@@ -6,13 +6,11 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-import uuid_utils
 from pydantic import BaseModel, ConfigDict, Field
 
+from jhin_domain import new_uuid7
 
-def new_uuid7() -> UUID:
-    """Time-ordered UUIDv7 as a stdlib UUID (usable as a NATS dedupe id)."""
-    return UUID(str(uuid_utils.uuid7()))
+__all__ = ["EventEnvelope", "EventSource", "new_uuid7"]
 
 
 def _utc_now() -> datetime:

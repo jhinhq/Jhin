@@ -13,6 +13,7 @@ members = [
     "services/workflow_worker",
     "services/event_worker",
     "packages/db",
+    "packages/domain",
     "packages/events",
     "packages/workflows",
     "packages/observability",
@@ -35,6 +36,7 @@ src = [
     "services/workflow_worker/src",
     "services/event_worker/src",
     "packages/db/src",
+    "packages/domain/src",
     "packages/events/src",
     "packages/workflows/src",
     "packages/observability/src",
@@ -64,6 +66,7 @@ files = [
     "services/workflow_worker/src",
     "services/event_worker/src",
     "packages/db/src",
+    "packages/domain/src",
     "packages/events/src",
     "packages/workflows/src",
     "packages/observability/src",
@@ -79,6 +82,7 @@ ignore_missing_imports = true
 asyncio_mode = "auto"
 testpaths = [
     "apps/api/tests",
+    "packages/domain/tests",
     "packages/events/tests",
     "packages/workflows/tests",
     "packages/db/tests",

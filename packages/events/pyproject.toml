@@ -6,9 +6,12 @@ requires-python = ">=3.13"
 dependencies = [
     "nats-py>=2.13",
     "pydantic>=2.10",
-    "uuid-utils>=0.10",
     "structlog>=25.1",
+    "jhin-domain",
 ]
+
+[tool.uv.sources]
+jhin-domain = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]
