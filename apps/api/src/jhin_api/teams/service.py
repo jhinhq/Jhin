@@ -44,7 +44,7 @@ async def _validate_parent(
     )
     if not exists:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="parent_team_id does not reference a team in this workspace",
         )
 
@@ -59,7 +59,7 @@ async def _validate_manager_agent(
     )
     if not exists:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="manager_agent_id does not reference an agent in this workspace",
         )
 

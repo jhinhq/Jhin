@@ -51,7 +51,7 @@ async def _validate_team(db: AsyncSession, workspace_id: UUID, team_id: UUID | N
     )
     if not exists:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="team_id does not reference a team in this workspace",
         )
 
@@ -70,7 +70,7 @@ async def _validate_manager(
     )
     if not exists:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="manager_agent_id does not reference an agent in this workspace",
         )
     if agent_id is None:

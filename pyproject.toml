@@ -75,7 +75,7 @@ files = [
 ]
 
 [[tool.mypy.overrides]]
-module = ["nats.*", "uuid_utils.*"]
+module = ["nats.*", "uuid_utils.*", "asyncpg.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
