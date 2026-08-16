@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import httpx
 import pytest
 
@@ -11,12 +13,20 @@ pytestmark = pytest.mark.integration
 
 
 def test_all_compose_services_healthy() -> None:
-    result = compose("ps", "--format", "{{.Service}} {{.Health}}")
-    statuses = dict(
-        line.split(maxsplit=1) for line in result.stdout.strip().splitlines() if " " in line
-    )
-    unhealthy = {service: health for service, health in statuses.items() if health != "healthy"}
-    assert not unhealthy, f"services not healthy: {unhealthy}"
+    # Poll: sibling tests restart services, whose healthchecks have a
+    # start_period during which they report "starting".
+    deadline = time.monotonic() + 90
+    while True:
+        result = compose("ps", "--format", "{{.Service}} {{.Health}}")
+        statuses = dict(
+            line.split(maxsplit=1) for line in result.stdout.strip().splitlines() if " " in line
+        )
+        unhealthy = {s: h for s, h in statuses.items() if h != "healthy"}
+        if not unhealthy:
+            break
+        if time.monotonic() > deadline or any(h == "unhealthy" for h in unhealthy.values()):
+            pytest.fail(f"services not healthy: {unhealthy}")
+        time.sleep(3)
 
 
 async def test_api_liveness() -> None:

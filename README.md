@@ -31,7 +31,7 @@ Then open:
 
 - Web UI (stack status): http://localhost:3000
 - API health: http://localhost:8000/api/v1/health/ready
-- Temporal UI (admin, localhost-only): http://127.0.0.1:8080
+- Temporal UI (admin, dev overlay only): http://127.0.0.1:8233
 
 Internal infrastructure ports (Postgres, NATS, Temporal) are **not** published
 publicly. The dev overlay (`compose.dev.yaml`) binds them to `127.0.0.1` only.

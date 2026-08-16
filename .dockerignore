@@ -1,0 +1,15 @@
+# Never ship local installs, build output, or VCS state into image builds.
+.git
+**/node_modules
+**/.next
+**/.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+.env
+.env.*
+!.env.example
+docs
+terminals

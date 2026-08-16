@@ -4,6 +4,9 @@
 FROM node:22-alpine AS deps
 RUN corepack enable pnpm
 WORKDIR /repo
+# Hoisted layout: Next.js standalone output-file tracing misses files behind
+# pnpm's default symlinked store (e.g. @swc/helpers esm subpaths).
+ENV npm_config_node_linker=hoisted
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/web/package.json apps/web/
 RUN pnpm install --frozen-lockfile --filter jhin-web
