@@ -32,8 +32,8 @@ typecheck: ## mypy + tsc
 migrate: ## Run Alembic migrations inside the compose network
 	$(COMPOSE) run --rm --no-deps api jhin-db-migrate
 
-seed: ## Seed development data (stub — arrives with the domain phases)
-	@echo "seed: no seedable domain entities exist yet (Phase 1); this becomes real in Phase 2."
+seed: ## Seed dev data: owner account + Engineering/Marketing sample org
+	$(COMPOSE) run --rm --no-deps api jhin-seed-dev
 
 compose-up: ## Start the production-shaped stack
 	$(COMPOSE) up -d --build
