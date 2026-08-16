@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python lint / typecheck / tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync workspace
+        run: uv sync --frozen --all-packages
+
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: mypy
+        run: uv run mypy
+
+      - name: Unit tests
+        run: uv run pytest
+
+  web:
+    name: Web lint / typecheck / tests / build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm --filter jhin-web lint
+
+      - name: Typecheck
+        run: pnpm --filter jhin-web typecheck
+
+      - name: Vitest
+        run: pnpm --filter jhin-web test
+
+      - name: Build
+        run: pnpm --filter jhin-web build
+
+  docker:
+    name: Docker image builds
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: api
+            dockerfile: docker/python.Dockerfile
+            build_args: SERVICE_PACKAGE=jhin-api
+          - name: workflow-worker
+            dockerfile: docker/python.Dockerfile
+            build_args: SERVICE_PACKAGE=jhin-workflow-worker
+          - name: event-worker
+            dockerfile: docker/python.Dockerfile
+            build_args: SERVICE_PACKAGE=jhin-event-worker
+          - name: web
+            dockerfile: apps/web/Dockerfile
+            build_args: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.name }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          build-args: ${{ matrix.build_args }}
+          push: false
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }},mode=max
