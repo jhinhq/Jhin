@@ -7,6 +7,7 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+import jhin_db.models  # noqa: F401  (populates Base.metadata for autogenerate)
 from jhin_db.base import Base
 
 config = context.config
