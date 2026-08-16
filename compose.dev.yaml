@@ -1,0 +1,24 @@
+# Development overrides: bind infrastructure ports to localhost so host
+# tooling (uv run scripts, integration tests, psql, nats CLI, Temporal UI)
+# can reach the stack. Usage: docker compose -f compose.yaml -f compose.dev.yaml up -d
+services:
+  api:
+    environment:
+      APP_ENV: dev
+
+  postgres:
+    ports:
+      - "127.0.0.1:${POSTGRES_DEV_PORT:-5432}:5432"
+
+  nats:
+    ports:
+      - "127.0.0.1:${NATS_DEV_PORT:-4222}:4222"
+      - "127.0.0.1:${NATS_MONITOR_DEV_PORT:-8222}:8222"
+
+  temporal:
+    ports:
+      - "127.0.0.1:${TEMPORAL_DEV_PORT:-7233}:7233"
+
+  temporal-ui:
+    ports:
+      - "127.0.0.1:${TEMPORAL_UI_DEV_PORT:-8233}:8080"

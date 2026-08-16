@@ -1,0 +1,190 @@
+name: jhin
+
+# Production-shaped stack (plan section 24). Only web and api publish ports;
+# infrastructure services stay on internal networks. Dev conveniences
+# (localhost-bound infra ports, hot reload) live in compose.dev.yaml.
+
+x-python-build: &python-build
+  context: .
+  dockerfile: docker/python.Dockerfile
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    environment:
+      APP_NAME: ${APP_NAME:-Jhin}
+      API_INTERNAL_URL: http://api:8000
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks: [edge]
+    restart: unless-stopped
+
+  api:
+    build:
+      <<: *python-build
+      args:
+        SERVICE_PACKAGE: jhin-api
+    command: ["uvicorn", "jhin_api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      APP_NAME: ${APP_NAME:-Jhin}
+      APP_ENV: ${APP_ENV:-production}
+      APP_URL: ${APP_URL:-http://localhost:3000}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-jhin}:${POSTGRES_PASSWORD:-jhin}@postgres:5432/${POSTGRES_DB:-jhin}
+      NATS_URL: nats://nats:4222
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import urllib.request, sys
+          sys.exit(0 if urllib.request.urlopen("http://127.0.0.1:8000/api/v1/health", timeout=3).status == 200 else 1)
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [edge, control, data]
+    restart: unless-stopped
+
+  workflow-worker:
+    build:
+      <<: *python-build
+      args:
+        SERVICE_PACKAGE: jhin-workflow-worker
+    command: ["jhin-workflow-worker"]
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+    depends_on:
+      temporal:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "jhin-health-check"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks: [control]
+    restart: unless-stopped
+
+  event-worker:
+    build:
+      <<: *python-build
+      args:
+        SERVICE_PACKAGE: jhin-event-worker
+    command: ["jhin-event-worker"]
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      NATS_URL: nats://nats:4222
+    depends_on:
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "jhin-health-check"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks: [control]
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-jhin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-jhin}
+      POSTGRES_DB: ${POSTGRES_DB:-jhin}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-jhin} -d ${POSTGRES_DB:-jhin}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [data]
+    restart: unless-stopped
+
+  nats:
+    image: nats:2.12-alpine
+    command: ["--jetstream", "--store_dir=/data", "--http_port=8222"]
+    volumes:
+      - nats_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8222/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [control]
+    restart: unless-stopped
+
+  temporal:
+    image: temporalio/auto-setup:1.29.7
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-jhin}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD:-jhin}
+      POSTGRES_SEEDS: postgres
+      TEMPORAL_ADDRESS: temporal:7233
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "tctl --address temporal:7233 cluster health | grep -q SERVING"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+    networks: [control, data]
+    restart: unless-stopped
+
+  temporal-ui:
+    image: temporalio/ui:2.53.3
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    depends_on:
+      temporal:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q --spider http://127.0.0.1:8080/ || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks: [control]
+    restart: unless-stopped
+
+networks:
+  edge:
+  control:
+  data:
+
+volumes:
+  postgres_data:
+  nats_data:
