@@ -67,6 +67,8 @@ files = [
     "packages/events/src",
     "packages/workflows/src",
     "packages/observability/src",
+    "scripts",
+    "tests",
 ]
 
 [[tool.mypy.overrides]]
