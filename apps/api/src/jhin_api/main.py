@@ -11,6 +11,7 @@ from jhin_api.agents.router import router as agents_router
 from jhin_api.audit.router import router as audit_router
 from jhin_api.auth.router import router as auth_router
 from jhin_api.health.router import router as health_router
+from jhin_api.models.router import profiles_router, providers_router
 from jhin_api.org.router import router as org_router
 from jhin_api.secrets.router import router as secrets_router
 from jhin_api.security.rate_limit import LoginRateLimiter
@@ -83,6 +84,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(org_router)
     app.include_router(audit_router)
     app.include_router(secrets_router)
+    app.include_router(providers_router)
+    app.include_router(profiles_router)
     return app
 
 

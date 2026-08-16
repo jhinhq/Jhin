@@ -1,6 +1,6 @@
 """Redaction unit tests (plan 32.5: redactor strips known secret)."""
 
-from jhin_secrets.redaction import REDACTED, SecretRedactor, redact_event_dict, get_redactor
+from jhin_secrets.redaction import REDACTED, SecretRedactor, get_redactor, redact_event_dict
 
 
 def test_redactor_strips_known_secret() -> None:

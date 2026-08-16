@@ -18,6 +18,8 @@ class AgentCreate(BaseModel):
     manager_agent_id: UUID | None = None
     status: AgentStatus = AgentStatus.ACTIVE
     autonomy_level: AutonomyLevel = AutonomyLevel.SUPERVISED
+    # Null = inherit the workspace default profile (plan 15.2).
+    model_profile_id: UUID | None = None
     temperature: float | None = Field(default=None, ge=0, le=2)
     max_output_tokens: int | None = Field(default=None, ge=1)
     max_steps: int = Field(default=20, ge=1, le=500)
@@ -37,6 +39,7 @@ class AgentUpdate(BaseModel):
     manager_agent_id: UUID | None = None
     status: AgentStatus | None = None
     autonomy_level: AutonomyLevel | None = None
+    model_profile_id: UUID | None = None
     temperature: float | None = Field(default=None, ge=0, le=2)
     max_output_tokens: int | None = Field(default=None, ge=1)
     max_steps: int | None = Field(default=None, ge=1, le=500)

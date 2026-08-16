@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from jhin_api.audit import service as audit
 from jhin_api.deps import WorkspaceContext
 from jhin_api.slugs import slugify, with_suffix
-from jhin_db.models import User, Workspace, WorkspaceMembership
+from jhin_db.models import ModelProfile, User, Workspace, WorkspaceMembership
 from jhin_domain import WorkspaceRole
 
 
@@ -75,11 +75,23 @@ async def update(
     db: AsyncSession,
     ctx: WorkspaceContext,
     *,
-    changes: dict[str, str],
+    changes: dict[str, object],
     request_id: UUID,
     ip_hash: str,
 ) -> Workspace:
     workspace = await get(db, ctx.workspace_id)
+    if "default_model_profile_id" in changes:
+        profile_id = changes["default_model_profile_id"]
+        exists = await db.scalar(
+            select(ModelProfile.id).where(
+                ModelProfile.id == profile_id, ModelProfile.workspace_id == ctx.workspace_id
+            )
+        )
+        if not exists:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="default_model_profile_id does not reference a profile in this workspace",
+            )
     for field, value in changes.items():
         setattr(workspace, field, value)
     audit.record(

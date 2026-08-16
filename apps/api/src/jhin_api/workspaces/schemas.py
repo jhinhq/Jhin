@@ -16,6 +16,7 @@ class WorkspaceCreate(BaseModel):
 class WorkspaceUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     default_timezone: str | None = Field(default=None, max_length=64)
+    default_model_profile_id: UUID | None = None
 
 
 class WorkspaceOut(BaseModel):
@@ -24,6 +25,7 @@ class WorkspaceOut(BaseModel):
     slug: str
     status: str
     default_timezone: str
+    default_model_profile_id: UUID | None
     created_at: datetime
     updated_at: datetime
 

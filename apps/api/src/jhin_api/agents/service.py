@@ -15,7 +15,7 @@ from jhin_api.audit import service as audit
 from jhin_api.deps import WorkspaceContext
 from jhin_api.org.hierarchy import would_create_cycle
 from jhin_api.slugs import slugify, with_suffix
-from jhin_db.models import Agent, Team
+from jhin_db.models import Agent, ModelProfile, Team
 from jhin_domain import AgentStatus
 
 
@@ -86,6 +86,23 @@ async def _validate_manager(
         )
 
 
+async def _validate_model_profile(
+    db: AsyncSession, workspace_id: UUID, profile_id: UUID | None
+) -> None:
+    if profile_id is None:
+        return
+    exists = await db.scalar(
+        select(ModelProfile.id).where(
+            ModelProfile.id == profile_id, ModelProfile.workspace_id == workspace_id
+        )
+    )
+    if not exists:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="model_profile_id does not reference a model profile in this workspace",
+        )
+
+
 async def create_agent(
     db: AsyncSession,
     ctx: WorkspaceContext,
@@ -96,6 +113,7 @@ async def create_agent(
 ) -> Agent:
     await _validate_team(db, ctx.workspace_id, values.get("team_id"))
     await _validate_manager(db, ctx.workspace_id, None, values.get("manager_agent_id"))
+    await _validate_model_profile(db, ctx.workspace_id, values.get("model_profile_id"))
     agent = Agent(
         workspace_id=ctx.workspace_id,
         slug=await _unique_slug(db, ctx.workspace_id, values["name"]),
@@ -132,6 +150,8 @@ async def update_agent(
         await _validate_team(db, ctx.workspace_id, changes["team_id"])
     if "manager_agent_id" in changes:
         await _validate_manager(db, ctx.workspace_id, agent.id, changes["manager_agent_id"])
+    if "model_profile_id" in changes:
+        await _validate_model_profile(db, ctx.workspace_id, changes["model_profile_id"])
     for field, value in changes.items():
         setattr(agent, field, value)
     audit.record(
