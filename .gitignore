@@ -23,7 +23,9 @@ out/
 .env.*
 !.env.example
 *.local
-secrets/
+# Local key material (e.g. secrets/dev/jhin_master_key) — never the
+# packages/secrets source tree.
+/secrets/
 
 # Editors / OS
 .DS_Store

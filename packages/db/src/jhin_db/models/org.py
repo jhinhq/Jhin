@@ -23,7 +23,17 @@ class Workspace(Base, UuidPkMixin, TimestampMixin):
     name: Mapped[str] = mapped_column(String(200))
     slug: Mapped[str] = mapped_column(String(120), unique=True)
     status: Mapped[str] = mapped_column(String(32), default=WorkspaceStatus.ACTIVE.value)
-    # default_model_profile_id arrives with model profiles in Phase 3.
+    # use_alter: workspace <-> model_profile reference each other.
+    default_model_profile_id: Mapped[UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey(
+            "model_profile.id",
+            ondelete="SET NULL",
+            use_alter=True,
+            name="fk_workspace_default_model_profile",
+        ),
+        default=None,
+    )
     default_timezone: Mapped[str] = mapped_column(String(64), default="UTC")
     settings_json: Mapped[dict[str, Any]] = mapped_column(JsonDict, default=dict)
 
@@ -82,8 +92,17 @@ class Agent(Base, UuidPkMixin, TimestampMixin):
     system_prompt: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(32), default=AgentStatus.ACTIVE.value)
     autonomy_level: Mapped[str] = mapped_column(String(32), default=AutonomyLevel.SUPERVISED.value)
-    # Plain UUID (no FK) until model profiles land in Phase 3.
-    model_profile_id: Mapped[UUID | None] = mapped_column(Uuid, default=None)
+    # Null means "use the workspace default profile" (plan 15.2).
+    model_profile_id: Mapped[UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey(
+            "model_profile.id",
+            ondelete="SET NULL",
+            use_alter=True,
+            name="fk_agent_model_profile",
+        ),
+        default=None,
+    )
     temperature: Mapped[float | None] = mapped_column(Float, default=None)
     max_output_tokens: Mapped[int | None] = mapped_column(Integer, default=None)
     max_steps: Mapped[int] = mapped_column(Integer, default=20)

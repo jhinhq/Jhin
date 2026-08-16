@@ -12,11 +12,15 @@ members = [
     "apps/api",
     "services/workflow_worker",
     "services/event_worker",
+    "services/agent_worker",
     "packages/db",
     "packages/domain",
     "packages/events",
     "packages/workflows",
     "packages/observability",
+    "packages/secrets",
+    "packages/models",
+    "packages/agents",
 ]
 
 [dependency-groups]
@@ -35,11 +39,15 @@ src = [
     "apps/api/src",
     "services/workflow_worker/src",
     "services/event_worker/src",
+    "services/agent_worker/src",
     "packages/db/src",
     "packages/domain/src",
     "packages/events/src",
     "packages/workflows/src",
     "packages/observability/src",
+    "packages/secrets/src",
+    "packages/models/src",
+    "packages/agents/src",
 ]
 
 [tool.ruff.lint]
@@ -65,11 +73,15 @@ files = [
     "apps/api/src",
     "services/workflow_worker/src",
     "services/event_worker/src",
+    "services/agent_worker/src",
     "packages/db/src",
     "packages/domain/src",
     "packages/events/src",
     "packages/workflows/src",
     "packages/observability/src",
+    "packages/secrets/src",
+    "packages/models/src",
+    "packages/agents/src",
     "scripts",
     "tests",
 ]
@@ -86,6 +98,9 @@ testpaths = [
     "packages/events/tests",
     "packages/workflows/tests",
     "packages/db/tests",
+    "packages/secrets/tests",
+    "packages/models/tests",
+    "packages/agents/tests",
     "tests",
 ]
 markers = [

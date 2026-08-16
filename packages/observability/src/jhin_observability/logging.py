@@ -14,8 +14,17 @@ import structlog
 from structlog.typing import EventDict, WrappedLogger
 
 
-def configure_logging(service: str, level: str = "INFO") -> None:
-    """Route all logging (structlog + stdlib) to JSON lines on stdout."""
+def configure_logging(
+    service: str,
+    level: str = "INFO",
+    extra_processors: list[structlog.typing.Processor] | None = None,
+) -> None:
+    """Route all logging (structlog + stdlib) to JSON lines on stdout.
+
+    ``extra_processors`` run on every record (structlog and stdlib) before
+    rendering — services that handle credentials pass the secret redaction
+    processor here (plan 13.5) without this package depending on it.
+    """
 
     def add_service(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
         event_dict.setdefault("service", service)
@@ -27,6 +36,7 @@ def configure_logging(service: str, level: str = "INFO") -> None:
         structlog.stdlib.add_logger_name,
         add_service,
         structlog.processors.TimeStamper(fmt="iso", utc=True),
+        *(extra_processors or []),
     ]
 
     structlog.configure(

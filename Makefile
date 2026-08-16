@@ -3,12 +3,18 @@ COMPOSE := docker compose
 COMPOSE_DEV := docker compose -f compose.yaml -f compose.dev.yaml
 
 .PHONY: help dev test test-unit test-integration lint typecheck migrate seed \
-	compose-up compose-down sample-workflow
+	compose-up compose-down sample-workflow master-key
+
+MASTER_KEY_PATH := secrets/dev/jhin_master_key
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 
-dev: ## Boot the full stack with dev overrides (hot reload, localhost infra ports)
+master-key: ## Generate the local dev master key file (required once before `make dev`)
+	@test -f $(MASTER_KEY_PATH) && echo "master key already exists at $(MASTER_KEY_PATH)" \
+		|| uv run python scripts/generate_master_key.py $(MASTER_KEY_PATH)
+
+dev: master-key ## Boot the full stack with dev overrides (hot reload, localhost infra ports)
 	$(COMPOSE_DEV) up -d --build
 
 test: test-unit ## Alias for test-unit
@@ -35,7 +41,7 @@ migrate: ## Run Alembic migrations inside the compose network
 seed: ## Seed dev data: owner account + Engineering/Marketing sample org
 	$(COMPOSE) run --rm --no-deps api jhin-seed-dev
 
-compose-up: ## Start the production-shaped stack
+compose-up: master-key ## Start the production-shaped stack
 	$(COMPOSE) up -d --build
 
 compose-down: ## Stop the stack (volumes preserved)

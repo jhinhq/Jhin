@@ -14,7 +14,10 @@ dependencies = [
     "jhin-db",
     "jhin-domain",
     "jhin-events",
+    "jhin-models",
     "jhin-observability",
+    "jhin-secrets",
+    "jhin-workflows",
 ]
 
 [project.scripts]
@@ -24,7 +27,10 @@ jhin-seed-dev = "jhin_api.seed:main"
 jhin-db = { workspace = true }
 jhin-domain = { workspace = true }
 jhin-events = { workspace = true }
+jhin-models = { workspace = true }
 jhin-observability = { workspace = true }
+jhin-secrets = { workspace = true }
+jhin-workflows = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

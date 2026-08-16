@@ -23,6 +23,7 @@ from jhin_api.security.tokens import hash_token
 from jhin_api.settings import Settings
 from jhin_db.models import User, UserSession, WorkspaceMembership
 from jhin_domain import UserStatus, WorkspaceRole, role_satisfies
+from jhin_secrets import SecretCrypto
 
 
 def get_settings_dep(request: Request) -> Settings:
@@ -129,3 +130,22 @@ ViewerCtx = Annotated[WorkspaceContext, Depends(require_workspace_role(Workspace
 MemberCtx = Annotated[WorkspaceContext, Depends(require_workspace_role(WorkspaceRole.MEMBER))]
 AdminCtx = Annotated[WorkspaceContext, Depends(require_workspace_role(WorkspaceRole.ADMIN))]
 OwnerCtx = Annotated[WorkspaceContext, Depends(require_workspace_role(WorkspaceRole.OWNER))]
+
+
+def get_secret_crypto(request: Request) -> SecretCrypto:
+    """Envelope crypto bound to the master key loaded at startup.
+
+    503 (not 500) when the key is absent: the operator can fix this without a
+    code change by mounting the key file and restarting.
+    """
+    crypto: SecretCrypto | None = request.app.state.secret_crypto
+    if crypto is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Secret encryption is unavailable: no master key configured "
+            "(set MASTER_KEY_FILE; see `make master-key`)",
+        )
+    return crypto
+
+
+SecretCryptoDep = Annotated[SecretCrypto, Depends(get_secret_crypto)]

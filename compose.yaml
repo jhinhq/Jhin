@@ -45,6 +45,9 @@ services:
       NATS_URL: nats://nats:4222
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      MASTER_KEY_FILE: /run/secrets/jhin_master_key
+    secrets:
+      - jhin_master_key
     ports:
       - "${API_PORT:-8000}:8000"
     depends_on:
@@ -188,3 +191,10 @@ networks:
 volumes:
   postgres_data:
   nats_data:
+
+# The master key encrypts all user secrets (plan 13.2). It is mounted only
+# into services that must decrypt (api, agent-worker) — never into web.
+# Create the dev key with `make master-key`.
+secrets:
+  jhin_master_key:
+    file: ${MASTER_KEY_FILE_HOST:-./secrets/dev/jhin_master_key}

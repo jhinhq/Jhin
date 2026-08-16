@@ -63,3 +63,79 @@ class ActorType(StrEnum):
     USER = "user"
     AGENT = "agent"
     SYSTEM = "system"
+
+
+class SecretType(StrEnum):
+    """What kind of credential an encrypted secret holds (plan 6.10)."""
+
+    API_KEY = "api_key"
+    TOKEN = "token"
+    PASSWORD = "password"
+    OTHER = "other"
+
+
+class ModelProviderType(StrEnum):
+    """Supported model provider adapters (plan 6.7, 15.1)."""
+
+    OPENAI = "openai"
+    ANTHROPIC = "anthropic"
+    OPENROUTER = "openrouter"
+    OLLAMA = "ollama"
+    OPENAI_COMPATIBLE = "openai_compatible"
+
+
+class TaskState(StrEnum):
+    """Lifecycle of user-visible work (plan 6.12)."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    PAUSED = "paused"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+TASK_TERMINAL_STATES = frozenset({TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELLED})
+
+
+class TaskPriority(StrEnum):
+    LOW = "low"
+    NORMAL = "normal"
+    HIGH = "high"
+    URGENT = "urgent"
+
+
+class RunStatus(StrEnum):
+    """Lifecycle of a single agent run (plan 6.13)."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    PAUSED = "paused"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+RUN_TERMINAL_STATUSES = frozenset({RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED})
+
+
+class SenderType(StrEnum):
+    """Who authored a message (plan 6.14)."""
+
+    USER = "user"
+    AGENT = "agent"
+    SYSTEM = "system"
+
+
+class RecipientType(StrEnum):
+    USER = "user"
+    AGENT = "agent"
+    TEAM = "team"
+    TASK = "task"
+
+
+class MessageVisibility(StrEnum):
+    """Whether a message is shown in the product UI or internal-only."""
+
+    VISIBLE = "visible"
+    INTERNAL = "internal"
