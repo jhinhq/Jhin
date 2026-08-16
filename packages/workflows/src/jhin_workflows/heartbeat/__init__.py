@@ -1,0 +1,7 @@
+"""Sample durable heartbeat workflow (Phase 1 durability proof)."""
+
+from jhin_workflows.heartbeat.activities import record_beat
+from jhin_workflows.heartbeat.shared import HeartbeatInput, HeartbeatResult
+from jhin_workflows.heartbeat.workflows import HeartbeatWorkflow
+
+__all__ = ["HeartbeatInput", "HeartbeatResult", "HeartbeatWorkflow", "record_beat"]
