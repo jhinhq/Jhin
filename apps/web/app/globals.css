@@ -1,18 +1,65 @@
 @import "tailwindcss";
 
+/* Jhin visual system (plan 17.1): calm, dense, dark-first. */
 :root {
-  --background: #09090b;
-  --foreground: #fafafa;
+  --bg: #0b0c0f;
+  --surface: #111318;
+  --surface-raised: #16181f;
+  --surface-hover: #1b1e27;
+  --line: #23262f;
+  --line-strong: #2e323d;
+  --text: #e7e9ee;
+  --text-dim: #9aa0ae;
+  --text-faint: #616774;
+  --accent: #6d7cff;
+  --accent-strong: #8b96ff;
+  --accent-soft: rgba(109, 124, 255, 0.12);
+  --ok: #3ecf8e;
+  --warn: #f5b453;
+  --danger: #f0596b;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-raised: var(--surface-raised);
+  --color-hover: var(--surface-hover);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-ink: var(--text);
+  --color-dim: var(--text-dim);
+  --color-faint: var(--text-faint);
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-soft: var(--accent-soft);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-danger: var(--danger);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
+  background: var(--bg);
+  color: var(--text);
   font-family:
-    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  font-feature-settings: "tnum", "cv02";
+}
+
+::selection {
+  background: var(--accent-soft);
+}
+
+/* Team accent tokens (team.color_token) */
+.team-accent-slate { --team: #8b95a7; }
+.team-accent-indigo { --team: #6d7cff; }
+.team-accent-violet { --team: #a78bfa; }
+.team-accent-cyan { --team: #22d3ee; }
+.team-accent-emerald { --team: #34d399; }
+.team-accent-amber { --team: #fbbf24; }
+.team-accent-rose { --team: #fb7185; }
+
+/* Thin scrollbars for panel UIs */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
 }

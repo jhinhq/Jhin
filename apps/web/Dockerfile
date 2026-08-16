@@ -14,6 +14,8 @@ RUN pnpm install --frozen-lockfile --filter jhin-web
 FROM deps AS build
 COPY apps/web apps/web
 ENV NEXT_TELEMETRY_DISABLED=1
+# Baked into the /api/* rewrite at build time (see next.config.ts).
+ENV API_INTERNAL_URL=http://api:8000
 RUN pnpm --filter jhin-web build
 
 FROM node:22-alpine AS runtime
