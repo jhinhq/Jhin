@@ -1,15 +1,23 @@
 """FastAPI application factory."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from jhin_api import __version__
+from jhin_api.agents.router import router as agents_router
+from jhin_api.audit.router import router as audit_router
+from jhin_api.auth.router import router as auth_router
 from jhin_api.health.router import router as health_router
+from jhin_api.org.router import router as org_router
+from jhin_api.security.rate_limit import LoginRateLimiter
 from jhin_api.settings import Settings, get_settings
-from jhin_db import create_engine
+from jhin_api.teams.router import router as teams_router
+from jhin_api.workspaces.router import router as workspaces_router
+from jhin_db import create_engine, create_session_factory
+from jhin_domain import new_uuid7
 from jhin_observability import configure_logging, get_logger
 
 logger = get_logger(__name__)
@@ -24,6 +32,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Engine construction is lazy: no connection is made until first use,
         # and tables are never auto-created (migrations own the schema).
         app.state.engine = create_engine(settings.database_url)
+        app.state.session_factory = create_session_factory(app.state.engine)
         logger.info("api.started", app_name=settings.app_name, env=settings.app_env)
         yield
         await app.state.engine.dispose()
@@ -31,6 +40,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title=settings.app_name, version=__version__, lifespan=lifespan)
     app.state.settings = settings
+    app.state.login_limiter = LoginRateLimiter(
+        settings.login_max_attempts, settings.login_window_seconds
+    )
 
     app.add_middleware(
         CORSMiddleware,
@@ -40,7 +52,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
+    @app.middleware("http")
+    async def request_id_middleware(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        request.state.request_id = new_uuid7()
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = str(request.state.request_id)
+        return response
+
     app.include_router(health_router)
+    app.include_router(auth_router)
+    app.include_router(workspaces_router)
+    app.include_router(teams_router)
+    app.include_router(agents_router)
+    app.include_router(org_router)
+    app.include_router(audit_router)
     return app
 
 
