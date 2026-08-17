@@ -79,6 +79,9 @@ jobs:
           - name: event-worker
             dockerfile: docker/python.Dockerfile
             build_args: SERVICE_PACKAGE=jhin-event-worker
+          - name: agent-worker
+            dockerfile: docker/python.Dockerfile
+            build_args: SERVICE_PACKAGE=jhin-agent-worker
           - name: web
             dockerfile: apps/web/Dockerfile
             build_args: ""

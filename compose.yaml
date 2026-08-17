@@ -94,6 +94,37 @@ services:
     networks: [control]
     restart: unless-stopped
 
+  agent-worker:
+    build:
+      <<: *python-build
+      args:
+        SERVICE_PACKAGE: jhin-agent-worker
+    command: ["jhin-agent-worker"]
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-jhin}:${POSTGRES_PASSWORD:-jhin}@postgres:5432/${POSTGRES_DB:-jhin}
+      NATS_URL: nats://nats:4222
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      MASTER_KEY_FILE: /run/secrets/jhin_master_key
+    secrets:
+      - jhin_master_key
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "jhin-health-check"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks: [control, data]
+    restart: unless-stopped
+
   event-worker:
     build:
       <<: *python-build

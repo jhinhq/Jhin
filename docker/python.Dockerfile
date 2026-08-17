@@ -16,11 +16,15 @@ COPY pyproject.toml uv.lock ./
 COPY apps/api/pyproject.toml apps/api/
 COPY services/workflow_worker/pyproject.toml services/workflow_worker/
 COPY services/event_worker/pyproject.toml services/event_worker/
+COPY services/agent_worker/pyproject.toml services/agent_worker/
 COPY packages/db/pyproject.toml packages/db/
 COPY packages/domain/pyproject.toml packages/domain/
 COPY packages/events/pyproject.toml packages/events/
 COPY packages/workflows/pyproject.toml packages/workflows/
 COPY packages/observability/pyproject.toml packages/observability/
+COPY packages/secrets/pyproject.toml packages/secrets/
+COPY packages/models/pyproject.toml packages/models/
+COPY packages/agents/pyproject.toml packages/agents/
 
 ARG SERVICE_PACKAGE
 RUN --mount=type=cache,target=/root/.cache/uv \
