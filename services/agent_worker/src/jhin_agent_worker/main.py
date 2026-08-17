@@ -84,6 +84,7 @@ async def main() -> None:
         activities=[
             activities.resolve_snapshot_activity,
             activities.run_agent_step_activity,
+            activities.resolve_approval_activity,
             activities.finalize_run_activity,
         ],
     )

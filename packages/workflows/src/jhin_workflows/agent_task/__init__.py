@@ -2,12 +2,14 @@
 
 from jhin_workflows.agent_task.shared import (
     ACTIVITY_FINALIZE_RUN,
+    ACTIVITY_RESOLVE_APPROVAL,
     ACTIVITY_RESOLVE_SNAPSHOT,
     ACTIVITY_RUN_AGENT_STEP,
     AgentTaskInput,
     AgentTaskResult,
     AgentTaskStatus,
     FinalizeInput,
+    ResolveApprovalInput,
     RunStepInput,
     SnapshotResult,
     StepResult,
@@ -16,6 +18,7 @@ from jhin_workflows.agent_task.workflows import AgentTaskWorkflow
 
 __all__ = [
     "ACTIVITY_FINALIZE_RUN",
+    "ACTIVITY_RESOLVE_APPROVAL",
     "ACTIVITY_RESOLVE_SNAPSHOT",
     "ACTIVITY_RUN_AGENT_STEP",
     "AgentTaskInput",
@@ -23,6 +26,7 @@ __all__ = [
     "AgentTaskStatus",
     "AgentTaskWorkflow",
     "FinalizeInput",
+    "ResolveApprovalInput",
     "RunStepInput",
     "SnapshotResult",
     "StepResult",

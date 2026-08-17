@@ -239,8 +239,14 @@ class ToolGateway:
 
     # --- entry points ---
 
-    async def request(self, tool_name: str, arguments_json: str) -> GatewayOutcome:
-        """Authorize (and, when allowed, execute) one structured tool call."""
+    async def request(
+        self, tool_name: str, arguments_json: str, *, provider_call_id: str = ""
+    ) -> GatewayOutcome:
+        """Authorize (and, when allowed, execute) one structured tool call.
+
+        ``provider_call_id`` is the model's tool_call id; it rides along so a
+        later approval resume can stitch the result back into the transcript.
+        """
         # 1. Registry lookup: unknown tools are recorded denials.
         entry = self._catalog.get(tool_name)
         if entry is None:
@@ -327,6 +333,7 @@ class ToolGateway:
                     "capability": definition.required_capability,
                     "risk": definition.risk.value,
                     "input": sanitized_input,
+                    "provider_call_id": provider_call_id,
                 },
                 reason=decision.reason,
                 status=ApprovalStatus.PENDING.value,

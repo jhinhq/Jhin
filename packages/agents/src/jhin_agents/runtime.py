@@ -3,6 +3,11 @@
 This runs *inside* a Temporal activity on the agent worker. The caller
 supplies a ready :class:`ModelClient` (credentials were resolved at the call
 boundary and exist only there); this module never sees provider secrets.
+
+The step is one ``reason`` node: compose messages, call the model once, and
+report either a final text answer (``done``) or the structured tool calls
+the model requested. Tool authorization and execution happen in the caller
+through the tool gateway — never here, and never from model text (plan 52).
 """
 
 from __future__ import annotations
@@ -12,7 +17,7 @@ from pydantic import BaseModel, ConfigDict
 from jhin_agents.context import TaskContext, build_messages
 from jhin_agents.graph import NodeTransition
 from jhin_agents.snapshot import AgentExecutionSnapshot
-from jhin_models import ModelClient, ModelRequest, ModelUsage
+from jhin_models import ModelClient, ModelRequest, ModelToolCall, ModelUsage, ToolSchema
 
 
 class StepOutcome(BaseModel):
@@ -26,13 +31,19 @@ class StepOutcome(BaseModel):
     latency_ms: int
     provider_request_id: str | None
     transitions: tuple[NodeTransition, ...]
+    # Structured tool calls from the provider response — the only channel
+    # through which a tool request may enter the gateway (plan 21.4).
+    tool_calls: tuple[ModelToolCall, ...] = ()
 
 
 async def execute_step(
-    client: ModelClient, snapshot: AgentExecutionSnapshot, task: TaskContext
+    client: ModelClient,
+    snapshot: AgentExecutionSnapshot,
+    task: TaskContext,
+    tools: tuple[ToolSchema, ...] = (),
 ) -> StepOutcome:
     """load_context (compose messages) then reason (one model call)."""
-    messages = build_messages(snapshot, task)
+    messages = build_messages(snapshot, task, has_tools=bool(tools))
     transitions = [NodeTransition(node="load_context", detail=f"{len(messages)} messages composed")]
 
     response = await client.generate(
@@ -41,6 +52,7 @@ async def execute_step(
             messages=messages,
             temperature=snapshot.temperature,
             max_output_tokens=snapshot.max_output_tokens,
+            tools=tools,
         )
     )
     transitions.append(
@@ -49,17 +61,20 @@ async def execute_step(
             detail=f"model {response.model or snapshot.model_profile.model_name} responded",
         )
     )
+    if response.tool_calls:
+        names = ", ".join(call.name for call in response.tool_calls)
+        transitions.append(NodeTransition(node="call_tool", detail=f"requested: {names}"))
 
-    # Tool-free graph: a single reason step always completes the run.
     return StepOutcome(
         text=response.text,
-        done=True,
+        done=not response.tool_calls,
         finish_reason=response.finish_reason,
         model=response.model,
         usage=response.usage,
         latency_ms=response.latency_ms,
         provider_request_id=response.provider_request_id,
         transitions=tuple(transitions),
+        tool_calls=response.tool_calls,
     )
 
 

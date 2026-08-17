@@ -15,12 +15,14 @@ from temporalio.common import RetryPolicy
 
 from jhin_workflows.agent_task.shared import (
     ACTIVITY_FINALIZE_RUN,
+    ACTIVITY_RESOLVE_APPROVAL,
     ACTIVITY_RESOLVE_SNAPSHOT,
     ACTIVITY_RUN_AGENT_STEP,
     AgentTaskInput,
     AgentTaskResult,
     AgentTaskStatus,
     FinalizeInput,
+    ResolveApprovalInput,
     RunStepInput,
     SnapshotResult,
     StepResult,
@@ -45,6 +47,12 @@ _FINALIZE_RETRY = RetryPolicy(
     maximum_interval=timedelta(seconds=15),
     maximum_attempts=5,
 )
+_RESOLVE_APPROVAL_RETRY = RetryPolicy(
+    initial_interval=timedelta(seconds=1),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(seconds=15),
+    maximum_attempts=5,
+)
 
 
 @workflow.defn(name="AgentTaskWorkflow")
@@ -56,6 +64,9 @@ class AgentTaskWorkflow:
         self._cancelled = False
         self._steps_used = 0
         self._pending_instructions: list[str] = []
+        # approval_id -> decision ("approved" | "rejected"), delivered by the
+        # approval_decision signal from the API.
+        self._approval_decisions: dict[str, str] = {}
 
     # --- Signals (plan 8.2) ---
 
@@ -77,9 +88,11 @@ class AgentTaskWorkflow:
             self._pending_instructions.append(text)
 
     @workflow.signal
-    def approval_decision(self, decision: str) -> None:
-        # Approvals arrive with the policy engine in Phase 4; accept + log.
-        workflow.logger.info("approval_decision received before Phase 4; ignored: %s", decision)
+    def approval_decision(self, approval_id: str, decision: str) -> None:
+        """A human decided an approval. The signal only wakes the workflow;
+        the activity re-reads the Postgres approval row as the authority."""
+        if approval_id and decision in ("approved", "rejected"):
+            self._approval_decisions[approval_id] = decision
 
     # --- Queries (plan 8.2) ---
 
@@ -163,6 +176,45 @@ class AgentTaskWorkflow:
             totals.output_tokens += step.output_tokens
             totals.cost_micros += step.cost_micros
             done = step.done
+
+            if step.waiting_approval_id is not None:
+                # Durable approval wait (plan 8.2, 12.5): the tool call and
+                # approval rows are already persisted; park until a human
+                # decides. Workflow state survives worker restarts.
+                approval_id = step.waiting_approval_id
+                self._status = "waiting_approval"
+                self._waiting_reason = f"approval:{approval_id}"
+
+                def _decided(pending_id: str = approval_id) -> bool:
+                    return pending_id in self._approval_decisions or self._cancelled
+
+                await workflow.wait_condition(_decided)
+                if approval_id not in self._approval_decisions:
+                    break  # woken by cancel, not by a decision
+                decision = self._approval_decisions.pop(approval_id)
+                self._waiting_reason = None
+                self._status = "running"
+                try:
+                    await workflow.execute_activity(
+                        ACTIVITY_RESOLVE_APPROVAL,
+                        ResolveApprovalInput(
+                            workspace_id=params.workspace_id,
+                            task_id=params.task_id,
+                            run_id=snapshot.run_id,
+                            agent_id=params.agent_id,
+                            approval_id=approval_id,
+                            decision=decision,
+                        ),
+                        result_type=StepResult,
+                        start_to_close_timeout=timedelta(minutes=10),
+                        retry_policy=_RESOLVE_APPROVAL_RETRY,
+                    )
+                except Exception as exc:
+                    error_code = "approval_resolution_failed"
+                    error_message = str(exc)[:2000]
+                    break
+                # Approved or rejected, the loop continues: the next reason
+                # step sees the tool result or the recorded denial.
 
         if self._cancelled:
             final_status = "cancelled"

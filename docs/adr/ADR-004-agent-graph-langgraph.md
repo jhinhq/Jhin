@@ -1,6 +1,6 @@
 # ADR-004: Agent execution graph — hand-rolled state machine now, LangGraph later
 
-Status: accepted (Phase 3) — revisit in Phase 4 when tools arrive
+Status: accepted (Phase 3) — reaffirmed in Phase 4 (see "Phase 4 revisit")
 
 ## Context
 
@@ -40,3 +40,34 @@ The seams LangGraph would occupy are kept deliberately narrow:
   adopt LangGraph: conditional edges and tool nodes are where it earns its
   weight. This ADR must be revisited then; if LangGraph is adopted, only
   `jhin-agents` and the agent worker take the dependency (never the API).
+
+## Phase 4 revisit: keep the hand-rolled machine
+
+Phase 4 added the tool branches (`call_tool → policy_check → execute_tool →
+observe → reason` and `request_approval → SUSPEND`). We evaluated migrating to
+LangGraph at this point, as this ADR required, and decided **against** it.
+
+The deciding observation: after implementation, the branching the plan draws
+as an in-graph loop naturally splits across two stronger boundaries —
+
+1. **Between reason steps, Temporal is the graph engine.** Each `reason` step
+   is one activity; the workflow loop is the edge back to `reason`. The
+   durable interrupt LangGraph would model with a checkpointer + `interrupt()`
+   is exactly Temporal's native `wait_condition` on the `approval_decision`
+   signal — already proven durable across worker restarts. Running a LangGraph
+   checkpointer *inside* an activity would duplicate (and hide from Temporal)
+   state that must survive crashes.
+2. **Inside a step, the tool path is not a graph, it is a security pipeline.**
+   `policy_check → execute_tool` must be the tool gateway's single
+   authorization path (plan 12, 52). Expressing it as LangGraph nodes would
+   scatter authorization decisions across graph state, making the security
+   review surface larger, not smaller.
+
+What we keep from the LangGraph design: `execute_step()` remains the single
+entry point; the `StepOutcome` now carries structured `tool_calls`; node names
+(`load_context`, `reason`, `call_tool`, `policy_check`, `execute_tool`,
+`observe`, `request_approval`, `finalize`) still match plan 7.3, so persisted
+`run_event` rows would remain stable under a future swap. The swap trigger is
+now: multi-agent delegation subgraphs (plan Phase 7+), where parallel branches
+and shared state make a graph runtime genuinely simpler than hand-rolled code.
+The API still never imports LangGraph/langchain either way.

@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 
 ACTIVITY_RESOLVE_SNAPSHOT = "resolve_snapshot"
 ACTIVITY_RUN_AGENT_STEP = "run_agent_step"
+ACTIVITY_RESOLVE_APPROVAL = "resolve_approval"
 ACTIVITY_FINALIZE_RUN = "finalize_run"
 
 
@@ -54,6 +55,25 @@ class StepResult:
     output_tokens: int = 0
     cached_tokens: int = 0
     cost_micros: int = 0
+    # Set when the gateway parked a tool call pending human approval: the
+    # workflow suspends on the approval_decision signal for this id.
+    waiting_approval_id: str | None = None
+
+
+@dataclass
+class ResolveApprovalInput:
+    """Resume a run after a human decided a parked approval.
+
+    ``decision`` is advisory routing only — the activity re-reads the
+    approval row in Postgres, which is the sole authority (plan 52).
+    """
+
+    workspace_id: str
+    task_id: str
+    run_id: str
+    agent_id: str
+    approval_id: str
+    decision: str  # "approved" | "rejected"
 
 
 @dataclass

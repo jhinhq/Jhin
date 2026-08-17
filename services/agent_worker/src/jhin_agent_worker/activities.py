@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -24,30 +24,54 @@ from jhin_agents import AgentExecutionSnapshot, resolve_snapshot
 from jhin_agents.context import ConversationTurn, TaskContext
 from jhin_agents.runtime import estimate_cost_micros, execute_step
 from jhin_agents.snapshot import SnapshotError
-from jhin_db.models import AgentRun, Message, RunEvent, Task
+from jhin_db.models import (
+    Agent,
+    AgentCapabilityGrant,
+    AgentRun,
+    Approval,
+    Message,
+    RunEvent,
+    Task,
+    ToolCall,
+)
 from jhin_domain import (
+    ApprovalStatus,
     MessageVisibility,
     RecipientType,
     RunStatus,
     SenderType,
     TaskState,
+    ToolCallStatus,
 )
 from jhin_events import EventEnvelope, EventSource
-from jhin_models import ModelProviderError, build_model_client
+from jhin_models import ModelProviderError, ModelToolCall, ToolSchema, build_model_client
 from jhin_models.factory import ProviderConfigError
 from jhin_observability import get_logger
+from jhin_policy import Grant, GrantEffect
 from jhin_secrets import SecretStore
 from jhin_secrets.redaction import redact_text
+from jhin_tools import (
+    GatewayOutcome,
+    ToolExecutionContext,
+    ToolGateway,
+    allowed_tool_definitions,
+    build_builtin_catalog,
+)
 from jhin_workflows.agent_task import (
     ACTIVITY_FINALIZE_RUN,
+    ACTIVITY_RESOLVE_APPROVAL,
     ACTIVITY_RESOLVE_SNAPSHOT,
     ACTIVITY_RUN_AGENT_STEP,
     AgentTaskInput,
     FinalizeInput,
+    ResolveApprovalInput,
     RunStepInput,
     SnapshotResult,
     StepResult,
 )
+
+# Cap on persisted model-produced tool arguments (they re-enter the prompt).
+_MAX_ARGUMENTS_CHARS = 8_192
 
 logger = get_logger(__name__)
 
@@ -101,6 +125,129 @@ class AgentActivities:
                 payload_json=payload,
             )
         )
+
+    async def _advertised_tools(
+        self, session: AsyncSession, workspace_id: UUID, agent_id: UUID
+    ) -> tuple[ToolSchema, ...]:
+        """Tool schemas for the model request, filtered by live allow grants.
+
+        Advertising is prompt economy only — authorization happens in the
+        gateway on every call (plan 52)."""
+        rows = await session.scalars(
+            select(AgentCapabilityGrant).where(
+                AgentCapabilityGrant.agent_id == agent_id,
+                AgentCapabilityGrant.workspace_id == workspace_id,
+            )
+        )
+        grants: list[Grant] = []
+        for row in rows:
+            try:
+                grants.append(
+                    Grant(
+                        capability=row.capability,
+                        scope=row.scope_json,
+                        effect=GrantEffect(row.effect),
+                    )
+                )
+            except ValueError:
+                continue
+        definitions = allowed_tool_definitions(build_builtin_catalog(), grants)
+        return tuple(
+            ToolSchema(
+                name=definition.name,
+                description=definition.description,
+                parameters=definition.input_json_schema(),
+            )
+            for definition in definitions
+        )
+
+    def _add_tool_message(
+        self,
+        session: AsyncSession,
+        *,
+        workspace_id: UUID,
+        task_id: UUID,
+        run_id: UUID,
+        agent_id: UUID,
+        message_type: str,
+        content: dict[str, Any],
+    ) -> None:
+        """Internal transcript row for the tool-calling exchange; rebuilt into
+        provider messages on the next reasoning step."""
+        session.add(
+            Message(
+                workspace_id=workspace_id,
+                task_id=task_id,
+                run_id=run_id,
+                sender_type=SenderType.AGENT.value,
+                sender_id=agent_id,
+                recipient_type=RecipientType.TASK.value,
+                recipient_id=task_id,
+                message_type=message_type,
+                content_json=content,
+                visibility=MessageVisibility.INTERNAL.value,
+            )
+        )
+
+    def _record_gateway_result(
+        self,
+        session: AsyncSession,
+        *,
+        workspace_id: UUID,
+        run_id: UUID,
+        task_id: UUID,
+        seq: int,
+        step_index: int,
+        call: ModelToolCall,
+        result: GatewayOutcome,
+    ) -> int:
+        """Emit the run events for one gateway decision (plan 7.3 nodes)."""
+        base: dict[str, Any] = {
+            "step": step_index,
+            "tool_name": result.tool_name,
+            "tool_call_id": str(result.tool_call_id),
+            "risk": result.risk,
+        }
+
+        def emit(event_type: str, extra: dict[str, Any]) -> None:
+            nonlocal seq
+            self._add_run_event(
+                session,
+                workspace_id=workspace_id,
+                run_id=run_id,
+                task_id=task_id,
+                seq=seq,
+                event_type=event_type,
+                payload={**base, **extra},
+            )
+            seq += 1
+
+        emit("node.policy_check", {"decision": result.decision_code})
+        if result.status in ("executed", "failed"):
+            emit(
+                "node.execute_tool",
+                {"status": result.status, "duration_ms": result.duration_ms},
+            )
+            emit("node.observe", {"chars": len(result.observation_json())})
+        elif result.status == "denied":
+            emit("node.observe", {"denied": True, "reason": result.decision_reason})
+        elif result.status == "needs_approval":
+            emit(
+                "node.request_approval",
+                {"approval_id": str(result.approval_id), "reason": result.decision_reason},
+            )
+        emit(
+            "tool.call",
+            {
+                "status": result.status,
+                "decision": result.decision_code,
+                "reason": result.decision_reason,
+                "error_code": result.error_code,
+                "duration_ms": result.duration_ms,
+                "approval_id": str(result.approval_id) if result.approval_id else None,
+            },
+        )
+        return seq
 
     # --- Activities ---
 
@@ -199,6 +346,8 @@ class AgentActivities:
                 ) from exc
             del api_key  # plaintext lives only until the client holds it
 
+            tools = await self._advertised_tools(session, workspace_id, UUID(params.agent_id))
+
             try:
                 outcome = await execute_step(
                     client,
@@ -209,6 +358,7 @@ class AgentActivities:
                         history=history,
                         user_instructions=tuple(params.user_instructions),
                     ),
+                    tools=tools,
                 )
             except ModelProviderError as exc:
                 raise ApplicationError(
@@ -235,20 +385,24 @@ class AgentActivities:
                 run.estimated_cost_micros += cost_micros
                 run.steps_used = params.step_index + 1
 
-            session.add(
-                Message(
-                    workspace_id=workspace_id,
-                    task_id=task_id,
-                    run_id=run_id,
-                    sender_type=SenderType.AGENT.value,
-                    sender_id=UUID(params.agent_id),
-                    recipient_type=RecipientType.TASK.value,
-                    recipient_id=task_id,
-                    message_type="text",
-                    content_json={"text": outcome.text, "finish_reason": outcome.finish_reason},
-                    visibility=MessageVisibility.VISIBLE.value,
+            if not outcome.tool_calls:
+                session.add(
+                    Message(
+                        workspace_id=workspace_id,
+                        task_id=task_id,
+                        run_id=run_id,
+                        sender_type=SenderType.AGENT.value,
+                        sender_id=UUID(params.agent_id),
+                        recipient_type=RecipientType.TASK.value,
+                        recipient_id=task_id,
+                        message_type="text",
+                        content_json={
+                            "text": outcome.text,
+                            "finish_reason": outcome.finish_reason,
+                        },
+                        visibility=MessageVisibility.VISIBLE.value,
+                    )
                 )
-            )
 
             seq = await self._next_seq(session, run_id)
             for transition in outcome.transitions:
@@ -275,8 +429,99 @@ class AgentActivities:
                     payload=payload,
                 )
                 seq += 1
+
+            # Tool branch: every requested call goes through the gateway —
+            # the single authorization path (plan 12). Unprocessed calls
+            # after an approval park simply vanish from the transcript; the
+            # model may re-request them once the run resumes.
+            waiting_approval_id: str | None = None
+            parked: GatewayOutcome | None = None
+            if outcome.tool_calls:
+                gateway = ToolGateway(
+                    ToolExecutionContext(
+                        session=session,
+                        workspace_id=workspace_id,
+                        task_id=task_id,
+                        run_id=run_id,
+                        agent_id=UUID(params.agent_id),
+                        agent_name=snapshot.name,
+                    ),
+                    build_builtin_catalog(),
+                )
+                for call in outcome.tool_calls:
+                    self._add_tool_message(
+                        session,
+                        workspace_id=workspace_id,
+                        task_id=task_id,
+                        run_id=run_id,
+                        agent_id=UUID(params.agent_id),
+                        message_type="tool_call",
+                        content={
+                            "text": outcome.text,
+                            "tool_call_id": call.id,
+                            "tool_name": call.name,
+                            "arguments_json": redact_text(call.arguments_json)[
+                                :_MAX_ARGUMENTS_CHARS
+                            ],
+                        },
+                    )
+                    result = await gateway.request(
+                        call.name, call.arguments_json, provider_call_id=call.id
+                    )
+                    seq = self._record_gateway_result(
+                        session,
+                        workspace_id=workspace_id,
+                        run_id=run_id,
+                        task_id=task_id,
+                        seq=seq,
+                        step_index=params.step_index,
+                        call=call,
+                        result=result,
+                    )
+                    if result.status == "needs_approval":
+                        waiting_approval_id = str(result.approval_id)
+                        parked = result
+                        if run is not None:
+                            run.status = RunStatus.WAITING_APPROVAL.value
+                        break
+                    self._add_tool_message(
+                        session,
+                        workspace_id=workspace_id,
+                        task_id=task_id,
+                        run_id=run_id,
+                        agent_id=UUID(params.agent_id),
+                        message_type="tool_result",
+                        content={
+                            "tool_call_id": call.id,
+                            "tool_name": call.name,
+                            "status": result.status,
+                            "result": result.observation_json(),
+                        },
+                    )
             await session.commit()
 
+        if waiting_approval_id is not None and parked is not None:
+            await self._publish(
+                workspace_id,
+                "approval.requested",
+                {
+                    "approval_id": waiting_approval_id,
+                    "run_id": params.run_id,
+                    "task_id": params.task_id,
+                    "agent_id": params.agent_id,
+                    "tool_name": parked.tool_name,
+                    "risk": parked.risk,
+                },
+            )
+            await self._publish(
+                workspace_id,
+                "agent.run.waiting_approval",
+                {
+                    "run_id": params.run_id,
+                    "task_id": params.task_id,
+                    "approval_id": waiting_approval_id,
+                },
+            )
         await self._publish(
             workspace_id,
             "agent.run.step",
@@ -293,22 +538,52 @@ class AgentActivities:
             output_tokens=outcome.usage.output_tokens,
             cached_tokens=outcome.usage.cached_tokens,
             cost_micros=cost_micros,
+            waiting_approval_id=waiting_approval_id,
         )
 
     async def _load_history(
         self, session: AsyncSession, task: Task
     ) -> tuple[ConversationTurn, ...]:
+        """Visible conversation plus the internal tool transcript, in order,
+        so each reasoning step rebuilds the exact provider message sequence."""
         rows = await session.scalars(
             select(Message)
             .where(
                 Message.task_id == task.id,
-                Message.visibility == MessageVisibility.VISIBLE.value,
+                or_(
+                    Message.visibility == MessageVisibility.VISIBLE.value,
+                    Message.message_type.in_(("tool_call", "tool_result")),
+                ),
             )
             .order_by(Message.created_at, Message.id)
         )
         turns: list[ConversationTurn] = []
         for message in rows:
-            text = str(message.content_json.get("text", ""))
+            content = message.content_json
+            if message.message_type == "tool_call":
+                turns.append(
+                    ConversationTurn(
+                        role="agent",
+                        text=str(content.get("text", "") or ""),
+                        kind="tool_call",
+                        tool_call_id=str(content.get("tool_call_id", "")),
+                        tool_name=str(content.get("tool_name", "")),
+                        arguments_json=str(content.get("arguments_json", "{}")),
+                    )
+                )
+                continue
+            if message.message_type == "tool_result":
+                turns.append(
+                    ConversationTurn(
+                        role="agent",
+                        text=str(content.get("result", "")),
+                        kind="tool_result",
+                        tool_call_id=str(content.get("tool_call_id", "")),
+                        tool_name=str(content.get("tool_name", "")),
+                    )
+                )
+                continue
+            text = str(content.get("text", ""))
             if not text:
                 continue
             role = "agent" if message.sender_type == SenderType.AGENT.value else "user"
@@ -319,6 +594,142 @@ class AgentActivities:
             turns.append(ConversationTurn(role=role, text=text))
         return tuple(turns)
 
+    @activity.defn(name=ACTIVITY_RESOLVE_APPROVAL)
+    async def resolve_approval_activity(self, params: ResolveApprovalInput) -> StepResult:
+        """Execute or record the outcome of a human-decided approval.
+
+        The Postgres approval row is the authority; the signal's decision is
+        routing advice only (plan 52)."""
+        workspace_id = UUID(params.workspace_id)
+        task_id = UUID(params.task_id)
+        run_id = UUID(params.run_id)
+        agent_id = UUID(params.agent_id)
+        approval_id = UUID(params.approval_id)
+
+        async with self._resources.session_factory() as session:
+            approval = await session.scalar(
+                select(Approval).where(
+                    Approval.id == approval_id, Approval.workspace_id == workspace_id
+                )
+            )
+            if approval is None:
+                raise ApplicationError(
+                    "approval not found", type="approval_not_found", non_retryable=True
+                )
+            if approval.status == ApprovalStatus.PENDING.value:
+                # The API commits the decision before signaling; a pending row
+                # here is a transient read race — retry.
+                raise ApplicationError("approval still pending", type="approval_pending")
+
+            agent = await session.scalar(
+                select(Agent).where(Agent.id == agent_id, Agent.workspace_id == workspace_id)
+            )
+            gateway = ToolGateway(
+                ToolExecutionContext(
+                    session=session,
+                    workspace_id=workspace_id,
+                    task_id=task_id,
+                    run_id=run_id,
+                    agent_id=agent_id,
+                    agent_name=agent.name if agent is not None else "agent",
+                ),
+                build_builtin_catalog(),
+            )
+            if approval.status == ApprovalStatus.APPROVED.value:
+                result = await gateway.resolve_approved(approval_id)
+            else:
+                result = await gateway.resolve_rejected(approval_id)
+
+            provider_call_id = str(
+                approval.action_payload_sanitized.get("provider_call_id", "") or ""
+            )
+            self._add_tool_message(
+                session,
+                workspace_id=workspace_id,
+                task_id=task_id,
+                run_id=run_id,
+                agent_id=agent_id,
+                message_type="tool_result",
+                content={
+                    "tool_call_id": provider_call_id,
+                    "tool_name": result.tool_name,
+                    "status": result.status,
+                    "result": result.observation_json(),
+                },
+            )
+
+            run = await session.get(AgentRun, run_id)
+            if run is not None and run.workspace_id == workspace_id:
+                run.status = RunStatus.RUNNING.value
+
+            seq = await self._next_seq(session, run_id)
+            self._add_run_event(
+                session,
+                workspace_id=workspace_id,
+                run_id=run_id,
+                task_id=task_id,
+                seq=seq,
+                event_type=f"approval.{approval.status}",
+                payload={
+                    "approval_id": params.approval_id,
+                    "tool_name": result.tool_name,
+                    "status": result.status,
+                    "decided_by_user_id": (
+                        str(approval.decided_by_user_id) if approval.decided_by_user_id else None
+                    ),
+                },
+            )
+            seq += 1
+            if result.status in ("executed", "failed"):
+                self._add_run_event(
+                    session,
+                    workspace_id=workspace_id,
+                    run_id=run_id,
+                    task_id=task_id,
+                    seq=seq,
+                    event_type="node.execute_tool",
+                    payload={
+                        "tool_name": result.tool_name,
+                        "status": result.status,
+                        "duration_ms": result.duration_ms,
+                        "after_approval": True,
+                    },
+                )
+                seq += 1
+            self._add_run_event(
+                session,
+                workspace_id=workspace_id,
+                run_id=run_id,
+                task_id=task_id,
+                seq=seq,
+                event_type="tool.call",
+                payload={
+                    "tool_name": result.tool_name,
+                    "tool_call_id": str(result.tool_call_id),
+                    "risk": result.risk,
+                    "status": result.status,
+                    "decision": result.decision_code,
+                    "reason": result.decision_reason,
+                    "error_code": result.error_code,
+                    "duration_ms": result.duration_ms,
+                    "approval_id": params.approval_id,
+                },
+            )
+            await session.commit()
+
+        await self._publish(
+            workspace_id,
+            "agent.run.resumed",
+            {
+                "run_id": params.run_id,
+                "task_id": params.task_id,
+                "approval_id": params.approval_id,
+                "decision": approval.status,
+                "tool_status": result.status,
+            },
+        )
+        return StepResult(done=False)
+
     @activity.defn(name=ACTIVITY_FINALIZE_RUN)
     async def finalize_run_activity(self, params: FinalizeInput) -> None:
         workspace_id = UUID(params.workspace_id)
@@ -328,6 +739,29 @@ class AgentActivities:
 
         async with self._resources.session_factory() as session:
             if params.run_id is not None:
+                # A run that ends while an approval is still pending orphans
+                # it: mark it cancelled so the inbox stays truthful.
+                pending = await session.scalars(
+                    select(Approval).where(
+                        Approval.run_id == UUID(params.run_id),
+                        Approval.workspace_id == workspace_id,
+                        Approval.status == ApprovalStatus.PENDING.value,
+                    )
+                )
+                for approval in pending:
+                    approval.status = ApprovalStatus.CANCELLED.value
+                    approval.decided_at = datetime.now(UTC)
+                    stale_call = await session.scalar(
+                        select(ToolCall).where(
+                            ToolCall.approval_id == approval.id,
+                            ToolCall.workspace_id == workspace_id,
+                        )
+                    )
+                    if stale_call is not None:
+                        stale_call.status = ToolCallStatus.REJECTED.value
+                        stale_call.completed_at = datetime.now(UTC)
+                        stale_call.error_code = "run_ended"
+
                 run = await session.get(AgentRun, UUID(params.run_id))
                 if run is not None and run.workspace_id == workspace_id:
                     run.status = params.status
