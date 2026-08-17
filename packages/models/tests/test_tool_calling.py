@@ -87,9 +87,7 @@ async def test_openai_compatible_serializes_tool_exchange_messages() -> None:
             json={
                 "id": "x",
                 "model": "fake-mini",
-                "choices": [
-                    {"index": 0, "message": {"role": "assistant", "content": "done"}}
-                ],
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "done"}}],
                 "usage": {},
             },
         )

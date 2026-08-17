@@ -81,6 +81,11 @@ class ToolDefinition(BaseModel):
     output_model: type[BaseModel]
     required_capability: str
     supports_approval: bool = False
+    # Input fields that form the call's authorization scope (plan 6.6), e.g.
+    # ("repository", "branch") for a Phase 5 GitHub tool. The gateway extracts
+    # these from the validated input and matches them against grant scopes.
+    # Phase 4 system tools are unscoped.
+    scope_keys: tuple[str, ...] = ()
 
     @field_validator("name", "required_capability")
     @classmethod

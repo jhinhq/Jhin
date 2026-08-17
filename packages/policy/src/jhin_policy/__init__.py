@@ -12,6 +12,7 @@ from jhin_policy.approvals import (
     rules_for_preset,
 )
 from jhin_policy.capabilities import (
+    FORBIDDEN_CAPABILITY_PREFIXES,
     CapabilityRegistry,
     RegistryError,
     ToolDefinition,
@@ -32,6 +33,7 @@ from jhin_policy.risk import DEFAULT_ACTION_BY_RISK, RiskLevel, RuleAction
 
 __all__ = [
     "DEFAULT_ACTION_BY_RISK",
+    "FORBIDDEN_CAPABILITY_PREFIXES",
     "PRESET_RULES",
     "ApprovalPreset",
     "CapabilityRegistry",
