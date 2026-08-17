@@ -50,6 +50,9 @@ class TaskOut(BaseModel):
     external_source: str | None = None
     external_id: str | None = None
     trigger_id: UUID | None = None
+    # Delegation lineage (plan 6.12): set when this task is a child created
+    # by organization.delegate_task or a workflow template hop.
+    parent_task_id: UUID | None = None
     metadata_json: dict[str, Any] = {}
     created_at: datetime
     updated_at: datetime
@@ -116,6 +119,21 @@ class ToolCallOut(BaseModel):
     duration_ms: int | None
     error_code: str | None
     created_at: datetime
+
+
+class TaskTreeNodeOut(BaseModel):
+    """One node of a delegation chain (plan 45 'Task parent/child display')."""
+
+    task: TaskOut
+    agent_name: str | None = None
+    latest_run_status: str | None = None
+    children: list[TaskTreeNodeOut] = Field(default_factory=list)
+
+
+class TaskTreeOut(BaseModel):
+    root: TaskTreeNodeOut
+    # The task the caller asked about, so the UI can highlight it in the tree.
+    focus_task_id: UUID
 
 
 class TaskDetailOut(BaseModel):

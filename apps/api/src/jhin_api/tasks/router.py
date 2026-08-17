@@ -26,6 +26,8 @@ from jhin_api.tasks.schemas import (
     TaskDetailOut,
     TaskListOut,
     TaskOut,
+    TaskTreeNodeOut,
+    TaskTreeOut,
     ToolCallOut,
 )
 
@@ -90,6 +92,32 @@ async def get_task(task_id: UUID, ctx: ViewerCtx, db: DbSession) -> TaskDetailOu
         total_output_tokens=sum(r.output_tokens for r in runs),
         total_cost_micros=sum(r.estimated_cost_micros for r in runs),
     )
+
+
+@tasks_router.get("/{task_id}/tree")
+async def task_tree(task_id: UUID, ctx: ViewerCtx, db: DbSession) -> TaskTreeOut:
+    """Delegation chain around a task: lineage root plus every descendant."""
+    root, tasks = await service.get_task_tree(db, ctx.workspace_id, task_id)
+    task_ids = [t.id for t in tasks]
+    run_status = await service.latest_run_status_by_task(db, ctx.workspace_id, task_ids)
+    names = await service.agent_names(
+        db,
+        ctx.workspace_id,
+        [t.assigned_agent_id for t in tasks if t.assigned_agent_id is not None],
+    )
+
+    nodes: dict[UUID, TaskTreeNodeOut] = {
+        t.id: TaskTreeNodeOut(
+            task=TaskOut.model_validate(t),
+            agent_name=names.get(t.assigned_agent_id) if t.assigned_agent_id else None,
+            latest_run_status=run_status.get(t.id),
+        )
+        for t in tasks
+    }
+    for t in tasks:
+        if t.parent_task_id is not None and t.parent_task_id in nodes and t.id != root.id:
+            nodes[t.parent_task_id].children.append(nodes[t.id])
+    return TaskTreeOut(root=nodes[root.id], focus_task_id=task_id)
 
 
 @tasks_router.get("/{task_id}/timeline")

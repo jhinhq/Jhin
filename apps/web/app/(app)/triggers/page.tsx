@@ -195,6 +195,9 @@ function TriggerCard({
           <p className="mt-0.5 truncate text-xs text-dim">
             {trigger.event_type ?? "any event"}
             {agent ? ` → ${agent.name}` : ""}
+            {trigger.workflow_definition?.template === "engineering_ticket"
+              ? " · engineering template"
+              : ""}
             {trigger.action_config_json.comment_back ? " · comments back" : ""}
           </p>
         </div>
@@ -305,6 +308,18 @@ function TriggerBuilder({
   const [dedupeWindow, setDedupeWindow] = useState(
     String(existing?.dedupe_window_seconds ?? 300),
   );
+  // Workflow template picker (Phase 8, plan 8.4): default vs engineering.
+  const existingDef = existing?.workflow_definition ?? null;
+  const [template, setTemplate] = useState(
+    existingDef?.template === "engineering_ticket" ? "engineering_ticket" : "",
+  );
+  const [qaAgentId, setQaAgentId] = useState(
+    typeof existingDef?.qa_agent_id === "string" ? existingDef.qa_agent_id : "",
+  );
+  const [managerReview, setManagerReview] = useState(Boolean(existingDef?.manager_review));
+  const [retestCycles, setRetestCycles] = useState(
+    String(existingDef?.max_retest_cycles ?? 3),
+  );
   const [error, setError] = useState<string | null>(null);
 
   const connection = connections.data?.find((c) => c.id === connectionId);
@@ -325,6 +340,15 @@ function TriggerBuilder({
         target_agent_id: agentId || null,
         action_config: { comment_back: commentBack },
         dedupe_window_seconds: Number(dedupeWindow) || 0,
+        workflow_definition:
+          template === "engineering_ticket"
+            ? {
+                template: "engineering_ticket",
+                ...(qaAgentId ? { qa_agent_id: qaAgentId } : {}),
+                manager_review: managerReview,
+                max_retest_cycles: Number(retestCycles) || 3,
+              }
+            : null,
       };
       return existing
         ? api(`/api/v1/workspaces/${workspaceId}/triggers/${existing.id}`, {
@@ -516,6 +540,59 @@ function TriggerBuilder({
             />
             Comment the outcome back on the source issue when the task finishes
           </label>
+
+          <div data-testid="workflow-template" className="space-y-3 border-t border-line pt-3">
+            <Field
+              label="Workflow"
+              hint="Standard runs the assigned agent once. The engineering template adds delegated QA review with a failure → fix → retest loop (Phase 8)."
+            >
+              <Select
+                value={template}
+                onChange={(event) => setTemplate(event.target.value)}
+              >
+                <option value="">Standard (default)</option>
+                <option value="engineering_ticket">Engineering ticket template</option>
+              </Select>
+            </Field>
+            {template === "engineering_ticket" ? (
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field
+                  label="QA agent"
+                  hint="Empty = auto-pick a teammate of the implementer."
+                >
+                  <Select
+                    value={qaAgentId}
+                    onChange={(event) => setQaAgentId(event.target.value)}
+                  >
+                    <option value="">Auto (same team)</option>
+                    {agents.data?.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.name}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                <Field label="Max retest cycles" hint="Bounds the fail → fix → retest loop.">
+                  <Input
+                    type="number"
+                    min={1}
+                    max={10}
+                    value={retestCycles}
+                    onChange={(event) => setRetestCycles(event.target.value)}
+                  />
+                </Field>
+                <label className="flex items-center gap-2 text-sm text-dim sm:col-span-2">
+                  <input
+                    type="checkbox"
+                    checked={managerReview}
+                    onChange={(event) => setManagerReview(event.target.checked)}
+                    className="h-4 w-4 accent-[var(--accent,#7aa2f7)]"
+                  />
+                  Ask the implementer&apos;s manager for a review before QA
+                </label>
+              </div>
+            ) : null}
+          </div>
         </section>
 
         <p className="rounded-md bg-raised px-3 py-2 text-sm text-dim">

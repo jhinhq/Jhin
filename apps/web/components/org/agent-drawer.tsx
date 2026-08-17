@@ -200,6 +200,10 @@ export function AgentDrawer({
                   <OverviewRow label="Max steps per run" value={agent.max_steps} />
                   <OverviewRow label="Max run minutes" value={agent.max_run_minutes} />
                   <OverviewRow
+                    label="Max concurrent runs"
+                    value={agent.max_concurrent_runs}
+                  />
+                  <OverviewRow
                     label="Monthly budget"
                     value={
                       agent.monthly_budget_cents !== null
@@ -529,6 +533,7 @@ function SettingsTab({
   const [autonomy, setAutonomy] = useState<AutonomyLevel>(agent.autonomy_level);
   const [maxSteps, setMaxSteps] = useState(String(agent.max_steps));
   const [maxRunMinutes, setMaxRunMinutes] = useState(String(agent.max_run_minutes));
+  const [maxConcurrent, setMaxConcurrent] = useState(String(agent.max_concurrent_runs));
 
   const save = useMutation({
     mutationFn: () =>
@@ -543,6 +548,7 @@ function SettingsTab({
           autonomy_level: autonomy,
           max_steps: Number(maxSteps),
           max_run_minutes: Number(maxRunMinutes),
+          max_concurrent_runs: Number(maxConcurrent),
         },
       }),
     onSuccess: onSaved,
@@ -630,6 +636,19 @@ function SettingsTab({
           />
         </Field>
       </div>
+      <Field
+        label="Max concurrent runs"
+        hint="Additional tasks queue and start automatically when a run finishes (plan 30)."
+      >
+        <Input
+          type="number"
+          min={1}
+          max={50}
+          required
+          value={maxConcurrent}
+          onChange={(e) => setMaxConcurrent(e.target.value)}
+        />
+      </Field>
       <ErrorNote
         message={save.error instanceof ApiError ? save.error.detail : null}
       />

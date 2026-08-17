@@ -26,6 +26,10 @@ class TriggerCreate(BaseModel):
     target_team_id: UUID | None = None
     action_config: dict[str, Any] = Field(default_factory=dict)
     dedupe_window_seconds: int = Field(default=300, ge=0, le=86_400)
+    # Workflow-template selection (plan 8.4): None/empty = plain
+    # TriggeredTaskWorkflow; {"template": "engineering_ticket", ...} selects
+    # the built-in engineering template.
+    workflow_definition: dict[str, Any] | None = None
 
 
 class TriggerUpdate(BaseModel):
@@ -40,6 +44,7 @@ class TriggerUpdate(BaseModel):
     target_team_id: UUID | None = None
     action_config: dict[str, Any] | None = None
     dedupe_window_seconds: int | None = Field(default=None, ge=0, le=86_400)
+    workflow_definition: dict[str, Any] | None = None
 
 
 class TriggerInvocationOut(BaseModel):
@@ -70,6 +75,7 @@ class TriggerOut(BaseModel):
     target_team_id: UUID | None
     action_config_json: dict[str, Any]
     dedupe_window_seconds: int
+    workflow_definition: dict[str, Any] | None = None
     created_by_user_id: UUID | None
     created_at: datetime
     updated_at: datetime

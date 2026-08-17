@@ -24,6 +24,8 @@ class AgentCreate(BaseModel):
     max_output_tokens: int | None = Field(default=None, ge=1)
     max_steps: int = Field(default=20, ge=1, le=500)
     max_run_minutes: int = Field(default=30, ge=1, le=24 * 60)
+    # Concurrency admission (plan 30): active runs beyond this queue visibly.
+    max_concurrent_runs: int = Field(default=1, ge=1, le=50)
     monthly_budget_cents: int | None = Field(default=None, ge=0)
     metadata_json: dict[str, Any] = Field(default_factory=dict)
 
@@ -44,6 +46,7 @@ class AgentUpdate(BaseModel):
     max_output_tokens: int | None = Field(default=None, ge=1)
     max_steps: int | None = Field(default=None, ge=1, le=500)
     max_run_minutes: int | None = Field(default=None, ge=1, le=24 * 60)
+    max_concurrent_runs: int | None = Field(default=None, ge=1, le=50)
     monthly_budget_cents: int | None = Field(default=None, ge=0)
     metadata_json: dict[str, Any] | None = None
 
@@ -65,6 +68,7 @@ class AgentOut(BaseModel):
     max_output_tokens: int | None
     max_steps: int
     max_run_minutes: int
+    max_concurrent_runs: int
     monthly_budget_cents: int | None
     metadata_json: dict[str, Any]
     created_at: datetime

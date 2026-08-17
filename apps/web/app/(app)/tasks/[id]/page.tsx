@@ -10,7 +10,9 @@ import {
   Bot,
   CircleDollarSign,
   Eye,
+  GitFork,
   Hand,
+  Hourglass,
   Pause,
   Play,
   Send,
@@ -24,7 +26,13 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useState } from "react";
 import { PageHeader } from "@/components/app-shell";
-import { isActiveState, StateBadge } from "@/components/task-bits";
+import {
+  AGENT_MESSAGE_TYPES,
+  isActiveState,
+  MessageTypeBadge,
+  StateBadge,
+  StructuredMessageBody,
+} from "@/components/task-bits";
 import { Badge, Button, ErrorNote, Input, Spinner } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import { riskTone } from "@/lib/policy";
@@ -35,8 +43,9 @@ import {
   useTask,
   useTaskMessages,
   useTaskTimeline,
+  useTaskTree,
 } from "@/lib/hooks";
-import type { RunEvent, TaskMessage } from "@/lib/types";
+import type { RunEvent, TaskMessage, TaskTreeNode } from "@/lib/types";
 import { useWorkspace } from "@/lib/workspace-context";
 
 export default function TaskDetailPage() {
@@ -51,6 +60,7 @@ export default function TaskDetailPage() {
   const live = detail.data ? isActiveState(detail.data.task.state) : true;
   const timeline = useTaskTimeline(workspaceId, taskId, live);
   const messages = useTaskMessages(workspaceId, taskId, live);
+  const tree = useTaskTree(workspaceId, taskId, live);
   const agents = useAgents(workspaceId);
 
   const act = useMutation({
@@ -90,6 +100,15 @@ export default function TaskDetailPage() {
   const canOperate = can("member");
   const active = isActiveState(task.state);
   const waitingApproval = runs.some((run) => run.status === "waiting_approval");
+  const waitingDelegation = runs.some((run) => run.status === "waiting_delegation");
+  const queueInfo =
+    task.state === "queued" &&
+    typeof task.metadata_json.queue === "object" &&
+    task.metadata_json.queue !== null
+      ? (task.metadata_json.queue as Record<string, unknown>)
+      : null;
+  const treeRoot = tree.data?.root;
+  const hasLineage = Boolean(treeRoot && (treeRoot.children.length > 0 || task.parent_task_id));
 
   return (
     <>
@@ -161,6 +180,41 @@ export default function TaskDetailPage() {
             </section>
           ) : null}
 
+          {queueInfo ? (
+            <section
+              data-testid="queued-banner"
+              className="flex items-center gap-3 rounded-xl border border-line-strong bg-raised px-5 py-3.5"
+            >
+              <Hourglass size={16} className="shrink-0 text-dim" />
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-ink">Queued — waiting for a free slot</p>
+                <p className="text-xs text-dim">
+                  {queueInfo.reason === "agent_concurrency"
+                    ? "The assigned agent is at its max concurrent runs. The task starts automatically when a run finishes."
+                    : queueInfo.reason === "workspace_concurrency"
+                      ? "The workspace is at its max concurrent runs. The task starts automatically when a slot frees."
+                      : "The task starts automatically when a concurrency slot frees."}
+                </p>
+              </div>
+            </section>
+          ) : null}
+
+          {waitingDelegation ? (
+            <section
+              data-testid="waiting-delegation-banner"
+              className="flex items-center gap-3 rounded-xl border border-accent/30 bg-accent-soft px-5 py-3.5"
+            >
+              <GitFork size={16} className="shrink-0 text-accent" />
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-ink">Waiting on a delegated subtask</p>
+                <p className="text-xs text-dim">
+                  This run is parked durably until the child task below returns its result
+                  summary.
+                </p>
+              </div>
+            </section>
+          ) : null}
+
           {waitingApproval ? (
             <section
               data-testid="waiting-approval-banner"
@@ -219,6 +273,15 @@ export default function TaskDetailPage() {
         </div>
 
         <aside className="space-y-6">
+          {hasLineage && treeRoot ? (
+            <section data-testid="delegation-chain">
+              <h2 className="mb-3 flex items-center gap-1.5 text-sm font-semibold text-dim">
+                <GitFork size={14} /> Delegation chain
+              </h2>
+              <TreeNode node={treeRoot} focusId={taskId} depth={0} />
+            </section>
+          ) : null}
+
           <section>
             <h2 className="mb-3 text-sm font-semibold text-dim">Timeline</h2>
             <Timeline events={timeline.data ?? []} live={active} />
@@ -255,6 +318,44 @@ export default function TaskDetailPage() {
         </aside>
       </div>
     </>
+  );
+}
+
+/** One node of the delegation chain (plan 45 "Task parent/child display"). */
+function TreeNode({
+  node,
+  focusId,
+  depth,
+}: {
+  node: TaskTreeNode;
+  focusId: string;
+  depth: number;
+}) {
+  const isFocus = node.task.id === focusId;
+  return (
+    <div className={depth > 0 ? "mt-1.5 border-l border-line pl-3" : ""}>
+      <Link
+        href={`/tasks/${node.task.id}`}
+        className={`block rounded-lg border px-3 py-2 text-sm transition-colors ${
+          isFocus
+            ? "border-accent/50 bg-accent-soft"
+            : "border-line bg-surface hover:border-accent/40"
+        }`}
+      >
+        <div className="flex items-center justify-between gap-2">
+          <span className="min-w-0 truncate font-medium">{node.task.title}</span>
+          <StateBadge state={node.task.state} />
+        </div>
+        <p className="mt-0.5 text-xs text-dim">
+          {node.agent_name ?? "unassigned"}
+          {node.latest_run_status ? ` · run ${node.latest_run_status}` : ""}
+          {isFocus ? " · this task" : ""}
+        </p>
+      </Link>
+      {node.children.map((child) => (
+        <TreeNode key={child.task.id} node={child} focusId={focusId} depth={depth + 1} />
+      ))}
+    </div>
   );
 }
 
@@ -441,8 +542,22 @@ function Conversation({
           messages.map((message) => {
             const fromAgent = message.sender_type === "agent";
             const fromSystem = message.sender_type === "system";
+            // Structured agent-to-agent messages (plan 29) render with a type
+            // badge + summary/artifacts; plain messages keep their text body.
+            const structured =
+              AGENT_MESSAGE_TYPES.has(message.message_type) &&
+              message.message_type !== "instruction" &&
+              (fromAgent || fromSystem);
             const body =
               typeof message.content_json.text === "string" ? message.content_json.text : "";
+            const senderLabel =
+              typeof message.content_json.from_agent_name === "string"
+                ? message.content_json.from_agent_name
+                : fromAgent
+                  ? agentName
+                  : fromSystem
+                    ? "System"
+                    : "You";
             return (
               <div key={message.id} className="flex gap-3">
                 <span
@@ -457,20 +572,29 @@ function Conversation({
                   {fromAgent ? <Bot size={14} /> : <User size={14} />}
                 </span>
                 <div className="min-w-0 flex-1">
-                  <p className="text-xs text-dim">
-                    <span className="font-medium text-ink">
-                      {fromAgent ? agentName : fromSystem ? "System" : "You"}
-                    </span>{" "}
-                    · {formatDateTime(message.created_at)}
-                    {message.message_type === "instruction" ? " · instruction" : ""}
+                  <p className="flex items-center gap-1.5 text-xs text-dim">
+                    <span className="font-medium text-ink">{senderLabel}</span>
+                    <span>· {formatDateTime(message.created_at)}</span>
+                    {structured ? (
+                      <MessageTypeBadge
+                        type={message.message_type}
+                        content={message.content_json}
+                      />
+                    ) : message.message_type === "instruction" ? (
+                      <span>· instruction</span>
+                    ) : null}
                   </p>
-                  <p
-                    className={`mt-1 whitespace-pre-wrap text-sm ${
-                      fromSystem ? "text-danger" : "text-ink"
-                    }`}
-                  >
-                    {body}
-                  </p>
+                  {structured ? (
+                    <StructuredMessageBody content={message.content_json} />
+                  ) : (
+                    <p
+                      className={`mt-1 whitespace-pre-wrap text-sm ${
+                        fromSystem ? "text-danger" : "text-ink"
+                      }`}
+                    >
+                      {body}
+                    </p>
+                  )}
                 </div>
               </div>
             );

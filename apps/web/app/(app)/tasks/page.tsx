@@ -3,7 +3,7 @@
 /** Tasks page: workspace task list with live polling + create/assign dialog. */
 
 import { useMutation } from "@tanstack/react-query";
-import { Plus } from "lucide-react";
+import { GitFork, Plus } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
@@ -122,15 +122,31 @@ function TasksPageInner() {
                     <td className="max-w-md px-4 py-2.5">
                       <Link
                         href={`/tasks/${task.id}`}
-                        className="block truncate font-medium hover:text-accent-strong"
+                        className="flex items-center gap-1.5 truncate font-medium hover:text-accent-strong"
                       >
-                        {task.title}
+                        {task.parent_task_id ? (
+                          <GitFork
+                            size={12}
+                            className="shrink-0 text-accent"
+                            aria-label="Delegated subtask"
+                          />
+                        ) : null}
+                        <span className="truncate">{task.title}</span>
                       </Link>
                     </td>
                     <td className="px-4 py-2.5">
                       <StateBadge state={task.state} />
                       {isActiveState(task.state) ? (
                         <span className="ml-2 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent align-middle" />
+                      ) : null}
+                      {task.state === "queued" &&
+                      typeof task.metadata_json.queue === "object" &&
+                      task.metadata_json.queue !== null ? (
+                        <span className="ml-2 text-[11px] text-faint">
+                          {String(
+                            (task.metadata_json.queue as Record<string, unknown>).reason ?? "",
+                          ).replace("_", " ")}
+                        </span>
                       ) : null}
                     </td>
                     <td className="px-4 py-2.5 text-dim">{agentName(task.assigned_agent_id)}</td>

@@ -71,6 +71,39 @@ def _validate_filter_document(document: dict[str, Any]) -> None:
         raise _bad_request(f"Invalid filter: {exc}") from exc
 
 
+_KNOWN_TEMPLATES = ("engineering_ticket",)
+
+
+async def _validate_workflow_definition(
+    db: AsyncSession, workspace_id: UUID, definition: dict[str, Any] | None
+) -> None:
+    """Template config validation (plan 8.4). Unknown templates are rejected;
+    configured agent ids must reference agents in this workspace."""
+    if not definition:
+        return
+    template = definition.get("template")
+    if template not in _KNOWN_TEMPLATES:
+        raise _bad_request(
+            f"unknown workflow template {template!r}; available: {', '.join(_KNOWN_TEMPLATES)}"
+        )
+    for key in ("implementer_agent_id", "qa_agent_id"):
+        raw = definition.get(key)
+        if not raw:
+            continue
+        try:
+            agent_id = UUID(str(raw))
+        except ValueError as exc:
+            raise _bad_request(f"{key} is not a valid agent id") from exc
+        agent = await db.scalar(
+            select(Agent).where(Agent.id == agent_id, Agent.workspace_id == workspace_id)
+        )
+        if agent is None:
+            raise _bad_request(f"{key} does not reference an agent in this workspace")
+    cycles = definition.get("max_retest_cycles")
+    if cycles is not None and (not isinstance(cycles, int) or not 1 <= cycles <= 10):
+        raise _bad_request("max_retest_cycles must be an integer between 1 and 10")
+
+
 async def list_triggers(db: AsyncSession, workspace_id: UUID) -> list[Trigger]:
     rows = await db.scalars(
         select(Trigger).where(Trigger.workspace_id == workspace_id).order_by(Trigger.created_at)
@@ -141,6 +174,7 @@ async def create_trigger(
         target_agent_id=payload.target_agent_id,
         target_team_id=payload.target_team_id,
     )
+    await _validate_workflow_definition(db, ctx.workspace_id, payload.workflow_definition)
 
     trigger = Trigger(
         workspace_id=ctx.workspace_id,
@@ -155,6 +189,7 @@ async def create_trigger(
         target_team_id=payload.target_team_id,
         action_config_json=payload.action_config,
         dedupe_window_seconds=payload.dedupe_window_seconds,
+        workflow_definition=payload.workflow_definition,
         created_by_user_id=ctx.user.id,
     )
     db.add(trigger)
@@ -190,6 +225,8 @@ async def update_trigger(
         trigger.filter_json = changes.pop("filter")
     if "action_config" in changes:
         trigger.action_config_json = changes.pop("action_config")
+    if "workflow_definition" in changes:
+        await _validate_workflow_definition(db, ctx.workspace_id, changes["workflow_definition"])
     await _validate_references(
         db,
         ctx.workspace_id,

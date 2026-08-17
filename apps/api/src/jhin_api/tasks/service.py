@@ -238,6 +238,83 @@ async def get_task(db: AsyncSession, workspace_id: UUID, task_id: UUID) -> Task:
     return task
 
 
+MAX_TREE_DEPTH = 20  # hard bound when walking lineage (delegation depth is ~5)
+
+
+async def get_task_tree(
+    db: AsyncSession, workspace_id: UUID, task_id: UUID
+) -> tuple[Task, list[Task]]:
+    """Resolve the delegation chain around a task (plan 6.12, 45).
+
+    Walks up parent_task_id to the lineage root, then collects every
+    descendant breadth-first. Returns (root, all_tasks_in_lineage).
+    """
+    task = await get_task(db, workspace_id, task_id)
+
+    root = task
+    for _ in range(MAX_TREE_DEPTH):
+        if root.parent_task_id is None:
+            break
+        parent = await db.scalar(
+            select(Task).where(Task.id == root.parent_task_id, Task.workspace_id == workspace_id)
+        )
+        if parent is None:
+            break
+        root = parent
+
+    tasks: list[Task] = [root]
+    frontier = [root.id]
+    for _ in range(MAX_TREE_DEPTH):
+        if not frontier:
+            break
+        children = list(
+            await db.scalars(
+                select(Task)
+                .where(
+                    Task.parent_task_id.in_(frontier),
+                    Task.workspace_id == workspace_id,
+                )
+                .order_by(Task.created_at)
+            )
+        )
+        if not children:
+            break
+        tasks.extend(children)
+        frontier = [child.id for child in children]
+    return root, tasks
+
+
+async def latest_run_status_by_task(
+    db: AsyncSession, workspace_id: UUID, task_ids: list[UUID]
+) -> dict[UUID, str]:
+    """Latest run status per task, for tree/lineage displays."""
+    if not task_ids:
+        return {}
+    rows = await db.execute(
+        select(AgentRun.task_id, AgentRun.status)
+        .where(AgentRun.workspace_id == workspace_id, AgentRun.task_id.in_(task_ids))
+        .order_by(AgentRun.task_id, AgentRun.created_at)
+    )
+    latest: dict[UUID, str] = {}
+    for tid, run_status in rows.all():
+        if tid is not None:
+            latest[tid] = run_status  # later rows overwrite: last write wins
+    return latest
+
+
+async def agent_names(
+    db: AsyncSession, workspace_id: UUID, agent_ids: list[UUID]
+) -> dict[UUID, str]:
+    if not agent_ids:
+        return {}
+    rows = await db.execute(
+        select(Agent.id, Agent.name).where(
+            Agent.workspace_id == workspace_id, Agent.id.in_(agent_ids)
+        )
+    )
+    return {row[0]: row[1] for row in rows.all()}
+
+
 async def list_task_runs(db: AsyncSession, workspace_id: UUID, task_id: UUID) -> list[AgentRun]:
     rows = await db.scalars(
         select(AgentRun)

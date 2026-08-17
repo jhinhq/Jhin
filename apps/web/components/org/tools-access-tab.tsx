@@ -52,11 +52,13 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
   const [repoScope, setRepoScope] = useState("");
   const [branchScope, setBranchScope] = useState("");
   const [cliScope, setCliScope] = useState<Record<string, string>>({});
+  const [delegationTargets, setDelegationTargets] = useState("subordinates");
   const [error, setError] = useState<string | null>(null);
 
   const connectorTypes = (connectors.data ?? []).map((c) => c.connector_type);
   const grantConnectorType = capabilityConnectorType(capability, connectorTypes);
   const isCli = grantConnectorType === "cli";
+  const isDelegate = capability === "organization.delegate";
   const cliFields = isCli ? (CLI_SCOPE_FIELDS[capability] ?? []) : [];
   const matchingConnections = (connections.data ?? []).filter(
     (connection) => connection.connector_type === grantConnectorType,
@@ -68,11 +70,13 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
         method: "POST",
         body: {
           capability,
-          scope: isCli
-            ? buildCliScope(capability, connectionId, cliScope)
-            : grantConnectorType
-              ? buildConnectorScope(connectionId, repoScope, branchScope)
-              : {},
+          scope: isDelegate
+            ? { targets: delegationTargets }
+            : isCli
+              ? buildCliScope(capability, connectionId, cliScope)
+              : grantConnectorType
+                ? buildConnectorScope(connectionId, repoScope, branchScope)
+                : {},
           effect,
         },
       }),
@@ -211,7 +215,28 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
                 <Plus size={13} /> Add
               </Button>
             </div>
-            {isCli ? (
+            {isDelegate ? (
+              <div
+                data-testid="delegation-scope"
+                className="rounded-lg border border-line bg-surface px-3 py-2.5"
+              >
+                <Field
+                  label="Delegation targets"
+                  hint="Who this agent may delegate tasks to. Deny-by-default: without this grant the agent cannot delegate at all."
+                >
+                  <Select
+                    value={delegationTargets}
+                    onChange={(e) => setDelegationTargets(e.target.value)}
+                  >
+                    <option value="subordinates">
+                      Subordinates — direct and indirect reports
+                    </option>
+                    <option value="team">Team — agents on the same team</option>
+                    <option value="any">Any agent in the workspace</option>
+                  </Select>
+                </Field>
+              </div>
+            ) : isCli ? (
               <div
                 data-testid="cli-scope"
                 className="grid gap-2 rounded-lg border border-line bg-surface px-3 py-2.5 sm:grid-cols-3"

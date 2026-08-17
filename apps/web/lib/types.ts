@@ -76,6 +76,7 @@ export interface Agent {
   max_output_tokens: number | null;
   max_steps: number;
   max_run_minutes: number;
+  max_concurrent_runs: number;
   monthly_budget_cents: number | null;
   metadata_json: Record<string, unknown>;
   created_at: string;
@@ -202,9 +203,24 @@ export interface Task {
   external_source: string | null;
   external_id: string | null;
   trigger_id: string | null;
+  /** Delegation lineage (Phase 8): set on child tasks created by delegation. */
+  parent_task_id: string | null;
   metadata_json: Record<string, unknown>;
   created_at: string;
   updated_at: string;
+}
+
+/** One node of a delegation chain (Phase 8). */
+export interface TaskTreeNode {
+  task: Task;
+  agent_name: string | null;
+  latest_run_status: string | null;
+  children: TaskTreeNode[];
+}
+
+export interface TaskTree {
+  root: TaskTreeNode;
+  focus_task_id: string;
 }
 
 export interface Run {
@@ -451,6 +467,8 @@ export interface Trigger {
   target_team_id: string | null;
   action_config_json: Record<string, unknown>;
   dedupe_window_seconds: number;
+  /** Workflow template selection (Phase 8): null = plain triggered flow. */
+  workflow_definition: Record<string, unknown> | null;
   created_by_user_id: string | null;
   created_at: string;
   updated_at: string;

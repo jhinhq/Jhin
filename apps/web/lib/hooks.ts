@@ -24,6 +24,7 @@ import type {
   TaskDetail,
   TaskList,
   TaskMessage,
+  TaskTree,
   Team,
   ToolCallRecord,
   ToolInfo,
@@ -157,6 +158,15 @@ export function useTaskTimeline(workspaceId: string, taskId: string, live: boole
   });
 }
 
+/** Delegation chain around a task (Phase 8). */
+export function useTaskTree(workspaceId: string, taskId: string, live: boolean) {
+  return useQuery({
+    queryKey: ["task-tree", workspaceId, taskId],
+    queryFn: () => api<TaskTree>(`/api/v1/workspaces/${workspaceId}/tasks/${taskId}/tree`),
+    refetchInterval: live ? LIVE_POLL_MS : false,
+  });
+}
+
 export function useTaskMessages(workspaceId: string, taskId: string, live: boolean) {
   return useQuery({
     queryKey: ["task-messages", workspaceId, taskId],
@@ -255,6 +265,7 @@ export function useInvalidateTasks(workspaceId: string) {
     void queryClient.invalidateQueries({ queryKey: ["task", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["task-timeline", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["task-messages", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["task-tree", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["runs", workspaceId] });
   };
 }
