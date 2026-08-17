@@ -80,6 +80,13 @@ async def update(
     ip_hash: str,
 ) -> Workspace:
     workspace = await get(db, ctx.workspace_id)
+    audit_fields = sorted(changes)
+    incoming_settings = changes.pop("settings", None)
+    if isinstance(incoming_settings, dict):
+        # Validated sections merge over existing settings_json so unrelated
+        # keys survive (delegation depth guard + workspace concurrency,
+        # plan 7.5 / 30).
+        workspace.settings_json = {**workspace.settings_json, **incoming_settings}
     if "default_model_profile_id" in changes:
         profile_id = changes["default_model_profile_id"]
         exists = await db.scalar(
@@ -103,7 +110,7 @@ async def update(
         actor_id=ctx.user.id,
         request_id=request_id,
         ip_hash=ip_hash,
-        metadata={"changed_fields": sorted(changes)},
+        metadata={"changed_fields": audit_fields},
     )
     await db.commit()
     return workspace

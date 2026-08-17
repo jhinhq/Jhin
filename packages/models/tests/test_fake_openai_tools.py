@@ -90,6 +90,21 @@ def test_b64_segment_smuggles_nested_markers() -> None:
     assert json.loads(call["function"]["arguments"]) == {"suite": "unit"}
 
 
+def test_system_prompt_markers_are_collected_first() -> None:
+    """Phase 8: template-created review tasks compose their own instructions,
+    so a scripted reviewer carries its behavior on the system prompt."""
+    body = {
+        "model": "fake-mini",
+        "messages": [
+            {"role": "system", "content": 'You are QA. [[tool:cli.test.run {"suite": "all"}]]'},
+            {"role": "user", "content": "Review the implementation."},
+        ],
+    }
+    _status, payload = build_completion(body)
+    call = payload["choices"][0]["message"]["tool_calls"][0]
+    assert call["function"]["name"] == "cli.test.run"
+
+
 def test_invalid_b64_segment_is_left_untouched() -> None:
     body = {
         "model": "fake-mini",

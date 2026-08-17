@@ -36,6 +36,10 @@ Phase 8 extensions for multi-agent scripts:
   with ``pass``/``fail`` based on evidence: the most recent tool result that
   reports an ``exit_code`` (``0`` → pass). A QA script can therefore run the
   test suite and report an honest, evidence-based review verdict.
+- Markers are also collected from **system** messages (before user messages,
+  matching transcript order). Template-created review tasks compose their own
+  instructions, so a scripted reviewer carries its behavior on the agent's
+  system prompt instead.
 """
 
 from __future__ import annotations
@@ -110,7 +114,7 @@ def _pending_tool_marker(messages: list[dict[str, Any]]) -> tuple[int, str, str]
     """
     markers: list[tuple[str, str]] = []
     for message in messages:
-        if message.get("role") == "user":
+        if message.get("role") in ("system", "user"):
             content = _expand_b64(str(message.get("content", "")))
             markers.extend(TOOL_MARKER_RE.findall(content))
     results = sum(1 for m in messages if m.get("role") == "tool")
