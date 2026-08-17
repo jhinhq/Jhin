@@ -23,6 +23,7 @@ members = [
     "jhin-sandbox-runner",
     "jhin-secrets",
     "jhin-tools",
+    "jhin-triggers",
     "jhin-workflow-worker",
     "jhin-workflows",
     "jhin-workspace",
@@ -1063,6 +1064,11 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.10" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.36" },
 ]
+
+[[package]]
+name = "jhin-triggers"
+version = "0.1.0"
+source = { editable = "packages/triggers" }
 
 [[package]]
 name = "jhin-workflow-worker"

@@ -25,6 +25,7 @@ members = [
     "packages/policy",
     "packages/tools",
     "packages/connectors",
+    "packages/triggers",
 ]
 
 [dependency-groups]
@@ -58,6 +59,7 @@ src = [
     "packages/policy/src",
     "packages/tools/src",
     "packages/connectors/src",
+    "packages/triggers/src",
 ]
 
 [tool.ruff.lint]
@@ -96,6 +98,7 @@ files = [
     "packages/policy/src",
     "packages/tools/src",
     "packages/connectors/src",
+    "packages/triggers/src",
     "scripts",
     "tests",
 ]
@@ -123,6 +126,7 @@ testpaths = [
     "packages/policy/tests",
     "packages/tools/tests",
     "packages/connectors/tests",
+    "packages/triggers/tests",
     "services/event_worker/tests",
     "services/sandbox_runner/tests",
     "tests",
