@@ -27,6 +27,8 @@ import type {
   Team,
   ToolCallRecord,
   ToolInfo,
+  Trigger,
+  TriggerInvocation,
   WorkspaceDetail,
 } from "@/lib/types";
 
@@ -302,6 +304,54 @@ export function useInvalidateConnections(workspaceId: string) {
   return () => {
     void queryClient.invalidateQueries({ queryKey: ["connections", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["connection-tool-calls", workspaceId] });
+  };
+}
+
+// --- Phase 7: triggers ---
+
+export function useTriggers(workspaceId: string) {
+  return useQuery({
+    queryKey: ["triggers", workspaceId],
+    queryFn: () => api<Trigger[]>(`/api/v1/workspaces/${workspaceId}/triggers`),
+    refetchInterval: 10_000, // keep last-invocation status reasonably live
+  });
+}
+
+export function useTriggerInvocations(workspaceId: string, triggerId: string | null) {
+  return useQuery({
+    queryKey: ["trigger-invocations", workspaceId, triggerId],
+    queryFn: () =>
+      api<TriggerInvocation[]>(
+        `/api/v1/workspaces/${workspaceId}/triggers/${triggerId}/invocations`,
+      ),
+    enabled: triggerId !== null,
+    refetchInterval: 10_000,
+  });
+}
+
+/** Provider metadata for builder pickers (admin-only endpoint). */
+export function useConnectionMetadata(
+  workspaceId: string,
+  connectionId: string | null,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: ["connection-metadata", workspaceId, connectionId],
+    queryFn: () =>
+      api<Record<string, unknown>>(
+        `/api/v1/workspaces/${workspaceId}/connections/${connectionId}/metadata`,
+      ),
+    enabled: enabled && connectionId !== null,
+    staleTime: 60_000,
+    retry: false,
+  });
+}
+
+export function useInvalidateTriggers(workspaceId: string) {
+  const queryClient = useQueryClient();
+  return () => {
+    void queryClient.invalidateQueries({ queryKey: ["triggers", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["trigger-invocations", workspaceId] });
   };
 }
 

@@ -198,6 +198,11 @@ export interface Task {
   priority: string;
   assigned_agent_id: string | null;
   temporal_workflow_id: string | null;
+  /** Trigger origin (Phase 7): set when a trigger started this task. */
+  external_source: string | null;
+  external_id: string | null;
+  trigger_id: string | null;
+  metadata_json: Record<string, unknown>;
   created_at: string;
   updated_at: string;
 }
@@ -352,6 +357,7 @@ export interface ConnectorInfo {
   auth_schemes: AuthSchemeSpec[];
   config_fields: ConfigFieldSpec[];
   webhook_events: string[];
+  canonical_events: string[];
   capabilities: string[];
   supports_webhooks: boolean;
   docs_url: string;
@@ -404,4 +410,76 @@ export interface ToolCallRecord {
   duration_ms: number | null;
   error_code: string | null;
   created_at: string;
+}
+
+// --- Phase 7: triggers ---
+
+export type TriggerInvocationStatus = "started" | "duplicate" | "failed";
+
+export interface TriggerCondition {
+  path: string;
+  op: string;
+  value?: unknown;
+}
+
+export interface TriggerFilter {
+  all?: (TriggerCondition | TriggerFilter)[];
+  any?: (TriggerCondition | TriggerFilter)[];
+}
+
+export interface TriggerInvocation {
+  id: string;
+  trigger_id: string;
+  status: TriggerInvocationStatus;
+  event_id: string;
+  task_id: string | null;
+  workflow_id: string | null;
+  error: string | null;
+  created_at: string;
+}
+
+export interface Trigger {
+  id: string;
+  name: string;
+  enabled: boolean;
+  trigger_type: string;
+  connection_id: string | null;
+  event_type: string | null;
+  filter_json: TriggerFilter;
+  action_type: string;
+  target_agent_id: string | null;
+  target_team_id: string | null;
+  action_config_json: Record<string, unknown>;
+  dedupe_window_seconds: number;
+  created_by_user_id: string | null;
+  created_at: string;
+  updated_at: string;
+  last_invocation: TriggerInvocation | null;
+}
+
+export interface ConditionExplanation {
+  path: string;
+  op: string;
+  value: unknown;
+  passed: boolean;
+  actual: unknown;
+  actual_present: boolean;
+  previous: unknown;
+  previous_present: boolean;
+  detail: string;
+}
+
+export interface TriggerTestResult {
+  matched: boolean;
+  event_type_matches: boolean;
+  filter_matches: boolean;
+  conditions: ConditionExplanation[];
+}
+
+/** Connector metadata for pickers, e.g. Linear teams + workflow states. */
+export interface LinearTeamMetadata {
+  id: string;
+  key: string;
+  name: string;
+  states: { id: string; name: string; type: string }[];
 }

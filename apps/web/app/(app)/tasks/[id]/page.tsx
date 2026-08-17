@@ -18,6 +18,7 @@ import {
   TerminalSquare,
   User,
   Wrench,
+  Zap,
 } from "lucide-react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
@@ -126,6 +127,39 @@ export default function TaskDetailPage() {
       <div className="grid gap-6 px-8 py-6 xl:grid-cols-[1fr_380px]">
         <div className="min-w-0 space-y-6">
           <ErrorNote message={actionError} />
+
+          {task.trigger_id ? (
+            <section
+              data-testid="trigger-origin-banner"
+              className="flex items-center gap-3 rounded-xl border border-accent/30 bg-accent-soft px-5 py-3.5"
+            >
+              <Zap size={16} className="shrink-0 text-accent" />
+              <p className="min-w-0 flex-1 text-sm text-dim">
+                Started by trigger{" "}
+                <Link href="/triggers" className="font-medium text-accent hover:underline">
+                  {String(task.metadata_json.trigger_name ?? shortId(task.trigger_id))}
+                </Link>
+                {task.external_source ? (
+                  <>
+                    {" "}
+                    from {task.external_source}{" "}
+                    {typeof task.metadata_json.external_url === "string" ? (
+                      <a
+                        href={task.metadata_json.external_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="font-medium text-accent hover:underline"
+                      >
+                        {task.external_id}
+                      </a>
+                    ) : (
+                      <span className="font-medium text-ink">{task.external_id}</span>
+                    )}
+                  </>
+                ) : null}
+              </p>
+            </section>
+          ) : null}
 
           {waitingApproval ? (
             <section

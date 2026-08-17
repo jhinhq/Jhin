@@ -18,6 +18,7 @@ const GITHUB: ConnectorInfo = {
   ],
   config_fields: [],
   webhook_events: ["issues", "pull_request", "push"],
+  canonical_events: [],
   capabilities: ["github.repository.read", "github.branch.create"],
   supports_webhooks: true,
   docs_url: "",
