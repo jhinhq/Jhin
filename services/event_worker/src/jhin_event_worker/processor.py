@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import OrderedDict
+from typing import Protocol
 
 from nats.aio.msg import Msg
 from nats.js import JetStreamContext
@@ -17,16 +18,29 @@ from jhin_observability import get_logger
 logger = get_logger(__name__)
 
 
+class EventHandler(Protocol):
+    """Downstream processing hook (the TriggerMatcher in production)."""
+
+    async def handle_event(self, envelope: EventEnvelope) -> None: ...
+
+
 class EventProcessor:
-    """Parses, dedupes (by event_id), logs, and acks consumed events.
+    """Parses, dedupes (by event_id), dispatches, and acks consumed events.
 
     JetStream's duplicate window already dedupes republished messages
     server-side; this consumer-side set additionally makes *redelivery*
     (e.g. after a worker crash between processing and ack) effectively-once.
     """
 
-    def __init__(self, js: JetStreamContext, *, max_remembered: int = 10_000) -> None:
+    def __init__(
+        self,
+        js: JetStreamContext,
+        *,
+        matcher: EventHandler | None = None,
+        max_remembered: int = 10_000,
+    ) -> None:
         self._js = js
+        self._matcher = matcher
         self._max_remembered = max_remembered
         self._seen: OrderedDict[str, None] = OrderedDict()
 
@@ -60,6 +74,11 @@ class EventProcessor:
             )
             await msg.ack()
             return
+
+        # Dispatch before remembering: a matcher failure propagates so the
+        # consumer naks for redelivery, and the retry is not skipped as seen.
+        if self._matcher is not None:
+            await self._matcher.handle_event(envelope)
 
         self._seen[event_id] = None
         while len(self._seen) > self._max_remembered:

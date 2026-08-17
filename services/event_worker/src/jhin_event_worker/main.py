@@ -11,7 +11,10 @@ import signal
 
 import nats
 from nats.aio.client import Client as NatsClient
+from temporalio.client import Client as TemporalClient
 
+from jhin_db import create_engine, create_session_factory
+from jhin_event_worker.matcher import TriggerMatcher
 from jhin_event_worker.normalizer import IngressNormalizer
 from jhin_event_worker.processor import EventProcessor
 from jhin_event_worker.settings import Settings
@@ -39,6 +42,24 @@ async def connect_with_retry(settings: Settings) -> NatsClient:
             delay = min(delay * 2, 15.0)
 
 
+async def temporal_with_retry(settings: Settings) -> TemporalClient:
+    delay = 1.0
+    while True:
+        try:
+            return await TemporalClient.connect(
+                settings.temporal_address, namespace=settings.temporal_namespace
+            )
+        except Exception as exc:
+            logger.warning(
+                "temporal.connect_retry",
+                address=settings.temporal_address,
+                error=f"{type(exc).__name__}: {exc}"[:200],
+                retry_in_seconds=delay,
+            )
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 15.0)
+
+
 async def main() -> None:
     settings = Settings()
     configure_logging("event-worker", settings.log_level)
@@ -48,13 +69,21 @@ async def main() -> None:
     await ensure_streams(js)
     logger.info("nats.connected", url=settings.nats_url, stream=EVENTS_STREAM)
 
+    temporal = await temporal_with_retry(settings)
+    engine = create_engine(settings.database_url)
+    session_factory = create_session_factory(engine)
+    logger.info("temporal.connected", address=settings.temporal_address)
+
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
 
     heartbeat_task = asyncio.create_task(run_heartbeat())
-    processor = EventProcessor(js)
+    matcher = TriggerMatcher(
+        session_factory, temporal, cache_ttl_seconds=settings.trigger_cache_ttl_seconds
+    )
+    processor = EventProcessor(js, matcher=matcher)
     normalizer = IngressNormalizer(js)
     try:
         # Two durable consumers side by side: canonical EVENTS processing and
@@ -80,6 +109,7 @@ async def main() -> None:
         heartbeat_task.cancel()
         clear_heartbeat()
         await client.close()
+        await engine.dispose()
 
 
 def run() -> None:

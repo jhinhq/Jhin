@@ -7,9 +7,14 @@ dependencies = [
     "nats-py>=2.13",
     "pydantic>=2.10",
     "pydantic-settings>=2.7",
+    "temporalio>=1.9",
     "jhin-connectors",
+    "jhin-db",
+    "jhin-domain",
     "jhin-events",
     "jhin-observability",
+    "jhin-triggers",
+    "jhin-workflows",
 ]
 
 [project.scripts]
@@ -17,8 +22,12 @@ jhin-event-worker = "jhin_event_worker.main:run"
 
 [tool.uv.sources]
 jhin-connectors = { workspace = true }
+jhin-db = { workspace = true }
+jhin-domain = { workspace = true }
 jhin-events = { workspace = true }
 jhin-observability = { workspace = true }
+jhin-triggers = { workspace = true }
+jhin-workflows = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

@@ -1,0 +1,352 @@
+"""TriggerMatcher: canonical events → trigger invocations (plan 10, 9.4).
+
+For every ``connector.*`` event on the EVENTS stream, load the workspace's
+enabled triggers (cached briefly), evaluate their filters with the pure DSL,
+and for each match run the idempotent start sequence:
+
+1. derive the deterministic idempotency key (trigger + connection + external
+   entity + transition fingerprint + dedupe-window bucket);
+2. insert a ``started`` invocation row — the partial unique index makes the
+   database the first dedupe authority; losers record a ``duplicate`` row;
+3. start TriggeredTaskWorkflow under a workflow id derived from the same
+   key — Temporal's duplicate-start policy is the second defense, closing
+   the race against a crash between commit and start (plan 48.6).
+
+A Temporal outage marks the invocation ``failed`` and raises, so the
+consumer naks for redelivery: the failed row remains as history and the
+retry inserts a fresh ``started`` row.
+
+The matcher knows nothing about Linear: normalized events follow the
+connector-agnostic conventions ``data.external_id/title/description/url``
+and ``data.changed_from`` (plan 52).
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from typing import Any
+from uuid import UUID
+
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from temporalio.client import Client as TemporalClient
+from temporalio.exceptions import WorkflowAlreadyStartedError
+
+from jhin_db.models import Agent, AuditEvent, Team, Trigger, TriggerInvocation
+from jhin_domain import AgentStatus, TriggerInvocationStatus, TriggerType
+from jhin_events.envelope import EventEnvelope
+from jhin_observability import get_logger
+from jhin_triggers import (
+    build_idempotency_key,
+    evaluate_filter,
+    transition_fingerprint,
+    workflow_id_for_key,
+)
+from jhin_workflows import AGENT_TASK_QUEUE
+from jhin_workflows.triggered_task import TriggeredTaskInput
+
+logger = get_logger(__name__)
+
+_CACHE_TTL_SECONDS = 5.0
+_MAX_TITLE = 500
+_MAX_DESCRIPTION = 10_000
+
+
+@dataclass(frozen=True)
+class TriggerSpec:
+    """Detached snapshot of one enabled trigger (safe to cache)."""
+
+    id: UUID
+    name: str
+    connection_id: UUID | None
+    event_type: str | None
+    filter_json: dict[str, Any]
+    target_agent_id: UUID | None
+    target_team_id: UUID | None
+    dedupe_window_seconds: int
+    comment_back: bool
+
+
+@dataclass
+class _CacheEntry:
+    loaded_at: float
+    specs: list[TriggerSpec] = field(default_factory=list)
+
+
+class TriggerMatcher:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        temporal: TemporalClient,
+        *,
+        cache_ttl_seconds: float = _CACHE_TTL_SECONDS,
+    ) -> None:
+        self._session_factory = session_factory
+        self._temporal = temporal
+        self._cache_ttl = cache_ttl_seconds
+        self._cache: dict[str, _CacheEntry] = {}
+
+    async def handle_event(self, envelope: EventEnvelope) -> None:
+        """Evaluate one canonical event against the workspace's triggers."""
+        if not envelope.event_type.startswith("connector."):
+            return
+        specs = await self._triggers_for(envelope.workspace_id)
+        event_view: dict[str, Any] = {"event_type": envelope.event_type, "data": envelope.data}
+        for spec in specs:
+            if spec.event_type and spec.event_type != envelope.event_type:
+                continue
+            if spec.connection_id is not None and spec.connection_id != (
+                envelope.source.connection_id
+            ):
+                continue
+            result = evaluate_filter(spec.filter_json, event_view)
+            if not result.matched:
+                continue
+            await self._invoke(spec, envelope, result)
+
+    def invalidate_cache(self) -> None:
+        self._cache.clear()
+
+    async def _triggers_for(self, workspace_id: str) -> list[TriggerSpec]:
+        now = time.monotonic()
+        cached = self._cache.get(workspace_id)
+        if cached is not None and now - cached.loaded_at < self._cache_ttl:
+            return cached.specs
+        async with self._session_factory() as session:
+            rows = await session.scalars(
+                select(Trigger).where(
+                    Trigger.workspace_id == UUID(workspace_id),
+                    Trigger.enabled.is_(True),
+                    Trigger.trigger_type == TriggerType.CONNECTOR_EVENT.value,
+                )
+            )
+            specs = [
+                TriggerSpec(
+                    id=row.id,
+                    name=row.name,
+                    connection_id=row.connection_id,
+                    event_type=row.event_type,
+                    filter_json=dict(row.filter_json),
+                    target_agent_id=row.target_agent_id,
+                    target_team_id=row.target_team_id,
+                    dedupe_window_seconds=row.dedupe_window_seconds,
+                    comment_back=bool(row.action_config_json.get("comment_back", False)),
+                )
+                for row in rows
+            ]
+        self._cache[workspace_id] = _CacheEntry(loaded_at=now, specs=specs)
+        return specs
+
+    async def _invoke(self, spec: TriggerSpec, envelope: EventEnvelope, result: Any) -> None:
+        workspace_id = UUID(envelope.workspace_id)
+        external_id = str(envelope.data.get("external_id") or "") or str(envelope.event_id)
+        key = build_idempotency_key(
+            trigger_id=spec.id,
+            connection_id=spec.connection_id,
+            external_id=external_id,
+            fingerprint=transition_fingerprint(result),
+            dedupe_window_seconds=spec.dedupe_window_seconds,
+            occurred_at=envelope.occurred_at,
+        )
+        workflow_id = workflow_id_for_key(key)
+
+        async with self._session_factory() as session:
+            invocation = await self._record_started(session, spec, envelope, key, workflow_id)
+            if invocation is None:
+                return  # duplicate — recorded and audited inside
+
+            agent_id = await self._resolve_agent(session, workspace_id, spec)
+            if agent_id is None:
+                invocation.status = TriggerInvocationStatus.FAILED.value
+                invocation.error = "no active agent to assign (trigger target missing)"
+                self._audit(session, spec, envelope, key, "failed", workflow_id)
+                await session.commit()
+                logger.warning("trigger.no_agent", trigger_id=str(spec.id))
+                return
+
+            params = self._workflow_input(spec, envelope, invocation.id, external_id, agent_id)
+            self._audit(session, spec, envelope, key, "started", workflow_id)
+            await session.commit()
+            invocation_id = invocation.id
+
+        try:
+            await self._temporal.start_workflow(
+                "TriggeredTaskWorkflow",
+                params,
+                id=workflow_id,
+                task_queue=AGENT_TASK_QUEUE,
+            )
+        except WorkflowAlreadyStartedError:
+            # The work already exists exactly once (e.g. crash after a prior
+            # start but before its invocation row committed). Not an error.
+            logger.info("trigger.workflow_already_started", workflow_id=workflow_id)
+        except Exception as exc:
+            async with self._session_factory() as session:
+                row = await session.get(TriggerInvocation, invocation_id)
+                if row is not None:
+                    row.status = TriggerInvocationStatus.FAILED.value
+                    row.error = f"{type(exc).__name__}: {exc}"[:500]
+                    await session.commit()
+            raise  # nak → redelivery retries the whole match
+
+        logger.info(
+            "trigger.invoked",
+            trigger_id=str(spec.id),
+            workflow_id=workflow_id,
+            external_id=external_id,
+            event_id=str(envelope.event_id),
+        )
+
+    async def _record_started(
+        self,
+        session: AsyncSession,
+        spec: TriggerSpec,
+        envelope: EventEnvelope,
+        key: str,
+        workflow_id: str,
+    ) -> TriggerInvocation | None:
+        """Insert the ``started`` row; on unique-index loss record a
+        ``duplicate`` row and return None."""
+        workspace_id = UUID(envelope.workspace_id)
+        existing = await session.scalar(
+            select(TriggerInvocation).where(
+                TriggerInvocation.trigger_id == spec.id,
+                TriggerInvocation.idempotency_key == key,
+                TriggerInvocation.status == TriggerInvocationStatus.STARTED.value,
+            )
+        )
+        if existing is None:
+            invocation = TriggerInvocation(
+                workspace_id=workspace_id,
+                trigger_id=spec.id,
+                idempotency_key=key,
+                event_id=envelope.event_id,
+                workflow_id=workflow_id,
+                status=TriggerInvocationStatus.STARTED.value,
+            )
+            session.add(invocation)
+            try:
+                await session.flush()
+            except IntegrityError:
+                # Lost the insert race to a concurrent replica.
+                await session.rollback()
+            else:
+                return invocation
+
+        duplicate = TriggerInvocation(
+            workspace_id=workspace_id,
+            trigger_id=spec.id,
+            idempotency_key=key,
+            event_id=envelope.event_id,
+            workflow_id=workflow_id,
+            status=TriggerInvocationStatus.DUPLICATE.value,
+        )
+        session.add(duplicate)
+        self._audit(session, spec, envelope, key, "duplicate", workflow_id)
+        await session.commit()
+        logger.info(
+            "trigger.duplicate_suppressed",
+            trigger_id=str(spec.id),
+            idempotency_key=key,
+            event_id=str(envelope.event_id),
+        )
+        return None
+
+    async def _resolve_agent(
+        self, session: AsyncSession, workspace_id: UUID, spec: TriggerSpec
+    ) -> UUID | None:
+        """Trigger target → concrete active agent (plan 8.1)."""
+        if spec.target_agent_id is not None:
+            agent = await session.scalar(
+                select(Agent).where(
+                    Agent.id == spec.target_agent_id,
+                    Agent.workspace_id == workspace_id,
+                    Agent.status == AgentStatus.ACTIVE.value,
+                )
+            )
+            return agent.id if agent is not None else None
+        if spec.target_team_id is not None:
+            team = await session.get(Team, spec.target_team_id)
+            if team is not None and team.manager_agent_id is not None:
+                manager = await session.scalar(
+                    select(Agent).where(
+                        Agent.id == team.manager_agent_id,
+                        Agent.workspace_id == workspace_id,
+                        Agent.status == AgentStatus.ACTIVE.value,
+                    )
+                )
+                if manager is not None:
+                    return manager.id
+            member = await session.scalar(
+                select(Agent)
+                .where(
+                    Agent.team_id == spec.target_team_id,
+                    Agent.workspace_id == workspace_id,
+                    Agent.status == AgentStatus.ACTIVE.value,
+                )
+                .order_by(Agent.created_at)
+            )
+            return member.id if member is not None else None
+        return None
+
+    def _workflow_input(
+        self,
+        spec: TriggerSpec,
+        envelope: EventEnvelope,
+        invocation_id: UUID,
+        external_id: str,
+        agent_id: UUID,
+    ) -> TriggeredTaskInput:
+        data = envelope.data
+        title = str(data.get("title") or "")[:_MAX_TITLE]
+        description = str(data.get("description") or "")[:_MAX_DESCRIPTION]
+        url = str(data.get("url") or "")
+        if title and external_id:
+            title = f"[{external_id}] {title}"[:_MAX_TITLE]
+        if url:
+            description = f"{description}\n\nSource: {url}".strip()
+        return TriggeredTaskInput(
+            workspace_id=envelope.workspace_id,
+            trigger_id=str(spec.id),
+            trigger_name=spec.name,
+            invocation_id=str(invocation_id),
+            connection_id=str(spec.connection_id or envelope.source.connection_id or ""),
+            event_id=str(envelope.event_id),
+            event_type=envelope.event_type,
+            external_source=envelope.source.type,
+            external_id=external_id,
+            title=title,
+            description=description,
+            external_url=url,
+            agent_id=str(agent_id),
+            comment_back=spec.comment_back,
+        )
+
+    def _audit(
+        self,
+        session: AsyncSession,
+        spec: TriggerSpec,
+        envelope: EventEnvelope,
+        key: str,
+        status: str,
+        workflow_id: str,
+    ) -> None:
+        session.add(
+            AuditEvent(
+                workspace_id=UUID(envelope.workspace_id),
+                actor_type="system",
+                actor_id=None,
+                action="trigger.invoked",
+                target_type="trigger",
+                target_id=spec.id,
+                metadata_json={
+                    "status": status,
+                    "event_id": str(envelope.event_id),
+                    "event_type": envelope.event_type,
+                    "idempotency_key": key,
+                    "workflow_id": workflow_id,
+                },
+            )
+        )

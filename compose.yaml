@@ -188,8 +188,16 @@ services:
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       NATS_URL: nats://nats:4222
+      # Trigger matching: reads triggers, records invocations, starts
+      # TriggeredTaskWorkflow (plan 10.5).
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-jhin}:${POSTGRES_PASSWORD:-jhin}@postgres:5432/${POSTGRES_DB:-jhin}
+      TEMPORAL_ADDRESS: temporal:7233
     depends_on:
       nats:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      temporal:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "jhin-health-check"]
