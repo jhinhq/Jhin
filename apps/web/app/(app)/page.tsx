@@ -1,13 +1,13 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { ArrowRight, Bot, PauseCircle, Users, UsersRound } from "lucide-react";
+import { ArrowRight, Bot, CheckSquare, PauseCircle, Users, UsersRound } from "lucide-react";
 import Link from "next/link";
 import { PageHeader } from "@/components/app-shell";
 import { Badge, Spinner } from "@/components/ui";
 import { api } from "@/lib/api";
 import { formatDateTime } from "@/lib/format";
-import { useAuditEvents, useMembers, useOrgGraph } from "@/lib/hooks";
+import { useAuditEvents, useMembers, useOrgGraph, usePendingApprovalCount } from "@/lib/hooks";
 import { useWorkspace } from "@/lib/workspace-context";
 
 interface ReadinessReport {
@@ -45,6 +45,7 @@ export default function OverviewPage() {
   const graph = useOrgGraph(workspace.workspace_id);
   const members = useMembers(workspace.workspace_id);
   const recentAudit = useAuditEvents(workspace.workspace_id, { limit: 8 }, can("admin"));
+  const pendingApprovals = usePendingApprovalCount(workspace.workspace_id);
   const health = useQuery({
     queryKey: ["health"],
     queryFn: () => api<ReadinessReport>("/api/v1/health/ready"),
@@ -72,7 +73,7 @@ export default function OverviewPage() {
         {graph.isPending ? (
           <Spinner />
         ) : (
-          <section className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+          <section className="grid grid-cols-2 gap-4 lg:grid-cols-5">
             <StatCard
               label="Active agents"
               value={activeAgents}
@@ -84,6 +85,12 @@ export default function OverviewPage() {
               value={pausedAgents}
               icon={PauseCircle}
               href="/organization"
+            />
+            <StatCard
+              label="Pending approvals"
+              value={pendingApprovals.data ?? "—"}
+              icon={CheckSquare}
+              href="/approvals"
             />
             <StatCard
               label="Teams"
@@ -158,7 +165,7 @@ export default function OverviewPage() {
         </section>
 
         <p className="text-xs text-faint">
-          Task throughput, spend, and connector health cards arrive with Phases 3-5.
+          Spend and connector health cards arrive with Phases 5 and 10.
         </p>
       </div>
     </>

@@ -20,6 +20,7 @@ import {
   StatusDot,
   Textarea,
 } from "@/components/ui";
+import { ToolsAccessTab } from "@/components/org/tools-access-tab";
 import { api, ApiError } from "@/lib/api";
 import {
   useAgent,
@@ -35,7 +36,7 @@ const TABS = [
   { id: "overview", label: "Overview" },
   { id: "instructions", label: "Instructions" },
   { id: "model", label: "Model" },
-  { id: "tools", label: "Tools & Access", phase: "Phase 4" },
+  { id: "tools", label: "Tools & Access" },
   { id: "memory", label: "Memory", phase: "Phase 6" },
   { id: "settings", label: "Settings" },
 ] as const;
@@ -243,6 +244,10 @@ export function AgentDrawer({
 
               {tab === "instructions" ? (
                 <InstructionsTab agent={agent} canEdit={can("admin")} onSaved={invalidate} />
+              ) : null}
+
+              {tab === "tools" ? (
+                <ToolsAccessTab agent={agent} canEdit={can("admin")} />
               ) : null}
 
               {tab === "settings" ? (

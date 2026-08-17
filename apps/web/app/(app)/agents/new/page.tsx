@@ -1,7 +1,8 @@
 "use client";
 
-/** Agent creation wizard (plan 17.6). Steps 1-4 (identity, instructions,
- * placement, model) and 8 (review) are live; steps 5-7 arrive in Phase 4. */
+/** Agent creation wizard (plan 17.6). Steps 1-6 (identity, instructions,
+ * placement, model, tools, autonomy) and 8 (review) are live; step 7
+ * (budget enforcement) arrives in Phase 10. */
 
 import { useMutation } from "@tanstack/react-query";
 import { Check, ChevronLeft, ChevronRight, Lock } from "lucide-react";
@@ -23,14 +24,17 @@ import {
   useInvalidateOrg,
   useModelProfiles,
   useOrgGraph,
+  useTools,
   useWorkspaceDetail,
 } from "@/lib/hooks";
-import type { Agent } from "@/lib/types";
+import { PRESET_DESCRIPTIONS, PRESET_RULES, describeRule, riskTone } from "@/lib/policy";
+import type { Agent, ApprovalPreset, AutonomyLevel } from "@/lib/types";
 import {
   AGENT_TEMPLATES,
   canSubmit,
   EMPTY_WIZARD,
   toCreatePayload,
+  toggleCapability,
   validateStep,
   WIZARD_STEPS,
   type WizardState,
@@ -103,6 +107,7 @@ function WizardInner() {
   const workspaceId = workspace.workspace_id;
   const graph = useOrgGraph(workspaceId);
   const profiles = useModelProfiles(workspaceId);
+  const tools = useTools(workspaceId);
   const workspaceDetail = useWorkspaceDetail(workspaceId);
   const invalidate = useInvalidateOrg(workspaceId);
 
@@ -117,11 +122,24 @@ function WizardInner() {
     setState((previous) => ({ ...previous, ...changes }));
 
   const create = useMutation({
-    mutationFn: () =>
-      api<Agent>(`/api/v1/workspaces/${workspaceId}/agents`, {
+    mutationFn: async () => {
+      const agent = await api<Agent>(`/api/v1/workspaces/${workspaceId}/agents`, {
         method: "POST",
         body: toCreatePayload(state),
-      }),
+      });
+      // Apply tool grants and the approval policy chosen in steps 5-6.
+      for (const capability of state.grantCapabilities) {
+        await api(`/api/v1/workspaces/${workspaceId}/agents/${agent.id}/grants`, {
+          method: "POST",
+          body: { capability, scope: {}, effect: "allow" },
+        });
+      }
+      await api(`/api/v1/workspaces/${workspaceId}/agents/${agent.id}/policy`, {
+        method: "PUT",
+        body: { preset: state.approvalPreset },
+      });
+      return agent;
+    },
     onSuccess: () => {
       invalidate();
       router.push("/organization");
@@ -289,6 +307,96 @@ function WizardInner() {
               </p>
             ) : null}
           </div>
+        ) : step === 5 ? (
+          <div className="space-y-4">
+            <Field
+              label="Tool access"
+              hint="Deny-by-default: the agent can only call tools you grant here. Connectors arrive in Phase 5."
+            >
+              <div className="space-y-2 pt-1">
+                {(tools.data ?? []).map((tool) => {
+                  const checked = state.grantCapabilities.includes(tool.required_capability);
+                  return (
+                    <label
+                      key={tool.name}
+                      className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2.5 transition-colors ${
+                        checked ? "border-accent bg-accent-soft" : "border-line bg-raised"
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => setState(toggleCapability(state, tool.required_capability))}
+                        className="mt-0.5 accent-[var(--accent)]"
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="flex items-center gap-2">
+                          <code className="text-[13px] font-medium">{tool.name}</code>
+                          <Badge tone={riskTone(tool.risk)}>{tool.risk}</Badge>
+                        </span>
+                        <span className="mt-0.5 block text-xs text-dim">{tool.description}</span>
+                      </span>
+                    </label>
+                  );
+                })}
+                {tools.isPending ? <Spinner /> : null}
+              </div>
+            </Field>
+          </div>
+        ) : step === 6 ? (
+          <div className="space-y-4">
+            <Field label="Autonomy level" hint="How independently the agent operates.">
+              <Select
+                value={state.autonomyLevel}
+                onChange={(e) => patch({ autonomyLevel: e.target.value as AutonomyLevel })}
+              >
+                <option value="manual">manual — acts only when messaged</option>
+                <option value="supervised">supervised — works tasks, humans approve risk</option>
+                <option value="autonomous">autonomous — minimal human involvement</option>
+              </Select>
+            </Field>
+            <Field
+              label="Approval policy"
+              hint="A preset expands to explicit rules stored on the agent (plan 42)."
+            >
+              <div className="grid gap-2 pt-1 sm:grid-cols-3">
+                {(["autonomous", "balanced", "restricted"] as ApprovalPreset[]).map((preset) => {
+                  const active = state.approvalPreset === preset;
+                  return (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => patch({ approvalPreset: preset })}
+                      aria-pressed={active}
+                      className={`rounded-lg border px-3 py-2.5 text-left transition-colors ${
+                        active
+                          ? "border-accent bg-accent-soft"
+                          : "border-line bg-raised hover:border-line-strong"
+                      }`}
+                    >
+                      <p className="text-[13px] font-medium capitalize">{preset}</p>
+                      <p className="mt-1 text-[11px] leading-snug text-dim">
+                        {PRESET_DESCRIPTIONS[preset]}
+                      </p>
+                    </button>
+                  );
+                })}
+              </div>
+            </Field>
+            <div className="rounded-lg border border-line bg-surface px-4 py-3">
+              <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-dim">
+                Rules this preset sets
+              </p>
+              <ul className="space-y-1">
+                {PRESET_RULES[state.approvalPreset].map((rule, index) => (
+                  <li key={index} className="flex items-center gap-2 text-xs">
+                    <Badge tone={riskTone(rule.risk)}>{rule.risk ?? "any"}</Badge>
+                    <span>{describeRule(rule)}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
         ) : (
           <div className="space-y-4">
             <div className="rounded-xl border border-line bg-surface px-5 py-2">
@@ -319,8 +427,29 @@ function WizardInner() {
                 }
               />
               <ReviewRow
-                label="Tools / autonomy / budget"
-                value={<span className="text-faint">defaults · configure in Phase 4</span>}
+                label="Tools"
+                value={
+                  state.grantCapabilities.length > 0 ? (
+                    <span className="text-xs">
+                      {state.grantCapabilities.map((capability) => (
+                        <code key={capability} className="ml-1.5 text-[12px]">
+                          {capability}
+                        </code>
+                      ))}
+                    </span>
+                  ) : (
+                    <span className="text-faint">none (deny-by-default)</span>
+                  )
+                }
+              />
+              <ReviewRow label="Autonomy" value={state.autonomyLevel} />
+              <ReviewRow
+                label="Approval policy"
+                value={<span className="capitalize">{state.approvalPreset}</span>}
+              />
+              <ReviewRow
+                label="Budget"
+                value={<span className="text-faint">unlimited · enforcement in Phase 10</span>}
               />
             </div>
             <ErrorNote

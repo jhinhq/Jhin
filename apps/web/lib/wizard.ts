@@ -3,6 +3,8 @@
  * and pure validation functions (unit-tested).
  */
 
+import type { ApprovalPreset, AutonomyLevel } from "@/lib/types";
+
 export interface WizardState {
   name: string;
   roleTitle: string;
@@ -12,6 +14,10 @@ export interface WizardState {
   managerAgentId: string;
   /** Empty string = use the workspace default profile (plan 15.2). */
   modelProfileId: string;
+  /** Capabilities to allow-grant right after creation (plan 12.3). */
+  grantCapabilities: string[];
+  approvalPreset: ApprovalPreset;
+  autonomyLevel: AutonomyLevel;
 }
 
 export const EMPTY_WIZARD: WizardState = {
@@ -22,6 +28,9 @@ export const EMPTY_WIZARD: WizardState = {
   teamId: "",
   managerAgentId: "",
   modelProfileId: "",
+  grantCapabilities: [],
+  approvalPreset: "balanced",
+  autonomyLevel: "supervised",
 };
 
 export interface WizardStep {
@@ -36,11 +45,11 @@ export const WIZARD_STEPS: WizardStep[] = [
   { id: 2, title: "Role & instructions" },
   { id: 3, title: "Team & manager" },
   { id: 4, title: "Model" },
-  { id: 5, title: "Tools & connections", disabledPhase: "Phase 4" },
-  { id: 6, title: "Autonomy & approvals", disabledPhase: "Phase 4" },
+  { id: 5, title: "Tools & connections" },
+  { id: 6, title: "Autonomy & approvals" },
   // Step/time limits are editable in the agent drawer today; budget
-  // *enforcement* arrives with policies in Phase 4.
-  { id: 7, title: "Limits & budget", disabledPhase: "Phase 4" },
+  // *enforcement* arrives in Phase 10.
+  { id: 7, title: "Limits & budget", disabledPhase: "Phase 10" },
   { id: 8, title: "Review" },
 ];
 
@@ -167,5 +176,17 @@ export function toCreatePayload(state: WizardState): Record<string, unknown> {
     team_id: state.teamId || null,
     manager_agent_id: state.managerAgentId || null,
     model_profile_id: state.modelProfileId || null,
+    autonomy_level: state.autonomyLevel,
+  };
+}
+
+/** Toggle a capability in the wizard's grant list (pure, unit-tested). */
+export function toggleCapability(state: WizardState, capability: string): WizardState {
+  const has = state.grantCapabilities.includes(capability);
+  return {
+    ...state,
+    grantCapabilities: has
+      ? state.grantCapabilities.filter((entry) => entry !== capability)
+      : [...state.grantCapabilities, capability],
   };
 }

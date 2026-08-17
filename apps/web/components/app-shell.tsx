@@ -24,8 +24,8 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect } from "react";
 import { Spinner } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
-import { useBootstrapStatus, useMe } from "@/lib/hooks";
-import { WorkspaceProvider } from "@/lib/workspace-context";
+import { useBootstrapStatus, useMe, usePendingApprovalCount } from "@/lib/hooks";
+import { useWorkspace, WorkspaceProvider } from "@/lib/workspace-context";
 
 const NAV = [
   { href: "/", label: "Overview", icon: LayoutDashboard },
@@ -45,11 +45,13 @@ function NavLink({
   label,
   icon: Icon,
   active,
+  badge,
 }: {
   href: string;
   label: string;
   icon: typeof ClipboardList;
   active: boolean;
+  badge?: number;
 }) {
   return (
     <Link
@@ -62,8 +64,31 @@ function NavLink({
       }`}
     >
       <Icon size={15} strokeWidth={1.8} />
-      {label}
+      <span className="flex-1">{label}</span>
+      {badge !== undefined && badge > 0 ? (
+        <span className="rounded-full bg-warn/15 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-warn">
+          {badge}
+        </span>
+      ) : null}
     </Link>
+  );
+}
+
+/** Sidebar nav; lives inside WorkspaceProvider so the approvals badge can poll. */
+function SidebarNav({ pathname }: { pathname: string }) {
+  const { workspace } = useWorkspace();
+  const pendingApprovals = usePendingApprovalCount(workspace.workspace_id);
+  return (
+    <nav className="flex-1 space-y-0.5 overflow-y-auto px-2 py-2">
+      {NAV.map((item) => (
+        <NavLink
+          key={item.href}
+          {...item}
+          badge={item.href === "/approvals" ? pendingApprovals.data : undefined}
+          active={item.href === "/" ? pathname === "/" : pathname.startsWith(item.href)}
+        />
+      ))}
+    </nav>
   );
 }
 
@@ -128,17 +153,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <p className="truncate text-[11px] text-faint">{workspace.workspace_name}</p>
             </div>
           </div>
-          <nav className="flex-1 space-y-0.5 overflow-y-auto px-2 py-2">
-            {NAV.map((item) => (
-              <NavLink
-                key={item.href}
-                {...item}
-                active={
-                  item.href === "/" ? pathname === "/" : pathname.startsWith(item.href)
-                }
-              />
-            ))}
-          </nav>
+          <SidebarNav pathname={pathname} />
           <div className="border-t border-line px-3 py-3">
             <div className="flex items-center justify-between gap-2">
               <div className="min-w-0">

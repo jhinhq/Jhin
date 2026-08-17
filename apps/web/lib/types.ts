@@ -258,3 +258,79 @@ export interface RunList {
   items: Run[];
   total: number;
 }
+
+// --- Phase 4: tools, grants, policies, approvals ---
+
+export type RiskLevel = "read" | "write" | "elevated" | "destructive";
+export type RuleAction = "auto" | "approval" | "forbid";
+export type GrantEffect = "allow" | "deny";
+export type ApprovalPreset = "autonomous" | "balanced" | "restricted";
+export type ApprovalStatus = "pending" | "approved" | "rejected" | "cancelled";
+
+export interface ToolInfo {
+  name: string;
+  description: string;
+  risk: RiskLevel;
+  required_capability: string;
+  supports_approval: boolean;
+  input_schema: Record<string, unknown>;
+}
+
+export interface Grant {
+  id: string;
+  agent_id: string;
+  capability: string;
+  scope_json: Record<string, unknown>;
+  effect: GrantEffect;
+  created_at: string;
+}
+
+export interface PolicyRule {
+  capability: string;
+  risk: RiskLevel | null;
+  action: RuleAction;
+}
+
+export interface AgentPolicy {
+  rules: PolicyRule[];
+  preset: ApprovalPreset | null;
+  autonomy_level: string;
+}
+
+export interface Approval {
+  id: string;
+  task_id: string | null;
+  run_id: string | null;
+  requested_by_agent_id: string | null;
+  action_type: string;
+  action_payload_sanitized: Record<string, unknown>;
+  reason: string;
+  status: ApprovalStatus;
+  requested_at: string;
+  decided_at: string | null;
+  decided_by_user_id: string | null;
+  agent_name?: string | null;
+  task_title?: string | null;
+}
+
+export interface ApprovalList {
+  items: Approval[];
+  total: number;
+  pending_count: number;
+}
+
+export interface ToolCallRecord {
+  id: string;
+  run_id: string;
+  agent_id: string;
+  tool_name: string;
+  sanitized_input_json: Record<string, unknown>;
+  sanitized_output_json: Record<string, unknown>;
+  status: string;
+  approval_id: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  duration_ms: number | null;
+  error_code: string | null;
+  created_at: string;
+}

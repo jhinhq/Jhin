@@ -5,6 +5,7 @@ import {
   EMPTY_WIZARD,
   firstInvalidStep,
   toCreatePayload,
+  toggleCapability,
   validateIdentity,
   validateStep,
   WIZARD_STEPS,
@@ -44,9 +45,9 @@ describe("wizard validation", () => {
     }
   });
 
-  it("only steps 5-7 remain stubbed for later phases (model is live in Phase 3)", () => {
+  it("only step 7 (budget) remains stubbed — tools & autonomy are live in Phase 4", () => {
     const disabled = WIZARD_STEPS.filter((s) => s.disabledPhase).map((s) => s.id);
-    expect(disabled).toEqual([5, 6, 7]);
+    expect(disabled).toEqual([7]);
   });
 });
 
@@ -79,6 +80,29 @@ describe("wizard payload", () => {
     expect(payload.team_id).toBe("team-1");
     expect(payload.manager_agent_id).toBe("agent-1");
     expect(payload.model_profile_id).toBe("profile-1");
+  });
+
+  it("carries the chosen autonomy level (defaults to supervised)", () => {
+    expect(toCreatePayload({ ...EMPTY_WIZARD, name: "SWE" }).autonomy_level).toBe("supervised");
+    expect(
+      toCreatePayload({ ...EMPTY_WIZARD, name: "SWE", autonomyLevel: "manual" }).autonomy_level,
+    ).toBe("manual");
+  });
+});
+
+describe("wizard tool grants", () => {
+  it("toggles capabilities on and off", () => {
+    let state = { ...EMPTY_WIZARD, name: "SWE" };
+    state = toggleCapability(state, "system.echo");
+    state = toggleCapability(state, "system.time");
+    expect(state.grantCapabilities).toEqual(["system.echo", "system.time"]);
+    state = toggleCapability(state, "system.echo");
+    expect(state.grantCapabilities).toEqual(["system.time"]);
+  });
+
+  it("starts with no grants (deny-by-default) and the balanced preset", () => {
+    expect(EMPTY_WIZARD.grantCapabilities).toEqual([]);
+    expect(EMPTY_WIZARD.approvalPreset).toBe("balanced");
   });
 });
 

@@ -5,14 +5,27 @@
  * active; SSE replaces polling in a later phase (plan 18). */
 
 import { useMutation } from "@tanstack/react-query";
-import { Ban, Bot, CircleDollarSign, Pause, Play, Send, User } from "lucide-react";
+import {
+  Ban,
+  Bot,
+  CircleDollarSign,
+  Eye,
+  Hand,
+  Pause,
+  Play,
+  Send,
+  ShieldQuestion,
+  User,
+  Wrench,
+} from "lucide-react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useState } from "react";
 import { PageHeader } from "@/components/app-shell";
 import { isActiveState, StateBadge } from "@/components/task-bits";
-import { Button, ErrorNote, Input, Spinner } from "@/components/ui";
+import { Badge, Button, ErrorNote, Input, Spinner } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
+import { riskTone } from "@/lib/policy";
 import { formatCostMicros, formatDateTime, formatTokens, shortId } from "@/lib/format";
 import {
   useAgents,
@@ -74,6 +87,7 @@ export default function TaskDetailPage() {
   const agent = agents.data?.find((a) => a.id === task.assigned_agent_id);
   const canOperate = can("member");
   const active = isActiveState(task.state);
+  const waitingApproval = runs.some((run) => run.status === "waiting_approval");
 
   return (
     <>
@@ -111,6 +125,27 @@ export default function TaskDetailPage() {
       <div className="grid gap-6 px-8 py-6 xl:grid-cols-[1fr_380px]">
         <div className="min-w-0 space-y-6">
           <ErrorNote message={actionError} />
+
+          {waitingApproval ? (
+            <section
+              data-testid="waiting-approval-banner"
+              className="flex items-center gap-3 rounded-xl border border-warn/40 bg-warn/10 px-5 py-3.5"
+            >
+              <ShieldQuestion size={18} className="shrink-0 text-warn" />
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-warn">Waiting for approval</p>
+                <p className="text-xs text-dim">
+                  The agent requested a gated tool call and the run is parked durably until
+                  someone decides.
+                </p>
+              </div>
+              <Link href="/approvals">
+                <Button size="sm" variant="primary">
+                  Review approval
+                </Button>
+              </Link>
+            </section>
+          ) : null}
 
           <section className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-xl border border-line bg-surface px-5 py-3.5 text-sm">
             <StateBadge state={task.state} />
@@ -188,6 +223,29 @@ export default function TaskDetailPage() {
   );
 }
 
+/** Dot color + optional icon per event family (tool/approval events, plan 17.7). */
+function eventStyle(event: RunEvent): { dot: string; icon: React.ReactNode | null } {
+  const type = event.event_type;
+  const payload = event.payload_json;
+  if (type === "run.failed") return { dot: "bg-danger", icon: null };
+  if (type === "run.completed") return { dot: "bg-ok", icon: null };
+  if (type === "tool.call") {
+    const status = payload.status;
+    return {
+      dot: status === "executed" ? "bg-ok" : status === "needs_approval" ? "bg-warn" : "bg-danger",
+      icon: <Wrench size={12} className="text-dim" />,
+    };
+  }
+  if (type === "node.execute_tool") return { dot: "bg-accent", icon: <Wrench size={12} className="text-dim" /> };
+  if (type === "node.observe") return { dot: "bg-accent", icon: <Eye size={12} className="text-dim" /> };
+  if (type === "node.request_approval" || type === "approval.requested") {
+    return { dot: "bg-warn", icon: <ShieldQuestion size={12} className="text-warn" /> };
+  }
+  if (type === "approval.approved") return { dot: "bg-ok", icon: <Hand size={12} className="text-ok" /> };
+  if (type === "approval.rejected") return { dot: "bg-danger", icon: <Hand size={12} className="text-danger" /> };
+  return { dot: "bg-accent", icon: null };
+}
+
 function Timeline({ events, live }: { events: RunEvent[]; live: boolean }) {
   if (events.length === 0) {
     return (
@@ -200,16 +258,31 @@ function Timeline({ events, live }: { events: RunEvent[]; live: boolean }) {
     <ol className="relative space-y-0 border-l border-line-strong pl-4">
       {events.map((event) => {
         const payload = event.payload_json;
-        const isError = event.event_type === "run.failed";
-        const isDone = event.event_type === "run.completed";
+        const { dot, icon } = eventStyle(event);
+        const toolName = typeof payload.tool_name === "string" ? payload.tool_name : null;
+        const risk = typeof payload.risk === "string" ? payload.risk : null;
+        const status = typeof payload.status === "string" ? payload.status : null;
         return (
           <li key={event.id} className="relative pb-4 last:pb-0">
             <span
-              className={`absolute -left-[21px] top-1.5 h-2.5 w-2.5 rounded-full border-2 border-surface ${
-                isError ? "bg-danger" : isDone ? "bg-ok" : "bg-accent"
-              }`}
+              className={`absolute -left-[21px] top-1.5 h-2.5 w-2.5 rounded-full border-2 border-surface ${dot}`}
             />
-            <p className="text-[13px] font-medium">{event.event_type}</p>
+            <p className="flex items-center gap-1.5 text-[13px] font-medium">
+              {icon}
+              {event.event_type}
+              {event.event_type === "tool.call" && risk ? (
+                <Badge tone={riskTone(risk)}>{risk}</Badge>
+              ) : null}
+            </p>
+            {toolName ? (
+              <p className="text-xs text-dim">
+                <code>{toolName}</code>
+                {status ? ` · ${status}` : ""}
+                {typeof payload.reason === "string" && payload.reason
+                  ? ` · ${payload.reason}`
+                  : ""}
+              </p>
+            ) : null}
             <p className="text-xs text-dim">
               {typeof payload.detail === "string" ? `${payload.detail} · ` : ""}
               {formatDateTime(event.created_at)}

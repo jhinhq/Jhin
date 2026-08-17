@@ -6,8 +6,11 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import type {
   Agent,
+  AgentPolicy,
+  ApprovalList,
   AuditEventPage,
   BootstrapStatus,
+  Grant,
   Member,
   MeResponse,
   ModelProfile,
@@ -20,6 +23,7 @@ import type {
   TaskList,
   TaskMessage,
   Team,
+  ToolInfo,
   WorkspaceDetail,
 } from "@/lib/types";
 
@@ -167,6 +171,75 @@ export function useRuns(
     placeholderData: (previous) => previous,
     refetchInterval: LIVE_POLL_MS,
   });
+}
+
+// --- Phase 4: tools, grants, policies, approvals ---
+
+export function useTools(workspaceId: string) {
+  return useQuery({
+    queryKey: ["tools", workspaceId],
+    queryFn: () => api<ToolInfo[]>(`/api/v1/workspaces/${workspaceId}/tools`),
+    staleTime: 60_000, // the catalog only changes with deploys
+  });
+}
+
+export function useAgentGrants(workspaceId: string, agentId: string) {
+  return useQuery({
+    queryKey: ["agent-grants", workspaceId, agentId],
+    queryFn: () =>
+      api<Grant[]>(`/api/v1/workspaces/${workspaceId}/agents/${agentId}/grants`),
+  });
+}
+
+export function useAgentPolicy(workspaceId: string, agentId: string) {
+  return useQuery({
+    queryKey: ["agent-policy", workspaceId, agentId],
+    queryFn: () =>
+      api<AgentPolicy>(`/api/v1/workspaces/${workspaceId}/agents/${agentId}/policy`),
+  });
+}
+
+export function useApprovals(
+  workspaceId: string,
+  params: Record<string, string | number | undefined> = {},
+) {
+  return useQuery({
+    queryKey: ["approvals", workspaceId, params],
+    queryFn: () =>
+      api<ApprovalList>(`/api/v1/workspaces/${workspaceId}/approvals`, { params }),
+    placeholderData: (previous) => previous,
+    refetchInterval: LIVE_POLL_MS,
+  });
+}
+
+/** Lightweight pending count for the nav badge and overview card. */
+export function usePendingApprovalCount(workspaceId: string) {
+  return useQuery({
+    queryKey: ["approvals-pending-count", workspaceId],
+    queryFn: () =>
+      api<ApprovalList>(`/api/v1/workspaces/${workspaceId}/approvals`, {
+        params: { status: "pending", limit: 1 },
+      }),
+    refetchInterval: 10_000,
+    select: (data) => data.pending_count,
+  });
+}
+
+export function useInvalidateApprovals(workspaceId: string) {
+  const queryClient = useQueryClient();
+  return () => {
+    void queryClient.invalidateQueries({ queryKey: ["approvals", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["approvals-pending-count", workspaceId] });
+  };
+}
+
+export function useInvalidateAgentAccess(workspaceId: string, agentId: string) {
+  const queryClient = useQueryClient();
+  return () => {
+    void queryClient.invalidateQueries({ queryKey: ["agent-grants", workspaceId, agentId] });
+    void queryClient.invalidateQueries({ queryKey: ["agent-policy", workspaceId, agentId] });
+    void queryClient.invalidateQueries({ queryKey: ["agent", workspaceId, agentId] });
+  };
 }
 
 /** Invalidate task/run views after a task mutation. */
