@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
+
 from jhin_connectors.base import (
     ConnectionHealth,
     Connector,
     NormalizedEvent,
     RawWebhookEvent,
     VerifyContext,
+    WebhookVerificationError,
 )
 from jhin_connectors.github.auth import (
     AUTH_GITHUB_APP,
@@ -23,7 +27,13 @@ from jhin_connectors.github.client import (
 )
 from jhin_connectors.github.manifest import GITHUB_MANIFEST
 from jhin_connectors.github.tools import GITHUB_TOOLS
-from jhin_connectors.github.webhook import normalize
+from jhin_connectors.github.webhook import (
+    DELIVERY_HEADER,
+    EVENT_HEADER,
+    SIGNATURE_HEADER,
+    normalize,
+    verify_signature,
+)
 from jhin_policy import ToolDefinition
 from jhin_tools.builtin import ToolExecutor
 
@@ -69,6 +79,25 @@ class GitHubConnector(Connector):
 
     def tools(self) -> tuple[tuple[ToolDefinition, ToolExecutor], ...]:
         return GITHUB_TOOLS
+
+    def parse_webhook(
+        self, headers: Mapping[str, str], body: bytes, secret: str
+    ) -> RawWebhookEvent:
+        # Signature check comes strictly first (plan 48.5): the body is not
+        # even JSON-parsed until HMAC verification succeeds.
+        if not verify_signature(secret, body, headers.get(SIGNATURE_HEADER)):
+            raise WebhookVerificationError(f"invalid or missing {SIGNATURE_HEADER} signature")
+        event = headers.get(EVENT_HEADER, "")
+        delivery_id = headers.get(DELIVERY_HEADER, "")
+        if not event or not delivery_id:
+            raise WebhookVerificationError(f"missing {EVENT_HEADER} or {DELIVERY_HEADER} header")
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            raise WebhookVerificationError("payload is not valid JSON") from None
+        if not isinstance(payload, dict):
+            raise WebhookVerificationError("payload must be a JSON object")
+        return RawWebhookEvent(event=event, delivery_id=delivery_id, payload=payload)
 
     def normalize_event(self, raw: RawWebhookEvent) -> list[NormalizedEvent]:
         return normalize(raw)

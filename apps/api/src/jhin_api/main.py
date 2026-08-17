@@ -12,6 +12,8 @@ from jhin_api.agents.router import router as agents_router
 from jhin_api.approvals.router import router as approvals_router
 from jhin_api.audit.router import router as audit_router
 from jhin_api.auth.router import router as auth_router
+from jhin_api.connections.router import catalog_router as connectors_catalog_router
+from jhin_api.connections.router import router as connections_router
 from jhin_api.health.router import router as health_router
 from jhin_api.models.router import profiles_router, providers_router
 from jhin_api.org.router import router as org_router
@@ -21,6 +23,7 @@ from jhin_api.security.rate_limit import LoginRateLimiter
 from jhin_api.settings import Settings, get_settings
 from jhin_api.tasks.router import agent_actions_router, runs_router, tasks_router
 from jhin_api.teams.router import router as teams_router
+from jhin_api.webhooks.router import router as webhooks_router
 from jhin_api.workspaces.router import router as workspaces_router
 from jhin_db import create_engine, create_session_factory
 from jhin_domain import new_uuid7
@@ -53,8 +56,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.session_factory = create_session_factory(app.state.engine)
         app.state.temporal_client = None
         app.state.temporal_connect_lock = asyncio.Lock()
+        app.state.nats_client = None
+        app.state.nats_connect_lock = asyncio.Lock()
         logger.info("api.started", app_name=settings.app_name, env=settings.app_env)
         yield
+        if app.state.nats_client is not None and not app.state.nats_client.is_closed:
+            await app.state.nats_client.close()
         await app.state.engine.dispose()
         logger.info("api.stopped")
 
@@ -97,6 +104,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(agent_actions_router)
     app.include_router(policy_router)
     app.include_router(approvals_router)
+    app.include_router(connectors_catalog_router)
+    app.include_router(connections_router)
+    app.include_router(webhooks_router)
     return app
 
 

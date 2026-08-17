@@ -21,7 +21,7 @@ from jhin_api.policy.schemas import (
     ToolOut,
 )
 from jhin_api.security.csrf import csrf_protect
-from jhin_tools import build_builtin_catalog
+from jhin_connectors import build_default_catalog
 
 router = APIRouter(
     prefix="/api/v1/workspaces/{workspace_id}",
@@ -32,7 +32,7 @@ router = APIRouter(
 
 @router.get("/tools")
 async def list_tools(ctx: ViewerCtx) -> list[ToolOut]:
-    """The registered tool catalog (built-ins now, connectors in Phase 5)."""
+    """The registered tool catalog: system built-ins plus connector tools."""
     return [
         ToolOut(
             name=definition.name,
@@ -42,7 +42,7 @@ async def list_tools(ctx: ViewerCtx) -> list[ToolOut]:
             supports_approval=definition.supports_approval,
             input_schema=definition.input_json_schema(),
         )
-        for definition in build_builtin_catalog().definitions()
+        for definition in build_default_catalog().definitions()
     ]
 
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -32,6 +33,12 @@ _EVENT_TYPE_RE = re.compile(r"^connector(\.[a-z0-9_]+)+$")
 
 class ConnectorError(Exception):
     """Raised for connector misconfiguration or invalid registration."""
+
+
+class WebhookVerificationError(Exception):
+    """A webhook delivery failed signature or shape verification. The API
+    rejects it with 401 *before* any payload processing (plan 48.5).
+    Messages must never include the secret or the raw body."""
 
 
 class ConnectionHealth(BaseModel):
@@ -110,6 +117,14 @@ class Connector(ABC):
         """Provider event names accepted at the webhook endpoint."""
         return self.manifest.webhook_events
 
+    def parse_webhook(
+        self, headers: Mapping[str, str], body: bytes, secret: str
+    ) -> RawWebhookEvent:
+        """Verify one webhook delivery (signature first — plan 48.5) and
+        extract its event name, delivery id, and payload. Raise
+        :class:`WebhookVerificationError` on any verification failure."""
+        raise WebhookVerificationError("connector does not accept webhooks")
+
     def normalize_event(self, raw: RawWebhookEvent) -> list[NormalizedEvent]:
         """Map one raw webhook payload to canonical domain events. Unknown
         events return [] — never raise for content the provider controls."""
@@ -123,4 +138,5 @@ __all__ = [
     "NormalizedEvent",
     "RawWebhookEvent",
     "VerifyContext",
+    "WebhookVerificationError",
 ]

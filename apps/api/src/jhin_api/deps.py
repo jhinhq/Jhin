@@ -15,7 +15,10 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
 
+import nats
 from fastapi import Depends, HTTPException, Request, status
+from nats.aio.client import Client as NatsClient
+from nats.js import JetStreamContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.client import Client as TemporalClient
@@ -182,3 +185,29 @@ async def get_temporal_client(request: Request) -> TemporalClient:
 
 
 TemporalDep = Annotated[TemporalClient, Depends(get_temporal_client)]
+
+
+async def get_jetstream(request: Request) -> JetStreamContext:
+    """Process-wide NATS JetStream context, connected lazily on first use
+    (same pattern as Temporal). Used by the webhook ingress path."""
+    app = request.app
+    cached: NatsClient | None = app.state.nats_client
+    if cached is not None and not cached.is_closed:
+        return cached.jetstream()
+    async with app.state.nats_connect_lock:
+        cached = app.state.nats_client
+        if cached is not None and not cached.is_closed:
+            return cached.jetstream()
+        settings: Settings = app.state.settings
+        try:
+            client = await nats.connect(settings.nats_url, connect_timeout=3)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Event backbone is unavailable (cannot reach NATS)",
+            ) from exc
+        app.state.nats_client = client
+        return client.jetstream()
+
+
+JetStreamDep = Annotated[JetStreamContext, Depends(get_jetstream)]

@@ -19,6 +19,7 @@ from jhin_connectors.base import (
     NormalizedEvent,
     RawWebhookEvent,
     VerifyContext,
+    WebhookVerificationError,
 )
 from jhin_connectors.execution import (
     ConnectionResolutionError,
@@ -53,6 +54,7 @@ __all__ = [
     "ResolvedConnection",
     "SecretFieldSpec",
     "VerifyContext",
+    "WebhookVerificationError",
     "build_default_catalog",
     "default_registry",
     "resolve_connection",
