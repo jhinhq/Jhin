@@ -111,6 +111,7 @@ class RunStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     PAUSED = "paused"
+    WAITING_APPROVAL = "waiting_approval"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -139,3 +140,31 @@ class MessageVisibility(StrEnum):
 
     VISIBLE = "visible"
     INTERNAL = "internal"
+
+
+class ApprovalStatus(StrEnum):
+    """Lifecycle of a human approval request (plan 6.16)."""
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+
+
+APPROVAL_DECIDED_STATUSES = frozenset(
+    {ApprovalStatus.APPROVED, ApprovalStatus.REJECTED, ApprovalStatus.CANCELLED}
+)
+
+
+class ToolCallStatus(StrEnum):
+    """Persisted outcome of one gateway-mediated tool call (plan 6.15).
+
+    ``denied`` is a policy decision; ``rejected`` is a human decision on an
+    approval-gated call; ``failed`` is an execution error after authorization.
+    """
+
+    PENDING_APPROVAL = "pending_approval"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    DENIED = "denied"
+    REJECTED = "rejected"

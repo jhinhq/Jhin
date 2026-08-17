@@ -4,12 +4,15 @@ from jhin_db.models.audit import AuditEvent
 from jhin_db.models.identity import User, UserSession
 from jhin_db.models.models import ModelProfile, ModelProvider
 from jhin_db.models.org import Agent, Team, Workspace, WorkspaceMembership
+from jhin_db.models.policy import AgentCapabilityGrant, Approval, ToolCall
 from jhin_db.models.secret import Secret
 from jhin_db.models.work import AgentRun, Message, RunEvent, Task
 
 __all__ = [
     "Agent",
+    "AgentCapabilityGrant",
     "AgentRun",
+    "Approval",
     "AuditEvent",
     "Message",
     "ModelProfile",
@@ -18,6 +21,7 @@ __all__ = [
     "Secret",
     "Task",
     "Team",
+    "ToolCall",
     "User",
     "UserSession",
     "Workspace",

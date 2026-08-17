@@ -16,6 +16,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from jhin_domain import new_uuid7
 
 JsonDict = JSON().with_variant(JSONB(), "postgresql")
+JsonList = JSON().with_variant(JSONB(), "postgresql")
 UtcDateTime = DateTime(timezone=True)
 
 

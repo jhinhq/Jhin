@@ -6,10 +6,12 @@ Pydantic, or NATS.
 """
 
 from jhin_domain.enums import (
+    APPROVAL_DECIDED_STATUSES,
     RUN_TERMINAL_STATUSES,
     TASK_TERMINAL_STATES,
     ActorType,
     AgentStatus,
+    ApprovalStatus,
     AutonomyLevel,
     MessageVisibility,
     ModelProviderType,
@@ -19,6 +21,7 @@ from jhin_domain.enums import (
     SenderType,
     TaskPriority,
     TaskState,
+    ToolCallStatus,
     UserStatus,
     WorkspaceRole,
     WorkspaceStatus,
@@ -27,10 +30,12 @@ from jhin_domain.enums import (
 from jhin_domain.ids import new_uuid7
 
 __all__ = [
+    "APPROVAL_DECIDED_STATUSES",
     "RUN_TERMINAL_STATUSES",
     "TASK_TERMINAL_STATES",
     "ActorType",
     "AgentStatus",
+    "ApprovalStatus",
     "AutonomyLevel",
     "MessageVisibility",
     "ModelProviderType",
@@ -40,6 +45,7 @@ __all__ = [
     "SenderType",
     "TaskPriority",
     "TaskState",
+    "ToolCallStatus",
     "UserStatus",
     "WorkspaceRole",
     "WorkspaceStatus",

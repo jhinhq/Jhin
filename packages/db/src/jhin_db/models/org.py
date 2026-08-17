@@ -13,7 +13,7 @@ from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstrain
 from sqlalchemy.orm import Mapped, mapped_column
 
 from jhin_db.base import Base
-from jhin_db.columns import JsonDict, TimestampMixin, UuidPkMixin
+from jhin_db.columns import JsonDict, JsonList, TimestampMixin, UuidPkMixin
 from jhin_domain import AgentStatus, AutonomyLevel, WorkspaceStatus
 
 
@@ -108,4 +108,8 @@ class Agent(Base, UuidPkMixin, TimestampMixin):
     max_steps: Mapped[int] = mapped_column(Integer, default=20)
     max_run_minutes: Mapped[int] = mapped_column(Integer, default=30)
     monthly_budget_cents: Mapped[int | None] = mapped_column(Integer, default=None)
+    # Explicit approval-policy rules (plan 42). Presets (Autonomous/Balanced/
+    # Restricted) are a UI shortcut that expands to rows in this list; an
+    # empty list means the plan 12.2 risk defaults apply.
+    approval_policy_json: Mapped[list[Any]] = mapped_column(JsonList, default=list)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JsonDict, default=dict)
