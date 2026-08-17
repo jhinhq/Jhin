@@ -1,5 +1,6 @@
 """FastAPI application factory."""
 
+import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
@@ -16,6 +17,7 @@ from jhin_api.org.router import router as org_router
 from jhin_api.secrets.router import router as secrets_router
 from jhin_api.security.rate_limit import LoginRateLimiter
 from jhin_api.settings import Settings, get_settings
+from jhin_api.tasks.router import agent_actions_router, runs_router, tasks_router
 from jhin_api.teams.router import router as teams_router
 from jhin_api.workspaces.router import router as workspaces_router
 from jhin_db import create_engine, create_session_factory
@@ -47,6 +49,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # and tables are never auto-created (migrations own the schema).
         app.state.engine = create_engine(settings.database_url)
         app.state.session_factory = create_session_factory(app.state.engine)
+        app.state.temporal_client = None
+        app.state.temporal_connect_lock = asyncio.Lock()
         logger.info("api.started", app_name=settings.app_name, env=settings.app_env)
         yield
         await app.state.engine.dispose()
@@ -86,6 +90,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(secrets_router)
     app.include_router(providers_router)
     app.include_router(profiles_router)
+    app.include_router(tasks_router)
+    app.include_router(runs_router)
+    app.include_router(agent_actions_router)
     return app
 
 

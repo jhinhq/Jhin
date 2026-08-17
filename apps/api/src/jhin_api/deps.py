@@ -18,6 +18,8 @@ from uuid import UUID
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from temporalio.client import Client as TemporalClient
+from temporalio.service import RPCError
 
 from jhin_api.security.tokens import hash_token
 from jhin_api.settings import Settings
@@ -149,3 +151,34 @@ def get_secret_crypto(request: Request) -> SecretCrypto:
 
 
 SecretCryptoDep = Annotated[SecretCrypto, Depends(get_secret_crypto)]
+
+
+async def get_temporal_client(request: Request) -> TemporalClient:
+    """Process-wide Temporal client, connected lazily on first use.
+
+    Lazy so the API can boot (and serve everything except task execution)
+    while Temporal is still starting. 503 tells the caller to retry.
+    """
+    app = request.app
+    cached: TemporalClient | None = app.state.temporal_client
+    if cached is not None:
+        return cached
+    async with app.state.temporal_connect_lock:
+        cached = app.state.temporal_client
+        if cached is not None:
+            return cached
+        settings: Settings = app.state.settings
+        try:
+            client = await TemporalClient.connect(
+                settings.temporal_address, namespace=settings.temporal_namespace
+            )
+        except (RPCError, OSError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Task orchestration is unavailable (cannot reach Temporal)",
+            ) from exc
+        app.state.temporal_client = client
+        return client
+
+
+TemporalDep = Annotated[TemporalClient, Depends(get_temporal_client)]
