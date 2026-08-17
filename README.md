@@ -11,21 +11,23 @@ backbone, and PostgreSQL is the system of record. A FastAPI control-plane API
 owns configuration and authorization, and a Next.js frontend provides the
 operations UI.
 
-> Status: Phase 5 — agents reach real external systems. On top of the tool
-> gateway (Phase 4), Jhin now has a connector SDK (`jhin_connectors`) with a
-> manifest-driven registry, a `connection` domain (credentials envelope-
-> encrypted, verified live, rotatable, never returned), and a full GitHub
-> connector: PAT and GitHub App auth (installation tokens minted and cached),
-> ten tools from repository read to approval-gated PR merge, and signed
-> webhooks (HMAC verified before any processing, delivery-id deduped, raw
-> events on the NATS INGRESS stream normalized to canonical `connector.*`
-> events). Grants can scope connector tools to one connection plus
-> repository/branch glob patterns. The web app gains a Connectors page
-> (gallery, connection create with one-time webhook secret, health/verify,
-> rotate, recent tool usage) and connection-aware grant scoping in the agent
-> wizard and Tools & Access tab. A fake GitHub service in the dev overlay
-> lets everything run and test with zero real credentials. Triggers that
-> react to connector events arrive in Phase 7.
+> Status: Phase 6 — coding agents work in ephemeral repository sandboxes. A
+> new internal-only sandbox runner service executes every `cli.*` tool call
+> in a fresh locked-down Docker container (non-root uid 1000, read-only
+> rootfs, cap_drop ALL, no-new-privileges, cpu/memory/pids/timeout caps,
+> network `none` or a dedicated bridge — never the compose control/data
+> networks, and never the Docker socket). The CLI connector adds five tools
+> (command execute, repository checkout, test run, file read/write) with
+> fnmatch scope enforcement over command/image/network/repository/path; a
+> per-run workspace volume carries a checkout across calls and dies with the
+> run. Short-lived git credentials are injected as job-scoped secret env
+> (askpass helper — never in the remote URL) and redacted from all persisted
+> output. `sandbox_job` rows, `sandbox.job.*` audit events, and collapsible
+> job output in the task timeline make every job attributable. The fake
+> GitHub service now serves git smart-HTTP so clone/push/PR flows run and
+> test with zero real credentials. See docs/architecture/sandboxing.md
+> (including the Docker-socket trust boundary). Triggers that react to
+> connector events arrive in Phase 7.
 
 ## Quick start
 
@@ -64,6 +66,7 @@ services/
   workflow_worker/   Temporal worker (general workflows)
   agent_worker/      Temporal worker executing agent runs (model calls live here)
   event_worker/      NATS JetStream durable consumer
+  sandbox_runner/    Internal-only API executing cli.* jobs in ephemeral containers
 packages/
   db/           SQLAlchemy 2 + Alembic (jhin_db)
   domain/       Shared enums + UUIDv7 helper (jhin_domain)
@@ -74,7 +77,7 @@ packages/
   agents/       Execution snapshots, prompt layers, step runtime (jhin_agents)
   policy/       Capability registry, tool definitions, policy evaluator (jhin_policy)
   tools/        Tool gateway: authorize, execute, sanitize, audit (jhin_tools)
-  connectors/   Connector SDK + GitHub connector + fake GitHub (jhin_connectors)
+  connectors/   Connector SDK + GitHub/CLI connectors + fake GitHub/git (jhin_connectors)
   observability/  Structured JSON logging (jhin_observability)
 tests/integration/  Compose-stack integration tests
 ```
