@@ -169,6 +169,32 @@ APPROVAL_DECIDED_STATUSES = frozenset(
 )
 
 
+class SandboxJobStatus(StrEnum):
+    """Lifecycle of one ephemeral sandbox job (plan 14).
+
+    ``completed`` means the job container ran to normal completion (any exit
+    code — the exit code is stored separately); ``failed`` is an
+    infrastructure error before/around execution (image missing, Docker
+    error); ``timeout`` and ``cancelled`` are forced terminations.
+    """
+
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    TIMEOUT = "timeout"
+    CANCELLED = "cancelled"
+
+
+SANDBOX_JOB_TERMINAL_STATUSES = frozenset(
+    {
+        SandboxJobStatus.COMPLETED,
+        SandboxJobStatus.FAILED,
+        SandboxJobStatus.TIMEOUT,
+        SandboxJobStatus.CANCELLED,
+    }
+)
+
+
 class ToolCallStatus(StrEnum):
     """Persisted outcome of one gateway-mediated tool call (plan 6.15).
 

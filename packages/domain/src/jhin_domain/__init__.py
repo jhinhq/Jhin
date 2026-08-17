@@ -8,6 +8,7 @@ Pydantic, or NATS.
 from jhin_domain.enums import (
     APPROVAL_DECIDED_STATUSES,
     RUN_TERMINAL_STATUSES,
+    SANDBOX_JOB_TERMINAL_STATUSES,
     TASK_TERMINAL_STATES,
     ActorType,
     AgentStatus,
@@ -18,6 +19,7 @@ from jhin_domain.enums import (
     ModelProviderType,
     RecipientType,
     RunStatus,
+    SandboxJobStatus,
     SecretType,
     SenderType,
     TaskPriority,
@@ -33,6 +35,7 @@ from jhin_domain.ids import new_uuid7
 __all__ = [
     "APPROVAL_DECIDED_STATUSES",
     "RUN_TERMINAL_STATUSES",
+    "SANDBOX_JOB_TERMINAL_STATUSES",
     "TASK_TERMINAL_STATES",
     "ActorType",
     "AgentStatus",
@@ -43,6 +46,7 @@ __all__ = [
     "ModelProviderType",
     "RecipientType",
     "RunStatus",
+    "SandboxJobStatus",
     "SecretType",
     "SenderType",
     "TaskPriority",
