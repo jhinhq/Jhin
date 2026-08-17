@@ -102,6 +102,15 @@ async def connection_tool_calls(
     return [ToolCallOut.model_validate(row, from_attributes=True) for row in rows]
 
 
+@router.get("/{connection_id}/metadata")
+async def connection_metadata(
+    connection_id: UUID, ctx: AdminCtx, db: DbSession, crypto: SecretCryptoDep
+) -> dict[str, object]:
+    """Display-safe provider metadata (e.g. Linear teams + workflow states)
+    for UI pickers like the trigger builder (plan 17.10). Never credentials."""
+    return await service.fetch_metadata(db, crypto, ctx, connection_id)
+
+
 @router.post("/{connection_id}/verify")
 async def verify_connection(
     connection_id: UUID,

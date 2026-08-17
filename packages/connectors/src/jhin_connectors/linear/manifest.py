@@ -63,6 +63,12 @@ LINEAR_MANIFEST = ConnectorManifest(
         ),
     ),
     webhook_events=WEBHOOK_EVENTS,
+    canonical_events=(
+        "connector.linear.issue.created",
+        "connector.linear.issue.updated",
+        "connector.linear.issue.removed",
+        "connector.linear.comment.created",
+    ),
     capabilities=LINEAR_CAPABILITIES,
     docs_url="https://linear.app/developers/graphql",
     supports_webhooks=True,

@@ -1,0 +1,284 @@
+"""Trigger CRUD, dry-run evaluation, and invocation reads (plan 10.3, 17.10).
+
+Filters are validated with the same pure DSL the event worker evaluates, so
+anything accepted here is exactly what will run. All writes are audited.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+from uuid import UUID
+
+from fastapi import HTTPException, status
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from jhin_api.audit import service as audit
+from jhin_api.deps import WorkspaceContext
+from jhin_api.triggers.schemas import (
+    ConditionExplanation,
+    TriggerCreate,
+    TriggerTestResult,
+    TriggerUpdate,
+)
+from jhin_db.models import Agent, Connection, Team, Trigger, TriggerInvocation
+from jhin_domain import TriggerType
+from jhin_triggers import FilterError, evaluate_filter, validate_filter
+
+
+def _not_found() -> HTTPException:
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trigger not found")
+
+
+def _bad_request(detail: str) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=detail)
+
+
+async def _validate_references(
+    db: AsyncSession,
+    workspace_id: UUID,
+    *,
+    connection_id: UUID | None,
+    target_agent_id: UUID | None,
+    target_team_id: UUID | None,
+) -> None:
+    if connection_id is not None:
+        connection = await db.scalar(
+            select(Connection).where(
+                Connection.id == connection_id, Connection.workspace_id == workspace_id
+            )
+        )
+        if connection is None:
+            raise _bad_request("connection_id does not reference a connection in this workspace")
+    if target_agent_id is not None:
+        agent = await db.scalar(
+            select(Agent).where(Agent.id == target_agent_id, Agent.workspace_id == workspace_id)
+        )
+        if agent is None:
+            raise _bad_request("target_agent_id does not reference an agent in this workspace")
+    if target_team_id is not None:
+        team = await db.scalar(
+            select(Team).where(Team.id == target_team_id, Team.workspace_id == workspace_id)
+        )
+        if team is None:
+            raise _bad_request("target_team_id does not reference a team in this workspace")
+
+
+def _validate_filter_document(document: dict[str, Any]) -> None:
+    try:
+        validate_filter(document)
+    except FilterError as exc:
+        raise _bad_request(f"Invalid filter: {exc}") from exc
+
+
+async def list_triggers(db: AsyncSession, workspace_id: UUID) -> list[Trigger]:
+    rows = await db.scalars(
+        select(Trigger).where(Trigger.workspace_id == workspace_id).order_by(Trigger.created_at)
+    )
+    return list(rows)
+
+
+async def last_invocations(
+    db: AsyncSession, workspace_id: UUID, trigger_ids: list[UUID]
+) -> dict[UUID, TriggerInvocation]:
+    """Most recent invocation per trigger, for the list view (plan 17.10)."""
+    if not trigger_ids:
+        return {}
+    # UUIDv7 ids are time-ordered, so max(id) is the newest row — and unlike
+    # created_at it can never tie within a transaction.
+    latest = (
+        select(func.max(TriggerInvocation.id).label("latest_id"))
+        .where(
+            TriggerInvocation.workspace_id == workspace_id,
+            TriggerInvocation.trigger_id.in_(trigger_ids),
+        )
+        .group_by(TriggerInvocation.trigger_id)
+        .subquery()
+    )
+    rows = await db.scalars(
+        select(TriggerInvocation).where(TriggerInvocation.id.in_(select(latest.c.latest_id)))
+    )
+    return {row.trigger_id: row for row in rows}
+
+
+async def get_trigger(db: AsyncSession, workspace_id: UUID, trigger_id: UUID) -> Trigger:
+    trigger = await db.scalar(
+        select(Trigger).where(Trigger.id == trigger_id, Trigger.workspace_id == workspace_id)
+    )
+    if trigger is None:
+        raise _not_found()
+    return trigger
+
+
+async def create_trigger(
+    db: AsyncSession,
+    ctx: WorkspaceContext,
+    payload: TriggerCreate,
+    *,
+    request_id: UUID,
+    ip_hash: str,
+) -> Trigger:
+    if payload.trigger_type == TriggerType.CONNECTOR_EVENT and not payload.event_type:
+        raise _bad_request("connector_event triggers require an event_type")
+    if payload.target_agent_id is None and payload.target_team_id is None:
+        raise _bad_request("a trigger needs a target_agent_id or target_team_id to assign work")
+    _validate_filter_document(payload.filter)
+    await _validate_references(
+        db,
+        ctx.workspace_id,
+        connection_id=payload.connection_id,
+        target_agent_id=payload.target_agent_id,
+        target_team_id=payload.target_team_id,
+    )
+
+    trigger = Trigger(
+        workspace_id=ctx.workspace_id,
+        name=payload.name,
+        enabled=payload.enabled,
+        trigger_type=payload.trigger_type.value,
+        connection_id=payload.connection_id,
+        event_type=payload.event_type,
+        filter_json=payload.filter,
+        action_type=payload.action_type.value,
+        target_agent_id=payload.target_agent_id,
+        target_team_id=payload.target_team_id,
+        action_config_json=payload.action_config,
+        dedupe_window_seconds=payload.dedupe_window_seconds,
+        created_by_user_id=ctx.user.id,
+    )
+    db.add(trigger)
+    await db.flush()
+    audit.record(
+        db,
+        action="trigger.created",
+        target_type="trigger",
+        target_id=trigger.id,
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user.id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        metadata={"name": trigger.name, "event_type": trigger.event_type},
+    )
+    await db.commit()
+    return trigger
+
+
+async def update_trigger(
+    db: AsyncSession,
+    ctx: WorkspaceContext,
+    trigger_id: UUID,
+    payload: TriggerUpdate,
+    *,
+    request_id: UUID,
+    ip_hash: str,
+) -> Trigger:
+    trigger = await get_trigger(db, ctx.workspace_id, trigger_id)
+    changes = payload.model_dump(exclude_unset=True)
+    if "filter" in changes:
+        _validate_filter_document(changes["filter"])
+        trigger.filter_json = changes.pop("filter")
+    if "action_config" in changes:
+        trigger.action_config_json = changes.pop("action_config")
+    await _validate_references(
+        db,
+        ctx.workspace_id,
+        connection_id=changes.get("connection_id"),
+        target_agent_id=changes.get("target_agent_id"),
+        target_team_id=changes.get("target_team_id"),
+    )
+    for field, value in changes.items():
+        setattr(trigger, field, value)
+    audit.record(
+        db,
+        action="trigger.updated",
+        target_type="trigger",
+        target_id=trigger.id,
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user.id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        metadata={"name": trigger.name, "fields": sorted(changes.keys())},
+    )
+    await db.commit()
+    return trigger
+
+
+async def set_enabled(
+    db: AsyncSession,
+    ctx: WorkspaceContext,
+    trigger_id: UUID,
+    *,
+    enabled: bool,
+    request_id: UUID,
+    ip_hash: str,
+) -> Trigger:
+    trigger = await get_trigger(db, ctx.workspace_id, trigger_id)
+    trigger.enabled = enabled
+    audit.record(
+        db,
+        action="trigger.enabled" if enabled else "trigger.disabled",
+        target_type="trigger",
+        target_id=trigger.id,
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user.id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        metadata={"name": trigger.name},
+    )
+    await db.commit()
+    return trigger
+
+
+async def delete_trigger(
+    db: AsyncSession,
+    ctx: WorkspaceContext,
+    trigger_id: UUID,
+    *,
+    request_id: UUID,
+    ip_hash: str,
+) -> None:
+    trigger = await get_trigger(db, ctx.workspace_id, trigger_id)
+    audit.record(
+        db,
+        action="trigger.deleted",
+        target_type="trigger",
+        target_id=trigger.id,
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user.id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        metadata={"name": trigger.name},
+    )
+    await db.delete(trigger)
+    await db.commit()
+
+
+def test_trigger(trigger: Trigger, event: dict[str, Any]) -> TriggerTestResult:
+    """Dry-run evaluation with per-condition explanations (plan 10.3).
+
+    Pure and side-effect free: nothing is recorded, no workflow starts.
+    """
+    event_type = str(event.get("event_type", ""))
+    event_type_matches = not trigger.event_type or trigger.event_type == event_type
+    result = evaluate_filter(trigger.filter_json, event)
+    return TriggerTestResult(
+        matched=event_type_matches and result.matched,
+        event_type_matches=event_type_matches,
+        filter_matches=result.matched,
+        conditions=[ConditionExplanation(**condition.as_dict()) for condition in result.conditions],
+    )
+
+
+async def list_invocations(
+    db: AsyncSession, workspace_id: UUID, trigger_id: UUID, *, limit: int = 20
+) -> list[TriggerInvocation]:
+    rows = await db.scalars(
+        select(TriggerInvocation)
+        .where(
+            TriggerInvocation.workspace_id == workspace_id,
+            TriggerInvocation.trigger_id == trigger_id,
+        )
+        .order_by(TriggerInvocation.id.desc())
+        .limit(min(limit, 100))
+    )
+    return list(rows)

@@ -221,6 +221,34 @@ async def verify_connection(
     return connection, health
 
 
+async def fetch_metadata(
+    db: AsyncSession,
+    crypto: SecretCrypto,
+    ctx: WorkspaceContext,
+    connection_id: UUID,
+) -> dict[str, object]:
+    """Connector-provided, display-safe metadata for UI pickers (plan 17.10)."""
+    connection = await get_connection(db, ctx.workspace_id, connection_id)
+    connector = get_connector(connection.connector_type)
+    if connection.encrypted_secret_id is None:
+        raise _bad_request("Connection has no stored credential")
+    store = SecretStore(db, crypto)
+    plaintext = await store.reveal(ctx.workspace_id, connection.encrypted_secret_id)
+    try:
+        return await connector.fetch_metadata(
+            VerifyContext(
+                auth_type=connection.auth_type,
+                credentials=json.loads(plaintext),
+                config=dict(connection.config_json),
+            )
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Provider metadata fetch failed: {type(exc).__name__}",
+        ) from exc
+
+
 async def rotate_credentials(
     db: AsyncSession,
     crypto: SecretCrypto,

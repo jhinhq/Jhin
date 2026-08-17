@@ -44,6 +44,13 @@ class TaskOut(BaseModel):
     priority: str
     assigned_agent_id: UUID | None
     temporal_workflow_id: str | None
+    # Trigger origin (plan 6.12, 17.10): where this task came from, when it
+    # was started by a trigger. metadata_json carries trigger_name and
+    # external_url for the "Started by trigger X from Linear ENG-142" banner.
+    external_source: str | None = None
+    external_id: str | None = None
+    trigger_id: UUID | None = None
+    metadata_json: dict[str, Any] = {}
     created_at: datetime
     updated_at: datetime
 

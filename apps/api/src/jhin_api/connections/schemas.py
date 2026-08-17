@@ -45,6 +45,7 @@ class ConnectorOut(BaseModel):
     auth_schemes: list[AuthSchemeOut] = []
     config_fields: list[ConfigFieldOut] = []
     webhook_events: list[str] = []
+    canonical_events: list[str] = []
     capabilities: list[str] = []
     supports_webhooks: bool = False
     docs_url: str = ""

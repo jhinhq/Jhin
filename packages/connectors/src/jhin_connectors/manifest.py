@@ -63,6 +63,10 @@ class ConnectorManifest(BaseModel):
     config_fields: tuple[ConfigFieldSpec, ...] = ()
     # Provider webhook event names this connector accepts (empty = no webhooks).
     webhook_events: tuple[str, ...] = ()
+    # Canonical ``connector.<type>.*`` event types normalization can produce —
+    # the trigger builder's WHEN dropdown (plan 17.10). Free-text event types
+    # remain allowed for connectors with dynamic suffixes.
+    canonical_events: tuple[str, ...] = ()
     # Capability names (plan 12.3) whose tools this connector registers.
     capabilities: tuple[str, ...] = ()
     docs_url: str = ""

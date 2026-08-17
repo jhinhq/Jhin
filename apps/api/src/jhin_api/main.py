@@ -23,6 +23,7 @@ from jhin_api.security.rate_limit import LoginRateLimiter
 from jhin_api.settings import Settings, get_settings
 from jhin_api.tasks.router import agent_actions_router, runs_router, tasks_router
 from jhin_api.teams.router import router as teams_router
+from jhin_api.triggers.router import router as triggers_router
 from jhin_api.webhooks.router import router as webhooks_router
 from jhin_api.workspaces.router import router as workspaces_router
 from jhin_db import create_engine, create_session_factory
@@ -106,6 +107,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(approvals_router)
     app.include_router(connectors_catalog_router)
     app.include_router(connections_router)
+    app.include_router(triggers_router)
     app.include_router(webhooks_router)
     return app
 
