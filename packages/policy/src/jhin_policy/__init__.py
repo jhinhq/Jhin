@@ -20,6 +20,15 @@ from jhin_policy.capabilities import (
     is_forbidden_capability,
     is_valid_capability,
 )
+from jhin_policy.delegation import (
+    DEFAULT_MAX_TASK_DEPTH,
+    DELEGATE_CAPABILITY,
+    DelegationDecision,
+    DelegationFacts,
+    DelegationSettings,
+    delegation_settings,
+    evaluate_delegation,
+)
 from jhin_policy.evaluator import (
     DecisionType,
     Grant,
@@ -33,11 +42,16 @@ from jhin_policy.risk import DEFAULT_ACTION_BY_RISK, RiskLevel, RuleAction
 
 __all__ = [
     "DEFAULT_ACTION_BY_RISK",
+    "DEFAULT_MAX_TASK_DEPTH",
+    "DELEGATE_CAPABILITY",
     "FORBIDDEN_CAPABILITY_PREFIXES",
     "PRESET_RULES",
     "ApprovalPreset",
     "CapabilityRegistry",
     "DecisionType",
+    "DelegationDecision",
+    "DelegationFacts",
+    "DelegationSettings",
     "Grant",
     "GrantEffect",
     "PolicyDecision",
@@ -47,7 +61,9 @@ __all__ = [
     "RuleAction",
     "ToolDefinition",
     "capability_matches",
+    "delegation_settings",
     "evaluate",
+    "evaluate_delegation",
     "is_forbidden_capability",
     "is_valid_capability",
     "matching_preset",
