@@ -150,6 +150,54 @@ async def test_match_starts_workflow_and_records_invocation(
     assert audits[0].metadata_json["status"] == "started"
 
 
+async def test_engineering_template_selects_engineering_ticket_workflow(
+    session_factory: async_sessionmaker[AsyncSession], ids: dict[str, UUID]
+) -> None:
+    """Phase 8 (plan 8.4): trigger.workflow_definition selects the built-in
+    template; the config rides along and malformed cycles fall back."""
+    qa_id = str(new_uuid7())
+    async with session_factory() as session:
+        trigger = await session.get(Trigger, ids["trigger"])
+        assert trigger is not None
+        trigger.workflow_definition = {
+            "template": "engineering_ticket",
+            "qa_agent_id": qa_id,
+            "manager_review": True,
+            "max_retest_cycles": "not-a-number",
+        }
+        await session.commit()
+
+    temporal = FakeTemporal()
+    matcher = make_matcher(session_factory, temporal)
+    await matcher.handle_event(issue_event(ids["workspace"]))
+
+    assert len(temporal.calls) == 1
+    call = temporal.calls[0]
+    assert call["name"] == "EngineeringTicketWorkflow"
+    params = call["params"]
+    assert params.base.external_id == "ENG-142"
+    assert params.qa_agent_id == qa_id
+    assert params.manager_review is True
+    assert params.max_retest_cycles == 3  # malformed value falls back
+
+
+async def test_unknown_template_falls_back_to_plain_workflow(
+    session_factory: async_sessionmaker[AsyncSession], ids: dict[str, UUID]
+) -> None:
+    async with session_factory() as session:
+        trigger = await session.get(Trigger, ids["trigger"])
+        assert trigger is not None
+        trigger.workflow_definition = {"template": "does_not_exist"}
+        await session.commit()
+
+    temporal = FakeTemporal()
+    matcher = make_matcher(session_factory, temporal)
+    await matcher.handle_event(issue_event(ids["workspace"]))
+
+    assert len(temporal.calls) == 1
+    assert temporal.calls[0]["name"] == "TriggeredTaskWorkflow"
+
+
 async def test_semantically_identical_event_is_suppressed(
     session_factory: async_sessionmaker[AsyncSession], ids: dict[str, UUID]
 ) -> None:
