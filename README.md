@@ -11,14 +11,16 @@ backbone, and PostgreSQL is the system of record. A FastAPI control-plane API
 owns configuration and authorization, and a Next.js frontend provides the
 operations UI.
 
-> Status: Phase 2 — identity and organization. On top of the Phase 1 stack,
-> Jhin now has email/password auth (Argon2id, server-side sessions, CSRF),
-> workspace RBAC (owner/admin/member/viewer), CRUD APIs for workspaces, teams,
-> agents, and members with server-side cycle prevention, an append-only audit
-> log, and a dark-themed web app: first-run owner setup, login, an
-> organization chart with team/agent management, an agent creation wizard,
-> and audit/settings pages. Agents do not run yet — execution arrives in
-> Phase 3.
+> Status: Phase 3 — agents run. On top of identity and organization (Phase 2),
+> Jhin now has an encrypted secret store (AES-256-GCM envelope encryption with
+> a master key file), model providers (OpenAI, Anthropic, OpenRouter, Ollama,
+> any OpenAI-compatible endpoint) with priced model profiles, and durable
+> agent execution: tasks and conversational messages start Temporal-backed
+> `AgentTaskWorkflow` runs on a dedicated agent worker, with
+> pause/resume/cancel/instruction signals, per-run token + cost tracking, and
+> a persisted execution timeline. The web app gains Models, Tasks (with a live
+> task detail view), and Runs pages, agent messaging, and a real Model step in
+> the agent wizard. Tools arrive in Phase 4.
 
 ## Quick start
 
@@ -28,9 +30,13 @@ Requirements: Docker with Compose v2.
 git clone <this repo>
 cd jhin
 cp .env.example .env
+make master-key          # one-time: generate the secret-store master key
 docker compose up -d --build
 make migrate
 ```
+
+The master key file (`secrets/dev/jhin_master_key` by default) encrypts every
+stored credential. Back it up; losing it makes stored secrets unreadable.
 
 Then open:
 
@@ -50,12 +56,17 @@ apps/
   api/          FastAPI control plane (jhin_api)
   web/          Next.js web UI
 services/
-  workflow_worker/   Temporal worker (sample durable workflow)
+  workflow_worker/   Temporal worker (general workflows)
+  agent_worker/      Temporal worker executing agent runs (model calls live here)
   event_worker/      NATS JetStream durable consumer
 packages/
   db/           SQLAlchemy 2 + Alembic (jhin_db)
+  domain/       Shared enums + UUIDv7 helper (jhin_domain)
   events/       Event envelope, subjects, JetStream helpers (jhin_events)
   workflows/    Temporal workflow definitions (jhin_workflows)
+  secrets/      Envelope encryption, secret store, log redaction (jhin_secrets)
+  models/       Model provider adapters + fake test provider (jhin_models)
+  agents/       Execution snapshots, prompt layers, step runtime (jhin_agents)
   observability/  Structured JSON logging (jhin_observability)
 tests/integration/  Compose-stack integration tests
 ```
@@ -93,6 +104,29 @@ password: jhin-dev-password
 
 Seeding is idempotent and refuses to run if users already exist. These
 credentials are for local development only.
+
+The seed also creates a "Fake Provider (dev)" model provider pointing at the
+in-stack fake OpenAI-compatible server (`fake-provider`, dev overlay only)
+with two priced profiles — `Fake Mini` (the workspace default) and
+`Fake Pro` — so agents can run tasks immediately without real API keys.
+
+### Models and tasks
+
+- **Models page** — add providers (API keys go into the encrypted secret
+  store and are never displayed again), verify them with a live call, create
+  priced model profiles, and pick the workspace default profile. Agents use
+  the workspace default unless a custom profile is set (wizard step 4 or the
+  agent drawer's Model tab).
+- **Tasks page** — create a task and optionally assign it to an agent;
+  assignment starts a durable `AgentTaskWorkflow` (workflow id `task-<uuid>`)
+  on the agent worker. The task detail view shows the execution timeline,
+  the conversation (you can send instructions mid-run), and token/cost
+  totals. Pause, resume, and cancel map to Temporal signals.
+- **Message an agent** — the Message action on any active agent starts a
+  conversational task; the agent's reply lands in the task conversation.
+- **Runs page** — every run with status, tokens, estimated cost, and a link
+  back to its task. Costs come from the profile's per-million-token pricing
+  (stored as integer micro-dollars).
 
 ### Frontend data fetching
 
