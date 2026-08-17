@@ -1,0 +1,26 @@
+[project]
+name = "jhin-tools"
+version = "0.1.0"
+description = "Tool gateway: the single authorization path for every agent tool call (plan section 12)"
+requires-python = ">=3.13"
+dependencies = [
+    "pydantic>=2.10",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "jhin-db",
+    "jhin-domain",
+    "jhin-policy",
+    "jhin-secrets",
+]
+
+[tool.uv.sources]
+jhin-db = { workspace = true }
+jhin-domain = { workspace = true }
+jhin-policy = { workspace = true }
+jhin-secrets = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jhin_tools"]
