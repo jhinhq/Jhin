@@ -237,7 +237,11 @@ async def test_pids_limit_enforced(runner: httpx.AsyncClient) -> None:
 
 
 async def test_timeout_kills_long_job_and_removes_container(runner: httpx.AsyncClient) -> None:
-    body = {"job_id": _job_id(), "command": _bash("sleep 120"), "timeout_seconds": 3}
+    body: dict[str, Any] = {
+        "job_id": _job_id(),
+        "command": _bash("sleep 120"),
+        "timeout_seconds": 3,
+    }
     await _submit(runner, body)
     job = await _wait(runner, body["job_id"])
     assert job["status"] == "timeout", job
@@ -251,7 +255,7 @@ async def test_timeout_kills_long_job_and_removes_container(runner: httpx.AsyncC
 
 async def test_secret_env_never_appears_in_captured_output(runner: httpx.AsyncClient) -> None:
     secret_value = f"sbx-secret-{uuid4().hex}"
-    body = {
+    body: dict[str, Any] = {
         "job_id": _job_id(),
         "secret_env": {"MY_TOKEN": secret_value},
         "command": _bash('echo "token=$MY_TOKEN"; echo "err=$MY_TOKEN" >&2; env | grep MY_TOKEN'),
@@ -280,7 +284,7 @@ async def test_container_removed_after_completion_and_cancel(runner: httpx.Async
     assert finished["status"] == "completed"
     assert _docker("ps", "-aq", "--filter", f"label=jhin.sandbox.job={finished['job_id']}") == ""
 
-    body = {"job_id": _job_id(), "command": _bash("sleep 120")}
+    body: dict[str, Any] = {"job_id": _job_id(), "command": _bash("sleep 120")}
     await _submit(runner, body)
     await asyncio.sleep(1.0)
     cancelled = await runner.post(
