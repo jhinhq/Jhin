@@ -30,12 +30,16 @@ from jhin_policy import (
     ToolDefinition,
     capability_matches,
 )
+from jhin_secrets import SecretCrypto
 
 
 @dataclass(frozen=True)
 class ToolExecutionContext:
-    """Everything an executor may touch. Deliberately narrow: no secrets, no
-    model client, no workflow handle."""
+    """Everything an executor may touch. Deliberately narrow: no model
+    client, no workflow handle. ``crypto`` exists so connector executors can
+    decrypt connection credentials at the moment of use (plan 13.5) — it is
+    None for processes that hold no master key, and system tools never
+    touch it."""
 
     session: AsyncSession
     workspace_id: UUID
@@ -43,6 +47,7 @@ class ToolExecutionContext:
     run_id: UUID
     agent_id: UUID
     agent_name: str
+    crypto: SecretCrypto | None = None
 
 
 ToolExecutor = Callable[[ToolExecutionContext, BaseModel], Awaitable[BaseModel]]

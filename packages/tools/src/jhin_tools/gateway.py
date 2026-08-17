@@ -45,6 +45,19 @@ from jhin_tools.sanitize import MAX_DOCUMENT_BYTES, sanitize_payload
 GatewayStatus = Literal["executed", "failed", "denied", "needs_approval", "rejected"]
 
 
+def _connection_uuid(dumped: dict[str, Any]) -> UUID | None:
+    """The connection a connector tool call targets, when the validated input
+    carries one — persisted on the tool_call row for per-connection usage
+    views (plan 17.9)."""
+    raw = dumped.get("connection_id")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return UUID(raw)
+    except ValueError:
+        return None
+
+
 class GatewayOutcome(BaseModel):
     """What happened to one tool call, ready for run events and observations."""
 
@@ -156,6 +169,7 @@ class ToolGateway:
         sanitized_input: dict[str, Any],
         risk: str | None,
         status: ToolCallStatus = ToolCallStatus.DENIED,
+        connection_id: UUID | None = None,
     ) -> tuple[ToolCall, GatewayOutcome]:
         now = datetime.now(UTC)
         # Ids are assigned eagerly (not at flush) because they go into the
@@ -166,6 +180,7 @@ class ToolGateway:
             run_id=self._ctx.run_id,
             agent_id=self._ctx.agent_id,
             tool_name=tool_name,
+            connection_id=connection_id,
             sanitized_input_json=sanitized_input,
             sanitized_output_json={},
             status=status.value,
@@ -290,12 +305,14 @@ class ToolGateway:
             self._audit("tool.call.denied", row.id, {"code": "invalid_input"})
             return outcome
 
-        sanitized_input = self._sanitize(validated.model_dump(mode="json"))
+        # Scope values come from the JSON-mode dump so UUIDs and other rich
+        # types compare as the same strings stored in grant scope_json.
+        dumped = validated.model_dump(mode="json")
+        sanitized_input = self._sanitize(dumped)
         requested_scope = {
-            key: getattr(validated, key)
-            for key in definition.scope_keys
-            if getattr(validated, key, None) is not None
+            key: dumped[key] for key in definition.scope_keys if dumped.get(key) is not None
         }
+        connection_id = _connection_uuid(dumped)
 
         # 3-5. Grants, scope, and policy — live from Postgres, so a revoked
         # grant takes effect immediately even mid-run.
@@ -310,6 +327,7 @@ class ToolGateway:
                 reason=decision.reason,
                 sanitized_input=sanitized_input,
                 risk=definition.risk.value,
+                connection_id=connection_id,
             )
             self._audit("tool.call.requested", row.id, {"tool_name": definition.name})
             self._audit(
@@ -346,6 +364,7 @@ class ToolGateway:
                 run_id=self._ctx.run_id,
                 agent_id=self._ctx.agent_id,
                 tool_name=definition.name,
+                connection_id=connection_id,
                 sanitized_input_json=sanitized_input,
                 sanitized_output_json={},
                 status=ToolCallStatus.PENDING_APPROVAL.value,
@@ -386,6 +405,7 @@ class ToolGateway:
             run_id=self._ctx.run_id,
             agent_id=self._ctx.agent_id,
             tool_name=definition.name,
+            connection_id=connection_id,
             sanitized_input_json=sanitized_input,
             sanitized_output_json={},
             status=ToolCallStatus.FAILED.value,  # overwritten by _execute
