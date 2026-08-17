@@ -1,0 +1,28 @@
+[project]
+name = "jhin-sandbox-runner"
+version = "0.1.0"
+description = "Jhin sandbox runner: ephemeral Docker job executor for CLI/repository work (plan section 14)"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.34",
+    "pydantic>=2.10",
+    "pydantic-settings>=2.7",
+    "aiodocker>=0.24",
+    "jhin-observability",
+    "jhin-secrets",
+]
+
+[tool.uv.sources]
+jhin-observability = { workspace = true }
+jhin-secrets = { workspace = true }
+
+[project.scripts]
+jhin-sandbox-runner = "jhin_sandbox_runner.main:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jhin_sandbox_runner"]

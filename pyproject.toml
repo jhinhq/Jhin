@@ -13,6 +13,7 @@ members = [
     "services/workflow_worker",
     "services/event_worker",
     "services/agent_worker",
+    "services/sandbox_runner",
     "packages/db",
     "packages/domain",
     "packages/events",
@@ -45,6 +46,7 @@ src = [
     "services/workflow_worker/src",
     "services/event_worker/src",
     "services/agent_worker/src",
+    "services/sandbox_runner/src",
     "packages/db/src",
     "packages/domain/src",
     "packages/events/src",
@@ -82,6 +84,7 @@ files = [
     "services/workflow_worker/src",
     "services/event_worker/src",
     "services/agent_worker/src",
+    "services/sandbox_runner/src",
     "packages/db/src",
     "packages/domain/src",
     "packages/events/src",
@@ -98,8 +101,13 @@ files = [
 ]
 
 [[tool.mypy.overrides]]
-module = ["nats.*", "uuid_utils.*", "asyncpg.*"]
+module = ["nats.*", "uuid_utils.*", "asyncpg.*", "aiodocker.*"]
 ignore_missing_imports = true
+
+# aiodocker's volume API is untyped; calls into it are contained here.
+[[tool.mypy.overrides]]
+module = ["jhin_sandbox_runner.jobs"]
+disallow_untyped_calls = false
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -116,6 +124,7 @@ testpaths = [
     "packages/tools/tests",
     "packages/connectors/tests",
     "services/event_worker/tests",
+    "services/sandbox_runner/tests",
     "tests",
 ]
 markers = [
