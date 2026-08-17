@@ -11,16 +11,19 @@ backbone, and PostgreSQL is the system of record. A FastAPI control-plane API
 owns configuration and authorization, and a Next.js frontend provides the
 operations UI.
 
-> Status: Phase 3 — agents run. On top of identity and organization (Phase 2),
-> Jhin now has an encrypted secret store (AES-256-GCM envelope encryption with
-> a master key file), model providers (OpenAI, Anthropic, OpenRouter, Ollama,
-> any OpenAI-compatible endpoint) with priced model profiles, and durable
-> agent execution: tasks and conversational messages start Temporal-backed
-> `AgentTaskWorkflow` runs on a dedicated agent worker, with
-> pause/resume/cancel/instruction signals, per-run token + cost tracking, and
-> a persisted execution timeline. The web app gains Models, Tasks (with a live
-> task detail view), and Runs pages, agent messaging, and a real Model step in
-> the agent wizard. Tools arrive in Phase 4.
+> Status: Phase 4 — agents call tools, safely. On top of durable agent runs
+> (Phase 3), Jhin now has a capability registry with built-in demo tools at
+> every risk level, deny-by-default capability grants (explicit deny beats
+> allow, scoped), per-agent approval policies (Autonomous/Balanced/Restricted
+> presets persisted as explicit rules), and a single tool gateway that
+> validates, authorizes, executes, sanitizes, and audits every call — model
+> output is never authorization. Approval-gated calls park the run durably in
+> Temporal (surviving worker restarts) until a human approves or rejects from
+> the new Approvals inbox. Model adapters speak OpenAI-style function calling,
+> and the web app gains the Tools & Access agent tab, real wizard steps for
+> tools and autonomy, an approvals inbox with a live pending badge, and
+> tool/approval events on the task timeline. Real connectors arrive in
+> Phase 5.
 
 ## Quick start
 
