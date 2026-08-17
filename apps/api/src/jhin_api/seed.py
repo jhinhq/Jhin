@@ -12,6 +12,7 @@ Dev credentials (documented in README):
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from uuid import UUID
 
@@ -24,14 +25,26 @@ from jhin_api.slugs import slugify
 from jhin_db import create_engine, create_session_factory
 from jhin_db.models import (
     Agent,
+    AgentCapabilityGrant,
+    Connection,
     ModelProfile,
     ModelProvider,
     Team,
+    Trigger,
     User,
     Workspace,
     WorkspaceMembership,
 )
-from jhin_domain import ActorType, ModelProviderType, WorkspaceRole, new_uuid7
+from jhin_db.models.connection import new_public_id
+from jhin_domain import (
+    ActorType,
+    ModelProviderType,
+    SecretType,
+    WorkspaceRole,
+    new_uuid7,
+)
+from jhin_secrets import SecretCrypto, SecretStore, load_master_key
+from jhin_secrets.crypto import MasterKeyError
 
 DEV_OWNER_EMAIL = "owner@jhin.dev"
 DEV_OWNER_PASSWORD = "jhin-dev-password"  # dev-only; never use in production
@@ -40,6 +53,22 @@ DEV_WORKSPACE_NAME = "Jhin HQ"
 # The compose dev stack runs a fake OpenAI-compatible provider (plan 32.2);
 # override when seeding from the host against a different endpoint.
 DEFAULT_FAKE_PROVIDER_URL = "http://fake-provider:8080/v1"
+
+# Fake Linear (dev profile). The webhook secret is deterministic so demo
+# scripts and integration tests can configure the fake service to sign with
+# it (dev-only; real connections generate a random secret at creation).
+DEFAULT_FAKE_LINEAR_URL = "http://fake-linear:8080"
+DEV_LINEAR_WEBHOOK_SECRET = "fake-linear-webhook-secret"
+DEV_LINEAR_API_KEY = "fake-linear-api-key"
+
+# The showcase trigger (plan 26): ENG issues transitioning into Todo.
+SHOWCASE_TRIGGER_NAME = "Pick up new engineering tickets"
+SHOWCASE_FILTER: dict[str, object] = {
+    "all": [
+        {"path": "data.team.key", "op": "eq", "value": "ENG"},
+        {"path": "data.state.name", "op": "transitioned_to", "value": "Todo"},
+    ]
+}
 
 
 def _agent(
@@ -61,6 +90,109 @@ def _agent(
         system_prompt=system_prompt,
         description=f"{role_title} (seeded dev data)",
     )
+
+
+def _load_crypto() -> SecretCrypto | None:
+    """Master-key crypto when available; the seed degrades gracefully
+    without it (connection + trigger seeding is skipped)."""
+    try:
+        return SecretCrypto(load_master_key())
+    except MasterKeyError:
+        return None
+
+
+async def _seed_linear_showcase(
+    session: AsyncSession,
+    crypto: SecretCrypto,
+    *,
+    workspace: Workspace,
+    owner: User,
+    swe: Agent,
+) -> Connection:
+    """Fake Linear connection + SWE linear grants + the showcase trigger
+    (plan 45 Phase 7 item 6) so a fresh dev stack demos the full slice."""
+    store = SecretStore(session, crypto)
+    public_id = new_public_id()
+    credential_secret = await store.create(
+        workspace_id=workspace.id,
+        name=f"connection/{public_id}/credentials",
+        plaintext=json.dumps(
+            {"api_key": os.environ.get("FAKE_LINEAR_API_KEY", DEV_LINEAR_API_KEY)}
+        ),
+        secret_type=SecretType.CONNECTION_CREDENTIALS,
+        created_by_user_id=owner.id,
+    )
+    webhook_secret = await store.create(
+        workspace_id=workspace.id,
+        name=f"connection/{public_id}/webhook",
+        plaintext=DEV_LINEAR_WEBHOOK_SECRET,
+        secret_type=SecretType.WEBHOOK_SECRET,
+        created_by_user_id=owner.id,
+    )
+    connection = Connection(
+        workspace_id=workspace.id,
+        connector_type="linear",
+        name="Linear (fake, dev)",
+        auth_type="api_key",
+        public_id=public_id,
+        encrypted_secret_id=credential_secret.id,
+        webhook_secret_id=webhook_secret.id,
+        config_json={"base_url": os.environ.get("FAKE_LINEAR_BASE_URL", DEFAULT_FAKE_LINEAR_URL)},
+        created_by_user_id=owner.id,
+    )
+    session.add(connection)
+    await session.flush()
+
+    # Deny-by-default (plan 12): the SWE needs explicit linear grants —
+    # read/search/metadata plus comment (progress notes). No issue.update:
+    # state moves stay with humans or the trigger's own sync-back.
+    scope = {"connection_id": str(connection.id)}
+    for capability in (
+        "linear.issue.read",
+        "linear.issue.search",
+        "linear.metadata.read",
+        "linear.comment.create",
+    ):
+        session.add(
+            AgentCapabilityGrant(
+                workspace_id=workspace.id,
+                agent_id=swe.id,
+                capability=capability,
+                scope_json=scope,
+                effect="allow",
+            )
+        )
+
+    trigger = Trigger(
+        workspace_id=workspace.id,
+        name=SHOWCASE_TRIGGER_NAME,
+        enabled=True,
+        connection_id=connection.id,
+        event_type="connector.linear.issue.updated",
+        filter_json=dict(SHOWCASE_FILTER),
+        target_agent_id=swe.id,
+        action_config_json={"comment_back": True},
+        created_by_user_id=owner.id,
+    )
+    session.add(trigger)
+    await session.flush()
+
+    request_id = new_uuid7()
+    for target_id, action, target_type, name in (
+        (connection.id, "connection.created", "connection", connection.name),
+        (trigger.id, "trigger.created", "trigger", trigger.name),
+    ):
+        audit.record(
+            session,
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+            workspace_id=workspace.id,
+            actor_type=ActorType.SYSTEM,
+            request_id=request_id,
+            metadata={"seed": True, "name": name},
+        )
+    return connection
 
 
 async def seed(session: AsyncSession) -> str:
@@ -207,10 +339,19 @@ async def seed(session: AsyncSession) -> str:
             metadata={"seed": True, "name": name},
         )
 
+    crypto = _load_crypto()
+    if crypto is not None:
+        connection = await _seed_linear_showcase(
+            session, crypto, workspace=workspace, owner=owner, swe=swe
+        )
+        linear_note = f"Linear connection '{connection.name}' + trigger '{SHOWCASE_TRIGGER_NAME}'"
+    else:
+        linear_note = "no master key: skipped Linear connection + showcase trigger"
+
     await session.commit()
     return (
         f"seeded: workspace '{DEV_WORKSPACE_NAME}' with Engineering and Marketing, "
-        f"fake model provider (default profile: Fake Mini); "
+        f"fake model provider (default profile: Fake Mini); {linear_note}; "
         f"dev owner {DEV_OWNER_EMAIL} / {DEV_OWNER_PASSWORD}"
     )
 
