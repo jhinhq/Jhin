@@ -24,10 +24,24 @@ responds with a normal completion summarizing the tool outputs.
 The fake deliberately emits tool calls even when the request advertises no
 ``tools`` — a real model can hallucinate tool names it was never offered, and
 authorization must live in the tool gateway, not in the prompt (plan 52).
+
+Phase 8 extensions for multi-agent scripts:
+
+- ``[[b64:<base64>]]`` segments in user messages are decoded in place before
+  marker extraction. This lets a delegation script smuggle the *child
+  agent's* markers through the parent's JSON marker payload (nested
+  ``[[tool:...]]`` braces would otherwise break both the outer marker regex
+  and JSON escaping).
+- The literal token ``__VERDICT__`` inside a marker's arguments is replaced
+  with ``pass``/``fail`` based on evidence: the most recent tool result that
+  reports an ``exit_code`` (``0`` → pass). A QA script can therefore run the
+  test suite and report an honest, evidence-based review verdict.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import re
 import threading
@@ -40,9 +54,51 @@ DEFAULT_MODELS = ("fake-mini", "fake-pro")
 # [[tool:<name> <flat-json-object>]] — payloads must not contain "]]".
 TOOL_MARKER_RE = re.compile(r"\[\[tool:([a-z0-9_.]+)\s+(\{.*?\})\]\]", re.DOTALL)
 
+# [[b64:<base64>]] — decoded into the message text before marker extraction.
+B64_MARKER_RE = re.compile(r"\[\[b64:([A-Za-z0-9+/=]+)\]\]")
+
+# Evidence placeholder substituted into marker arguments (see module docs).
+VERDICT_TOKEN = "__VERDICT__"
+_EXIT_CODE_RE = re.compile(r'"exit_code":\s*(-?\d+)')
+
 
 def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
+
+
+def _expand_b64(text: str, *, max_rounds: int = 3) -> str:
+    """Decode ``[[b64:...]]`` segments (bounded rounds allow one nesting level
+    per delegation hop); undecodable segments are left untouched."""
+
+    def _decode(match: re.Match[str]) -> str:
+        try:
+            return base64.b64decode(match.group(1), validate=True).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError):
+            return match.group(0)
+
+    for _ in range(max_rounds):
+        expanded = B64_MARKER_RE.sub(_decode, text)
+        if expanded == text:
+            break
+        text = expanded
+    return text
+
+
+def encode_marker_payload(text: str) -> str:
+    """Helper for tests: wrap script text as a ``[[b64:...]]`` segment."""
+    return f"[[b64:{base64.b64encode(text.encode('utf-8')).decode('ascii')}]]"
+
+
+def _evidence_verdict(messages: list[dict[str, Any]]) -> str:
+    """pass/fail from the most recent tool result carrying an exit_code;
+    no evidence at all counts as a pass (nothing failed)."""
+    for message in reversed(messages):
+        if message.get("role") != "tool":
+            continue
+        match = _EXIT_CODE_RE.search(str(message.get("content", "")))
+        if match:
+            return "pass" if match.group(1) == "0" else "fail"
+    return "pass"
 
 
 def _pending_tool_marker(messages: list[dict[str, Any]]) -> tuple[int, str, str] | None:
@@ -55,10 +111,13 @@ def _pending_tool_marker(messages: list[dict[str, Any]]) -> tuple[int, str, str]
     markers: list[tuple[str, str]] = []
     for message in messages:
         if message.get("role") == "user":
-            markers.extend(TOOL_MARKER_RE.findall(str(message.get("content", ""))))
+            content = _expand_b64(str(message.get("content", "")))
+            markers.extend(TOOL_MARKER_RE.findall(content))
     results = sum(1 for m in messages if m.get("role") == "tool")
     if results < len(markers):
         name, arguments = markers[results]
+        if VERDICT_TOKEN in arguments:
+            arguments = arguments.replace(VERDICT_TOKEN, _evidence_verdict(messages))
         return results, name, arguments
     return None
 

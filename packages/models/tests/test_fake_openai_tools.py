@@ -5,7 +5,7 @@ import json
 
 from jhin_models import ModelMessage, ModelRequest, build_model_client
 from jhin_models.testing import FakeOpenAIServer
-from jhin_models.testing.fake_openai import build_completion
+from jhin_models.testing.fake_openai import build_completion, encode_marker_payload
 
 MARKER = '[[tool:system.echo {"text": "hello tools"}]]'
 
@@ -75,6 +75,56 @@ def test_marker_ignored_without_tools_is_not_a_thing() -> None:
     body = {"model": "fake-mini", "messages": [{"role": "user", "content": MARKER}]}
     _status, payload = build_completion(body)
     assert payload["choices"][0]["finish_reason"] == "tool_calls"
+
+
+def test_b64_segment_smuggles_nested_markers() -> None:
+    """Phase 8: a delegation script embeds the child agent's markers as
+    [[b64:...]] so they survive the outer marker's JSON payload."""
+    child_script = 'Review it. [[tool:cli.test.run {"suite": "unit"}]]'
+    encoded = encode_marker_payload(child_script)
+    assert "[[tool:" not in encoded
+    body = {"model": "fake-mini", "messages": [{"role": "user", "content": encoded}]}
+    _status, payload = build_completion(body)
+    call = payload["choices"][0]["message"]["tool_calls"][0]
+    assert call["function"]["name"] == "cli.test.run"
+    assert json.loads(call["function"]["arguments"]) == {"suite": "unit"}
+
+
+def test_invalid_b64_segment_is_left_untouched() -> None:
+    body = {
+        "model": "fake-mini",
+        "messages": [{"role": "user", "content": "[[b64:!!not-base64!!]] no markers here"}],
+    }
+    _status, payload = build_completion(body)
+    assert payload["choices"][0]["finish_reason"] == "stop"
+
+
+def test_verdict_token_substitutes_from_exit_code_evidence() -> None:
+    """Phase 8: __VERDICT__ resolves from the latest tool result's exit_code,
+    so a QA script reports what the test run actually showed."""
+    content = (
+        '[[tool:cli.test.run {"suite": "unit"}]] then '
+        '[[tool:organization.report_result {"summary": "tested", "verdict": "__VERDICT__"}]]'
+    )
+    messages: list[dict[str, object]] = [{"role": "user", "content": content}]
+    _status, payload = build_completion({"model": "fake-mini", "messages": messages})
+    first = payload["choices"][0]["message"]["tool_calls"][0]
+    assert first["function"]["name"] == "cli.test.run"
+
+    for exit_code, expected in ((1, "fail"), (0, "pass")):
+        followup = [
+            *messages,
+            {"role": "assistant", "content": None, "tool_calls": [first]},
+            {
+                "role": "tool",
+                "content": json.dumps({"exit_code": exit_code, "stdout": "..."}),
+                "tool_call_id": first["id"],
+            },
+        ]
+        _status, payload = build_completion({"model": "fake-mini", "messages": followup})
+        call = payload["choices"][0]["message"]["tool_calls"][0]
+        assert call["function"]["name"] == "organization.report_result"
+        assert json.loads(call["function"]["arguments"])["verdict"] == expected
 
 
 async def test_adapter_roundtrip_with_tool_call() -> None:
