@@ -24,7 +24,7 @@ from temporalio.service import RPCError
 
 from jhin_api.audit import service as audit
 from jhin_api.deps import WorkspaceContext
-from jhin_db.models import Agent, AgentRun, Message, RunEvent, Task
+from jhin_db.models import Agent, AgentRun, Message, RunEvent, Task, ToolCall
 from jhin_domain import (
     AgentStatus,
     MessageVisibility,
@@ -306,6 +306,15 @@ async def list_run_events(db: AsyncSession, workspace_id: UUID, run_id: UUID) ->
         select(RunEvent)
         .where(RunEvent.run_id == run_id, RunEvent.workspace_id == workspace_id)
         .order_by(RunEvent.seq)
+    )
+    return list(rows)
+
+
+async def list_run_tool_calls(db: AsyncSession, workspace_id: UUID, run_id: UUID) -> list[ToolCall]:
+    rows = await db.scalars(
+        select(ToolCall)
+        .where(ToolCall.run_id == run_id, ToolCall.workspace_id == workspace_id)
+        .order_by(ToolCall.created_at, ToolCall.id)
     )
     return list(rows)
 

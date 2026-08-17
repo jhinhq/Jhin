@@ -26,6 +26,7 @@ from jhin_api.tasks.schemas import (
     TaskDetailOut,
     TaskListOut,
     TaskOut,
+    ToolCallOut,
 )
 
 tasks_router = APIRouter(
@@ -205,6 +206,13 @@ async def run_timeline(run_id: UUID, ctx: ViewerCtx, db: DbSession) -> list[RunE
     await service.get_run(db, ctx.workspace_id, run_id)
     events = await service.list_run_events(db, ctx.workspace_id, run_id)
     return [RunEventOut.model_validate(e) for e in events]
+
+
+@runs_router.get("/{run_id}/tool-calls")
+async def run_tool_calls(run_id: UUID, ctx: ViewerCtx, db: DbSession) -> list[ToolCallOut]:
+    await service.get_run(db, ctx.workspace_id, run_id)
+    calls = await service.list_run_tool_calls(db, ctx.workspace_id, run_id)
+    return [ToolCallOut.model_validate(c) for c in calls]
 
 
 # --- Agent actions ---

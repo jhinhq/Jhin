@@ -16,7 +16,9 @@ dependencies = [
     "jhin-events",
     "jhin-models",
     "jhin-observability",
+    "jhin-policy",
     "jhin-secrets",
+    "jhin-tools",
     "jhin-workflows",
 ]
 
@@ -29,7 +31,9 @@ jhin-domain = { workspace = true }
 jhin-events = { workspace = true }
 jhin-models = { workspace = true }
 jhin-observability = { workspace = true }
+jhin-policy = { workspace = true }
 jhin-secrets = { workspace = true }
+jhin-tools = { workspace = true }
 jhin-workflows = { workspace = true }
 
 [build-system]

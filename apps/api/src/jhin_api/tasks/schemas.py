@@ -93,6 +93,24 @@ class MessageOut(BaseModel):
     created_at: datetime
 
 
+class ToolCallOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    run_id: UUID
+    agent_id: UUID
+    tool_name: str
+    sanitized_input_json: dict[str, Any]
+    sanitized_output_json: dict[str, Any]
+    status: str
+    approval_id: UUID | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    duration_ms: int | None
+    error_code: str | None
+    created_at: datetime
+
+
 class TaskDetailOut(BaseModel):
     task: TaskOut
     runs: list[RunOut]
