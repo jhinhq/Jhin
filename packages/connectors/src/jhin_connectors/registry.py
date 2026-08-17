@@ -49,9 +49,15 @@ def _cli() -> Connector:
     return CliConnector()
 
 
+def _linear() -> Connector:
+    from jhin_connectors.linear.connector import LinearConnector
+
+    return LinearConnector()
+
+
 # One factory per shipped connector. Factories keep import cost lazy and are
 # the single line a contributor adds for a new connector (plan 36.5).
-DEFAULT_CONNECTORS: tuple[Callable[[], Connector], ...] = (_github, _cli)
+DEFAULT_CONNECTORS: tuple[Callable[[], Connector], ...] = (_github, _cli, _linear)
 
 
 def default_registry() -> ConnectorRegistry:

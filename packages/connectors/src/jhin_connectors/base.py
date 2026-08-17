@@ -117,6 +117,12 @@ class Connector(ABC):
         """Provider event names accepted at the webhook endpoint."""
         return self.manifest.webhook_events
 
+    async def fetch_metadata(self, ctx: VerifyContext) -> dict[str, Any]:
+        """Display-safe provider metadata for UI pickers (e.g. Linear teams
+        and workflow states for the trigger builder). Optional; connectors
+        without discoverable metadata return {}. Never credentials."""
+        return {}
+
     def parse_webhook(
         self, headers: Mapping[str, str], body: bytes, secret: str
     ) -> RawWebhookEvent:
