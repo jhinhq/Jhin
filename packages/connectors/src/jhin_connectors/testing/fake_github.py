@@ -46,10 +46,22 @@ def _sha(seed: str) -> str:
 
 
 class FakeGitHubState:
-    """In-memory GitHub: repos, branches, files, issues, PRs, workflow runs."""
+    """In-memory GitHub: repos, branches, files, issues, PRs, workflow runs.
 
-    def __init__(self, *, token: str = DEFAULT_TOKEN, repos: str = DEFAULT_REPOS) -> None:
+    With ``git_root`` set, the same repos are also served over git smart-HTTP
+    (see :mod:`jhin_connectors.testing.fake_git`) and branch state is synced
+    from the bare repositories so a ``git push`` is visible to the REST API
+    (create PR from a pushed branch — plan 14.5)."""
+
+    def __init__(
+        self,
+        *,
+        token: str = DEFAULT_TOKEN,
+        repos: str = DEFAULT_REPOS,
+        git_root: str | None = None,
+    ) -> None:
         self.token = token
+        self.git_root = git_root
         self.lock = threading.Lock()
         self.minted_tokens: set[str] = set()
         self.mint_count = 0
@@ -90,13 +102,33 @@ class FakeGitHubState:
                 ],
                 "dispatches": [],
             }
+        if git_root is not None:
+            from jhin_connectors.testing.fake_git import init_git_root
+
+            init_git_root(git_root, list(self.repos))
 
     def authorized(self, header: str | None) -> bool:
         if not header or not header.startswith("Bearer "):
             return False
         token = header.removeprefix("Bearer ").strip()
+        return self.token_valid(token)
+
+    def token_valid(self, token: str) -> bool:
         with self.lock:
             return token == self.token or token in self.minted_tokens
+
+    def refresh_from_git(self, full_name: str) -> None:
+        """Merge branch heads from the bare git repository into REST state,
+        so pushed branches are immediately valid PR heads."""
+        if self.git_root is None:
+            return
+        from jhin_connectors.testing.fake_git import list_git_branches
+
+        branches = list_git_branches(self.git_root, full_name)
+        with self.lock:
+            repo = self.repos.get(full_name)
+            if repo is not None:
+                repo["branches"].update(branches)
 
     def is_app_jwt(self, header: str | None) -> bool:
         if not header or not header.startswith("Bearer "):
@@ -112,9 +144,17 @@ class FakeGitHubState:
         return {"token": token, "expires_at": expires.strftime("%Y-%m-%dT%H:%M:%SZ")}
 
     def snapshot(self) -> dict[str, Any]:
+        for full_name in list(self.repos):
+            self.refresh_from_git(full_name)
         with self.lock:
             copied: dict[str, Any] = json.loads(
-                json.dumps({"repos": self.repos, "mint_count": self.mint_count})
+                json.dumps(
+                    {
+                        "repos": self.repos,
+                        "mint_count": self.mint_count,
+                        "git_enabled": self.git_root is not None,
+                    }
+                )
             )
             return copied
 
@@ -157,6 +197,7 @@ def handle_request(
     if not match:
         return 404, {"message": "Not Found"}
     full_name, rest = match.group(1), match.group(2) or ""
+    state.refresh_from_git(full_name)
     with state.lock:
         repo = state.repos.get(full_name)
     if repo is None:
@@ -346,9 +387,16 @@ def handle_request(
 
 def _make_handler(state: FakeGitHubState) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
         def _dispatch(self, method: str) -> None:
             length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(length) if length else b""
+
+            # Git smart-HTTP (binary bodies, CGI bridge) — before JSON logic.
+            if state.git_root is not None and self.path.startswith("/git/"):
+                self._dispatch_git(method, raw)
+                return
             try:
                 body = json.loads(raw) if raw else {}
             except json.JSONDecodeError:
@@ -357,13 +405,42 @@ def _make_handler(state: FakeGitHubState) -> type[BaseHTTPRequestHandler]:
                 body = {}
             headers = {"Authorization": self.headers.get("Authorization", "")}
             status, payload = handle_request(state, method, self.path.split("?")[0], headers, body)
-            data = json.dumps(payload).encode()
+            # HTTP/1.1 keep-alive framing: Content-Length must match exactly
+            # what is written (204 responses carry no body at all).
+            data = b"" if status == 204 else json.dumps(payload).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
-            if data and status != 204:
+            if data:
                 self.wfile.write(data)
+
+        def _dispatch_git(self, method: str, raw: bytes) -> None:
+            from jhin_connectors.testing.fake_git import handle_git_http
+
+            assert state.git_root is not None
+            path, _, query = self.path.partition("?")
+            request_headers = {
+                "Authorization": self.headers.get("Authorization", ""),
+                "Content-Type": self.headers.get("Content-Type", ""),
+                "Content-Encoding": self.headers.get("Content-Encoding", ""),
+            }
+            status, headers, payload = handle_git_http(
+                state.git_root,
+                method,
+                path.removeprefix("/git"),
+                query,
+                request_headers,
+                raw,
+                state.token_valid,
+            )
+            self.send_response(status)
+            for name, value in headers.items():
+                self.send_header(name, value)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            if payload:
+                self.wfile.write(payload)
 
         def do_GET(self) -> None:
             self._dispatch("GET")
@@ -390,8 +467,9 @@ class FakeGitHubServer:
         *,
         token: str = DEFAULT_TOKEN,
         repos: str = DEFAULT_REPOS,
+        git_root: str | None = None,
     ) -> None:
-        self.state = FakeGitHubState(token=token, repos=repos)
+        self.state = FakeGitHubState(token=token, repos=repos, git_root=git_root)
         self._host = host
         self._server = ThreadingHTTPServer((host, port), _make_handler(self.state))
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
@@ -411,12 +489,15 @@ class FakeGitHubServer:
 
 def main() -> None:
     port = int(os.environ.get("FAKE_GITHUB_PORT", "8080"))
+    git_root = os.environ.get("FAKE_GITHUB_GIT_ROOT") or None
     state = FakeGitHubState(
         token=os.environ.get("FAKE_GITHUB_TOKEN", DEFAULT_TOKEN),
         repos=os.environ.get("FAKE_GITHUB_REPOS", DEFAULT_REPOS),
+        git_root=git_root,
     )
     server = ThreadingHTTPServer(("0.0.0.0", port), _make_handler(state))
-    print(f"fake GitHub API listening on :{port}", flush=True)
+    mode = f" (git smart-HTTP at /git, root {git_root})" if git_root else ""
+    print(f"fake GitHub API listening on :{port}{mode}", flush=True)
     server.serve_forever()
 
 
