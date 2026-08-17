@@ -71,7 +71,20 @@ class SecretType(StrEnum):
     API_KEY = "api_key"
     TOKEN = "token"
     PASSWORD = "password"
+    # JSON object of connector credential fields (plan 6.9), e.g. a GitHub
+    # PAT or app id + private key + installation id.
+    CONNECTION_CREDENTIALS = "connection_credentials"
+    # Per-connection webhook signing secret (plan 19); shown once at creation.
+    WEBHOOK_SECRET = "webhook_secret"
     OTHER = "other"
+
+
+class ConnectionStatus(StrEnum):
+    """Health/lifecycle of an authenticated integration instance (plan 6.9)."""
+
+    ACTIVE = "active"
+    ERROR = "error"
+    DISABLED = "disabled"
 
 
 class ModelProviderType(StrEnum):
