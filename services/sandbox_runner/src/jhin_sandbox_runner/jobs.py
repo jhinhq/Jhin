@@ -190,7 +190,26 @@ class JobManager:
 
     async def start(self) -> None:
         self._docker = aiodocker.Docker()
+        await self._ensure_sandbox_network()
         await self.reap_orphans()
+
+    async def _ensure_sandbox_network(self) -> None:
+        """Create the dedicated job bridge network if compose has not.
+
+        In production no compose service is attached to it (plan 14.4 — the
+        sandbox network must carry no control-plane services), so the runner
+        owns its creation.
+        """
+        name = self._settings.sandbox_network
+        try:
+            networks = await self.docker.networks.list(filters={"name": name})
+            if not any(entry.get("Name") == name for entry in networks):
+                await self.docker.networks.create(
+                    {"Name": name, "Driver": "bridge", "Labels": {"jhin.sandbox.network": "1"}}
+                )
+                logger.info("sandbox.network_created", network=name)
+        except DockerError as exc:
+            logger.warning("sandbox.network_ensure_failed", network=name, error=exc.message)
 
     async def close(self) -> None:
         for record in self._jobs.values():
