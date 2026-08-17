@@ -127,6 +127,7 @@ testpaths = [
     "packages/tools/tests",
     "packages/connectors/tests",
     "packages/triggers/tests",
+    "services/agent_worker/tests",
     "services/event_worker/tests",
     "services/sandbox_runner/tests",
     "tests",

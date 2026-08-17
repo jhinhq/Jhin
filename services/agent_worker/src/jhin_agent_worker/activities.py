@@ -10,6 +10,8 @@ redactor before persisting or raising.
 
 from __future__ import annotations
 
+import json
+from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -17,6 +19,7 @@ from uuid import UUID
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio import activity
+from temporalio.client import Client as TemporalClient
 from temporalio.exceptions import ApplicationError
 
 from jhin_agent_worker.resources import Resources
@@ -31,19 +34,26 @@ from jhin_db.models import (
     AgentCapabilityGrant,
     AgentRun,
     Approval,
+    AuditEvent,
     Message,
     RunEvent,
     Task,
     ToolCall,
+    Workspace,
 )
 from jhin_domain import (
+    AGENT_MESSAGE_TYPES,
+    RUN_ACTIVE_STATUSES,
+    ActorType,
     ApprovalStatus,
+    MessageType,
     MessageVisibility,
     RecipientType,
     RunStatus,
     SenderType,
     TaskState,
     ToolCallStatus,
+    structured_content,
 )
 from jhin_events import EventEnvelope, EventSource
 from jhin_models import ModelProviderError, ModelToolCall, ToolSchema, build_model_client
@@ -64,22 +74,59 @@ from jhin_workflows.agent_task import (
     ACTIVITY_RESOLVE_SNAPSHOT,
     ACTIVITY_RUN_AGENT_STEP,
     AgentTaskInput,
+    DelegationRequest,
     FinalizeInput,
     ResolveApprovalInput,
     RunStepInput,
     SnapshotResult,
     StepResult,
 )
+from jhin_workflows.delegated_task import (
+    ACTIVITY_DELIVER_DELEGATION_RESULT,
+    ACTIVITY_SUMMARIZE_DELEGATION,
+    DelegationSummary,
+    DeliverDelegationResultInput,
+    SummarizeDelegationInput,
+)
 
 # Cap on persisted model-produced tool arguments (they re-enter the prompt).
 _MAX_ARGUMENTS_CHARS = 8_192
 
+# Structured agent-to-agent message types (plan 29) rendered into history.
+_STRUCTURED_MESSAGE_TYPES = frozenset(t.value for t in AGENT_MESSAGE_TYPES)
+_MAX_STRUCTURED_TURN_CHARS = 6_000
+
+_ACTIVE_RUN_STATUSES = tuple(status.value for status in RUN_ACTIVE_STATUSES)
+
 logger = get_logger(__name__)
 
 
+def _workspace_run_limit(workspace: Workspace | None) -> int | None:
+    """Workspace-wide concurrent-run ceiling from settings_json (plan 30).
+
+    ``{"concurrency": {"max_concurrent_runs": N}}`` (or the same key at the
+    top level). Missing/invalid means no workspace ceiling.
+    """
+    if workspace is None:
+        return None
+    settings = workspace.settings_json or {}
+    nested = settings.get("concurrency")
+    raw = (nested or {}).get("max_concurrent_runs") if isinstance(nested, dict) else None
+    if raw is None:
+        raw = settings.get("max_concurrent_runs")
+    try:
+        limit = int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return limit if limit >= 1 else None
+
+
 class AgentActivities:
-    def __init__(self, resources: Resources) -> None:
+    def __init__(self, resources: Resources, temporal_client: TemporalClient | None = None) -> None:
         self._resources = resources
+        # Used only to nudge queued workflows when a slot frees (plan 30);
+        # the poll timer in AgentTaskWorkflow is the correctness backstop.
+        self._temporal_client = temporal_client
 
     # --- Helpers ---
 
@@ -280,6 +327,84 @@ class AgentActivities:
         info = activity.info()
 
         async with self._resources.session_factory() as session:
+            # Concurrency admission (plan 30): claim a slot and create the run
+            # in one transaction, or report queued. Row locks (workspace then
+            # agent, consistent order) serialize concurrent admissions on
+            # Postgres; SQLite ignores FOR UPDATE, which is fine for tests.
+            workspace = await session.scalar(
+                select(Workspace).where(Workspace.id == workspace_id).with_for_update()
+            )
+            agent = await session.scalar(
+                select(Agent)
+                .where(Agent.id == agent_id, Agent.workspace_id == workspace_id)
+                .with_for_update()
+            )
+            queue_reason = ""
+            if agent is not None:
+                agent_limit = max(1, agent.max_concurrent_runs)
+                active_agent = (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(AgentRun)
+                        .where(
+                            AgentRun.workspace_id == workspace_id,
+                            AgentRun.agent_id == agent_id,
+                            AgentRun.status.in_(_ACTIVE_RUN_STATUSES),
+                        )
+                    )
+                    or 0
+                )
+                if active_agent >= agent_limit:
+                    queue_reason = "agent_concurrency"
+            workspace_limit = _workspace_run_limit(workspace)
+            if not queue_reason and workspace_limit is not None:
+                active_workspace = (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(AgentRun)
+                        .where(
+                            AgentRun.workspace_id == workspace_id,
+                            AgentRun.status.in_(_ACTIVE_RUN_STATUSES),
+                        )
+                    )
+                    or 0
+                )
+                if active_workspace >= workspace_limit:
+                    queue_reason = "workspace_concurrency"
+
+            task = await session.scalar(
+                select(Task).where(Task.id == task_id, Task.workspace_id == workspace_id)
+            )
+            if queue_reason:
+                if task is not None:
+                    task.state = TaskState.QUEUED.value
+                    task.metadata_json = {
+                        **task.metadata_json,
+                        "queue": {
+                            "reason": queue_reason,
+                            "agent_id": params.agent_id,
+                            "since": datetime.now(UTC).isoformat(),
+                        },
+                    }
+                await session.commit()
+                await self._publish(
+                    workspace_id,
+                    "task.queued",
+                    {
+                        "task_id": params.task_id,
+                        "agent_id": params.agent_id,
+                        "reason": queue_reason,
+                    },
+                )
+                return SnapshotResult(
+                    run_id="",
+                    snapshot_json="",
+                    snapshot_hash="",
+                    max_steps=0,
+                    queued=True,
+                    queue_reason=queue_reason,
+                )
+
             try:
                 snapshot = await resolve_snapshot(session, workspace_id, agent_id)
             except SnapshotError as exc:
@@ -297,11 +422,12 @@ class AgentActivities:
                 temporal_run_id=info.workflow_run_id,
             )
             session.add(run)
-            task = await session.scalar(
-                select(Task).where(Task.id == task_id, Task.workspace_id == workspace_id)
-            )
             if task is not None:
                 task.state = TaskState.RUNNING.value
+                if "queue" in task.metadata_json:
+                    task.metadata_json = {
+                        key: value for key, value in task.metadata_json.items() if key != "queue"
+                    }
             await session.flush()
             self._add_run_event(
                 session,
@@ -457,6 +583,8 @@ class AgentActivities:
             # model may re-request them once the run resumes.
             waiting_approval_id: str | None = None
             parked: GatewayOutcome | None = None
+            delegations: list[DelegationRequest] = []
+            blocking_delegation: DelegationRequest | None = None
             if outcome.tool_calls:
                 gateway = ToolGateway(
                     ToolExecutionContext(
@@ -506,6 +634,22 @@ class AgentActivities:
                         if run is not None:
                             run.status = RunStatus.WAITING_APPROVAL.value
                         break
+                    if (
+                        result.status == "executed"
+                        and result.tool_name == "organization.delegate_task"
+                    ):
+                        request = self._delegation_request(result, call.id)
+                        if request is not None:
+                            delegations.append(request)
+                            if request.blocking:
+                                # Park like an approval (plan 8.3): no
+                                # tool_result yet — the deliver activity
+                                # stitches the child's summary in as this
+                                # call's observation when the child finishes.
+                                blocking_delegation = request
+                                if run is not None:
+                                    run.status = RunStatus.WAITING_DELEGATION.value
+                                break
                     self._add_tool_message(
                         session,
                         workspace_id=workspace_id,
@@ -544,6 +688,17 @@ class AgentActivities:
                     "approval_id": waiting_approval_id,
                 },
             )
+        if blocking_delegation is not None:
+            await self._publish(
+                workspace_id,
+                "agent.run.waiting_delegation",
+                {
+                    "run_id": params.run_id,
+                    "task_id": params.task_id,
+                    "child_task_id": blocking_delegation.child_task_id,
+                    "target_agent_id": blocking_delegation.target_agent_id,
+                },
+            )
         await self._publish(
             workspace_id,
             "agent.run.step",
@@ -561,6 +716,24 @@ class AgentActivities:
             cached_tokens=outcome.usage.cached_tokens,
             cost_micros=cost_micros,
             waiting_approval_id=waiting_approval_id,
+            delegations=delegations,
+        )
+
+    @staticmethod
+    def _delegation_request(
+        result: GatewayOutcome, provider_call_id: str
+    ) -> DelegationRequest | None:
+        """Lift an executed delegate_task output into the workflow contract."""
+        output = result.sanitized_output or {}
+        child_task_id = str(output.get("child_task_id", "") or "")
+        if not child_task_id:
+            return None
+        return DelegationRequest(
+            child_task_id=child_task_id,
+            target_agent_id=str(output.get("target_agent_id", "") or ""),
+            blocking=bool(output.get("blocking", True)),
+            kind=str(output.get("kind", "") or "delegation"),
+            provider_call_id=provider_call_id,
         )
 
     async def _load_history(
@@ -602,6 +775,28 @@ class AgentActivities:
                         kind="tool_result",
                         tool_call_id=str(content.get("tool_call_id", "")),
                         tool_name=str(content.get("tool_name", "")),
+                    )
+                )
+                continue
+            if message.message_type in _STRUCTURED_MESSAGE_TYPES:
+                # Structured agent-to-agent messages (plan 29) enter the
+                # prompt as labeled JSON. Messages from *other* agents (a
+                # delegation result, an instruction from a manager) read as
+                # user turns; this agent's own messages read as its turns.
+                if content.get("delivered") == "observation":
+                    # A blocking-delegation summary already stitched into the
+                    # transcript as the tool observation; feeding the visible
+                    # copy too would duplicate it in the prompt.
+                    continue
+                is_own = (
+                    message.sender_type == SenderType.AGENT.value
+                    and message.sender_id == task.assigned_agent_id
+                )
+                rendered = json.dumps(content, ensure_ascii=False, default=str)
+                turns.append(
+                    ConversationTurn(
+                        role="agent" if is_own else "user",
+                        text=f"[{message.message_type}] {rendered}"[:_MAX_STRUCTURED_TURN_CHARS],
                     )
                 )
                 continue
@@ -753,12 +948,259 @@ class AgentActivities:
         )
         return StepResult(done=False)
 
+    @activity.defn(name=ACTIVITY_SUMMARIZE_DELEGATION)
+    async def summarize_delegation_activity(
+        self, params: SummarizeDelegationInput
+    ) -> DelegationSummary:
+        """Build the plan-7.6 standardized summary of a finished child task
+        and persist it as a structured result message on the parent task.
+
+        The summary comes from deterministic evidence — the child's
+        organization.report_result record (mirrored into task metadata), with
+        the child's last visible text as fallback. For review requests the
+        verdict is deny-by-default: only an explicitly reported "pass"
+        passes (plan 52 — never inferred from free-form model text)."""
+        workspace_id = UUID(params.workspace_id)
+        child_task_id = UUID(params.child_task_id)
+        parent_task_id = UUID(params.parent_task_id)
+        agent_id = UUID(params.agent_id)
+
+        async with self._resources.session_factory() as session:
+            child = await session.scalar(
+                select(Task).where(Task.id == child_task_id, Task.workspace_id == workspace_id)
+            )
+            agent = await session.scalar(
+                select(Agent).where(Agent.id == agent_id, Agent.workspace_id == workspace_id)
+            )
+            agent_name = agent.name if agent is not None else "agent"
+
+            reported = child.metadata_json.get("reported_result") if child is not None else None
+            artifacts: list[Any] = []
+            risks: list[str] = []
+            next_action = ""
+            if isinstance(reported, dict) and str(reported.get("summary", "")).strip():
+                was_reported = True
+                status = str(reported.get("status", "") or params.run_status)
+                summary_text = str(reported.get("summary", ""))[:4_000]
+                if isinstance(reported.get("artifacts"), list):
+                    artifacts = reported["artifacts"]
+                if isinstance(reported.get("risks"), list):
+                    risks = [str(risk) for risk in reported["risks"]]
+                next_action = str(reported.get("recommended_next_action", "") or "")
+            else:
+                was_reported = False
+                status = params.run_status
+                fallback = await session.scalar(
+                    select(Message)
+                    .where(
+                        Message.task_id == child_task_id,
+                        Message.workspace_id == workspace_id,
+                        Message.visibility == MessageVisibility.VISIBLE.value,
+                        Message.message_type == MessageType.TEXT.value,
+                        Message.sender_type == SenderType.AGENT.value,
+                    )
+                    .order_by(Message.created_at.desc(), Message.id.desc())
+                    .limit(1)
+                )
+                text = str((fallback.content_json.get("text") if fallback else "") or "")
+                summary_text = (
+                    text
+                    or f"Delegated task ended with run status '{params.run_status}' "
+                    "and no explicit report."
+                )[:4_000]
+
+            verdict = ""
+            if params.kind == "review_request":
+                verdict = "pass" if (was_reported and status == "pass") else "fail"
+
+            content = structured_content(
+                summary_text,
+                artifacts=artifacts,
+                risks=risks,
+                recommended_next_action=next_action,
+                child_task_id=params.child_task_id,
+                status=status,
+                verdict=verdict,
+                kind=params.kind,
+                run_status=params.run_status,
+                reported=was_reported,
+                from_agent_id=params.agent_id,
+                from_agent_name=agent_name,
+                **({"delivered": "observation"} if params.blocking else {}),
+            )
+            message_type = (
+                MessageType.REVIEW_RESULT if params.kind == "review_request" else MessageType.RESULT
+            )
+            session.add(
+                Message(
+                    workspace_id=workspace_id,
+                    task_id=parent_task_id,
+                    run_id=UUID(params.parent_run_id) if params.parent_run_id else None,
+                    sender_type=SenderType.AGENT.value,
+                    sender_id=agent_id,
+                    recipient_type=RecipientType.AGENT.value,
+                    recipient_id=UUID(params.delegating_agent_id),
+                    message_type=message_type.value,
+                    content_json=content,
+                    visibility=MessageVisibility.VISIBLE.value,
+                )
+            )
+            session.add(
+                AuditEvent(
+                    workspace_id=workspace_id,
+                    actor_type=ActorType.AGENT.value,
+                    actor_id=agent_id,
+                    action=(
+                        "task.review_completed"
+                        if params.kind == "review_request"
+                        else "task.delegation_completed"
+                    ),
+                    target_type="task",
+                    target_id=child_task_id,
+                    metadata_json={
+                        "parent_task_id": params.parent_task_id,
+                        "status": status,
+                        "verdict": verdict,
+                        "run_status": params.run_status,
+                        "reported": was_reported,
+                    },
+                )
+            )
+            await session.commit()
+
+        await self._publish(
+            workspace_id,
+            "task.delegation_completed",
+            {
+                "parent_task_id": params.parent_task_id,
+                "child_task_id": params.child_task_id,
+                "kind": params.kind,
+                "status": status,
+                "verdict": verdict,
+            },
+        )
+        return DelegationSummary(
+            task_id=params.child_task_id,
+            status=status,
+            summary=summary_text,
+            artifacts=[dict(item) for item in artifacts if isinstance(item, dict)],
+            risks=risks,
+            recommended_next_action=next_action,
+            verdict=verdict,
+            reported=was_reported,
+        )
+
+    @activity.defn(name=ACTIVITY_DELIVER_DELEGATION_RESULT)
+    async def deliver_delegation_result_activity(
+        self, params: DeliverDelegationResultInput
+    ) -> None:
+        """Resume a run parked on a blocking delegation: stitch the child's
+        summary into the transcript as the delegate_task call's observation
+        (plan 7.6 — the summary, never the child's transcript)."""
+        workspace_id = UUID(params.workspace_id)
+        task_id = UUID(params.task_id)
+        run_id = UUID(params.run_id)
+        summary = asdict(params.summary)
+
+        async with self._resources.session_factory() as session:
+            self._add_tool_message(
+                session,
+                workspace_id=workspace_id,
+                task_id=task_id,
+                run_id=run_id,
+                agent_id=UUID(params.agent_id),
+                message_type="tool_result",
+                content={
+                    "tool_call_id": params.provider_call_id,
+                    "tool_name": "organization.delegate_task",
+                    "status": "executed",
+                    "result": json.dumps(summary, ensure_ascii=False),
+                },
+            )
+            run = await session.get(AgentRun, run_id)
+            if run is not None and run.workspace_id == workspace_id:
+                run.status = RunStatus.RUNNING.value
+            seq = await self._next_seq(session, run_id)
+            self._add_run_event(
+                session,
+                workspace_id=workspace_id,
+                run_id=run_id,
+                task_id=task_id,
+                seq=seq,
+                event_type="delegation.result",
+                payload={
+                    "child_task_id": params.child_task_id,
+                    "kind": params.kind,
+                    "status": params.summary.status,
+                    "verdict": params.summary.verdict,
+                    "reported": params.summary.reported,
+                },
+            )
+            await session.commit()
+
+        await self._publish(
+            workspace_id,
+            "agent.run.resumed",
+            {
+                "run_id": params.run_id,
+                "task_id": params.task_id,
+                "child_task_id": params.child_task_id,
+                "delegation_status": params.summary.status,
+            },
+        )
+
+    async def _kick_queued(self, workspace_id: UUID, agent_id: UUID | None) -> None:
+        """Release-requeue check (plan 30): after a run frees a slot, nudge
+        the oldest queued workflow(s). Best-effort — queued workflows also
+        poll, so a missed kick only costs latency."""
+        if self._temporal_client is None:
+            return
+        async with self._resources.session_factory() as session:
+            rows = (
+                await session.scalars(
+                    select(Task)
+                    .where(
+                        Task.workspace_id == workspace_id,
+                        Task.state == TaskState.QUEUED.value,
+                        Task.temporal_workflow_id.isnot(None),
+                    )
+                    .order_by(Task.created_at)
+                    .limit(20)
+                )
+            ).all()
+        targets: list[str] = []
+        # Oldest queued task of the freed agent (agent slot) plus the oldest
+        # queued task overall (workspace slot).
+        for row in rows:
+            if agent_id is not None and row.assigned_agent_id == agent_id:
+                if row.temporal_workflow_id is not None:
+                    targets.append(row.temporal_workflow_id)
+                break
+        if (
+            rows
+            and rows[0].temporal_workflow_id is not None
+            and rows[0].temporal_workflow_id not in targets
+        ):
+            targets.append(rows[0].temporal_workflow_id)
+        for workflow_id in targets:
+            try:
+                await self._temporal_client.get_workflow_handle(workflow_id).signal(
+                    "slot_available"
+                )
+            except Exception as exc:
+                logger.warning(
+                    "concurrency.kick_failed",
+                    workflow_id=workflow_id,
+                    error=type(exc).__name__,
+                )
+
     @activity.defn(name=ACTIVITY_FINALIZE_RUN)
     async def finalize_run_activity(self, params: FinalizeInput) -> None:
         workspace_id = UUID(params.workspace_id)
         task_id = UUID(params.task_id)
         error_message = redact_text(params.error_message) if params.error_message else None
         run_totals: dict[str, Any] = {}
+        freed_agent_id: UUID | None = None
 
         # The run's sandbox workspace volume dies with the run (plan 14.5).
         # Best-effort: the runner also reaps aged volumes on startup.
@@ -793,6 +1235,7 @@ class AgentActivities:
 
                 run = await session.get(AgentRun, UUID(params.run_id))
                 if run is not None and run.workspace_id == workspace_id:
+                    freed_agent_id = run.agent_id
                     run.status = params.status
                     run.completed_at = datetime.now(UTC)
                     run.steps_used = params.steps_used
@@ -859,3 +1302,6 @@ class AgentActivities:
             f"task.{params.status}",
             {"task_id": params.task_id, "run_id": params.run_id},
         )
+        if params.run_id is not None:
+            # This run held a concurrency slot; wake queued work (plan 30).
+            await self._kick_queued(workspace_id, freed_agent_id)

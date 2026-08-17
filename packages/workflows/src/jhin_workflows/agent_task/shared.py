@@ -34,6 +34,29 @@ class SnapshotResult:
     snapshot_json: str
     snapshot_hash: str
     max_steps: int
+    # Concurrency admission (plan 30): when no run slot is free the activity
+    # creates no run, marks the task queued, and returns queued=True. The
+    # workflow parks and retries — queue, don't reject.
+    queued: bool = False
+    queue_reason: str = ""
+
+
+@dataclass
+class DelegationRequest:
+    """One organization.delegate_task execution surfaced by the step activity.
+
+    The tool executor already created the child *task row* and the structured
+    delegation message; the workflow starts the durable child workflow
+    (plan 8.3 — only workflows start child workflows).
+    """
+
+    child_task_id: str
+    target_agent_id: str
+    blocking: bool
+    kind: str  # "delegation" | "review_request"
+    # The model's tool-call id, so the blocking result can be stitched back
+    # into the transcript as this call's observation.
+    provider_call_id: str = ""
 
 
 @dataclass
@@ -58,6 +81,10 @@ class StepResult:
     # Set when the gateway parked a tool call pending human approval: the
     # workflow suspends on the approval_decision signal for this id.
     waiting_approval_id: str | None = None
+    # Delegations executed this step (plan 7.5): the workflow starts one
+    # DelegatedTaskWorkflow per entry and awaits the blocking one (at most
+    # one — the step parks immediately after a blocking delegation).
+    delegations: list[DelegationRequest] = field(default_factory=list)
 
 
 @dataclass

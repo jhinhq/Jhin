@@ -20,6 +20,7 @@ from jhin_observability.healthfile import clear_heartbeat, run_heartbeat
 from jhin_secrets.redaction import redact_event_dict
 from jhin_workflows import AGENT_TASK_QUEUE
 from jhin_workflows.agent_task import AgentTaskWorkflow
+from jhin_workflows.delegated_task import DelegatedTaskWorkflow
 from jhin_workflows.triggered_task import TriggeredTaskWorkflow
 
 logger = get_logger(__name__)
@@ -65,7 +66,7 @@ async def main() -> None:
 
     client = await connect_with_retry(settings)
     resources = await resources_with_retry(settings)
-    activities = AgentActivities(resources)
+    activities = AgentActivities(resources, temporal_client=client)
     trigger_activities = TriggerActivities(resources)
     logger.info(
         "temporal.connected",
@@ -83,12 +84,14 @@ async def main() -> None:
     worker = Worker(
         client,
         task_queue=AGENT_TASK_QUEUE,
-        workflows=[AgentTaskWorkflow, TriggeredTaskWorkflow],
+        workflows=[AgentTaskWorkflow, TriggeredTaskWorkflow, DelegatedTaskWorkflow],
         activities=[
             activities.resolve_snapshot_activity,
             activities.run_agent_step_activity,
             activities.resolve_approval_activity,
             activities.finalize_run_activity,
+            activities.summarize_delegation_activity,
+            activities.deliver_delegation_result_activity,
             trigger_activities.prepare_triggered_task_activity,
             trigger_activities.sync_external_activity,
         ],
