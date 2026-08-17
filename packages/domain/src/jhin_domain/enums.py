@@ -195,6 +195,33 @@ SANDBOX_JOB_TERMINAL_STATUSES = frozenset(
 )
 
 
+class TriggerType(StrEnum):
+    """What starts a trigger evaluation (plan 6.11)."""
+
+    CONNECTOR_EVENT = "connector_event"
+    SCHEDULE = "schedule"  # stored now; the scheduler arrives in a later phase
+    MANUAL = "manual"
+
+
+class TriggerActionType(StrEnum):
+    """What a matched trigger does (plan 10.3). Only task starts for now."""
+
+    START_AGENT_TASK = "start_agent_task"
+
+
+class TriggerInvocationStatus(StrEnum):
+    """Outcome of one trigger match (plan 9.4).
+
+    ``started`` — the TriggeredTaskWorkflow was started; ``duplicate`` — the
+    idempotency key (or Temporal's workflow-id policy) suppressed a repeat;
+    ``failed`` — the workflow could not be started (surfaced in the UI).
+    """
+
+    STARTED = "started"
+    DUPLICATE = "duplicate"
+    FAILED = "failed"
+
+
 class ToolCallStatus(StrEnum):
     """Persisted outcome of one gateway-mediated tool call (plan 6.15).
 

@@ -8,6 +8,7 @@ from jhin_db.models.org import Agent, Team, Workspace, WorkspaceMembership
 from jhin_db.models.policy import AgentCapabilityGrant, Approval, ToolCall
 from jhin_db.models.sandbox import SandboxJob
 from jhin_db.models.secret import Secret
+from jhin_db.models.trigger import Trigger, TriggerInvocation
 from jhin_db.models.work import AgentRun, Message, RunEvent, Task
 
 __all__ = [
@@ -26,6 +27,8 @@ __all__ = [
     "Task",
     "Team",
     "ToolCall",
+    "Trigger",
+    "TriggerInvocation",
     "User",
     "UserSession",
     "WebhookDelivery",
