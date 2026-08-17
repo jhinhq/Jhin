@@ -12,10 +12,11 @@ import signal
 import nats
 from nats.aio.client import Client as NatsClient
 
+from jhin_event_worker.normalizer import IngressNormalizer
 from jhin_event_worker.processor import EventProcessor
 from jhin_event_worker.settings import Settings
 from jhin_events.consumer import run_pull_consumer
-from jhin_events.streams import EVENTS_STREAM, ensure_streams
+from jhin_events.streams import EVENTS_STREAM, INGRESS_STREAM, ensure_streams
 from jhin_observability import configure_logging, get_logger
 from jhin_observability.healthfile import clear_heartbeat, run_heartbeat
 
@@ -54,13 +55,25 @@ async def main() -> None:
 
     heartbeat_task = asyncio.create_task(run_heartbeat())
     processor = EventProcessor(js)
+    normalizer = IngressNormalizer(js)
     try:
-        await run_pull_consumer(
-            js,
-            stream=EVENTS_STREAM,
-            durable=settings.consumer_durable_name,
-            handler=processor.handle,
-            stop=stop,
+        # Two durable consumers side by side: canonical EVENTS processing and
+        # INGRESS normalization (raw webhook payloads → connector.* events).
+        await asyncio.gather(
+            run_pull_consumer(
+                js,
+                stream=EVENTS_STREAM,
+                durable=settings.consumer_durable_name,
+                handler=processor.handle,
+                stop=stop,
+            ),
+            run_pull_consumer(
+                js,
+                stream=INGRESS_STREAM,
+                durable=settings.ingress_durable_name,
+                handler=normalizer.handle,
+                stop=stop,
+            ),
         )
         logger.info("worker.stopping")
     finally:

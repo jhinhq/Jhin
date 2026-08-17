@@ -24,6 +24,7 @@ from jhin_agents import AgentExecutionSnapshot, resolve_snapshot
 from jhin_agents.context import ConversationTurn, TaskContext
 from jhin_agents.runtime import estimate_cost_micros, execute_step
 from jhin_agents.snapshot import SnapshotError
+from jhin_connectors import build_default_catalog
 from jhin_db.models import (
     Agent,
     AgentCapabilityGrant,
@@ -55,7 +56,6 @@ from jhin_tools import (
     ToolExecutionContext,
     ToolGateway,
     allowed_tool_definitions,
-    build_builtin_catalog,
 )
 from jhin_workflows.agent_task import (
     ACTIVITY_FINALIZE_RUN,
@@ -151,7 +151,7 @@ class AgentActivities:
                 )
             except ValueError:
                 continue
-        definitions = allowed_tool_definitions(build_builtin_catalog(), grants)
+        definitions = allowed_tool_definitions(build_default_catalog(), grants)
         return tuple(
             ToolSchema(
                 name=definition.name,
@@ -445,8 +445,9 @@ class AgentActivities:
                         run_id=run_id,
                         agent_id=UUID(params.agent_id),
                         agent_name=snapshot.name,
+                        crypto=self._resources.crypto,
                     ),
-                    build_builtin_catalog(),
+                    build_default_catalog(),
                 )
                 for call in outcome.tool_calls:
                     self._add_tool_message(
@@ -632,8 +633,9 @@ class AgentActivities:
                     run_id=run_id,
                     agent_id=agent_id,
                     agent_name=agent.name if agent is not None else "agent",
+                    crypto=self._resources.crypto,
                 ),
-                build_builtin_catalog(),
+                build_default_catalog(),
             )
             if approval.status == ApprovalStatus.APPROVED.value:
                 result = await gateway.resolve_approved(approval_id)

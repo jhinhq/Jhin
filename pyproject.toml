@@ -115,6 +115,7 @@ testpaths = [
     "packages/policy/tests",
     "packages/tools/tests",
     "packages/connectors/tests",
+    "services/event_worker/tests",
     "tests",
 ]
 markers = [
