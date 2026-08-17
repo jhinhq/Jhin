@@ -33,7 +33,12 @@ def run_git(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[
         env={
             "PATH": "/usr/bin:/bin:/usr/local/bin",
             "HOME": str(cwd or "/tmp"),
+            # Fully isolate the client: no system/global config (macOS ships
+            # an osxkeychain credential helper that hangs headless on 401)
+            # and no interactive credential prompting of any kind.
+            "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_TERMINAL_PROMPT": "0",
+            "GIT_ASKPASS": "/usr/bin/false",
             "GIT_AUTHOR_NAME": "Test",
             "GIT_AUTHOR_EMAIL": "t@t",
             "GIT_COMMITTER_NAME": "Test",

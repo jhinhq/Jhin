@@ -39,7 +39,9 @@ class ToolExecutionContext:
     client, no workflow handle. ``crypto`` exists so connector executors can
     decrypt connection credentials at the moment of use (plan 13.5) — it is
     None for processes that hold no master key, and system tools never
-    touch it."""
+    touch it. ``tool_call_id`` is set by the gateway just before execution
+    so executors that spawn linked records (e.g. sandbox jobs, plan 14) can
+    attribute them to the exact tool call."""
 
     session: AsyncSession
     workspace_id: UUID
@@ -48,6 +50,7 @@ class ToolExecutionContext:
     agent_id: UUID
     agent_name: str
     crypto: SecretCrypto | None = None
+    tool_call_id: UUID | None = None
 
 
 ToolExecutor = Callable[[ToolExecutionContext, BaseModel], Awaitable[BaseModel]]

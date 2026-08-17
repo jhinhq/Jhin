@@ -38,6 +38,9 @@ _GIT_ENV = {
     "GIT_COMMITTER_NAME": "Jhin Seeder",
     "GIT_COMMITTER_EMAIL": "seed@jhin.local",
     "HOME": "/tmp",
+    # Never read host system/global git config (credential helpers etc.).
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_TERMINAL_PROMPT": "0",
 }
 
 

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID
@@ -212,10 +213,14 @@ class ToolGateway:
         assert executor_entry is not None  # caller already resolved it
         _, executor = executor_entry
 
+        # The executor sees which tool_call row it is serving so records it
+        # creates (sandbox jobs) can link back to it (plan 14).
+        execution_ctx = replace(self._ctx, tool_call_id=row.id)
+
         started = time.monotonic()
         row.started_at = datetime.now(UTC)
         try:
-            output_model = await executor(self._ctx, validated_input)
+            output_model = await executor(execution_ctx, validated_input)
             output = self._sanitize(output_model.model_dump(mode="json"))
             status: GatewayStatus = "executed"
             error_code = None

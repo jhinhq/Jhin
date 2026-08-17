@@ -25,6 +25,7 @@ from jhin_agents.context import ConversationTurn, TaskContext
 from jhin_agents.runtime import estimate_cost_micros, execute_step
 from jhin_agents.snapshot import SnapshotError
 from jhin_connectors import build_default_catalog
+from jhin_connectors.cli.runner_client import delete_workspace as delete_sandbox_workspace
 from jhin_db.models import (
     Agent,
     AgentCapabilityGrant,
@@ -228,6 +229,23 @@ class AgentActivities:
                 "node.execute_tool",
                 {"status": result.status, "duration_ms": result.duration_ms},
             )
+            # Sandbox jobs surface their own timeline event so the task view
+            # can render command/exit code/output without a detail fetch
+            # (plan 14; everything here is already sanitized + size-capped).
+            if result.tool_name.startswith("cli.") and result.sanitized_output is not None:
+                output = result.sanitized_output
+                emit(
+                    "sandbox.job",
+                    {
+                        "sandbox_job_id": output.get("sandbox_job_id"),
+                        "command": output.get("command"),
+                        "job_status": output.get("status"),
+                        "exit_code": output.get("exit_code"),
+                        "job_duration_ms": output.get("duration_ms"),
+                        "stdout": output.get("stdout", ""),
+                        "stderr": output.get("stderr", ""),
+                    },
+                )
             emit("node.observe", {"chars": len(result.observation_json())})
         elif result.status == "denied":
             emit("node.observe", {"denied": True, "reason": result.decision_reason})
@@ -738,6 +756,12 @@ class AgentActivities:
         task_id = UUID(params.task_id)
         error_message = redact_text(params.error_message) if params.error_message else None
         run_totals: dict[str, Any] = {}
+
+        # The run's sandbox workspace volume dies with the run (plan 14.5).
+        # Best-effort: the runner also reaps aged volumes on startup.
+        if params.run_id is not None:
+            deleted = await delete_sandbox_workspace(f"run-{params.run_id}")
+            logger.info("sandbox.workspace_cleanup", run_id=params.run_id, deleted=deleted)
 
         async with self._resources.session_factory() as session:
             if params.run_id is not None:
