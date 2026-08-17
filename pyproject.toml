@@ -23,6 +23,7 @@ members = [
     "packages/agents",
     "packages/policy",
     "packages/tools",
+    "packages/connectors",
 ]
 
 [dependency-groups]
@@ -54,6 +55,7 @@ src = [
     "packages/agents/src",
     "packages/policy/src",
     "packages/tools/src",
+    "packages/connectors/src",
 ]
 
 [tool.ruff.lint]
@@ -90,6 +92,7 @@ files = [
     "packages/agents/src",
     "packages/policy/src",
     "packages/tools/src",
+    "packages/connectors/src",
     "scripts",
     "tests",
 ]
@@ -111,6 +114,7 @@ testpaths = [
     "packages/agents/tests",
     "packages/policy/tests",
     "packages/tools/tests",
+    "packages/connectors/tests",
     "tests",
 ]
 markers = [

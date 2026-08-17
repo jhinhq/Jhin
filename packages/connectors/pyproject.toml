@@ -1,0 +1,32 @@
+[project]
+name = "jhin-connectors"
+version = "0.1.0"
+description = "Connector SDK and built-in connectors: manifests, tools, webhooks, event normalization (plan section 11)"
+requires-python = ">=3.13"
+dependencies = [
+    "pydantic>=2.10",
+    "httpx>=0.28",
+    "sqlalchemy[asyncio]>=2.0.36",
+    # GitHub App authentication: RS256 app JWTs (plan 11.2).
+    "pyjwt>=2.10",
+    "cryptography>=44.0",
+    "jhin-db",
+    "jhin-domain",
+    "jhin-policy",
+    "jhin-secrets",
+    "jhin-tools",
+]
+
+[tool.uv.sources]
+jhin-db = { workspace = true }
+jhin-domain = { workspace = true }
+jhin-policy = { workspace = true }
+jhin-secrets = { workspace = true }
+jhin-tools = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jhin_connectors"]
