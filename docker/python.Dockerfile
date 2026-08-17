@@ -17,6 +17,7 @@ COPY apps/api/pyproject.toml apps/api/
 COPY services/workflow_worker/pyproject.toml services/workflow_worker/
 COPY services/event_worker/pyproject.toml services/event_worker/
 COPY services/agent_worker/pyproject.toml services/agent_worker/
+COPY services/sandbox_runner/pyproject.toml services/sandbox_runner/
 COPY packages/db/pyproject.toml packages/db/
 COPY packages/domain/pyproject.toml packages/domain/
 COPY packages/events/pyproject.toml packages/events/
@@ -37,6 +38,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-editable --package "${SERVICE_PACKAGE}"
 
 FROM python:${PYTHON_VERSION}-slim-bookworm AS runtime
+# Dev-only knob for the fake-github service, which serves git smart-HTTP for
+# integration tests (git http-backend needs the git CLI). Production service
+# images keep INSTALL_GIT=0 and stay lean.
+ARG INSTALL_GIT=0
+RUN if [ "$INSTALL_GIT" = "1" ]; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends git \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
 RUN useradd --create-home --uid 10001 jhin
 COPY --from=builder --chown=jhin:jhin /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH" \

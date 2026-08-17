@@ -3,7 +3,7 @@ COMPOSE := docker compose
 COMPOSE_DEV := docker compose -f compose.yaml -f compose.dev.yaml
 
 .PHONY: help dev test test-unit test-integration lint typecheck migrate seed \
-	compose-up compose-down sample-workflow master-key
+	compose-up compose-down sample-workflow master-key sandbox-image
 
 MASTER_KEY_PATH := secrets/dev/jhin_master_key
 
@@ -14,8 +14,11 @@ master-key: ## Generate the local dev master key file (required once before `mak
 	@test -f $(MASTER_KEY_PATH) && echo "master key already exists at $(MASTER_KEY_PATH)" \
 		|| uv run python scripts/generate_master_key.py $(MASTER_KEY_PATH)
 
-dev: master-key ## Boot the full stack with dev overrides (hot reload, localhost infra ports)
+dev: master-key sandbox-image ## Boot the full stack with dev overrides (hot reload, localhost infra ports)
 	$(COMPOSE_DEV) up -d --build
+
+sandbox-image: ## Build the default sandbox job image (jhin-sandbox:latest)
+	$(COMPOSE_DEV) --profile build build sandbox-image
 
 test: test-unit ## Alias for test-unit
 
@@ -42,6 +45,7 @@ seed: ## Seed dev data: owner account + Engineering/Marketing sample org
 	$(COMPOSE) run --rm --no-deps api jhin-seed-dev
 
 compose-up: master-key ## Start the production-shaped stack
+	$(COMPOSE) --profile build build sandbox-image
 	$(COMPOSE) up -d --build
 
 compose-down: ## Stop the stack (volumes preserved)
