@@ -12,6 +12,7 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 from jhin_agent_worker.activities import AgentActivities
+from jhin_agent_worker.engineering_activities import EngineeringActivities
 from jhin_agent_worker.resources import Resources
 from jhin_agent_worker.settings import Settings
 from jhin_agent_worker.trigger_activities import TriggerActivities
@@ -21,6 +22,7 @@ from jhin_secrets.redaction import redact_event_dict
 from jhin_workflows import AGENT_TASK_QUEUE
 from jhin_workflows.agent_task import AgentTaskWorkflow
 from jhin_workflows.delegated_task import DelegatedTaskWorkflow
+from jhin_workflows.engineering_ticket import EngineeringTicketWorkflow
 from jhin_workflows.triggered_task import TriggeredTaskWorkflow
 
 logger = get_logger(__name__)
@@ -68,6 +70,7 @@ async def main() -> None:
     resources = await resources_with_retry(settings)
     activities = AgentActivities(resources, temporal_client=client)
     trigger_activities = TriggerActivities(resources)
+    engineering_activities = EngineeringActivities(resources)
     logger.info(
         "temporal.connected",
         address=settings.temporal_address,
@@ -84,7 +87,12 @@ async def main() -> None:
     worker = Worker(
         client,
         task_queue=AGENT_TASK_QUEUE,
-        workflows=[AgentTaskWorkflow, TriggeredTaskWorkflow, DelegatedTaskWorkflow],
+        workflows=[
+            AgentTaskWorkflow,
+            TriggeredTaskWorkflow,
+            DelegatedTaskWorkflow,
+            EngineeringTicketWorkflow,
+        ],
         activities=[
             activities.resolve_snapshot_activity,
             activities.run_agent_step_activity,
@@ -94,6 +102,9 @@ async def main() -> None:
             activities.deliver_delegation_result_activity,
             trigger_activities.prepare_triggered_task_activity,
             trigger_activities.sync_external_activity,
+            engineering_activities.resolve_engineering_plan_activity,
+            engineering_activities.create_engineering_child_task_activity,
+            engineering_activities.finalize_engineering_ticket_activity,
         ],
     )
     try:

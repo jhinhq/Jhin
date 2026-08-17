@@ -72,6 +72,7 @@ class DelegatedTaskResult:
     child_task_id: str
     run_status: str
     summary: DelegationSummary
+    run_id: str = ""  # the child's agent run, when one was created
 
 
 @dataclass

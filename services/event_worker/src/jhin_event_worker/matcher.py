@@ -45,6 +45,7 @@ from jhin_triggers import (
     workflow_id_for_key,
 )
 from jhin_workflows import AGENT_TASK_QUEUE
+from jhin_workflows.engineering_ticket import DEFAULT_MAX_RETEST_CYCLES, EngineeringTicketInput
 from jhin_workflows.triggered_task import TriggeredTaskInput
 
 logger = get_logger(__name__)
@@ -67,6 +68,9 @@ class TriggerSpec:
     target_team_id: UUID | None
     dedupe_window_seconds: int
     comment_back: bool
+    # trigger.workflow_definition: selects a workflow template (plan 8.4).
+    # Empty/absent = plain TriggeredTaskWorkflow (the default, never forced).
+    workflow_definition: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -133,6 +137,7 @@ class TriggerMatcher:
                     target_team_id=row.target_team_id,
                     dedupe_window_seconds=row.dedupe_window_seconds,
                     comment_back=bool(row.action_config_json.get("comment_back", False)),
+                    workflow_definition=dict(row.workflow_definition or {}),
                 )
                 for row in rows
             ]
@@ -171,10 +176,11 @@ class TriggerMatcher:
             await session.commit()
             invocation_id = invocation.id
 
+        workflow_name, workflow_params = self._select_workflow(spec, params)
         try:
             await self._temporal.start_workflow(
-                "TriggeredTaskWorkflow",
-                params,
+                workflow_name,
+                workflow_params,
                 id=workflow_id,
                 task_queue=AGENT_TASK_QUEUE,
             )
@@ -290,6 +296,29 @@ class TriggerMatcher:
             )
             return member.id if member is not None else None
         return None
+
+    @staticmethod
+    def _select_workflow(
+        spec: TriggerSpec, params: TriggeredTaskInput
+    ) -> tuple[str, TriggeredTaskInput | EngineeringTicketInput]:
+        """Workflow-template selection (plan 8.4): the trigger's
+        workflow_definition may pick a built-in template; plain
+        TriggeredTaskWorkflow stays the default. Config values are parsed
+        defensively — a malformed definition falls back to the default."""
+        definition = spec.workflow_definition
+        if definition.get("template") != "engineering_ticket":
+            return "TriggeredTaskWorkflow", params
+        try:
+            max_cycles = int(definition.get("max_retest_cycles", DEFAULT_MAX_RETEST_CYCLES))
+        except (TypeError, ValueError):
+            max_cycles = DEFAULT_MAX_RETEST_CYCLES
+        return "EngineeringTicketWorkflow", EngineeringTicketInput(
+            base=params,
+            implementer_agent_id=str(definition.get("implementer_agent_id", "") or ""),
+            qa_agent_id=str(definition.get("qa_agent_id", "") or ""),
+            manager_review=bool(definition.get("manager_review", False)),
+            max_retest_cycles=max_cycles,
+        )
 
     def _workflow_input(
         self,

@@ -230,6 +230,116 @@ def _artifact_dicts(artifacts: Sequence[ArtifactRef]) -> list[dict[str, str]]:
     return [artifact(a.type, id=a.id, url_ref=a.url_ref) for a in artifacts]
 
 
+async def create_delegated_task(
+    session: AsyncSession,
+    *,
+    workspace_id: UUID,
+    parent: Task,
+    target: Agent,
+    delegated_by_agent_id: UUID,
+    delegated_by_agent_name: str,
+    delegated_by_run_id: UUID | None,
+    title: str,
+    instructions: str,
+    expected_output: str = "",
+    blocking: bool = True,
+    kind: str = "delegation",
+    artifacts: list[dict[str, str]] | None = None,
+    origin: str = "delegation",
+) -> Task:
+    """Create one delegated child task with its structured message + audit row.
+
+    Shared by the organization.delegate_task executor (agent-driven, gateway
+    authorized) and the EngineeringTicketWorkflow activities (template-driven,
+    where authority derives from the human-configured trigger definition —
+    plan 8.4). Callers own authorization; this only persists the rows.
+    """
+    artifact_list = artifacts or []
+    description = instructions
+    if expected_output:
+        description += f"\n\nExpected output: {expected_output}"
+
+    child = Task(
+        id=new_uuid7(),
+        workspace_id=workspace_id,
+        title=title[:500],
+        description=description,
+        state=TaskState.QUEUED.value,
+        priority=parent.priority,
+        assigned_agent_id=target.id,
+        parent_task_id=parent.id,
+        correlation_id=parent.correlation_id,
+        metadata_json={
+            "origin": origin,
+            "delegation": {
+                "kind": kind,
+                "blocking": blocking,
+                "delegated_by_agent_id": str(delegated_by_agent_id),
+                "delegated_by_agent_name": delegated_by_agent_name,
+                "delegated_by_run_id": str(delegated_by_run_id) if delegated_by_run_id else "",
+                "parent_task_id": str(parent.id),
+                "expected_output": expected_output,
+                "artifacts": artifact_list,
+            },
+        },
+    )
+    # The child AgentTaskWorkflow runs under the API's id convention so
+    # pause/resume/cancel/approval signals work on delegated tasks too.
+    child.temporal_workflow_id = f"task-{child.id}"
+    session.add(child)
+
+    message_type = (
+        MessageType.REVIEW_REQUEST if kind == "review_request" else MessageType.DELEGATION
+    )
+    session.add(
+        Message(
+            workspace_id=workspace_id,
+            task_id=parent.id,
+            run_id=delegated_by_run_id,
+            sender_type=SenderType.AGENT.value,
+            sender_id=delegated_by_agent_id,
+            recipient_type=RecipientType.AGENT.value,
+            recipient_id=target.id,
+            message_type=message_type.value,
+            content_json=structured_content(
+                title,
+                artifacts=artifact_list,
+                recommended_next_action="await_result" if blocking else "",
+                child_task_id=str(child.id),
+                target_agent_id=str(target.id),
+                target_agent_name=target.name,
+                from_agent_id=str(delegated_by_agent_id),
+                from_agent_name=delegated_by_agent_name,
+                blocking=blocking,
+                instructions=instructions[:2_000],
+                expected_output=expected_output,
+            ),
+            visibility=MessageVisibility.VISIBLE.value,
+        )
+    )
+    session.add(
+        AuditEvent(
+            workspace_id=workspace_id,
+            actor_type=ActorType.AGENT.value,
+            actor_id=delegated_by_agent_id,
+            action="task.delegated",
+            target_type="task",
+            target_id=child.id,
+            metadata_json={
+                "parent_task_id": str(parent.id),
+                "run_id": str(delegated_by_run_id) if delegated_by_run_id else None,
+                "target_agent_id": str(target.id),
+                "kind": kind,
+                "blocking": blocking,
+                "title": title[:500],
+                "origin": origin,
+            },
+        )
+    )
+    await session.flush()
+    return child
+
+
 async def _delegate_task(ctx: ToolExecutionContext, payload: BaseModel) -> BaseModel:
     """Create the child task + structured delegation message (authorized
     upstream by the gateway pipeline and the delegation validator)."""
@@ -244,87 +354,21 @@ async def _delegate_task(ctx: ToolExecutionContext, payload: BaseModel) -> BaseM
     if target is None or parent is None:
         raise ValueError("delegation target or parent task disappeared before execution")
 
-    description = data.instructions
-    if data.expected_output:
-        description += f"\n\nExpected output: {data.expected_output}"
-
-    child = Task(
-        id=new_uuid7(),
+    child = await create_delegated_task(
+        ctx.session,
         workspace_id=ctx.workspace_id,
+        parent=parent,
+        target=target,
+        delegated_by_agent_id=ctx.agent_id,
+        delegated_by_agent_name=ctx.agent_name,
+        delegated_by_run_id=ctx.run_id,
         title=data.title,
-        description=description,
-        state=TaskState.QUEUED.value,
-        priority=parent.priority,
-        assigned_agent_id=target_id,
-        parent_task_id=parent.id,
-        correlation_id=parent.correlation_id,
-        metadata_json={
-            "origin": "delegation",
-            "delegation": {
-                "kind": data.kind,
-                "blocking": data.blocking,
-                "delegated_by_agent_id": str(ctx.agent_id),
-                "delegated_by_agent_name": ctx.agent_name,
-                "delegated_by_run_id": str(ctx.run_id),
-                "parent_task_id": str(parent.id),
-                "expected_output": data.expected_output,
-                "artifacts": _artifact_dicts(data.artifacts),
-            },
-        },
+        instructions=data.instructions,
+        expected_output=data.expected_output,
+        blocking=data.blocking,
+        kind=data.kind,
+        artifacts=_artifact_dicts(data.artifacts),
     )
-    # The child AgentTaskWorkflow runs under the API's id convention so
-    # pause/resume/cancel/approval signals work on delegated tasks too.
-    child.temporal_workflow_id = f"task-{child.id}"
-    ctx.session.add(child)
-
-    message_type = (
-        MessageType.REVIEW_REQUEST if data.kind == "review_request" else MessageType.DELEGATION
-    )
-    ctx.session.add(
-        Message(
-            workspace_id=ctx.workspace_id,
-            task_id=parent.id,
-            run_id=ctx.run_id,
-            sender_type=SenderType.AGENT.value,
-            sender_id=ctx.agent_id,
-            recipient_type=RecipientType.AGENT.value,
-            recipient_id=target_id,
-            message_type=message_type.value,
-            content_json=structured_content(
-                data.title,
-                artifacts=_artifact_dicts(data.artifacts),
-                recommended_next_action="await_result" if data.blocking else "",
-                child_task_id=str(child.id),
-                target_agent_id=str(target_id),
-                target_agent_name=target.name,
-                from_agent_id=str(ctx.agent_id),
-                from_agent_name=ctx.agent_name,
-                blocking=data.blocking,
-                instructions=data.instructions[:2_000],
-                expected_output=data.expected_output,
-            ),
-            visibility=MessageVisibility.VISIBLE.value,
-        )
-    )
-    ctx.session.add(
-        AuditEvent(
-            workspace_id=ctx.workspace_id,
-            actor_type=ActorType.AGENT.value,
-            actor_id=ctx.agent_id,
-            action="task.delegated",
-            target_type="task",
-            target_id=child.id,
-            metadata_json={
-                "parent_task_id": str(parent.id),
-                "run_id": str(ctx.run_id),
-                "target_agent_id": str(target_id),
-                "kind": data.kind,
-                "blocking": data.blocking,
-                "title": data.title,
-            },
-        )
-    )
-    await ctx.session.flush()
     return DelegateTaskOutput(
         child_task_id=str(child.id),
         target_agent_id=str(target_id),

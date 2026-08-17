@@ -44,6 +44,7 @@ _SUMMARIZE_RETRY = RetryPolicy(
 class DelegatedTaskWorkflow:
     @workflow.run
     async def run(self, params: DelegatedTaskInput) -> DelegatedTaskResult:
+        run_id = ""
         try:
             child: AgentTaskResult = await workflow.execute_child_workflow(
                 "AgentTaskWorkflow",
@@ -56,6 +57,7 @@ class DelegatedTaskWorkflow:
                 result_type=AgentTaskResult,
             )
             run_status = child.status
+            run_id = child.run_id or ""
         except Exception:
             # AgentTaskWorkflow persists failures itself and returns a failed
             # result; reaching here means the child workflow died abnormally
@@ -80,5 +82,8 @@ class DelegatedTaskWorkflow:
             retry_policy=_SUMMARIZE_RETRY,
         )
         return DelegatedTaskResult(
-            child_task_id=params.child_task_id, run_status=run_status, summary=summary
+            child_task_id=params.child_task_id,
+            run_status=run_status,
+            summary=summary,
+            run_id=run_id,
         )
