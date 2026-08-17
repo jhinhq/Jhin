@@ -11,19 +11,21 @@ backbone, and PostgreSQL is the system of record. A FastAPI control-plane API
 owns configuration and authorization, and a Next.js frontend provides the
 operations UI.
 
-> Status: Phase 4 — agents call tools, safely. On top of durable agent runs
-> (Phase 3), Jhin now has a capability registry with built-in demo tools at
-> every risk level, deny-by-default capability grants (explicit deny beats
-> allow, scoped), per-agent approval policies (Autonomous/Balanced/Restricted
-> presets persisted as explicit rules), and a single tool gateway that
-> validates, authorizes, executes, sanitizes, and audits every call — model
-> output is never authorization. Approval-gated calls park the run durably in
-> Temporal (surviving worker restarts) until a human approves or rejects from
-> the new Approvals inbox. Model adapters speak OpenAI-style function calling,
-> and the web app gains the Tools & Access agent tab, real wizard steps for
-> tools and autonomy, an approvals inbox with a live pending badge, and
-> tool/approval events on the task timeline. Real connectors arrive in
-> Phase 5.
+> Status: Phase 5 — agents reach real external systems. On top of the tool
+> gateway (Phase 4), Jhin now has a connector SDK (`jhin_connectors`) with a
+> manifest-driven registry, a `connection` domain (credentials envelope-
+> encrypted, verified live, rotatable, never returned), and a full GitHub
+> connector: PAT and GitHub App auth (installation tokens minted and cached),
+> ten tools from repository read to approval-gated PR merge, and signed
+> webhooks (HMAC verified before any processing, delivery-id deduped, raw
+> events on the NATS INGRESS stream normalized to canonical `connector.*`
+> events). Grants can scope connector tools to one connection plus
+> repository/branch glob patterns. The web app gains a Connectors page
+> (gallery, connection create with one-time webhook secret, health/verify,
+> rotate, recent tool usage) and connection-aware grant scoping in the agent
+> wizard and Tools & Access tab. A fake GitHub service in the dev overlay
+> lets everything run and test with zero real credentials. Triggers that
+> react to connector events arrive in Phase 7.
 
 ## Quick start
 
@@ -70,6 +72,9 @@ packages/
   secrets/      Envelope encryption, secret store, log redaction (jhin_secrets)
   models/       Model provider adapters + fake test provider (jhin_models)
   agents/       Execution snapshots, prompt layers, step runtime (jhin_agents)
+  policy/       Capability registry, tool definitions, policy evaluator (jhin_policy)
+  tools/        Tool gateway: authorize, execute, sanitize, audit (jhin_tools)
+  connectors/   Connector SDK + GitHub connector + fake GitHub (jhin_connectors)
   observability/  Structured JSON logging (jhin_observability)
 tests/integration/  Compose-stack integration tests
 ```
@@ -130,6 +135,25 @@ with two priced profiles — `Fake Mini` (the workspace default) and
 - **Runs page** — every run with status, tokens, estimated cost, and a link
   back to its task. Costs come from the profile's per-million-token pricing
   (stored as integer micro-dollars).
+
+### Connectors
+
+The **Connectors page** connects Jhin to external systems (GitHub is live;
+more arrive in later phases). Admins create a connection by picking an auth
+method (GitHub: personal access token or GitHub App), entering credentials
+(stored in the encrypted secret store, never displayed again), and optional
+config such as `base_url` for GitHub Enterprise. The create response shows
+the webhook payload URL and signing secret **once** — paste them into the
+provider's webhook settings. Connection details offer live verify, credential
+rotation, enable/disable, delete, and recent tool usage.
+
+Agents get connector tools through grants (Tools & Access tab or wizard
+step 5), optionally scoped to one connection and repository/branch glob
+patterns like `octo/*` or `agent/*`. See
+[docs/architecture/connectors.md](docs/architecture/connectors.md) for the
+SDK and how to contribute a connector. In the dev overlay a `fake-github`
+service lets the whole GitHub flow run without real credentials
+(point a connection's `base_url` at `http://fake-github:8080`).
 
 ### Frontend data fetching
 
