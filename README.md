@@ -11,23 +11,22 @@ backbone, and PostgreSQL is the system of record. A FastAPI control-plane API
 owns configuration and authorization, and a Next.js frontend provides the
 operations UI.
 
-> Status: Phase 6 — coding agents work in ephemeral repository sandboxes. A
-> new internal-only sandbox runner service executes every `cli.*` tool call
-> in a fresh locked-down Docker container (non-root uid 1000, read-only
-> rootfs, cap_drop ALL, no-new-privileges, cpu/memory/pids/timeout caps,
-> network `none` or a dedicated bridge — never the compose control/data
-> networks, and never the Docker socket). The CLI connector adds five tools
-> (command execute, repository checkout, test run, file read/write) with
-> fnmatch scope enforcement over command/image/network/repository/path; a
-> per-run workspace volume carries a checkout across calls and dies with the
-> run. Short-lived git credentials are injected as job-scoped secret env
-> (askpass helper — never in the remote URL) and redacted from all persisted
-> output. `sandbox_job` rows, `sandbox.job.*` audit events, and collapsible
-> job output in the task timeline make every job attributable. The fake
-> GitHub service now serves git smart-HTTP so clone/push/PR flows run and
-> test with zero real credentials. See docs/architecture/sandboxing.md
-> (including the Docker-socket trust boundary). Triggers that react to
-> connector events arrive in Phase 7.
+> Status: Phase 7 — the flagship vertical slice is live: a Linear issue
+> moving into **Todo** automatically starts exactly one SWE task whose agent
+> checks the repository out in an ephemeral sandbox, fixes the failing test,
+> pushes an agent branch, opens a GitHub pull request, and comments the
+> outcome back on the issue. A new Linear connector (GraphQL, API-key auth,
+> HMAC-verified webhooks) normalizes issue/comment events — preserving
+> Linear's `updatedFrom` as a `changed_from` mirror so state *transitions*
+> are detectable. A connector-agnostic trigger engine (`jhin_triggers`)
+> evaluates a safe JSON filter DSL (all/any groups; eq/neq/in/not_in/
+> contains/exists/gt/gte/lt/lte plus first-class `transitioned_to`) against
+> canonical events in the event worker, and duplicates never duplicate work:
+> webhook delivery dedupe, a deterministic trigger idempotency key
+> (unique-indexed `trigger_invocation` rows), and Temporal's duplicate-start
+> policy on deterministic workflow ids. The Triggers page offers a
+> WHEN/IF/THEN builder with per-condition dry-run testing, and task details
+> show trigger origin. See docs/architecture/events.md for the full flow.
 
 ## Quick start
 
@@ -77,7 +76,8 @@ packages/
   agents/       Execution snapshots, prompt layers, step runtime (jhin_agents)
   policy/       Capability registry, tool definitions, policy evaluator (jhin_policy)
   tools/        Tool gateway: authorize, execute, sanitize, audit (jhin_tools)
-  connectors/   Connector SDK + GitHub/CLI connectors + fake GitHub/git (jhin_connectors)
+  triggers/     Trigger filter DSL, transition matching, idempotency keys (jhin_triggers)
+  connectors/   Connector SDK + GitHub/CLI/Linear connectors + fake GitHub/Linear (jhin_connectors)
   observability/  Structured JSON logging (jhin_observability)
 tests/integration/  Compose-stack integration tests
 ```
@@ -121,6 +121,12 @@ in-stack fake OpenAI-compatible server (`fake-provider`, dev overlay only)
 with two priced profiles — `Fake Mini` (the workspace default) and
 `Fake Pro` — so agents can run tasks immediately without real API keys.
 
+When the master key is available the seed additionally wires the Phase 7
+showcase: a fake Linear connection, `linear.*` read/search/metadata/comment
+grants for the Senior Software Engineer, and the enabled trigger **"Pick up
+new engineering tickets"** (team ENG + state transitions to Todo → assign to
+the SWE, comment the outcome back on the issue).
+
 ### Models and tasks
 
 - **Models page** — add providers (API keys go into the encrypted secret
@@ -141,9 +147,10 @@ with two priced profiles — `Fake Mini` (the workspace default) and
 
 ### Connectors
 
-The **Connectors page** connects Jhin to external systems (GitHub is live;
-more arrive in later phases). Admins create a connection by picking an auth
-method (GitHub: personal access token or GitHub App), entering credentials
+The **Connectors page** connects Jhin to external systems (GitHub, Linear,
+and the CLI sandbox are live). Admins create a connection by picking an auth
+method (GitHub: personal access token or GitHub App; Linear: API key, with
+OAuth noted for later), entering credentials
 (stored in the encrypted secret store, never displayed again), and optional
 config such as `base_url` for GitHub Enterprise. The create response shows
 the webhook payload URL and signing secret **once** — paste them into the
@@ -154,9 +161,44 @@ Agents get connector tools through grants (Tools & Access tab or wizard
 step 5), optionally scoped to one connection and repository/branch glob
 patterns like `octo/*` or `agent/*`. See
 [docs/architecture/connectors.md](docs/architecture/connectors.md) for the
-SDK and how to contribute a connector. In the dev overlay a `fake-github`
-service lets the whole GitHub flow run without real credentials
-(point a connection's `base_url` at `http://fake-github:8080`).
+SDK and how to contribute a connector. In the dev overlay the `fake-github`
+and `fake-linear` services let the GitHub and Linear flows run without real
+credentials (point a connection's `base_url` at `http://fake-github:8080`
+or `http://fake-linear:8080`).
+
+### Triggers — the showcase demo
+
+The **Triggers page** automates WHEN/IF/THEN: WHEN a connector event arrives
+(connection + canonical event type), IF the filter conditions match (with a
+"State changes to Todo" preset and a team picker fed by connector metadata),
+THEN a task is created and assigned to an agent. Every trigger can be
+dry-run against a sample event with per-condition pass/fail explanations,
+and recent invocations link to the tasks they started.
+
+To walk the flagship slice on a fresh dev environment (`make dev`,
+`make migrate`, `make seed` — the seed installs everything above):
+
+```bash
+# 1. Point fake Linear's webhook at the seeded connection: copy the webhook
+#    URL/secret shown once when a connection is created (for the seeded
+#    connection, see the fixed dev values in apps/api/src/jhin_api/seed.py):
+curl -X POST http://localhost:8092/_admin/webhook \
+  -H 'content-type: application/json' \
+  -d '{"url":"http://api:8000/api/v1/webhooks/linear/<public_id>","secret":"<secret>"}'
+
+# 2. The moment: move the seeded issue ENG-142 from Backlog to Todo.
+curl -X POST http://localhost:8092/_admin/issues/ENG-142/transition \
+  -H 'content-type: application/json' -d '{"state":"Todo"}'
+```
+
+Fake Linear signs and fires the webhook; the API verifies the signature,
+dedupes the delivery, and publishes the raw event; the event worker
+normalizes it and matches the trigger; a `TriggeredTaskWorkflow` creates the
+task ("[ENG-142] …", linked to `linear`/`ENG-142`) and runs the SWE agent.
+Watch it on the Tasks page — the detail view shows "Started by trigger …
+from linear ENG-142" — and afterwards `curl http://localhost:8092/_state`
+shows the outcome comment on the issue. Redelivering the same webhook (or
+refiring the same transition) never creates a second task.
 
 ### Frontend data fetching
 
