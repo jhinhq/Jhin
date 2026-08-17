@@ -66,6 +66,10 @@ async def test_seed_creates_documented_dev_org(
     assert showcase["target_agent_id"] == agents["Senior Software Engineer"]["id"]
     assert showcase["action_config_json"] == {"comment_back": True}
 
+    # Phase 8: the showcase selects the engineering template with QA wired in.
+    assert showcase["workflow_definition"]["template"] == "engineering_ticket"
+    assert showcase["workflow_definition"]["qa_agent_id"] == agents["QA Engineer"]["id"]
+
     grants = (
         await api.client.get(
             f"/api/v1/workspaces/{ws}/agents/{agents['Senior Software Engineer']['id']}/grants"
@@ -78,3 +82,32 @@ async def test_seed_creates_documented_dev_org(
         "linear.metadata.read",
         "linear.comment.create",
     } <= granted
+
+    # Phase 8 delegation defaults (plan 27): CTO delegates to subordinates,
+    # SWE delegates to QA (team + pin), QA gets read/test sandbox + GitHub read.
+    swe_delegate = [g for g in grants if g["capability"] == "organization.delegate"]
+    assert len(swe_delegate) == 1
+    assert swe_delegate[0]["scope_json"]["targets"] == "team"
+    assert swe_delegate[0]["scope_json"]["target_agent_id"] == [agents["QA Engineer"]["id"]]
+
+    cto_grants = (
+        await api.client.get(f"/api/v1/workspaces/{ws}/agents/{agents['CTO']['id']}/grants")
+    ).json()
+    cto_delegate = [g for g in cto_grants if g["capability"] == "organization.delegate"]
+    assert len(cto_delegate) == 1
+    assert cto_delegate[0]["scope_json"] == {"targets": "subordinates"}
+
+    qa_grants = (
+        await api.client.get(f"/api/v1/workspaces/{ws}/agents/{agents['QA Engineer']['id']}/grants")
+    ).json()
+    qa_granted = {g["capability"] for g in qa_grants}
+    assert {
+        "organization.report_result",
+        "cli.repository.checkout",
+        "cli.test.run",
+        "cli.file.read",
+        "github.repository.read",
+        "github.pull_request.read",
+        "github.check.read",
+    } <= qa_granted
+    assert "organization.delegate" not in qa_granted  # QA never delegates

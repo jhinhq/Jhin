@@ -92,6 +92,44 @@ def _agent(
     )
 
 
+def _seed_delegation_grants(
+    session: AsyncSession, workspace_id: UUID, *, cto: Agent, swe: Agent, qa: Agent
+) -> None:
+    """Phase 8 delegation defaults (plan 27, 45): deny-by-default, so the
+    hierarchy only works with explicit grants.
+
+    - CTO may delegate to direct/indirect subordinates (SWE, QA).
+    - SWE may delegate to same-team members, pinned to the QA agent
+      (the review_request hop of the engineering lifecycle).
+    - QA gets read/test sandbox tools + GitHub read so it can check out a
+      PR branch and run the test suite — never write access.
+    - Everyone in the chain may report structured results upward.
+    """
+    grants: list[tuple[Agent, str, dict[str, object]]] = [
+        (cto, "organization.delegate", {"targets": "subordinates"}),
+        (swe, "organization.delegate", {"targets": "team", "target_agent_id": [str(qa.id)]}),
+        (cto, "organization.report_result", {}),
+        (swe, "organization.report_result", {}),
+        (qa, "organization.report_result", {}),
+        (qa, "cli.repository.checkout", {}),
+        (qa, "cli.test.run", {}),
+        (qa, "cli.file.read", {}),
+        (qa, "github.repository.read", {}),
+        (qa, "github.pull_request.read", {}),
+        (qa, "github.check.read", {}),
+    ]
+    for agent, capability, scope in grants:
+        session.add(
+            AgentCapabilityGrant(
+                workspace_id=workspace_id,
+                agent_id=agent.id,
+                capability=capability,
+                scope_json=dict(scope),
+                effect="allow",
+            )
+        )
+
+
 def _load_crypto() -> SecretCrypto | None:
     """Master-key crypto when available; the seed degrades gracefully
     without it (connection + trigger seeding is skipped)."""
@@ -108,6 +146,7 @@ async def _seed_linear_showcase(
     workspace: Workspace,
     owner: User,
     swe: Agent,
+    qa: Agent,
 ) -> Connection:
     """Fake Linear connection + SWE linear grants + the showcase trigger
     (plan 45 Phase 7 item 6) so a fresh dev stack demos the full slice."""
@@ -163,6 +202,9 @@ async def _seed_linear_showcase(
             )
         )
 
+    # Phase 8: the showcase selects the engineering template (plan 8.4) so a
+    # fresh stack demos delegated QA review with the fail→fix→retest loop.
+    # Switch the trigger back to "Standard" in the builder for the plain flow.
     trigger = Trigger(
         workspace_id=workspace.id,
         name=SHOWCASE_TRIGGER_NAME,
@@ -172,6 +214,11 @@ async def _seed_linear_showcase(
         filter_json=dict(SHOWCASE_FILTER),
         target_agent_id=swe.id,
         action_config_json={"comment_back": True},
+        workflow_definition={
+            "template": "engineering_ticket",
+            "qa_agent_id": str(qa.id),
+            "max_retest_cycles": 3,
+        },
         created_by_user_id=owner.id,
     )
     session.add(trigger)
@@ -339,10 +386,12 @@ async def seed(session: AsyncSession) -> str:
             metadata={"seed": True, "name": name},
         )
 
+    _seed_delegation_grants(session, workspace.id, cto=cto, swe=swe, qa=qa)
+
     crypto = _load_crypto()
     if crypto is not None:
         connection = await _seed_linear_showcase(
-            session, crypto, workspace=workspace, owner=owner, swe=swe
+            session, crypto, workspace=workspace, owner=owner, swe=swe, qa=qa
         )
         linear_note = f"Linear connection '{connection.name}' + trigger '{SHOWCASE_TRIGGER_NAME}'"
     else:
