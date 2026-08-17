@@ -13,18 +13,45 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-Role = Literal["system", "user", "assistant"]
+Role = Literal["system", "user", "assistant", "tool"]
+
+
+class ModelToolCall(BaseModel):
+    """One structured tool call the model requested (plan 12).
+
+    ``arguments_json`` is the raw JSON string from the provider. It is parsed
+    and schema-validated by the tool gateway, never trusted as-is; free text
+    in ``ModelResponse.text`` is never interpreted as a tool call (plan 21.4).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    name: str
+    arguments_json: str
 
 
 class ModelMessage(BaseModel):
+    """One conversation turn.
+
+    ``tool_calls`` is set on assistant turns that requested tools;
+    ``tool_call_id`` is set on ``tool`` turns carrying a tool's result back.
+    """
+
     model_config = ConfigDict(frozen=True)
 
     role: Role
     content: str
+    tool_calls: tuple[ModelToolCall, ...] = ()
+    tool_call_id: str | None = None
 
 
 class ToolSchema(BaseModel):
-    """Tool definition placeholder — populated when Phase 4 adds tool calls."""
+    """Function signature advertised to the model (plan 7.2 layer 8).
+
+    ``parameters`` is a JSON schema. Advertising a tool never authorizes it —
+    the gateway decides every call (plan 12, 52).
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -61,6 +88,7 @@ class ModelResponse(BaseModel):
     usage: ModelUsage = ModelUsage()
     latency_ms: int = 0
     provider_request_id: str | None = None
+    tool_calls: tuple[ModelToolCall, ...] = ()
 
 
 class ModelProviderError(Exception):

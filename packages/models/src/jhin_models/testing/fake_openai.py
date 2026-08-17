@@ -11,11 +11,25 @@ Deterministic behavior tests rely on:
   last user message, so assertions can tie a response to a model name.
 - Usage is length-derived (chars // 4), so token counts are stable.
 - ``model == "always-fails"`` returns HTTP 500 (error-path testing).
+
+Tool calling (Phase 4): a user message may embed markers of the form::
+
+    [[tool:system.echo {"text": "hi"}]]
+
+For each marker that does not yet have a tool-role result message in the
+conversation, the fake responds with one OpenAI-style ``tool_calls`` entry
+(one per response, in marker order). Once every marker has a result, it
+responds with a normal completion summarizing the tool outputs.
+
+The fake deliberately emits tool calls even when the request advertises no
+``tools`` — a real model can hallucinate tool names it was never offered, and
+authorization must live in the tool gateway, not in the prompt (plan 52).
 """
 
 from __future__ import annotations
 
 import json
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -23,9 +37,30 @@ from typing import Any
 FAIL_MODEL = "always-fails"
 DEFAULT_MODELS = ("fake-mini", "fake-pro")
 
+# [[tool:<name> <flat-json-object>]] — payloads must not contain "]]".
+TOOL_MARKER_RE = re.compile(r"\[\[tool:([a-z0-9_.]+)\s+(\{.*?\})\]\]", re.DOTALL)
+
 
 def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
+
+
+def _pending_tool_marker(messages: list[dict[str, Any]]) -> tuple[int, str, str] | None:
+    """The next (index, tool_name, arguments_json) marker without a result.
+
+    Markers are collected from user messages in order; each existing
+    tool-role message consumes one marker. Returns None when every marker has
+    been answered.
+    """
+    markers: list[tuple[str, str]] = []
+    for message in messages:
+        if message.get("role") == "user":
+            markers.extend(TOOL_MARKER_RE.findall(str(message.get("content", ""))))
+    results = sum(1 for m in messages if m.get("role") == "tool")
+    if results < len(markers):
+        name, arguments = markers[results]
+        return results, name, arguments
+    return None
 
 
 def build_completion(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -36,31 +71,66 @@ def build_completion(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         return 500, {"error": error}
 
     messages = body.get("messages", [])
-    last_user = ""
-    for message in reversed(messages):
-        if message.get("role") == "user":
-            last_user = str(message.get("content", ""))
-            break
     prompt_chars = sum(len(str(m.get("content", ""))) for m in messages)
-
-    reply = f"[{model}] Completed: {last_user[:200].strip() or 'no instruction given'}"
-    return 200, {
-        "id": f"fakecmpl-{abs(hash((model, prompt_chars))) % 10**10}",
+    usage = {
+        "prompt_tokens": _estimate_tokens("x" * prompt_chars),
+        "completion_tokens": 0,
+        "total_tokens": 0,
+    }
+    envelope: dict[str, Any] = {
+        "id": f"fakecmpl-{abs(hash((model, prompt_chars, len(messages)))) % 10**10}",
         "object": "chat.completion",
         "model": model,
-        "choices": [
+        "usage": usage,
+    }
+
+    pending = _pending_tool_marker(messages)
+    if pending is not None:
+        index, tool_name, arguments_json = pending
+        usage["completion_tokens"] = _estimate_tokens(arguments_json)
+        usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+        envelope["choices"] = [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": reply},
-                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": f"call_{index}",
+                            "type": "function",
+                            "function": {"name": tool_name, "arguments": arguments_json},
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
             }
-        ],
-        "usage": {
-            "prompt_tokens": _estimate_tokens("x" * prompt_chars),
-            "completion_tokens": _estimate_tokens(reply),
-            "total_tokens": _estimate_tokens("x" * prompt_chars) + _estimate_tokens(reply),
-        },
-    }
+        ]
+        return 200, envelope
+
+    tool_results = [str(m.get("content", "")) for m in messages if m.get("role") == "tool"]
+    if tool_results:
+        reply = f"[{model}] Done after {len(tool_results)} tool call(s). Last result: " + (
+            tool_results[-1][:200].strip()
+        )
+    else:
+        last_user = ""
+        for message in reversed(messages):
+            if message.get("role") == "user":
+                last_user = str(message.get("content", ""))
+                break
+        reply = f"[{model}] Completed: {last_user[:200].strip() or 'no instruction given'}"
+
+    usage["completion_tokens"] = _estimate_tokens(reply)
+    usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+    envelope["choices"] = [
+        {
+            "index": 0,
+            "message": {"role": "assistant", "content": reply},
+            "finish_reason": "stop",
+        }
+    ]
+    return 200, envelope
 
 
 class _Handler(BaseHTTPRequestHandler):

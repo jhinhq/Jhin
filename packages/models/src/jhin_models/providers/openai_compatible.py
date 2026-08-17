@@ -17,9 +17,11 @@ import httpx
 
 from jhin_models.base import (
     ModelClient,
+    ModelMessage,
     ModelProviderError,
     ModelRequest,
     ModelResponse,
+    ModelToolCall,
     ModelUsage,
     classify_retryable,
 )
@@ -52,12 +54,39 @@ class OpenAICompatibleClient(ModelClient):
             headers["authorization"] = f"Bearer {api_key}"
         return headers
 
+    def _serialize_message(self, message: ModelMessage) -> dict[str, Any]:
+        wire: dict[str, Any] = {"role": message.role, "content": message.content}
+        if message.tool_calls:
+            wire["tool_calls"] = [
+                {
+                    "id": call.id,
+                    "type": "function",
+                    "function": {"name": call.name, "arguments": call.arguments_json},
+                }
+                for call in message.tool_calls
+            ]
+        if message.tool_call_id is not None:
+            wire["tool_call_id"] = message.tool_call_id
+        return wire
+
     def _payload(self, request: ModelRequest, *, stream: bool) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": request.model,
-            "messages": [{"role": m.role, "content": m.content} for m in request.messages],
+            "messages": [self._serialize_message(m) for m in request.messages],
             "stream": stream,
         }
+        if request.tools:
+            payload["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters,
+                    },
+                }
+                for tool in request.tools
+            ]
         if request.temperature is not None:
             payload["temperature"] = request.temperature
         if request.max_output_tokens is not None:
@@ -97,6 +126,19 @@ class OpenAICompatibleClient(ModelClient):
         if not choices:
             raise ModelProviderError(f"{self.provider_name}: response contained no choices")
         message = choices[0].get("message") or {}
+        tool_calls = []
+        for raw in message.get("tool_calls") or []:
+            function = raw.get("function") or {}
+            name = function.get("name")
+            if not raw.get("id") or not name:
+                continue  # malformed entries are ignored, never guessed at
+            tool_calls.append(
+                ModelToolCall(
+                    id=str(raw["id"]),
+                    name=str(name),
+                    arguments_json=str(function.get("arguments") or "{}"),
+                )
+            )
         return ModelResponse(
             text=message.get("content") or "",
             finish_reason=choices[0].get("finish_reason") or "",
@@ -104,6 +146,7 @@ class OpenAICompatibleClient(ModelClient):
             usage=self._parse_usage(body.get("usage") or {}),
             latency_ms=latency_ms,
             provider_request_id=body.get("id"),
+            tool_calls=tuple(tool_calls),
         )
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[str]:

@@ -17,9 +17,11 @@ import httpx
 
 from jhin_models.base import (
     ModelClient,
+    ModelMessage,
     ModelProviderError,
     ModelRequest,
     ModelResponse,
+    ModelToolCall,
     ModelUsage,
     classify_retryable,
 )
@@ -51,19 +53,58 @@ class AnthropicClient(ModelClient):
             transport=transport,
         )
 
+    def _serialize_message(self, message: ModelMessage) -> dict[str, Any]:
+        """Map the neutral message shape onto Anthropic content blocks.
+
+        Assistant tool calls become ``tool_use`` blocks; tool results become
+        user-role ``tool_result`` blocks (the Messages API convention).
+        """
+        if message.role == "tool":
+            return {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": message.tool_call_id or "",
+                        "content": message.content,
+                    }
+                ],
+            }
+        if message.role == "assistant" and message.tool_calls:
+            blocks: list[dict[str, Any]] = []
+            if message.content:
+                blocks.append({"type": "text", "text": message.content})
+            for call in message.tool_calls:
+                try:
+                    arguments = json.loads(call.arguments_json)
+                except json.JSONDecodeError:
+                    arguments = {}
+                blocks.append(
+                    {"type": "tool_use", "id": call.id, "name": call.name, "input": arguments}
+                )
+            return {"role": "assistant", "content": blocks}
+        return {"role": message.role, "content": message.content}
+
     def _payload(self, request: ModelRequest, *, stream: bool) -> dict[str, Any]:
         system_parts = [m.content for m in request.messages if m.role == "system"]
         payload: dict[str, Any] = {
             "model": request.model,
             "max_tokens": request.max_output_tokens or _DEFAULT_MAX_TOKENS,
             "messages": [
-                {"role": m.role, "content": m.content}
-                for m in request.messages
-                if m.role != "system"
+                self._serialize_message(m) for m in request.messages if m.role != "system"
             ],
         }
         if system_parts:
             payload["system"] = "\n\n".join(system_parts)
+        if request.tools:
+            payload["tools"] = [
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.parameters or {"type": "object", "properties": {}},
+                }
+                for tool in request.tools
+            ]
         if request.temperature is not None:
             payload["temperature"] = request.temperature
         if stream:
@@ -94,6 +135,15 @@ class AnthropicClient(ModelClient):
             for block in body.get("content") or []
             if block.get("type") == "text"
         )
+        tool_calls = tuple(
+            ModelToolCall(
+                id=str(block["id"]),
+                name=str(block["name"]),
+                arguments_json=json.dumps(block.get("input") or {}),
+            )
+            for block in body.get("content") or []
+            if block.get("type") == "tool_use" and block.get("id") and block.get("name")
+        )
         usage = body.get("usage") or {}
         return ModelResponse(
             text=text,
@@ -106,6 +156,7 @@ class AnthropicClient(ModelClient):
             ),
             latency_ms=latency_ms,
             provider_request_id=body.get("id"),
+            tool_calls=tool_calls,
         )
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[str]:

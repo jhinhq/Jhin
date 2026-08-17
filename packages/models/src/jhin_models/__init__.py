@@ -11,6 +11,7 @@ from jhin_models.base import (
     ModelProviderError,
     ModelRequest,
     ModelResponse,
+    ModelToolCall,
     ModelUsage,
     ToolSchema,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "ModelProviderError",
     "ModelRequest",
     "ModelResponse",
+    "ModelToolCall",
     "ModelUsage",
     "ToolSchema",
     "build_model_client",
