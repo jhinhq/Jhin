@@ -107,6 +107,9 @@ class Agent(Base, UuidPkMixin, TimestampMixin):
     max_output_tokens: Mapped[int | None] = mapped_column(Integer, default=None)
     max_steps: Mapped[int] = mapped_column(Integer, default=20)
     max_run_minutes: Mapped[int] = mapped_column(Integer, default=30)
+    # Concurrency admission (plan 30): active runs beyond this queue visibly
+    # instead of starting. 1 = one coding ticket at a time.
+    max_concurrent_runs: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     monthly_budget_cents: Mapped[int | None] = mapped_column(Integer, default=None)
     # Explicit approval-policy rules (plan 42). Presets (Autonomous/Balanced/
     # Restricted) are a UI shortcut that expands to rows in this list; an

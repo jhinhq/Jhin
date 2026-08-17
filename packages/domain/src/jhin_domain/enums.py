@@ -125,12 +125,28 @@ class RunStatus(StrEnum):
     RUNNING = "running"
     PAUSED = "paused"
     WAITING_APPROVAL = "waiting_approval"
+    # Parked on a blocking delegation: a child task/run is doing the work
+    # and the parent resumes when its summary arrives (plan 7.5, 8.3).
+    WAITING_DELEGATION = "waiting_delegation"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
 
 
 RUN_TERMINAL_STATUSES = frozenset({RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED})
+
+# Statuses that occupy a concurrency slot (plan 30): anything between
+# admission and finalize, including parked waits — a parked run still owns
+# its working state (sandbox volume, transcript) and must not be doubled.
+RUN_ACTIVE_STATUSES = frozenset(
+    {
+        RunStatus.PENDING,
+        RunStatus.RUNNING,
+        RunStatus.PAUSED,
+        RunStatus.WAITING_APPROVAL,
+        RunStatus.WAITING_DELEGATION,
+    }
+)
 
 
 class SenderType(StrEnum):
@@ -146,6 +162,46 @@ class RecipientType(StrEnum):
     AGENT = "agent"
     TEAM = "team"
     TASK = "task"
+
+
+class MessageType(StrEnum):
+    """What a persisted message means (plan 6.14, 29).
+
+    The first group is conversational/runtime plumbing; the second group is
+    the structured agent-to-agent vocabulary from plan 29 — those messages
+    carry a structured ``content_json`` (see :mod:`jhin_domain.messages`)
+    that the UI renders conversationally while the backend keeps structure.
+    """
+
+    TEXT = "text"
+    NOTE = "note"
+    ERROR = "error"
+    TOOL_CALL = "tool_call"
+    TOOL_RESULT = "tool_result"
+
+    INSTRUCTION = "instruction"
+    QUESTION = "question"
+    STATUS = "status"
+    RESULT = "result"
+    DELEGATION = "delegation"
+    REVIEW_REQUEST = "review_request"
+    REVIEW_RESULT = "review_result"
+    ESCALATION = "escalation"
+
+
+# The structured agent-to-agent subset (plan 29).
+AGENT_MESSAGE_TYPES = frozenset(
+    {
+        MessageType.INSTRUCTION,
+        MessageType.QUESTION,
+        MessageType.STATUS,
+        MessageType.RESULT,
+        MessageType.DELEGATION,
+        MessageType.REVIEW_REQUEST,
+        MessageType.REVIEW_RESULT,
+        MessageType.ESCALATION,
+    }
+)
 
 
 class MessageVisibility(StrEnum):
