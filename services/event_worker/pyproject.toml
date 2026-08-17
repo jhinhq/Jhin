@@ -7,6 +7,7 @@ dependencies = [
     "nats-py>=2.13",
     "pydantic>=2.10",
     "pydantic-settings>=2.7",
+    "jhin-connectors",
     "jhin-events",
     "jhin-observability",
 ]
@@ -15,6 +16,7 @@ dependencies = [
 jhin-event-worker = "jhin_event_worker.main:run"
 
 [tool.uv.sources]
+jhin-connectors = { workspace = true }
 jhin-events = { workspace = true }
 jhin-observability = { workspace = true }
 

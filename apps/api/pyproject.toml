@@ -11,6 +11,7 @@ dependencies = [
     "nats-py>=2.13",
     "temporalio>=1.31",
     "argon2-cffi>=23.1",
+    "jhin-connectors",
     "jhin-db",
     "jhin-domain",
     "jhin-events",
@@ -26,6 +27,7 @@ dependencies = [
 jhin-seed-dev = "jhin_api.seed:main"
 
 [tool.uv.sources]
+jhin-connectors = { workspace = true }
 jhin-db = { workspace = true }
 jhin-domain = { workspace = true }
 jhin-events = { workspace = true }
