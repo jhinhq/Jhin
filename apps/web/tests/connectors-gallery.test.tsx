@@ -47,8 +47,9 @@ describe("ConnectorsGallery", () => {
     expect(screen.getByText("Linear")).toBeDefined();
     expect(screen.getByText("Vercel")).toBeDefined();
     expect(screen.getByText("Supabase")).toBeDefined();
-    expect(screen.getByText("CLI")).toBeDefined();
     expect(screen.getByText("HTTP")).toBeDefined();
-    expect(screen.getAllByText(/Arrives in Phase \d+/).length).toBe(5);
+    // CLI is live since Phase 6 — no longer in the upcoming list.
+    expect(screen.queryByText("CLI")).toBeNull();
+    expect(screen.getAllByText(/Arrives in Phase \d+/).length).toBe(4);
   });
 });

@@ -8,7 +8,12 @@ import { Plus, ShieldCheck, ShieldOff, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { Badge, Button, ErrorNote, Field, Input, Select, Spinner } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
-import { buildConnectorScope, capabilityConnectorType } from "@/lib/connectors";
+import {
+  buildCliScope,
+  buildConnectorScope,
+  capabilityConnectorType,
+  CLI_SCOPE_FIELDS,
+} from "@/lib/connectors";
 import {
   useAgentGrants,
   useAgentPolicy,
@@ -46,10 +51,13 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
   const [connectionId, setConnectionId] = useState("");
   const [repoScope, setRepoScope] = useState("");
   const [branchScope, setBranchScope] = useState("");
+  const [cliScope, setCliScope] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
 
   const connectorTypes = (connectors.data ?? []).map((c) => c.connector_type);
   const grantConnectorType = capabilityConnectorType(capability, connectorTypes);
+  const isCli = grantConnectorType === "cli";
+  const cliFields = isCli ? (CLI_SCOPE_FIELDS[capability] ?? []) : [];
   const matchingConnections = (connections.data ?? []).filter(
     (connection) => connection.connector_type === grantConnectorType,
   );
@@ -60,9 +68,11 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
         method: "POST",
         body: {
           capability,
-          scope: grantConnectorType
-            ? buildConnectorScope(connectionId, repoScope, branchScope)
-            : {},
+          scope: isCli
+            ? buildCliScope(capability, connectionId, cliScope)
+            : grantConnectorType
+              ? buildConnectorScope(connectionId, repoScope, branchScope)
+              : {},
           effect,
         },
       }),
@@ -72,6 +82,7 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
       setConnectionId("");
       setRepoScope("");
       setBranchScope("");
+      setCliScope({});
       invalidate();
     },
     onError: (err) => setError(err instanceof ApiError ? err.detail : "Adding the grant failed."),
@@ -200,7 +211,86 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
                 <Plus size={13} /> Add
               </Button>
             </div>
-            {grantConnectorType ? (
+            {isCli ? (
+              <div
+                data-testid="cli-scope"
+                className="grid gap-2 rounded-lg border border-line bg-surface px-3 py-2.5 sm:grid-cols-3"
+              >
+                <Field label="Connection" hint="Restricts the grant to one CLI connection.">
+                  <Select
+                    value={connectionId}
+                    onChange={(e) => setConnectionId(e.target.value)}
+                  >
+                    <option value="">Any connection</option>
+                    {matchingConnections.map((connection) => (
+                      <option key={connection.id} value={connection.id}>
+                        {connection.name}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                {cliFields.includes("command") ? (
+                  <Field label="Command pattern" hint="Glob on the full command — empty = any.">
+                    <Input
+                      value={cliScope.command ?? ""}
+                      onChange={(e) =>
+                        setCliScope((prev) => ({ ...prev, command: e.target.value }))
+                      }
+                      placeholder="git *"
+                    />
+                  </Field>
+                ) : null}
+                {cliFields.includes("image") ? (
+                  <Field
+                    label="Image"
+                    hint="Allowed job image glob. Constrained grants require calls to name an image."
+                  >
+                    <Input
+                      value={cliScope.image ?? ""}
+                      onChange={(e) => setCliScope((prev) => ({ ...prev, image: e.target.value }))}
+                      placeholder="jhin-sandbox:*"
+                    />
+                  </Field>
+                ) : null}
+                {cliFields.includes("network") ? (
+                  <Field
+                    label="Network"
+                    hint="Constrained grants require calls to name a network."
+                  >
+                    <Select
+                      value={cliScope.network ?? ""}
+                      onChange={(e) =>
+                        setCliScope((prev) => ({ ...prev, network: e.target.value }))
+                      }
+                    >
+                      <option value="">Any</option>
+                      <option value="none">none (isolated)</option>
+                      <option value="internet">internet (sandbox bridge)</option>
+                    </Select>
+                  </Field>
+                ) : null}
+                {cliFields.includes("repository") ? (
+                  <Field label="Repository" hint="Exact or glob, e.g. octo/* — empty = any.">
+                    <Input
+                      value={cliScope.repository ?? ""}
+                      onChange={(e) =>
+                        setCliScope((prev) => ({ ...prev, repository: e.target.value }))
+                      }
+                      placeholder="octo/alpha"
+                    />
+                  </Field>
+                ) : null}
+                {cliFields.includes("path") ? (
+                  <Field label="Path pattern" hint="Glob on the workspace path — empty = any.">
+                    <Input
+                      value={cliScope.path ?? ""}
+                      onChange={(e) => setCliScope((prev) => ({ ...prev, path: e.target.value }))}
+                      placeholder="src/*"
+                    />
+                  </Field>
+                ) : null}
+              </div>
+            ) : grantConnectorType ? (
               <div
                 data-testid="connector-scope"
                 className="grid gap-2 rounded-lg border border-line bg-surface px-3 py-2.5 sm:grid-cols-3"

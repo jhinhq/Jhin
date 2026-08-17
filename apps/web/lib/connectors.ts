@@ -33,12 +33,6 @@ export const UPCOMING_CONNECTORS: UpcomingConnector[] = [
     phase: "Phase 8",
   },
   {
-    connector_type: "cli",
-    display_name: "CLI",
-    description: "Sandboxed shell command execution.",
-    phase: "Phase 9",
-  },
-  {
     connector_type: "http",
     display_name: "HTTP",
     description: "Generic authenticated HTTP requests.",
@@ -101,6 +95,33 @@ export function buildConnectorScope(
   if (connectionId) scope.connection_id = connectionId;
   if (repository.trim()) scope.repository = repository.trim();
   if (branch.trim()) scope.branch = branch.trim();
+  return scope;
+}
+
+/** Scope dimensions each cli.* capability supports (plan 11.6). Only fields
+ * a tool actually sends may be constrained — a grant constraining a key the
+ * request never carries would fail closed and deny every call. */
+export const CLI_SCOPE_FIELDS: Record<string, ReadonlyArray<"command" | "image" | "network" | "repository" | "path">> = {
+  "cli.command.execute": ["command", "image", "network"],
+  "cli.test.run": ["command", "image"],
+  "cli.repository.checkout": ["repository", "image"],
+  "cli.file.read": ["path"],
+  "cli.file.write": ["path"],
+};
+
+/** Grant scope_json for a cli.* capability: connection plus the fnmatch
+ * patterns the capability supports. Empty inputs are omitted (unscoped). */
+export function buildCliScope(
+  capability: string,
+  connectionId: string,
+  values: { command?: string; image?: string; network?: string; repository?: string; path?: string },
+): Record<string, string> {
+  const scope: Record<string, string> = {};
+  if (connectionId) scope.connection_id = connectionId;
+  for (const field of CLI_SCOPE_FIELDS[capability] ?? []) {
+    const value = (values[field] ?? "").trim();
+    if (value) scope[field] = value;
+  }
   return scope;
 }
 

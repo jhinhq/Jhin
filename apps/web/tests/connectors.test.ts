@@ -2,8 +2,10 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  buildCliScope,
   buildConnectorScope,
   capabilityConnectorType,
+  CLI_SCOPE_FIELDS,
   findAuthScheme,
   UPCOMING_CONNECTORS,
   validateConnectionForm,
@@ -94,12 +96,38 @@ describe("connector scope helpers", () => {
     });
     expect(buildConnectorScope("", "", "")).toEqual({});
   });
+
+  it("builds cli scopes with only the fields the capability supports", () => {
+    expect(
+      buildCliScope("cli.command.execute", "conn-1", {
+        command: "git *",
+        network: "internet",
+        repository: "octo/*", // not a command.execute dimension — dropped
+      }),
+    ).toEqual({ connection_id: "conn-1", command: "git *", network: "internet" });
+    expect(
+      buildCliScope("cli.repository.checkout", "", { repository: "octo/*", command: "rm *" }),
+    ).toEqual({ repository: "octo/*" });
+    expect(buildCliScope("cli.file.read", "", { path: "src/*" })).toEqual({ path: "src/*" });
+    expect(buildCliScope("cli.file.write", "", {})).toEqual({});
+  });
+
+  it("declares scope dimensions for all five cli capabilities", () => {
+    expect(Object.keys(CLI_SCOPE_FIELDS).sort()).toEqual([
+      "cli.command.execute",
+      "cli.file.read",
+      "cli.file.write",
+      "cli.repository.checkout",
+      "cli.test.run",
+    ]);
+  });
 });
 
 describe("gallery data", () => {
   it("lists the roadmap connectors with phases", () => {
     const types = UPCOMING_CONNECTORS.map((c) => c.connector_type);
-    expect(types).toEqual(["linear", "vercel", "supabase", "cli", "http"]);
+    expect(types).toEqual(["linear", "vercel", "supabase", "http"]);
+    expect(types).not.toContain("cli"); // live since Phase 6
     for (const upcoming of UPCOMING_CONNECTORS) {
       expect(upcoming.phase).toMatch(/^Phase \d+$/);
     }

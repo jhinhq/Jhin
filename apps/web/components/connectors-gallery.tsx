@@ -4,13 +4,14 @@
  * ones are greyed out with their arrival phase. Pure presentational so it is
  * component-testable. */
 
-import { GitBranch, Plug } from "lucide-react";
+import { GitBranch, Plug, Terminal } from "lucide-react";
 import { Badge, Button } from "@/components/ui";
 import { UPCOMING_CONNECTORS } from "@/lib/connectors";
 import type { ConnectorInfo } from "@/lib/types";
 
 function ConnectorIcon({ icon }: { icon: string }) {
   if (icon === "github") return <GitBranch size={18} className="text-ink" />;
+  if (icon === "terminal") return <Terminal size={18} className="text-ink" />;
   return <Plug size={18} className="text-ink" />;
 }
 

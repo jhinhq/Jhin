@@ -15,6 +15,7 @@ import {
   Play,
   Send,
   ShieldQuestion,
+  TerminalSquare,
   User,
   Wrench,
 } from "lucide-react";
@@ -236,6 +237,13 @@ function eventStyle(event: RunEvent): { dot: string; icon: React.ReactNode | nul
       icon: <Wrench size={12} className="text-dim" />,
     };
   }
+  if (type === "sandbox.job") {
+    const exit = payload.exit_code;
+    return {
+      dot: payload.job_status === "completed" && exit === 0 ? "bg-ok" : "bg-danger",
+      icon: <TerminalSquare size={12} className="text-dim" />,
+    };
+  }
   if (type === "node.execute_tool") return { dot: "bg-accent", icon: <Wrench size={12} className="text-dim" /> };
   if (type === "node.observe") return { dot: "bg-accent", icon: <Eye size={12} className="text-dim" /> };
   if (type === "node.request_approval" || type === "approval.requested") {
@@ -244,6 +252,50 @@ function eventStyle(event: RunEvent): { dot: string; icon: React.ReactNode | nul
   if (type === "approval.approved") return { dot: "bg-ok", icon: <Hand size={12} className="text-ok" /> };
   if (type === "approval.rejected") return { dot: "bg-danger", icon: <Hand size={12} className="text-danger" /> };
   return { dot: "bg-accent", icon: null };
+}
+
+/** One sandbox job in the timeline (plan 14): command, exit code, duration,
+ * and collapsible sanitized output. */
+function SandboxJobEvent({ payload }: { payload: Record<string, unknown> }) {
+  const command = typeof payload.command === "string" ? payload.command : "";
+  const exitCode = typeof payload.exit_code === "number" ? payload.exit_code : null;
+  const durationMs = typeof payload.job_duration_ms === "number" ? payload.job_duration_ms : null;
+  const jobStatus = typeof payload.job_status === "string" ? payload.job_status : "";
+  const stdout = typeof payload.stdout === "string" ? payload.stdout : "";
+  const stderr = typeof payload.stderr === "string" ? payload.stderr : "";
+  return (
+    <div
+      data-testid="sandbox-job-event"
+      className="mt-1.5 space-y-1 rounded-md border border-line bg-raised px-2.5 py-2"
+    >
+      <div className="flex items-center gap-2 text-xs">
+        <code className="min-w-0 flex-1 truncate text-[11px]">{command || "(command)"}</code>
+        <Badge tone={jobStatus === "completed" && exitCode === 0 ? "ok" : "danger"}>
+          {jobStatus === "completed" && exitCode !== null ? `exit ${exitCode}` : jobStatus}
+        </Badge>
+      </div>
+      <p className="text-[11px] text-faint">
+        sandbox container{durationMs !== null ? ` · ${durationMs}ms` : ""}
+      </p>
+      {stdout || stderr ? (
+        <details className="group">
+          <summary className="cursor-pointer select-none text-[11px] text-dim hover:text-ink">
+            Show output
+          </summary>
+          {stdout ? (
+            <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded bg-surface px-2 py-1.5 text-[11px] leading-relaxed text-ink">
+              {stdout}
+            </pre>
+          ) : null}
+          {stderr ? (
+            <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-all rounded bg-danger/5 px-2 py-1.5 text-[11px] leading-relaxed text-danger">
+              {stderr}
+            </pre>
+          ) : null}
+        </details>
+      ) : null}
+    </div>
+  );
 }
 
 function Timeline({ events, live }: { events: RunEvent[]; live: boolean }) {
@@ -300,6 +352,7 @@ function Timeline({ events, live }: { events: RunEvent[]; live: boolean }) {
             {typeof payload.error_message === "string" && payload.error_message ? (
               <p className="mt-0.5 text-xs text-danger">{payload.error_message}</p>
             ) : null}
+            {event.event_type === "sandbox.job" ? <SandboxJobEvent payload={payload} /> : null}
           </li>
         );
       })}
