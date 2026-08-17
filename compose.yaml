@@ -205,7 +205,8 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
-    networks: [control]
+    # control for NATS/Temporal, data for Postgres (trigger matching).
+    networks: [control, data]
     restart: unless-stopped
 
   postgres:

@@ -26,6 +26,7 @@ COPY packages/observability/pyproject.toml packages/observability/
 COPY packages/secrets/pyproject.toml packages/secrets/
 COPY packages/models/pyproject.toml packages/models/
 COPY packages/agents/pyproject.toml packages/agents/
+COPY packages/triggers/pyproject.toml packages/triggers/
 
 ARG SERVICE_PACKAGE
 RUN --mount=type=cache,target=/root/.cache/uv \
