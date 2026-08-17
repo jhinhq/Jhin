@@ -27,11 +27,13 @@ authorization must live in the tool gateway, not in the prompt (plan 52).
 
 Phase 8 extensions for multi-agent scripts:
 
-- ``[[b64:<base64>]]`` segments in user messages are decoded in place before
-  marker extraction. This lets a delegation script smuggle the *child
-  agent's* markers through the parent's JSON marker payload (nested
-  ``[[tool:...]]`` braces would otherwise break both the outer marker regex
-  and JSON escaping).
+- ``[[b64:<base64>]]`` segments are decoded in place before marker
+  extraction — exactly ONE layer per conversation scan. To make markers fire
+  N conversation hops away, encode them N times: each hop's scan unwraps one
+  layer, so a parent sees an inert ``[[b64:...]]`` string inside its own
+  marker JSON while the child (whose task instructions carry the unwrapped
+  blob) decodes it into real markers. Nested ``[[tool:...]]`` braces would
+  otherwise break both the outer marker regex and JSON escaping.
 - The literal token ``__VERDICT__`` inside a marker's arguments is replaced
   with ``pass``/``fail`` based on evidence: the most recent tool result that
   reports an ``exit_code`` (``0`` → pass). A QA script can therefore run the
@@ -70,9 +72,13 @@ def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
-def _expand_b64(text: str, *, max_rounds: int = 3) -> str:
-    """Decode ``[[b64:...]]`` segments (bounded rounds allow one nesting level
-    per delegation hop); undecodable segments are left untouched."""
+def _expand_b64(text: str) -> str:
+    """Decode ``[[b64:...]]`` segments — exactly ONE round per conversation
+    scan. Single-round is load-bearing for multi-hop scripts: a blob that
+    should fire two hops away is double-encoded, and each hop's scan unwraps
+    exactly one layer (the parent sees an inert ``[[b64:...]]`` string inside
+    its marker JSON; the child decodes it into real markers). Undecodable
+    segments are left untouched."""
 
     def _decode(match: re.Match[str]) -> str:
         try:
@@ -80,12 +86,7 @@ def _expand_b64(text: str, *, max_rounds: int = 3) -> str:
         except (binascii.Error, UnicodeDecodeError):
             return match.group(0)
 
-    for _ in range(max_rounds):
-        expanded = B64_MARKER_RE.sub(_decode, text)
-        if expanded == text:
-            break
-        text = expanded
-    return text
+    return B64_MARKER_RE.sub(_decode, text)
 
 
 def encode_marker_payload(text: str) -> str:

@@ -377,13 +377,37 @@ class AgentActivities:
             )
             if queue_reason:
                 if task is not None:
+                    # Audit only the first transition into queued — the
+                    # admission check re-runs on every kick/backstop poll
+                    # while the task waits, and those are not new decisions.
+                    if "queue" not in task.metadata_json:
+                        session.add(
+                            AuditEvent(
+                                workspace_id=workspace_id,
+                                actor_type="system",
+                                actor_id=None,
+                                action="task.queued",
+                                target_type="task",
+                                target_id=task_id,
+                                metadata_json={
+                                    "agent_id": params.agent_id,
+                                    "reason": queue_reason,
+                                },
+                            )
+                        )
                     task.state = TaskState.QUEUED.value
+                    existing = task.metadata_json.get("queue")
+                    since = (
+                        existing.get("since", "")
+                        if isinstance(existing, dict)
+                        else datetime.now(UTC).isoformat()
+                    ) or datetime.now(UTC).isoformat()
                     task.metadata_json = {
                         **task.metadata_json,
                         "queue": {
                             "reason": queue_reason,
                             "agent_id": params.agent_id,
-                            "since": datetime.now(UTC).isoformat(),
+                            "since": since,
                         },
                     }
                 await session.commit()

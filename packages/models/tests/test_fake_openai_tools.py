@@ -90,6 +90,31 @@ def test_b64_segment_smuggles_nested_markers() -> None:
     assert json.loads(call["function"]["arguments"]) == {"suite": "unit"}
 
 
+def test_b64_unwraps_exactly_one_layer_per_scan() -> None:
+    """Phase 8: a double-encoded blob inside a marker's JSON payload must
+    stay inert in the parent's own scan (one unwrap leaves an inert
+    [[b64:...]] string) and only become markers one hop later, in the child
+    conversation that receives the unwrapped blob as instructions."""
+    child_script = '[[tool:cli.test.run {"suite": "unit"}]]'
+    once = encode_marker_payload(child_script)
+    twice = encode_marker_payload(once)
+    parent_content = f'[[tool:organization.delegate_task {{"instructions": "Review. {twice}"}}]]'
+    body = {"model": "fake-mini", "messages": [{"role": "user", "content": parent_content}]}
+    _status, payload = build_completion(body)
+    calls = payload["choices"][0]["message"]["tool_calls"]
+    assert len(calls) == 1
+    assert calls[0]["function"]["name"] == "organization.delegate_task"
+    # The parent's scan unwrapped one layer: the args carry the inner blob,
+    # ready for the child's own single unwrap.
+    args = json.loads(calls[0]["function"]["arguments"])
+    assert once in args["instructions"]
+
+    child_body = {"model": "fake-mini", "messages": [{"role": "user", "content": once}]}
+    _status, child_payload = build_completion(child_body)
+    child_call = child_payload["choices"][0]["message"]["tool_calls"][0]
+    assert child_call["function"]["name"] == "cli.test.run"
+
+
 def test_system_prompt_markers_are_collected_first() -> None:
     """Phase 8: template-created review tasks compose their own instructions,
     so a scripted reviewer carries its behavior on the system prompt."""
