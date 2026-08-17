@@ -342,6 +342,29 @@ class ToolGateway:
             )
             return outcome
 
+        # Tool-specific policy validator (plan 7.5): e.g. the delegation
+        # relationship/cycle/depth model. Runs before approval staging so
+        # humans are never asked to approve a call policy already forbids.
+        validator = self._catalog.validator_for(definition.name)
+        if validator is not None:
+            veto = await validator(self._ctx, validated, grants)
+            if veto is not None and veto.decision is DecisionType.DENY:
+                row, outcome = self._denied(
+                    definition.name,
+                    code=veto.code,
+                    reason=veto.reason,
+                    sanitized_input=sanitized_input,
+                    risk=definition.risk.value,
+                    connection_id=connection_id,
+                )
+                self._audit("tool.call.requested", row.id, {"tool_name": definition.name})
+                self._audit(
+                    "tool.call.denied",
+                    row.id,
+                    {"code": veto.code, "reason": veto.reason, "risk": definition.risk.value},
+                )
+                return outcome
+
         if decision.decision is DecisionType.REQUIRE_APPROVAL:
             now = datetime.now(UTC)
             approval = Approval(
@@ -464,6 +487,31 @@ class ToolGateway:
                 approval_id=approval_id,
                 error_code="invalid_input",
             )
+        # Re-run the tool-specific validator: conditions (org graph, task
+        # lineage) may have changed while the approval sat in the inbox.
+        validator = self._catalog.validator_for(definition.name)
+        if validator is not None:
+            veto = await validator(self._ctx, validated, await self._load_grants())
+            if veto is not None and veto.decision is DecisionType.DENY:
+                row.status = ToolCallStatus.DENIED.value
+                row.completed_at = datetime.now(UTC)
+                row.error_code = veto.code
+                self._audit(
+                    "tool.call.denied",
+                    row.id,
+                    {"code": veto.code, "reason": veto.reason, "approval_id": str(approval_id)},
+                )
+                return GatewayOutcome(
+                    status="denied",
+                    tool_call_id=row.id,
+                    tool_name=definition.name,
+                    risk=definition.risk.value,
+                    decision_code=veto.code,
+                    decision_reason=veto.reason,
+                    sanitized_input=row.sanitized_input_json,
+                    approval_id=approval_id,
+                    error_code=veto.code,
+                )
         self._audit(
             "tool.call.approved",
             row.id,

@@ -125,20 +125,26 @@ def evaluate(
     capability = tool.required_capability
     scope = requested_scope or {}
 
-    # 1. Explicit deny beats everything (within its scope).
+    # 1. Explicit deny beats everything (within its scope). Tools that defer
+    #    scope semantics to their registered validator (plan 7.5 delegation)
+    #    only honor *unscoped* denies here — scoped denies are the
+    #    validator's to interpret.
     for grant in grants:
-        if (
-            grant.effect is GrantEffect.DENY
-            and capability_matches(grant.capability, capability)
-            and scope_matches(grant.scope, scope)
-        ):
+        if grant.effect is not GrantEffect.DENY:
+            continue
+        if not capability_matches(grant.capability, capability):
+            continue
+        covers = not grant.scope if tool.defers_scope else scope_matches(grant.scope, scope)
+        if covers:
             return PolicyDecision(
                 decision=DecisionType.DENY,
                 code="explicit_deny",
                 reason=f"capability '{capability}' is explicitly denied for this agent",
             )
 
-    # 2. Deny-by-default: an allow grant must match capability *and* scope.
+    # 2. Deny-by-default: an allow grant must match capability *and* scope
+    #    (capability only for defers_scope tools — their validator owns
+    #    scope enforcement and runs before execution).
     allow_grants = [
         grant
         for grant in grants
@@ -150,7 +156,9 @@ def evaluate(
             code="no_grant",
             reason=f"agent has no capability grant matching '{capability}'",
         )
-    if not any(scope_matches(grant.scope, scope) for grant in allow_grants):
+    if not tool.defers_scope and not any(
+        scope_matches(grant.scope, scope) for grant in allow_grants
+    ):
         return PolicyDecision(
             decision=DecisionType.DENY,
             code="scope_mismatch",

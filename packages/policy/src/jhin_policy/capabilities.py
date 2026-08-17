@@ -86,6 +86,12 @@ class ToolDefinition(BaseModel):
     # these from the validated input and matches them against grant scopes.
     # Phase 4 system tools are unscoped.
     scope_keys: tuple[str, ...] = ()
+    # True for tools whose grant scopes carry semantics the generic fnmatch
+    # matcher cannot express (e.g. organization.delegate relationship scopes,
+    # plan 7.5). The generic evaluator then checks capability + rules only
+    # and a tool-specific validator registered with the catalog owns scope
+    # enforcement — still policy code, never model output (plan 52).
+    defers_scope: bool = False
 
     @field_validator("name", "required_capability")
     @classmethod

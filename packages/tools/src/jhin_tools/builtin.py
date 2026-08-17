@@ -26,6 +26,7 @@ from jhin_policy import (
     CapabilityRegistry,
     Grant,
     GrantEffect,
+    PolicyDecision,
     RiskLevel,
     ToolDefinition,
     capability_matches,
@@ -55,9 +56,18 @@ class ToolExecutionContext:
 
 ToolExecutor = Callable[[ToolExecutionContext, BaseModel], Awaitable[BaseModel]]
 
+# Optional tool-specific policy validator (plan 7.5): runs in the gateway
+# after the generic grant/policy evaluation and before approval staging or
+# execution. Receives the already-loaded grants; returns a DENY decision to
+# block the call or None to let it proceed. This is policy code — model
+# output never reaches it unvalidated.
+ToolValidator = Callable[
+    [ToolExecutionContext, BaseModel, Sequence[Grant]], Awaitable[PolicyDecision | None]
+]
+
 
 class ToolCatalog:
-    """Tool definitions plus their executors.
+    """Tool definitions plus their executors (and optional validators).
 
     Wraps a :class:`CapabilityRegistry`, so the same guards apply (no
     duplicate names, no self-modification capabilities).
@@ -66,16 +76,27 @@ class ToolCatalog:
     def __init__(self) -> None:
         self.registry = CapabilityRegistry()
         self._executors: dict[str, ToolExecutor] = {}
+        self._validators: dict[str, ToolValidator] = {}
 
-    def register(self, definition: ToolDefinition, executor: ToolExecutor) -> None:
+    def register(
+        self,
+        definition: ToolDefinition,
+        executor: ToolExecutor,
+        validator: ToolValidator | None = None,
+    ) -> None:
         self.registry.register(definition)
         self._executors[definition.name] = executor
+        if validator is not None:
+            self._validators[definition.name] = validator
 
     def get(self, name: str) -> tuple[ToolDefinition, ToolExecutor] | None:
         definition = self.registry.get(name)
         if definition is None:
             return None
         return definition, self._executors[name]
+
+    def validator_for(self, name: str) -> ToolValidator | None:
+        return self._validators.get(name)
 
     def definitions(self) -> tuple[ToolDefinition, ...]:
         return tuple(self.registry)
@@ -261,11 +282,19 @@ BUILTIN_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor], ...] = (
 
 
 def build_builtin_catalog() -> ToolCatalog:
-    """The default Phase 4 catalog. Phase 5 connectors extend it by calling
-    ``catalog.register`` with their own definitions and executors."""
+    """The default built-in catalog: Phase 4 system tools plus the Phase 8
+    organization tools (delegation + structured result reporting). Phase 5
+    connectors extend it by calling ``catalog.register`` with their own
+    definitions and executors."""
+    # Local import: jhin_tools.organization imports ToolExecutionContext
+    # from this module.
+    from jhin_tools.organization import ORGANIZATION_TOOLS
+
     catalog = ToolCatalog()
     for definition, executor in BUILTIN_TOOLS:
         catalog.register(definition, executor)
+    for definition, org_executor, validator in ORGANIZATION_TOOLS:
+        catalog.register(definition, org_executor, validator)
     return catalog
 
 
