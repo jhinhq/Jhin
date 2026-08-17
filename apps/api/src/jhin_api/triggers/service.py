@@ -84,19 +84,30 @@ async def last_invocations(
     """Most recent invocation per trigger, for the list view (plan 17.10)."""
     if not trigger_ids:
         return {}
-    # UUIDv7 ids are time-ordered, so max(id) is the newest row — and unlike
-    # created_at it can never tie within a transaction.
-    latest = (
-        select(func.max(TriggerInvocation.id).label("latest_id"))
+    # UUIDv7 ids are time-ordered (and compare bytewise the same way in
+    # Postgres and SQLite), so `id desc` picks the newest row — and unlike
+    # created_at it can never tie within a transaction. Postgres has no
+    # max(uuid) aggregate, hence the window function.
+    ranked = (
+        select(
+            TriggerInvocation.id.label("invocation_id"),
+            func.row_number()
+            .over(
+                partition_by=TriggerInvocation.trigger_id,
+                order_by=TriggerInvocation.id.desc(),
+            )
+            .label("rank"),
+        )
         .where(
             TriggerInvocation.workspace_id == workspace_id,
             TriggerInvocation.trigger_id.in_(trigger_ids),
         )
-        .group_by(TriggerInvocation.trigger_id)
         .subquery()
     )
     rows = await db.scalars(
-        select(TriggerInvocation).where(TriggerInvocation.id.in_(select(latest.c.latest_id)))
+        select(TriggerInvocation).where(
+            TriggerInvocation.id.in_(select(ranked.c.invocation_id).where(ranked.c.rank == 1))
+        )
     )
     return {row.trigger_id: row for row in rows}
 
