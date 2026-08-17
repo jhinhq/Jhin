@@ -234,12 +234,15 @@ class AgentActivities:
             # (plan 14; everything here is already sanitized + size-capped).
             if result.tool_name.startswith("cli.") and result.sanitized_output is not None:
                 output = result.sanitized_output
+                # File tools omit job fields (they raise on job failure), so
+                # a persisted executed call implies the job completed.
+                default_status = "completed" if result.status == "executed" else "failed"
                 emit(
                     "sandbox.job",
                     {
                         "sandbox_job_id": output.get("sandbox_job_id"),
                         "command": output.get("command"),
-                        "job_status": output.get("status"),
+                        "job_status": output.get("status", default_status),
                         "exit_code": output.get("exit_code"),
                         "job_duration_ms": output.get("duration_ms"),
                         "stdout": output.get("stdout", ""),
