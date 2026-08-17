@@ -14,11 +14,13 @@ from temporalio.worker import Worker
 from jhin_agent_worker.activities import AgentActivities
 from jhin_agent_worker.resources import Resources
 from jhin_agent_worker.settings import Settings
+from jhin_agent_worker.trigger_activities import TriggerActivities
 from jhin_observability import configure_logging, get_logger
 from jhin_observability.healthfile import clear_heartbeat, run_heartbeat
 from jhin_secrets.redaction import redact_event_dict
 from jhin_workflows import AGENT_TASK_QUEUE
 from jhin_workflows.agent_task import AgentTaskWorkflow
+from jhin_workflows.triggered_task import TriggeredTaskWorkflow
 
 logger = get_logger(__name__)
 
@@ -64,6 +66,7 @@ async def main() -> None:
     client = await connect_with_retry(settings)
     resources = await resources_with_retry(settings)
     activities = AgentActivities(resources)
+    trigger_activities = TriggerActivities(resources)
     logger.info(
         "temporal.connected",
         address=settings.temporal_address,
@@ -80,12 +83,14 @@ async def main() -> None:
     worker = Worker(
         client,
         task_queue=AGENT_TASK_QUEUE,
-        workflows=[AgentTaskWorkflow],
+        workflows=[AgentTaskWorkflow, TriggeredTaskWorkflow],
         activities=[
             activities.resolve_snapshot_activity,
             activities.run_agent_step_activity,
             activities.resolve_approval_activity,
             activities.finalize_run_activity,
+            trigger_activities.prepare_triggered_task_activity,
+            trigger_activities.sync_external_activity,
         ],
     )
     try:
