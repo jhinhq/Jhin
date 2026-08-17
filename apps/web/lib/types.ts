@@ -125,3 +125,136 @@ export interface AuditEventPage {
   events: AuditEvent[];
   total: number;
 }
+
+// --- Phase 3: secrets, models, tasks, runs ---
+
+export type ModelProviderType =
+  | "openai"
+  | "anthropic"
+  | "openrouter"
+  | "ollama"
+  | "openai_compatible";
+
+export interface SecretOut {
+  id: string;
+  workspace_id: string;
+  name: string;
+  type: string;
+  masked_hint: string;
+  key_version: number;
+  last_used_at: string | null;
+  rotated_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ModelProvider {
+  id: string;
+  workspace_id: string;
+  type: ModelProviderType;
+  display_name: string;
+  base_url: string | null;
+  secret_id: string | null;
+  enabled: boolean;
+  last_verified_at: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ModelProfile {
+  id: string;
+  workspace_id: string;
+  provider_id: string;
+  model_name: string;
+  display_name: string;
+  context_window: number | null;
+  input_cost_micros_per_million: number | null;
+  output_cost_micros_per_million: number | null;
+  supports_tools: boolean;
+  supports_reasoning: boolean;
+  config_json: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkspaceDetail extends Workspace {
+  default_model_profile_id: string | null;
+}
+
+export type TaskState =
+  | "queued"
+  | "running"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface Task {
+  id: string;
+  title: string;
+  description: string;
+  state: TaskState;
+  priority: string;
+  assigned_agent_id: string | null;
+  temporal_workflow_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Run {
+  id: string;
+  task_id: string | null;
+  agent_id: string;
+  status: string;
+  model_profile_id: string | null;
+  snapshot_hash: string;
+  started_at: string | null;
+  completed_at: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  cached_tokens: number;
+  estimated_cost_micros: number;
+  steps_used: number;
+  error_code: string | null;
+  error_message: string | null;
+  created_at: string;
+}
+
+export interface RunEvent {
+  id: string;
+  run_id: string;
+  seq: number;
+  event_type: string;
+  payload_json: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface TaskMessage {
+  id: string;
+  task_id: string | null;
+  run_id: string | null;
+  sender_type: string;
+  sender_id: string | null;
+  message_type: string;
+  content_json: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface TaskDetail {
+  task: Task;
+  runs: Run[];
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_cost_micros: number;
+}
+
+export interface TaskList {
+  items: Task[];
+  total: number;
+}
+
+export interface RunList {
+  items: Run[];
+  total: number;
+}

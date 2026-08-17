@@ -44,9 +44,9 @@ describe("wizard validation", () => {
     }
   });
 
-  it("steps 4-7 are stubbed for later phases", () => {
+  it("only steps 5-7 remain stubbed for later phases (model is live in Phase 3)", () => {
     const disabled = WIZARD_STEPS.filter((s) => s.disabledPhase).map((s) => s.id);
-    expect(disabled).toEqual([4, 5, 6, 7]);
+    expect(disabled).toEqual([5, 6, 7]);
   });
 });
 
@@ -64,18 +64,21 @@ describe("wizard payload", () => {
       role_title: "Chief",
       team_id: null,
       manager_agent_id: null,
+      model_profile_id: null,
     });
   });
 
-  it("passes through team and manager ids", () => {
+  it("passes through team, manager, and model profile ids", () => {
     const payload = toCreatePayload({
       ...EMPTY_WIZARD,
       name: "SWE",
       teamId: "team-1",
       managerAgentId: "agent-1",
+      modelProfileId: "profile-1",
     });
     expect(payload.team_id).toBe("team-1");
     expect(payload.manager_agent_id).toBe("agent-1");
+    expect(payload.model_profile_id).toBe("profile-1");
   });
 });
 

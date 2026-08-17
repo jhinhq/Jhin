@@ -1,7 +1,7 @@
 "use client";
 
-/** Agent creation wizard (plan 17.6). Steps 1-3 and 8 are live; steps 4-7
- * (model, tools, autonomy, budget) are shown but arrive in Phases 3-4. */
+/** Agent creation wizard (plan 17.6). Steps 1-4 (identity, instructions,
+ * placement, model) and 8 (review) are live; steps 5-7 arrive in Phase 4. */
 
 import { useMutation } from "@tanstack/react-query";
 import { Check, ChevronLeft, ChevronRight, Lock } from "lucide-react";
@@ -19,7 +19,12 @@ import {
   Textarea,
 } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
-import { useInvalidateOrg, useOrgGraph } from "@/lib/hooks";
+import {
+  useInvalidateOrg,
+  useModelProfiles,
+  useOrgGraph,
+  useWorkspaceDetail,
+} from "@/lib/hooks";
 import type { Agent } from "@/lib/types";
 import {
   AGENT_TEMPLATES,
@@ -97,6 +102,8 @@ function WizardInner() {
   const { workspace } = useWorkspace();
   const workspaceId = workspace.workspace_id;
   const graph = useOrgGraph(workspaceId);
+  const profiles = useModelProfiles(workspaceId);
+  const workspaceDetail = useWorkspaceDetail(workspaceId);
   const invalidate = useInvalidateOrg(workspaceId);
 
   const [step, setStep] = useState(1);
@@ -135,6 +142,11 @@ function WizardInner() {
   const errors = attempted ? validateStep(step, state) : [];
   const team = teams.find((t) => t.id === state.teamId);
   const manager = agents.find((a) => a.id === state.managerAgentId);
+  const profileList = profiles.data ?? [];
+  const defaultProfile = profileList.find(
+    (p) => p.id === workspaceDetail.data?.default_model_profile_id,
+  );
+  const chosenProfile = profileList.find((p) => p.id === state.modelProfileId);
 
   const goNext = () => {
     const validation = validateStep(step, state);
@@ -248,6 +260,35 @@ function WizardInner() {
               </Select>
             </Field>
           </div>
+        ) : step === 4 ? (
+          <div className="space-y-4">
+            <Field
+              label="Model profile"
+              hint={
+                defaultProfile
+                  ? `Workspace default: ${defaultProfile.display_name} (${defaultProfile.model_name}).`
+                  : "No workspace default is set — configure one on the Models page."
+              }
+            >
+              <Select
+                value={state.modelProfileId}
+                onChange={(e) => patch({ modelProfileId: e.target.value })}
+              >
+                <option value="">Workspace default</option>
+                {profileList.map((profile) => (
+                  <option key={profile.id} value={profile.id}>
+                    {profile.display_name} — {profile.model_name}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            {profileList.length === 0 ? (
+              <p className="rounded-md border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-warn">
+                No model profiles exist yet. The agent can be created, but it cannot run tasks
+                until a profile is assigned or a workspace default is set (Models page).
+              </p>
+            ) : null}
+          </div>
         ) : (
           <div className="space-y-4">
             <div className="rounded-xl border border-line bg-surface px-5 py-2">
@@ -268,8 +309,18 @@ function WizardInner() {
                 }
               />
               <ReviewRow
-                label="Model / tools / autonomy / budget"
-                value={<span className="text-faint">defaults · configure in Phases 3-4</span>}
+                label="Model"
+                value={
+                  chosenProfile
+                    ? `${chosenProfile.display_name} (${chosenProfile.model_name})`
+                    : defaultProfile
+                      ? `Workspace default — ${defaultProfile.display_name}`
+                      : "Workspace default (none set yet)"
+                }
+              />
+              <ReviewRow
+                label="Tools / autonomy / budget"
+                value={<span className="text-faint">defaults · configure in Phase 4</span>}
               />
             </div>
             <ErrorNote

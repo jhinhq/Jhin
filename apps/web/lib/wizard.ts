@@ -10,6 +10,8 @@ export interface WizardState {
   systemPrompt: string;
   teamId: string;
   managerAgentId: string;
+  /** Empty string = use the workspace default profile (plan 15.2). */
+  modelProfileId: string;
 }
 
 export const EMPTY_WIZARD: WizardState = {
@@ -19,6 +21,7 @@ export const EMPTY_WIZARD: WizardState = {
   systemPrompt: "",
   teamId: "",
   managerAgentId: "",
+  modelProfileId: "",
 };
 
 export interface WizardStep {
@@ -32,10 +35,12 @@ export const WIZARD_STEPS: WizardStep[] = [
   { id: 1, title: "Identity" },
   { id: 2, title: "Role & instructions" },
   { id: 3, title: "Team & manager" },
-  { id: 4, title: "Model", disabledPhase: "Phase 3" },
+  { id: 4, title: "Model" },
   { id: 5, title: "Tools & connections", disabledPhase: "Phase 4" },
   { id: 6, title: "Autonomy & approvals", disabledPhase: "Phase 4" },
-  { id: 7, title: "Limits & budget", disabledPhase: "Phase 3" },
+  // Step/time limits are editable in the agent drawer today; budget
+  // *enforcement* arrives with policies in Phase 4.
+  { id: 7, title: "Limits & budget", disabledPhase: "Phase 4" },
   { id: 8, title: "Review" },
 ];
 
@@ -161,5 +166,6 @@ export function toCreatePayload(state: WizardState): Record<string, unknown> {
     system_prompt: state.systemPrompt,
     team_id: state.teamId || null,
     manager_agent_id: state.managerAgentId || null,
+    model_profile_id: state.modelProfileId || null,
   };
 }

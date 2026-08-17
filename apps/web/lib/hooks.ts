@@ -10,9 +10,21 @@ import type {
   BootstrapStatus,
   Member,
   MeResponse,
+  ModelProfile,
+  ModelProvider,
   OrgGraph,
+  RunEvent,
+  RunList,
+  SecretOut,
+  TaskDetail,
+  TaskList,
+  TaskMessage,
   Team,
+  WorkspaceDetail,
 } from "@/lib/types";
+
+/** Poll cadence for live task/run views until SSE lands (plan 18). */
+export const LIVE_POLL_MS = 2000;
 
 export function useMe() {
   return useQuery({
@@ -77,6 +89,107 @@ export function useAuditEvents(
     enabled,
     placeholderData: (previous) => previous,
   });
+}
+
+export function useWorkspaceDetail(workspaceId: string) {
+  return useQuery({
+    queryKey: ["workspace", workspaceId],
+    queryFn: () => api<WorkspaceDetail>(`/api/v1/workspaces/${workspaceId}`),
+  });
+}
+
+export function useSecrets(workspaceId: string, enabled = true) {
+  return useQuery({
+    queryKey: ["secrets", workspaceId],
+    queryFn: () => api<SecretOut[]>(`/api/v1/workspaces/${workspaceId}/secrets`),
+    enabled,
+  });
+}
+
+export function useModelProviders(workspaceId: string) {
+  return useQuery({
+    queryKey: ["model-providers", workspaceId],
+    queryFn: () => api<ModelProvider[]>(`/api/v1/workspaces/${workspaceId}/model-providers`),
+  });
+}
+
+export function useModelProfiles(workspaceId: string) {
+  return useQuery({
+    queryKey: ["model-profiles", workspaceId],
+    queryFn: () => api<ModelProfile[]>(`/api/v1/workspaces/${workspaceId}/model-profiles`),
+  });
+}
+
+export function useTasks(
+  workspaceId: string,
+  params: Record<string, string | number | undefined> = {},
+) {
+  return useQuery({
+    queryKey: ["tasks", workspaceId, params],
+    queryFn: () => api<TaskList>(`/api/v1/workspaces/${workspaceId}/tasks`, { params }),
+    placeholderData: (previous) => previous,
+    refetchInterval: LIVE_POLL_MS,
+  });
+}
+
+export function useTask(workspaceId: string, taskId: string, live: boolean) {
+  return useQuery({
+    queryKey: ["task", workspaceId, taskId],
+    queryFn: () => api<TaskDetail>(`/api/v1/workspaces/${workspaceId}/tasks/${taskId}`),
+    refetchInterval: live ? LIVE_POLL_MS : false,
+  });
+}
+
+export function useTaskTimeline(workspaceId: string, taskId: string, live: boolean) {
+  return useQuery({
+    queryKey: ["task-timeline", workspaceId, taskId],
+    queryFn: () => api<RunEvent[]>(`/api/v1/workspaces/${workspaceId}/tasks/${taskId}/timeline`),
+    refetchInterval: live ? LIVE_POLL_MS : false,
+  });
+}
+
+export function useTaskMessages(workspaceId: string, taskId: string, live: boolean) {
+  return useQuery({
+    queryKey: ["task-messages", workspaceId, taskId],
+    queryFn: () =>
+      api<TaskMessage[]>(`/api/v1/workspaces/${workspaceId}/tasks/${taskId}/messages`),
+    refetchInterval: live ? LIVE_POLL_MS : false,
+  });
+}
+
+export function useRuns(
+  workspaceId: string,
+  params: Record<string, string | number | undefined> = {},
+) {
+  return useQuery({
+    queryKey: ["runs", workspaceId, params],
+    queryFn: () => api<RunList>(`/api/v1/workspaces/${workspaceId}/runs`, { params }),
+    placeholderData: (previous) => previous,
+    refetchInterval: LIVE_POLL_MS,
+  });
+}
+
+/** Invalidate task/run views after a task mutation. */
+export function useInvalidateTasks(workspaceId: string) {
+  const queryClient = useQueryClient();
+  return () => {
+    void queryClient.invalidateQueries({ queryKey: ["tasks", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["task", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["task-timeline", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["task-messages", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["runs", workspaceId] });
+  };
+}
+
+/** Invalidate model configuration views after a mutation. */
+export function useInvalidateModels(workspaceId: string) {
+  const queryClient = useQueryClient();
+  return () => {
+    void queryClient.invalidateQueries({ queryKey: ["model-providers", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["model-profiles", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["secrets", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["workspace", workspaceId] });
+  };
 }
 
 /** Invalidate everything that renders org structure after a mutation. */

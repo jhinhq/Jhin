@@ -4,11 +4,14 @@
  * Settings tabs. Later-phase tabs are visible but disabled with their phase. */
 
 import { useMutation } from "@tanstack/react-query";
-import { Pause, Play, Trash2, X } from "lucide-react";
+import { MessageSquare, Pause, Play, Trash2, X } from "lucide-react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
   Badge,
   Button,
+  Dialog,
   ErrorNote,
   Field,
   Input,
@@ -18,19 +21,22 @@ import {
   Textarea,
 } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
-import { useAgent, useInvalidateOrg } from "@/lib/hooks";
-import type { Agent, AutonomyLevel, OrgAgentNode, OrgTeamNode } from "@/lib/types";
+import {
+  useAgent,
+  useInvalidateOrg,
+  useInvalidateTasks,
+  useModelProfiles,
+  useWorkspaceDetail,
+} from "@/lib/hooks";
+import type { Agent, AutonomyLevel, OrgAgentNode, OrgTeamNode, Task } from "@/lib/types";
 import { useWorkspace } from "@/lib/workspace-context";
 
 const TABS = [
   { id: "overview", label: "Overview" },
   { id: "instructions", label: "Instructions" },
+  { id: "model", label: "Model" },
   { id: "tools", label: "Tools & Access", phase: "Phase 4" },
-  { id: "model", label: "Model", phase: "Phase 3" },
-  { id: "tasks", label: "Tasks", phase: "Phase 3" },
-  { id: "runs", label: "Runs", phase: "Phase 3" },
   { id: "memory", label: "Memory", phase: "Phase 6" },
-  { id: "activity", label: "Activity", phase: "Phase 3" },
   { id: "settings", label: "Settings" },
 ] as const;
 
@@ -59,9 +65,12 @@ export function AgentDrawer({
   const { workspace, can } = useWorkspace();
   const workspaceId = workspace.workspace_id;
   const agentQuery = useAgent(workspaceId, agentId);
+  const profiles = useModelProfiles(workspaceId);
+  const workspaceDetail = useWorkspaceDetail(workspaceId);
   const invalidate = useInvalidateOrg(workspaceId);
   // The drawer is mounted with key={agentId}, so tab state resets per agent.
   const [tab, setTab] = useState<TabId>("overview");
+  const [messageOpen, setMessageOpen] = useState(false);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -130,6 +139,11 @@ export function AgentDrawer({
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
+                  {can("member") && agent.status === "active" ? (
+                    <Button size="sm" variant="primary" onClick={() => setMessageOpen(true)}>
+                      <MessageSquare size={13} /> Message
+                    </Button>
+                  ) : null}
                   {can("member") ? (
                     <Button size="sm" onClick={() => toggle.mutate()} disabled={toggle.isPending}>
                       {agent.status === "paused" ? (
@@ -194,10 +208,37 @@ export function AgentDrawer({
                   />
                   <OverviewRow
                     label="Model"
-                    value={<span className="text-faint">assign in Phase 3</span>}
+                    value={(() => {
+                      const profile = profiles.data?.find(
+                        (p) => p.id === agent.model_profile_id,
+                      );
+                      if (profile) return `${profile.display_name} (${profile.model_name})`;
+                      const fallback = profiles.data?.find(
+                        (p) => p.id === workspaceDetail.data?.default_model_profile_id,
+                      );
+                      return fallback
+                        ? `Workspace default — ${fallback.display_name}`
+                        : "Workspace default (none set)";
+                    })()}
                   />
                   <OverviewRow label="Slug" value={<code className="text-xs">{agent.slug}</code>} />
+                  <div className="mt-4 flex gap-2">
+                    <Link href={`/tasks?agent=${agent.id}`}>
+                      <Button size="sm" variant="ghost">
+                        View tasks
+                      </Button>
+                    </Link>
+                    <Link href={`/runs?agent=${agent.id}`}>
+                      <Button size="sm" variant="ghost">
+                        View runs
+                      </Button>
+                    </Link>
+                  </div>
                 </div>
+              ) : null}
+
+              {tab === "model" ? (
+                <ModelTab agent={agent} canEdit={can("admin")} onSaved={invalidate} />
               ) : null}
 
               {tab === "instructions" ? (
@@ -230,6 +271,176 @@ export function AgentDrawer({
           </>
         )}
       </aside>
+      {messageOpen && agent ? (
+        <MessageDialog agent={agent} onClose={() => setMessageOpen(false)} />
+      ) : null}
+    </div>
+  );
+}
+
+/** Message an agent (plan 17.5): the message becomes a task + run and the
+ * user lands in the task's conversation view. */
+function MessageDialog({ agent, onClose }: { agent: Agent; onClose: () => void }) {
+  const router = useRouter();
+  const { workspace } = useWorkspace();
+  const invalidateTasks = useInvalidateTasks(workspace.workspace_id);
+  const [text, setText] = useState("");
+
+  const send = useMutation({
+    mutationFn: () =>
+      api<Task>(
+        `/api/v1/workspaces/${workspace.workspace_id}/agents/${agent.id}/message`,
+        { method: "POST", body: { text: text.trim() } },
+      ),
+    onSuccess: (task) => {
+      invalidateTasks();
+      onClose();
+      router.push(`/tasks/${task.id}`);
+    },
+  });
+
+  return (
+    <Dialog title={`Message ${agent.name}`} open onClose={onClose} wide>
+      <form
+        className="space-y-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (text.trim()) send.mutate();
+        }}
+      >
+        <Field
+          label="Message"
+          hint="Starts a conversational task; the agent replies in the task view."
+        >
+          <Textarea
+            autoFocus
+            rows={5}
+            maxLength={20000}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder={`Ask ${agent.name} to do something…`}
+          />
+        </Field>
+        <ErrorNote
+          message={
+            send.error instanceof ApiError
+              ? send.error.detail
+              : send.error
+                ? "Sending the message failed."
+                : null
+          }
+        />
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" variant="primary" disabled={send.isPending || !text.trim()}>
+            {send.isPending ? "Sending…" : "Send message"}
+          </Button>
+        </div>
+      </form>
+    </Dialog>
+  );
+}
+
+function ModelTab({
+  agent,
+  canEdit,
+  onSaved,
+}: {
+  agent: Agent;
+  canEdit: boolean;
+  onSaved: () => void;
+}) {
+  const { workspace } = useWorkspace();
+  const workspaceId = workspace.workspace_id;
+  const profiles = useModelProfiles(workspaceId);
+  const workspaceDetail = useWorkspaceDetail(workspaceId);
+  const [profileId, setProfileId] = useState(agent.model_profile_id ?? "");
+  const [temperature, setTemperature] = useState(
+    agent.temperature !== null ? String(agent.temperature) : "",
+  );
+  const [maxTokens, setMaxTokens] = useState(
+    agent.max_output_tokens !== null ? String(agent.max_output_tokens) : "",
+  );
+
+  const save = useMutation({
+    mutationFn: () =>
+      api<Agent>(`/api/v1/workspaces/${workspaceId}/agents/${agent.id}`, {
+        method: "PATCH",
+        body: {
+          model_profile_id: profileId || null,
+          temperature: temperature === "" ? null : Number(temperature),
+          max_output_tokens: maxTokens === "" ? null : Number(maxTokens),
+        },
+      }),
+    onSuccess: onSaved,
+  });
+
+  const defaultProfile = profiles.data?.find(
+    (p) => p.id === workspaceDetail.data?.default_model_profile_id,
+  );
+
+  return (
+    <div className="space-y-4">
+      <Field
+        label="Model profile"
+        hint={
+          defaultProfile
+            ? `Workspace default: ${defaultProfile.display_name} (${defaultProfile.model_name}).`
+            : "No workspace default is set — configure one on the Models page."
+        }
+      >
+        <Select
+          value={profileId}
+          disabled={!canEdit}
+          onChange={(e) => setProfileId(e.target.value)}
+        >
+          <option value="">Workspace default</option>
+          {(profiles.data ?? []).map((profile) => (
+            <option key={profile.id} value={profile.id}>
+              {profile.display_name} — {profile.model_name}
+            </option>
+          ))}
+        </Select>
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Temperature" hint="Empty = provider default.">
+          <Input
+            type="number"
+            min="0"
+            max="2"
+            step="0.1"
+            disabled={!canEdit}
+            value={temperature}
+            onChange={(e) => setTemperature(e.target.value)}
+            placeholder="—"
+          />
+        </Field>
+        <Field label="Max output tokens" hint="Empty = provider default.">
+          <Input
+            type="number"
+            min="1"
+            disabled={!canEdit}
+            value={maxTokens}
+            onChange={(e) => setMaxTokens(e.target.value)}
+            placeholder="—"
+          />
+        </Field>
+      </div>
+      {canEdit ? (
+        <div className="flex items-center justify-end gap-3">
+          {save.error instanceof ApiError ? (
+            <span className="text-xs text-danger">{save.error.detail}</span>
+          ) : null}
+          {save.isSuccess ? <span className="text-xs text-ok">Saved</span> : null}
+          <Button variant="primary" size="sm" disabled={save.isPending} onClick={() => save.mutate()}>
+            {save.isPending ? "Saving…" : "Save model settings"}
+          </Button>
+        </div>
+      ) : (
+        <p className="text-xs text-dim">Model settings can be changed by workspace admins.</p>
+      )}
     </div>
   );
 }
