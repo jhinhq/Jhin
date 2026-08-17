@@ -6,11 +6,14 @@
 import { useMutation } from "@tanstack/react-query";
 import { Plus, ShieldCheck, ShieldOff, Trash2 } from "lucide-react";
 import { useState } from "react";
-import { Badge, Button, ErrorNote, Field, Select, Spinner } from "@/components/ui";
+import { Badge, Button, ErrorNote, Field, Input, Select, Spinner } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
+import { buildConnectorScope, capabilityConnectorType } from "@/lib/connectors";
 import {
   useAgentGrants,
   useAgentPolicy,
+  useConnections,
+  useConnectors,
   useInvalidateAgentAccess,
   useTools,
 } from "@/lib/hooks";
@@ -29,26 +32,46 @@ import { useWorkspace } from "@/lib/workspace-context";
 const PRESETS: ApprovalPreset[] = ["autonomous", "balanced", "restricted"];
 
 export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: boolean }) {
-  const { workspace } = useWorkspace();
+  const { workspace, can } = useWorkspace();
   const workspaceId = workspace.workspace_id;
   const grants = useAgentGrants(workspaceId, agent.id);
   const policy = useAgentPolicy(workspaceId, agent.id);
   const tools = useTools(workspaceId);
+  const connectors = useConnectors();
+  const connections = useConnections(workspaceId, can("admin"));
   const invalidate = useInvalidateAgentAccess(workspaceId, agent.id);
 
   const [capability, setCapability] = useState("");
   const [effect, setEffect] = useState<GrantEffect>("allow");
+  const [connectionId, setConnectionId] = useState("");
+  const [repoScope, setRepoScope] = useState("");
+  const [branchScope, setBranchScope] = useState("");
   const [error, setError] = useState<string | null>(null);
+
+  const connectorTypes = (connectors.data ?? []).map((c) => c.connector_type);
+  const grantConnectorType = capabilityConnectorType(capability, connectorTypes);
+  const matchingConnections = (connections.data ?? []).filter(
+    (connection) => connection.connector_type === grantConnectorType,
+  );
 
   const addGrant = useMutation({
     mutationFn: () =>
       api(`/api/v1/workspaces/${workspaceId}/agents/${agent.id}/grants`, {
         method: "POST",
-        body: { capability, scope: {}, effect },
+        body: {
+          capability,
+          scope: grantConnectorType
+            ? buildConnectorScope(connectionId, repoScope, branchScope)
+            : {},
+          effect,
+        },
       }),
     onSuccess: () => {
       setError(null);
       setCapability("");
+      setConnectionId("");
+      setRepoScope("");
+      setBranchScope("");
       invalidate();
     },
     onError: (err) => setError(err instanceof ApiError ? err.detail : "Adding the grant failed."),
@@ -138,36 +161,79 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
 
         {canEdit ? (
           <form
-            className="mt-3 flex items-end gap-2"
+            className="mt-3 space-y-2"
             onSubmit={(event) => {
               event.preventDefault();
               if (capability) addGrant.mutate();
             }}
           >
-            <div className="flex-1">
-              <Field label="Capability">
-                <Select value={capability} onChange={(e) => setCapability(e.target.value)}>
-                  <option value="">Choose a capability…</option>
-                  {toolList.map((tool) => (
-                    <option key={tool.name} value={tool.required_capability}>
-                      {tool.required_capability} ({tool.risk})
-                    </option>
-                  ))}
-                  <option value="system.*">system.* (all system tools)</option>
-                </Select>
-              </Field>
+            <div className="flex items-end gap-2">
+              <div className="flex-1">
+                <Field label="Capability">
+                  <Select value={capability} onChange={(e) => setCapability(e.target.value)}>
+                    <option value="">Choose a capability…</option>
+                    {toolList.map((tool) => (
+                      <option key={tool.name} value={tool.required_capability}>
+                        {tool.required_capability} ({tool.risk})
+                      </option>
+                    ))}
+                    <option value="system.*">system.* (all system tools)</option>
+                  </Select>
+                </Field>
+              </div>
+              <div className="w-28">
+                <Field label="Effect">
+                  <Select
+                    value={effect}
+                    onChange={(e) => setEffect(e.target.value as GrantEffect)}
+                  >
+                    <option value="allow">allow</option>
+                    <option value="deny">deny</option>
+                  </Select>
+                </Field>
+              </div>
+              <Button
+                type="submit"
+                variant="primary"
+                disabled={!capability || addGrant.isPending}
+              >
+                <Plus size={13} /> Add
+              </Button>
             </div>
-            <div className="w-28">
-              <Field label="Effect">
-                <Select value={effect} onChange={(e) => setEffect(e.target.value as GrantEffect)}>
-                  <option value="allow">allow</option>
-                  <option value="deny">deny</option>
-                </Select>
-              </Field>
-            </div>
-            <Button type="submit" variant="primary" disabled={!capability || addGrant.isPending}>
-              <Plus size={13} /> Add
-            </Button>
+            {grantConnectorType ? (
+              <div
+                data-testid="connector-scope"
+                className="grid gap-2 rounded-lg border border-line bg-surface px-3 py-2.5 sm:grid-cols-3"
+              >
+                <Field label="Connection" hint="Restricts the grant to one connection.">
+                  <Select
+                    value={connectionId}
+                    onChange={(e) => setConnectionId(e.target.value)}
+                  >
+                    <option value="">Any connection</option>
+                    {matchingConnections.map((connection) => (
+                      <option key={connection.id} value={connection.id}>
+                        {connection.name}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                <Field label="Repository" hint="Exact or glob, e.g. octo/* — empty = any.">
+                  <Input
+                    value={repoScope}
+                    onChange={(e) => setRepoScope(e.target.value)}
+                    placeholder="octo/alpha"
+                  />
+                </Field>
+                <Field label="Branch" hint="Glob like agent/* — empty = any.">
+                  <Input
+                    value={branchScope}
+                    onChange={(e) => setBranchScope(e.target.value)}
+                    placeholder="agent/*"
+                  />
+                </Field>
+              </div>
+            ) : null}
           </form>
         ) : (
           <p className="mt-2 text-xs text-dim">Grants can be changed by workspace admins.</p>

@@ -16,6 +16,10 @@ export interface WizardState {
   modelProfileId: string;
   /** Capabilities to allow-grant right after creation (plan 12.3). */
   grantCapabilities: string[];
+  /** Scope applied to connector-capability grants (plan 11): restrict to one
+   * connection and optional repository glob. Empty = unscoped. */
+  grantConnectionId: string;
+  grantRepository: string;
   approvalPreset: ApprovalPreset;
   autonomyLevel: AutonomyLevel;
 }
@@ -29,6 +33,8 @@ export const EMPTY_WIZARD: WizardState = {
   managerAgentId: "",
   modelProfileId: "",
   grantCapabilities: [],
+  grantConnectionId: "",
+  grantRepository: "",
   approvalPreset: "balanced",
   autonomyLevel: "supervised",
 };

@@ -20,7 +20,10 @@ import {
   Textarea,
 } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
+import { buildConnectorScope, capabilityConnectorType } from "@/lib/connectors";
 import {
+  useConnections,
+  useConnectors,
   useInvalidateOrg,
   useModelProfiles,
   useOrgGraph,
@@ -108,6 +111,8 @@ function WizardInner() {
   const graph = useOrgGraph(workspaceId);
   const profiles = useModelProfiles(workspaceId);
   const tools = useTools(workspaceId);
+  const connectors = useConnectors();
+  const connections = useConnections(workspaceId);
   const workspaceDetail = useWorkspaceDetail(workspaceId);
   const invalidate = useInvalidateOrg(workspaceId);
 
@@ -128,10 +133,19 @@ function WizardInner() {
         body: toCreatePayload(state),
       });
       // Apply tool grants and the approval policy chosen in steps 5-6.
+      // Connector capabilities carry the connection/repository scope (plan 11).
+      const connectorTypes = (connectors.data ?? []).map((c) => c.connector_type);
       for (const capability of state.grantCapabilities) {
+        const isConnector = capabilityConnectorType(capability, connectorTypes) !== null;
         await api(`/api/v1/workspaces/${workspaceId}/agents/${agent.id}/grants`, {
           method: "POST",
-          body: { capability, scope: {}, effect: "allow" },
+          body: {
+            capability,
+            scope: isConnector
+              ? buildConnectorScope(state.grantConnectionId, state.grantRepository, "")
+              : {},
+            effect: "allow",
+          },
         });
       }
       await api(`/api/v1/workspaces/${workspaceId}/agents/${agent.id}/policy`, {
@@ -311,7 +325,7 @@ function WizardInner() {
           <div className="space-y-4">
             <Field
               label="Tool access"
-              hint="Deny-by-default: the agent can only call tools you grant here. Connectors arrive in Phase 5."
+              hint="Deny-by-default: the agent can only call tools you grant here."
             >
               <div className="space-y-2 pt-1">
                 {(tools.data ?? []).map((tool) => {
@@ -342,6 +356,39 @@ function WizardInner() {
                 {tools.isPending ? <Spinner /> : null}
               </div>
             </Field>
+            {state.grantCapabilities.some(
+              (capability) =>
+                capabilityConnectorType(
+                  capability,
+                  (connectors.data ?? []).map((c) => c.connector_type),
+                ) !== null,
+            ) ? (
+              <div className="grid gap-3 rounded-lg border border-line bg-surface px-4 py-3 sm:grid-cols-2">
+                <Field
+                  label="Connection for connector tools"
+                  hint="Restricts the granted connector capabilities to one connection."
+                >
+                  <Select
+                    value={state.grantConnectionId}
+                    onChange={(e) => patch({ grantConnectionId: e.target.value })}
+                  >
+                    <option value="">Any connection</option>
+                    {(connections.data ?? []).map((connection) => (
+                      <option key={connection.id} value={connection.id}>
+                        {connection.name} ({connection.connector_type})
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                <Field label="Repository scope" hint="Exact or glob, e.g. octo/* — empty = any.">
+                  <Input
+                    value={state.grantRepository}
+                    onChange={(e) => patch({ grantRepository: e.target.value })}
+                    placeholder="octo/alpha"
+                  />
+                </Field>
+              </div>
+            ) : null}
           </div>
         ) : step === 6 ? (
           <div className="space-y-4">

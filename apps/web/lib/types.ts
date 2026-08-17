@@ -319,6 +319,77 @@ export interface ApprovalList {
   pending_count: number;
 }
 
+// --- Phase 5: connectors and connections ---
+
+export interface SecretFieldSpec {
+  name: string;
+  label: string;
+  placeholder: string;
+  multiline: boolean;
+  required: boolean;
+}
+
+export interface AuthSchemeSpec {
+  type: string;
+  label: string;
+  description: string;
+  secret_fields: SecretFieldSpec[];
+}
+
+export interface ConfigFieldSpec {
+  name: string;
+  label: string;
+  required: boolean;
+  placeholder: string;
+  help: string;
+}
+
+export interface ConnectorInfo {
+  connector_type: string;
+  display_name: string;
+  icon: string;
+  description: string;
+  auth_schemes: AuthSchemeSpec[];
+  config_fields: ConfigFieldSpec[];
+  webhook_events: string[];
+  capabilities: string[];
+  supports_webhooks: boolean;
+  docs_url: string;
+}
+
+export type ConnectionStatus = "active" | "error" | "disabled";
+
+export interface ConnectionInfo {
+  id: string;
+  connector_type: string;
+  name: string;
+  auth_type: string;
+  status: ConnectionStatus;
+  public_id: string;
+  config_json: Record<string, unknown>;
+  created_by_user_id: string | null;
+  created_at: string;
+  last_verified_at: string | null;
+  last_error: string | null;
+}
+
+export interface WebhookSetup {
+  url_path: string;
+  secret: string;
+}
+
+export interface ConnectionCreated {
+  connection: ConnectionInfo;
+  webhook: WebhookSetup | null;
+}
+
+export interface VerifyResult {
+  ok: boolean;
+  message: string;
+  status: string;
+  details: Record<string, string>;
+}
+
 export interface ToolCallRecord {
   id: string;
   run_id: string;

@@ -10,6 +10,8 @@ import type {
   ApprovalList,
   AuditEventPage,
   BootstrapStatus,
+  ConnectionInfo,
+  ConnectorInfo,
   Grant,
   Member,
   MeResponse,
@@ -23,6 +25,7 @@ import type {
   TaskList,
   TaskMessage,
   Team,
+  ToolCallRecord,
   ToolInfo,
   WorkspaceDetail,
 } from "@/lib/types";
@@ -262,6 +265,43 @@ export function useInvalidateModels(workspaceId: string) {
     void queryClient.invalidateQueries({ queryKey: ["model-profiles", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["secrets", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["workspace", workspaceId] });
+  };
+}
+
+// --- Phase 5: connectors and connections ---
+
+export function useConnectors() {
+  return useQuery({
+    queryKey: ["connectors"],
+    queryFn: () => api<ConnectorInfo[]>("/api/v1/connectors"),
+    staleTime: 60_000, // static manifests; only change with deploys
+  });
+}
+
+export function useConnections(workspaceId: string, enabled = true) {
+  return useQuery({
+    queryKey: ["connections", workspaceId],
+    queryFn: () => api<ConnectionInfo[]>(`/api/v1/workspaces/${workspaceId}/connections`),
+    enabled,
+  });
+}
+
+export function useConnectionToolCalls(workspaceId: string, connectionId: string | null) {
+  return useQuery({
+    queryKey: ["connection-tool-calls", workspaceId, connectionId],
+    queryFn: () =>
+      api<ToolCallRecord[]>(
+        `/api/v1/workspaces/${workspaceId}/connections/${connectionId}/tool-calls`,
+      ),
+    enabled: connectionId !== null,
+  });
+}
+
+export function useInvalidateConnections(workspaceId: string) {
+  const queryClient = useQueryClient();
+  return () => {
+    void queryClient.invalidateQueries({ queryKey: ["connections", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["connection-tool-calls", workspaceId] });
   };
 }
 
