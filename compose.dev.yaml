@@ -6,6 +6,35 @@ services:
     environment:
       APP_ENV: dev
 
+  # Dev/test-only fake OpenAI-compatible provider so agents can run without
+  # real API keys (plan 32.2, 38). Reused agent-worker image; never part of
+  # the production-shaped compose.yaml.
+  fake-provider:
+    build:
+      context: .
+      dockerfile: docker/python.Dockerfile
+      args:
+        SERVICE_PACKAGE: jhin-agent-worker
+    command: ["python", "-m", "jhin_models.testing.fake_openai"]
+    environment:
+      FAKE_PROVIDER_PORT: "8080"
+    ports:
+      - "127.0.0.1:${FAKE_PROVIDER_DEV_PORT:-8090}:8080"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8080/v1/models', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks: [data]
+    restart: unless-stopped
+
   postgres:
     ports:
       - "127.0.0.1:${POSTGRES_DEV_PORT:-55432}:5432"

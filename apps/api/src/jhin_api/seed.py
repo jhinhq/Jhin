@@ -22,12 +22,24 @@ from jhin_api.audit import service as audit
 from jhin_api.security.passwords import hash_password
 from jhin_api.slugs import slugify
 from jhin_db import create_engine, create_session_factory
-from jhin_db.models import Agent, Team, User, Workspace, WorkspaceMembership
-from jhin_domain import ActorType, WorkspaceRole, new_uuid7
+from jhin_db.models import (
+    Agent,
+    ModelProfile,
+    ModelProvider,
+    Team,
+    User,
+    Workspace,
+    WorkspaceMembership,
+)
+from jhin_domain import ActorType, ModelProviderType, WorkspaceRole, new_uuid7
 
 DEV_OWNER_EMAIL = "owner@jhin.dev"
 DEV_OWNER_PASSWORD = "jhin-dev-password"  # dev-only; never use in production
 DEV_WORKSPACE_NAME = "Jhin HQ"
+
+# The compose dev stack runs a fake OpenAI-compatible provider (plan 32.2);
+# override when seeding from the host against a different endpoint.
+DEFAULT_FAKE_PROVIDER_URL = "http://fake-provider:8080/v1"
 
 
 def _agent(
@@ -138,6 +150,37 @@ async def seed(session: AsyncSession) -> str:
     engineering.manager_agent_id = cto.id
     marketing.manager_agent_id = director.id
 
+    # Fake model provider + profiles: agents can run tasks with zero real
+    # API keys. Users add real providers via the Models page later.
+    fake_provider = ModelProvider(
+        workspace_id=workspace.id,
+        type=ModelProviderType.OPENAI_COMPATIBLE.value,
+        display_name="Fake Provider (dev)",
+        base_url=os.environ.get("FAKE_PROVIDER_BASE_URL", DEFAULT_FAKE_PROVIDER_URL),
+    )
+    session.add(fake_provider)
+    await session.flush()
+    fake_mini = ModelProfile(
+        workspace_id=workspace.id,
+        provider_id=fake_provider.id,
+        model_name="fake-mini",
+        display_name="Fake Mini",
+        input_cost_micros_per_million=150_000,  # $0.15 / 1M input tokens
+        output_cost_micros_per_million=600_000,
+    )
+    fake_pro = ModelProfile(
+        workspace_id=workspace.id,
+        provider_id=fake_provider.id,
+        model_name="fake-pro",
+        display_name="Fake Pro",
+        input_cost_micros_per_million=2_500_000,
+        output_cost_micros_per_million=10_000_000,
+    )
+    session.add_all([fake_mini, fake_pro])
+    await session.flush()
+    workspace.default_model_profile_id = fake_mini.id
+    cto.model_profile_id = fake_pro.id  # one agent on a custom profile
+
     request_id = new_uuid7()
     seeded: list[tuple[UUID, str, str, str]] = [
         (workspace.id, "workspace.created", "workspace", workspace.name),
@@ -148,6 +191,9 @@ async def seed(session: AsyncSession) -> str:
         (qa.id, "agent.created", "agent", qa.name),
         (director.id, "agent.created", "agent", director.name),
         (blogger.id, "agent.created", "agent", blogger.name),
+        (fake_provider.id, "provider.created", "model_provider", fake_provider.display_name),
+        (fake_mini.id, "model_profile.created", "model_profile", fake_mini.display_name),
+        (fake_pro.id, "model_profile.created", "model_profile", fake_pro.display_name),
     ]
     for target_id, action, target_type, name in seeded:
         audit.record(
@@ -163,7 +209,8 @@ async def seed(session: AsyncSession) -> str:
 
     await session.commit()
     return (
-        f"seeded: workspace '{DEV_WORKSPACE_NAME}' with Engineering and Marketing; "
+        f"seeded: workspace '{DEV_WORKSPACE_NAME}' with Engineering and Marketing, "
+        f"fake model provider (default profile: Fake Mini); "
         f"dev owner {DEV_OWNER_EMAIL} / {DEV_OWNER_PASSWORD}"
     )
 
