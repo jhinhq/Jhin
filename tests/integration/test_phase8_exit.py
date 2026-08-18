@@ -896,14 +896,27 @@ async def test_concurrency_queues_second_task_and_survives_worker_restart(
 
     # Wait until task 1 genuinely holds the slot (run parked on approval).
     approval_id = ""
+    first_detail: dict[str, Any] = {}
     deadline = time.monotonic() + 60.0
-    while time.monotonic() < deadline and not approval_id:
+    while time.monotonic() < deadline:
         pending = await _get(client, f"/api/v1/workspaces/{ws}/approvals", status="pending")
+        first_detail = await _task(client, ws, first["id"])
+        parked_run = next(
+            (run for run in first_detail["runs"] if run["status"] == "waiting_approval"),
+            None,
+        )
         for row in pending["items"]:
             if row.get("task_id") == first["id"]:
                 approval_id = row["id"]
+        if parked_run is not None and approval_id:
+            break
         await asyncio.sleep(1.0)
     assert approval_id, "task 1 never parked on its approval"
+    parked_run = next(
+        (run for run in first_detail["runs"] if run["status"] == "waiting_approval"),
+        None,
+    )
+    assert parked_run is not None, first_detail
 
     second = await _assign(
         client, ws, agent["id"], f"P8e second {tag}", "Reply with a one-line status. No tools."
@@ -934,6 +947,17 @@ async def test_concurrency_queues_second_task_and_survives_worker_restart(
     compose("restart", "agent-worker", timeout=180.0)
 
     # Still parked + queued after the restart; now release the slot.
+    first_after_restart = await _task(client, ws, first["id"])
+    same_run = next(
+        (run for run in first_after_restart["runs"] if run["id"] == parked_run["id"]),
+        None,
+    )
+    assert same_run is not None, first_after_restart
+    assert same_run["status"] == "waiting_approval", first_after_restart
+    pending_after_restart = await _get(
+        client, f"/api/v1/workspaces/{ws}/approvals", status="pending"
+    )
+    assert any(row["id"] == approval_id for row in pending_after_restart["items"])
     still = await _task(client, ws, second["id"])
     assert still["task"]["state"] == "queued"
     approve = await client.post(
