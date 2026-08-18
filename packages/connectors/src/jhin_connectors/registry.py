@@ -55,9 +55,15 @@ def _linear() -> Connector:
     return LinearConnector()
 
 
+def _vercel() -> Connector:
+    from jhin_connectors.vercel.connector import VercelConnector
+
+    return VercelConnector()
+
+
 # One factory per shipped connector. Factories keep import cost lazy and are
 # the single line a contributor adds for a new connector (plan 36.5).
-DEFAULT_CONNECTORS: tuple[Callable[[], Connector], ...] = (_github, _cli, _linear)
+DEFAULT_CONNECTORS: tuple[Callable[[], Connector], ...] = (_github, _cli, _linear, _vercel)
 
 
 def default_registry() -> ConnectorRegistry:

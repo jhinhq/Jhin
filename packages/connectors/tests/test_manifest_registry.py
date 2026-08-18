@@ -21,6 +21,7 @@ from jhin_connectors.github.connector import GitHubConnector
 from jhin_connectors.github.manifest import GITHUB_CAPABILITIES
 from jhin_connectors.linear.connector import LinearConnector
 from jhin_connectors.linear.manifest import LINEAR_MANIFEST
+from jhin_connectors.vercel.connector import VercelConnector
 
 
 def _typed_manifest() -> ConnectorManifest:
@@ -317,6 +318,15 @@ def test_default_registry_ships_github() -> None:
     assert connector is not None
     assert connector.manifest.display_name == "GitHub"
     assert connector.manifest.supports_webhooks
+
+
+def test_default_registry_ships_vercel_without_webhook_ingress_yet() -> None:
+    registry = default_registry()
+    connector = registry.get("vercel")
+
+    assert isinstance(connector, VercelConnector)
+    assert connector.manifest.supports_webhooks is False
+    assert connector.manifest.webhook_events == ()
 
 
 def test_registry_rejects_duplicate_type() -> None:
