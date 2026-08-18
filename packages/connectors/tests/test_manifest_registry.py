@@ -21,6 +21,7 @@ from jhin_connectors.github.connector import GitHubConnector
 from jhin_connectors.github.manifest import GITHUB_CAPABILITIES
 from jhin_connectors.linear.connector import LinearConnector
 from jhin_connectors.linear.manifest import LINEAR_MANIFEST
+from jhin_connectors.supabase.connector import SupabaseConnector
 from jhin_connectors.vercel.connector import VercelConnector
 
 
@@ -329,6 +330,23 @@ def test_default_registry_ships_vercel_with_webhook_ingress() -> None:
     assert connector.manifest.webhook_secret_mode == "provider_supplied"
     assert len(connector.manifest.webhook_events) == 6
     assert len(connector.manifest.canonical_events) == 5
+
+
+def test_default_registry_ships_supabase_exactly_once() -> None:
+    registry = default_registry()
+    connector = registry.get("supabase")
+
+    assert isinstance(connector, SupabaseConnector)
+    assert registry.types().count("supabase") == 1
+    assert connector.manifest.webhook_secret_mode == "none"
+    assert connector.manifest.supports_webhooks is False
+    assert {definition.name for definition, _ in connector.tools()} == {
+        "supabase.project.read",
+        "supabase.logs.read",
+        "supabase.function.list",
+        "supabase.function.deploy",
+        "supabase.function.delete",
+    }
 
 
 def test_registry_rejects_duplicate_type() -> None:

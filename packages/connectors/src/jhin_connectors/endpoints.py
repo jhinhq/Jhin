@@ -15,7 +15,6 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 
 _HOST_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
 _PROJECT_REF_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
-_FORBIDDEN_DSN_QUERY_KEYS = frozenset({"host", "hostaddr", "port", "dbname", "user", "service"})
 _HOSTED_TLS_MODES = frozenset({"require", "verify-ca", "verify-full"})
 _DEFAULT_POSTGRES_PORT = 5432
 
@@ -152,11 +151,12 @@ def _parse_postgres_url(dsn: str) -> _PostgresTarget:
         host_value = parsed.hostname
         port_value = parsed.port
         username_value = parsed.username
+        password_value = parsed.password
     except ValueError:
         raise EndpointPolicyError("PostgreSQL target is invalid") from None
     if scheme not in {"postgresql", "postgresql+asyncpg"} or host_value is None:
         raise EndpointPolicyError("PostgreSQL target is invalid")
-    if username_value is None:
+    if username_value is None or password_value is None or not password_value:
         raise EndpointPolicyError("PostgreSQL target is invalid")
 
     database = unquote(parsed.path.removeprefix("/"))
@@ -172,15 +172,13 @@ def _parse_postgres_url(dsn: str) -> _PostgresTarget:
     except ValueError:
         raise EndpointPolicyError("PostgreSQL target is invalid") from None
     normalized_keys = [key.casefold() for key, _value in query_pairs]
-    if any(key in _FORBIDDEN_DSN_QUERY_KEYS for key in normalized_keys):
-        raise EndpointPolicyError("PostgreSQL query cannot override the validated target")
+    if len(query_pairs) > 1 or any(key != "sslmode" for key in normalized_keys):
+        raise EndpointPolicyError("PostgreSQL target query is not allowed")
     sslmode_values = [
         value.casefold()
         for (key, value), normalized_key in zip(query_pairs, normalized_keys, strict=True)
         if normalized_key == "sslmode"
     ]
-    if len(sslmode_values) > 1:
-        raise EndpointPolicyError("PostgreSQL target contains duplicate sslmode settings")
     sslmode = sslmode_values[0] if sslmode_values else None
     return _PostgresTarget(
         host=host,
@@ -227,9 +225,15 @@ def _is_official_pooler_target(target: _PostgresTarget, project_ref: str) -> boo
     return (
         target.host.endswith(suffix)
         and target.host != suffix.removeprefix(".")
-        and target.port in {_DEFAULT_POSTGRES_PORT, 6543}
+        and target.port == _DEFAULT_POSTGRES_PORT
         and target.username.endswith(f".{project_ref}")
     )
+
+
+def _uses_official_supabase_namespace(target: _PostgresTarget) -> bool:
+    return (
+        target.host.startswith("db.") and target.host.endswith(".supabase.co")
+    ) or target.host.endswith(".pooler.supabase.com")
 
 
 def validate_postgres_target(
@@ -241,8 +245,9 @@ def validate_postgres_target(
 ) -> str:
     """Validate a PostgreSQL target and return its original DSN unchanged.
 
-    Credentials are parsed only to validate the pooler username suffix. No
-    exception includes the DSN, username, password, host, or database name.
+    Credentials are parsed only to require an explicit password and validate
+    the pooler username suffix. No exception includes the DSN, username,
+    password, host, or database name.
     """
     normalized_project_ref = project_ref.casefold()
     if not _PROJECT_REF_RE.fullmatch(normalized_project_ref):
@@ -257,17 +262,19 @@ def validate_postgres_target(
     if app_target is not None and target.identity == app_target.identity:
         raise EndpointPolicyError("PostgreSQL target cannot be Jhin's application database")
 
-    if (target.host, target.port) in _database_allowlist(allowlist_env):
-        return dsn
-
     hosted = _is_official_direct_target(
         target, normalized_project_ref
     ) or _is_official_pooler_target(target, normalized_project_ref)
-    if not hosted:
-        raise EndpointPolicyError("PostgreSQL target is not allowed")
-    if target.sslmode not in _HOSTED_TLS_MODES:
-        raise EndpointPolicyError("Hosted PostgreSQL targets require TLS")
-    return dsn
+    if _uses_official_supabase_namespace(target):
+        if not hosted:
+            raise EndpointPolicyError("PostgreSQL target is not allowed")
+        if target.sslmode not in _HOSTED_TLS_MODES:
+            raise EndpointPolicyError("Hosted PostgreSQL targets require TLS")
+        return dsn
+
+    if (target.host, target.port) in _database_allowlist(allowlist_env):
+        return dsn
+    raise EndpointPolicyError("PostgreSQL target is not allowed")
 
 
 __all__ = ["EndpointPolicyError", "validate_http_origin", "validate_postgres_target"]

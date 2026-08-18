@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Connector SDK and built-in connectors: manifests, tools, webhooks, event normalization (plan section 11)"
 requires-python = ">=3.13"
 dependencies = [
+    "asyncpg>=0.31,<1",
     "pydantic>=2.10",
     "httpx>=0.28",
     "sqlalchemy[asyncio]>=2.0.36",

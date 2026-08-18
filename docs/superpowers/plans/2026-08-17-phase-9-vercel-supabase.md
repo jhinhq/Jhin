@@ -16,7 +16,7 @@
 - PostgreSQL remains Jhin's source of truth, Temporal remains the durable workflow authority, and all agent tool calls continue through `ToolGateway`.
 - No Phase 9 database migration is required; migration `0014` remains the single Alembic head.
 - A provider credential, Vercel environment-variable value, PostgreSQL DSN, SQL cell, function source, raw webhook body, or unsanitized tool input must never enter a prompt, API response, audit record, exception, log, or persisted tool-call field outside the bounded outputs specified here.
-- Vercel and Supabase tools require connection-scoped grants. A production-impacting Vercel action and every Supabase DML/DDL mutation use `RiskLevel.ELEVATED` or `RiskLevel.DESTRUCTIVE` and set `supports_approval=True`. Balanced is the default and requires approval for both; Autonomous may auto-run the elevated preview action but still parks destructive actions; only an explicit custom `AUTO` rule may auto-run a destructive action. `supports_approval` is not itself a non-overridable approval floor.
+- Vercel and Supabase tools require connection-scoped grants. A production-impacting Vercel action and every exposed Supabase database mutation use `RiskLevel.ELEVATED` or `RiskLevel.DESTRUCTIVE` and set `supports_approval=True`. Balanced is the default and requires approval for both; Autonomous may auto-run the elevated preview action but still parks destructive actions; only an explicit custom `AUTO` rule may auto-run a destructive action. `supports_approval` is not itself a non-overridable approval floor. Phase 9 exposes no agent DDL capability; schema changes remain reviewed operator migrations.
 - A human approval is permission to retry authorization, not a frozen authorization result: resume must bind to the original workspace/agent/run/task/tool definition/connection credential revision and re-evaluate current grants, required scopes, policy rules, connection state, and tool-specific validators.
 - Every structured tool call receives a versioned deterministic internal invocation UUID derived from its durable run ID, durable step index, and zero-based tool-call ordinal—never from a retry-variant model/provider call ID, arguments, credentials, or secret material. A bounded provider call ID may be integrity-bound to the persisted request, but it is not retry identity; persisted transcript tool-call/result pairing uses the canonical internal UUID. Regardless of whether policy returns `ALLOW` immediately or resumes an approval, an atomically committed `executing` claim precedes external side effects; terminal outcomes replay on activity retry, and an ambiguous post-claim failure becomes `execution_unknown` and is never automatically executed again. Transmit the internal UUID as a provider idempotency key only on an endpoint whose current official contract explicitly supports idempotency.
 - Vercel webhook secrets use the provider's value and HMAC-SHA1 protocol. GitHub and Linear retain generated secrets and their existing algorithms.
@@ -24,7 +24,7 @@
 - HTTP endpoints default to the official HTTPS origins. Non-official origins and database hosts work only when an operator explicitly adds their exact origin/host to the documented dev/self-host allowlists; localhost, link-local, metadata, private-IP, and redirect-based bypasses otherwise fail closed.
 - A Supabase database connection uses a custom low-privilege login, never `postgres`, a superuser, or a `BYPASSRLS` role. Hosted connections require TLS. Jhin's application database is never accepted as the target.
 - Supabase SQL accepts exactly one PostgreSQL statement, validates the entire SQLGlot AST against the fixed-risk tool selected by the model, executes the original parameterized SQL, and rejects unknown syntax rather than guessing its risk.
-- Database reads use a read-only transaction, `statement_cache_size=0`, quoted `search_path`, server-side cursor fetch of `max_rows + 1`, server and client timeouts, and per-cell plus total-result byte caps.
+- Database reads use a read-only transaction, `statement_cache_size=0`, `search_path=pg_catalog`, deterministic relation locks and live catalog revalidation, a type-specific trusted wrapper that accepts only fixed-width outputs or safely sliceable direct `text`/`varchar` columns, one-row cursor fetch, server and client timeouts, and per-cell plus total-result byte caps. Unsupported or compressed variable-width outputs fail closed.
 - Dev fakes live only in `compose.dev.yaml`, expose health checks, record side effects for assertions, and never appear in production-shaped `compose.yaml`.
 - Use current official Vercel and Supabase API documentation at implementation time. The Supabase logs tool targets `/v1/projects/{ref}/analytics/endpoints/logs`, not the deprecated `logs.all` endpoint scheduled for removal on 2026-09-23.
 - Each task is implemented test-first, receives a requirements review and code-quality review, and ends in the scoped commit shown. Do not carry unrelated working-tree changes into a task commit.
@@ -816,13 +816,16 @@ git commit -m "feat: ingest signed Vercel deployment events"
 - Create: `packages/connectors/src/jhin_connectors/supabase/database_client.py`
 - Create: `packages/connectors/src/jhin_connectors/supabase/connector.py`
 - Create: `packages/connectors/src/jhin_connectors/testing/fake_supabase.py`
+- Modify: `packages/connectors/src/jhin_connectors/endpoints.py`
 - Modify: `packages/connectors/pyproject.toml`
 - Modify: `uv.lock`
 - Modify: `packages/connectors/src/jhin_connectors/registry.py`
 - Modify: `packages/connectors/src/jhin_connectors/testing/__init__.py`
+- Modify: `docs/superpowers/plans/2026-08-17-phase-9-vercel-supabase.md`
 - Test: `packages/connectors/tests/supabase/test_manifest.py`
 - Test: `packages/connectors/tests/supabase/test_management_tools.py`
 - Test: `packages/connectors/tests/supabase/test_database_verify.py`
+- Test: `packages/connectors/tests/test_endpoints.py`
 - Test: `packages/connectors/tests/test_manifest_registry.py`
 
 **Interfaces:**
@@ -838,17 +841,17 @@ management_token -> secret access_token
 postgres         -> secret database_url
 ```
 
-The `management_token` settings are `project_ref` (required text) and `base_url` (text, default `https://api.supabase.com`). The `postgres` settings are `project_ref`, `allowed_schemas` (string list, default `public`), `allow_writes` (boolean, default false), `allow_ddl` (boolean, default false), `statement_timeout_ms` (integer, default 5000, 250..30000), `lock_timeout_ms` (integer, default 1000, 100..5000), `max_rows` (integer, default 200, 1..1000), `max_cell_bytes` (integer, default 16384, 256..65536), and `max_result_bytes` (integer, default 262144, 4096..1048576).
+The `management_token` settings are `project_ref` (required text) and `base_url` (text, default `https://api.supabase.com`). The `postgres` settings are `project_ref`, `allowed_schemas` (string list, default `public`), `allow_writes` (boolean, default false), `statement_timeout_ms` (integer, default 5000, 250..30000), `lock_timeout_ms` (integer, default 1000, 100..5000), `max_rows` (integer, default 200, 1..1000), `max_cell_bytes` (integer, default 4096, 256..8000), and `max_result_bytes` (integer, default 24000, 4096..30000). The effective cell budget cannot exceed the effective result budget. The result ceiling stays below `ToolGateway`'s fixed 32,768-byte document cap, and the cell ceiling stays below its 8,192-character string cap. Phase 9 deliberately exposes no agent DDL setting or capability.
 
-Tests must prove every Management API executor rejects a `postgres` connection before network I/O, every future database executor rejects `management_token`, fields for the other auth type are rejected rather than silently stored, empty/duplicate/system schemas fail validation, and `allow_ddl=True` requires `allow_writes=True`.
+Tests must prove every Management API executor rejects a `postgres` connection before network I/O, every future database executor rejects `management_token`, fields for the other auth type (and removed `allow_ddl`) are rejected rather than silently stored, and empty/duplicate/system schemas fail validation.
 
-Add `asyncpg>=0.31,<1` as a direct connector dependency and refresh `uv.lock`. Add a database-verification protocol test proving the `postgres` auth path validates the target, connects with `timeout=5` and `statement_cache_size=0`, checks `current_user`/superuser/`BYPASSRLS`, rejects unsafe roles without returning the DSN, and closes in `finally`. This makes the connector complete and healthy before Task 6 adds any SQL execution tools.
+Add `asyncpg>=0.31,<1` as a direct connector dependency and refresh `uv.lock`. Add a database-verification protocol test proving the `postgres` auth path validates the target, requires an explicit nonempty DSN password, permits at most one case-insensitive `sslmode` query key and rejects every other key before connect, normalizes an accepted `postgresql+asyncpg://` scheme case-insensitively to the driver-supported `postgresql://` prefix without changing the remaining credential bytes, connects with `timeout=5` and `statement_cache_size=0`, checks equal `session_user`/`current_user` plus direct superuser/`BYPASSRLS`/`CREATEDB`/`CREATEROLE`/replication flags, and rejects a login that owns `current_database()` or any configured `allowed_schemas`. Every unsafe-role/ownership/target failure is credential-safe. Bound the whole connect-and-query verification and the final close with client-side timeouts, preserve external cancellation, and always close in `finally`. Official Supabase direct and session-mode pooler connections use port 5432; reject the official transaction-pooler port 6543 because Task 6 requires prepared statements and server cursors with session semantics. Evaluate official Supabase hostname/ref/port/TLS rules before the operator allowlist so an allowlist entry cannot downgrade an official host; keep arbitrary ports available only for exact non-official operator-allowlisted dev hosts. This makes the connector complete and healthy before Task 6 adds any SQL execution tools.
 
 Run after editing the dependency:
 
 ```bash
 uv lock
-uv sync --frozen
+uv sync --frozen --all-packages
 ```
 
 Expected: asyncpg is recorded as a direct `jhin-connectors` dependency and the frozen environment syncs.
@@ -868,16 +871,16 @@ POST   /_reset
 POST   /_fault   # test-only one-shot post-side-effect transport failure
 ```
 
-Add tests for project-ref binding, auth failure, bounded project/function output, log time range at most 24 hours, log `limit <= 200`, a fixed source enum, a fixed projected-field query, no caller-provided log SQL, no `logs.all`, fixed `DESTRUCTIVE` risk plus approval support for both function mutations, shared streaming-response cap/redirect behavior, no undocumented idempotency header/field, deterministic one-shot `/_fault` behavior after a deploy/delete side effect, and zero side effects on validation failure.
+Add tests for project-ref binding, auth failure, bounded project/function output, log time range at most 24 hours, log `limit <= 200`, a fixed source enum, a fixed projected-field query, no caller-provided log SQL, no `logs.all`, fixed `DESTRUCTIVE` risk plus approval support for both function mutations, shared streaming-response cap/redirect behavior, an outer total wall-clock timeout with cancellation preserved, no undocumented idempotency header/field, deterministic one-shot `/_fault` behavior after a deploy/delete side effect, and zero side effects on validation failure. Projected log and function-list documents use deterministic row/byte cutoffs below the gateway's 32,768-byte whole-document cap, calculate with the gateway's spaced UTF-8 JSON serialization rather than Pydantic's compact JSON, account for expansion by the active secret redactor through `sanitize_payload`, survive sanitization without whole-document replacement, and set `truncated=True` whenever a row, requested limit, or byte budget cuts the provider result. Every projected provider string must be strict UTF-8 and reject Unicode `C*` categories; a log event message may preserve ordinary newline/tab only, and input log filters must be strict UTF-8 before network I/O. Prove unsafe project/function/log strings fail with stable provider errors, including an unsafe deploy response after its side effect.
 
-Function deployment input is an in-memory list of at most eight `{path, content}` files. Paths are POSIX-relative, reject absolute paths, `.`/`..`, backslashes, control characters, and duplicates. Each content string is at most 6 KiB and total serialized source is at most 24 KiB, keeping approval persistence lossless under gateway limits. Require a bounded slug, `entrypoint_path` that names one supplied file, and explicit `verify_jwt`. Deletion accepts only the slug.
+Function deployment input is an in-memory list of at most eight `{path, content}` files. Paths are POSIX-relative, reject absolute paths, `.`/`..`, backslashes, duplicates, and every Unicode control/format/surrogate/unassigned/private-use category (`C*`), including C1 controls and bidirectional format characters; ordinary Unicode letters remain valid. Each content string is at most 6 KiB and total serialized source is at most 24 KiB, keeping approval persistence lossless under gateway limits. Require a bounded slug, `entrypoint_path` that names one supplied file, and explicit `verify_jwt`. Deletion accepts only the slug.
 
 - [ ] **Step 3: Run Supabase Management tests to verify RED**
 
 Run:
 
 ```bash
-uv run pytest packages/connectors/tests/supabase/test_manifest.py packages/connectors/tests/supabase/test_management_tools.py packages/connectors/tests/supabase/test_database_verify.py packages/connectors/tests/test_manifest_registry.py -q
+uv run pytest packages/connectors/tests/supabase/test_manifest.py packages/connectors/tests/supabase/test_management_tools.py packages/connectors/tests/supabase/test_database_verify.py packages/connectors/tests/test_endpoints.py packages/connectors/tests/test_manifest_registry.py -q
 ```
 
 Expected: FAIL because the Supabase manifest, client, tools, and fake do not exist.
@@ -896,19 +899,20 @@ supabase.function.delete    DESTRUCTIVE + approval
 
 All tools require grant scopes `connection_id` and `project_ref`; function mutations additionally require `function_slug`. The configured `project_ref`, not model output, is authoritative: require input scope to equal config before the request.
 
-The client uses bearer auth and the validated official/allowlisted origin, constructs requests with a 5-second connect/20-second total timeout, and routes every response through Task 2's redirect-free streaming 512 KiB helper. Build the unified log ClickHouse query internally from a closed source enum, validated ISO start/end, an optional 500-character text filter escaped by a dedicated ClickHouse string-literal function, and `limit`; select only timestamp, source, event message, path, status code, and method. Snapshot the exact generated query in unit tests, including quotes/backslashes in the text filter. Never accept arbitrary log SQL.
+The client uses bearer auth and the validated official/allowlisted origin, constructs requests with a 5-second connect timeout, wraps request construction, send, bounded streaming read, and client close in a 20-second total wall-clock timeout, and routes every response through Task 2's redirect-free streaming 512 KiB helper. Preserve caller cancellation rather than converting it to a provider error. Build the unified log ClickHouse query internally from a closed source enum, validated ISO start/end, an optional 500-character text filter escaped by a dedicated ClickHouse string-literal function, and `limit`; select only timestamp, source, event message, path, status code, and method. Snapshot the exact generated query in unit tests, including quote, backslash, NUL, newline, carriage return, and tab escaping. Never accept arbitrary log SQL. Treat a 200 response with a nonempty provider `error` as a stable credential-free failure rather than returning `result`.
 
 Deploy with official multipart `POST /v1/projects/{ref}/functions/deploy?slug={function_slug}`, JSON metadata, and in-memory files. Delete with the official slug path. Return only id, slug, name, status, version, timestamps, `verify_jwt`, and entrypoint path. These selected Management API endpoints do not currently document an idempotency header or request field, so retain the tool-call ID as Jhin's internal invocation ID and do not invent an on-wire key; a post-side-effect transport ambiguity becomes `execution_unknown` under Task 1 and is not automatically retried.
 
-`SupabaseConnector.verify_connection` switches strictly on auth type: `management_token` calls project metadata; `postgres` calls `verify_database_connection` in `database_client.py`. The verifier applies `validate_postgres_target(..., app_database_url=os.getenv("DATABASE_URL"))`, connects without a statement cache, reads `current_user` and the current row's `rolsuper`, `rolbypassrls`, `rolcreatedb`, `rolcreaterole`, and `rolreplication` flags from `pg_catalog.pg_roles`, rejects `postgres` or any privileged flag, and always closes. Add the factory to `DEFAULT_CONNECTORS` now; its database tool tuple stays empty until Task 6.
+`SupabaseConnector.verify_connection` switches strictly on auth type: `management_token` calls project metadata; `postgres` calls `verify_database_connection` in `database_client.py`. The verifier applies `validate_postgres_target(..., app_database_url=os.getenv("DATABASE_URL"))`, normalizes only an accepted SQLAlchemy asyncpg scheme prefix for driver compatibility, connects without a statement cache, reads equal `session_user` and `current_user` plus the current row's `rolsuper`, `rolbypassrls`, `rolcreatedb`, `rolcreaterole`, and `rolreplication` flags from `pg_catalog.pg_roles`, and checks ownership of `current_database()` plus every configured allowed schema from `pg_catalog`. Reject `postgres`, a session/current-user mismatch, any privileged direct flag, current-database ownership, or allowed-schema ownership with one credential-safe least-privilege error. Bound the entire verification query and close lifecycle. Add the factory to `DEFAULT_CONNECTORS` now; its database tool tuple stays empty until Task 6.
 
 - [ ] **Step 5: Run focused tests and commit**
 
 Run:
 
 ```bash
-uv run pytest packages/connectors/tests/supabase/test_manifest.py packages/connectors/tests/supabase/test_management_tools.py packages/connectors/tests/supabase/test_database_verify.py packages/connectors/tests/test_manifest_registry.py packages/policy/tests/test_evaluator.py -q
+uv run pytest packages/connectors/tests/supabase/test_manifest.py packages/connectors/tests/supabase/test_management_tools.py packages/connectors/tests/supabase/test_database_verify.py packages/connectors/tests/test_endpoints.py packages/connectors/tests/test_manifest_registry.py packages/policy/tests/test_evaluator.py -q
 uv run ruff check packages/connectors
+uv run ruff format --check packages/connectors
 uv run mypy
 git diff --check
 ```
@@ -918,7 +922,7 @@ Expected: PASS, including plane separation, endpoint/ref binding, current logs e
 Commit:
 
 ```bash
-git add packages/connectors/pyproject.toml packages/connectors/src/jhin_connectors/supabase packages/connectors/src/jhin_connectors/testing/fake_supabase.py packages/connectors/src/jhin_connectors/testing/__init__.py packages/connectors/src/jhin_connectors/registry.py packages/connectors/tests/supabase packages/connectors/tests/test_manifest_registry.py uv.lock
+git add docs/superpowers/plans/2026-08-17-phase-9-vercel-supabase.md packages/connectors/pyproject.toml packages/connectors/src/jhin_connectors/endpoints.py packages/connectors/src/jhin_connectors/supabase packages/connectors/src/jhin_connectors/testing/fake_supabase.py packages/connectors/src/jhin_connectors/testing/__init__.py packages/connectors/src/jhin_connectors/registry.py packages/connectors/tests/supabase packages/connectors/tests/test_endpoints.py packages/connectors/tests/test_manifest_registry.py uv.lock
 git commit -m "feat: add Supabase management plane tools"
 ```
 
@@ -929,70 +933,109 @@ git commit -m "feat: add Supabase management plane tools"
 - Modify: `packages/connectors/src/jhin_connectors/supabase/database_client.py`
 - Create: `packages/connectors/src/jhin_connectors/supabase/database_tools.py`
 - Modify: `packages/connectors/src/jhin_connectors/supabase/schemas.py`
+- Modify: `packages/connectors/src/jhin_connectors/supabase/manifest.py`
 - Modify: `packages/connectors/src/jhin_connectors/supabase/connector.py`
 - Modify: `packages/connectors/pyproject.toml`
 - Modify: `uv.lock`
 - Create: `tests/fixtures/supabase/init.sql`
 - Modify: `compose.dev.yaml`
 - Modify: `.env.example`
+- Test: `packages/connectors/tests/supabase/test_manifest.py`
 - Test: `packages/connectors/tests/supabase/test_sql_policy.py`
 - Test: `packages/connectors/tests/supabase/test_database_tools.py`
 - Test: `packages/connectors/tests/supabase/test_database_integration.py`
+- Test: `packages/connectors/tests/test_manifest_registry.py`
+- Test: `tests/test_compose_supabase_db_fixture.py`
 
 **Interfaces:**
-- Consumes: the latest resolved encrypted `database_url` and public config on every invocation, typed Postgres settings, endpoint policy, fixed tool risks, required grant scopes, SQLGlot PostgreSQL ASTs, asyncpg, and Task 1's mutation claim lifecycle.
-- Produces: `classify_and_validate_sql(sql, *, expected, requested_schema) -> ValidatedSql`; per-execution target/TLS/project/role verification; bounded parameterized execution; separate read/write/destructive/DDL tools; an isolated real PostgreSQL fixture and integration gate.
+- Consumes: Task 5's strict `validate_postgres_target` and `verify_database_connection(database_url, *, project_ref, allowed_schemas, app_database_url)` boundary; the latest resolved encrypted `database_url` and normalized public config on every invocation; fixed tool risks and grant scopes; SQLGlot 30.x PostgreSQL ASTs; asyncpg 0.31 session semantics; Task 1's mutation-claim lifecycle.
+- Produces: `classify_and_validate_sql(sql, *, expected, requested_schema) -> ValidatedSql`; immutable physical-relation and placeholder metadata; same-connection direct/inherited role and ownership verification; locked catalog preflight; bounded parameterized execution; three database tools (`read`, `write`, `destructive`); an isolated real PostgreSQL fixture and integration gate.
 
-- [ ] **Step 1: Add the pinned SQL parser dependency**
+Phase 9 exposes no agent DDL tool or setting. Schema changes remain reviewed operator migrations until a later dedicated migration workflow can give them a separate sandbox, plan/diff artifact, and approval contract. Remove Task 5's temporary `allow_ddl` manifest/config field if it remains when this task starts, and reject legacy/new submitted `allow_ddl` rather than silently storing it.
 
-Keep Task 5's direct asyncpg dependency and add the SQL parser dependency, then refresh the lock:
+- [ ] **Step 1: Add SQLGlot and write failing manifest/schema/tool-contract tests**
+
+Keep Task 5's direct asyncpg dependency and add:
 
 ```toml
 "sqlglot>=30.13,<31",
 ```
 
-Run:
+`uv.lock` is the exact deployed parser resolution; do not add `pglast` or another GPL-licensed parser. Refresh and sync all workspace packages:
 
 ```bash
 uv lock
-uv sync --frozen
+uv sync --frozen --all-packages
 ```
 
-Expected: lock succeeds with SQLGlot 30.x and asyncpg remains a direct connector dependency. Do not add `pglast` or another GPL-licensed parser.
+In `test_manifest.py` and `test_manifest_registry.py`, first assert the final exact Supabase capability set is Task 5's five Management API tools plus:
+
+```text
+supabase.database.read          READ, no approval support
+supabase.database.write         ELEVATED, approval support
+supabase.database.destructive   DESTRUCTIVE, approval support
+```
+
+All three database tools require grant scopes `connection_id`, `project_ref`, and `schema`. Assert there is no `supabase.database.ddl` capability/tool and no `allow_ddl` config field. Assert the Postgres config bounds are exactly `max_cell_bytes=4096` with range `256..8000` and `max_result_bytes=24000` with range `4096..30000`, below the gateway's 8,192-character leaf and 32,768-byte document limits.
+
+Add strict database request/output models. Every input has `connection_id`, `project_ref`, `schema`, `sql`, and `params`. Cap SQL at 7,000 strict UTF-8 bytes, reject surrogates/control characters other than ordinary SQL whitespace, and accept at most 50 positional JSON scalars. Parameters are only `None`, strict booleans, signed 64-bit integers, finite floats, or strict UTF-8 strings; cap one encoded string at 8,192 bytes and compact-JSON encoding of the full parameter list at 16,000 bytes. No coercion, nested list/object, non-finite number, or unsupported Python value reaches asyncpg. Add boundary tests through the real `ToolGateway` proving the complete SQL/scopes/params input is preserved byte-for-byte by active sanitization for approval digest/replay; a redaction hit still fails lossless admission before a tool claim. Read output is positional—bounded column names plus `list[list[str | None]]`, `row_count`, and `truncated`—so duplicate SQL aliases cannot overwrite cells. Mutation output contains only `affected_rows`.
+
+Run:
+
+```bash
+uv run pytest packages/connectors/tests/supabase/test_manifest.py packages/connectors/tests/test_manifest_registry.py -q
+```
+
+Expected: FAIL because the database tools/models/capabilities do not exist and the temporary Task 5 bounds/config still differ.
 
 - [ ] **Step 2: Write the SQL policy decision table as failing parameterized tests**
 
-Define `SqlClass = Literal["read", "write", "destructive", "ddl"]`. Cover at least this matrix:
+Define `SqlClass = Literal["read", "write", "destructive"]`. Test this exact matrix:
 
 ```text
-read allow:        SELECT 1, SELECT FROM public.widgets,
-                   WITH named_cte AS (SELECT FROM public.widgets)
-                   SELECT FROM named_cte, qualified UNION branches
-read deny:         SELECT INTO, FOR UPDATE/SHARE, data-changing CTE,
-                   EXPLAIN ANALYZE, COPY, CALL, DO, PREPARE, EXECUTE,
-                   SET/RESET, transaction/session commands
-write allow:       INSERT INTO public.widgets, UPDATE public.widgets with WHERE
-write deny:        UPDATE without WHERE, DELETE, TRUNCATE, any DDL, RETURNING
-destructive allow: DELETE FROM public.widgets,
-                   UPDATE public.widgets without WHERE, TRUNCATE public.widgets
-destructive deny:  safe UPDATE, INSERT, any DDL, RETURNING
-ddl allow:         one narrow CREATE or DROP TABLE, INDEX, or VIEW only
-ddl deny:          every ALTER plus schema/database/role/function/trigger/
-                   extension/policy/type DDL; every DROP ... CASCADE;
-                   unsupported CREATE properties/forms
-all deny:          empty SQL, comments only, two statements, unknown command,
-                   cross-schema references, system catalogs, disallowed schema,
-                   every function call, AST whose actual class differs from
-                   the selected tool
+read allow:         SELECT 1; SELECT id FROM public.widgets;
+                    WITH named_cte AS (SELECT id FROM public.widgets)
+                    SELECT id FROM named_cte; qualified joins/subqueries/UNION branches
+read deny:          SELECT INTO; FOR UPDATE/NO KEY UPDATE/SHARE/KEY SHARE;
+                    data-changing CTE; EXPLAIN/ANALYZE; VALUES as the root;
+                    COPY/CALL/DO/PREPARE/EXECUTE/DEALLOCATE; DECLARE/FETCH;
+                    LOCK; LISTEN/NOTIFY; SET/RESET/DISCARD; transaction commands
+write allow:        INSERT INTO public.widgets (...) VALUES (...)
+write deny:         every UPDATE/DELETE/TRUNCATE/MERGE; INSERT DEFAULT VALUES;
+                    INSERT ... SELECT; ON CONFLICT (including DO UPDATE);
+                    OVERRIDING; RETURNING; DEFAULT in an individual value
+destructive allow:  UPDATE with the fixed assignment grammar (with/without
+                    WHERE/FROM), DELETE FROM public.widgets,
+                    one `TRUNCATE public.widgets` using default/CONTINUE IDENTITY
+                    and default/RESTRICT behavior
+destructive deny:   INSERT; multi-table TRUNCATE; ONLY/descendant `*` TRUNCATE;
+                    RESTART IDENTITY; CASCADE; RETURNING; MERGE; every DDL
+all deny:           empty/comments-only SQL; any semicolon token (even a trailing
+                    terminator); two statements; parser fallback/unknown command;
+                    CREATE/ALTER/DROP/GRANT/REVOKE and every other DDL;
+                    wrong concrete root for the selected tool; catalog/system/
+                    cross-schema/unqualified physical relations; every function,
+                    aggregate, window/table function, explicit COLLATE, custom
+                    operator/type/cast, or unsupported AST node
 ```
 
-Test quoted identifiers, mixed case, nested subqueries, lexical CTE aliases, `INSERT INTO public.widgets SELECT 1`, comments containing semicolons, and bypass attempts hidden below the root node. Every physical table/view/source/target reference must be explicitly qualified with exactly `requested_schema`; `SELECT * FROM widgets`, `INSERT INTO widgets`, and an unqualified physical name hidden in a subquery or DDL source all fail. An unqualified `named_cte` is accepted only when it resolves to a CTE alias in that query scope. `pg_catalog`, `information_schema`, and every other schema are denied to agent SQL even though the executor's internal role-verification query uses `pg_catalog`.
+Test quoted identifiers, mixed case, nested and recursive CTE scopes, CTE shadowing, aliases that collide with table names, `UPDATE ... FROM`, `DELETE ... USING`, rejected `INSERT ... SELECT`, rejected source-column UPDATE assignment, comments/dollar-quoted strings containing semicolons, and bypasses below the root. Every physical source and target table is explicitly qualified with exactly `requested_schema`; an unqualified table name is accepted only when it resolves lexically to a CTE in that query scope. Column references may be unqualified (`id`), qualified by an alias/table (`w.id`), or quoted in either form (`"MixedCase"`, `w."MixedCase"`); do not confuse column qualification with the mandatory schema qualification of physical tables. Add positive mixed-case/quoted table, alias, and column combinations plus stable rejection of an ambiguous unqualified join column. `pg_catalog`, `information_schema`, `pg_toast`, and every other schema are denied to submitted SQL even though trusted executor queries use `pg_catalog`.
 
-The Phase 9 CREATE allowlist is deliberately small: ordinary permanent `CREATE TABLE requested_schema.name (...)`, `CREATE [UNIQUE] INDEX name ON requested_schema.table (simple_columns)`, and `CREATE VIEW requested_schema.name WITH (security_invoker=true) AS <validated read query>`. PostgreSQL requires a new index name to be unqualified and creates it in its explicitly qualified parent table's schema; treat that declaration name as part of CREATE syntax, not as an unqualified lookup. Deny `TEMP`/`TEMPORARY`, `UNLOGGED`, `FOREIGN`, `MATERIALIZED`, `OR REPLACE`, `CONCURRENTLY`, `TABLESPACE`, `LIKE`, `INHERITS`, partition clauses, CTAS, expression/partial indexes, custom access methods/operator classes, unrecognized properties, and any other CREATE form. DROP accepts one explicitly qualified TABLE/INDEX/VIEW with default/`RESTRICT` behavior; every `CASCADE` and multi-object drop fails. Every `ALTER` fails.
+Add fixed resource-abuse boundaries and their exact boundary/over-boundary cases:
 
-Phase 9 defaults every SQL function/aggregate call to deny; it does not try to infer volatility from a name, resolve overloads, or trust a database catalog that a privileged operator could change. Add explicit bypass tests for `pg_read_file`, `dblink`, `setval`, `nextval`, `pg_sleep`, an unqualified custom function, a `requested_schema.custom_function`, and a callable `SECURITY DEFINER` function. Basic projections, predicates, arithmetic, the restricted literal casts below, CASE, and CTEs remain available without functions. A later phase may introduce a versioned exact built-in function allowlist only with parser and real-PostgreSQL tests.
+```python
+MAX_SQL_TOKENS = 1_024
+MAX_SQL_AST_NODES = 512
+MAX_SQL_AST_DEPTH = 64
+```
 
-Deny PostgreSQL's explicitly schema-qualified `OPERATOR(schema.operator)` syntax and every custom/operator-class reference. Explicit casts are accepted only when the operand is a scalar literal (or another already-validated literal cast) and both the inferred source and exact unqualified target are in a fixed built-in whitelist: `boolean`, `smallint`, `integer`, `bigint`, `numeric`, `real`, `double precision`, `text`, `varchar`, `date`, `timestamp`, `timestamptz`, `uuid`, `json`, and `jsonb`. Reject casts of columns/parameters, schema-qualified/custom/domain/array types, and CREATE columns outside the same whitelist. Add bypass tests for `OPERATOR(public.+)`, a custom operator, `literal::public.custom_type`, a custom/domain cast, and a column cast that could dispatch through a user-defined cast function.
+Tokenize with the SQLGlot PostgreSQL dialect first so parentheses inside strings/comments do not count as nesting. Parse using `error_message_context=0`, `max_errors=1`, and `max_nodes=MAX_SQL_AST_NODES`; then perform an independent iterative whole-tree node/depth walk because SQLGlot's parser-side node counter does not cover every expression form. Catch tokenizer/parser errors and `RecursionError`, raise only `SqlPolicyError("unsupported SQL") from None`, and never log the exception, SQL, or parameters. A `caplog` regression places a secret marker in invalid syntax and `Command` fallback and proves it appears nowhere in logs/errors.
+
+Only PostgreSQL `$1` through `$50` parameter nodes are accepted. Reject `?`, `:name`, `$0`, gaps, indexes above 50, and a placeholder set that is not exactly contiguous `1..len(params)` at execution. Placeholders inside comments/string/dollar-quoted literals do not count.
+
+Every SQLGlot `exp.Func` is denied except the deliberately narrow cast case. Since SQLGlot's `Cast` subclasses `Func`, validate an `exp.Cast` before the blanket function rejection. Accept only a scalar literal (or nested already-valid literal cast) to a semantic, unqualified built-in scalar type in this fixed set: `boolean`, `smallint`, `integer`, `bigint`, `numeric`, `real`, `double precision`, `text`, `varchar`, `date`, `timestamp`, `timestamptz`, `uuid`, `json`, `jsonb`. SQLGlot normalizes aliases such as `int` and loses quote spelling, so enforce the semantic `DataType` plus absence of user-defined/schema/array structure rather than claiming to recover original spelling. Reject parameter/column casts, `TRY_CAST`, domains/custom/schema-qualified/array/composite types, and every other type. Deny explicit `OPERATOR(schema.op)` and `COLLATE`; add cases for `pg_read_file`, `dblink`, `setval`, `nextval`, `pg_sleep`, `current_user`, `session_user`, unquoted `user`/`current_role`/`system_user`, a qualified/unqualified custom function, a SECURITY DEFINER function, `OPERATOR(public.+)`, a domain/custom cast, and a column cast.
+
+The expression allowlist contains only literals/parameters, qualified or unqualified column references, aliases, `CASE`, boolean `AND`/`OR`/`NOT`, `IS [NOT] NULL`, `IN`, `BETWEEN`, `LIKE`/`ILIKE`, comparisons (`=`, `<>`, `<`, `<=`, `>`, `>=`), unary sign, arithmetic (`+`, `-`, `*`, `/`, `%`), and the structural SELECT/CTE/join/subquery/set-operation/filter/group/order/distinct/limit/offset nodes required by the allowed matrix. Reject every generic/custom binary node and every PostgreSQL operator spelling not explicitly mapped to one of those concrete SQLGlot nodes. Live preflight limits all operands to the fixed built-in column types below, and `search_path=pg_catalog` limits unqualified symbolic resolution to built-in operators.
 
 - [ ] **Step 3: Run SQL policy tests to verify RED**
 
@@ -1002,46 +1045,139 @@ Run:
 uv run pytest packages/connectors/tests/supabase/test_sql_policy.py -q
 ```
 
-Expected: FAIL because `sql_policy.py` is absent.
+Expected: FAIL because `sql_policy.py` does not exist.
 
-- [ ] **Step 4: Implement entire-AST validation**
+- [ ] **Step 4: Implement fail-closed entire-AST validation**
 
-Parse with `sqlglot.parse(sql, read="postgres")`, require exactly one non-empty expression, classify by concrete root and nested nodes, and walk the entire AST. Do not authorize by the first keyword or a regex. Treat parser fallback `Command`, unrecognized nodes, and unsupported syntax as `SqlPolicyError("unsupported SQL")`.
-
-Return immutable metadata:
+Return immutable metadata without re-rendering SQL:
 
 ```python
+@dataclass(frozen=True, order=True)
+class RelationRef:
+    schema: str
+    name: str
+    access: Literal["source", "target"]
+
+@dataclass(frozen=True)
+class MutationValueRef:
+    parameter_index: int | None
+    literal_bytes: int | None
+
 @dataclass(frozen=True)
 class ValidatedSql:
     sql_class: SqlClass
-    schemas: frozenset[str]
     statement_type: str
+    relations: tuple[RelationRef, ...]
+    mutation_target: RelationRef | None
+    parameter_indexes: tuple[int, ...]
+    mutation_values: tuple[MutationValueRef, ...]
+    insert_row_count: int | None
 ```
 
-Build a lexical set of CTE aliases while walking each query scope; only a matching unqualified CTE reference is exempt from physical-relation qualification. Validate every source and target node, including nested queries and DDL subtrees. Reject every SQLGlot function/aggregate/anonymous-function node before execution, including qualified and nested calls; do not consult `pg_proc` to widen access. Reject schema-qualified operator nodes, nonliteral casts, and any cast/CREATE column type outside Step 2's fixed built-in whitelist. Reject any CREATE property/node not in Step 2's fixed allowlist and every DROP with `CASCADE`. Execute the original SQL string with the original validated positional-parameter sequence, never string interpolation and never SQLGlot's re-rendered text. Reject `RETURNING` for all mutation tools so mutation output is only an affected-row count and cannot bypass result caps. Operators use reviewed migrations outside the agent SQL path for every unsupported DDL operation.
+Build a concrete root map and an explicit supported-node allowlist; a node not required by the Step 2 grammar is denied. Walk every child iteratively. Track CTE aliases per lexical query scope rather than globally, distinguish CTE references from physical tables, preserve quoted identifier values for catalog lookup, and deterministically de-duplicate/sort physical metadata. `parameter_indexes` is the sorted unique set used for contiguity; `mutation_values` preserves every assignment/VALUES occurrence so repeated placeholders cannot evade expansion accounting, with exactly one field populated per item. Never authorize by a first keyword, regex, SQLGlot pretty-print, or inferred parser warning. The original SQL bytes and original validated positional parameters are the only user values later submitted to PostgreSQL.
 
-- [ ] **Step 5: Write failing database connection/executor tests**
+Classify every `UPDATE` as destructive regardless of whether a `WHERE` node exists—`WHERE TRUE`, `id IS NOT NULL`, and equivalent tautologies are not bounded writes. Treat `OnConflict(action=DO UPDATE)` as unsupported rather than hiding an update below an `Insert`. Require one exact target for every mutation and one exact table for TRUNCATE. INSERT accepts only an explicit column list and one `VALUES` matrix whose every cell is a bounded literal, parameter, or already-allowed literal cast; it never accepts a query source. Every UPDATE assignment is likewise only a bounded literal, parameter, or allowed literal cast—never a source/target column, operator expression, subquery, row expression, or `DEFAULT`. Predicates and qualified `UPDATE ... FROM`/`DELETE ... USING` sources still follow the read expression/relation rules.
 
-Use an asyncpg protocol fake for unit-level call ordering and assert:
+Define `MAX_MUTATION_VALUE_BYTES = 1_048_576`. Before dispatch, resolve every literal/parameter value to its strict UTF-8/compact-JSON byte contribution. INSERT sums each occurrence across all VALUES rows (a repeated `$1` counts each time), requires the static VALUES row count to be at most `max_rows`, and rejects when the sum exceeds the fixed budget. After the locked target pre-probe below, UPDATE sums its assignment values once, multiplies by the exact bounded target row count, and rejects when that product exceeds the budget. DELETE/TRUNCATE contribute zero new value bytes. Add exact budget/cap+1 cases, repeated-parameter amplification, many-column assignment, and huge-source copy attempts; none may reach asyncpg when rejected.
+
+Run `uv run pytest packages/connectors/tests/supabase/test_sql_policy.py -q` now. Expected: PASS, including fixed token/node/depth boundaries, parser-error secrecy, cast-before-function handling, the explicit operator grammar, CTE scoping, placeholder validation, and exact TRUNCATE forms, before executor work starts.
+
+- [ ] **Step 5: Write failing same-connection role, preflight, timeout, and bounded-output protocol tests**
+
+Use an asyncpg protocol fake to assert Task 5's strict connection call remains:
 
 ```python
 asyncpg.connect(
-    dsn=database_url,
+    dsn=driver_normalized_database_url,
     timeout=5,
     statement_cache_size=0,
-    ssl=hosted_ssl_context,
+    ssl=hosted_verify_full_context,
 )
 ```
 
-The verifier and every executor query the same connection for `current_user`, `rolsuper`, `rolbypassrls`, `rolcreatedb`, `rolcreaterole`, and `rolreplication`, rejecting `postgres`, a missing role row, or any privileged flag. In the same round trip/transaction, walk the transitive membership closure through `pg_catalog.pg_auth_members` and `pg_catalog.pg_roles` with a cycle-safe recursive CTE. Reject membership in any built-in `pg_%` role—including `pg_read_all_data`, `pg_write_all_data`, `pg_read_server_files`, `pg_write_server_files`, `pg_execute_server_program`, `pg_signal_backend`, and `pg_monitor`—and any custom ancestor carrying superuser, BYPASSRLS, CREATEDB, CREATEROLE, or REPLICATION. Return/log only a generic credential-safe `database_role_not_least_privilege` code; never expose the login or inherited role name.
+Rerun Task 5 endpoint/verifier regressions proving an explicit password, a sole optional `sslmode` query key, official direct/session `:5432`, rejected official transaction-pooler `:6543`, rejected startup/file query keys, and exact operator-allowlisted dev hosts. Task 6 does not add a second looser DSN path.
 
-Execution begins a transaction only after this check; reads set it read-only. Every call issues transaction-local statement timeout, lock timeout, and a safely double-quoted search path with `pg_catalog` first and only the requested schema second. The search path is defense in depth for built-in function/operator/type resolution, never permission to accept an unqualified physical relation. Read execution uses a prepared statement plus server cursor and fetches at most `max_rows + 1`.
+Start the execution transaction immediately after connect so all following database work is bounded. Before catalog inspection or planning submitted SQL, issue transaction-local settings with trusted constants/validated decimal timeout literals:
 
-Cover server timeout, client `asyncio.timeout`, cancellation, connection failure, rollback, close-in-finally, oversized cells, oversized total result, and credential-safe errors. Add call-order tests proving every invocation resolves the latest connection, re-runs `validate_postgres_target` with the current `database_url`, `project_ref`, and process `DATABASE_URL`, builds current hosted TLS settings, connects, and re-reads current direct flags plus recursive memberships before any user SQL. Rotate the credential after successful verification, change public config (`project_ref`, `allowed_schemas`, write/DDL flags, timeout bounds), change the returned role to each privileged case, and add/remove a dangerous direct or transitive membership; old assumptions must fail closed with zero SQL side effects. Assert no DSN/password/login/member-role name appears in returned errors or captured logs.
+```sql
+SET LOCAL statement_timeout = '<validated-ms>ms';
+SET LOCAL lock_timeout = '<validated-ms>ms';
+SET LOCAL idle_in_transaction_session_timeout = '<bounded-total-ms>ms';
+SET LOCAL search_path TO pg_catalog;
+SET LOCAL standard_conforming_strings = on;
+SET LOCAL row_security = on;
+SET LOCAL work_mem = '1MB';
+SET LOCAL hash_mem_multiplier = 1.0;
+SET LOCAL temp_file_limit = '16MB';
+SET LOCAL max_parallel_workers_per_gather = 0;
+SET LOCAL jit = off;
+SET LOCAL enable_seqscan = on;
+SET LOCAL enable_indexscan = off;
+SET LOCAL enable_indexonlyscan = off;
+SET LOCAL enable_bitmapscan = off;
+```
 
-For every `write`/`destructive` statement, add a live mutation-target preflight on the same checked connection and inside the execution transaction. Acquire a safely quoted `ROW EXCLUSIVE` table lock first so an ALTER/TRIGGER race cannot invalidate the check. Query catalogs with relation names as parameters and accept only one ordinary, non-partition table (`relkind='r'`, `relispartition=false`) in exactly `requested_schema`. Reject views/materialized views, partitioned tables/partitions, foreign tables, inheritance parents/children, user-defined triggers, nontrivial rewrite rules, and any inbound foreign key whose UPDATE/DELETE action is CASCADE, SET NULL, or SET DEFAULT (reject all such actions, necessarily including any crossing the allowed schema). Unit protocol tests must prove the catalog checks and lock occur before user SQL and a failed preflight rolls back/closes without invoking the prepared mutation.
+Discover supported resource GUCs through `pg_catalog.pg_settings`, set every present setting, and fail closed if a present setting cannot be applied. An absent feature-control setting is skipped only when the same trusted capability/version query proves that feature itself is unavailable (for example, a build without JIT); absence never masks a permission/value failure or leaves a supported resource path unbounded. The fixture grants the low-privilege roles `SET` on `temp_file_limit`. Add unit/real-PostgreSQL tests for exact ordering and exact `current_setting` values, including `standard_conforming_strings=on`, `enable_indexscan=off`, `enable_indexonlyscan=off`, and `enable_bitmapscan=off`; also cover `temp_file_limit` permission failure, JIT-unavailable fallback, no parallel workers, forced sequential planning even when role defaults prefer indexes, a sort that crosses `work_mem` but stays under the temp limit, and a query canceled at the temp-file limit without leaking provider text.
 
-- [ ] **Step 6: Run database tests to verify RED**
+On that same connection and transaction, run one cycle-safe recursive role query starting from `session_user` and following every direct/transitive `pg_auth_members` edge. Require a nonempty role row, `session_user = current_user`, UTF-8 server encoding, `current_setting('session_replication_role') = 'origin'`, and existence of every configured allowed schema. Reject `replica`/`local` before relation inspection, and add protocol plus real-PostgreSQL controls proving the origin setting is checked rather than silently overwritten. Reject the login or any ancestor that is named `postgres`, starts `pg_`, carries SUPERUSER/BYPASSRLS/CREATEDB/CREATEROLE/REPLICATION, owns `current_database()`, or owns any allowed schema. Later relation preflight also rejects login/ancestor ownership of every accessed or FK-peer relation. Return/log only `database_role_not_least_privilege`; never include a DSN, password, login, ancestor, relation, schema, SQL, parameter, or raw asyncpg/PostgreSQL error.
+
+Test separate deadlines: 5 seconds for connect; one transaction-work deadline bounded by `statement_timeout_ms + lock_timeout_ms + 10_000ms` and capped at 45 seconds; and 2 seconds each for rollback/close cleanup. Server timeouts still apply per statement. Preserve an external `CancelledError`, shield/bound cleanup sufficiently to rollback/close, never retry internally, and raise stable errors `from None`. Cover connect/role/catalog/prepare/cursor/execute/commit/rollback/close failures, including a post-commit ambiguity that Task 1 records as `execution_unknown` and never automatically repeats.
+
+For every AST physical relation, first resolve `(schema, name)` to an OID using parameterized `pg_catalog` queries; for a mutation target, also discover a cycle-safe same-schema foreign-key peer closure capped with all AST relations at `MAX_PREFLIGHT_RELATIONS = 32`. Acquire internal `LOCK TABLE ONLY` statements in deterministic quoted `(schema, name)` order, doubling identifier quotes: `ACCESS SHARE` for source-only relations, `SHARE ROW EXCLUSIVE` for a non-TRUNCATE mutation target and every FK peer, and `ACCESS EXCLUSIVE` for the TRUNCATE target. Use the strongest required mode once per relation. The operator must grant the login `MAINTAIN`, `UPDATE`, `DELETE`, or `TRUNCATE` on each FK peer so PostgreSQL permits the stronger lock; recommend table-scoped `MAINTAIN` when the role should not receive peer DML, and fail closed on insufficient lock privilege. Re-resolve OID/name and rerun every catalog assertion after all locks; a pre-lock lookup never authorizes execution. Protocol tests simulate drop/recreate/rename, trigger/index/FK changes between discovery and lock, over-cap/cyclic FK graphs, insufficient lock privilege, and reversed input relation order. A failed resolve, lock, or post-lock recheck rolls back without prepare/execute of submitted SQL.
+
+Every accessed source/target/FK peer must be a permanent PostgreSQL heap base table (`relkind='r'`, `relpersistence='p'`, `relispartition=false`, heap table AM) in exactly the requested schema. Reject views/materialized views, foreign/partitioned/partition tables, inheritance parents/children, relation ownership by the login/any ancestor, RLS flags or policies, custom/domain/array/composite column types, non-`pg_catalog` column collations, expression/partial/invalid/unready/dead indexes, custom index access methods or operator classes, and INCLUDE columns. Cap each relation at `MAX_RELATION_COLUMNS = 128` live columns and `MAX_RELATION_INDEXES = 16` indexes; every catalog list query requests only its cap plus one, and existence-only unsafe-feature checks use `LIMIT 1`. Permit simple column-only `pg_catalog` B-tree indexes, whether primary-key, unique, or nonunique, when every key/opclass/collation is built-in and no expression/predicate/custom option exists. The exact allowed relation column types are `bool`, `int2`, `int4`, `int8`, `float4`, `float8`, `numeric`, `text`, `varchar`, `bpchar`, `date`, `timestamp`, `timestamptz`, `uuid`, `json`, `jsonb`, and `bytea`; the narrower read-output set is defined below. Reject every other type OID/name pair. Bound constraint/FK catalog rows at 64 per relation and reject cap+1 before extending the peer graph. Disable index, index-only, and bitmap scans before planning as defense in depth for the weaker source `ACCESS SHARE` locks: AccessExclusive schema/type/owner/RLS-enable/rule changes are blocked, a policy created while RLS is off remains inert, triggers/defaults/checks do not execute on a source that is not mutated, and compatible concurrent index creation cannot enter the submitted plan. The mutation target/FK-peer stronger locks block trigger/index/policy DDL, and the mutation target additionally has no column defaults/identity, generated expressions, CHECK/exclusion constraints, noninternal triggers, or rewrite rules. Internal FK triggers are allowed only for an accepted FK.
+
+An FK is accepted only when every peer is inside the bounded locked closure, in the same requested schema, passes the applicable ordinary-table/type/index/ownership checks, is nondeferrable and initially immediate, uses only simple built-in key columns, uses `pg_catalog` equality operators and B-tree operator families, and has NO ACTION or RESTRICT for both update and delete. Reject SET NULL/SET DEFAULT/CASCADE, cross-schema, expression/custom-opclass, or dangling peers. After the target and peers are locked and revalidated, UPDATE and DELETE under `SHARE ROW EXCLUSIVE` and TRUNCATE under `ACCESS EXCLUSIVE` run a trusted `SELECT 1 FROM ONLY <quoted target> LIMIT <max_rows + 1>` cursor probe. Reject target row `max_rows + 1` before submitted SQL, never use unbounded `count(*)`, and retain the bounded exact row count for UPDATE expansion accounting and mutation output. INSERT remains VALUES-only and is pre-bounded by its static row count. TRUNCATE also rejects every external inbound FK. Thus every mutation is bounded before dispatch; strict command-tag `affected_rows <= max_rows` remains a post-execution invariant, not the primary cap.
+
+Add exact protocol regressions for hidden code in default/generated/CHECK/exclusion/RLS policy/expression or partial index/custom opclass/custom type; stored view/rule; trigger; unsafe FK; and an ancestor-owned relation. Prove catalog checks and locks precede the first prepare/execute of submitted SQL.
+
+For reads, lock/preflight first and then `prepare(original_sql)` exactly once only to inspect attributes. Reject zero or more than 64 columns, a column name over 256 strict UTF-8 bytes, and any Unicode general-category `C*` code point in a column name. The only fixed-width result OID/name pairs are `bool`, `int2`, `int4`, `int8`, `float4`, `float8`, `date`, `timestamp`, `timestamptz`, and `uuid`; their built-in text outputs have fixed small maxima, so the trusted wrapper may cast them to `pg_catalog.text` before byte slicing. Reject `numeric`, `bpchar`, `json`, `jsonb`, `bytea`, and every other output type, plus a projection cast to any rejected type, because safe Phase 9 execution cannot prove their complete text/binary representation is bounded without whole-value materialization.
+
+`text` and `varchar` are the sole variable-width output exception. Each such result must be an explicitly projected direct physical column (optionally table/alias-qualified and output-aliased) whose live `pg_attribute.attstorage='e'`; reject `*`, CTE/set-operation propagation, a literal/parameter/cast/expression result, and any use of that column in `WHERE`, `JOIN`/`ON`, `GROUP BY`, `ORDER BY`, `DISTINCT`, a set operation, operator, function, or cast. Resolve unqualified columns against the locked live column catalogs and reject ambiguity. This keeps the submitted SELECT itself from comparing, sorting, transforming, or otherwise detoasting the wide datum before the wrapper.
+
+Never reference a user alias in generated SQL. Replace output names with generated `__jhin_c0..N` in a derived-table alias list. For each accepted direct text/varchar result, project a compression flag and use this exact ordering in the trusted wrapper around the byte-for-byte original SELECT:
+
+```sql
+CASE
+  WHEN pg_catalog.pg_column_compression(__jhin_row.__jhin_c0) IS NULL THEN
+    pg_catalog.encode(
+      pg_catalog.substr(
+        pg_catalog.convert_to(
+          pg_catalog.substr(
+            __jhin_row.__jhin_c0::pg_catalog.text,
+            1,
+            <effective_cell_bytes + 1>
+          ),
+          'UTF8'
+        ),
+        1,
+        <effective_cell_bytes + 1>
+      ),
+      'base64'
+    )
+  ELSE NULL
+END AS __jhin_c0,
+(pg_catalog.pg_column_compression(__jhin_row.__jhin_c0) IS NOT NULL)
+  AS __jhin_c0_compressed
+-- fixed-width columns use only their bounded ::pg_catalog.text form plus
+-- convert_to/substr/encode; repeat trusted projections for all attributes
+FROM (
+<exact original SELECT, followed by a newline>
+) AS __jhin_row(__jhin_c0 /*, generated aliases */)
+LIMIT <max_rows + 1>
+```
+
+The no-semicolon policy makes the nested original unambiguous; the inserted newline safely ends a trailing `--` comment. All wrapper identifiers, functions, types, encodings, and numeric limits are trusted constants/generated names—not model text—and every function/type is explicitly `pg_catalog`. For UTF-8 text/varchar, character `substring` occurs before `convert_to`; PostgreSQL 17's text substring uses the TOAST slicing interface, fetching at most four times the character limit for an uncompressed external value, and the following bytea `substr` enforces the exact byte cap. `attstorage='e'` prevents future compression, while the per-row `pg_column_compression` flag rejects legacy compressed values without returning the cell. If any flag is true, discard the whole result and raise stable `database_output_not_safely_sliceable` from none. Tests set storage to EXTERNAL before insertion, and separately insert a compressed value before changing only catalog storage to EXTERNAL to prove that the per-value check—not `attstorage` alone—is authoritative.
+
+This is an asyncpg/wire-copy bound, not a claim that arbitrary hostile database contents can never consume backend memory. Phase 9 rejects every output form known to require whole-value conversion and prevents accepted wide text from participating in submitted expressions, but PostgreSQL storage internals and already-running privileged database changes remain inside the explicitly trusted database-operator boundary. Tests assert bounded wire fields and rejection behavior; they must not describe this as a universal PostgreSQL backend-memory sandbox.
+
+Compute `effective_cell_bytes` as the minimum of configured `max_cell_bytes` and the remaining configured result budget divided by the validated column count after exact header/marker overhead; fail safely if even headers cannot fit. Base64-decode in Python, use the extra byte to detect truncation, back off an incomplete UTF-8 suffix, append the fixed marker, and keep the final cell within its byte cap. Values are display strings or null; original column names remain separately bounded metadata.
+
+Prepare the wrapper and obtain a manual cursor by awaiting `wrapped_statement.cursor(*params)` with no prefetch; `CursorFactory(prefetch=...)` cannot be awaited for manual one-row reads. Call `fetchrow()` one row at a time, at most `max_rows + 1`. The executor imports and uses the production defaults `sanitize_payload`, `MAX_STRING_CHARS=8192`, and `MAX_DOCUMENT_BYTES=32768` directly; it does not add sanitizer fields to `ToolExecutionContext` or accept per-call cap/redactor overrides. Before appending each row, call `sanitize_payload(candidate)` with its default process redactor and fixed caps, including redaction-marker expansion, then measure the exact final spaced UTF-8 JSON serialization. Retain the sanitized candidate, or stop before the row and set `truncated=True` when it would exceed configured `max_result_bytes`; never rely on raw pre-sanitization JSON sizing. Detect `sanitize_payload`'s whole-document replacement shape and stop rather than returning it as a database result; if redaction expansion alone causes a leaf truncation, retain the safe marked leaf and set the model's `truncated=True`. Boundary tests register a secret whose replacement expands the cell and invoke a real `ToolGateway` constructed with its production-default output limit—no custom context/gateway sanitizer option—proving the returned value is redacted and the result is neither gateway-truncated nor replaced wholesale.
+
+For UPDATE/DELETE, run the bounded target probe first, execute the exact original SQL only when it returned at most `max_rows`, and parse only the expected strict asyncpg command tag. INSERT is already statically row-bounded and follows the same strict tag check. Treat any impossible `affected_rows > max_rows` as an invariant failure inside the transaction and roll back. Return no row data. TRUNCATE accepts exactly one table with default/CONTINUE IDENTITY and default/RESTRICT, dispatches only after the same bounded probe under `ACCESS EXCLUSIVE`, and returns the pre-probed row count as `affected_rows`; RESTART IDENTITY/CASCADE/ONLY/descendants/multiple tables never dispatch.
+
+- [ ] **Step 6: Run executor protocol tests to verify RED**
 
 Run:
 
@@ -1049,135 +1185,174 @@ Run:
 uv run pytest packages/connectors/tests/supabase/test_database_tools.py -q
 ```
 
-Expected: FAIL because the database client/executors and live revalidation are absent.
+Expected: FAIL because live database executors, locked preflight, and bounded wrapper are absent.
 
-- [ ] **Step 7: Add the isolated real PostgreSQL fixture service**
+- [ ] **Step 7: Write the isolated PostgreSQL fixture contract test and verify RED**
 
-Create `tests/fixtures/supabase/init.sql` with fixture-only credentials and least-privilege roles:
-
-```sql
-REVOKE CREATE ON SCHEMA public FROM PUBLIC;
-CREATE ROLE jhin_reader LOGIN PASSWORD 'reader-pass' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-CREATE ROLE jhin_writer LOGIN PASSWORD 'writer-pass' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-CREATE TABLE public.widgets (id integer PRIMARY KEY, name text NOT NULL);
-INSERT INTO public.widgets VALUES (1, 'alpha'), (2, 'beta'), (3, repeat('x', 20000));
-CREATE SCHEMA private;
-REVOKE ALL ON SCHEMA private FROM PUBLIC;
-CREATE TABLE private.secrets (id integer PRIMARY KEY, value text NOT NULL);
-INSERT INTO private.secrets VALUES (1, 'must-never-be-readable');
-GRANT CONNECT ON DATABASE supabase_fixture TO jhin_reader, jhin_writer;
-GRANT USAGE ON SCHEMA public TO jhin_reader, jhin_writer;
-GRANT CREATE ON SCHEMA public TO jhin_writer;
-GRANT SELECT ON public.widgets TO jhin_reader;
-GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON public.widgets TO jhin_writer;
-```
-
-Define `fake-supabase-db` only in `compose.dev.yaml`:
-
-```yaml
-services:
-  fake-supabase-db:
-    image: postgres:17-alpine
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${PHASE9_SUPABASE_FIXTURE_ADMIN_PASSWORD:-phase9-fixture-admin-only}
-      POSTGRES_DB: supabase_fixture
-    ports:
-      - "127.0.0.1:${FAKE_SUPABASE_DB_DEV_PORT:-55433}:5432"
-    volumes:
-      - fake_supabase_data:/var/lib/postgresql/data
-      - ./tests/fixtures/supabase/init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d supabase_fixture"]
-    networks: [data]
-
-volumes:
-  fake_supabase_data:
-```
-
-Add exact `fake-supabase-db:5432` to `JHIN_CONNECTOR_ALLOWED_DB_HOSTS` for both `api` verification and `agent-worker` execution in the dev override only. Document `FAKE_SUPABASE_DB_DEV_PORT` and the fixture-only role names in `.env.example`; do not put this service, its volume, passwords, or the permissive host entry in `compose.yaml`.
-
-- [ ] **Step 8: Write failing real-PostgreSQL integration tests**
-
-Mark `test_database_integration.py` with `pytest.mark.integration` and read three explicit fixture DSNs from environment: reader, writer, and fixture admin. Exercise the real asyncpg connection/transaction/cursor path, not the protocol fake. Prove qualified reads and CTE aliases work; unqualified/cross-schema/catalog queries fail; row/cell/document caps truncate; one held lock with `lock_timeout_ms` lower than `statement_timeout_ms` raises the lock timeout and another with the bounds reversed raises the statement timeout; a failing mutation rolls back; a scoped approved write changes exactly one row; narrow CREATE/DROP TABLE, INDEX, and `security_invoker` VIEW work only through the DDL tool; and unsupported CREATE, every ALTER, and DROP CASCADE leave state unchanged. Create harmless custom and `SECURITY DEFINER` functions, a custom type/cast, and a custom operator as fixture admin, then prove those and `pg_read_file`/`dblink`/`setval` are rejected by policy before asyncpg sends user SQL. Assert the executor sets `search_path` to `pg_catalog` before the requested schema.
-
-After a successful verification, rotate to the fixture `postgres` DSN and separately change `project_ref`, `allowed_schemas`, `allow_writes`, and `allow_ddl` before execution. Each invocation must use the new state, reject stale scope or the live privileged role, and cause zero SQL side effects. Also pass the fixture target as `app_database_url` once and prove the Jhin-database collision check rejects it without leaking either password.
-
-Using the fixture-admin connection and restoring state in `finally`, grant `pg_read_all_data` directly to each low-privilege login, then test a deep transitive custom parent-role chain whose ancestor carries `CREATEDB`; execution must fail before user SQL even though the login's direct flags did not change. The recursive query remains cycle-safe even though PostgreSQL prevents creating a cyclic role grant through supported DDL. Revoke/drop each fixture role after the assertion and prove the returned error/logs contain only `database_role_not_least_privilege`, never any login or member-role name. Rotate membership after connection verification to prove the check is live on every execution, not cached.
-
-Create isolated ordinary-table fixtures whose DML would otherwise have indirect effects: a user trigger calling a `SECURITY DEFINER` function that writes `private.secrets`, a nontrivial rewrite rule that writes a second table, and a cross-schema inbound foreign key with `ON UPDATE CASCADE` or `ON DELETE SET NULL`. Also create partitioned/partition, foreign-table, view/materialized-view, and inheritance parent/child targets. For each, invoke the matching write/destructive tool and assert preflight rejection before user SQL, unchanged target rows, and zero rows added/changed in every private or secondary relation. Include one plain `public` table without those features to prove the preflight still permits an approved bounded mutation.
-
-- [ ] **Step 9: Start a fresh fixture volume and verify the real tests are RED**
-
-Run against a dedicated Compose project so deleting its volume cannot affect a developer's normal stack:
-
-```bash
-export FAKE_SUPABASE_DB_DEV_PORT=65434
-export JHIN_CONNECTOR_ALLOWED_DB_HOSTS=127.0.0.1:65434
-export JHIN_PHASE9_DB_READER_DSN=postgresql://jhin_reader:reader-pass@127.0.0.1:65434/supabase_fixture
-export JHIN_PHASE9_DB_WRITER_DSN=postgresql://jhin_writer:writer-pass@127.0.0.1:65434/supabase_fixture
-export JHIN_PHASE9_DB_ADMIN_DSN=postgresql://postgres:phase9-fixture-admin-only@127.0.0.1:65434/supabase_fixture
-docker compose -p jhin-phase9-dbtest -f compose.yaml -f compose.dev.yaml down --volumes --remove-orphans
-docker compose -p jhin-phase9-dbtest -f compose.yaml -f compose.dev.yaml up -d --force-recreate fake-supabase-db
-docker compose -p jhin-phase9-dbtest -f compose.yaml -f compose.dev.yaml ps fake-supabase-db
-uv run pytest -m integration packages/connectors/tests/supabase/test_database_integration.py -q
-```
-
-Expected: the named fixture service is healthy with a newly initialized `fake_supabase_data` volume, then tests FAIL because the database tools are not implemented. Never run the `down --volumes` command without the exact `jhin-phase9-dbtest` project name.
-
-- [ ] **Step 10: Implement four fixed-risk database tools with live checks**
-
-Register:
-
-```text
-supabase.database.read          READ
-supabase.database.write         ELEVATED + approval
-supabase.database.destructive   DESTRUCTIVE + approval
-supabase.database.ddl           DESTRUCTIVE + approval
-```
-
-Every input contains `connection_id`, `project_ref`, `schema`, `sql` capped at 7,000 characters, and at most 50 JSON-scalar positional parameters. Every definition requires grant scopes `connection_id`, `project_ref`, and `schema`. The executor requires configured `project_ref` equality and membership of `schema` in `allowed_schemas`; write/destructive additionally require `allow_writes=True`; DDL requires both `allow_writes=True` and `allow_ddl=True`.
-
-On every invocation—including calls allowed immediately by Autonomous/custom policy and resumed Balanced approvals—resolve the connection again and perform this exact order before user SQL: require `auth_type="postgres"`; validate current input scope against current config; re-run `validate_postgres_target` on the current credential with current `project_ref`, current process `DATABASE_URL`, and hosted TLS rules; connect using current SSL settings; query and reject current privileged direct role flags plus the cycle-safe transitive membership closure on that same connection; then begin the bounded transaction. For every write/destructive DML call, acquire the target lock and complete the live ordinary-table/trigger/rule/partition/inheritance/foreign-key preflight inside that transaction before preparing or dispatching user SQL. Verification performed when the connection was created never substitutes for these live checks. Task 1's authorization digest rejects a parked approval after credential/config changes, but these executor checks remain mandatory defense in depth and protect non-parked calls too.
-
-For reads, create a read-only transaction, prepare the original SQL, open a server-side cursor, fetch `max_rows + 1`, and return column names, at most `max_rows` rows, `row_count`, and `truncated`. Cap each encoded cell at `max_cell_bytes` with an explicit marker and stop the document at `max_result_bytes`; never fetch the whole result to compute truncation. For mutations, execute the original positional-parameter SQL, parse the command tag into `affected_rows`, and return no row data.
-
-Use server settings:
-
-```sql
-SET LOCAL statement_timeout = '<validated integer>ms';
-SET LOCAL lock_timeout = '<validated integer>ms';
-SET LOCAL search_path TO pg_catalog, "<escaped schema>";
-```
-
-Identifiers are quoted by doubling `"`; config bounds make timeout literals numeric. Wrap connection plus transaction work in a client timeout slightly above `statement_timeout_ms`; rollback on every exception and close the connection in `finally`.
-
-- [ ] **Step 11: Run unit, real-PostgreSQL, Compose, and quality gates; then commit**
+Create `tests/test_compose_supabase_db_fixture.py` first. Render the production Compose file alone and the production-plus-dev files as JSON. Assert `fake-supabase-db`, its named volume, fixture credential, fixture port, and database allowlist are absent from production; the dev service uses `postgres:17-alpine`, exact environment `POSTGRES_DB=supabase_fixture`, `POSTGRES_USER=postgres`, and `POSTGRES_PASSWORD=phase9-fixture-admin-only`, a read-only init mount, a localhost-only configurable port, a project-scoped named volume, and a sentinel-backed health check; and only the dev API/agent-worker receive `fake-supabase-db:5432` in their database-host allowlist.
 
 Run:
 
 ```bash
-uv run pytest packages/connectors/tests/supabase packages/policy/tests/test_evaluator.py packages/tools/tests/test_gateway.py -q
+uv run pytest tests/test_compose_supabase_db_fixture.py -q
+```
+
+Expected: FAIL because the dev fixture service, volume, mount, health contract, and environment documentation do not exist.
+
+- [ ] **Step 8: Add the isolated real PostgreSQL 17 fixture, make its contract green, and write failing execution/security tests**
+
+Create `tests/fixtures/supabase/init.sql` with fixture-only credentials and put a health sentinel last:
+
+```sql
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+CREATE ROLE jhin_reader LOGIN PASSWORD 'reader-pass'
+  NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+CREATE ROLE jhin_writer LOGIN PASSWORD 'writer-pass'
+  NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+GRANT SET ON PARAMETER temp_file_limit TO jhin_reader, jhin_writer;
+CREATE TABLE public.widget_groups (id integer PRIMARY KEY, label text NOT NULL);
+ALTER TABLE public.widget_groups ALTER COLUMN label SET STORAGE EXTERNAL;
+CREATE TABLE public.widgets (
+  id integer PRIMARY KEY,
+  group_id integer NOT NULL REFERENCES public.widget_groups(id)
+    ON UPDATE NO ACTION ON DELETE NO ACTION NOT DEFERRABLE,
+  name text NOT NULL
+);
+ALTER TABLE public.widgets ALTER COLUMN name SET STORAGE EXTERNAL;
+CREATE INDEX widgets_group_id_idx ON public.widgets (group_id);
+INSERT INTO public.widget_groups VALUES (1, 'primary');
+INSERT INTO public.widgets VALUES
+  (1, 1, 'alpha'), (2, 1, 'beta'), (3, 1, repeat('x', 20000));
+CREATE TABLE public.fixture_ready (ready boolean PRIMARY KEY);
+INSERT INTO public.fixture_ready VALUES (true);
+CREATE SCHEMA private;
+REVOKE ALL ON SCHEMA private FROM PUBLIC;
+CREATE TABLE private.side_effects (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, source text NOT NULL);
+GRANT CONNECT ON DATABASE supabase_fixture TO jhin_reader, jhin_writer;
+GRANT USAGE ON SCHEMA public TO jhin_reader, jhin_writer;
+GRANT SELECT ON public.widgets, public.widget_groups TO jhin_reader;
+GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON public.widgets TO jhin_writer;
+GRANT SELECT ON public.widget_groups TO jhin_writer;
+GRANT MAINTAIN ON public.widget_groups TO jhin_writer;
+```
+
+The fixture-only identity/default lives in `private.side_effects`, which agent SQL can never name; `public.widgets` remains a safe mutation target. Do not grant `CREATE` on `public` to either low-privilege role now that agent DDL is absent.
+
+Define `fake-supabase-db` only in `compose.dev.yaml`, using `postgres:17-alpine`, exact environment `POSTGRES_DB=supabase_fixture`, `POSTGRES_USER=postgres`, and `POSTGRES_PASSWORD=phase9-fixture-admin-only`, a project-scoped named volume, the read-only init mount, and a localhost-only `${FAKE_SUPABASE_DB_DEV_PORT:-55433}` binding. Its health check must connect to `supabase_fixture` as `postgres` and query `public.fixture_ready`, not merely call `pg_isready`, because the official image starts a temporary server before init scripts finish. Add exactly `fake-supabase-db:5432` to `JHIN_CONNECTOR_ALLOWED_DB_HOSTS` for API verification and agent-worker execution in the dev override only. Document the fixture port and role names in `.env.example`; no fixture service, volume, password, or DB allowlist enters production-shaped `compose.yaml`.
+
+Rerun `uv run pytest tests/test_compose_supabase_db_fixture.py -q`. Expected: PASS before the integration suite relies on the fixture.
+
+Mark `test_database_integration.py` with `pytest.mark.integration` and require explicit reader, writer, and fixture-admin DSNs from environment. Use real asyncpg transactions/prepared statements/manual cursors; do not substitute the protocol fake.
+
+Cover qualified and unqualified column reads, nested/recursive CTE aliases for fixed-width outputs, joins/set operations, bound parameters, exact/over 8,192-byte parameter leaves and 16,000-byte compact parameter payloads through approval/replay, row/cell/document boundaries, 64/65 columns, Unicode `C*` output aliases, multibyte truncation, duplicate/hostile aliases, redaction-expanding cells, exact 30,000-byte executor output passing through a real production-default `ToolGateway`, statement versus lock timeout ordering, resource/planner GUCs, `session_replication_role`, temp spill cancellation, cancellation cleanup, and transaction rollback. Verify the generated wrapper contains the exact original SQL and generated aliases only, retains bound `$N` values, uses only the fully qualified trusted functions shown above, limits to `max_rows + 1`, and copies at most one bounded encoded row per cursor fetch.
+
+For extraction, store a large incompressible UTF-8 value after setting its physical text column to `STORAGE EXTERNAL`; prove direct `text` and `varchar` projections slice by characters before conversion, then by exact bytes, and transfer only the bounded base64 prefix. Insert a highly compressible value while the column is EXTENDED, change only its catalog storage to EXTERNAL without rewriting it, and prove `pg_column_compression` causes stable rejection with no cell bytes copied. Reject numeric/bpchar/json/jsonb/bytea results and casts, text/varchar through a CTE/star/expression/cast/operator/DISTINCT/set operation, and any wide text/varchar used in WHERE/JOIN/GROUP/ORDER. Accept a direct aliased text/varchar projection while predicates/order use fixed-width columns. Include mixed-case quoted/unquoted column controls and document that the test proves asyncpg/wire bounds, not a universal backend-memory sandbox over a malicious database administrator.
+
+Create fixture-admin attack objects with cleanup in `finally` and prove rejection before submitted SQL executes:
+
+- a view and materialized view over a SECURITY DEFINER function/private table;
+- partitioned/partition, foreign, and inheritance parent/child relations;
+- custom/domain/array columns and a custom collation;
+- default, generated, CHECK, and RLS-policy expressions backed by SECURITY DEFINER functions that would append to `private.side_effects` (use a deliberately misdeclared immutable sequence helper where PostgreSQL requires immutable generated/index expressions);
+- user trigger and rewrite rule side effects;
+- expression/partial/custom-opclass/INCLUDE/invalid indexes, plus a safe ordinary
+  nonunique column-only `pg_catalog` B-tree index that remains usable;
+- exclusion constraints;
+- unsafe cross-schema or CASCADE/SET NULL/SET DEFAULT/deferrable FKs;
+- a safe same-schema nondeferrable NO ACTION/RESTRICT FK graph and a graph over the 32-relation cap.
+
+For every unsafe case, assert unchanged target/peer/private rows or sequence counters. Include a plain table with both safe nonunique and unique B-tree indexes and the safe FK graph to prove approved bounded mutations still work under deterministic `SHARE ROW EXCLUSIVE` peer locks; remove the peer `MAINTAIN` grant in one test and prove failure before SQL. Tables at 128 columns/16 indexes and their 129/17 cases prove exact catalog boundaries without unbounded fetches. Exact/cap+1 mutation-byte tests repeat one large parameter across VALUES rows and UPDATE columns; `INSERT ... SELECT` and `UPDATE ... SET value = source.huge_value` against a huge stored source are rejected before submitted SQL. UPDATE and DELETE against a target containing `max_rows + 1` rows are rejected by a spy-confirmed cap+1 probe before the submitted command; INSERT is rejected statically at `max_rows + 1` VALUES rows. A single default/CONTINUE+RESTRICT TRUNCATE at or below the cap succeeds; spy on the trusted probe to prove it reads no more than `max_rows + 1` rows, while multi-table/RESTART/CASCADE/over-cap/external-inbound-FK forms leave every row and sequence unchanged.
+
+Create a custom composite type plus symbolic operator in `public` backed by a SECURITY DEFINER counter function. As fixture admin, prove the control resolves/fires with `search_path=public,pg_catalog`, then prove `search_path=pg_catalog` cannot resolve it. The executor must also reject custom relation/output types before prepare and explicit `OPERATOR(public.op)` in static policy. This covers unqualified arithmetic/predicate operator resolution without putting an untrusted schema on the executor path.
+
+After successful connection verification, change each live fact independently and restore it in `finally`: rotate the credential; change project/schema/write config; use the fixture admin to alter the test login to each privileged flag; add direct/deep inherited `pg_read_all_data` or privileged ancestors; make a deep ancestor own the current database, an allowed schema, or an accessed/FK-peer relation; and simulate a session/current-user mismatch. Every invocation re-resolves current state and fails before submitted SQL with only `database_role_not_least_privilege` or another stable credential-free code. Assert captured logs/errors contain no DSN password, SQL marker, parameter marker, login, ancestor, schema, or relation name.
+
+Add race coverage. Unit tests mutate catalog answers between initial discovery and the post-lock check. Real PostgreSQL tests hold/attempt conflicting ALTER/owner/RLS/rule operations against a source and ALTER/TRIGGER/index/policy operations against a mutation target, proving the deterministic locks either serialize them or fail under `lock_timeout`. A separate source/peer concurrent-index control proves index scans remain disabled and no index support function fires. No pre-lock observation alone permits SQL. State explicitly in the test name that a concurrently malicious superuser can always terminate or tamper with the executor—this contract closes ordinary effect-bearing relation DDL races under the declared lock/plan rules, not the database-administrator trust boundary.
+
+- [ ] **Step 9: Start a fresh isolated fixture and verify the integration tests are RED**
+
+Use one literal Compose project. Run this entire fenced block as one Bash process—never as separately spawned lines—so the installed cleanup trap remains active through startup and pytest and removes only this task's volume on success, failure, or interruption:
+
+```bash
+set -euo pipefail
+phase9_db_cleanup() {
+  docker compose -p jhin-phase9-dbtest -f compose.yaml -f compose.dev.yaml down --volumes --remove-orphans
+}
+trap phase9_db_cleanup EXIT INT TERM
+phase9_db_cleanup
 export FAKE_SUPABASE_DB_DEV_PORT=65434
+export POSTGRES_DB=supabase_fixture
+export POSTGRES_USER=postgres
+export POSTGRES_PASSWORD=phase9-fixture-admin-only
 export JHIN_CONNECTOR_ALLOWED_DB_HOSTS=127.0.0.1:65434
 export JHIN_PHASE9_DB_READER_DSN=postgresql://jhin_reader:reader-pass@127.0.0.1:65434/supabase_fixture
 export JHIN_PHASE9_DB_WRITER_DSN=postgresql://jhin_writer:writer-pass@127.0.0.1:65434/supabase_fixture
 export JHIN_PHASE9_DB_ADMIN_DSN=postgresql://postgres:phase9-fixture-admin-only@127.0.0.1:65434/supabase_fixture
+docker compose -p jhin-phase9-dbtest -f compose.yaml -f compose.dev.yaml up -d --force-recreate --wait --wait-timeout 60 fake-supabase-db
+docker compose -p jhin-phase9-dbtest -f compose.yaml -f compose.dev.yaml ps fake-supabase-db
 uv run pytest -m integration packages/connectors/tests/supabase/test_database_integration.py -q
-docker compose -f compose.yaml -f compose.dev.yaml config --quiet
-uv run ruff check packages/connectors
-uv run ruff format --check packages/connectors
-uv run mypy
-git diff --check
-docker compose -p jhin-phase9-dbtest -f compose.yaml -f compose.dev.yaml down --volumes --remove-orphans
 ```
 
-Expected: PASS across the SQL matrix, explicit physical-relation qualification, CTE handling, fixed risks, opt-in writes/DDL, per-call endpoint/config/direct-and-inherited-role checks, mutation-target indirect-effect preflights, real transactions, cursor limits, timeouts, output caps, and safe failures; only the literal `jhin-phase9-dbtest` fixture project and its volumes are then removed.
+Expected: Compose itself waits for the sentinel-backed health check on a new project-scoped volume, then tests FAIL because the executors are absent, and the still-active same-shell trap tears the fixture down. Never parameterize or omit the literal `jhin-phase9-dbtest` destructive target.
+
+- [ ] **Step 10: Implement three fixed-risk tools and the ordered execution boundary**
+
+Register the three exact tools from Step 1. `SupabaseConnector.tools()` returns the Management tuple followed by the database tuple, and the manifest advertises the same exact names once. Every executor first calls `resolve_connection`, requires `auth_type="postgres"`, binds the submitted project/schema to current normalized config, requires `allow_writes=True` for write/destructive, validates the current DSN against the current project ref/process `DATABASE_URL`, creates current hosted TLS state, and only then connects.
+
+Within the connection, preserve this exact order:
+
+```text
+begin transaction (read-only for read tool)
+set time/namespace/resource GUCs
+recheck replication mode, session/direct/transitive role, DB/schema ownership, and server encoding
+resolve relation OIDs and bounded FK closure
+lock every relation in deterministic order
+re-resolve and revalidate every relation/FK/owner fact
+read: prepare original for attributes -> enforce fixed/direct-text output matrix -> build/prepare trusted wrapper -> bounded cursor
+update/delete/truncate: bounded target probe -> execute original once -> verify command tag
+insert: static VALUES row/byte caps -> execute original once -> verify command tag
+commit; on every failure rollback; always bounded-close
+```
+
+Verification at connection creation never substitutes for these per-call checks. The authorization digest handles parked approval drift, while the executor independently protects immediate calls. Do not retry a database statement or commit internally. All asyncpg/SQLGlot errors become stable credential-free connector errors `from None`; caller cancellation propagates after cleanup.
+
+- [ ] **Step 11: Run unit, real-PostgreSQL, Compose, and quality gates; then commit**
+
+Run this entire fenced block as one Bash process. It creates a fresh fixture for the GREEN gate and keeps the literal-project cleanup trap active through integration and every later check:
+
+```bash
+set -euo pipefail
+uv run pytest packages/connectors/tests/supabase packages/connectors/tests/test_endpoints.py packages/connectors/tests/test_manifest_registry.py packages/policy/tests/test_evaluator.py packages/tools/tests/test_gateway.py tests/test_compose_supabase_db_fixture.py -q
+phase9_db_cleanup() {
+  docker compose -p jhin-phase9-dbtest -f compose.yaml -f compose.dev.yaml down --volumes --remove-orphans
+}
+trap phase9_db_cleanup EXIT INT TERM
+phase9_db_cleanup
+export FAKE_SUPABASE_DB_DEV_PORT=65434
+export POSTGRES_DB=supabase_fixture
+export POSTGRES_USER=postgres
+export POSTGRES_PASSWORD=phase9-fixture-admin-only
+export JHIN_CONNECTOR_ALLOWED_DB_HOSTS=127.0.0.1:65434
+export JHIN_PHASE9_DB_READER_DSN=postgresql://jhin_reader:reader-pass@127.0.0.1:65434/supabase_fixture
+export JHIN_PHASE9_DB_WRITER_DSN=postgresql://jhin_writer:writer-pass@127.0.0.1:65434/supabase_fixture
+export JHIN_PHASE9_DB_ADMIN_DSN=postgresql://postgres:phase9-fixture-admin-only@127.0.0.1:65434/supabase_fixture
+docker compose -p jhin-phase9-dbtest -f compose.yaml -f compose.dev.yaml up -d --force-recreate --wait --wait-timeout 60 fake-supabase-db
+uv run pytest -m integration packages/connectors/tests/supabase/test_database_integration.py -q
+docker compose -f compose.yaml -f compose.dev.yaml config --quiet
+uv run ruff check packages/connectors tests/test_compose_supabase_db_fixture.py
+uv run ruff format --check packages/connectors tests/test_compose_supabase_db_fixture.py
+uv run mypy
+git diff --check
+phase9_db_cleanup
+trap - EXIT INT TERM
+```
+
+Expected: PASS across parser secrecy/resource boundaries, three exact fixed risks, no DDL surface, current credential/config/role/ownership checks, deterministic locked relation/FK preflight, hidden-code fixtures, bounded mutation rollback, type-specific fixed/direct-text output extraction with unsupported/compressed values rejected, real cursor/time/resource limits, plane isolation, Compose isolation, and static gates. Task 7 still owns adding the connector workspace manifest to the Docker dependency-cache stage before clean production image builds.
 
 Commit:
 
 ```bash
-git add packages/connectors/pyproject.toml packages/connectors/src/jhin_connectors/supabase packages/connectors/tests/supabase uv.lock tests/fixtures/supabase/init.sql compose.dev.yaml .env.example
+git add packages/connectors/pyproject.toml packages/connectors/src/jhin_connectors/supabase packages/connectors/tests/supabase packages/connectors/tests/test_manifest_registry.py tests/test_compose_supabase_db_fixture.py uv.lock tests/fixtures/supabase/init.sql compose.dev.yaml .env.example
 git commit -m "feat: add bounded Supabase SQL execution"
 ```
 
@@ -1281,7 +1456,8 @@ Assert:
 - GitHub/Linear retain the one-time generated-secret dialog.
 - Connection detail shows "Webhook secret configured" from the boolean only.
 - Supabase management-token and database forms show only their own settings.
-- allow_writes and allow_ddl are explicit advanced toggles defaulting off.
+- allow_writes is an explicit advanced toggle defaulting off; no agent DDL
+  toggle or capability is exposed in Phase 9.
 - Connection detail lists authorized agent names and each exact relevant
   capability/effect/scope, labels incomplete or denied grants, shows a clear
   empty state, and never implies that a grant bypasses current approval policy.
@@ -1304,7 +1480,7 @@ Mirror the new API fields in `ToolInfo`, `ConfigFieldSpec`, `ConnectorInfo`, `Co
 
 Use `ScopeEditor` in both `ToolsAccessTab` and the agent wizard. Key picker options by `tool.name` and display both tool name and required capability; never merge different tools' scope keys into one grant editor. Keep per-tool scope state in the wizard, submit the selected tool's `required_capability`, and rely on Task 1's distinct-scope grants when two tools share a capability.
 
-Render config controls by manifest kind: text/password as appropriate, bounded integer input, checkbox for booleans, and newline-separated editor normalized to a string list. Filter by `auth_types`; submit defaults so the operator sees the effective safety posture. Put `allow_writes` and `allow_ddl` under a clearly labeled Advanced database access disclosure.
+Render config controls by manifest kind: text/password as appropriate, bounded integer input, checkbox for booleans, and newline-separated editor normalized to a string list. Filter by `auth_types`; submit defaults so the operator sees the effective safety posture. Put `allow_writes` under a clearly labeled Advanced database access disclosure, and do not render or submit an `allow_ddl` field.
 
 For `provider_supplied`, show setup metadata after create and in connection detail, accept the provider-generated secret through the new `PUT /webhook-secret` route, then discard the local form state. Remove Linear/Vercel/Supabase from `UPCOMING_CONNECTORS`; leave HTTP as future work without assigning it to completed Phase 9.
 
@@ -1340,7 +1516,7 @@ pnpm --filter jhin-web typecheck
 pnpm --filter jhin-web test
 docker compose -f compose.yaml -f compose.dev.yaml config --quiet
 docker compose -f compose.yaml -f compose.dev.yaml build --no-cache api agent-worker workflow-worker event-worker web
-docker compose -f compose.yaml -f compose.dev.yaml up -d fake-vercel fake-supabase fake-supabase-db
+docker compose -f compose.yaml -f compose.dev.yaml up -d --wait --wait-timeout 60 fake-vercel fake-supabase fake-supabase-db
 docker compose -f compose.yaml -f compose.dev.yaml ps fake-vercel fake-supabase fake-supabase-db
 git diff --check
 ```
@@ -1413,19 +1589,31 @@ Implement independent workspace-isolated tests with unique names, deterministic 
 7. Supabase database read: a postgres connection using jhin_reader reads
    public.widgets with explicit qualification and a CTE alias, demonstrates
    max_rows, max_cell_bytes, max_result_bytes, and a real statement timeout,
-   and rejects private/cross-schema/unqualified/catalog/multi-statement/lock/
+   and rejects private/cross-schema/unqualified-table/catalog-schema/multi-statement/lock/
    session/data-changing SQL plus function, custom operator, and custom cast
    bypasses before execution.
 8. Supabase database mutation/live recheck: read-only config, missing required
-   scope, wrong SQL-risk tool, missing Balanced approval, and allow_writes/
-   allow_ddl=false leave state unchanged; exact approved write and narrow DDL
-   behave as declared. After verification, rotate the credential and separately
-   change project/schema/write/DDL config or current role to postgres/superuser/
-   BYPASSRLS/CREATEDB/CREATEROLE/REPLICATION, grant a dangerous built-in role,
-   or add a privileged transitive membership; every execution rechecks live
-   state and causes zero unauthorized SQL effects. Trigger/rule, partition/
-   foreign/view/inheritance, and cascading-FK targets fail the same-transaction
-   preflight with zero changes to private or secondary relations.
+   scope, wrong SQL-risk tool, missing Balanced approval, and
+   `allow_writes=false` leave state unchanged; exact approved INSERT,
+   UPDATE/DELETE, and bounded single-table TRUNCATE behave as declared, while
+   every DDL statement remains unavailable and rejected. After verification,
+   rotate the credential and separately change project/schema/write config or
+   current role to postgres/superuser/BYPASSRLS/CREATEDB/CREATEROLE/REPLICATION,
+   grant a dangerous built-in role or ancestor ownership of the database,
+   allowed schema, accessed table, or FK-peer table, or add a privileged deep
+   transitive membership; every execution rechecks live state and causes zero
+   unauthorized SQL effects. Trigger/rule, partition/foreign/view/inheritance,
+   RLS/policy, custom-type/opclass, default/generated/CHECK/exclusion,
+   expression/partial-index, over-column/index/constraint caps, unsafe-FK,
+   INSERT-SELECT/source-assignment, and mutation-byte-expansion paths fail the
+   same-transaction locked preflight with zero changes to private or secondary
+   relations. The
+   real-PostgreSQL path also proves approval-lossless SQL/parameter bounds,
+   resource GUCs, `pg_catalog`-only search path, allowed ordinary nonunique
+   B-tree indexes, bounded UPDATE/DELETE/TRUNCATE target probing, Unicode-safe
+   output names, production-default sanitizer/redaction budgeting, the
+   fixed/direct-text type-specific base64 wrapper with unsupported or compressed
+   variable-width results rejected, one-row cursor, and row/cell/result caps.
 9. Plane/workspace isolation: management tools cannot use the postgres
    connection, database tools cannot use the management token, and another
    workspace cannot reference either connection.
@@ -1493,7 +1681,7 @@ export JHIN_PHASE9_DB_ADMIN_DSN=postgresql://postgres:phase9-fixture-admin-only@
 docker compose -p jhin-phase9-acceptance -f compose.yaml -f compose.dev.yaml down --volumes --remove-orphans
 docker compose -p jhin-phase9-acceptance -f compose.yaml -f compose.dev.yaml --profile build build sandbox-image
 docker compose -p jhin-phase9-acceptance -f compose.yaml -f compose.dev.yaml build --no-cache api agent-worker workflow-worker event-worker web fake-vercel fake-supabase
-docker compose -p jhin-phase9-acceptance -f compose.yaml -f compose.dev.yaml up -d --force-recreate
+docker compose -p jhin-phase9-acceptance -f compose.yaml -f compose.dev.yaml up -d --force-recreate --wait --wait-timeout 120
 docker compose -p jhin-phase9-acceptance -f compose.yaml -f compose.dev.yaml ps
 docker compose -p jhin-phase9-acceptance -f compose.yaml -f compose.dev.yaml exec -T api jhin-db-migrate
 uv run alembic -c packages/db/alembic.ini heads
@@ -1523,7 +1711,8 @@ Explain Vercel access-token authority and the two independent Supabase
 connection rows. State that one credential never crosses planes.
 
 ## Grants and approvals
-List every tool, risk, required scope key, write/DDL opt-in, approval resume
+List every tool, risk, required scope key, write opt-in, absence of agent DDL,
+approval resume
 reauthorization, Balanced/Autonomous/custom behavior, deterministic invocation
 claims, execution_unknown reconciliation, and example least-privilege grants.
 
@@ -1534,12 +1723,17 @@ deduplication. Do not imply every Vercel plan supports account webhooks.
 
 ## Supabase database role
 Show creation of a custom NOSUPERUSER NOBYPASSRLS login, grants limited to
-curated schemas/views, TLS DSN setup, allowlist settings, timeouts, row/cell/
-result caps, explicit physical relation qualification, pg_catalog-first search
-path, function/operator/cast denials, direct plus inherited role rejection,
-mutation-target indirect-effect preflight, and the SQL decision table. State that
-schema allowlisting does not classify sensitive cells; low-privilege roles and
-curated views are the primary confidentiality boundary.
+curated ordinary nonpartition base tables, TLS DSN setup, allowlist settings,
+timeouts, row/cell/result caps, explicit physical relation qualification,
+`pg_catalog`-only search path, function/operator/cast denials, direct plus
+inherited role and ownership rejection, deterministic relation/FK-peer locking,
+hidden-code preflight, pre-dispatch target bounds for every destructive mutation,
+the fixed/direct-text output-type matrix and its trusted-database residual, and
+the SQL decision table. State that schema allowlisting
+does not classify sensitive cells; least-privilege table/column grants and
+purpose-built ordinary tables containing only intended data are the primary
+confidentiality boundary. Views are intentionally rejected in Phase 9 rather
+than recursively trusting stored view definitions and owner authority.
 
 ## Connection access summary
 Explain how authorized agent names and exact relevant grant capability/effect/
@@ -1639,12 +1833,12 @@ git commit -m "docs: close Phase 9 production integrations"
 - [ ] Confirm Supabase management/database auth types cannot substitute for each other and `project_ref` comes from connection config.
 - [ ] Confirm Supabase Management project/log/function reads and approved function deploy/delete pass end to end with destructive risks and no source/value leak.
 - [ ] Confirm every database execution re-resolves current credential/config, rechecks endpoint/TLS/project, direct role flags, and the transitive dangerous-role membership closure, then runs bounded SQL on the same checked connection without exposing role names.
-- [ ] Confirm SQL validation walks the complete AST, executes the original SQL, requires explicit schema qualification for every physical relation, permits lexical CTE aliases, denies all functions and custom operator/cast paths, rejects every ALTER/unsupported CREATE/DROP CASCADE, and uses `pg_catalog` first in search path.
-- [ ] Confirm every write/destructive DML call locks and preflights its live target as one ordinary requested-schema table, rejecting trigger/rule, partition/foreign/view/inheritance, and cascading-FK indirect effects with zero changes outside the target.
+- [ ] Confirm SQL validation enforces token/node/depth limits, catches parser recursion without logging raw SQL, walks the complete AST, handles casts before the blanket function denial, executes the original SQL, requires explicit schema qualification for every physical relation while permitting qualified/unqualified and quoted/mixed-case column references, permits lexical CTE aliases, denies all functions and custom operator/cast paths, rejects every DDL statement, accepts TRUNCATE only for one table with default/CONTINUE IDENTITY and default/RESTRICT behavior, bounds every UPDATE/DELETE/TRUNCATE target with a locked `max_rows + 1` pre-probe before dispatch, and uses a `pg_catalog`-only search path.
+- [ ] Confirm every accessed source, mutation target, and bounded same-schema FK peer is deterministically locked and then revalidated as an ordinary nonpartition base table; relation column/index/constraint catalogs use cap+1 reads; current/ancestor ownership and trigger/rule, view/foreign/partition/inheritance, RLS/policy, custom-type/opclass, default/generated/CHECK/exclusion, expression/partial-index, and unsafe-FK indirect-effect paths are rejected with zero unauthorized changes.
 - [ ] Confirm no approval can execute from a different agent/run/task or after a grant/policy/connection change forbids it.
 - [ ] Confirm webhook ingress UUID derives from connector/connection/delivery and a post-publish/precommit retry creates one delivery, canonical event, and trigger.
 - [ ] Confirm webhook readers test exact cap, cap+1, and one huge chunk before copy; provider clients stream up to 512 KiB before buffering and never follow redirects.
-- [ ] Confirm response/row/cell/source/time caps are constants with boundary tests and statement-timeout/max-row behavior is proven against real PostgreSQL.
+- [ ] Confirm SQL/parameter input caps preserve the complete approval digest through production-default gateway sanitization, and response/row/cell/source/time/AST/mutation-byte caps are constants with boundary tests; INSERT-SELECT/source-column assignments are rejected, repeated literal/parameter expansion is pre-bounded, resource GUC ordering (including string, replication, and index-plan controls), statement/lock/client timeout behavior, `max_rows` mutation rollback, Unicode-safe output names, production-default sanitizer-aware redaction/result budgeting, and the trusted fixed/direct-text type-specific base64 wrapper with unsupported/compressed variable-width rejection and one-row cursor fetch are proven through real PostgreSQL and a real default `ToolGateway` while remaining below its leaf/document limits.
 - [ ] Confirm provider endpoints cannot redirect or target an unapproved private/metadata/Jhin database address.
 - [ ] Confirm credentials and their individual JSON leaves are registered with redaction in API and worker processes.
 - [ ] Confirm the connection detail/API names authorized agents and shows exact relevant capability/effect/scope with admin-only RBAC and workspace isolation.

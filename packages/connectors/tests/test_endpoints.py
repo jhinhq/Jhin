@@ -76,9 +76,9 @@ def test_hosted_supabase_dsn_requires_tls_and_expected_host_shape(dsn: str) -> N
 @pytest.mark.parametrize(
     "dsn",
     [
-        "postgresql://postgres@db.abc123.supabase.co:5432/postgres?sslmode=require",
+        "postgresql://postgres:secret@db.abc123.supabase.co:5432/postgres?sslmode=require",
         (
-            "postgresql://postgres.abc123@aws-0-us-west-1.pooler.supabase.com:6543/"
+            "postgresql://postgres.abc123:secret@aws-0-us-west-1.pooler.supabase.com:5432/"
             "postgres?sslmode=verify-full"
         ),
     ],
@@ -89,7 +89,17 @@ def test_valid_hosted_supabase_targets_return_the_original_dsn(dsn: str) -> None
 
 def test_pooler_username_must_end_with_project_ref() -> None:
     dsn = (
-        "postgresql://postgres.wrong@aws-0-us-west-1.pooler.supabase.com:6543/"
+        "postgresql://postgres.wrong:secret@aws-0-us-west-1.pooler.supabase.com:5432/"
+        "postgres?sslmode=require"
+    )
+
+    with pytest.raises(EndpointPolicyError):
+        validate_postgres_target(dsn, project_ref="abc123", app_database_url=None)
+
+
+def test_official_transaction_pooler_port_is_rejected_for_session_execution() -> None:
+    dsn = (
+        "postgresql://postgres.abc123:secret@aws-0-us-west-1.pooler.supabase.com:6543/"
         "postgres?sslmode=require"
     )
 
@@ -106,14 +116,42 @@ def test_pooler_username_must_end_with_project_ref() -> None:
         "sslmode=require&dbname=other",
         "sslmode=require&user=other",
         "sslmode=require&service=unsafe",
+        "sslmode=require&application_name=jhin",
+        "sslmode=require&options=-csearch_path%3Dpublic",
+        "sslmode=require&role=postgres",
+        "sslmode=require&search_path=public",
+        "sslmode=require&passfile=/tmp/pass",
+        "sslmode=require&sslcert=/tmp/cert",
+        "sslmode=require&SSLKEY=/tmp/key",
         "sslmode=require&sslmode=disable",
+        "sslmode=require&SSLMODE=verify-full",
     ],
 )
 def test_database_query_cannot_override_validated_connection_target(query: str) -> None:
-    dsn = f"postgresql://reader@db.abc123.supabase.co:5432/postgres?{query}"
+    dsn = f"postgresql://reader:secret@db.abc123.supabase.co:5432/postgres?{query}"
 
     with pytest.raises(EndpointPolicyError):
         validate_postgres_target(dsn, project_ref="abc123", app_database_url=None)
+
+
+@pytest.mark.parametrize(
+    "dsn",
+    [
+        "postgresql://reader@db.abc123.supabase.co:5432/postgres?sslmode=require",
+        "postgresql://reader:@db.abc123.supabase.co:5432/postgres?sslmode=require",
+    ],
+)
+def test_database_target_requires_an_explicit_nonempty_password(dsn: str) -> None:
+    with pytest.raises(EndpointPolicyError) as exc_info:
+        validate_postgres_target(dsn, project_ref="abc123", app_database_url=None)
+
+    assert "reader" not in str(exc_info.value)
+
+
+def test_sslmode_query_key_is_case_insensitive_when_it_is_the_only_key() -> None:
+    dsn = "postgresql://reader:secret@db.abc123.supabase.co:5432/postgres?SSLMODE=VERIFY-FULL"
+
+    assert validate_postgres_target(dsn, project_ref="abc123", app_database_url=None) == dsn
 
 
 def test_exact_allowlisted_database_host_bypasses_hosted_tls_rule(
@@ -123,6 +161,38 @@ def test_exact_allowlisted_database_host_bypasses_hosted_tls_rule(
     dsn = "postgresql://reader:secret@fake-supabase-db:5432/fixture?sslmode=disable"
 
     assert validate_postgres_target(dsn, project_ref="abc123", app_database_url=None) == dsn
+
+
+def test_exact_allowlisted_dev_host_may_use_transaction_pooler_port_number(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JHIN_CONNECTOR_ALLOWED_DB_HOSTS", "fake-supabase-db:6543")
+    dsn = "postgresql://reader:secret@fake-supabase-db:6543/fixture?sslmode=disable"
+
+    assert validate_postgres_target(dsn, project_ref="abc123", app_database_url=None) == dsn
+
+
+@pytest.mark.parametrize(
+    "dsn",
+    [
+        "postgresql://reader:secret@db.abc123.supabase.co:5432/postgres?sslmode=disable",
+        (
+            "postgresql://postgres.abc123:secret@"
+            "aws-0-us-west-1.pooler.supabase.com:5432/postgres?sslmode=disable"
+        ),
+    ],
+)
+def test_allowlist_cannot_downgrade_official_supabase_tls(
+    monkeypatch: pytest.MonkeyPatch,
+    dsn: str,
+) -> None:
+    monkeypatch.setenv(
+        "JHIN_CONNECTOR_ALLOWED_DB_HOSTS",
+        "db.abc123.supabase.co:5432,aws-0-us-west-1.pooler.supabase.com:5432",
+    )
+
+    with pytest.raises(EndpointPolicyError):
+        validate_postgres_target(dsn, project_ref="abc123", app_database_url=None)
 
 
 def test_jhin_database_target_is_rejected() -> None:

@@ -61,9 +61,21 @@ def _vercel() -> Connector:
     return VercelConnector()
 
 
+def _supabase() -> Connector:
+    from jhin_connectors.supabase.connector import SupabaseConnector
+
+    return SupabaseConnector()
+
+
 # One factory per shipped connector. Factories keep import cost lazy and are
 # the single line a contributor adds for a new connector (plan 36.5).
-DEFAULT_CONNECTORS: tuple[Callable[[], Connector], ...] = (_github, _cli, _linear, _vercel)
+DEFAULT_CONNECTORS: tuple[Callable[[], Connector], ...] = (
+    _github,
+    _cli,
+    _linear,
+    _vercel,
+    _supabase,
+)
 
 
 def default_registry() -> ConnectorRegistry:
