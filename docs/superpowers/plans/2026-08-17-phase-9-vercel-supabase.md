@@ -726,23 +726,27 @@ git commit -m "feat: add scoped Vercel deployment tools"
 ### Task 4: Implement Vercel deployment webhook ingestion and normalization
 
 **Files:**
+- Modify: `docs/superpowers/plans/2026-08-17-phase-9-vercel-supabase.md`
 - Create: `packages/connectors/src/jhin_connectors/vercel/webhook.py`
 - Modify: `packages/connectors/src/jhin_connectors/vercel/manifest.py`
 - Modify: `packages/connectors/src/jhin_connectors/vercel/connector.py`
 - Modify: `packages/connectors/src/jhin_connectors/testing/fake_vercel.py`
 - Test: `packages/connectors/tests/vercel/test_webhook.py`
+- Test: `packages/connectors/tests/vercel/test_manifest.py`
+- Test: `packages/connectors/tests/test_manifest_registry.py`
 - Test: `apps/api/tests/test_webhooks_unit.py`
 - Test: `services/event_worker/tests/test_normalizer.py`
+- Test: `services/event_worker/tests/test_matcher.py`
 
 **Interfaces:**
 - Consumes: the Vercel connector from Task 3, provider-supplied webhook secret storage, bounded raw-body ingress, Task 2's deterministic ingress UUID, dotted subjects, `RawWebhookEvent`, `NormalizedEvent`, and the event worker's generic deterministic normalizer.
-- Produces: constant-time Vercel signature verification and fixed-field, retry-stable canonical deployment events for `deployment.created`, `deployment.ready`, `deployment.error`, `deployment.canceled`, and `deployment.promoted`.
+- Produces: constant-time Vercel signature verification and fixed-field, retry-stable canonical deployment events for `deployment.created`, `deployment.ready`, `deployment.error`, `deployment.canceled`, and `deployment.promoted`. The current account-webhook success event `deployment.succeeded` is also accepted and maps to the existing canonical `deployment.ready` concept because Vercel still emits `deployment.ready` for integrations/checks; this avoids splitting one successful-deployment automation concept into two Jhin events.
 
 - [ ] **Step 1: Write failing signature and normalization tests**
 
-First assert the completed manifest changes from `none` to `provider_supplied`, declares `sha1`, advertises the five provider/canonical event names, and returns setup metadata with no Jhin-generated secret. Then use raw JSON bytes, a known provider secret, and `hmac.new(secret, body, hashlib.sha1).hexdigest()`. Assert missing/malformed/wrong `x-vercel-signature` returns `WebhookVerificationError`; correct signature yields root-level `id` as `delivery_id` and root-level `type` as `event`. Reject missing/oversized IDs before payload normalization.
+First assert the completed manifest changes from `none` to `provider_supplied`, declares `sha1`, advertises six provider event names but five canonical event names, and returns setup metadata with no Jhin-generated secret. The provider list contains both `deployment.ready` and current account-webhook `deployment.succeeded`; both normalize to `connector.vercel.deployment.ready`. Then use raw JSON bytes, a known provider secret, and `hmac.new(secret, body, hashlib.sha1).hexdigest()`. Assert missing/malformed/wrong `x-vercel-signature` returns `WebhookVerificationError`; correct signature yields root-level `id` as `delivery_id` and root-level `type` as `event`. Reject missing/oversized IDs before payload normalization.
 
-For every supported event assert one canonical event:
+For every supported provider event assert one canonical event, with an explicit compatibility test proving `deployment.ready` and `deployment.succeeded` produce the same canonical event type and neither copies provider-only fields:
 
 ```python
 assert normalized.event_type == "connector.vercel.deployment.ready"
@@ -768,7 +772,7 @@ Add `test_vercel_post_publish_precommit_retry_keeps_one_canonical_event`. Pass t
 Run:
 
 ```bash
-uv run pytest packages/connectors/tests/vercel/test_webhook.py apps/api/tests/test_webhooks_unit.py services/event_worker/tests/test_normalizer.py -q
+uv run pytest packages/connectors/tests/vercel/test_webhook.py packages/connectors/tests/vercel/test_manifest.py packages/connectors/tests/test_manifest_registry.py apps/api/tests/test_webhooks_unit.py services/event_worker/tests/test_normalizer.py services/event_worker/tests/test_matcher.py -q
 ```
 
 Expected: FAIL because Vercel has no parser/normalizer.
@@ -777,7 +781,7 @@ Expected: FAIL because Vercel has no parser/normalizer.
 
 Verify the exact raw bytes before `json.loads`, compare lowercase hex digests with `hmac.compare_digest`, require an object root, and accept only bounded string `id`/`type`. Do not derive a delivery identifier from timestamps or mutable deployment fields.
 
-Normalize through small extraction helpers that tolerate provider shape changes while emitting only the ten allowed fields shown in Step 1. Do not copy `data` wholesale. Wire `parse_webhook` and `normalize_event` through `VercelConnector` and set `WEBHOOK_EVENTS`/canonical events in the manifest. Preserve Task 2's deterministic ingress ID unchanged; the existing event worker continues deriving canonical UUIDv5 IDs from that ingress ID, so publish/commit crash recovery remains idempotent across both streams.
+Normalize through small extraction helpers that tolerate provider shape changes while emitting only the allowed fields shown in Step 1. Do not copy `data` wholesale. Wire `parse_webhook` and `normalize_event` through `VercelConnector` and set the six provider `WEBHOOK_EVENTS` plus five canonical events in the manifest. Preserve Task 2's deterministic ingress ID unchanged; the existing event worker continues deriving canonical UUIDv5 IDs from that ingress ID, so publish/commit crash recovery remains idempotent across both streams. Do not attempt cross-delivery semantic deduplication: provider delivery identity remains the safe idempotency boundary.
 
 Extend the fake with an admin webhook emitter that signs the exact bytes using a supplied test secret, posts to a caller-provided Jhin callback URL only in dev tests, and reports the provider response without logging the secret.
 
@@ -786,7 +790,7 @@ Extend the fake with an admin webhook emitter that signs the exact bytes using a
 Run:
 
 ```bash
-uv run pytest packages/connectors/tests/vercel/test_webhook.py apps/api/tests/test_webhooks_unit.py services/event_worker/tests/test_normalizer.py packages/events/tests/test_subjects.py -q
+uv run pytest packages/connectors/tests/vercel/test_webhook.py packages/connectors/tests/vercel/test_manifest.py packages/connectors/tests/test_manifest_registry.py apps/api/tests/test_webhooks_unit.py services/event_worker/tests/test_normalizer.py services/event_worker/tests/test_matcher.py packages/events/tests/test_subjects.py -q
 uv run ruff check packages/connectors apps/api services/event_worker packages/events
 uv run mypy
 git diff --check
@@ -797,7 +801,7 @@ Expected: PASS for valid, invalid, duplicate, oversized, dotted, unknown, normal
 Commit:
 
 ```bash
-git add packages/connectors/src/jhin_connectors/vercel packages/connectors/src/jhin_connectors/testing/fake_vercel.py packages/connectors/tests/vercel/test_webhook.py apps/api/tests/test_webhooks_unit.py services/event_worker/tests/test_normalizer.py
+git add docs/superpowers/plans/2026-08-17-phase-9-vercel-supabase.md packages/connectors/src/jhin_connectors/vercel packages/connectors/src/jhin_connectors/testing/fake_vercel.py packages/connectors/tests/vercel/test_webhook.py packages/connectors/tests/vercel/test_manifest.py packages/connectors/tests/test_manifest_registry.py apps/api/tests/test_webhooks_unit.py services/event_worker/tests/test_normalizer.py services/event_worker/tests/test_matcher.py
 git commit -m "feat: ingest signed Vercel deployment events"
 ```
 

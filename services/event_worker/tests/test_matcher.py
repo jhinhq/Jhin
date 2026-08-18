@@ -214,6 +214,46 @@ async def test_semantically_identical_event_is_suppressed(
     assert rows[0].idempotency_key == rows[1].idempotency_key
 
 
+async def test_vercel_canonical_redelivery_starts_at_most_one_task(
+    session_factory: async_sessionmaker[AsyncSession], ids: dict[str, UUID]
+) -> None:
+    async with session_factory() as session:
+        trigger = await session.get(Trigger, ids["trigger"])
+        assert trigger is not None
+        trigger.event_type = "connector.vercel.deployment.ready"
+        trigger.filter_json = {}
+        await session.commit()
+
+    event = EventEnvelope(
+        event_id=UUID("aaaaaaaa-bbbb-5ccc-8ddd-eeeeeeeeeeee"),
+        event_type="connector.vercel.deployment.ready",
+        workspace_id=str(ids["workspace"]),
+        source=EventSource(type="vercel", connection_id=ids["connection"]),
+        data={
+            "deployment_id": "dpl_123",
+            "project_id": "prj_123",
+            "project_name": "storefront",
+            "url": "storefront-abc.vercel.app",
+            "target": "preview",
+            "state": "READY",
+            "created_at": 1_700_000_000_000,
+            "git_ref": "agent/fix",
+            "git_sha": "abc123",
+        },
+    )
+    temporal = FakeTemporal()
+    matcher = make_matcher(session_factory, temporal)
+
+    await matcher.handle_event(event)
+    await matcher.handle_event(event)
+
+    assert len(temporal.calls) == 1
+    rows = await invocations(session_factory)
+    assert [row.status for row in rows] == ["started", "duplicate"]
+    assert rows[0].idempotency_key == rows[1].idempotency_key
+    assert rows[0].event_id == rows[1].event_id == event.event_id
+
+
 async def test_no_transition_and_filter_miss_do_not_invoke(
     session_factory: async_sessionmaker[AsyncSession], ids: dict[str, UUID]
 ) -> None:

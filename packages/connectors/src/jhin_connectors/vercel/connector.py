@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
-from jhin_connectors.base import ConnectionHealth, Connector, VerifyContext
+from jhin_connectors.base import (
+    ConnectionHealth,
+    Connector,
+    NormalizedEvent,
+    RawWebhookEvent,
+    VerifyContext,
+)
 from jhin_connectors.vercel.client import (
     DEFAULT_BASE_URL,
     VercelApiError,
@@ -14,6 +21,8 @@ from jhin_connectors.vercel.client import (
 )
 from jhin_connectors.vercel.manifest import VERCEL_MANIFEST
 from jhin_connectors.vercel.tools import VERCEL_TOOLS
+from jhin_connectors.vercel.webhook import normalize as normalize_webhook_event
+from jhin_connectors.vercel.webhook import parse_webhook as parse_vercel_webhook
 from jhin_policy import ToolDefinition
 from jhin_tools.builtin import ToolExecutor
 
@@ -77,3 +86,11 @@ class VercelConnector(Connector):
 
     def tools(self) -> tuple[tuple[ToolDefinition, ToolExecutor], ...]:
         return VERCEL_TOOLS
+
+    def parse_webhook(
+        self, headers: Mapping[str, str], body: bytes, secret: str
+    ) -> RawWebhookEvent:
+        return parse_vercel_webhook(headers, body, secret)
+
+    def normalize_event(self, raw: RawWebhookEvent) -> list[NormalizedEvent]:
+        return normalize_webhook_event(raw)

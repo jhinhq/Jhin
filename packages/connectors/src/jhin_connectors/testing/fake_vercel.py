@@ -13,6 +13,9 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, cast
 from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.request import Request, urlopen
+
+from jhin_connectors.vercel.webhook import WEBHOOK_EVENTS, sign_payload
 
 DEFAULT_TOKEN = "fake-vercel-token"
 _MUTATIONS = frozenset({"preview_create", "redeploy", "promote", "alias"})
@@ -152,6 +155,7 @@ class FakeVercelState:
         self.mixed_project_list_row = False
         self.repeat_pagination_cursor = False
         self.ignore_event_limit = False
+        self.webhook_counter = 0
 
     @staticmethod
     def _deployment(
@@ -249,6 +253,84 @@ class FakeVercelState:
             self.last_requests.clear()
             self.faults.clear()
 
+    def emit_webhook(
+        self,
+        *,
+        callback_url: str,
+        secret: str,
+        event: str,
+        deployment_id: str,
+    ) -> _FakeResponse:
+        """Send one deterministic, correctly signed provider-shaped delivery.
+
+        The callback URL and signing secret are deliberately call-local: neither
+        is copied into request inspection state or returned to the caller.
+        """
+        destination = urlsplit(callback_url)
+        if destination.scheme not in {"http", "https"} or not destination.netloc:
+            return _FakeResponse(400, {"error": "invalid callback URL"})
+        if not secret or len(secret) > 4_096:
+            return _FakeResponse(400, {"error": "invalid webhook secret"})
+        if event not in WEBHOOK_EVENTS:
+            return _FakeResponse(400, {"error": "unsupported webhook event"})
+
+        with self.lock:
+            deployment_source = self.deployments.get(deployment_id)
+            if deployment_source is None:
+                return _FakeResponse(404, {"error": "deployment not found"})
+            deployment = dict(deployment_source)
+            project_id = str(deployment.get("projectId", ""))
+            project_source = self.projects.get(project_id, {})
+            self.webhook_counter += 1
+            delivery_id = f"evt_webhook_{self.webhook_counter}"
+            created_at = 1_700_000_100_000 + self.webhook_counter
+
+        provider_payload = {
+            "id": delivery_id,
+            "type": event,
+            "createdAt": created_at,
+            "payload": {
+                "deployment": {
+                    "id": str(deployment.get("id", "")),
+                    "name": str(deployment.get("name", "")),
+                    "url": str(deployment.get("url", "")),
+                    "target": str(deployment.get("target", "")),
+                    "meta": {
+                        "githubCommitRef": "main",
+                        "githubCommitSha": "a" * 40,
+                    },
+                },
+                "project": {
+                    "id": project_id,
+                    "name": str(project_source.get("name", "")),
+                },
+                "target": str(deployment.get("target", "")),
+            },
+        }
+        raw_body = json.dumps(provider_payload, separators=(",", ":")).encode("utf-8")
+        outbound = Request(
+            callback_url,
+            data=raw_body,
+            headers={
+                "Content-Type": "application/json",
+                "x-vercel-signature": sign_payload(secret, raw_body),
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(outbound, timeout=10) as response:
+                response.read()
+                status = response.status
+        except (OSError, ValueError):
+            return _FakeResponse(
+                502,
+                {"delivered": False, "delivery_id": delivery_id, "response": 0},
+            )
+        return _FakeResponse(
+            200,
+            {"delivered": True, "delivery_id": delivery_id, "response": status},
+        )
+
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
             return cast(
@@ -307,6 +389,24 @@ def handle_request(
         if not isinstance(mutation, str) or not state.arm_fault(mutation):
             return _FakeResponse(400, {"error": "unknown mutation"})
         return _FakeResponse(200, {"armed": mutation})
+    if method == "POST" and path == "/_admin/webhook":
+        callback_url = body.get("url")
+        secret = body.get("secret")
+        event = body.get("event")
+        deployment_id = body.get("deployment_id")
+        if (
+            not isinstance(callback_url, str)
+            or not isinstance(secret, str)
+            or not isinstance(event, str)
+            or not isinstance(deployment_id, str)
+        ):
+            return _FakeResponse(400, {"error": "invalid webhook request"})
+        return state.emit_webhook(
+            callback_url=callback_url,
+            secret=secret,
+            event=event,
+            deployment_id=deployment_id,
+        )
 
     request = state.record_request(method, path, query, body)
     redirect = state.redirects.get(path)

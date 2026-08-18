@@ -22,8 +22,18 @@ from jhin_api.webhooks.router import router as webhooks_router
 from jhin_connectors import WebhookVerificationError
 from jhin_connectors.github.manifest import GITHUB_MANIFEST
 from jhin_connectors.github.webhook import sign_payload
-from jhin_db.models import AuditEvent, Connection, WebhookDelivery
-from jhin_domain import new_uuid7
+from jhin_connectors.vercel.webhook import sign_payload as sign_vercel_payload
+from jhin_db.models import (
+    Agent,
+    AuditEvent,
+    Connection,
+    Trigger,
+    TriggerInvocation,
+    WebhookDelivery,
+)
+from jhin_domain import AgentStatus, new_uuid7
+from jhin_event_worker.matcher import TriggerMatcher
+from jhin_event_worker.normalizer import IngressNormalizer, derived_event_id
 from jhin_events.envelope import EventEnvelope
 from jhin_secrets import SecretCrypto
 
@@ -51,6 +61,47 @@ class RecordingJetStream:
         if self.fail:
             raise ConnectionError("nats is down")
         self.published.append((subject, payload, headers or {}))
+
+
+class DeduplicatingRecordingJetStream(RecordingJetStream):
+    """Records the first message for each JetStream id, like its dedupe window."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen_message_ids: set[str] = set()
+
+    async def publish(
+        self, subject: str, payload: bytes, headers: dict[str, str] | None = None
+    ) -> None:
+        normalized_headers = headers or {}
+        message_id = normalized_headers.get("Nats-Msg-Id", "")
+        if message_id and message_id in self.seen_message_ids:
+            return
+        if message_id:
+            self.seen_message_ids.add(message_id)
+        await super().publish(subject, payload, normalized_headers)
+
+
+class IngressMessage:
+    def __init__(self, subject: str, data: bytes) -> None:
+        self.subject = subject
+        self.data = data
+        self.acked = False
+        self.termed = False
+
+    async def ack(self) -> None:
+        self.acked = True
+
+    async def term(self) -> None:
+        self.termed = True
+
+
+class RecordingTemporal:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def start_workflow(self, name: str, params: Any, *, id: str, task_queue: str) -> None:
+        self.calls.append({"name": name, "params": params, "id": id, "task_queue": task_queue})
 
 
 class EchoingVerificationConnector:
@@ -524,3 +575,171 @@ async def test_nats_outage_rolls_back_delivery_row(
     result = await deliver(session, crypto, js, connection, headers, body)
     assert result.outcome == "accepted"
     assert len(js.published) == 1
+
+
+async def test_vercel_post_publish_precommit_retry_keeps_one_canonical_event(
+    session: AsyncSession,
+    crypto: SecretCrypto,
+    admin_ctx: WorkspaceContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "vercel-webhook-secret-123"
+    connection, generated_secret = await connections_service.create_connection(
+        session,
+        crypto,
+        admin_ctx,
+        connector_type="vercel",
+        name="Vercel production",
+        auth_type="access_token",
+        credentials={"token": "fake-vercel-access-token"},
+        config={},
+        **REQ,
+    )
+    assert generated_secret is None
+    await connections_service.set_webhook_secret(
+        session,
+        crypto,
+        admin_ctx,
+        connection.id,
+        secret=secret,
+        **REQ,
+    )
+
+    agent = Agent(
+        workspace_id=admin_ctx.workspace_id,
+        name="Release engineer",
+        slug="release-engineer",
+        status=AgentStatus.ACTIVE.value,
+    )
+    session.add(agent)
+    await session.flush()
+    trigger = Trigger(
+        workspace_id=admin_ctx.workspace_id,
+        name="Review a ready deployment",
+        connection_id=connection.id,
+        event_type="connector.vercel.deployment.ready",
+        filter_json={},
+        target_agent_id=agent.id,
+    )
+    session.add(trigger)
+    await session.commit()
+
+    connection_id = connection.id
+    public_id = connection.public_id
+    trigger_id = trigger.id
+    body = json.dumps(
+        {
+            "id": "evt_commit_crash",
+            "type": "deployment.ready",
+            "createdAt": 1_700_000_000_000,
+            "payload": {
+                "deployment": {
+                    "id": "dpl_123",
+                    "url": "storefront-abc.vercel.app",
+                    "name": "storefront",
+                    "meta": {
+                        "githubCommitRef": "agent/fix",
+                        "githubCommitSha": "abc123",
+                        "token": "must-not-survive",
+                    },
+                },
+                "project": {"id": "prj_123"},
+                "target": "preview",
+                "environment": {"DATABASE_URL": "must-not-survive"},
+            },
+        },
+        separators=(",", ":"),
+    ).encode()
+    headers = {"x-vercel-signature": sign_vercel_payload(secret, body)}
+    ingress_js = RecordingJetStream()
+
+    original_commit = session.commit
+
+    async def fail_before_commit() -> None:
+        raise RuntimeError("injected pre-commit failure")
+
+    monkeypatch.setattr(session, "commit", fail_before_commit)
+    with pytest.raises(HTTPException) as excinfo:
+        await webhooks.process_delivery(
+            session,
+            crypto,
+            ingress_js,
+            connector_type="vercel",
+            public_id=public_id,
+            headers=headers,
+            body=body,
+            **REQ,
+        )
+    assert excinfo.value.status_code == 503
+    monkeypatch.setattr(session, "commit", original_commit)
+
+    bind = session.bind
+    assert bind is not None
+    fresh_sessions = async_sessionmaker(bind, expire_on_commit=False)
+    async with fresh_sessions() as fresh_session:
+        retry = await webhooks.process_delivery(
+            fresh_session,
+            crypto,
+            ingress_js,
+            connector_type="vercel",
+            public_id=public_id,
+            headers=headers,
+            body=body,
+            **REQ,
+        )
+        deliveries = list(await fresh_session.scalars(select(WebhookDelivery)))
+
+    assert retry.outcome == "accepted"
+    assert len(deliveries) == 1
+    assert deliveries[0].connection_id == connection_id
+    assert len(ingress_js.published) == 2
+    ingress_envelopes = [
+        EventEnvelope.from_bytes(payload) for _, payload, _ in ingress_js.published
+    ]
+    assert ingress_envelopes[0].event_id == ingress_envelopes[1].event_id
+    assert ingress_envelopes[0].event_id == webhooks.ingress_event_id(
+        "vercel", connection_id, "evt_commit_crash"
+    )
+    assert {
+        published_headers["Nats-Msg-Id"] for _, _, published_headers in ingress_js.published
+    } == {str(ingress_envelopes[0].event_id)}
+
+    canonical_js = DeduplicatingRecordingJetStream()
+    normalizer = IngressNormalizer(canonical_js)  # type: ignore[arg-type]
+    ingress_messages: list[IngressMessage] = []
+    for subject, payload, _ in ingress_js.published:
+        message = IngressMessage(subject, payload)
+        ingress_messages.append(message)
+        await normalizer.handle(message)  # type: ignore[arg-type]
+
+    assert all(message.acked and not message.termed for message in ingress_messages)
+    assert len(canonical_js.published) == 1
+    canonical_subject, canonical_payload, canonical_headers = canonical_js.published[0]
+    canonical = EventEnvelope.from_bytes(canonical_payload)
+    assert canonical_subject.endswith(".connector.vercel.deployment.ready")
+    assert canonical.event_id == derived_event_id(ingress_envelopes[0].event_id, 0)
+    assert canonical_headers["Nats-Msg-Id"] == str(canonical.event_id)
+    assert "must-not-survive" not in canonical_payload.decode()
+
+    temporal = RecordingTemporal()
+    matcher = TriggerMatcher(
+        fresh_sessions,
+        temporal,  # type: ignore[arg-type]
+        cache_ttl_seconds=0.0,
+    )
+    await matcher.handle_event(canonical)
+    # A downstream consumer redelivery remains safe even beyond JetStream's
+    # duplicate suppression.
+    await matcher.handle_event(canonical)
+
+    assert len(temporal.calls) == 1
+    async with fresh_sessions() as fresh_session:
+        invocations = list(
+            await fresh_session.scalars(
+                select(TriggerInvocation).where(TriggerInvocation.trigger_id == trigger_id)
+            )
+        )
+    assert sorted(invocation.status for invocation in invocations) == [
+        "duplicate",
+        "started",
+    ]

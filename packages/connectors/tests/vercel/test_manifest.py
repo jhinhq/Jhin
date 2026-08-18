@@ -31,7 +31,7 @@ EXPECTED_TOOLS = {
 }
 
 
-def test_manifest_declares_access_token_config_and_no_webhook_yet() -> None:
+def test_manifest_declares_access_token_config_and_webhook_ingress() -> None:
     manifest = VercelConnector.manifest
 
     assert manifest.connector_type == "vercel"
@@ -43,9 +43,23 @@ def test_manifest_declares_access_token_config_and_no_webhook_yet() -> None:
     fields = {field.name: field for field in manifest.config_fields}
     assert fields["team_id"].required is False
     assert fields["base_url"].default == "https://api.vercel.com"
-    assert manifest.webhook_secret_mode == "none"
-    assert manifest.webhook_events == ()
-    assert manifest.supports_webhooks is False
+    assert manifest.webhook_secret_mode == "provider_supplied"
+    assert set(manifest.webhook_events) == {
+        "deployment.created",
+        "deployment.ready",
+        "deployment.succeeded",
+        "deployment.error",
+        "deployment.canceled",
+        "deployment.promoted",
+    }
+    assert set(manifest.canonical_events) == {
+        "connector.vercel.deployment.created",
+        "connector.vercel.deployment.ready",
+        "connector.vercel.deployment.error",
+        "connector.vercel.deployment.canceled",
+        "connector.vercel.deployment.promoted",
+    }
+    assert manifest.supports_webhooks is True
 
 
 def test_manifest_and_connector_tools_match_exactly() -> None:

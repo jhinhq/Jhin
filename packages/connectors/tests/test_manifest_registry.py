@@ -320,13 +320,15 @@ def test_default_registry_ships_github() -> None:
     assert connector.manifest.supports_webhooks
 
 
-def test_default_registry_ships_vercel_without_webhook_ingress_yet() -> None:
+def test_default_registry_ships_vercel_with_webhook_ingress() -> None:
     registry = default_registry()
     connector = registry.get("vercel")
 
     assert isinstance(connector, VercelConnector)
-    assert connector.manifest.supports_webhooks is False
-    assert connector.manifest.webhook_events == ()
+    assert connector.manifest.supports_webhooks is True
+    assert connector.manifest.webhook_secret_mode == "provider_supplied"
+    assert len(connector.manifest.webhook_events) == 6
+    assert len(connector.manifest.canonical_events) == 5
 
 
 def test_registry_rejects_duplicate_type() -> None:

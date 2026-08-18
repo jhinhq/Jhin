@@ -6,6 +6,7 @@ from jhin_connectors.manifest import (
     ConnectorManifest,
     SecretFieldSpec,
 )
+from jhin_connectors.vercel.webhook import CANONICAL_EVENTS, WEBHOOK_EVENTS
 
 DEFAULT_BASE_URL = "https://api.vercel.com"
 
@@ -54,8 +55,14 @@ VERCEL_MANIFEST = ConnectorManifest(
             help="Override only for an operator-approved self-hosted or development endpoint.",
         ),
     ),
+    webhook_events=WEBHOOK_EVENTS,
+    canonical_events=CANONICAL_EVENTS,
     capabilities=VERCEL_CAPABILITIES,
     docs_url="https://vercel.com/docs/rest-api",
-    webhook_secret_mode="none",
-    supports_webhooks=False,
+    webhook_secret_mode="provider_supplied",
+    webhook_signature_algorithm="hmac-sha1",
+    webhook_setup_help=(
+        "Create the webhook in Vercel, then paste the signing secret displayed by Vercel."
+    ),
+    supports_webhooks=True,
 )
