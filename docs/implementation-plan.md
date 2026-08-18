@@ -14,9 +14,9 @@
 
 Do **not** hard-code the product name throughout the codebase. Use `APP_NAME`/branding configuration so the project can be renamed before release.
 
-### Recommended names
+### Product name
 
-1. **OrgForge** — strongest overall fit: create and operate an AI organization.
+1. **Jhin** — strongest overall fit: create and operate an AI organization.
 2. **AgentGuild** — emphasizes teams, roles, specialists, and hierarchy.
 3. **Workmesh** — emphasizes a network of workers, tools, events, and workflows.
 4. **Crewframe** — organizational framework for autonomous crews.
@@ -27,13 +27,13 @@ Do **not** hard-code the product name throughout the codebase. Use `APP_NAME`/br
 9. **Guildstack** — good if the developer/open-source audience is primary.
 10. **Delegant** — “delegate” + “agent”; memorable but less immediately obvious.
 
-**Recommendation:** use **OrgForge** as the working name in design/mockups, but perform GitHub organization, package registry, trademark, and domain availability checks before public launch.
+**Decision:** the product is **Jhin**. Keep the user-facing name configurable through `APP_NAME`/branding settings, and complete package-registry, trademark, and domain checks before public launch.
 
 ---
 
 # 1. Product Vision
 
-OrgForge is a self-hostable operating system for teams of AI workers.
+Jhin is a self-hostable operating system for teams of AI workers.
 
 A user should be able to model an organization such as:
 
@@ -346,7 +346,7 @@ Durable workflow execution history.
 Use a monorepo.
 
 ```text
-orgforge/
+jhin/
 ├── README.md
 ├── LICENSE
 ├── SECURITY.md
@@ -382,7 +382,7 @@ orgforge/
 │   │   ├── lib/
 │   │   └── tests/
 │   └── api/
-│       └── src/orgforge_api/
+│       └── src/jhin_api/
 ├── services/
 │   ├── workflow_worker/
 │   ├── agent_worker/
@@ -1042,24 +1042,24 @@ Temporal remains the workflow authority.
 Use versioned subjects:
 
 ```text
-orgforge.v1.<workspace_id>.<domain>.<entity>.<event>
+jhin.v1.<workspace_id>.<domain>.<entity>.<event>
 ```
 
 Examples:
 
 ```text
-orgforge.v1.ws_123.connector.linear.issue.updated
-orgforge.v1.ws_123.agent.run.started
-orgforge.v1.ws_123.agent.run.completed
-orgforge.v1.ws_123.task.created
-orgforge.v1.ws_123.tool.call.failed
-orgforge.v1.ws_123.approval.requested
+jhin.v1.ws_123.connector.linear.issue.updated
+jhin.v1.ws_123.agent.run.started
+jhin.v1.ws_123.agent.run.completed
+jhin.v1.ws_123.task.created
+jhin.v1.ws_123.tool.call.failed
+jhin.v1.ws_123.approval.requested
 ```
 
 External raw events should first land under:
 
 ```text
-orgforge.v1.<workspace_id>.ingress.<connector>.<event>
+jhin.v1.<workspace_id>.ingress.<connector>.<event>
 ```
 
 Normalized events then use the canonical domain subjects.
@@ -1520,7 +1520,7 @@ At minimum:
 For self-hosted Docker Compose:
 
 ```text
-/run/secrets/orgforge_master_key
+/run/secrets/jhin_master_key
 ```
 
 is mounted only into services that require decryption.
@@ -2843,7 +2843,7 @@ Target:
 
 ```bash
 git clone ...
-cd orgforge
+cd jhin
 cp .env.example .env
 docker compose up -d
 ```
@@ -3337,88 +3337,88 @@ Each phase must end in independently testable software. Do not build all infrast
 ## API
 
 ```text
-apps/api/src/orgforge_api/main.py
-apps/api/src/orgforge_api/auth/
-apps/api/src/orgforge_api/routes/agents.py
-apps/api/src/orgforge_api/routes/teams.py
-apps/api/src/orgforge_api/routes/tasks.py
-apps/api/src/orgforge_api/routes/runs.py
-apps/api/src/orgforge_api/routes/connections.py
-apps/api/src/orgforge_api/routes/triggers.py
-apps/api/src/orgforge_api/routes/secrets.py
-apps/api/src/orgforge_api/routes/webhooks/
+apps/api/src/jhin_api/main.py
+apps/api/src/jhin_api/auth/
+apps/api/src/jhin_api/routes/agents.py
+apps/api/src/jhin_api/routes/teams.py
+apps/api/src/jhin_api/routes/tasks.py
+apps/api/src/jhin_api/routes/runs.py
+apps/api/src/jhin_api/routes/connections.py
+apps/api/src/jhin_api/routes/triggers.py
+apps/api/src/jhin_api/routes/secrets.py
+apps/api/src/jhin_api/routes/webhooks/
 ```
 
 ## Domain
 
 ```text
-packages/domain/orgforge_domain/agents.py
-packages/domain/orgforge_domain/teams.py
-packages/domain/orgforge_domain/tasks.py
-packages/domain/orgforge_domain/connections.py
-packages/domain/orgforge_domain/triggers.py
-packages/domain/orgforge_domain/runs.py
+packages/domain/jhin_domain/agents.py
+packages/domain/jhin_domain/teams.py
+packages/domain/jhin_domain/tasks.py
+packages/domain/jhin_domain/connections.py
+packages/domain/jhin_domain/triggers.py
+packages/domain/jhin_domain/runs.py
 ```
 
 ## Events
 
 ```text
-packages/events/orgforge_events/envelope.py
-packages/events/orgforge_events/subjects.py
-packages/events/orgforge_events/publisher.py
-packages/events/orgforge_events/consumer.py
-packages/events/orgforge_events/idempotency.py
+packages/events/jhin_events/envelope.py
+packages/events/jhin_events/subjects.py
+packages/events/jhin_events/publisher.py
+packages/events/jhin_events/consumer.py
+packages/events/jhin_events/idempotency.py
 ```
 
 ## Workflows
 
 ```text
-packages/workflows/orgforge_workflows/triggered_task.py
-packages/workflows/orgforge_workflows/agent_task.py
-packages/workflows/orgforge_workflows/delegated_task.py
-packages/workflows/orgforge_workflows/engineering_ticket.py
-packages/workflows/orgforge_workflows/activities/
+packages/workflows/jhin_workflows/triggered_task.py
+packages/workflows/jhin_workflows/agent_task.py
+packages/workflows/jhin_workflows/delegated_task.py
+packages/workflows/jhin_workflows/engineering_ticket.py
+packages/workflows/jhin_workflows/activities/
 ```
 
 ## Agents
 
 ```text
-packages/agents/orgforge_agents/runtime.py
-packages/agents/orgforge_agents/snapshot.py
-packages/agents/orgforge_agents/context.py
-packages/agents/orgforge_agents/graph.py
-packages/agents/orgforge_agents/nodes/
-packages/agents/orgforge_agents/delegation.py
+packages/agents/jhin_agents/runtime.py
+packages/agents/jhin_agents/snapshot.py
+packages/agents/jhin_agents/context.py
+packages/agents/jhin_agents/graph.py
+packages/agents/jhin_agents/nodes/
+packages/agents/jhin_agents/delegation.py
 ```
 
 ## Policy
 
 ```text
-packages/policy/orgforge_policy/capabilities.py
-packages/policy/orgforge_policy/evaluator.py
-packages/policy/orgforge_policy/risk.py
-packages/policy/orgforge_policy/approvals.py
+packages/policy/jhin_policy/capabilities.py
+packages/policy/jhin_policy/evaluator.py
+packages/policy/jhin_policy/risk.py
+packages/policy/jhin_policy/approvals.py
 ```
 
 ## Secrets
 
 ```text
-packages/secrets/orgforge_secrets/crypto.py
-packages/secrets/orgforge_secrets/store.py
-packages/secrets/orgforge_secrets/redaction.py
-packages/secrets/orgforge_secrets/rotation.py
+packages/secrets/jhin_secrets/crypto.py
+packages/secrets/jhin_secrets/store.py
+packages/secrets/jhin_secrets/redaction.py
+packages/secrets/jhin_secrets/rotation.py
 ```
 
 ## Models
 
 ```text
-packages/models/orgforge_models/base.py
-packages/models/orgforge_models/router.py
-packages/models/orgforge_models/providers/openai.py
-packages/models/orgforge_models/providers/anthropic.py
-packages/models/orgforge_models/providers/openrouter.py
-packages/models/orgforge_models/providers/ollama.py
-packages/models/orgforge_models/providers/openai_compatible.py
+packages/models/jhin_models/base.py
+packages/models/jhin_models/router.py
+packages/models/jhin_models/providers/openai.py
+packages/models/jhin_models/providers/anthropic.py
+packages/models/jhin_models/providers/openrouter.py
+packages/models/jhin_models/providers/ollama.py
+packages/models/jhin_models/providers/openai_compatible.py
 ```
 
 ---
