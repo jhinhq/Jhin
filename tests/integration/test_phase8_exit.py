@@ -959,7 +959,10 @@ async def test_concurrency_queues_second_task_and_survives_worker_restart(
     )
     assert any(row["id"] == approval_id for row in pending_after_restart["items"])
     still = await _task(client, ws, second["id"])
-    assert still["task"]["state"] == "queued"
+    assert still["task"]["state"] == "queued", still["task"]
+    assert isinstance(still["task"].get("metadata_json"), dict), still["task"]
+    assert still["task"]["metadata_json"].get("queue", {}).get("reason") == "agent_concurrency"
+    assert still["runs"] == [], "queued tasks must not have started a run after restart"
     approve = await client.post(
         f"{API_URL}/api/v1/workspaces/{ws}/approvals/{approval_id}/approve",
         headers=_csrf(client),

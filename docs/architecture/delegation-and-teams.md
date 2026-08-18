@@ -36,7 +36,7 @@ Managers and parent workflows receive this standardized summary rather than the
 child's raw transcript or tool output. A review passes only when the child
 explicitly reports `pass`; missing or free-form verdicts fail closed.
 
-## Delegation authorization
+## Model-initiated delegation authorization
 
 `organization.delegate_task` is a write-risk, approval-capable tool enforced by
 the live tool gateway. The model's request is not authority: the gateway checks
@@ -48,6 +48,12 @@ subordinates, members of the same team, or any active agent in the workspace;
 when omitted it permits subordinates only. The optional `target_agent_id` scope
 further pins the allowed target by identifier pattern. An applicable explicit
 deny wins over allows.
+
+This path requires a live applicable grant and target scope for every gateway
+call. Removing an allow grant or adding an applicable deny therefore prevents
+future model-initiated `organization.delegate_task` calls. Reporting
+relationships are validator facts that constrain a grant's scope; they never
+create delegation authority on their own.
 
 The validator also applies structural rules that grants cannot override. The
 target must exist, be active, and belong to the workspace. The target may not
@@ -90,6 +96,22 @@ triggered workflow remains the default. It supports two routing modes:
 - In coordinator mode, trigger configuration supplies a distinct
   `implementer_agent_id`. The trigger target (for example, a CTO) owns the root
   ticket without running a model, and implementation is a delegated child.
+
+This is a separate authority path from model-initiated delegation. An
+administrator's trigger configuration selects `engineering_ticket` and its
+assigned target, optional `implementer_agent_id`, and optional `qa_agent_id`;
+the workflow creates its template child tasks through its activity and does not
+call `organization.delegate_task`. It therefore does not require or consume an
+`organization.delegate` grant, and revoking or denying that grant does not
+disable configured template routing. Team membership and manager relationships
+may help resolve optional reviewers, but do not authorize either path.
+
+To stop new engineering-template routes, an administrator can disable the
+trigger (`POST .../triggers/{trigger_id}/disable`), delete it (`DELETE
+.../triggers/{trigger_id}`), or update it (`PATCH .../triggers/{trigger_id}`)
+to remove the engineering template or change its routing configuration. These
+controls govern future trigger invocations; they do not retroactively cancel
+an already-started workflow.
 
 After successful implementation, the workflow optionally asks the
 implementer's manager to review and then asks the configured or resolved QA

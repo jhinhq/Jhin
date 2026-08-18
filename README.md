@@ -160,13 +160,24 @@ or `http://fake-linear:8080`).
 
 ### Delegation and teams
 
-Create a reporting hierarchy, grant an agent the `organization.delegate`
-capability for the intended relationship scope, and choose the engineering
-ticket template on a trigger. Direct mode assigns the root ticket to the SWE;
-coordinator mode keeps the CTO-owned root model-free and routes implementation
-to the configured SWE. Optional manager and QA reviews use real child tasks,
-with bounded fix/retest cycles after a failed verdict. Follow the delegation
-chain and structured results on the task page; tasks waiting for an agent or
+Jhin has two separate ways to create child work. Model-initiated
+`organization.delegate_task` is deny-by-default: grant the delegating agent a
+live `organization.delegate` capability with the intended target scope.
+Reporting relationships only constrain that scope; they do not grant
+delegation authority. Removing the allow grant or adding an applicable deny
+stops future gateway delegation requests.
+
+The engineering ticket template is different: an administrator configures a
+trigger, its target and optional implementer/QA routing, and the
+`engineering_ticket` template. Its child-task routing is authorized by that
+trigger configuration and does not call `organization.delegate_task`, so a
+delegation grant is neither needed nor a way to disable it. Disable or delete
+the trigger, or update its routing/template configuration, to stop new
+template routes. Direct mode assigns the root ticket to the SWE; coordinator
+mode keeps the CTO-owned root model-free and routes implementation to the
+configured SWE. Optional manager and QA reviews use real child tasks, with
+bounded fix/retest cycles after a failed verdict. Follow the delegation chain
+and structured results on the task page; tasks waiting for an agent or
 workspace run slot remain visibly queued until capacity is available.
 
 ### Triggers — the showcase demo
