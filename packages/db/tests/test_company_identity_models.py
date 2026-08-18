@@ -119,6 +119,21 @@ def test_expertise_tags_are_bounded_before_persistence() -> None:
         )
 
 
+def test_mutated_expertise_tags_are_revalidated_at_persistence(sqlite_engine: Engine) -> None:
+    workspace = _workspace("Mutable Expertise")
+    agent = _agent(workspace, "Expert")
+    agent.expertise_json = ["valid"]
+    agent.expertise_json.append("x" * 65)
+
+    with Session(sqlite_engine) as session:
+        session.add(workspace)
+        session.flush()
+        session.add(agent)
+
+        with pytest.raises(ValueError, match="1 to 64"):
+            session.flush()
+
+
 def test_agent_can_have_multiple_active_team_memberships(sqlite_engine: Engine) -> None:
     agent_team_membership, _ = _company_models()
     workspace = _workspace("Multiple")
@@ -168,6 +183,25 @@ def test_only_one_active_primary_membership_per_agent(sqlite_engine: Engine) -> 
         session.flush()
         session.add(agent)
         session.flush()
+        ended_primary = agent_team_membership(
+            workspace_id=workspace.id,
+            agent_id=agent.id,
+            team_id=first_team.id,
+            is_primary=True,
+            left_at=datetime.now(UTC),
+        )
+        active_primary = agent_team_membership(
+            workspace_id=workspace.id,
+            agent_id=agent.id,
+            team_id=second_team.id,
+            is_primary=True,
+        )
+        session.add_all([ended_primary, active_primary])
+        session.flush()
+
+        assert ended_primary.left_at is not None
+        assert active_primary.left_at is None
+
         session.add(
             agent_team_membership(
                 workspace_id=workspace.id,
@@ -176,16 +210,6 @@ def test_only_one_active_primary_membership_per_agent(sqlite_engine: Engine) -> 
                 is_primary=True,
             )
         )
-        session.flush()
-        session.add(
-            agent_team_membership(
-                workspace_id=workspace.id,
-                agent_id=agent.id,
-                team_id=second_team.id,
-                is_primary=True,
-            )
-        )
-
         with pytest.raises(IntegrityError):
             session.flush()
 
@@ -203,21 +227,32 @@ def test_active_agent_team_membership_pair_is_unique(sqlite_engine: Engine) -> N
         session.flush()
         session.add(agent)
         session.flush()
-        session.add_all(
-            [
-                agent_team_membership(
-                    workspace_id=workspace.id,
-                    agent_id=agent.id,
-                    team_id=team.id,
-                    is_primary=False,
-                ),
-                agent_team_membership(
-                    workspace_id=workspace.id,
-                    agent_id=agent.id,
-                    team_id=team.id,
-                    is_primary=False,
-                ),
-            ]
+        ended_membership = agent_team_membership(
+            workspace_id=workspace.id,
+            agent_id=agent.id,
+            team_id=team.id,
+            is_primary=False,
+            left_at=datetime.now(UTC),
+        )
+        active_membership = agent_team_membership(
+            workspace_id=workspace.id,
+            agent_id=agent.id,
+            team_id=team.id,
+            is_primary=False,
+        )
+        session.add_all([ended_membership, active_membership])
+        session.flush()
+
+        assert ended_membership.left_at is not None
+        assert active_membership.left_at is None
+
+        session.add(
+            agent_team_membership(
+                workspace_id=workspace.id,
+                agent_id=agent.id,
+                team_id=team.id,
+                is_primary=False,
+            )
         )
 
         with pytest.raises(IntegrityError):
@@ -257,46 +292,37 @@ def test_relationship_kind_and_canonical_order_are_enforced(sqlite_engine: Engin
     high_agent = _agent(workspace, "High")
     low_agent.id = low_id
     high_agent.id = high_id
+    workspace_id = workspace.id
 
     with Session(sqlite_engine) as session:
         session.add(workspace)
         session.flush()
         session.add_all([low_agent, high_agent])
-        session.flush()
-        session.add(
-            agent_relationship(
-                workspace_id=workspace.id,
-                source_agent_id=high_id,
-                target_agent_id=low_id,
-                kind="close_collaborator",
-            )
-        )
-        with pytest.raises(IntegrityError):
-            session.flush()
+        session.commit()
 
-    with Session(sqlite_engine) as session:
-        session.add(
-            agent_relationship(
-                workspace_id=workspace.id,
-                source_agent_id=low_id,
-                target_agent_id=low_id,
-                kind="advisor",
+    invalid_relationships = [
+        (
+            high_id,
+            low_id,
+            "close_collaborator",
+            "ck_agent_relationship_close_collaborator_order",
+        ),
+        (low_id, low_id, "advisor", "ck_agent_relationship_directed_not_self"),
+        (low_id, high_id, "manager", "ck_agent_relationship_kind"),
+    ]
+    for source_id, target_id, kind, constraint_name in invalid_relationships:
+        with Session(sqlite_engine) as session:
+            session.add(
+                agent_relationship(
+                    workspace_id=workspace_id,
+                    source_agent_id=source_id,
+                    target_agent_id=target_id,
+                    kind=kind,
+                )
             )
-        )
-        with pytest.raises(IntegrityError):
-            session.flush()
-
-    with Session(sqlite_engine) as session:
-        session.add(
-            agent_relationship(
-                workspace_id=workspace.id,
-                source_agent_id=low_id,
-                target_agent_id=high_id,
-                kind="manager",
-            )
-        )
-        with pytest.raises(IntegrityError):
-            session.flush()
+            with pytest.raises(IntegrityError) as error:
+                session.flush()
+            assert constraint_name in str(error.value.orig)
 
 
 def test_only_one_active_relationship_pair_and_kind(sqlite_engine: Engine) -> None:
@@ -310,21 +336,32 @@ def test_only_one_active_relationship_pair_and_kind(sqlite_engine: Engine) -> No
         session.flush()
         session.add_all([source, target])
         session.flush()
-        session.add_all(
-            [
-                agent_relationship(
-                    workspace_id=workspace.id,
-                    source_agent_id=source.id,
-                    target_agent_id=target.id,
-                    kind="advisor",
-                ),
-                agent_relationship(
-                    workspace_id=workspace.id,
-                    source_agent_id=source.id,
-                    target_agent_id=target.id,
-                    kind="advisor",
-                ),
-            ]
+        inactive_relationship = agent_relationship(
+            workspace_id=workspace.id,
+            source_agent_id=source.id,
+            target_agent_id=target.id,
+            kind="advisor",
+            status="inactive",
+        )
+        active_relationship = agent_relationship(
+            workspace_id=workspace.id,
+            source_agent_id=source.id,
+            target_agent_id=target.id,
+            kind="advisor",
+        )
+        session.add_all([inactive_relationship, active_relationship])
+        session.flush()
+
+        assert inactive_relationship.status == "inactive"
+        assert active_relationship.status == "active"
+
+        session.add(
+            agent_relationship(
+                workspace_id=workspace.id,
+                source_agent_id=source.id,
+                target_agent_id=target.id,
+                kind="advisor",
+            )
         )
 
         with pytest.raises(IntegrityError):
@@ -515,9 +552,15 @@ def migrated_postgres() -> Iterator[MigratedPostgres]:
         asyncio.run(_drop_database())
 
 
-@pytest.mark.parametrize("edge", ["membership", "relationship"])
+@pytest.mark.parametrize(
+    ("edge", "constraint_name"),
+    [
+        ("membership", "fk_agent_team_membership_workspace_team"),
+        ("relationship", "fk_agent_relationship_workspace_target_agent"),
+    ],
+)
 async def test_postgres_rejects_cross_workspace_edges(
-    migrated_postgres: MigratedPostgres, edge: str
+    migrated_postgres: MigratedPostgres, edge: str, constraint_name: str
 ) -> None:
     connection = await asyncpg.connect(migrated_postgres.asyncpg_dsn)
     try:
@@ -548,8 +591,9 @@ async def test_postgres_rejects_cross_workspace_edges(
                 migrated_postgres.agent_two_id,
             )
 
-        with pytest.raises(asyncpg.ForeignKeyViolationError):
+        with pytest.raises(asyncpg.ForeignKeyViolationError) as error:
             await connection.execute(statement, *values)
+        assert error.value.constraint_name == constraint_name
     finally:
         await connection.close()
 

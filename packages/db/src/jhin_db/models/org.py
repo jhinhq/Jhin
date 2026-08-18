@@ -22,6 +22,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Uuid,
+    event,
     func,
     text,
 )
@@ -33,6 +34,20 @@ from jhin_domain import AgentStatus, AutonomyLevel, WorkspaceStatus
 
 MAX_EXPERTISE_TAGS = 20
 MAX_EXPERTISE_TAG_LENGTH = 64
+
+
+def _validate_expertise_tags(value: list[str]) -> list[str]:
+    if not isinstance(value, list):
+        raise ValueError("expertise_json must be a JSON array of strings")
+    if len(value) > MAX_EXPERTISE_TAGS:
+        raise ValueError(f"expertise_json accepts at most {MAX_EXPERTISE_TAGS} tags")
+    if any(not isinstance(tag, str) for tag in value):
+        raise ValueError("expertise_json tags must be strings")
+    if any(not 1 <= len(tag) <= MAX_EXPERTISE_TAG_LENGTH for tag in value):
+        raise ValueError(
+            f"expertise_json tags must contain 1 to {MAX_EXPERTISE_TAG_LENGTH} characters"
+        )
+    return value
 
 
 class Workspace(Base, UuidPkMixin, TimestampMixin):
@@ -151,17 +166,17 @@ class Agent(Base, UuidPkMixin, TimestampMixin):
 
     @validates("expertise_json")
     def _validate_expertise_json(self, _key: str, value: list[str]) -> list[str]:
-        if not isinstance(value, list):
-            raise ValueError("expertise_json must be a JSON array of strings")
-        if len(value) > MAX_EXPERTISE_TAGS:
-            raise ValueError(f"expertise_json accepts at most {MAX_EXPERTISE_TAGS} tags")
-        if any(not isinstance(tag, str) for tag in value):
-            raise ValueError("expertise_json tags must be strings")
-        if any(not 1 <= len(tag) <= MAX_EXPERTISE_TAG_LENGTH for tag in value):
-            raise ValueError(
-                f"expertise_json tags must contain 1 to {MAX_EXPERTISE_TAG_LENGTH} characters"
-            )
-        return value
+        return _validate_expertise_tags(value)
+
+
+@event.listens_for(Agent, "before_insert")
+@event.listens_for(Agent, "before_update")
+def _validate_agent_expertise_at_persistence(_mapper: Any, _connection: Any, target: Agent) -> None:
+    value: list[str] | None = target.__dict__.get("expertise_json")
+    if value is None:
+        target.expertise_json = []
+        return
+    _validate_expertise_tags(value)
 
 
 class AgentTeamMembership(Base, UuidPkMixin):
