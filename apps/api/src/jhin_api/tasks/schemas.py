@@ -6,8 +6,9 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
+from jhin_api.public_payloads import public_run_event_payload, public_tool_payload
 from jhin_domain import TaskPriority
 
 
@@ -89,6 +90,10 @@ class RunEventOut(BaseModel):
     payload_json: dict[str, Any]
     created_at: datetime
 
+    @field_serializer("payload_json")
+    def serialize_payload_json(self, value: dict[str, Any]) -> dict[str, Any]:
+        return public_run_event_payload(self.event_type, value)
+
 
 class MessageOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -119,6 +124,10 @@ class ToolCallOut(BaseModel):
     duration_ms: int | None
     error_code: str | None
     created_at: datetime
+
+    @field_serializer("sanitized_input_json")
+    def serialize_sanitized_input(self, value: dict[str, Any]) -> dict[str, Any]:
+        return public_tool_payload(self.tool_name, value)
 
 
 class TaskTreeNodeOut(BaseModel):

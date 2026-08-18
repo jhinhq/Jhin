@@ -36,6 +36,7 @@ from jhin_connectors.supabase.sql_policy import (
 )
 from jhin_policy import RiskLevel, ToolDefinition
 from jhin_tools.builtin import ToolExecutionContext, ToolExecutor
+from jhin_tools.errors import ToolExecutionError
 from jhin_tools.sanitize import (
     MAX_DOCUMENT_BYTES,
     MAX_STRING_CHARS,
@@ -135,16 +136,41 @@ class _CleanupOutcome:
     failed: bool
 
 
-class SupabaseDatabaseError(Exception):
+class SupabaseDatabaseError(ToolExecutionError):
     """A stable, credential-free database execution failure."""
 
-    def __init__(self, message: str, *, code: str = "database_execution_failed") -> None:
-        super().__init__(message)
-        self.code = code
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "database_execution_failed",
+        side_effect_possible: bool = True,
+    ) -> None:
+        super().__init__(
+            message,
+            code=code,
+            side_effect_possible=side_effect_possible,
+        )
 
 
-def _error(code: str, message: str = "Supabase database execution failed") -> NoReturn:
-    raise SupabaseDatabaseError(message, code=code) from None
+def _error(
+    code: str,
+    message: str = "Supabase database execution failed",
+    *,
+    side_effect_possible: bool = True,
+) -> NoReturn:
+    raise SupabaseDatabaseError(
+        message,
+        code=code,
+        side_effect_possible=side_effect_possible,
+    ) from None
+
+
+def _pre_effect_error(
+    code: str,
+    message: str = "Supabase database execution failed",
+) -> NoReturn:
+    _error(code, message, side_effect_possible=False)
 
 
 def _bounded_int(
@@ -156,7 +182,7 @@ def _bounded_int(
 ) -> int:
     value = config.get(name, default)
     if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
-        _error("invalid_configuration", "Supabase database configuration is invalid")
+        _pre_effect_error("invalid_configuration", "Supabase database configuration is invalid")
     return value
 
 
@@ -172,13 +198,13 @@ def _execution_config(config: Mapping[str, Any]) -> _ExecutionConfig:
         "max_result_bytes",
     }
     if set(config) - allowed_fields:
-        _error("invalid_configuration", "Supabase database configuration is invalid")
+        _pre_effect_error("invalid_configuration", "Supabase database configuration is invalid")
     project_ref = config.get("project_ref")
     if not isinstance(project_ref, str) or not _PROJECT_REF_RE.fullmatch(project_ref):
-        _error("invalid_configuration", "Supabase database configuration is invalid")
+        _pre_effect_error("invalid_configuration", "Supabase database configuration is invalid")
     raw_schemas = config.get("allowed_schemas", ["public"])
     if not isinstance(raw_schemas, list) or not 1 <= len(raw_schemas) <= 8:
-        _error("invalid_configuration", "Supabase database configuration is invalid")
+        _pre_effect_error("invalid_configuration", "Supabase database configuration is invalid")
     schemas: list[str] = []
     for schema in raw_schemas:
         if (
@@ -188,15 +214,15 @@ def _execution_config(config: Mapping[str, Any]) -> _ExecutionConfig:
             or schema.startswith("pg_")
             or schema in schemas
         ):
-            _error("invalid_configuration", "Supabase database configuration is invalid")
+            _pre_effect_error("invalid_configuration", "Supabase database configuration is invalid")
         schemas.append(schema)
     allow_writes = config.get("allow_writes", False)
     if not isinstance(allow_writes, bool):
-        _error("invalid_configuration", "Supabase database configuration is invalid")
+        _pre_effect_error("invalid_configuration", "Supabase database configuration is invalid")
     max_cell_bytes = _bounded_int(config, "max_cell_bytes", 4_096, 256, 8_000)
     max_result_bytes = _bounded_int(config, "max_result_bytes", 24_000, 4_096, 30_000)
     if max_cell_bytes > max_result_bytes:
-        _error("invalid_configuration", "Supabase database configuration is invalid")
+        _pre_effect_error("invalid_configuration", "Supabase database configuration is invalid")
     return _ExecutionConfig(
         project_ref=project_ref,
         allowed_schemas=tuple(schemas),
@@ -226,7 +252,7 @@ def _validate_bindings_and_static_budget(
     max_rows: int,
 ) -> int:
     if validated.parameter_indexes != tuple(range(1, len(params) + 1)):
-        _error("database_parameter_mismatch", "Database parameters do not match SQL")
+        _pre_effect_error("database_parameter_mismatch", "Database parameters do not match SQL")
     contribution = 0
     for value in validated.mutation_values:
         if value.parameter_index is not None:
@@ -234,11 +260,11 @@ def _validate_bindings_and_static_budget(
         elif value.literal_bytes is not None:
             contribution += value.literal_bytes
         else:
-            _error("database_sql_not_allowed", "Database SQL is not allowed")
+            _pre_effect_error("database_sql_not_allowed", "Database SQL is not allowed")
         if contribution > MAX_MUTATION_VALUE_BYTES:
-            _error("database_mutation_too_large", "Database mutation is too large")
+            _pre_effect_error("database_mutation_too_large", "Database mutation is too large")
     if validated.insert_row_count is not None and validated.insert_row_count > max_rows:
-        _error("database_row_limit_exceeded", "Database mutation exceeds the row limit")
+        _pre_effect_error("database_row_limit_exceeded", "Database mutation exceeds the row limit")
     return contribution
 
 
@@ -309,6 +335,7 @@ async def _apply_transaction_settings(connection: Any, config: _ExecutionConfig)
                 _error(
                     "database_role_not_least_privilege",
                     "Supabase database role is not least privilege",
+                    side_effect_possible=False,
                 )
             raise
 
@@ -356,7 +383,7 @@ async def _probe_target_rows(connection: Any, target: Any, max_rows: int) -> int
         _error("database_execution_failed")
     count = len(rows)
     if count > max_rows:
-        _error("database_row_limit_exceeded", "Database mutation exceeds the row limit")
+        _pre_effect_error("database_row_limit_exceeded", "Database mutation exceeds the row limit")
     return count
 
 
@@ -934,7 +961,7 @@ async def _execute_mutation(
 ) -> DatabaseMutationOutput:
     target = preflight.target
     if target is None:
-        _error("database_relation_not_allowed", "Database relation is not allowed")
+        _pre_effect_error("database_relation_not_allowed", "Database relation is not allowed")
     probed_rows: int | None = None
     if validated.statement_type in {"update", "delete", "truncate"}:
         probed_rows = await _probe_target_rows(connection, target, config.max_rows)
@@ -943,7 +970,7 @@ async def _execute_mutation(
         and probed_rows is not None
         and assignment_bytes * probed_rows > MAX_MUTATION_VALUE_BYTES
     ):
-        _error("database_mutation_too_large", "Database mutation is too large")
+        _pre_effect_error("database_mutation_too_large", "Database mutation is too large")
 
     statement = await connection.prepare(data.sql)
     await statement.fetch(*data.params)
@@ -1030,19 +1057,19 @@ async def _database_executor(
     try:
         resolved = await resolve_connection(ctx, data.connection_id, connector_type="supabase")
     except ConnectionResolutionError:
-        _error("connection_unavailable", "Supabase database connection is unavailable")
+        _pre_effect_error("connection_unavailable", "Supabase database connection is unavailable")
     if resolved.connection.auth_type != "postgres":
-        _error("unsupported_auth_type", "This Supabase connection is not PostgreSQL")
+        _pre_effect_error("unsupported_auth_type", "This Supabase connection is not PostgreSQL")
     config = _execution_config(resolved.config)
     if data.project_ref != config.project_ref:
-        _error("project_scope_mismatch", "Supabase project scope does not match")
+        _pre_effect_error("project_scope_mismatch", "Supabase project scope does not match")
     if data.requested_schema not in config.allowed_schemas:
-        _error("schema_scope_mismatch", "Supabase schema scope does not match")
+        _pre_effect_error("schema_scope_mismatch", "Supabase schema scope does not match")
     if expected != "read" and not config.allow_writes:
-        _error("database_writes_disabled", "Supabase database writes are disabled")
+        _pre_effect_error("database_writes_disabled", "Supabase database writes are disabled")
     database_url = resolved.credentials.get("database_url")
     if not isinstance(database_url, str) or not database_url:
-        _error("credential_invalid", "Supabase database credential is invalid")
+        _pre_effect_error("credential_invalid", "Supabase database credential is invalid")
     try:
         validated_url = validate_postgres_target(
             database_url,
@@ -1050,7 +1077,7 @@ async def _database_executor(
             app_database_url=os.getenv("DATABASE_URL"),
         )
     except EndpointPolicyError:
-        _error("database_target_not_allowed", "Supabase database target is not allowed")
+        _pre_effect_error("database_target_not_allowed", "Supabase database target is not allowed")
     try:
         validated = classify_and_validate_sql(
             data.sql,
@@ -1058,14 +1085,14 @@ async def _database_executor(
             requested_schema=data.requested_schema,
         )
     except SqlPolicyError:
-        _error("database_sql_not_allowed", "Database SQL is not allowed")
+        _pre_effect_error("database_sql_not_allowed", "Database SQL is not allowed")
     assignment_bytes = _validate_bindings_and_static_budget(
         validated,
         cast(list[object], data.params),
         max_rows=config.max_rows,
     )
     if len(validated.relations) > MAX_PREFLIGHT_RELATIONS:
-        _error("database_relation_not_allowed", "Database relation is not allowed")
+        _pre_effect_error("database_relation_not_allowed", "Database relation is not allowed")
 
     connection: Any = None
     transaction: Any = None
@@ -1104,11 +1131,12 @@ async def _database_executor(
                     config.allowed_schemas,
                 )
             except DatabasePreflightError as exc:
-                _error(exc.code, str(exc))
+                _error(exc.code, str(exc), side_effect_possible=False)
             if locked_role_oids != role_oids:
                 _error(
                     "database_role_not_least_privilege",
                     "Supabase database role is not least privilege",
+                    side_effect_possible=False,
                 )
             result: DatabaseReadOutput | DatabaseMutationOutput
             if expected == "read":
@@ -1145,7 +1173,11 @@ async def _database_executor(
         await _cleanup(transaction, connection, rollback=not committed)
         connection = None
         if _database_timeout(exc):
-            _error("database_timeout", "Supabase database operation timed out")
+            _error(
+                "database_timeout",
+                "Supabase database operation timed out",
+                side_effect_possible=expected != "read",
+            )
         _error("database_execution_failed")
     except BaseException:
         await _cleanup(transaction, connection, rollback=not committed)

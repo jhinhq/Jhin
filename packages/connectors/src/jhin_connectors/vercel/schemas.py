@@ -71,8 +71,16 @@ class DeploymentInfo(VercelOutput):
     ready_at: int | None = Field(default=None, ge=0, le=2**63 - 1)
 
 
+class DeploymentListItem(VercelOutput):
+    deployment_id: str = Field(max_length=200)
+    project_id: str = Field(max_length=200)
+    state: str = Field(default="", max_length=50)
+    target: str = Field(default="", max_length=50)
+    created_at: int | None = Field(default=None, ge=0, le=2**63 - 1)
+
+
 class DeploymentListOutput(VercelOutput):
-    deployments: list[DeploymentInfo] = Field(max_length=200)
+    deployments: list[DeploymentListItem] = Field(max_length=200)
     truncated: bool = False
 
 

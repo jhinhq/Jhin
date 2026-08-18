@@ -373,10 +373,10 @@ def _validate_whole_tree(root: exp.Expression, nodes: tuple[exp.Expression, ...]
             _reject()
         if (
             isinstance(node, exp.Column)
-            and not node.table
             and isinstance(node.this, exp.Identifier)
             and not node.this.args.get("quoted")
-            and _ascii_fold(str(node.this.this)) in {"user", "current_role", "system_user"}
+            and _ascii_fold(str(node.this.this))
+            in {"user", "current_user", "session_user", "current_role", "system_user"}
         ):
             _reject()
         if isinstance(node, exp.Identifier):

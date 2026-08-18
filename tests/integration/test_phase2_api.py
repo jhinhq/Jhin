@@ -1,6 +1,6 @@
 """Phase 2 API integration tests (plan 45 Phase 2 exit test, at the API level).
 
-Uses the dev-stack Postgres on 127.0.0.1:55432 with a dedicated test database
+Uses the configured dev-stack Postgres endpoint with a dedicated test database
 created and migrated from empty for every test, so these also prove the
 migration chain works from an empty database. The FastAPI app runs in-process
 via httpx's ASGI transport.
@@ -26,10 +26,11 @@ from jhin_db import create_engine, create_session_factory
 from jhin_db.migrate import upgrade_to_head
 from jhin_db.models import AuditEvent, User
 
+from .conftest import POSTGRES_HOST as PG_HOST
+from .conftest import POSTGRES_PORT as PG_PORT
+
 pytestmark = pytest.mark.integration
 
-PG_HOST = "127.0.0.1"
-PG_PORT = 55432
 TEST_DB = "jhin_phase2_test"
 ADMIN_DSN = f"postgresql://jhin:jhin@{PG_HOST}:{PG_PORT}/postgres"
 TEST_DB_URL = f"postgresql+asyncpg://jhin:jhin@{PG_HOST}:{PG_PORT}/{TEST_DB}"

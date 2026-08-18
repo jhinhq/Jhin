@@ -267,6 +267,7 @@ class JobManager:
         record.started_at = datetime.now(UTC)
         container = None
         timed_out = False
+        terminal_status = "failed"
         try:
             if request.workspace_key:
                 await self._ensure_workspace_volume(request.workspace_key)
@@ -288,26 +289,25 @@ class JobManager:
             record.exit_code = int(info.get("State", {}).get("ExitCode", -1))
             await self._collect_logs(record, container)
             if record.cancel_requested:
-                record.status = "cancelled"
+                terminal_status = "cancelled"
             elif timed_out:
-                record.status = "timeout"
+                terminal_status = "timeout"
                 record.error = f"job exceeded its {record.timeout_seconds}s timeout and was killed"
             else:
-                record.status = "completed"
+                terminal_status = "completed"
         except DockerError as exc:
-            record.status = "failed"
             record.error = record.redactor.redact_text(f"docker error: {exc.message}")[:2000]
         except Exception as exc:  # infrastructure failure — never secrets
-            record.status = "failed"
             record.error = record.redactor.redact_text(f"{type(exc).__name__}: {exc}")[:2000]
         finally:
-            record.finished_at = datetime.now(UTC)
             # Ephemeral always (plan 14.1): the container is force-removed no
             # matter how the job ended.
             if container is not None:
                 # Startup reaping is the backstop if this delete fails.
                 with contextlib.suppress(DockerError):
                     await container.delete(force=True, v=True)
+            record.finished_at = datetime.now(UTC)
+            record.status = terminal_status
             logger.info(
                 "sandbox.job.finished",
                 job_id=request.job_id,

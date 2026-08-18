@@ -19,6 +19,8 @@ from jhin_connectors.vercel.webhook import WEBHOOK_EVENTS, sign_payload
 
 DEFAULT_TOKEN = "fake-vercel-token"
 _MUTATIONS = frozenset({"preview_create", "redeploy", "promote", "alias"})
+_SCENARIOS = frozenset({"deployment_list_mixed_project", "deployment_list_pagination"})
+_PAGINATION_SCENARIO_DEPLOYMENTS = 240
 
 
 @dataclass(frozen=True)
@@ -156,6 +158,15 @@ class FakeVercelState:
         self.repeat_pagination_cursor = False
         self.ignore_event_limit = False
         self.webhook_counter = 0
+        self.scenarios: set[str] = set()
+        self._seeded_projects = self._clone(self.projects)
+        self._seeded_deployments = self._clone(self.deployments)
+        self._seeded_env_records = self._clone(self.env_records)
+        self._seeded_events = self._clone(self.events)
+
+    @staticmethod
+    def _clone(value: Any) -> Any:
+        return json.loads(json.dumps(value))
 
     @staticmethod
     def _deployment(
@@ -232,6 +243,17 @@ class FakeVercelState:
                     "link": {"type": "github", "repoId": 10_000 + index},
                 }
 
+    def arm_scenario(self, scenario: str) -> bool:
+        if scenario not in _SCENARIOS:
+            return False
+        with self.lock:
+            if scenario == "deployment_list_mixed_project":
+                self.mixed_project_list_row = True
+            elif scenario == "deployment_list_pagination":
+                self.seed_many_deployments("prj_github", _PAGINATION_SCENARIO_DEPLOYMENTS)
+            self.scenarios.add(scenario)
+        return True
+
     def arm_fault(self, mutation: str) -> bool:
         if mutation not in _MUTATIONS:
             return False
@@ -247,11 +269,22 @@ class FakeVercelState:
             self.faults.discard(action)
             return should_drop
 
-    def reset_mutations(self) -> None:
+    def reset(self) -> None:
         with self.lock:
+            self.projects = self._clone(self._seeded_projects)
+            self.deployments = self._clone(self._seeded_deployments)
+            self.env_records = self._clone(self._seeded_env_records)
+            self.events = self._clone(self._seeded_events)
             self.counters = dict.fromkeys(_MUTATIONS, 0)
             self.last_requests.clear()
+            self.requests.clear()
             self.faults.clear()
+            self.redirects.clear()
+            self.mixed_project_list_row = False
+            self.repeat_pagination_cursor = False
+            self.ignore_event_limit = False
+            self.webhook_counter = 0
+            self.scenarios.clear()
 
     def emit_webhook(
         self,
@@ -341,6 +374,7 @@ class FakeVercelState:
                             "counters": self.counters,
                             "last_requests": self.last_requests,
                             "requests": self.requests,
+                            "scenarios": sorted(self.scenarios),
                         }
                     )
                 ),
@@ -382,8 +416,17 @@ def handle_request(
     if method == "GET" and path == "/_state":
         return _FakeResponse(200, state.snapshot())
     if method == "POST" and path == "/_reset":
-        state.reset_mutations()
+        state.reset()
         return _FakeResponse(200, {"ok": True})
+    if method == "POST" and path == "/_scenario":
+        scenario = body.get("scenario")
+        if (
+            set(body) != {"scenario"}
+            or not isinstance(scenario, str)
+            or not state.arm_scenario(scenario)
+        ):
+            return _FakeResponse(400, {"error": "unknown scenario"})
+        return _FakeResponse(200, {"armed": scenario})
     if method == "POST" and path == "/_fault":
         mutation = body.get("mutation")
         if not isinstance(mutation, str) or not state.arm_fault(mutation):

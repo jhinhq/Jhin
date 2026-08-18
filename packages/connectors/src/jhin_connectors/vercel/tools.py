@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any, cast
 
 from pydantic import BaseModel
 
-from jhin_connectors.execution import resolve_connection
+from jhin_connectors.execution import ConnectionResolutionError, resolve_connection
 from jhin_connectors.vercel.client import (
     DEFAULT_BASE_URL,
     VercelApiError,
@@ -19,6 +20,7 @@ from jhin_connectors.vercel.schemas import (
     AliasAssignInput,
     AliasAssignOutput,
     DeploymentListInput,
+    DeploymentListItem,
     DeploymentListOutput,
     DeploymentLogEvent,
     DeploymentLogsInput,
@@ -39,8 +41,10 @@ from jhin_connectors.vercel.schemas import (
 )
 from jhin_policy import RiskLevel, ToolDefinition
 from jhin_tools.builtin import ToolExecutionContext, ToolExecutor
+from jhin_tools.sanitize import sanitize_payload
 
-MAX_LOG_OUTPUT_BYTES = 65_536
+MAX_DEPLOYMENT_LIST_OUTPUT_BYTES = 28_000
+MAX_LOG_OUTPUT_BYTES = 28_000
 _MAX_LOG_MESSAGE_CHARS = 4_000
 _MAX_ENV_ROWS = 200
 _LOG_WINDOW_MS = 86_400_000
@@ -48,6 +52,18 @@ _LOG_WINDOW_MS = 86_400_000
 
 def _provider_shape(message: str) -> VercelApiError:
     return VercelApiError(message, code="invalid_provider_response")
+
+
+def _gateway_document_retained(output: BaseModel, *, maximum: int) -> bool:
+    dumped = output.model_dump(mode="json")
+    encoded = json.dumps(dumped, ensure_ascii=False, default=str).encode("utf-8")
+    if len(encoded) > maximum:
+        return False
+    sanitized = sanitize_payload(
+        dumped,
+        max_document_bytes=maximum,
+    )
+    return "original_size_bytes" not in sanitized
 
 
 def _required_string(value: Any, *, field: str, maximum: int) -> str:
@@ -148,18 +164,37 @@ def _deployment_info(deployment: dict[str, Any]) -> DeploymentReadOutput:
     )
 
 
+def _deployment_list_item(deployment: dict[str, Any]) -> DeploymentListItem:
+    return DeploymentListItem(
+        deployment_id=_deployment_id(deployment),
+        project_id=deployment_project_id(deployment),
+        state=_provider_state(deployment),
+        target=_display_string(deployment.get("target"), field="deployment target", maximum=50),
+        created_at=_timestamp(deployment.get("created"), field="deployment creation timestamp"),
+    )
+
+
 async def _api(ctx: ToolExecutionContext, connection_id: str) -> VercelClient:
-    resolved = await resolve_connection(ctx, connection_id, connector_type="vercel")
+    try:
+        resolved = await resolve_connection(ctx, connection_id, connector_type="vercel")
+    except ConnectionResolutionError:
+        raise VercelApiError(
+            "Vercel connection is unavailable",
+            code="connection_unavailable",
+            side_effect_possible=False,
+        ) from None
     if resolved.connection.auth_type != "access_token":
         raise VercelApiError(
             "This Vercel connection does not use access-token authentication",
             code="unsupported_auth_type",
+            side_effect_possible=False,
         )
     token = resolved.credentials.get("token")
     if not isinstance(token, str) or not token:
         raise VercelApiError(
             "This Vercel connection has no access token",
             code="credential_invalid",
+            side_effect_possible=False,
         )
     config = resolved.config
     base_url = config.get("base_url", DEFAULT_BASE_URL)
@@ -167,6 +202,7 @@ async def _api(ctx: ToolExecutionContext, connection_id: str) -> VercelClient:
         raise VercelApiError(
             "Vercel API target is not allowed",
             code="endpoint_not_allowed",
+            side_effect_possible=False,
         )
     validated_team_id = ""
     if "team_id" in config:
@@ -176,6 +212,7 @@ async def _api(ctx: ToolExecutionContext, connection_id: str) -> VercelClient:
             raise VercelApiError(
                 "Vercel team configuration is invalid",
                 code="invalid_configuration",
+                side_effect_possible=False,
             ) from None
     return VercelClient(base_url=base_url, token=token, team_id=validated_team_id)
 
@@ -187,6 +224,7 @@ async def _require_project(client: VercelClient, project_id: str) -> dict[str, A
         raise VercelApiError(
             "Vercel project does not match the requested project",
             code="project_scope_mismatch",
+            side_effect_possible=False,
         )
     return project
 
@@ -202,11 +240,13 @@ async def _require_deployment(
         raise VercelApiError(
             "Vercel deployment does not match the requested deployment",
             code="deployment_scope_mismatch",
+            side_effect_possible=False,
         )
     if deployment_project_id(deployment) != project_id:
         raise VercelApiError(
             "Vercel deployment does not belong to the requested project",
             code="project_scope_mismatch",
+            side_effect_possible=False,
         )
     return deployment
 
@@ -236,10 +276,24 @@ async def _deployment_list(ctx: ToolExecutionContext, payload: BaseModel) -> Bas
         project_id=data.project_id,
         limit=data.limit,
     )
-    return DeploymentListOutput(
-        deployments=[_deployment_info(deployment) for deployment in deployments],
-        truncated=truncated,
-    )
+    projected: list[DeploymentListItem] = []
+    for deployment in deployments:
+        item = _deployment_list_item(deployment)
+        candidate = DeploymentListOutput(deployments=[*projected, item], truncated=True)
+        if not _gateway_document_retained(
+            candidate,
+            maximum=MAX_DEPLOYMENT_LIST_OUTPUT_BYTES,
+        ):
+            truncated = True
+            break
+        projected.append(item)
+    output = DeploymentListOutput(deployments=projected, truncated=truncated)
+    if not _gateway_document_retained(
+        output,
+        maximum=MAX_DEPLOYMENT_LIST_OUTPUT_BYTES,
+    ):
+        raise _provider_shape("Vercel deployment-list output exceeded its safety limit")
+    return output
 
 
 async def _deployment_read(ctx: ToolExecutionContext, payload: BaseModel) -> BaseModel:
@@ -308,13 +362,13 @@ async def _deployment_logs(ctx: ToolExecutionContext, payload: BaseModel) -> Bas
             truncated = True
             continue
         candidate = DeploymentLogsOutput(events=[*events, event], truncated=True)
-        if len(candidate.model_dump_json().encode("utf-8")) > MAX_LOG_OUTPUT_BYTES:
+        if not _gateway_document_retained(candidate, maximum=MAX_LOG_OUTPUT_BYTES):
             truncated = True
             break
         events.append(event)
     output = DeploymentLogsOutput(events=events, truncated=truncated)
     # Keep a hard postcondition even if model serialization changes.
-    if len(output.model_dump_json().encode("utf-8")) > MAX_LOG_OUTPUT_BYTES:
+    if not _gateway_document_retained(output, maximum=MAX_LOG_OUTPUT_BYTES):
         raise _provider_shape("Vercel build-log output exceeded its safety limit")
     return output
 
@@ -367,6 +421,7 @@ def _git_source(
         raise VercelApiError(
             "Vercel project is not linked to the requested repository",
             code="repository_scope_mismatch",
+            side_effect_possible=False,
         )
     link_type = link.get("type")
     if link_type in {"github", "github-limited"} and requested_provider == "github":
@@ -380,6 +435,7 @@ def _git_source(
             raise VercelApiError(
                 "Vercel project is not linked to the requested repository",
                 code="repository_scope_mismatch",
+                side_effect_possible=False,
             )
         return {"type": "github", "ref": ref, "repoId": repo_id}
     if link_type == "gitlab" and requested_provider == "gitlab":
@@ -393,6 +449,7 @@ def _git_source(
             raise VercelApiError(
                 "Vercel project is not linked to the requested repository",
                 code="repository_scope_mismatch",
+                side_effect_possible=False,
             )
         return {"type": "gitlab", "ref": ref, "projectId": project_id}
     if link_type == "bitbucket" and requested_provider == "bitbucket":
@@ -415,6 +472,7 @@ def _git_source(
             raise VercelApiError(
                 "Vercel project is not linked to the requested repository",
                 code="repository_scope_mismatch",
+                side_effect_possible=False,
             )
         source: dict[str, Any] = {
             "type": "bitbucket",
@@ -427,6 +485,7 @@ def _git_source(
     raise VercelApiError(
         "Vercel project is not linked to the requested repository",
         code="repository_scope_mismatch",
+        side_effect_possible=False,
     )
 
 
@@ -485,6 +544,7 @@ async def _redeploy(ctx: ToolExecutionContext, payload: BaseModel) -> BaseModel:
         raise VercelApiError(
             "Vercel deployment environment does not match the requested environment",
             code="environment_scope_mismatch",
+            side_effect_possible=False,
         )
     created = await client.redeploy(
         {
@@ -530,6 +590,7 @@ async def _alias_assign(ctx: ToolExecutionContext, payload: BaseModel) -> BaseMo
         raise VercelApiError(
             "Vercel deployment environment does not match the requested environment",
             code="environment_scope_mismatch",
+            side_effect_possible=False,
         )
     await client.assign_alias(data.deployment_id, data.alias)
     return AliasAssignOutput(

@@ -179,18 +179,22 @@ def test_required_grant_scope_keys_reject_unscoped_allow() -> None:
     )
     assert decision.code == "required_scope_missing"
 
+
 def test_required_grant_scope_keys_accept_matching_scoped_allow() -> None:
     tool = scoped_tool(required_grant_scope_keys=("connection_id", "project_id"))
     decision = evaluate(
         tool,
-        grants=[Grant(
-            capability=tool.required_capability,
-            scope={"connection_id": "c1", "project_id": "p1"},
-        )],
+        grants=[
+            Grant(
+                capability=tool.required_capability,
+                scope={"connection_id": "c1", "project_id": "p1"},
+            )
+        ],
         rules=[],
         requested_scope={"connection_id": "c1", "project_id": "p1"},
     )
     assert decision.code == "granted"
+
 
 def test_required_grant_scope_keys_must_be_declared_scope_keys() -> None:
     with pytest.raises(ValidationError, match="required grant scope"):
@@ -198,6 +202,7 @@ def test_required_grant_scope_keys_must_be_declared_scope_keys() -> None:
             scope_keys=("connection_id",),
             required_grant_scope_keys=("connection_id", "project_id"),
         )
+
 
 def test_decode_secret_map_registers_full_json_and_each_string_leaf() -> None:
     plaintext = (
@@ -209,6 +214,7 @@ def test_decode_secret_map_registers_full_json_and_each_string_leaf() -> None:
     assert redact_text("Bearer token-six-plus") == "Bearer [REDACTED]"
     assert redact_text("password-six-plus") == "[REDACTED]"
     assert redact_text("query-secret") == "[REDACTED]"
+
 
 def test_decode_secret_map_rejects_non_string_leaf() -> None:
     with pytest.raises(SecretMaterialError):
@@ -260,13 +266,13 @@ async def test_approved_call_reauthorizes_live_state(change: str, gateway_fixtur
     assert outcome.status == "denied"
     assert effects == []
 
+
 async def test_approved_call_is_bound_to_original_agent_run_and_task(gateway_fixture) -> None:
     approval_id, effects = await gateway_fixture.park_scoped_call()
     other_context = gateway_fixture.context_for_other_agent_run_task()
     with pytest.raises(GatewayStateError, match="does not belong"):
         await ToolGateway(other_context, gateway_fixture.catalog).resolve_approved(approval_id)
     assert effects == []
-
 ```
 
 Also add tests for wrong workspace; a tool-specific validator changing to DENY while parked; capability/risk/input/approval-format drift under the same tool name; connection credential rotation, public-config change, disablement, and deletion; every fail-closed branch emitting an audit event; single-use resolution; terminal outcome replay; and an `executing`/`execution_unknown` row never invoking the executor.
@@ -443,11 +449,15 @@ def test_config_fields_filter_by_auth_and_apply_typed_defaults() -> None:
     assert normalized["allow_writes"] is False
     assert "management_base_url" not in normalized
 
-@pytest.mark.parametrize("url", [
-    "http://169.254.169.254/latest/meta-data",
-    "http://127.0.0.1:9000",
-    "https://user:pass@example.com",
-])
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://169.254.169.254/latest/meta-data",
+        "http://127.0.0.1:9000",
+        "https://user:pass@example.com",
+    ],
+)
 def test_unapproved_http_target_is_rejected(url: str) -> None:
     with pytest.raises(EndpointPolicyError):
         validate_http_origin(url, official_origins=("https://api.vercel.com",))
@@ -459,6 +469,7 @@ In `test_http_client.py`, test the exact shared primitive:
 
 ```python
 MAX_PROVIDER_RESPONSE_BYTES = 524_288
+
 
 async def send_bounded_json(
     client: httpx.AsyncClient,
@@ -546,6 +557,7 @@ Read the webhook stream incrementally:
 
 ```python
 MAX_WEBHOOK_BODY_BYTES = 1_048_576
+
 
 async def read_bounded_body(request: Request) -> bytes:
     content_length = parse_optional_nonnegative_content_length(request.headers)
@@ -646,11 +658,14 @@ class PreviewCreateInput(ScopedProjectInput):
     repository_id: str = Field(min_length=1, max_length=200)
     ref: str = Field(min_length=1, max_length=250)
 
+
 class RedeployInput(ScopedDeploymentInput):
     environment: Literal["preview", "production"]
 
+
 class PromoteInput(ScopedDeploymentInput):
     environment: Literal["production"] = "production"
+
 
 class AliasAssignInput(ScopedDeploymentInput):
     environment: Literal["production"] = "production"
@@ -1063,10 +1078,12 @@ class RelationRef:
     name: str
     access: Literal["source", "target"]
 
+
 @dataclass(frozen=True)
 class MutationValueRef:
     parameter_index: int | None
     literal_bytes: int | None
+
 
 @dataclass(frozen=True)
 class ValidatedSql:
@@ -1441,12 +1458,14 @@ class ConnectionGrantSummaryOut(BaseModel):
     eligible_tool_names: list[str]
     eligibility_reason: str | None
 
+
 class ConnectionAgentAccessOut(BaseModel):
     agent_id: UUID
     agent_name: str
     authorized: bool
     authorized_tool_names: list[str]
     grants: list[ConnectionGrantSummaryOut]
+
 
 class ConnectionAccessSummaryOut(BaseModel):
     connection_id: UUID
@@ -1543,12 +1562,47 @@ git commit -m "feat: add scoped production connector setup"
 ### Task 8: Prove the Phase 9 exit test and close documentation
 
 **Files:**
+- Modify: `docs/superpowers/plans/2026-08-17-phase-9-vercel-supabase.md`
 - Create: `tests/integration/test_phase9_exit.py`
 - Modify: `tests/integration/conftest.py`
+- Modify: `tests/integration/test_phase2_api.py`
+- Modify: `tests/integration/test_phase3_exit.py`
 - Modify: `tests/integration/test_phase5_exit.py`
 - Modify: `tests/integration/test_phase6_exit.py`
 - Modify: `tests/integration/test_phase7_exit.py`
 - Modify: `tests/integration/test_phase8_exit.py`
+- Modify: `tests/integration/test_company_topology_concurrency.py`
+- Modify: `tests/integration/test_phase9_authorization.py`
+- Create: `apps/api/src/jhin_api/public_payloads.py`
+- Modify: `apps/api/src/jhin_api/approvals/schemas.py`
+- Modify: `apps/api/src/jhin_api/tasks/schemas.py`
+- Test: `apps/api/tests/test_approvals_unit.py`
+- Modify: `compose.yaml`
+- Create: `config/nats.conf`
+- Create: `packages/tools/src/jhin_tools/errors.py`
+- Modify: `packages/tools/src/jhin_tools/__init__.py`
+- Modify: `packages/tools/src/jhin_tools/gateway.py`
+- Test: `packages/tools/tests/test_gateway.py`
+- Modify: `packages/connectors/src/jhin_connectors/testing/fake_vercel.py`
+- Create: `packages/connectors/tests/cli/__init__.py`
+- Create: `packages/connectors/tests/github/__init__.py`
+- Create: `packages/connectors/tests/linear/__init__.py`
+- Create: `packages/connectors/tests/supabase/__init__.py`
+- Create: `packages/connectors/tests/vercel/__init__.py`
+- Modify: `packages/connectors/src/jhin_connectors/vercel/client.py`
+- Modify: `packages/connectors/src/jhin_connectors/vercel/schemas.py`
+- Modify: `packages/connectors/src/jhin_connectors/vercel/tools.py`
+- Modify: `packages/connectors/tests/vercel/test_tools_against_fake.py`
+- Modify: `packages/connectors/src/jhin_connectors/supabase/database_tools.py`
+- Modify: `packages/connectors/src/jhin_connectors/supabase/management_client.py`
+- Modify: `packages/connectors/src/jhin_connectors/supabase/management_tools.py`
+- Modify: `packages/connectors/src/jhin_connectors/supabase/sql_policy.py`
+- Test: `packages/connectors/tests/supabase/test_database_tools.py`
+- Test: `packages/connectors/tests/supabase/test_management_tools.py`
+- Test: `packages/connectors/tests/supabase/test_sql_policy.py`
+- Test: `services/event_worker/tests/test_normalizer.py`
+- Modify: `services/sandbox_runner/src/jhin_sandbox_runner/jobs.py`
+- Create: `services/sandbox_runner/tests/test_job_lifecycle.py`
 - Create: `scripts/assert_phase9_production_compose.py`
 - Test: `tests/test_phase9_production_compose.py`
 - Create: `docs/architecture/vercel-and-supabase.md`
@@ -1578,9 +1632,12 @@ Implement independent workspace-isolated tests with unique names, deterministic 
    revoke a grant, add a deny/forbid rule, rotate credentials, change public
    config, disable/delete the connection, or simulate tool-definition drift.
    Approval never executes stale authority and emits the exact denial audit.
-4. Invocation race/crash: race two Balanced approval resolvers for one Vercel
-   mutation and one Supabase function mutation; each has one side effect and
-   one replay. An Autonomous agent auto-runs ELEVATED preview create but still
+4. Invocation race/crash: race duplicate public Balanced approval decisions
+   for one Vercel mutation and one Supabase function mutation; each has one
+   side effect. Separately, the real-PostgreSQL gateway race drives two
+   resolvers for the same approved invocation and observes exactly one replay;
+   this is separate because duplicate workflow signals are intentionally
+   coalesced before gateway resolution. An Autonomous agent auto-runs ELEVATED preview create but still
    parks DESTRUCTIVE; a separate explicit custom-AUTO agent exercises a
    destructive one-shot post-effect transport fault. Vercel redeploy and
    Supabase function deploy each become execution_unknown, and activity/gateway
@@ -1640,6 +1697,15 @@ Use the normal agent/gateway path for authorization and approval assertions, pro
 
 Make existing integration endpoint constants environment-driven in `conftest.py` and Phases 5–8 (`JHIN_API_URL`, `JHIN_WEB_URL`, `JHIN_NATS_URL`, `JHIN_TEMPORAL_ADDRESS`, `JHIN_FAKE_GITHUB_URL`, and `JHIN_FAKE_LINEAR_URL`) so the full suite can target the dedicated Phase 9 stack without conflicting with a developer's normal stack. `compose()` adds literal project `-p` from validated `JHIN_TEST_COMPOSE_PROJECT`, whose acceptance value is fixed to `jhin-phase9-acceptance` in Step 3.
 
+The same harness exports `JHIN_FAKE_VERCEL_URL`, `JHIN_FAKE_SUPABASE_URL`,
+`JHIN_POSTGRES_HOST`, `POSTGRES_DEV_PORT`, and the three
+`JHIN_PHASE9_DB_{READER,WRITER,ADMIN}_DSN` values.  The older direct-Postgres
+integration files consume those host/port values rather than silently testing
+the developer stack on `55432`.  Fake Vercel exposes only two closed acceptance
+scenarios (`deployment_list_pagination` and `deployment_list_mixed_project`),
+and `/_reset` restores every seeded resource while clearing request, fault,
+counter, scenario, and webhook state.
+
 Create `assert_phase9_production_compose.py` with a pure `assert_production_config(config: dict[str, Any])` plus a CLI that runs `docker compose -f compose.yaml config --format json`. Fail if any service name starts with `fake-`, or if the rendered JSON contains `fake-supabase-db`, `supabase_fixture`, `reader-pass`, `writer-pass`, `phase9-fixture-admin-only`, `JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS`, or `JHIN_CONNECTOR_ALLOWED_DB_HOSTS`. Unit tests feed safe and individually poisoned configs; this is an executable negative assertion, not a prose inspection.
 
 - [ ] **Step 2: Run acceptance tests to verify RED or expose missing behavior**
@@ -1661,6 +1727,7 @@ export JHIN_TEST_COMPOSE_PROJECT=jhin-phase9-acceptance
 export WEB_PORT=13000
 export API_PORT=18000
 export APP_URL=http://127.0.0.1:13000
+export JHIN_POSTGRES_HOST=127.0.0.1
 export POSTGRES_DEV_PORT=65432
 export NATS_DEV_PORT=14222
 export NATS_MONITOR_DEV_PORT=18222
@@ -1694,10 +1761,10 @@ docker compose -p jhin-phase9-acceptance -f compose.yaml -f compose.dev.yaml bui
 docker compose -p jhin-phase9-acceptance -f compose.yaml -f compose.dev.yaml up -d --force-recreate --wait --wait-timeout 120
 docker compose -p jhin-phase9-acceptance -f compose.yaml -f compose.dev.yaml ps
 docker compose -p jhin-phase9-acceptance -f compose.yaml -f compose.dev.yaml exec -T api jhin-db-migrate
-uv run alembic -c packages/db/alembic.ini heads
+uv run pytest packages/db/tests/test_migration_graph.py -q
 ```
 
-Expected: every required service/fake is healthy under the dedicated project; Docker names fresh project-scoped `postgres_data`, `nats_data`, and `fake_supabase_data` volumes; Alembic reports exactly one head and no Phase 9 migration. Never replace the literal project name on either `down --volumes` command with an unchecked variable.
+Expected: every required service/fake is healthy under the dedicated project; Docker names fresh project-scoped `postgres_data`, `nats_data`, and `fake_supabase_data` volumes; the executable migration-graph assertion reports exactly one head and no Phase 9 migration. Never replace the literal project name on either `down --volumes` command with an unchecked variable.
 
 - [ ] **Step 4: Make the acceptance suite green without weakening boundaries**
 
@@ -1828,7 +1895,7 @@ Expected: commit `d8d1055` is the scoped canonical branding migration; no tracke
 - [ ] **Step 10: Commit Phase 9 acceptance and closure**
 
 ```bash
-git add tests/integration/test_phase9_exit.py tests/integration/conftest.py tests/integration/test_phase5_exit.py tests/integration/test_phase6_exit.py tests/integration/test_phase7_exit.py tests/integration/test_phase8_exit.py scripts/assert_phase9_production_compose.py tests/test_phase9_production_compose.py docs/architecture/vercel-and-supabase.md README.md docs/implementation-plan.md
+git add docs/superpowers/plans/2026-08-17-phase-9-vercel-supabase.md tests/integration/test_phase9_exit.py tests/integration/conftest.py tests/integration/test_phase2_api.py tests/integration/test_phase3_exit.py tests/integration/test_phase5_exit.py tests/integration/test_phase6_exit.py tests/integration/test_phase7_exit.py tests/integration/test_phase8_exit.py tests/integration/test_company_topology_concurrency.py tests/integration/test_phase9_authorization.py apps/api/src/jhin_api/public_payloads.py apps/api/src/jhin_api/approvals/schemas.py apps/api/src/jhin_api/tasks/schemas.py apps/api/tests/test_approvals_unit.py compose.yaml config/nats.conf packages/tools/src/jhin_tools/errors.py packages/tools/src/jhin_tools/__init__.py packages/tools/src/jhin_tools/gateway.py packages/tools/tests/test_gateway.py packages/connectors/src/jhin_connectors/testing/fake_vercel.py packages/connectors/tests/cli/__init__.py packages/connectors/tests/github/__init__.py packages/connectors/tests/linear/__init__.py packages/connectors/tests/supabase/__init__.py packages/connectors/tests/vercel/__init__.py packages/connectors/src/jhin_connectors/vercel/client.py packages/connectors/src/jhin_connectors/vercel/schemas.py packages/connectors/src/jhin_connectors/vercel/tools.py packages/connectors/tests/vercel/test_tools_against_fake.py packages/connectors/src/jhin_connectors/supabase/database_tools.py packages/connectors/src/jhin_connectors/supabase/management_client.py packages/connectors/src/jhin_connectors/supabase/management_tools.py packages/connectors/src/jhin_connectors/supabase/sql_policy.py packages/connectors/tests/supabase/test_database_tools.py packages/connectors/tests/supabase/test_management_tools.py packages/connectors/tests/supabase/test_sql_policy.py services/event_worker/tests/test_normalizer.py services/sandbox_runner/src/jhin_sandbox_runner/jobs.py services/sandbox_runner/tests/test_job_lifecycle.py scripts/assert_phase9_production_compose.py tests/test_phase9_production_compose.py docs/architecture/vercel-and-supabase.md README.md docs/implementation-plan.md
 git commit -m "docs: close Phase 9 production integrations"
 ```
 

@@ -32,13 +32,13 @@ import pytest
 
 from jhin_api.seed import DEV_OWNER_EMAIL, DEV_OWNER_PASSWORD
 
-from .conftest import API_URL, REPO_ROOT, compose
+from .conftest import API_URL, FAKE_GITHUB_URL, REPO_ROOT, compose
 
 pytestmark = pytest.mark.integration
 
 FAKE_PROVIDER_URL = "http://fake-provider:8080/v1"
 FAKE_GITHUB_INTERNAL = "http://fake-github:8080"
-FAKE_GITHUB_HOST = "http://localhost:8091"
+FAKE_GITHUB_HOST = FAKE_GITHUB_URL
 FAKE_GITHUB_PAT = "fake-github-pat"
 # Sandbox jobs are real containers; the whole flow needs more headroom than
 # the API-only phase 5 tasks.

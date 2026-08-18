@@ -10,6 +10,7 @@ import httpx
 
 from jhin_connectors.endpoints import EndpointPolicyError, validate_http_origin
 from jhin_connectors.http_client import ProviderHTTPError, send_bounded_json
+from jhin_tools.errors import ToolExecutionError
 
 DEFAULT_BASE_URL = "https://api.vercel.com"
 USER_AGENT = "jhin-connector-vercel"
@@ -22,7 +23,7 @@ _TOTAL_TIMEOUT_SECONDS = 20.0
 _TEAM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")
 
 
-class VercelApiError(Exception):
+class VercelApiError(ToolExecutionError):
     """A stable, credential-free Vercel failure."""
 
     def __init__(
@@ -31,9 +32,13 @@ class VercelApiError(Exception):
         *,
         code: str = "provider_error",
         status_code: int | None = None,
+        side_effect_possible: bool = True,
     ) -> None:
-        super().__init__(message)
-        self.code = code
+        super().__init__(
+            message,
+            code=code,
+            side_effect_possible=side_effect_possible,
+        )
         self.status_code = status_code
 
 
@@ -45,6 +50,7 @@ def validate_vercel_base_url(base_url: str) -> str:
         raise VercelApiError(
             "Vercel API target is not allowed",
             code="endpoint_not_allowed",
+            side_effect_possible=False,
         ) from None
 
 
@@ -291,6 +297,7 @@ class VercelClient:
                     raise VercelApiError(
                         "Vercel deployment does not belong to the requested project",
                         code="project_scope_mismatch",
+                        side_effect_possible=False,
                     )
             next_cursor = _next_cursor(payload)
             rows.extend(page_rows[:remaining])

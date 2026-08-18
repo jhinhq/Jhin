@@ -6,7 +6,9 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_serializer
+
+from jhin_api.public_payloads import public_tool_payload
 
 
 class ApprovalOut(BaseModel):
@@ -23,6 +25,10 @@ class ApprovalOut(BaseModel):
     requested_at: datetime
     decided_at: datetime | None
     decided_by_user_id: UUID | None
+
+    @field_serializer("action_payload_sanitized")
+    def serialize_action_payload(self, value: dict[str, Any]) -> dict[str, Any]:
+        return public_tool_payload(self.action_type, value)
 
 
 class ApprovalListItem(ApprovalOut):

@@ -227,9 +227,10 @@ services:
 
   nats:
     image: nats:2.12-alpine
-    command: ["--jetstream", "--store_dir=/data", "--http_port=8222"]
+    command: ["--config", "/etc/nats/nats.conf"]
     volumes:
       - nats_data:/data
+      - ./config/nats.conf:/etc/nats/nats.conf:ro
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8222/healthz"]
       interval: 5s
@@ -246,6 +247,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-jhin}
       POSTGRES_PWD: ${POSTGRES_PASSWORD:-jhin}
       POSTGRES_SEEDS: postgres
+      BIND_ON_IP: 0.0.0.0
       TEMPORAL_ADDRESS: temporal:7233
     depends_on:
       postgres:

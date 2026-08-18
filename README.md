@@ -11,14 +11,13 @@ backbone, and PostgreSQL is the system of record. A FastAPI control-plane API
 owns configuration and authorization, and a Next.js frontend provides the
 operations UI.
 
-> Status: Phase 8 — teams can now perform durable SWE/QA handoffs through
-> direct coordination or a CTO-owned coordinator task. Delegations use
-> authorized, structured messages; blocking parents park durably while child
-> tasks run, and failed reviews enter a bounded fix/retest loop. Task details
-> expose the full lineage, artifacts, risks, verdicts, and visible agent- or
-> workspace-concurrency queuing. See
-> [Delegation and Teams](docs/architecture/delegation-and-teams.md) for the
-> workflow, policy, durability, and admission model.
+> Status: Phase 9 — Vercel and Supabase are now governed production
+> integrations with exact connection/project/environment/schema scopes,
+> approval-time reauthorization, bounded provider and SQL outputs, deployment
+> webhooks, and a live connection access summary. Phase 9 does not complete
+> the broader company, chat, memory, or operations redesign. See
+> [Vercel and Supabase Connectors](docs/architecture/vercel-and-supabase.md)
+> for the authority planes, least-privilege setup, and operator boundaries.
 
 ## Quick start
 
@@ -140,18 +139,29 @@ the SWE, comment the outcome back on the issue).
 ### Connectors
 
 The **Connectors page** connects Jhin to external systems (GitHub, Linear,
-and the CLI sandbox are live). Admins create a connection by picking an auth
-method (GitHub: personal access token or GitHub App; Linear: API key, with
-OAuth noted for later), entering credentials
+Vercel, Supabase, and the CLI sandbox are live). Admins create a connection by
+picking an auth method (including a Vercel access token, a Supabase Management
+API token, or a separate Supabase PostgreSQL DSN), entering credentials
 (stored in the encrypted secret store, never displayed again), and optional
-config such as `base_url` for GitHub Enterprise. The create response shows
-the webhook payload URL and signing secret **once** — paste them into the
-provider's webhook settings. Connection details offer live verify, credential
-rotation, enable/disable, delete, and recent tool usage.
+public config. The create response shows webhook setup once: Jhin-generated
+secrets are displayed once, while Vercel's provider-generated signing secret
+is pasted into a write-only field. Connection details offer live verify,
+credential rotation, enable/disable, delete, Agent Access, and recent tool
+usage.
+
+For a least-privilege production setup, create one Vercel connection for the
+intended account/team and grant agents only the exact project, deployment,
+environment, and repository dimensions they need. For Supabase, create one
+Management API connection for project/log/Edge Function work and a different
+PostgreSQL connection backed by a custom non-owner role for database work.
+Keep `allow_writes=false` unless mutations are required, then combine the
+smallest table privileges with exact `connection_id`/`project_ref`/`schema`
+grants and approval policy. The complete setup and SQL safety model are in
+[Vercel and Supabase Connectors](docs/architecture/vercel-and-supabase.md).
 
 Agents get connector tools through grants (Tools & Access tab or wizard
-step 5), optionally scoped to one connection and repository/branch glob
-patterns like `octo/*` or `agent/*`. See
+step 5), scoped to the connector's required dimensions; GitHub repository and
+branch values may use patterns like `octo/*` or `agent/*`. See
 [docs/architecture/connectors.md](docs/architecture/connectors.md) for the
 SDK and how to contribute a connector. In the dev overlay the `fake-github`
 and `fake-linear` services let the GitHub and Linear flows run without real

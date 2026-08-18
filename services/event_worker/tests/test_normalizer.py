@@ -4,9 +4,14 @@ to canonical connector.* events with derived (deterministic) event ids."""
 import json
 from typing import Any
 
+from jhin_connectors.vercel.connector import VercelConnector
+from jhin_connectors.vercel.webhook import SIGNATURE_HEADER, sign_payload
 from jhin_domain import new_uuid7
 from jhin_event_worker.normalizer import IngressNormalizer, derived_event_id
 from jhin_events.envelope import EventEnvelope, EventSource
+
+VERCEL_WEBHOOK_SECRET = "exact-cap-vercel-webhook-secret"
+VERCEL_WEBHOOK_BODY_CAP = 1_048_576
 
 
 class FakeJetStream:
@@ -93,6 +98,39 @@ def vercel_ingress_envelope(event: str = "deployment.ready") -> EventEnvelope:
     )
 
 
+def exact_cap_vercel_webhook_body() -> bytes:
+    payload: dict[str, Any] = {
+        "id": "evt_exact_cap",
+        "type": "deployment.ready",
+        "createdAt": 1_700_000_000_000,
+        "payload": {
+            "deployment": {
+                "id": "dpl_preview",
+                "url": "dpl-preview.fake.vercel.app",
+                "name": "github-project",
+                "meta": {
+                    "githubCommitRef": "main",
+                    "githubCommitSha": "abc123",
+                    "token": "must-not-survive",
+                },
+            },
+            "project": {"id": "prj_github"},
+            "target": "preview",
+            "environment": {"DATABASE_URL": "must-not-survive"},
+            "padding": "",
+        },
+    }
+    compact = json.dumps(payload, separators=(",", ":")).encode()
+    padding = VERCEL_WEBHOOK_BODY_CAP - len(compact)
+    assert padding > 0
+    provider_payload = payload["payload"]
+    assert isinstance(provider_payload, dict)
+    provider_payload["padding"] = "x" * padding
+    exact = json.dumps(payload, separators=(",", ":")).encode()
+    assert len(exact) == VERCEL_WEBHOOK_BODY_CAP
+    return exact
+
+
 async def test_issue_ingress_produces_canonical_event() -> None:
     js = FakeJetStream()
     envelope = ingress_envelope(
@@ -127,7 +165,7 @@ async def test_redelivery_produces_identical_event_ids() -> None:
         "push",
         {"ref": "refs/heads/main", "before": "a", "after": "b", "commits": []},
     )
-    normalizer = IngressNormalizer(js)
+    normalizer = IngressNormalizer(js)  # type: ignore[arg-type]
     await normalizer.handle(FakeMsg(envelope.to_bytes()))  # type: ignore[arg-type]
     await normalizer.handle(FakeMsg(envelope.to_bytes()))  # type: ignore[arg-type]
 
@@ -170,6 +208,58 @@ async def test_vercel_dotted_success_ingress_publishes_one_safe_canonical_event(
         "git_sha": "abc123",
     }
     assert "must-not-survive" not in payload.decode()
+
+
+async def test_exact_cap_vercel_ingress_publishes_one_bounded_event_across_redelivery() -> None:
+    body = exact_cap_vercel_webhook_body()
+    connector = VercelConnector()
+    raw = connector.parse_webhook(
+        {SIGNATURE_HEADER: sign_payload(VERCEL_WEBHOOK_SECRET, body)},
+        body,
+        VERCEL_WEBHOOK_SECRET,
+    )
+    envelope = EventEnvelope(
+        event_type="ingress.vercel.deployment.ready",
+        workspace_id=str(new_uuid7()),
+        source=EventSource(type="vercel", connection_id=new_uuid7()),
+        data={
+            "event": raw.event,
+            "delivery_id": raw.delivery_id,
+            "payload": raw.payload,
+        },
+    )
+    js = DeduplicatingJetStream()
+    normalizer = IngressNormalizer(js)  # type: ignore[arg-type]
+    subject = f"jhin.v1.{envelope.workspace_id}.ingress.vercel.deployment.ready"
+    first = FakeMsg(envelope.to_bytes(), subject=subject)
+    retry = FakeMsg(envelope.to_bytes(), subject=subject)
+
+    await normalizer.handle(first)  # type: ignore[arg-type]
+    await normalizer.handle(retry)  # type: ignore[arg-type]
+
+    assert first.acked and retry.acked
+    assert len(js.published) == 1
+    canonical_subject, canonical_bytes, headers = js.published[0]
+    assert canonical_subject == (
+        f"jhin.v1.{envelope.workspace_id}.connector.vercel.deployment.ready"
+    )
+    canonical = EventEnvelope.from_bytes(canonical_bytes)
+    assert canonical.event_id == derived_event_id(envelope.event_id, 0)
+    assert headers["Nats-Msg-Id"] == str(canonical.event_id)
+    assert canonical.data == {
+        "deployment_id": "dpl_preview",
+        "project_id": "prj_github",
+        "project_name": "github-project",
+        "url": "dpl-preview.fake.vercel.app",
+        "target": "preview",
+        "state": "READY",
+        "created_at": 1_700_000_000_000,
+        "git_ref": "main",
+        "git_sha": "abc123",
+    }
+    assert len(canonical_bytes) < 2_000
+    assert "padding" not in canonical_bytes.decode()
+    assert "must-not-survive" not in canonical_bytes.decode()
 
 
 async def test_unknown_connector_or_event_is_terminated() -> None:

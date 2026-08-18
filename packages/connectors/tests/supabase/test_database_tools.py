@@ -149,6 +149,7 @@ async def test_scope_drift_fails_before_connect(
         await _invoke(name, context, input_factory(connection))
 
     assert exc_info.value.code == expected_code
+    assert exc_info.value.side_effect_possible is False
     assert connected is False
 
 
@@ -181,7 +182,35 @@ async def test_write_disabled_and_parameter_mismatch_fail_before_connect(
         )
 
     assert disabled_error.value.code == "database_writes_disabled"
+    assert disabled_error.value.side_effect_possible is False
     assert parameter_error.value.code == "database_parameter_mismatch"
+    assert parameter_error.value.side_effect_possible is False
+    assert connected is False
+
+
+async def test_ddl_policy_failure_is_pre_effect_and_never_connects(
+    context: ToolExecutionContext,
+    make_postgres_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = await make_postgres_connection()
+    connected = False
+
+    async def fake_connect(**_kwargs: object) -> None:
+        nonlocal connected
+        connected = True
+
+    monkeypatch.setattr(database_tools.asyncpg, "connect", fake_connect, raising=False)
+
+    with pytest.raises(SupabaseDatabaseError) as exc_info:
+        await _invoke(
+            "supabase.database.destructive",
+            context,
+            _mutation(connection, "ALTER TABLE public.widgets ADD COLUMN unsafe integer", []),
+        )
+
+    assert exc_info.value.code == "database_sql_not_allowed"
+    assert exc_info.value.side_effect_possible is False
     assert connected is False
 
 
@@ -634,6 +663,42 @@ async def test_truncate_fully_consumes_the_bounded_probe_before_the_effect(
     assert fake.events.count("prepared.fetch") == 2
 
 
+@pytest.mark.parametrize("failure", ["row_limit", "assignment_budget"])
+async def test_mutation_probe_rejections_are_pre_effect(
+    context: ToolExecutionContext,
+    make_postgres_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    max_rows = 1 if failure == "row_limit" else 200
+    connection_row = await make_postgres_connection(max_rows=max_rows)
+    fake = FakeConnection()
+    probe_count = 2 if failure == "row_limit" else 129
+    fake.probe_rows = [[1] for _ in range(probe_count)]
+    submitted_sql = "UPDATE public.widgets SET name = $1 WHERE id = $2"
+    value = "x" if failure == "row_limit" else "x" * 8_192
+
+    async def fake_connect(**_kwargs: object) -> FakeConnection:
+        return fake
+
+    monkeypatch.setattr(database_tools.asyncpg, "connect", fake_connect, raising=False)
+
+    with pytest.raises(SupabaseDatabaseError) as exc_info:
+        await _invoke(
+            "supabase.database.destructive",
+            context,
+            _mutation(connection_row, submitted_sql, [value, 0]),
+        )
+
+    expected_code = (
+        "database_row_limit_exceeded" if failure == "row_limit" else "database_mutation_too_large"
+    )
+    assert exc_info.value.code == expected_code
+    assert exc_info.value.side_effect_possible is False
+    assert submitted_sql not in fake.prepared_sql
+    assert fake.events[-2:] == ["transaction.rollback", "connection.close"]
+
+
 async def test_transaction_guc_readback_mismatch_fails_before_role_or_prepare(
     context: ToolExecutionContext,
     make_postgres_connection: ConnectionFactory,
@@ -745,6 +810,7 @@ async def test_role_closure_drift_after_relation_locks_fails_before_prepare(
         )
 
     assert exc_info.value.code == "database_role_not_least_privilege"
+    assert exc_info.value.side_effect_possible is False
     assert fake.events.count("role.closure") == 2
     assert fake.prepared_sql == []
     assert fake.events[-2:] == ["transaction.rollback", "connection.close"]
@@ -772,7 +838,58 @@ async def test_privileged_role_rolls_back_closes_and_never_prepares_submitted_sq
         )
 
     assert exc_info.value.code == "database_role_not_least_privilege"
+    assert exc_info.value.side_effect_possible is False
     assert fake.prepared_sql == []
+    assert fake.events[-2:] == ["transaction.rollback", "connection.close"]
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "sql", "payload_factory", "side_effect_possible"),
+    [
+        (
+            "supabase.database.read",
+            "SELECT id FROM public.widgets",
+            lambda connection, sql: _read(connection, sql),
+            False,
+        ),
+        (
+            "supabase.database.write",
+            "INSERT INTO public.widgets (id, name) VALUES ($1, $2)",
+            lambda connection, sql: _mutation(connection, sql, [1, "bounded"]),
+            True,
+        ),
+    ],
+)
+async def test_database_timeout_is_safe_only_for_read_only_execution(
+    context: ToolExecutionContext,
+    make_postgres_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+    sql: str,
+    payload_factory: Callable[[Connection, str], BaseModel],
+    side_effect_possible: bool,
+) -> None:
+    connection_row = await make_postgres_connection()
+    fake = FakeConnection()
+    original_prepare = fake.prepare
+
+    async def timeout_submitted_sql(candidate: str) -> FakePrepared:
+        if candidate == sql:
+            raise TimeoutError
+        return await original_prepare(candidate)
+
+    fake.prepare = timeout_submitted_sql  # type: ignore[assignment]
+
+    async def fake_connect(**_kwargs: object) -> FakeConnection:
+        return fake
+
+    monkeypatch.setattr(database_tools.asyncpg, "connect", fake_connect, raising=False)
+
+    with pytest.raises(SupabaseDatabaseError) as exc_info:
+        await _invoke(tool_name, context, payload_factory(connection_row, sql))
+
+    assert exc_info.value.code == "database_timeout"
+    assert exc_info.value.side_effect_possible is side_effect_possible
     assert fake.events[-2:] == ["transaction.rollback", "connection.close"]
 
 

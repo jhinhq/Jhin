@@ -21,10 +21,11 @@ from jhin_db.migrate import upgrade_to_head
 from jhin_db.models import Agent, AgentTeamMembership, Team, User, Workspace
 from jhin_domain import WorkspaceRole, new_uuid7
 
+from .conftest import POSTGRES_HOST as PG_HOST
+from .conftest import POSTGRES_PORT as PG_PORT
+
 pytestmark = pytest.mark.integration
 
-PG_HOST = "127.0.0.1"
-PG_PORT = 55432
 PG_USER = "jhin"
 PG_PASSWORD = "jhin"
 ADMIN_DSN = f"postgresql://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/postgres"

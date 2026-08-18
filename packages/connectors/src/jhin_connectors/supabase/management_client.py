@@ -11,13 +11,14 @@ import httpx
 from jhin_connectors.endpoints import EndpointPolicyError, validate_http_origin
 from jhin_connectors.http_client import ProviderHTTPError, send_bounded_json
 from jhin_connectors.supabase.manifest import DEFAULT_BASE_URL
+from jhin_tools.errors import ToolExecutionError
 
 USER_AGENT = "jhin-connector-supabase"
 _CONNECT_TIMEOUT_SECONDS = 5.0
 _TOTAL_TIMEOUT_SECONDS = 20.0
 
 
-class SupabaseManagementError(Exception):
+class SupabaseManagementError(ToolExecutionError):
     """A stable, credential-free Management API failure."""
 
     def __init__(
@@ -26,9 +27,13 @@ class SupabaseManagementError(Exception):
         *,
         code: str = "provider_error",
         status_code: int | None = None,
+        side_effect_possible: bool = True,
     ) -> None:
-        super().__init__(message)
-        self.code = code
+        super().__init__(
+            message,
+            code=code,
+            side_effect_possible=side_effect_possible,
+        )
         self.status_code = status_code
 
 
@@ -39,6 +44,7 @@ def validate_supabase_base_url(base_url: str) -> str:
         raise SupabaseManagementError(
             "Supabase Management API target is not allowed",
             code="endpoint_not_allowed",
+            side_effect_possible=False,
         ) from None
 
 
@@ -111,6 +117,7 @@ class SupabaseManagementClient:
             raise SupabaseManagementError(
                 "Supabase returned an unexpected project response",
                 code="invalid_provider_response",
+                side_effect_possible=False,
             )
         return payload
 
@@ -135,6 +142,7 @@ class SupabaseManagementClient:
             raise SupabaseManagementError(
                 "Supabase returned an unexpected logs response",
                 code="invalid_provider_response",
+                side_effect_possible=False,
             )
         return payload
 
@@ -147,6 +155,7 @@ class SupabaseManagementClient:
             raise SupabaseManagementError(
                 "Supabase returned an unexpected function-list response",
                 code="invalid_provider_response",
+                side_effect_possible=False,
             )
         return payload
 

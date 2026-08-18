@@ -32,14 +32,14 @@ import pytest
 
 from jhin_api.seed import DEV_OWNER_EMAIL, DEV_OWNER_PASSWORD
 
-from .conftest import API_URL, NATS_URL, compose
+from .conftest import API_URL, FAKE_GITHUB_URL, NATS_URL, compose
 
 pytestmark = pytest.mark.integration
 
 FAKE_PROVIDER_URL = "http://fake-provider:8080/v1"
 # In-network URL the agent worker uses; host-mapped port for test inspection.
 FAKE_GITHUB_INTERNAL = "http://fake-github:8080"
-FAKE_GITHUB_HOST = "http://localhost:8091"
+FAKE_GITHUB_HOST = FAKE_GITHUB_URL
 FAKE_GITHUB_PAT = "fake-github-pat"
 TASK_TIMEOUT_SECONDS = 120.0
 

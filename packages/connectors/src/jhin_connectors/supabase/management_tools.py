@@ -10,7 +10,7 @@ from typing import Any, cast
 
 from pydantic import BaseModel
 
-from jhin_connectors.execution import resolve_connection
+from jhin_connectors.execution import ConnectionResolutionError, resolve_connection
 from jhin_connectors.supabase.management_client import (
     SupabaseManagementClient,
     SupabaseManagementError,
@@ -118,6 +118,7 @@ def project_read_output(project: dict[str, Any], *, project_ref: str) -> Project
         raise SupabaseManagementError(
             "Supabase project does not match the configured project",
             code="project_scope_mismatch",
+            side_effect_possible=False,
         )
     return ProjectReadOutput(
         project_id=_identifier(project.get("id"), field="project id", maximum=200),
@@ -142,34 +143,46 @@ async def _api(
     connection_id: str,
     requested_project_ref: str,
 ) -> SupabaseManagementClient:
-    resolved = await resolve_connection(ctx, connection_id, connector_type="supabase")
+    try:
+        resolved = await resolve_connection(ctx, connection_id, connector_type="supabase")
+    except ConnectionResolutionError:
+        raise SupabaseManagementError(
+            "Supabase connection is unavailable",
+            code="connection_unavailable",
+            side_effect_possible=False,
+        ) from None
     if resolved.connection.auth_type != "management_token":
         raise SupabaseManagementError(
             "This Supabase connection does not use Management API authentication",
             code="unsupported_auth_type",
+            side_effect_possible=False,
         )
     access_token = resolved.credentials.get("access_token")
     if not isinstance(access_token, str) or not access_token:
         raise SupabaseManagementError(
             "This Supabase connection has no Management API access token",
             code="credential_invalid",
+            side_effect_possible=False,
         )
     configured_ref = resolved.config.get("project_ref")
     if not isinstance(configured_ref, str) or not _PROJECT_REF_RE.fullmatch(configured_ref):
         raise SupabaseManagementError(
             "Supabase project configuration is invalid",
             code="invalid_configuration",
+            side_effect_possible=False,
         )
     if configured_ref != requested_project_ref:
         raise SupabaseManagementError(
             "Supabase project does not match the configured project",
             code="project_scope_mismatch",
+            side_effect_possible=False,
         )
     base_url = resolved.config.get("base_url", DEFAULT_BASE_URL)
     if not isinstance(base_url, str):
         raise SupabaseManagementError(
             "Supabase Management API target is not allowed",
             code="endpoint_not_allowed",
+            side_effect_possible=False,
         )
     return SupabaseManagementClient(base_url=base_url, access_token=access_token)
 

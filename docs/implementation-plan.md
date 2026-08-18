@@ -3275,16 +3275,16 @@ Each phase must end in independently testable software. Do not build all infrast
 
 **Deliverable:** useful production integrations with tight scopes.
 
-- [ ] Vercel connector.
-- [ ] Vercel tools and scopes.
-- [ ] deployment events where supported.
-- [ ] Supabase connector.
-- [ ] management-plane tools.
-- [ ] SQL read-only path.
-- [ ] SQL write policy.
-- [ ] statement timeout/max rows.
-- [ ] elevated/destructive approvals.
-- [ ] connector-specific tests.
+- [x] Vercel connector.
+- [x] Vercel tools and scopes.
+- [x] deployment events where supported.
+- [x] Supabase connector.
+- [x] management-plane tools.
+- [x] SQL read-only path.
+- [x] SQL write policy.
+- [x] statement timeout/max rows.
+- [x] elevated/destructive approvals.
+- [x] connector-specific tests.
 
 **Exit test:** agent can inspect deployment and read allowed DB data but is blocked from unauthorized production changes.
 

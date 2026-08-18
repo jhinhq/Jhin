@@ -37,6 +37,7 @@ from jhin_tools.builtin import (
     ToolValidator,
     build_builtin_catalog,
 )
+from jhin_tools.errors import ToolExecutionError
 from jhin_tools.gateway import GatewayOutcome, GatewayStateError, ToolGateway
 from jhin_tools.sanitize import MAX_STRING_CHARS
 
@@ -427,6 +428,122 @@ async def test_uncertain_runtime_invocation_never_reexecutes_auto_mutation(
     assert row is not None
     assert row.status == ToolCallStatus.EXECUTION_UNKNOWN.value
     assert executions == 1
+
+
+async def test_pre_effect_runtime_failure_persists_provider_code_and_replays(
+    session: AsyncSession, context: ToolExecutionContext
+) -> None:
+    await _persist_execution_context(session, context)
+    await _grant(session, context, "test.provider_read")
+    await session.commit()
+    context = _with_isolated_sessions(context)
+    executions = 0
+    exception_secret = "provider-exception-secret-must-not-persist"
+
+    async def executor(executor_ctx: ToolExecutionContext, payload: BaseModel) -> _ApprovalOutput:
+        nonlocal executions
+        executions += 1
+        raise ToolExecutionError(
+            exception_secret,
+            code="project_scope_mismatch",
+            side_effect_possible=False,
+        )
+
+    catalog = ToolCatalog()
+    catalog.register(
+        ToolDefinition(
+            name="test.provider_read",
+            description="Provider validation failure",
+            risk=RiskLevel.READ,
+            input_model=_WideApprovalInput,
+            output_model=_ApprovalOutput,
+            required_capability="test.provider_read",
+        ),
+        executor,
+    )
+    invocation_id = new_uuid7()
+    gateway = ToolGateway(context, catalog)
+
+    first = await gateway.request(
+        "test.provider_read",
+        '{"label": "scope-check"}',
+        invocation_id=invocation_id,
+    )
+    replay = await gateway.request(
+        "test.provider_read",
+        '{"label": "scope-check"}',
+        invocation_id=invocation_id,
+    )
+
+    assert first.status == replay.status == "failed"
+    assert first.error_code == replay.error_code == "project_scope_mismatch"
+    assert first.sanitized_output == replay.sanitized_output == {"error": "project_scope_mismatch"}
+    assert replay.replayed is True
+    assert executions == 1
+    row = await session.get(ToolCall, invocation_id)
+    assert row is not None
+    assert row.status == ToolCallStatus.FAILED.value
+    assert row.error_code == "project_scope_mismatch"
+    audit_rows = list(await session.scalars(select(AuditEvent)))
+    persisted = json.dumps(
+        {
+            "outcomes": [first.model_dump(mode="json"), replay.model_dump(mode="json")],
+            "tool_call": {
+                "input": row.sanitized_input_json,
+                "output": row.sanitized_output_json,
+                "error_code": row.error_code,
+            },
+            "audits": [audit.metadata_json for audit in audit_rows],
+        },
+        default=str,
+    )
+    assert exception_secret not in persisted
+
+
+@pytest.mark.parametrize(
+    ("side_effect_possible", "raised_code", "expected_status", "expected_code"),
+    [
+        (False, "repository_scope_mismatch", "failed", "repository_scope_mismatch"),
+        (True, "provider_transport_error", "execution_unknown", "execution_outcome_unknown"),
+    ],
+)
+async def test_approved_typed_failure_preserves_only_proven_pre_effect_outcomes(
+    session: AsyncSession,
+    context: ToolExecutionContext,
+    side_effect_possible: bool,
+    raised_code: str,
+    expected_status: str,
+    expected_code: str,
+) -> None:
+    executions = 0
+
+    async def executor(executor_ctx: ToolExecutionContext, payload: BaseModel) -> _ApprovalOutput:
+        nonlocal executions
+        executions += 1
+        raise ToolExecutionError(
+            "Bounded provider failure",
+            code=raised_code,
+            side_effect_possible=side_effect_possible,
+        )
+
+    catalog = _custom_approval_catalog(executor=executor)
+    gateway = ToolGateway(context, catalog)
+    await _grant(session, context, "test.approval_action")
+    parked = await gateway.request("test.approval_action", '{"label": "validate"}')
+    approval = await _mark_approved(session, parked)
+
+    outcome = await gateway.resolve_approved(approval.id)
+
+    assert outcome.status == expected_status
+    assert outcome.error_code == expected_code
+    assert executions == 1
+    row = await session.get(ToolCall, parked.tool_call_id)
+    assert row is not None
+    assert row.status == (
+        ToolCallStatus.FAILED.value
+        if side_effect_possible is False
+        else ToolCallStatus.EXECUTION_UNKNOWN.value
+    )
 
 
 @pytest.mark.parametrize("mismatch", ["tool", "input", "task"])

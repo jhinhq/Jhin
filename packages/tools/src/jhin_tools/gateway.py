@@ -57,6 +57,7 @@ from jhin_policy import (
     evaluate,
 )
 from jhin_tools.builtin import ToolCatalog, ToolExecutionContext, ToolExecutor
+from jhin_tools.errors import ToolExecutionError
 from jhin_tools.invocation import TOOL_INVOCATION_FORMAT_VERSION
 from jhin_tools.sanitize import (
     MAX_DOCUMENT_BYTES,
@@ -1056,6 +1057,22 @@ class ToolGateway:
             output = self._sanitize(output_model.model_dump(mode="json"))
             status: GatewayStatus = "executed"
             error_code = None
+            decision_code = "granted"
+            decision_reason = "executed through the tool gateway"
+        except ToolExecutionError as exc:
+            if commit_terminal and exc.side_effect_possible:
+                await session.rollback()
+                return await self._persist_execution_unknown(
+                    tool_call_id,
+                    risk=definition.risk.value,
+                )
+            # Only the validated, bounded code crosses the gateway boundary;
+            # provider exception messages are never persisted or observed.
+            output = self._sanitize({"error": exc.code})
+            status = "failed"
+            error_code = exc.code
+            decision_code = exc.code
+            decision_reason = "the tool failed before any external effect"
         except Exception as exc:
             if commit_terminal:
                 # Once a claimed mutation was dispatched, a timeout or
@@ -1070,6 +1087,8 @@ class ToolGateway:
             output = self._sanitize({"error": f"{type(exc).__name__}: {exc}"})
             status = "failed"
             error_code = "execution_error"
+            decision_code = "granted"
+            decision_reason = "executed through the tool gateway"
         except BaseException:
             # Cancellation or process shutdown can occur after an external
             # side effect but before a normal terminal outcome is known.
@@ -1090,11 +1109,18 @@ class ToolGateway:
         )
         row.error_code = error_code
 
+        audit_metadata = {
+            "tool_name": definition.name,
+            "risk": definition.risk.value,
+            "status": row.status,
+        }
+        if error_code is not None:
+            audit_metadata["code"] = error_code
         self._audit_on(
             session,
             "tool.call.executed" if status == "executed" else "tool.call.failed",
             row.id,
-            {"tool_name": definition.name, "risk": definition.risk.value, "status": row.status},
+            audit_metadata,
         )
         if commit_terminal:
             # Persist the executor's terminal result (and any same-database
@@ -1108,8 +1134,8 @@ class ToolGateway:
             tool_call_id=row.id,
             tool_name=definition.name,
             risk=definition.risk.value,
-            decision_code="granted",
-            decision_reason="executed through the tool gateway",
+            decision_code=decision_code,
+            decision_reason=decision_reason,
             sanitized_input=row.sanitized_input_json,
             sanitized_output=output,
             approval_id=row.approval_id,

@@ -331,6 +331,8 @@ def test_identifier_limit_counts_strict_utf8_bytes_not_characters() -> None:
         "SELECT pg_sleep(1)",
         "SELECT current_user",
         "SELECT session_user",
+        "SELECT pg_catalog.current_user",
+        "SELECT public.session_user",
         "SELECT user",
         "SELECT current_role",
         "SELECT system_user",

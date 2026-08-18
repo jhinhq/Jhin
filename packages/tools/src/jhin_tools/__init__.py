@@ -8,6 +8,7 @@ from jhin_tools.builtin import (
     allowed_tool_definitions,
     build_builtin_catalog,
 )
+from jhin_tools.errors import ToolExecutionError
 from jhin_tools.gateway import (
     GatewayOutcome,
     GatewayStateError,
@@ -40,6 +41,7 @@ __all__ = [
     "GatewayStateError",
     "ToolCatalog",
     "ToolExecutionContext",
+    "ToolExecutionError",
     "ToolGateway",
     "allowed_tool_definitions",
     "build_builtin_catalog",

@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 from collections.abc import Iterator
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -32,6 +33,7 @@ from jhin_connectors.supabase.schemas import (
 )
 from jhin_connectors.testing.fake_supabase import FakeSupabaseServer
 from jhin_db.models import Workspace
+from jhin_domain import new_uuid7
 from jhin_secrets.redaction import SecretRedactor
 from jhin_tools.builtin import ToolExecutionContext
 from jhin_tools.sanitize import MAX_DOCUMENT_BYTES, sanitize_payload
@@ -203,6 +205,7 @@ async def test_every_management_executor_rejects_postgres_before_network(
         await _run(tool_name, context, payload)
 
     assert exc_info.value.code == "unsupported_auth_type"
+    assert exc_info.value.side_effect_possible is False
     assert fake_supabase.state.requests == []
     assert fake_supabase.state.counters == {"deploy": 0, "delete": 0}
 
@@ -253,6 +256,7 @@ async def test_every_management_executor_binds_configured_project_before_network
         await _run(tool_name, context, payload)
 
     assert exc_info.value.code == "project_scope_mismatch"
+    assert exc_info.value.side_effect_possible is False
     assert fake_supabase.state.requests == []
     assert fake_supabase.state.counters == {"deploy": 0, "delete": 0}
 
@@ -298,6 +302,30 @@ async def test_project_read_binds_provider_ref_and_filters_unknown_fields(
             ),
         )
     assert exc_info.value.code == "project_scope_mismatch"
+    assert exc_info.value.side_effect_possible is False
+
+
+async def test_management_executor_maps_foreign_workspace_connection_to_safe_error(
+    context: ToolExecutionContext,
+    management_connection,
+    fake_supabase: FakeSupabaseServer,
+) -> None:
+    foreign_context = replace(context, workspace_id=new_uuid7())
+
+    with pytest.raises(SupabaseManagementError) as exc_info:
+        await _run(
+            "supabase.project.read",
+            foreign_context,
+            ProjectReadInput(
+                connection_id=str(management_connection.id),
+                project_ref=PROJECT_REF,
+            ),
+        )
+
+    assert exc_info.value.code == "connection_unavailable"
+    assert exc_info.value.side_effect_possible is False
+    assert "workspace" not in str(exc_info.value).casefold()
+    assert fake_supabase.state.requests == []
 
 
 async def test_function_list_is_capped_truncated_and_display_safe(
@@ -969,6 +997,7 @@ async def test_one_shot_post_effect_fault_records_exactly_one_effect_then_clears
         await _run(tool_name, context, payload)
 
     assert exc_info.value.code == "provider_transport_error"
+    assert exc_info.value.side_effect_possible is True
     assert fake_supabase.state.counters[mutation] == 1
     assert mutation not in fake_supabase.state.faults
 

@@ -38,16 +38,16 @@ import pytest
 
 from jhin_api.seed import DEV_OWNER_EMAIL, DEV_OWNER_PASSWORD
 
-from .conftest import API_URL, compose
+from .conftest import API_URL, FAKE_GITHUB_URL, FAKE_LINEAR_URL, compose
 
 pytestmark = pytest.mark.integration
 
 FAKE_PROVIDER_URL = "http://fake-provider:8080/v1"
 FAKE_GITHUB_INTERNAL = "http://fake-github:8080"
-FAKE_GITHUB_HOST = "http://localhost:8091"
+FAKE_GITHUB_HOST = FAKE_GITHUB_URL
 FAKE_GITHUB_PAT = "fake-github-pat"
 FAKE_LINEAR_INTERNAL = "http://fake-linear:8080"
-FAKE_LINEAR_HOST = "http://localhost:8092"
+FAKE_LINEAR_HOST = FAKE_LINEAR_URL
 FAKE_LINEAR_API_KEY = "fake-linear-api-key"
 # fake-linear POSTs webhooks at the API over the compose "data" network.
 API_INTERNAL_URL = "http://api:8000"

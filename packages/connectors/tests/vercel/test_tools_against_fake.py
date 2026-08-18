@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from copy import deepcopy
 from dataclasses import replace
 
 import httpx
 import pytest
 from pydantic import BaseModel, ValidationError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from jhin_connectors.base import VerifyContext
 from jhin_connectors.testing.fake_vercel import FakeVercelServer
@@ -30,9 +32,11 @@ from jhin_connectors.vercel.schemas import (
     PromoteInput,
     RedeployInput,
 )
-from jhin_connectors.vercel.tools import MAX_LOG_OUTPUT_BYTES
+from jhin_connectors.vercel.tools import MAX_DEPLOYMENT_LIST_OUTPUT_BYTES, MAX_LOG_OUTPUT_BYTES
 from jhin_db.models import Workspace
+from jhin_secrets import SecretRedactor
 from jhin_tools.builtin import ToolExecutionContext
+from jhin_tools.sanitize import MAX_DOCUMENT_BYTES, sanitize_payload
 
 EXECUTORS = {definition.name: executor for definition, executor in VercelConnector().tools()}
 
@@ -173,6 +177,35 @@ async def test_project_list_and_read_filter_unknown_provider_fields(
     assert fake_vercel.state.token not in rendered
 
 
+async def test_foreign_workspace_connection_fails_safely_before_provider_request(
+    context: ToolExecutionContext,
+    session: AsyncSession,
+    make_connection,
+    fake_vercel: FakeVercelServer,
+) -> None:
+    foreign_workspace = Workspace(name="Foreign", slug="foreign-vercel-workspace")
+    session.add(foreign_workspace)
+    await session.flush()
+    foreign_connection = await make_connection(
+        foreign_workspace,
+        connector_type="vercel",
+        auth_type="access_token",
+        credentials={"token": fake_vercel.state.token},
+        config={"base_url": fake_vercel.base_url},
+    )
+
+    with pytest.raises(VercelApiError) as exc_info:
+        await _run(
+            "vercel.project.list",
+            context,
+            ProjectListInput(connection_id=str(foreign_connection.id)),
+        )
+
+    assert exc_info.value.code == "connection_unavailable"
+    assert exc_info.value.side_effect_possible is False
+    assert not fake_vercel.state.requests_for("GET", "/v9/projects")
+
+
 async def test_project_list_is_capped_and_reports_truncation(
     context: ToolExecutionContext,
     vercel_connection,
@@ -289,6 +322,7 @@ async def test_corrupt_project_response_id_blocks_project_actions_and_all_mutati
         with pytest.raises(VercelApiError) as exc_info:
             await _run(name, context, payload)
         assert exc_info.value.code == "project_scope_mismatch", name
+        assert exc_info.value.side_effect_possible is False, name
 
     assert fake_vercel.state.snapshot()["counters"] == {
         "preview_create": 0,
@@ -387,6 +421,9 @@ async def test_logs_are_time_count_and_output_byte_bounded(
     assert isinstance(output, DeploymentLogsOutput)
     assert len(output.events) <= 200
     assert len(output.model_dump_json().encode()) <= MAX_LOG_OUTPUT_BYTES
+    sanitized = sanitize_payload(output.model_dump(mode="json"))
+    assert "original_size_bytes" not in sanitized
+    assert len(json.dumps(sanitized, sort_keys=True).encode()) < 32_768
     request = fake_vercel.state.requests_for("GET", "/v3/deployments/dpl_preview/events")[-1]
     assert int(request["query"]["limit"][0]) <= 200
     assert int(request["query"]["until"][0]) - int(request["query"]["since"][0]) <= 86_400_000
@@ -460,7 +497,14 @@ async def test_deployment_list_always_sends_project_id_and_has_bounded_paginatio
     vercel_connection,
     fake_vercel: FakeVercelServer,
 ) -> None:
-    fake_vercel.state.seed_many_deployments("prj_github", 240)
+    async with httpx.AsyncClient() as client:
+        scenario = await client.post(
+            f"{fake_vercel.base_url}/_scenario",
+            json={"scenario": "deployment_list_pagination"},
+            timeout=5,
+        )
+    assert scenario.status_code == 200
+    assert scenario.json() == {"armed": "deployment_list_pagination"}
 
     output = await _run(
         "vercel.deployment.list",
@@ -473,10 +517,51 @@ async def test_deployment_list_always_sends_project_id_and_has_bounded_paginatio
     assert isinstance(output, DeploymentListOutput)
     assert len(output.deployments) == 200
     assert output.truncated
+    sanitized = sanitize_payload(output.model_dump(mode="json"))
+    assert "original_size_bytes" not in sanitized
+    assert len(sanitized["deployments"]) == 200
     requests = fake_vercel.state.requests_for("GET", "/v6/deployments")
     assert 1 < len(requests) <= 5
     assert all(request["query"]["projectId"] == ["prj_github"] for request in requests)
     assert all(int(request["query"]["limit"][0]) <= 100 for request in requests)
+
+
+async def test_deployment_list_survives_gateway_cap_after_redaction_expansion(
+    context: ToolExecutionContext,
+    vercel_connection,
+    fake_vercel: FakeVercelServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with httpx.AsyncClient() as client:
+        scenario = await client.post(
+            f"{fake_vercel.base_url}/_scenario",
+            json={"scenario": "deployment_list_pagination"},
+            timeout=5,
+        )
+    assert scenario.status_code == 200
+    redactor = SecretRedactor()
+    redactor.register("preview")
+    redactor.register("dpl_bu")
+    redactor.register("prj_gi")
+    monkeypatch.setattr("jhin_tools.sanitize.get_redactor", lambda: redactor)
+
+    output = await _run(
+        "vercel.deployment.list",
+        context,
+        DeploymentListInput(
+            connection_id=str(vercel_connection.id), project_id="prj_github", limit=200
+        ),
+    )
+
+    sanitized = sanitize_payload(output.model_dump(mode="json"), redactor=redactor)
+
+    assert "original_size_bytes" not in sanitized
+    assert 0 < len(sanitized["deployments"]) < 200
+    assert sanitized["truncated"] is True
+    assert {row["target"] for row in sanitized["deployments"]} == {"[REDACTED]"}
+    assert all("[REDACTED]" in row["deployment_id"] for row in sanitized["deployments"])
+    serialized_bytes = len(json.dumps(sanitized, ensure_ascii=False).encode())
+    assert serialized_bytes <= MAX_DEPLOYMENT_LIST_OUTPUT_BYTES < MAX_DOCUMENT_BYTES
 
 
 async def test_deployment_list_rejects_any_mixed_project_page_without_returning_rows(
@@ -484,7 +569,14 @@ async def test_deployment_list_rejects_any_mixed_project_page_without_returning_
     vercel_connection,
     fake_vercel: FakeVercelServer,
 ) -> None:
-    fake_vercel.state.mixed_project_list_row = True
+    async with httpx.AsyncClient() as client:
+        scenario = await client.post(
+            f"{fake_vercel.base_url}/_scenario",
+            json={"scenario": "deployment_list_mixed_project"},
+            timeout=5,
+        )
+    assert scenario.status_code == 200
+    assert scenario.json() == {"armed": "deployment_list_mixed_project"}
 
     with pytest.raises(VercelApiError) as exc_info:
         await _run(
@@ -496,6 +588,101 @@ async def test_deployment_list_rejects_any_mixed_project_page_without_returning_
         )
 
     assert exc_info.value.code == "project_scope_mismatch"
+    assert exc_info.value.side_effect_possible is False
+
+
+def test_fake_scenarios_are_closed_and_reset_restores_all_state(
+    fake_vercel: FakeVercelServer,
+) -> None:
+    state = fake_vercel.state
+    token = state.token
+    seeded_projects = deepcopy(state.projects)
+    seeded_deployments = deepcopy(state.deployments)
+    seeded_env_records = deepcopy(state.env_records)
+    seeded_events = deepcopy(state.events)
+
+    pagination = httpx.post(
+        f"{fake_vercel.base_url}/_scenario",
+        json={"scenario": "deployment_list_pagination"},
+        timeout=5,
+    )
+    mixed = httpx.post(
+        f"{fake_vercel.base_url}/_scenario",
+        json={"scenario": "deployment_list_mixed_project"},
+        timeout=5,
+    )
+    arbitrary = httpx.post(
+        f"{fake_vercel.base_url}/_scenario",
+        json={"scenario": "deployment_list_pagination", "count": 10_000},
+        timeout=5,
+    )
+    unknown = httpx.post(
+        f"{fake_vercel.base_url}/_scenario",
+        json={"scenario": "arbitrary_resource_mutation"},
+        timeout=5,
+    )
+
+    assert pagination.json() == {"armed": "deployment_list_pagination"}
+    assert mixed.json() == {"armed": "deployment_list_mixed_project"}
+    assert arbitrary.status_code == 400
+    assert arbitrary.json() == {"error": "unknown scenario"}
+    assert unknown.status_code == 400
+    assert unknown.json() == {"error": "unknown scenario"}
+
+    state.projects["prj_github"]["name"] = "mutated-project"
+    state.deployments["dpl_preview"]["target"] = "production"
+    state.env_records["prj_github"].clear()
+    state.events["dpl_preview"].clear()
+    state.record_mutation(
+        "alias",
+        {
+            "method": "POST",
+            "path": "/v2/deployments/dpl_production/aliases",
+            "query": {},
+            "body": {"alias": "mutated.example.test"},
+        },
+    )
+    state.arm_fault("redeploy")
+    state.redirects["/v2/user"] = "https://redirect.invalid"
+    state.repeat_pagination_cursor = True
+    state.ignore_event_limit = True
+    state.webhook_counter = 9
+    authenticated = httpx.get(
+        f"{fake_vercel.base_url}/v2/user",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=5,
+    )
+    assert authenticated.status_code == 302
+
+    before_reset = httpx.get(f"{fake_vercel.base_url}/_state", timeout=5)
+    reset = httpx.post(f"{fake_vercel.base_url}/_reset", timeout=5)
+    after_reset = httpx.get(f"{fake_vercel.base_url}/_state", timeout=5)
+
+    assert before_reset.json()["scenarios"] == [
+        "deployment_list_mixed_project",
+        "deployment_list_pagination",
+    ]
+    assert token not in before_reset.text
+    assert reset.status_code == 200
+    assert reset.json() == {"ok": True}
+    assert state.token == token
+    assert state.projects == seeded_projects
+    assert state.deployments == seeded_deployments
+    assert state.env_records == seeded_env_records
+    assert state.events == seeded_events
+    assert state.faults == set()
+    assert state.redirects == {}
+    assert state.mixed_project_list_row is False
+    assert state.repeat_pagination_cursor is False
+    assert state.ignore_event_limit is False
+    assert state.webhook_counter == 0
+    assert after_reset.json() == {
+        "counters": {"preview_create": 0, "redeploy": 0, "promote": 0, "alias": 0},
+        "last_requests": {},
+        "requests": [],
+        "scenarios": [],
+    }
+    assert token not in reset.text + after_reset.text
 
 
 async def test_deployment_list_rejects_repeated_pagination_cursor(
@@ -558,6 +745,7 @@ async def test_deployment_project_mismatch_has_zero_side_effects(
         with pytest.raises(VercelApiError) as exc_info:
             await _run(name, context, payload)
         assert exc_info.value.code == "project_scope_mismatch"
+        assert exc_info.value.side_effect_possible is False
 
     assert fake_vercel.state.snapshot()["counters"] == before
 
@@ -580,6 +768,7 @@ async def test_redeploy_rejects_environment_mismatch_before_side_effect(
         )
 
     assert exc_info.value.code == "environment_scope_mismatch"
+    assert exc_info.value.side_effect_possible is False
     assert fake_vercel.state.snapshot()["counters"]["redeploy"] == 0
 
 
@@ -671,6 +860,7 @@ async def test_preview_create_rejects_unlinked_or_mismatched_git_repository_befo
         )
 
     assert exc_info.value.code == "repository_scope_mismatch"
+    assert exc_info.value.side_effect_possible is False
     assert fake_vercel.state.snapshot()["counters"]["preview_create"] == 0
 
 
@@ -701,6 +891,7 @@ async def test_github_repo_id_is_bounded_before_display_or_mutation(
             ),
         )
     assert exc_info.value.code == "repository_scope_mismatch"
+    assert exc_info.value.side_effect_possible is False
     assert fake_vercel.state.snapshot()["counters"]["preview_create"] == 0
 
 
@@ -863,6 +1054,7 @@ async def test_post_effect_fault_is_one_shot_and_visible_in_state(
     with pytest.raises(VercelApiError) as exc_info:
         await _run(name, context, payload)
     assert exc_info.value.code == "provider_transport_error"
+    assert exc_info.value.side_effect_possible is True
     assert fake_vercel.state.snapshot()["counters"][action] == 1
 
     await _run(name, context, payload)
