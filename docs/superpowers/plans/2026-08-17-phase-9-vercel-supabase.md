@@ -128,6 +128,9 @@ Expected: the plan is tracked before the first implementation commit, so later t
 - Modify: `packages/tools/src/jhin_tools/__init__.py`
 - Modify: `packages/tools/src/jhin_tools/builtin.py`
 - Modify: `packages/tools/src/jhin_tools/gateway.py`
+- Modify: `packages/workflows/src/jhin_workflows/agent_task/shared.py`
+- Modify: `packages/workflows/src/jhin_workflows/agent_task/workflows.py`
+- Modify: `packages/workflows/src/jhin_workflows/delegated_task/shared.py`
 - Modify: `services/agent_worker/src/jhin_agent_worker/activities.py`
 - Modify: `apps/api/src/jhin_api/connections/service.py`
 - Modify: `apps/api/src/jhin_api/policy/schemas.py`
@@ -140,8 +143,10 @@ Expected: the plan is tracked before the first implementation commit, so later t
 - Test: `packages/tools/tests/test_invocation.py`
 - Test: `packages/tools/tests/test_gateway.py`
 - Test: `packages/tools/tests/test_gateway_concurrency.py`
+- Test: `packages/workflows/tests/test_agent_task_delegation.py`
 - Test: `services/agent_worker/tests/test_activities.py`
 - Test: `services/agent_worker/tests/test_approval_activity.py`
+- Test: `services/agent_worker/tests/test_delegation_activities.py`
 - Test: `apps/api/tests/test_connections_unit.py`
 - Test: `apps/api/tests/test_policy_unit.py`
 - Test: `tests/integration/test_phase9_authorization.py`
@@ -313,7 +318,7 @@ def stable_tool_invocation_id(
 
 For every call, first look up/lock the deterministic row. Require the existing workspace/run/agent/tool/connection and exact validated JSON input to match; otherwise audit and return `invocation_mismatch`. Replay terminal rows and the same pending approval without creating a row or side effect. For a newly immediate `ALLOW`, atomically insert the row as `executing`, add the requested/claimed audits, and commit before calling the executor. Approval staging inserts the same deterministic row as `pending_approval`; approval resolution atomically changes it to `executing` and commits before execution. A duplicate observer of `executing` must not invoke the executor; after a retry/crash it records or returns `execution_unknown`. Commit a definitive terminal result before returning it to the activity. A failure proven to occur before any external dispatch may be `failed`; a timeout, connection loss, process crash, or database-commit ambiguity after dispatch is `execution_unknown`. Neither state is automatically executed again.
 
-After the gateway returns, the activity writes the canonical transcript/run-event bundle under the internal invocation UUID and checks for an existing bundle first. Thus a crash after the gateway's terminal commit but before the outer bundle commit is repaired on activity retry without a second executor call or duplicate messages/events. Extend `GatewayStatus`/`ToolCallStatus` and observation handling for `executing` and `execution_unknown`; do not add a migration because the existing `ToolCall.id` UUID and string status columns carry the new protocol.
+After the gateway returns, the activity writes the canonical transcript/run-event bundle under the internal invocation UUID and checks for an existing bundle first. Thus a crash after the gateway's terminal commit but before the outer bundle commit is repaired on activity retry without a second executor call or duplicate messages/events. Extend `GatewayStatus`/`ToolCallStatus` and observation handling for `executing` and `execution_unknown`; an unknown result is committed and then fails the step non-retryably so the workflow cannot advance to a new model step and repeat the uncertain mutation. Carry the canonical invocation ID through approval and delegated-result stitching. Do not add a migration because the existing `ToolCall.id` UUID and string status columns carry the new protocol.
 
 Before creating an `Approval`, require structural equality between the JSON-mode validated input and `sanitized_input`. If redaction or truncation changed it, record a denied tool call with `approval_input_not_lossless`; do not persist an approval. Persist `approval_format_version=2`, the tool capability/risk, and—when `connection_id` is present—a one-way authorization digest over connection ID, auth type, status, canonical public config, and current secret fingerprint/key version. Never persist raw fingerprint or credential material. Bound approved/rejected resolution to all of:
 
@@ -347,9 +352,9 @@ In `create_grant`, lock the target agent row before checking/inserting and inclu
 Run:
 
 ```bash
-uv run pytest packages/policy/tests packages/tools/tests packages/secrets/tests packages/connectors/tests/test_execution.py apps/api/tests/test_connections_unit.py apps/api/tests/test_policy_unit.py services/agent_worker/tests -q
+uv run pytest packages/policy/tests packages/tools/tests packages/secrets/tests packages/connectors/tests/test_execution.py packages/workflows/tests apps/api/tests/test_connections_unit.py apps/api/tests/test_policy_unit.py services/agent_worker/tests -q
 uv run pytest -m integration tests/integration/test_phase9_authorization.py -v
-uv run ruff check packages/domain packages/policy packages/tools packages/secrets packages/connectors apps/api services/agent_worker
+uv run ruff check packages/domain packages/policy packages/tools packages/secrets packages/connectors packages/workflows apps/api services/agent_worker
 uv run mypy
 git diff --check
 ```
@@ -359,7 +364,7 @@ Expected: PASS, including immediate-policy crash/race/replay/unknown behavior, r
 Commit:
 
 ```bash
-git add packages/domain/src/jhin_domain/enums.py packages/policy/src/jhin_policy/capabilities.py packages/policy/src/jhin_policy/evaluator.py packages/policy/tests/test_evaluator.py packages/tools/src/jhin_tools/__init__.py packages/tools/src/jhin_tools/builtin.py packages/tools/src/jhin_tools/invocation.py packages/tools/src/jhin_tools/gateway.py packages/tools/tests/test_invocation.py packages/tools/tests/test_gateway.py packages/tools/tests/test_gateway_concurrency.py packages/secrets/src/jhin_secrets/__init__.py packages/secrets/src/jhin_secrets/material.py packages/secrets/src/jhin_secrets/store.py packages/secrets/src/jhin_secrets/redaction.py packages/secrets/tests/test_store.py packages/secrets/tests/test_redaction.py packages/connectors/src/jhin_connectors/execution.py packages/connectors/tests/test_execution.py apps/api/src/jhin_api/connections/service.py apps/api/src/jhin_api/policy/schemas.py apps/api/src/jhin_api/policy/router.py apps/api/src/jhin_api/policy/service.py apps/api/tests/test_connections_unit.py apps/api/tests/test_policy_unit.py services/agent_worker/src/jhin_agent_worker/activities.py services/agent_worker/tests/test_activities.py services/agent_worker/tests/test_approval_activity.py tests/integration/test_phase9_authorization.py
+git add packages/domain/src/jhin_domain/enums.py packages/policy/src/jhin_policy/capabilities.py packages/policy/src/jhin_policy/evaluator.py packages/policy/tests/test_evaluator.py packages/tools/src/jhin_tools/__init__.py packages/tools/src/jhin_tools/builtin.py packages/tools/src/jhin_tools/invocation.py packages/tools/src/jhin_tools/gateway.py packages/tools/tests/test_invocation.py packages/tools/tests/test_gateway.py packages/tools/tests/test_gateway_concurrency.py packages/secrets/src/jhin_secrets/__init__.py packages/secrets/src/jhin_secrets/material.py packages/secrets/src/jhin_secrets/store.py packages/secrets/src/jhin_secrets/redaction.py packages/secrets/tests/test_store.py packages/secrets/tests/test_redaction.py packages/connectors/src/jhin_connectors/execution.py packages/connectors/tests/test_execution.py packages/workflows/src/jhin_workflows/agent_task/shared.py packages/workflows/src/jhin_workflows/agent_task/workflows.py packages/workflows/src/jhin_workflows/delegated_task/shared.py packages/workflows/tests/test_agent_task_delegation.py apps/api/src/jhin_api/connections/service.py apps/api/src/jhin_api/policy/schemas.py apps/api/src/jhin_api/policy/router.py apps/api/src/jhin_api/policy/service.py apps/api/tests/test_connections_unit.py apps/api/tests/test_policy_unit.py services/agent_worker/src/jhin_agent_worker/activities.py services/agent_worker/tests/test_activities.py services/agent_worker/tests/test_approval_activity.py services/agent_worker/tests/test_delegation_activities.py tests/integration/test_phase9_authorization.py docs/superpowers/plans/2026-08-17-phase-9-vercel-supabase.md
 git commit -m "fix: harden scoped tool approval authorization"
 ```
 
