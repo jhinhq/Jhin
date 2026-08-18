@@ -914,11 +914,18 @@ async def test_concurrency_queues_second_task_and_survives_worker_restart(
     queued: dict[str, Any] = {}
     while time.monotonic() < deadline:
         queued = await _task(client, ws, second["id"])
-        if queued["task"]["state"] == "queued":
+        task_meta = queued["task"].get("metadata_json")
+        queue_meta = task_meta.get("queue") if isinstance(task_meta, dict) else None
+        if (
+            queued["task"]["state"] == "queued"
+            and isinstance(queue_meta, dict)
+            and queue_meta.get("reason") == "agent_concurrency"
+        ):
             break
         await asyncio.sleep(1.0)
     assert queued["task"]["state"] == "queued", queued["task"]
-    assert queued["task"]["metadata_json"]["queue"]["reason"] == "agent_concurrency"
+    assert isinstance(queued["task"].get("metadata_json"), dict), queued["task"]
+    assert queued["task"]["metadata_json"].get("queue", {}).get("reason") == "agent_concurrency"
     assert queued["runs"] == [], "queued tasks must not have started a run"
     assert await _audit_actions(client, ws, "task.queued", second["id"])
 
