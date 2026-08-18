@@ -15,7 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from jhin_api.audit import service as audit
 from jhin_api.deps import WorkspaceContext
 from jhin_api.org.hierarchy import would_create_cycle
-from jhin_db.models import Agent, Team
+from jhin_api.teams.schemas import TeamMemberOut, TeamMembershipGroups
+from jhin_db.models import Agent, AgentTeamMembership, Team
 
 
 async def list_teams(db: AsyncSession, workspace_id: UUID) -> list[Team]:
@@ -32,6 +33,46 @@ async def get_team(db: AsyncSession, workspace_id: UUID, team_id: UUID) -> Team:
     if team is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
     return team
+
+
+async def get_team_memberships(
+    db: AsyncSession, workspace_id: UUID, team_id: UUID
+) -> TeamMembershipGroups:
+    await get_team(db, workspace_id, team_id)
+    result = await db.execute(
+        select(AgentTeamMembership, Agent)
+        .join(
+            Agent,
+            (Agent.workspace_id == AgentTeamMembership.workspace_id)
+            & (Agent.id == AgentTeamMembership.agent_id),
+        )
+        .where(
+            AgentTeamMembership.workspace_id == workspace_id,
+            AgentTeamMembership.team_id == team_id,
+            AgentTeamMembership.left_at.is_(None),
+        )
+        .order_by(Agent.name, Agent.id)
+    )
+    primary: list[TeamMemberOut] = []
+    secondary: list[TeamMemberOut] = []
+    seen: set[UUID] = set()
+    for membership, agent in result.all():
+        if agent.id in seen:
+            continue
+        seen.add(agent.id)
+        item = TeamMemberOut(
+            membership_id=membership.id,
+            agent_id=agent.id,
+            name=agent.name,
+            slug=agent.slug,
+            role_title=agent.role_title,
+            is_primary=membership.is_primary,
+            role_label=membership.role_label,
+            joined_at=membership.joined_at,
+            state="active",
+        )
+        (primary if membership.is_primary else secondary).append(item)
+    return TeamMembershipGroups(primary=primary, secondary=secondary)
 
 
 async def _validate_parent(

@@ -5,6 +5,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from jhin_api.agents.schemas import MembershipState
+
 
 class TeamCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
@@ -26,6 +28,23 @@ class TeamUpdate(BaseModel):
     icon: str | None = Field(default=None, max_length=64)
 
 
+class TeamMemberOut(BaseModel):
+    membership_id: UUID
+    agent_id: UUID
+    name: str
+    slug: str
+    role_title: str
+    is_primary: bool
+    role_label: str
+    joined_at: datetime
+    state: MembershipState = "active"
+
+
+class TeamMembershipGroups(BaseModel):
+    primary: list[TeamMemberOut] = Field(default_factory=list)
+    secondary: list[TeamMemberOut] = Field(default_factory=list)
+
+
 class TeamOut(BaseModel):
     id: UUID
     workspace_id: UUID
@@ -35,5 +54,6 @@ class TeamOut(BaseModel):
     manager_agent_id: UUID | None
     color_token: str
     icon: str
+    memberships: TeamMembershipGroups = Field(default_factory=TeamMembershipGroups)
     created_at: datetime
     updated_at: datetime

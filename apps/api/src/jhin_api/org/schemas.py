@@ -2,8 +2,15 @@
 
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from jhin_api.agents.schemas import (
+    AgentMembershipOut,
+    AgentRelationshipOut,
+    Availability,
+    Discoverability,
+)
+from jhin_api.teams.schemas import TeamMembershipGroups
 from jhin_domain import AgentStatus
 
 
@@ -15,6 +22,7 @@ class OrgTeamNode(BaseModel):
     manager_agent_id: UUID | None
     color_token: str
     icon: str
+    memberships: TeamMembershipGroups = Field(default_factory=TeamMembershipGroups)
 
 
 class OrgAgentNode(BaseModel):
@@ -22,9 +30,15 @@ class OrgAgentNode(BaseModel):
     name: str
     slug: str
     role_title: str
+    public_purpose: str
+    expertise_json: list[str]
+    discoverability: Discoverability
+    availability: Availability
     status: AgentStatus
     team_id: UUID | None
     manager_agent_id: UUID | None
+    memberships: list[AgentMembershipOut] = Field(default_factory=list)
+    relationships: list[AgentRelationshipOut] = Field(default_factory=list)
 
 
 class OrgGraph(BaseModel):

@@ -9,7 +9,7 @@ from jhin_api.deps import client_ip_hash as ip_hash
 from jhin_api.deps import get_request_id as req_id
 from jhin_api.security.csrf import csrf_protect
 from jhin_api.teams import service
-from jhin_api.teams.schemas import TeamCreate, TeamOut, TeamUpdate
+from jhin_api.teams.schemas import TeamCreate, TeamMembershipGroups, TeamOut, TeamUpdate
 from jhin_db.models import Team
 
 router = APIRouter(
@@ -19,8 +19,9 @@ router = APIRouter(
 )
 
 
-def _out(team: Team) -> TeamOut:
-    return TeamOut.model_validate(team, from_attributes=True)
+def _out(team: Team, memberships: TeamMembershipGroups | None = None) -> TeamOut:
+    result = TeamOut.model_validate(team, from_attributes=True)
+    return result if memberships is None else result.model_copy(update={"memberships": memberships})
 
 
 @router.get("")
@@ -30,7 +31,9 @@ async def list_teams(ctx: ViewerCtx, db: DbSession) -> list[TeamOut]:
 
 @router.get("/{team_id}")
 async def get_team(team_id: UUID, ctx: ViewerCtx, db: DbSession) -> TeamOut:
-    return _out(await service.get_team(db, ctx.workspace_id, team_id))
+    team = await service.get_team(db, ctx.workspace_id, team_id)
+    memberships = await service.get_team_memberships(db, ctx.workspace_id, team_id)
+    return _out(team, memberships)
 
 
 @router.post("", status_code=201)

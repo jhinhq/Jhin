@@ -1,12 +1,54 @@
 """Request/response contracts for agents (plan 6.5)."""
 
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from jhin_domain import AgentStatus, AutonomyLevel
+
+Discoverability = Literal["discoverable", "hidden"]
+Availability = Literal["available", "unavailable"]
+MembershipState = Literal["active", "inactive"]
+RelationshipKind = Literal["close_collaborator", "advisor", "preferred_reviewer"]
+RelationshipStatus = Literal["active", "inactive"]
+ExpertiseTag = Annotated[str, Field(min_length=1, max_length=64)]
+
+
+class AgentMembershipOut(BaseModel):
+    id: UUID
+    workspace_id: UUID
+    agent_id: UUID
+    team_id: UUID
+    is_primary: bool
+    role_label: str
+    joined_at: datetime
+    left_at: datetime | None
+    state: MembershipState
+
+
+class MembershipReplace(BaseModel):
+    primary_team_id: UUID | None = None
+    secondary_team_ids: list[UUID] = Field(default_factory=list, max_length=100)
+
+
+class RelationshipCreate(BaseModel):
+    target_agent_id: UUID
+    kind: RelationshipKind
+    purpose: str = Field(default="", max_length=1000)
+
+
+class AgentRelationshipOut(BaseModel):
+    id: UUID
+    workspace_id: UUID
+    source_agent_id: UUID
+    target_agent_id: UUID
+    kind: RelationshipKind
+    purpose: str
+    status: RelationshipStatus
+    created_at: datetime
+    updated_at: datetime
 
 
 class AgentCreate(BaseModel):
@@ -15,7 +57,12 @@ class AgentCreate(BaseModel):
     description: str = Field(default="", max_length=4000)
     system_prompt: str = Field(default="", max_length=100_000)
     team_id: UUID | None = None
+    secondary_team_ids: list[UUID] = Field(default_factory=list, max_length=100)
     manager_agent_id: UUID | None = None
+    public_purpose: str = Field(default="", max_length=1000)
+    expertise_json: list[ExpertiseTag] = Field(default_factory=list, max_length=20)
+    discoverability: Discoverability = "discoverable"
+    availability: Availability = "available"
     status: AgentStatus = AgentStatus.ACTIVE
     autonomy_level: AutonomyLevel = AutonomyLevel.SUPERVISED
     # Null = inherit the workspace default profile (plan 15.2).
@@ -29,6 +76,13 @@ class AgentCreate(BaseModel):
     monthly_budget_cents: int | None = Field(default=None, ge=0)
     metadata_json: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("expertise_json")
+    @classmethod
+    def expertise_tags_are_unique(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("expertise_json tags must be unique")
+        return value
+
 
 class AgentUpdate(BaseModel):
     """PATCH semantics: omitted fields are untouched; explicit nulls clear."""
@@ -38,7 +92,12 @@ class AgentUpdate(BaseModel):
     description: str | None = Field(default=None, max_length=4000)
     system_prompt: str | None = Field(default=None, max_length=100_000)
     team_id: UUID | None = None
+    secondary_team_ids: list[UUID] = Field(default_factory=list, max_length=100)
     manager_agent_id: UUID | None = None
+    public_purpose: str = Field(default="", max_length=1000)
+    expertise_json: list[ExpertiseTag] = Field(default_factory=list, max_length=20)
+    discoverability: Discoverability = "discoverable"
+    availability: Availability = "available"
     status: AgentStatus | None = None
     autonomy_level: AutonomyLevel | None = None
     model_profile_id: UUID | None = None
@@ -49,6 +108,13 @@ class AgentUpdate(BaseModel):
     max_concurrent_runs: int | None = Field(default=None, ge=1, le=50)
     monthly_budget_cents: int | None = Field(default=None, ge=0)
     metadata_json: dict[str, Any] | None = None
+
+    @field_validator("expertise_json")
+    @classmethod
+    def expertise_tags_are_unique(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("expertise_json tags must be unique")
+        return value
 
 
 class AgentOut(BaseModel):
@@ -61,6 +127,10 @@ class AgentOut(BaseModel):
     role_title: str
     description: str
     system_prompt: str
+    public_purpose: str
+    expertise_json: list[str]
+    discoverability: Discoverability
+    availability: Availability
     status: AgentStatus
     autonomy_level: AutonomyLevel
     model_profile_id: UUID | None
@@ -71,5 +141,7 @@ class AgentOut(BaseModel):
     max_concurrent_runs: int
     monthly_budget_cents: int | None
     metadata_json: dict[str, Any]
+    memberships: list[AgentMembershipOut] = Field(default_factory=list)
+    relationships: list[AgentRelationshipOut] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
