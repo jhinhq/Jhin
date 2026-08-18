@@ -6,10 +6,38 @@ services:
     environment:
       APP_ENV: dev
       JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS: http://fake-github:8080,http://fake-linear:8080
+      JHIN_CONNECTOR_ALLOWED_DB_HOSTS: fake-supabase-db:5432
 
   agent-worker:
     environment:
       JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS: http://fake-github:8080,http://fake-linear:8080
+      JHIN_CONNECTOR_ALLOWED_DB_HOSTS: fake-supabase-db:5432
+
+  # Dev/test-only PostgreSQL 17 target for Supabase database connector tests.
+  # It is intentionally separate from Jhin's own postgres service and data.
+  fake-supabase-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: supabase_fixture
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: phase9-fixture-admin-only
+    ports:
+      - "127.0.0.1:${FAKE_SUPABASE_DB_DEV_PORT:-55433}:5432"
+    volumes:
+      - fake_supabase_db_data:/var/lib/postgresql/data
+      - ./tests/fixtures/supabase/init.sql:/docker-entrypoint-initdb.d/00-jhin-fixture.sql:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          psql -U postgres -d supabase_fixture -tAc
+          'SELECT ready FROM public.fixture_ready WHERE ready' | grep -qx t
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    networks: [data]
+    restart: unless-stopped
 
   # Dev/test-only fake OpenAI-compatible provider so agents can run without
   # real API keys (plan 32.2, 38). Reused agent-worker image; never part of
@@ -133,3 +161,6 @@ services:
   temporal-ui:
     ports:
       - "127.0.0.1:${TEMPORAL_UI_DEV_PORT:-8233}:8080"
+
+volumes:
+  fake_supabase_db_data:

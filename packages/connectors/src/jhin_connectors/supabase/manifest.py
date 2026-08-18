@@ -15,6 +15,9 @@ SUPABASE_CAPABILITIES: tuple[str, ...] = (
     "supabase.function.list",
     "supabase.function.deploy",
     "supabase.function.delete",
+    "supabase.database.read",
+    "supabase.database.write",
+    "supabase.database.destructive",
 )
 
 SUPABASE_MANIFEST = ConnectorManifest(

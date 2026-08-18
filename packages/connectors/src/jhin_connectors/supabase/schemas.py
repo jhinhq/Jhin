@@ -7,12 +7,25 @@ import unicodedata
 from datetime import datetime, timedelta
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 
 PROJECT_REF_PATTERN = r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
 FUNCTION_SLUG_PATTERN = r"^[a-z0-9](?:[a-z0-9_-]{0,98}[a-z0-9])?$"
 MAX_FUNCTION_FILE_BYTES = 6_144
 MAX_FUNCTION_SOURCE_BYTES = 24_576
+MAX_DATABASE_SQL_BYTES = 7_000
+MAX_DATABASE_PARAM_BYTES = 8_192
+MAX_DATABASE_PARAMS_BYTES = 16_000
+DATABASE_SCHEMA_PATTERN = r"^[a-z_][a-z0-9_$]{0,62}$"
 
 LogSource = Literal[
     "edge_logs",
@@ -24,6 +37,8 @@ LogSource = Literal[
     "function_logs",
 ]
 ShortText = Annotated[str, Field(max_length=256)]
+StrictFiniteFloat = Annotated[float, Field(strict=True, allow_inf_nan=False)]
+DatabaseScalar = None | StrictBool | StrictInt | StrictFiniteFloat | StrictStr
 
 
 class SupabaseInput(BaseModel):
@@ -205,11 +220,133 @@ class FunctionDeleteOutput(SupabaseOutput):
     deleted: bool
 
 
+class DatabaseInput(ProjectScopedInput):
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+        validate_by_alias=True,
+        validate_by_name=False,
+        serialize_by_alias=True,
+    )
+
+    requested_schema: str = Field(
+        alias="schema",
+        serialization_alias="schema",
+        min_length=1,
+        max_length=63,
+        pattern=DATABASE_SCHEMA_PATTERN,
+    )
+    sql: str = Field(min_length=1, max_length=MAX_DATABASE_SQL_BYTES)
+    params: list[DatabaseScalar] = Field(default_factory=list, max_length=50)
+
+    @field_validator("sql")
+    @classmethod
+    def _validate_sql_bytes(cls, value: str) -> str:
+        try:
+            encoded = value.encode("utf-8", errors="strict")
+        except UnicodeEncodeError:
+            raise ValueError("database SQL must be valid UTF-8") from None
+        if len(encoded) > MAX_DATABASE_SQL_BYTES or any(
+            unicodedata.category(character).startswith("C") and character not in {"\t", "\n", "\r"}
+            for character in value
+        ):
+            raise ValueError("database SQL is invalid")
+        return value
+
+    @field_validator("params")
+    @classmethod
+    def _validate_params(cls, values: list[DatabaseScalar]) -> list[DatabaseScalar]:
+        for value in values:
+            if isinstance(value, bool) or value is None:
+                continue
+            if isinstance(value, int):
+                if not -(2**63) <= value <= 2**63 - 1:
+                    raise ValueError("database integer parameter is out of range")
+                continue
+            if isinstance(value, float):
+                continue
+            if isinstance(value, str):
+                try:
+                    encoded = value.encode("utf-8", errors="strict")
+                except UnicodeEncodeError:
+                    raise ValueError("database string parameter must be valid UTF-8") from None
+                if len(encoded) > MAX_DATABASE_PARAM_BYTES:
+                    raise ValueError("database string parameter is too large")
+                continue
+            raise ValueError("database parameter type is not allowed")
+        try:
+            serialized = json.dumps(
+                values,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError, UnicodeEncodeError):
+            raise ValueError("database parameters are invalid") from None
+        if len(serialized) > MAX_DATABASE_PARAMS_BYTES:
+            raise ValueError("database parameters are too large")
+        return values
+
+
+class DatabaseReadInput(DatabaseInput):
+    pass
+
+
+class DatabaseMutationInput(DatabaseInput):
+    pass
+
+
+DatabaseCell = Annotated[str, Field(max_length=8_192)] | None
+
+
+class DatabaseReadOutput(SupabaseOutput):
+    columns: list[str] = Field(min_length=1, max_length=64)
+    rows: list[list[DatabaseCell]] = Field(max_length=1_000)
+    row_count: int = Field(ge=0, le=1_000)
+    truncated: bool = False
+
+    @field_validator("columns")
+    @classmethod
+    def _validate_columns(cls, columns: list[str]) -> list[str]:
+        for column in columns:
+            try:
+                encoded = column.encode("utf-8", errors="strict")
+            except UnicodeEncodeError:
+                raise ValueError("database column name must be valid UTF-8") from None
+            if (
+                not column
+                or len(encoded) > 256
+                or any(unicodedata.category(character).startswith("C") for character in column)
+            ):
+                raise ValueError("database column name is invalid")
+        return columns
+
+    @model_validator(mode="after")
+    def _validate_shape(self) -> Self:
+        if self.row_count != len(self.rows) or any(
+            len(row) != len(self.columns) for row in self.rows
+        ):
+            raise ValueError("database result shape is invalid")
+        return self
+
+
+class DatabaseMutationOutput(SupabaseOutput):
+    affected_rows: int = Field(ge=0, le=1_000)
+
+
 __all__ = [
+    "DATABASE_SCHEMA_PATTERN",
     "FUNCTION_SLUG_PATTERN",
+    "MAX_DATABASE_PARAMS_BYTES",
+    "MAX_DATABASE_PARAM_BYTES",
+    "MAX_DATABASE_SQL_BYTES",
     "MAX_FUNCTION_FILE_BYTES",
     "MAX_FUNCTION_SOURCE_BYTES",
     "PROJECT_REF_PATTERN",
+    "DatabaseMutationInput",
+    "DatabaseMutationOutput",
+    "DatabaseReadInput",
+    "DatabaseReadOutput",
     "FunctionDeleteInput",
     "FunctionDeleteOutput",
     "FunctionDeployInput",

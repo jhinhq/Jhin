@@ -8,6 +8,10 @@ from pydantic import ValidationError
 from jhin_connectors.manifest import normalize_config
 from jhin_connectors.supabase.connector import SupabaseConnector
 from jhin_connectors.supabase.schemas import (
+    DatabaseMutationInput,
+    DatabaseMutationOutput,
+    DatabaseReadInput,
+    DatabaseReadOutput,
     FunctionDeployInput,
     LogsReadInput,
     SourceFile,
@@ -20,6 +24,11 @@ EXPECTED_MANAGEMENT_TOOLS = {
     "supabase.function.list",
     "supabase.function.deploy",
     "supabase.function.delete",
+}
+EXPECTED_DATABASE_TOOLS = {
+    "supabase.database.read",
+    "supabase.database.write",
+    "supabase.database.destructive",
 }
 
 
@@ -186,6 +195,29 @@ def test_postgres_settings_reject_empty_duplicate_or_system_schemas(
         )
 
 
+def test_postgres_settings_cap_allowed_schemas_at_eight() -> None:
+    connector = SupabaseConnector()
+    accepted = [f"schema_{index}" for index in range(8)]
+
+    assert (
+        _normalized(
+            connector,
+            "postgres",
+            {"project_ref": "abcdefghijklmnopqrst", "allowed_schemas": accepted},
+        )["allowed_schemas"]
+        == accepted
+    )
+    with pytest.raises(ValueError, match="allowed_schemas"):
+        _normalized(
+            connector,
+            "postgres",
+            {
+                "project_ref": "abcdefghijklmnopqrst",
+                "allowed_schemas": [f"schema_{index}" for index in range(9)],
+            },
+        )
+
+
 def test_postgres_settings_reject_removed_ddl_authority() -> None:
     with pytest.raises(ValueError, match="not allowed"):
         _normalized(
@@ -234,9 +266,12 @@ def test_management_tool_definitions_have_fixed_risk_and_required_scopes() -> No
     connector = SupabaseConnector()
     definitions = {definition.name: definition for definition, _ in connector.tools()}
 
-    assert set(definitions) == EXPECTED_MANAGEMENT_TOOLS
-    assert set(connector.manifest.capabilities) == EXPECTED_MANAGEMENT_TOOLS
-    for name, definition in definitions.items():
+    assert set(definitions) == EXPECTED_MANAGEMENT_TOOLS | EXPECTED_DATABASE_TOOLS
+    assert set(connector.manifest.capabilities) == (
+        EXPECTED_MANAGEMENT_TOOLS | EXPECTED_DATABASE_TOOLS
+    )
+    for name in EXPECTED_MANAGEMENT_TOOLS:
+        definition = definitions[name]
         expected_required = {"connection_id", "project_ref"}
         if name in {"supabase.function.deploy", "supabase.function.delete"}:
             expected_required.add("function_slug")
@@ -247,6 +282,109 @@ def test_management_tool_definitions_have_fixed_risk_and_required_scopes() -> No
             assert definition.supports_approval is False
         assert set(definition.required_grant_scope_keys) == expected_required
         assert expected_required.issubset(definition.scope_keys)
+
+
+def test_database_tool_definitions_have_fixed_risks_and_scopes_without_ddl() -> None:
+    definitions = {definition.name: definition for definition, _ in SupabaseConnector().tools()}
+    expected = {
+        "supabase.database.read": (RiskLevel.READ, False),
+        "supabase.database.write": (RiskLevel.ELEVATED, True),
+        "supabase.database.destructive": (RiskLevel.DESTRUCTIVE, True),
+    }
+
+    for name, (risk, supports_approval) in expected.items():
+        definition = definitions[name]
+        assert definition.risk is risk
+        assert definition.supports_approval is supports_approval
+        assert set(definition.scope_keys) == {"connection_id", "project_ref", "schema"}
+        assert set(definition.required_grant_scope_keys) == {
+            "connection_id",
+            "project_ref",
+            "schema",
+        }
+    assert "supabase.database.ddl" not in definitions
+    assert "supabase.database.ddl" not in SupabaseConnector.manifest.capabilities
+
+
+def test_database_request_models_preserve_strict_bounded_json_scalars() -> None:
+    params = [None, True, False, -(2**63), 2**63 - 1, 1.25, "café"]
+    payload = DatabaseReadInput(
+        connection_id="connection",
+        project_ref="abcdefghijklmnopqrst",
+        schema="public",
+        sql="SELECT id FROM public.widgets WHERE id = $1",
+        params=params,
+    )
+
+    assert payload.model_dump(mode="json")["params"] == params
+    mutation = DatabaseMutationInput.model_validate(payload.model_dump(mode="json"))
+    assert mutation.params == params
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        [[1]],
+        [{"value": 1}],
+        [2**63],
+        [-(2**63) - 1],
+        [float("inf")],
+        [float("nan")],
+        ["x" * 8_193],
+        ["x" * 8_000, "y" * 8_000],
+        list(range(51)),
+    ],
+)
+def test_database_request_models_reject_unsupported_or_oversized_params(
+    params: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        DatabaseReadInput(
+            connection_id="connection",
+            project_ref="abcdefghijklmnopqrst",
+            schema="public",
+            sql="SELECT 1",
+            params=params,
+        )
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "x" * 7_001,
+        "SELECT 1\x00",
+        "SELECT 1\u202e",
+        "SELECT '\ud800'",
+    ],
+)
+def test_database_request_models_reject_oversized_or_unsafe_sql(sql: str) -> None:
+    with pytest.raises(ValidationError):
+        DatabaseReadInput(
+            connection_id="connection",
+            project_ref="abcdefghijklmnopqrst",
+            schema="public",
+            sql=sql,
+            params=[],
+        )
+
+
+def test_database_outputs_are_positional_and_bounded() -> None:
+    output = DatabaseReadOutput(
+        columns=["duplicate", "duplicate"],
+        rows=[["first", "second"], [None, "third"]],
+        row_count=2,
+        truncated=False,
+    )
+    mutation = DatabaseMutationOutput(affected_rows=2)
+
+    assert output.rows[0] == ["first", "second"]
+    assert output.model_dump() == {
+        "columns": ["duplicate", "duplicate"],
+        "rows": [["first", "second"], [None, "third"]],
+        "row_count": 2,
+        "truncated": False,
+    }
+    assert mutation.model_dump() == {"affected_rows": 2}
 
 
 def test_logs_input_is_typed_bounded_and_never_accepts_sql() -> None:

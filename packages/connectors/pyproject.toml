@@ -5,6 +5,7 @@ description = "Connector SDK and built-in connectors: manifests, tools, webhooks
 requires-python = ">=3.13"
 dependencies = [
     "asyncpg>=0.31,<1",
+    "sqlglot>=30.13,<31",
     "pydantic>=2.10",
     "httpx>=0.28",
     "sqlalchemy[asyncio]>=2.0.36",

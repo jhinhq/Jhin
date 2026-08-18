@@ -346,6 +346,9 @@ def test_default_registry_ships_supabase_exactly_once() -> None:
         "supabase.function.list",
         "supabase.function.deploy",
         "supabase.function.delete",
+        "supabase.database.read",
+        "supabase.database.write",
+        "supabase.database.destructive",
     }
 
 

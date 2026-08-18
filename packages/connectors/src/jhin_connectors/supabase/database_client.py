@@ -3,40 +3,26 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import ssl
 import sys
-from collections.abc import Mapping
+from collections.abc import Sequence
 from typing import Any, Protocol, cast
 from urllib.parse import urlsplit
 
 import asyncpg
 
 from jhin_connectors.endpoints import EndpointPolicyError, validate_postgres_target
-
-_ROLE_QUERY = """
-SELECT
-    current_user AS current_user,
-    session_user AS session_user,
-    role.rolsuper AS rolsuper,
-    role.rolbypassrls AS rolbypassrls,
-    role.rolcreatedb AS rolcreatedb,
-    role.rolcreaterole AS rolcreaterole,
-    role.rolreplication AS rolreplication,
-    pg_catalog.pg_get_userbyid(database.datdba) = current_user AS owns_current_database,
-    EXISTS (
-        SELECT 1
-        FROM pg_catalog.pg_namespace AS namespace
-        WHERE namespace.nspname = ANY($1::text[])
-          AND pg_catalog.pg_get_userbyid(namespace.nspowner) = current_user
-    ) AS owns_allowed_schema
-FROM pg_catalog.pg_roles AS role
-JOIN pg_catalog.pg_database AS database
-  ON database.datname = current_database()
-WHERE role.rolname = current_user
-"""
+from jhin_connectors.supabase.database_preflight import (
+    MAX_ALLOWED_SCHEMAS,
+    DatabasePreflightError,
+    verify_live_role,
+)
 
 DATABASE_VERIFY_TIMEOUT_SECONDS = 10.0
 DATABASE_CLOSE_TIMEOUT_SECONDS = 2.0
+_SCHEMA_RE = re.compile(r"^[a-z_][a-z0-9_$]{0,62}$")
+_SYSTEM_SCHEMAS = frozenset({"information_schema", "pg_catalog", "pg_toast"})
 
 
 class DatabaseConnectionError(Exception):
@@ -48,7 +34,11 @@ class DatabaseConnectionError(Exception):
 
 
 class _DatabaseConnection(Protocol):
+    async def fetch(self, query: str, *args: object) -> Sequence[Any]: ...
+
     async def fetchrow(self, query: str, *args: object) -> Any: ...
+
+    async def execute(self, query: str, *args: object) -> str: ...
 
     async def close(self) -> None: ...
 
@@ -74,30 +64,6 @@ def _asyncpg_dsn(validated_dsn: str) -> str:
     return validated_dsn
 
 
-def _safe_role(row: Any) -> bool:
-    if not isinstance(row, Mapping):
-        return False
-    current_user = row.get("current_user")
-    session_user = row.get("session_user")
-    flags = [
-        row.get("rolsuper"),
-        row.get("rolbypassrls"),
-        row.get("rolcreatedb"),
-        row.get("rolcreaterole"),
-        row.get("rolreplication"),
-        row.get("owns_current_database"),
-        row.get("owns_allowed_schema"),
-    ]
-    return (
-        isinstance(current_user, str)
-        and bool(current_user)
-        and isinstance(session_user, str)
-        and session_user == current_user
-        and current_user.casefold() != "postgres"
-        and all(flag is False for flag in flags)
-    )
-
-
 async def verify_database_connection(
     database_url: str,
     *,
@@ -105,11 +71,7 @@ async def verify_database_connection(
     allowed_schemas: tuple[str, ...],
     app_database_url: str | None,
 ) -> None:
-    """Validate and verify one direct PostgreSQL credential.
-
-    Task 6 extends this same live boundary with inherited-role checks before
-    SQL execution. Verification deliberately checks no user tables.
-    """
+    """Validate and verify one low-privilege PostgreSQL credential."""
     try:
         validated_url = validate_postgres_target(
             database_url,
@@ -122,8 +84,17 @@ async def verify_database_connection(
             code="database_target_not_allowed",
         ) from None
 
-    if not allowed_schemas or any(
-        not isinstance(schema, str) or not schema for schema in allowed_schemas
+    if (
+        not isinstance(allowed_schemas, tuple)
+        or not 1 <= len(allowed_schemas) <= MAX_ALLOWED_SCHEMAS
+        or len(set(allowed_schemas)) != len(allowed_schemas)
+        or any(
+            not isinstance(schema, str)
+            or not _SCHEMA_RE.fullmatch(schema)
+            or schema in _SYSTEM_SCHEMAS
+            or schema.startswith("pg_")
+            for schema in allowed_schemas
+        )
     ):
         raise DatabaseConnectionError(
             "Supabase database verification failed",
@@ -143,12 +114,14 @@ async def verify_database_connection(
                     ssl=_hosted_ssl_context(validated_url, project_ref),
                 ),
             )
-            role = await connection.fetchrow(_ROLE_QUERY, list(allowed_schemas))
-            if not _safe_role(role):
+            try:
+                await connection.execute("SET search_path TO pg_catalog")
+                await verify_live_role(connection, allowed_schemas)
+            except DatabasePreflightError:
                 raise DatabaseConnectionError(
                     "Supabase database role is not least privilege",
                     code="database_role_not_least_privilege",
-                )
+                ) from None
     except DatabaseConnectionError:
         raise
     except Exception:

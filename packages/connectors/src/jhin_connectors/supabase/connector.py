@@ -11,6 +11,7 @@ from jhin_connectors.supabase.database_client import (
     DatabaseConnectionError,
     verify_database_connection,
 )
+from jhin_connectors.supabase.database_tools import SUPABASE_DATABASE_TOOLS
 from jhin_connectors.supabase.management_client import (
     SupabaseManagementClient,
     SupabaseManagementError,
@@ -36,7 +37,7 @@ def validate_project_ref(value: Any) -> str:
 
 
 def validate_allowed_schemas(value: Any) -> list[str]:
-    if not isinstance(value, list) or not value:
+    if not isinstance(value, list) or not value or len(value) > 8:
         raise ValueError("config field 'allowed_schemas' is invalid")
     normalized: list[str] = []
     seen: set[str] = set()
@@ -170,7 +171,7 @@ class SupabaseConnector(Connector):
         return ConnectionHealth(ok=False, message="Unsupported Supabase authentication type")
 
     def tools(self) -> tuple[tuple[ToolDefinition, ToolExecutor], ...]:
-        return SUPABASE_MANAGEMENT_TOOLS
+        return SUPABASE_MANAGEMENT_TOOLS + SUPABASE_DATABASE_TOOLS
 
 
 __all__ = ["SupabaseConnector", "validate_allowed_schemas", "validate_project_ref"]

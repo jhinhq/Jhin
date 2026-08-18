@@ -15,6 +15,8 @@ from jhin_connectors.supabase.database_client import (
 )
 
 SAFE_ROLE = {
+    "role_oid": 700,
+    "role_name": "jhin_reader",
     "current_user": "jhin_reader",
     "session_user": "jhin_reader",
     "rolsuper": False,
@@ -24,13 +26,19 @@ SAFE_ROLE = {
     "rolreplication": False,
     "owns_current_database": False,
     "owns_allowed_schema": False,
+    "can_create_in_allowed_schema": False,
+    "server_encoding": "UTF8",
+    "session_replication_role": "origin",
+    "allowed_schema_count": 1,
 }
 
 
 class FakeDatabaseConnection:
     def __init__(self, role: dict[str, object] | None = SAFE_ROLE) -> None:
         self.role = role
+        self.role_rows = [] if role is None else [role]
         self.queries: list[tuple[str, tuple[object, ...]]] = []
+        self.events: list[str] = []
         self.closed = False
         self.fetch_error: Exception | None = None
         self.close_error: Exception | None = None
@@ -44,6 +52,20 @@ class FakeDatabaseConnection:
         if self.fetch_error is not None:
             raise self.fetch_error
         return self.role
+
+    async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
+        self.events.append("role.fetch")
+        self.queries.append((query, args))
+        if self.stall_fetch:
+            await asyncio.Event().wait()
+        if self.fetch_error is not None:
+            raise self.fetch_error
+        return self.role_rows
+
+    async def execute(self, query: str, *args: object) -> str:
+        self.events.append(f"execute:{query}")
+        self.queries.append((query, args))
+        return "SET"
 
     async def close(self) -> None:
         self.closed = True
@@ -82,12 +104,19 @@ async def test_database_verify_validates_target_checks_role_and_closes(
             "ssl": None,
         }
     ]
-    assert len(connection.queries) == 1
-    query, args = connection.queries[0]
+    assert connection.events[:2] == [
+        "execute:SET search_path TO pg_catalog",
+        "role.fetch",
+    ]
+    assert len(connection.queries) == 2
+    assert connection.queries[0] == ("SET search_path TO pg_catalog", ())
+    query, args = connection.queries[1]
     assert "pg_catalog.pg_roles" in query
     assert "pg_catalog.pg_database" in query
     assert "pg_catalog.pg_namespace" in query
+    assert "pg_catalog.pg_auth_members" in query
     assert "current_database()" in query
+    assert "LIMIT 65" in query
     assert args == (["public"],)
     for field in (
         "current_user",
@@ -99,9 +128,120 @@ async def test_database_verify_validates_target_checks_role_and_closes(
         "rolreplication",
         "owns_current_database",
         "owns_allowed_schema",
+        "can_create_in_allowed_schema",
+        "server_encoding",
+        "session_replication_role",
+        "allowed_schema_count",
     ):
         assert field in query
     assert connection.closed is True
+
+
+@pytest.mark.parametrize(
+    "ancestor_change",
+    [
+        {"rolsuper": True},
+        {"rolbypassrls": True},
+        {"rolcreatedb": True},
+        {"rolcreaterole": True},
+        {"rolreplication": True},
+        {"owns_current_database": True},
+        {"owns_allowed_schema": True},
+        {"can_create_in_allowed_schema": True},
+        {"role_name": "pg_read_all_data"},
+        {"role_name": "postgres"},
+    ],
+)
+async def test_database_verify_rejects_privileged_inherited_role(
+    monkeypatch: pytest.MonkeyPatch,
+    ancestor_change: dict[str, object],
+) -> None:
+    dsn = "postgresql://jhin_reader:database-password-marker@127.0.0.1:65433/fixture"
+    monkeypatch.setenv("JHIN_CONNECTOR_ALLOWED_DB_HOSTS", "127.0.0.1:65433")
+    connection = FakeDatabaseConnection()
+    connection.role_rows = [
+        dict(SAFE_ROLE),
+        {
+            **SAFE_ROLE,
+            "role_oid": 701,
+            "role_name": "team_reader",
+            **ancestor_change,
+        },
+    ]
+
+    async def fake_connect(**_kwargs: Any) -> FakeDatabaseConnection:
+        return connection
+
+    monkeypatch.setattr(database_client.asyncpg, "connect", fake_connect)
+
+    with pytest.raises(DatabaseConnectionError) as exc_info:
+        await verify_database_connection(
+            dsn,
+            project_ref="abcdefghijklmnopqrst",
+            allowed_schemas=("public",),
+            app_database_url=None,
+        )
+
+    assert exc_info.value.code == "database_role_not_least_privilege"
+    assert connection.closed is True
+
+
+async def test_database_verify_rejects_role_closure_cap_plus_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dsn = "postgresql://jhin_reader:database-password-marker@127.0.0.1:65433/fixture"
+    monkeypatch.setenv("JHIN_CONNECTOR_ALLOWED_DB_HOSTS", "127.0.0.1:65433")
+    connection = FakeDatabaseConnection()
+    connection.role_rows = [
+        {
+            **SAFE_ROLE,
+            "role_oid": 700 + index,
+            "role_name": "jhin_reader" if index == 0 else f"team_reader_{index}",
+        }
+        for index in range(65)
+    ]
+
+    async def fake_connect(**_kwargs: Any) -> FakeDatabaseConnection:
+        return connection
+
+    monkeypatch.setattr(database_client.asyncpg, "connect", fake_connect)
+
+    with pytest.raises(DatabaseConnectionError) as exc_info:
+        await verify_database_connection(
+            dsn,
+            project_ref="abcdefghijklmnopqrst",
+            allowed_schemas=("public",),
+            app_database_url=None,
+        )
+
+    assert exc_info.value.code == "database_role_not_least_privilege"
+    assert connection.closed is True
+
+
+async def test_database_verify_rejects_too_many_allowed_schemas_before_connect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dsn = "postgresql://jhin_reader:database-password-marker@127.0.0.1:65433/fixture"
+    monkeypatch.setenv("JHIN_CONNECTOR_ALLOWED_DB_HOSTS", "127.0.0.1:65433")
+    connected = False
+
+    async def fake_connect(**_kwargs: Any) -> FakeDatabaseConnection:
+        nonlocal connected
+        connected = True
+        return FakeDatabaseConnection()
+
+    monkeypatch.setattr(database_client.asyncpg, "connect", fake_connect)
+
+    with pytest.raises(DatabaseConnectionError) as exc_info:
+        await verify_database_connection(
+            dsn,
+            project_ref="abcdefghijklmnopqrst",
+            allowed_schemas=tuple(f"schema_{index}" for index in range(9)),
+            app_database_url=None,
+        )
+
+    assert exc_info.value.code == "database_verification_failed"
+    assert connected is False
 
 
 async def test_database_verify_uses_hosted_tls_context(
@@ -227,6 +367,7 @@ async def test_database_verify_normalizes_mixed_case_sqlalchemy_scheme_for_drive
         {**SAFE_ROLE, "rolreplication": True},
         {**SAFE_ROLE, "owns_current_database": True},
         {**SAFE_ROLE, "owns_allowed_schema": True},
+        {**SAFE_ROLE, "can_create_in_allowed_schema": True},
     ],
 )
 async def test_database_verify_rejects_missing_or_privileged_role_without_leaks(
