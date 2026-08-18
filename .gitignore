@@ -32,6 +32,9 @@ out/
 .idea/
 .vscode/
 
+# Isolated implementation worktrees
+.worktrees/
+
 # Test artifacts
 .test-artifacts/
 playwright-report/
