@@ -24,7 +24,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from jhin_api.audit import service as audit
 from jhin_api.deps import WorkspaceContext
-from jhin_connectors import ConnectionHealth, Connector, VerifyContext, default_registry
+from jhin_connectors import (
+    ConnectionHealth,
+    Connector,
+    VerifyContext,
+    WebhookSecretMode,
+    default_registry,
+    normalize_config,
+)
 from jhin_db.models import Connection, ToolCall
 from jhin_db.models.connection import new_public_id
 from jhin_domain import ConnectionStatus, SecretType
@@ -175,6 +182,81 @@ def get_connector(connector_type: str) -> Connector:
     return connector
 
 
+def webhook_secret_mode(connector: Connector) -> WebhookSecretMode:
+    return connector.manifest.webhook_secret_mode
+
+
+def public_connection_config(connection: Connection) -> dict[str, object]:
+    """Return only manifest-declared settings that still pass current policy.
+
+    Legacy rows predate strict settings validation and may contain unknown or
+    now-unsafe values. Serialization therefore reuses the same generic and
+    connector-specific validators as writes, and fails closed without ever
+    falling back to the raw JSON column.
+    """
+    try:
+        connector = get_connector(connection.connector_type)
+    except Exception:
+        return {}
+
+    applicable_names = tuple(
+        field.name
+        for field in connector.manifest.config_fields
+        if not field.auth_types or connection.auth_type in field.auth_types
+    )
+    submitted = {
+        name: connection.config_json[name]
+        for name in applicable_names
+        if name in connection.config_json
+    }
+
+    def validate(candidate: dict[str, object]) -> dict[str, object] | None:
+        try:
+            normalized = normalize_config(
+                connector.manifest,
+                connection.auth_type,
+                candidate,
+            )
+            provider_validated = connector.validate_settings(
+                connection.auth_type,
+                normalized,
+            )
+            return {
+                name: provider_validated[name]
+                for name in applicable_names
+                if name in provider_validated
+            }
+        except Exception:
+            return None
+
+    fully_validated = validate(submitted)
+    if fully_validated is not None:
+        return fully_validated
+
+    # Preserve independently valid public settings when one legacy field is
+    # stale. Revalidate the accumulated candidate on every addition so an
+    # unsafe cross-field combination can never be serialized.
+    accepted: dict[str, object] = {}
+    safe: dict[str, object] = {}
+    pending = [(name, submitted[name]) for name in applicable_names if name in submitted]
+    while pending:
+        progress = False
+        remaining: list[tuple[str, object]] = []
+        for name, value in pending:
+            candidate = {**accepted, name: value}
+            validated = validate(candidate)
+            if validated is None:
+                remaining.append((name, value))
+                continue
+            accepted = candidate
+            safe = validated
+            progress = True
+        if not progress:
+            break
+        pending = remaining
+    return safe
+
+
 def _validate_credentials(
     connector: Connector, auth_type: str, credentials: dict[str, str]
 ) -> None:
@@ -185,26 +267,11 @@ def _validate_credentials(
         allowed = ", ".join(s.type for s in connector.manifest.auth_schemes)
         raise _bad_request(f"Auth type '{auth_type}' is not supported (expected one of: {allowed})")
     declared = {field.name for field in scheme.secret_fields}
-    unknown = sorted(set(credentials) - declared)
-    if unknown:
-        raise _bad_request(f"Unknown credential fields: {', '.join(unknown)}")
+    if set(credentials) - declared:
+        raise _bad_request("Unknown credential fields")
     missing = [name for name in scheme.required_field_names() if not credentials.get(name)]
     if missing:
         raise _bad_request(f"Missing required credential fields: {', '.join(missing)}")
-
-
-def _validate_config(connector: Connector, config: dict[str, object]) -> None:
-    declared = {field.name for field in connector.manifest.config_fields}
-    unknown = sorted(set(config) - declared)
-    if unknown:
-        raise _bad_request(f"Unknown config fields: {', '.join(unknown)}")
-    missing = [
-        field.name
-        for field in connector.manifest.config_fields
-        if field.required and not config.get(field.name)
-    ]
-    if missing:
-        raise _bad_request(f"Missing required config fields: {', '.join(missing)}")
 
 
 async def list_connections(db: AsyncSession, workspace_id: UUID) -> list[Connection]:
@@ -244,7 +311,11 @@ async def create_connection(
     plaintext (shown exactly once) when the connector supports webhooks."""
     connector = get_connector(connector_type)
     _validate_credentials(connector, auth_type, credentials)
-    _validate_config(connector, config)
+    try:
+        normalized_config = normalize_config(connector.manifest, auth_type, config)
+        normalized_config = connector.validate_settings(auth_type, normalized_config)
+    except ValueError as exc:
+        raise _bad_request(str(exc)) from None
 
     public_id = new_public_id()
     store = SecretStore(db, crypto)
@@ -258,7 +329,7 @@ async def create_connection(
 
     webhook_plaintext: str | None = None
     webhook_secret_id: UUID | None = None
-    if connector.manifest.supports_webhooks:
+    if webhook_secret_mode(connector) == "generated":
         webhook_plaintext = stdlib_secrets.token_urlsafe(32)
         webhook_secret = await store.create(
             workspace_id=ctx.workspace_id,
@@ -277,7 +348,7 @@ async def create_connection(
         public_id=public_id,
         encrypted_secret_id=credential_secret.id,
         webhook_secret_id=webhook_secret_id,
-        config_json=dict(config),
+        config_json=normalized_config,
         created_by_user_id=ctx.user.id,
     )
     db.add(connection)
@@ -301,6 +372,61 @@ async def create_connection(
     )
     await db.commit()
     return connection, webhook_plaintext
+
+
+async def set_webhook_secret(
+    db: AsyncSession,
+    crypto: SecretCrypto,
+    ctx: WorkspaceContext,
+    connection_id: UUID,
+    *,
+    secret: str,
+    request_id: UUID,
+    ip_hash: str,
+) -> None:
+    """Create or rotate a provider-supplied webhook secret without readback."""
+    connection = await db.scalar(
+        select(Connection)
+        .where(
+            Connection.id == connection_id,
+            Connection.workspace_id == ctx.workspace_id,
+        )
+        .with_for_update()
+    )
+    if connection is None:
+        raise _not_found()
+    connector = get_connector(connection.connector_type)
+    if webhook_secret_mode(connector) != "provider_supplied":
+        raise _bad_request("Connector does not accept provider-supplied webhook secrets")
+
+    store = SecretStore(db, crypto)
+    action: str
+    if connection.webhook_secret_id is None:
+        stored = await store.create(
+            workspace_id=ctx.workspace_id,
+            name=f"connection/{connection.public_id}/webhook",
+            plaintext=secret,
+            secret_type=SecretType.WEBHOOK_SECRET,
+            created_by_user_id=ctx.user.id,
+        )
+        connection.webhook_secret_id = stored.id
+        action = "connection.webhook_secret_configured"
+    else:
+        await store.rotate(ctx.workspace_id, connection.webhook_secret_id, secret)
+        action = "connection.webhook_secret_rotated"
+
+    audit.record(
+        db,
+        action=action,
+        target_type="connection",
+        target_id=connection.id,
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user.id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        metadata={},
+    )
+    await db.commit()
 
 
 async def verify_connection(

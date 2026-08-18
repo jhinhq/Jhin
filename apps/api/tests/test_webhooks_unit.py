@@ -3,17 +3,24 @@ rejection, delivery-id dedupe, ping handling, and 404-not-leaking — with a
 recording JetStream stub instead of NATS."""
 
 import json
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import AsyncIterator, Mapping
+from dataclasses import dataclass
+from typing import Any, ClassVar
+from uuid import UUID
 
+import httpx
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from jhin_api.connections import service as connections_service
-from jhin_api.deps import WorkspaceContext
+from jhin_api.deps import WorkspaceContext, get_db, get_jetstream
+from jhin_api.webhooks import router as webhook_router_module
 from jhin_api.webhooks import service as webhooks
+from jhin_api.webhooks.router import router as webhooks_router
+from jhin_connectors import WebhookVerificationError
+from jhin_connectors.github.manifest import GITHUB_MANIFEST
 from jhin_connectors.github.webhook import sign_payload
 from jhin_db.models import AuditEvent, Connection, WebhookDelivery
 from jhin_domain import new_uuid7
@@ -21,6 +28,7 @@ from jhin_events.envelope import EventEnvelope
 from jhin_secrets import SecretCrypto
 
 REQ = {"request_id": new_uuid7(), "ip_hash": "test"}
+MAX_WEBHOOK_BODY_BYTES = 1_048_576
 
 ISSUE_PAYLOAD = {
     "action": "opened",
@@ -43,6 +51,98 @@ class RecordingJetStream:
         if self.fail:
             raise ConnectionError("nats is down")
         self.published.append((subject, payload, headers or {}))
+
+
+class EchoingVerificationConnector:
+    manifest = GITHUB_MANIFEST
+
+    def parse_webhook(
+        self,
+        _headers: Mapping[str, str],
+        body: bytes,
+        secret: str,
+    ) -> Any:
+        raise WebhookVerificationError(f"echoed {secret} and {body.decode()}")
+
+
+class SingleConnectorRegistry:
+    def __init__(self, connector: EchoingVerificationConnector) -> None:
+        self.connector = connector
+
+    def get(self, connector_type: str) -> EchoingVerificationConnector | None:
+        return self.connector if connector_type == "github" else None
+
+
+class ChunkedRequestBody(httpx.AsyncByteStream):
+    def __init__(self, *chunks: bytes) -> None:
+        self.chunks = chunks
+        self.chunks_yielded = 0
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for chunk in self.chunks:
+            self.chunks_yielded += 1
+            yield chunk
+
+
+class TrackingBytearray(bytearray):
+    extended_sizes: ClassVar[list[int]] = []
+
+    def extend(self, value: Any) -> None:
+        type(self).extended_sizes.append(len(value))
+        super().extend(value)
+
+
+@dataclass
+class WebhookRouteHarness:
+    client: httpx.AsyncClient
+    processed_bodies: list[bytes]
+    js: RecordingJetStream
+
+
+@pytest.fixture
+async def webhook_routes(
+    session: AsyncSession,
+    crypto: SecretCrypto,
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[WebhookRouteHarness]:
+    processed_bodies: list[bytes] = []
+    js = RecordingJetStream()
+
+    async def fake_process_delivery(
+        _db: AsyncSession,
+        _crypto: SecretCrypto,
+        _js: Any,
+        **kwargs: Any,
+    ) -> webhooks.WebhookResult:
+        processed_bodies.append(kwargs["body"])
+        return webhooks.WebhookResult(outcome="accepted", event_id=new_uuid7())
+
+    monkeypatch.setattr(webhooks, "process_delivery", fake_process_delivery)
+    app = FastAPI()
+    app.state.secret_crypto = crypto
+
+    @app.middleware("http")
+    async def request_id(request: Request, call_next: Any) -> Any:
+        request.state.request_id = new_uuid7()
+        return await call_next(request)
+
+    app.include_router(webhooks_router)
+
+    async def override_db() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    async def override_jetstream() -> RecordingJetStream:
+        return js
+
+    app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_jetstream] = override_jetstream
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        yield WebhookRouteHarness(
+            client=client,
+            processed_bodies=processed_bodies,
+            js=js,
+        )
 
 
 @pytest.fixture
@@ -92,6 +192,106 @@ async def deliver(
     )
 
 
+async def test_webhook_body_exactly_one_mib_is_accepted(
+    webhook_routes: WebhookRouteHarness,
+) -> None:
+    body = b"x" * MAX_WEBHOOK_BODY_BYTES
+
+    response = await webhook_routes.client.post(
+        "/api/v1/webhooks/github/public-id",
+        content=ChunkedRequestBody(body),
+    )
+
+    assert response.status_code == 202, response.text
+    assert webhook_routes.processed_bodies == [body]
+
+
+async def test_webhook_body_one_byte_over_cap_is_rejected_before_parse_or_publish(
+    webhook_routes: WebhookRouteHarness,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    TrackingBytearray.extended_sizes = []
+    monkeypatch.setattr(webhook_router_module, "bytearray", TrackingBytearray, raising=False)
+    body = ChunkedRequestBody(b"x" * MAX_WEBHOOK_BODY_BYTES, b"y")
+
+    response = await webhook_routes.client.post(
+        "/api/v1/webhooks/github/public-id",
+        content=body,
+    )
+
+    assert response.status_code == 413, response.text
+    assert TrackingBytearray.extended_sizes == [MAX_WEBHOOK_BODY_BYTES]
+    assert webhook_routes.processed_bodies == []
+    assert webhook_routes.js.published == []
+    assert (await session.scalars(select(WebhookDelivery))).all() == []
+
+
+async def test_one_huge_asgi_chunk_is_rejected_before_copy(
+    webhook_routes: WebhookRouteHarness,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    TrackingBytearray.extended_sizes = []
+    monkeypatch.setattr(webhook_router_module, "bytearray", TrackingBytearray, raising=False)
+    body = ChunkedRequestBody(b"x" * (MAX_WEBHOOK_BODY_BYTES + 1))
+
+    response = await webhook_routes.client.post(
+        "/api/v1/webhooks/github/public-id",
+        content=body,
+    )
+
+    assert response.status_code == 413, response.text
+    assert TrackingBytearray.extended_sizes == []
+    assert webhook_routes.processed_bodies == []
+    assert webhook_routes.js.published == []
+    assert (await session.scalars(select(WebhookDelivery))).all() == []
+
+
+async def test_content_length_over_cap_rejects_before_stream_iteration(
+    webhook_routes: WebhookRouteHarness,
+    session: AsyncSession,
+) -> None:
+    body = ChunkedRequestBody(b"must-not-be-read")
+
+    response = await webhook_routes.client.post(
+        "/api/v1/webhooks/github/public-id",
+        content=body,
+        headers={"content-length": str(MAX_WEBHOOK_BODY_BYTES + 1)},
+    )
+
+    assert response.status_code == 413, response.text
+    assert body.chunks_yielded == 0
+    assert webhook_routes.processed_bodies == []
+    assert webhook_routes.js.published == []
+    assert (await session.scalars(select(WebhookDelivery))).all() == []
+
+
+async def test_process_delivery_rejects_body_over_cap_before_connector_lookup(
+    session: AsyncSession,
+    crypto: SecretCrypto,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_registry_lookup() -> Any:
+        pytest.fail("oversized body reached connector lookup")
+
+    monkeypatch.setattr(webhooks, "default_registry", unexpected_registry_lookup)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await webhooks.process_delivery(
+            session,
+            crypto,
+            RecordingJetStream(),
+            connector_type="github",
+            public_id="0" * 32,
+            headers={},
+            body=b"x" * (MAX_WEBHOOK_BODY_BYTES + 1),
+            **REQ,
+        )
+
+    assert excinfo.value.status_code == 413
+
+
 async def test_valid_signature_accepted_and_published(
     session: AsyncSession, crypto: SecretCrypto, github_connection: tuple[Connection, str]
 ) -> None:
@@ -115,6 +315,70 @@ async def test_valid_signature_accepted_and_published(
     assert msg_headers["Nats-Msg-Id"] == str(envelope.event_id)
 
 
+def test_ingress_event_id_is_stable_for_connector_connection_and_delivery() -> None:
+    connection_id = UUID("11111111-2222-3333-4444-555555555555")
+
+    first = webhooks.ingress_event_id("vercel", connection_id, "delivery-42")
+    second = webhooks.ingress_event_id("vercel", connection_id, "delivery-42")
+
+    assert first == UUID("c3a160bb-6079-52b8-9455-32abdb462d15")
+    assert second == first
+
+
+async def test_retry_after_publish_before_commit_reuses_event_id(
+    session: AsyncSession,
+    crypto: SecretCrypto,
+    github_connection: tuple[Connection, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection, secret = github_connection
+    public_id = connection.public_id
+    js = RecordingJetStream()
+    body = json.dumps(ISSUE_PAYLOAD).encode()
+    headers = github_headers(secret, body, event="issues", delivery="d-commit-crash")
+    original_commit = session.commit
+
+    async def fail_before_commit() -> None:
+        raise RuntimeError("injected pre-commit failure")
+
+    monkeypatch.setattr(session, "commit", fail_before_commit)
+    with pytest.raises(HTTPException) as excinfo:
+        await deliver(session, crypto, js, connection, headers, body)
+    assert excinfo.value.status_code == 503
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__suppress_context__ is True
+    monkeypatch.setattr(session, "commit", original_commit)
+
+    bind = session.bind
+    assert bind is not None
+    fresh_sessions = async_sessionmaker(bind, expire_on_commit=False)
+    async with fresh_sessions() as fresh_session:
+        retry = await webhooks.process_delivery(
+            fresh_session,
+            crypto,
+            js,
+            connector_type="github",
+            public_id=public_id,
+            headers=headers,
+            body=body,
+            **REQ,
+        )
+        deliveries = (await fresh_session.scalars(select(WebhookDelivery))).all()
+
+    assert retry.outcome == "accepted"
+    assert len(deliveries) == 1
+    assert len(js.published) == 2
+    first_subject, first_payload, first_headers = js.published[0]
+    second_subject, second_payload, second_headers = js.published[1]
+    first_event = EventEnvelope.from_bytes(first_payload)
+    second_event = EventEnvelope.from_bytes(second_payload)
+    assert second_subject == first_subject
+    assert second_event.event_id == first_event.event_id
+    assert first_headers["Nats-Msg-Id"] == second_headers["Nats-Msg-Id"]
+    assert first_headers["Nats-Msg-Id"] == str(first_event.event_id)
+    assert deliveries[0].event_id == first_event.event_id
+
+
 async def test_invalid_signature_rejected_and_audited(
     session: AsyncSession, crypto: SecretCrypto, github_connection: tuple[Connection, str]
 ) -> None:
@@ -135,6 +399,35 @@ async def test_invalid_signature_rejected_and_audited(
     ).all()
     assert len(audits) == 1
     assert audits[0].actor_type == "system"
+
+
+async def test_webhook_rejection_audit_does_not_persist_echoed_secret_or_body(
+    session: AsyncSession,
+    crypto: SecretCrypto,
+    github_connection: tuple[Connection, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection, secret = github_connection
+    raw_body_marker = "raw-body-must-not-persist"
+    body = json.dumps({"marker": raw_body_marker}).encode()
+    registry = SingleConnectorRegistry(EchoingVerificationConnector())
+    monkeypatch.setattr(webhooks, "default_registry", lambda: registry)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await deliver(session, crypto, RecordingJetStream(), connection, {}, body)
+
+    assert excinfo.value.status_code == 401
+    audit_event = await session.scalar(
+        select(AuditEvent).where(AuditEvent.action == "webhook.rejected")
+    )
+    assert audit_event is not None
+    assert audit_event.metadata_json == {
+        "connector_type": "github",
+        "reason": "verification_failed",
+    }
+    serialized_audit = json.dumps(audit_event.metadata_json)
+    assert secret not in serialized_audit
+    assert raw_body_marker not in serialized_audit
 
 
 async def test_tampered_body_rejected(
@@ -221,6 +514,8 @@ async def test_nats_outage_rolls_back_delivery_row(
     with pytest.raises(HTTPException) as excinfo:
         await deliver(session, crypto, RecordingJetStream(fail=True), connection, headers, body)
     assert excinfo.value.status_code == 503
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__suppress_context__ is True
     # Row rolled back: the provider's retry will process cleanly.
     await session.refresh(connection)  # rollback expired the ORM row
     assert (await session.scalars(select(WebhookDelivery))).all() == []

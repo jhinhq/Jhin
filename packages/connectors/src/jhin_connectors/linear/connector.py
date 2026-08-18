@@ -19,6 +19,7 @@ from jhin_connectors.linear.client import (
     DEFAULT_BASE_URL,
     LinearApiError,
     linear_graphql,
+    validate_linear_base_url,
 )
 from jhin_connectors.linear.manifest import LINEAR_MANIFEST
 from jhin_connectors.linear.tools import LINEAR_TOOLS, TEAMS_QUERY
@@ -39,6 +40,18 @@ _VIEWER_QUERY = "query { viewer { id name email } }"
 
 class LinearConnector(Connector):
     manifest = LINEAR_MANIFEST
+
+    def validate_settings(self, _auth_type: str, config: dict[str, Any]) -> dict[str, Any]:
+        """Normalize and approve the public API origin before persistence."""
+        normalized = dict(config)
+        base_url = normalized.get("base_url", DEFAULT_BASE_URL)
+        if not isinstance(base_url, str):
+            raise ValueError("config field 'base_url' must be text")
+        try:
+            normalized["base_url"] = validate_linear_base_url(base_url)
+        except LinearApiError:
+            raise ValueError("config field 'base_url' is not allowed") from None
+        return normalized
 
     async def verify_connection(self, ctx: VerifyContext) -> ConnectionHealth:
         if ctx.auth_type == AUTH_OAUTH:

@@ -32,8 +32,9 @@ EXECUTORS = {definition.name: executor for definition, executor in connector.too
 
 
 @pytest.fixture
-def fake_linear() -> Iterator[FakeLinearServer]:
+def fake_linear(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeLinearServer]:
     with FakeLinearServer() as server:
+        monkeypatch.setenv("JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS", server.base_url)
         yield server
 
 

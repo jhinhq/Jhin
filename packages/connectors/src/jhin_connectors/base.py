@@ -117,6 +117,10 @@ class Connector(ABC):
         """Provider event names accepted at the webhook endpoint."""
         return self.manifest.webhook_events
 
+    def validate_settings(self, auth_type: str, config: dict[str, Any]) -> dict[str, Any]:
+        """Apply optional connector-specific checks after generic normalization."""
+        return dict(config)
+
     async def fetch_metadata(self, ctx: VerifyContext) -> dict[str, Any]:
         """Display-safe provider metadata for UI pickers (e.g. Linear teams
         and workflow states for the trigger builder). Optional; connectors

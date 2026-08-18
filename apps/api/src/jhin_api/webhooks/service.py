@@ -15,9 +15,10 @@ traceable through their ``webhook_delivery`` row and ingress event.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from fastapi import HTTPException, status
 from nats.js import JetStreamContext
@@ -28,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from jhin_api.audit import service as audit
 from jhin_connectors import RawWebhookEvent, WebhookVerificationError, default_registry
 from jhin_db.models import Connection, WebhookDelivery
-from jhin_domain import ActorType, ConnectionStatus, new_uuid7
+from jhin_domain import ActorType, ConnectionStatus
 from jhin_events.envelope import EventEnvelope, EventSource
 from jhin_events.publisher import MSG_ID_HEADER
 from jhin_events.subjects import ingress_subject
@@ -36,6 +37,19 @@ from jhin_observability import get_logger
 from jhin_secrets import SecretCrypto, SecretStore
 
 logger = get_logger(__name__)
+
+MAX_WEBHOOK_BODY_BYTES = 1_048_576
+INGRESS_EVENT_ID_NAMESPACE = UUID("65c0e8a1-4264-5f57-bd7c-bc170fdde583")
+
+
+def ingress_event_id(connector_type: str, connection_id: UUID, delivery_id: str) -> UUID:
+    """Stable ingress identity for retries of one provider delivery."""
+    canonical_tuple = json.dumps(
+        [connector_type, str(connection_id), delivery_id],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    return uuid5(INGRESS_EVENT_ID_NAMESPACE, canonical_tuple)
 
 
 @dataclass(frozen=True)
@@ -59,6 +73,11 @@ async def process_delivery(
     request_id: UUID,
     ip_hash: str,
 ) -> WebhookResult:
+    if len(body) > MAX_WEBHOOK_BODY_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail="Webhook body is too large",
+        )
     connector = default_registry().get(connector_type)
     if connector is None or not connector.manifest.supports_webhooks:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
@@ -81,7 +100,7 @@ async def process_delivery(
 
     try:
         raw = connector.parse_webhook(headers, body, secret)
-    except WebhookVerificationError as exc:
+    except WebhookVerificationError:
         audit.record(
             db,
             action="webhook.rejected",
@@ -91,12 +110,12 @@ async def process_delivery(
             actor_type=ActorType.SYSTEM,
             request_id=request_id,
             ip_hash=ip_hash,
-            metadata={"connector_type": connector_type, "reason": str(exc)},
+            metadata={"connector_type": connector_type, "reason": "verification_failed"},
         )
         await db.commit()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Signature verification failed"
-        ) from exc
+        ) from None
 
     if raw.event not in connector.webhook_events():
         # Verified but not ingested (e.g. GitHub's "ping"): acknowledge so the
@@ -109,7 +128,7 @@ async def process_delivery(
 async def _ingest(
     db: AsyncSession, js: JetStreamContext, connection: Connection, raw: RawWebhookEvent
 ) -> WebhookResult:
-    event_id = new_uuid7()
+    event_id = ingress_event_id(connection.connector_type, connection.id, raw.delivery_id)
     delivery = WebhookDelivery(
         workspace_id=connection.workspace_id,
         connection_id=connection.id,
@@ -140,19 +159,26 @@ async def _ingest(
     # (keyed on event_id) covers the crash-after-publish edge.
     try:
         await js.publish(subject, envelope.to_bytes(), headers={MSG_ID_HEADER: str(event_id)})
+        await db.commit()
     except Exception as exc:
-        await db.rollback()
+        try:
+            await db.rollback()
+        except Exception:
+            logger.error(
+                "webhook.rollback_failed",
+                connection_id=connection_id,
+                event_name=raw.event,
+            )
         logger.error(
-            "webhook.publish_failed",
+            "webhook.publish_or_commit_failed",
             connection_id=connection_id,
             event_name=raw.event,
-            error=f"{type(exc).__name__}: {exc}"[:200],
+            error_type=type(exc).__name__,
         )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Event backbone is unavailable; retry later",
-        ) from exc
-    await db.commit()
+        ) from None
     logger.info(
         "webhook.accepted",
         connection_id=connection_id,

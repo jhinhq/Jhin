@@ -22,6 +22,7 @@ from jhin_connectors.cli.schemas import (
     TestRunInput,
     TestRunOutput,
 )
+from jhin_connectors.github.client import GitHubApiError
 from jhin_db.models import AuditEvent, SandboxJob, Workspace
 from jhin_domain import new_uuid7
 from jhin_tools.builtin import ToolExecutionContext
@@ -176,6 +177,10 @@ class TestCheckoutAndGitCredentials:
         make_connection,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        monkeypatch.setenv(
+            "JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS",
+            "http://fake-github:8080",
+        )
         github = await make_connection(
             workspace,
             connector_type="github",
@@ -228,6 +233,73 @@ class TestCheckoutAndGitCredentials:
                 RepositoryCheckoutInput(connection_id=str(cli.id), repository="octo/alpha"),
             )
 
+    async def test_legacy_unallowlisted_git_origin_rejects_before_token_or_runner(
+        self,
+        workspace: Workspace,
+        linked_context: ToolExecutionContext,
+        make_connection,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS", raising=False)
+        github = await make_connection(
+            workspace,
+            connector_type="github",
+            name="Legacy unsafe GitHub",
+            credentials={"token": TOKEN},
+            config={"base_url": "http://127.0.0.1:9000"},
+        )
+        cli = await _cli_connection(
+            make_connection,
+            workspace,
+            git_connection_id=str(github.id),
+        )
+        runner = RunnerStub()
+        monkeypatch.setattr(cli_tools, "run_sandbox_job", runner)
+
+        async def unexpected_token_resolution(*args: Any, **kwargs: Any) -> str:
+            pytest.fail("unapproved git origin reached token resolution")
+
+        monkeypatch.setattr(
+            cli_tools,
+            "resolve_access_token",
+            unexpected_token_resolution,
+        )
+
+        with pytest.raises(GitHubApiError) as exc_info:
+            await cli_tools._repository_checkout(
+                linked_context,
+                RepositoryCheckoutInput(
+                    connection_id=str(cli.id),
+                    repository="octo/alpha",
+                ),
+            )
+
+        assert TOKEN not in str(exc_info.value)
+        assert "127.0.0.1" not in str(exc_info.value)
+        assert runner.payloads == []
+
+    async def test_official_git_origin_is_derived_from_normalized_exact_origin(
+        self,
+        workspace: Workspace,
+        linked_context: ToolExecutionContext,
+        make_connection,
+    ) -> None:
+        github = await make_connection(
+            workspace,
+            connector_type="github",
+            name="Normalized official GitHub",
+            credentials={"token": TOKEN},
+            config={"base_url": "https://API.GITHUB.COM:443/"},
+        )
+
+        git_base, token = await cli_tools._git_credentials(
+            linked_context,
+            str(github.id),
+        )
+
+        assert git_base == "https://github.com"
+        assert token == TOKEN
+
     async def test_command_execute_reinjects_git_token_on_internet_jobs(
         self,
         workspace: Workspace,
@@ -235,6 +307,10 @@ class TestCheckoutAndGitCredentials:
         make_connection,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        monkeypatch.setenv(
+            "JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS",
+            "http://fake-github:8080",
+        )
         github = await make_connection(
             workspace,
             connector_type="github",
@@ -277,6 +353,10 @@ class TestCheckoutAndGitCredentials:
     ) -> None:
         """Worker-side defense in depth: even if the runner missed it, the
         process redactor scrubs the token before the row persists (48.9)."""
+        monkeypatch.setenv(
+            "JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS",
+            "http://fake-github:8080",
+        )
         github = await make_connection(
             workspace,
             connector_type="github",

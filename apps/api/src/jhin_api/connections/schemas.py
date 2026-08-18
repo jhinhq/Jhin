@@ -6,7 +6,7 @@ returned exactly once, inside ``ConnectionCreated``.
 """
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -33,6 +33,11 @@ class ConfigFieldOut(BaseModel):
     required: bool = False
     placeholder: str = ""
     help: str = ""
+    kind: Literal["text", "integer", "boolean", "string_list"] = "text"
+    auth_types: list[str] = []
+    default: Any | None = None
+    minimum: int | None = None
+    maximum: int | None = None
 
 
 class ConnectorOut(BaseModel):
@@ -48,11 +53,14 @@ class ConnectorOut(BaseModel):
     canonical_events: list[str] = []
     capabilities: list[str] = []
     supports_webhooks: bool = False
+    webhook_secret_mode: Literal["none", "generated", "provider_supplied"] = "none"
+    webhook_signature_algorithm: str = ""
+    webhook_setup_help: str = ""
     docs_url: str = ""
 
 
 class ConnectionCreate(BaseModel):
-    model_config = ConfigDict(str_strip_whitespace=True)
+    model_config = ConfigDict(str_strip_whitespace=True, strict=True, extra="forbid")
 
     connector_type: str = Field(min_length=1, max_length=50)
     name: str = Field(min_length=1, max_length=200)
@@ -66,6 +74,8 @@ class ConnectionCreate(BaseModel):
 
 class CredentialsRotate(BaseModel):
     """Re-entered credential fields; replaces the encrypted secret in place."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
 
     credentials: dict[str, str] = Field(min_length=1)
 
@@ -84,6 +94,7 @@ class ConnectionOut(BaseModel):
     created_at: datetime
     last_verified_at: datetime | None
     last_error: str | None
+    webhook_secret_configured: bool = False
 
 
 class WebhookSetupOut(BaseModel):
@@ -91,7 +102,18 @@ class WebhookSetupOut(BaseModel):
     secret to paste there. The secret is not retrievable afterwards."""
 
     url_path: str
-    secret: str
+    secret: str | None
+    secret_mode: Literal["generated", "provider_supplied"]
+    signature_algorithm: str
+    help: str = ""
+
+
+class WebhookSecretWrite(BaseModel):
+    """Write-only provider-supplied webhook signing secret."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    secret: str = Field(min_length=16, max_length=4096)
 
 
 class ConnectionCreated(BaseModel):

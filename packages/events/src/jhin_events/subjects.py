@@ -55,8 +55,10 @@ def ingress_subject(workspace_id: str, connector: str, event: str) -> str:
     """Subject for a raw external event prior to normalization."""
     _validate_token(workspace_id, field="workspace_id")
     _validate_token(connector, field="connector")
-    _validate_token(event, field="event")
-    return f"{SUBJECT_PREFIX}.{workspace_id}.ingress.{connector}.{event}"
+    event_parts = event.split(".")
+    for part in event_parts:
+        _validate_token(part, field="event")
+    return f"{SUBJECT_PREFIX}.{workspace_id}.ingress.{connector}.{'.'.join(event_parts)}"
 
 
 def audit_subject(workspace_id: str, action: str) -> str:

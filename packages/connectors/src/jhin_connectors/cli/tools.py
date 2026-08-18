@@ -51,7 +51,7 @@ from jhin_connectors.cli.schemas import (
 )
 from jhin_connectors.execution import ConnectionResolutionError, resolve_connection
 from jhin_connectors.github.auth import resolve_access_token
-from jhin_connectors.github.client import DEFAULT_BASE_URL
+from jhin_connectors.github.client import DEFAULT_BASE_URL, validate_github_base_url
 from jhin_db.models import AuditEvent, Connection, SandboxJob
 from jhin_domain import ActorType, ConnectionStatus, SandboxJobStatus, new_uuid7
 from jhin_policy import RiskLevel, ToolDefinition
@@ -128,13 +128,13 @@ async def _git_credentials(ctx: ToolExecutionContext, git_connection_id: str) ->
             "connection or pass it in the tool call"
         )
     resolved = await resolve_connection(ctx, git_connection_id, connector_type="github")
-    api_base = str(resolved.config.get("base_url") or DEFAULT_BASE_URL).rstrip("/")
+    api_base = validate_github_base_url(str(resolved.config.get("base_url") or DEFAULT_BASE_URL))
     token = await resolve_access_token(
         resolved.connection.auth_type, resolved.credentials, api_base
     )
     # Real GitHub serves git on github.com; test/self-hosted layouts serve
     # git smart-HTTP under /git on the same server as the REST API.
-    git_base = "https://github.com" if "api.github.com" in api_base else f"{api_base}/git"
+    git_base = "https://github.com" if api_base == DEFAULT_BASE_URL else f"{api_base}/git"
     return git_base, token
 
 

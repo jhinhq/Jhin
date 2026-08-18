@@ -1,18 +1,19 @@
 """Thin async HTTP layer for the GitHub REST API (plan 11.2).
 
-All requests pin the API version header and use httpx with explicit
-timeouts. Error mapping is deliberately conservative: only the HTTP status
-and GitHub's short ``message`` field (truncated) enter the exception text —
-never request headers, never tokens. The process redactor scrubs anything
-that slips through before persistence (plan 13.5, 48.9).
+All requests pin the API version header, validate the exact destination
+origin, and use the shared redirect-free streaming response cap. Error
+mapping is deliberately conservative: provider bodies, request headers,
+URLs, and tokens never enter exception text.
 """
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import httpx
+
+from jhin_connectors.endpoints import EndpointPolicyError, validate_http_origin
+from jhin_connectors.http_client import ProviderHTTPError, send_bounded_json
 
 # Pinned GitHub REST API version (docs.github.com, current as of 2026).
 API_VERSION = "2026-03-10"
@@ -20,7 +21,6 @@ DEFAULT_BASE_URL = "https://api.github.com"
 USER_AGENT = "jhin-connector-github"
 
 _TIMEOUT_SECONDS = 30.0
-_MAX_ERROR_DETAIL_CHARS = 300
 
 
 class GitHubApiError(Exception):
@@ -31,23 +31,12 @@ class GitHubApiError(Exception):
         self.status_code = status_code
 
 
-def _safe_detail(response: httpx.Response) -> str:
-    """GitHub's ``message`` field when the body is JSON, else a truncated
-    body preview. Bounded so hostile bodies cannot flood errors."""
+def validate_github_base_url(base_url: str) -> str:
+    """Return a normalized approved GitHub origin without rendering the input."""
     try:
-        payload = response.json()
-        if isinstance(payload, dict) and isinstance(payload.get("message"), str):
-            return str(payload["message"])[:_MAX_ERROR_DETAIL_CHARS]
-    except (json.JSONDecodeError, ValueError):
-        pass
-    return response.text[:_MAX_ERROR_DETAIL_CHARS]
-
-
-def error_from_response(method: str, path: str, response: httpx.Response) -> GitHubApiError:
-    return GitHubApiError(
-        f"GitHub API {method} {path} failed ({response.status_code}): {_safe_detail(response)}",
-        status_code=response.status_code,
-    )
+        return validate_http_origin(base_url, official_origins=(DEFAULT_BASE_URL,))
+    except EndpointPolicyError:
+        raise GitHubApiError("GitHub API target is not allowed") from None
 
 
 def github_headers(token: str) -> dict[str, str]:
@@ -69,20 +58,28 @@ async def github_request(
     params: dict[str, Any] | None = None,
 ) -> Any:
     """One authenticated JSON request. Returns the parsed body ({} for 204)."""
-    url = f"{base_url.rstrip('/')}{path}"
+    safe_base_url = validate_github_base_url(base_url)
+    url = f"{safe_base_url}{path}"
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
-            response = await client.request(
+            request = client.build_request(
                 method,
                 url,
                 headers=github_headers(token),
                 json=json_body,
                 params=params,
             )
-    except httpx.HTTPError as exc:
-        raise GitHubApiError(f"GitHub API {method} {path} failed: {type(exc).__name__}") from None
-    if response.status_code >= 400:
-        raise error_from_response(method, path, response)
-    if response.status_code == 204 or not response.content:
+            payload = await send_bounded_json(client, request)
+    except ProviderHTTPError as exc:
+        message = "GitHub API request failed"
+        if exc.status_code is not None:
+            message = f"{message} with status {exc.status_code}"
+        raise GitHubApiError(
+            message,
+            status_code=exc.status_code,
+        ) from None
+    except Exception:
+        raise GitHubApiError("GitHub API request failed") from None
+    if payload is None:
         return {}
-    return response.json()
+    return payload

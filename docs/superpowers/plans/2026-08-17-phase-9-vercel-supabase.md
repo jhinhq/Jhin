@@ -393,10 +393,20 @@ git commit -m "fix: harden scoped tool approval authorization"
 - Create: `packages/connectors/src/jhin_connectors/http_client.py`
 - Modify: `packages/connectors/src/jhin_connectors/manifest.py`
 - Modify: `packages/connectors/src/jhin_connectors/base.py`
+- Modify: `packages/connectors/src/jhin_connectors/example/manifest.py`
 - Modify: `packages/connectors/src/jhin_connectors/github/manifest.py`
+- Modify: `packages/connectors/src/jhin_connectors/github/connector.py`
+- Modify: `packages/connectors/src/jhin_connectors/github/client.py`
+- Modify: `packages/connectors/src/jhin_connectors/github/auth.py`
 - Modify: `packages/connectors/src/jhin_connectors/linear/manifest.py`
+- Modify: `packages/connectors/src/jhin_connectors/linear/connector.py`
+- Modify: `packages/connectors/src/jhin_connectors/linear/client.py`
+- Modify: `packages/connectors/src/jhin_connectors/cli/tools.py`
 - Modify: `packages/connectors/src/jhin_connectors/__init__.py`
 - Modify: `packages/events/src/jhin_events/subjects.py`
+- Modify: `.env.example`
+- Modify: `compose.dev.yaml`
+- Modify: `docs/superpowers/plans/2026-08-17-phase-9-vercel-supabase.md`
 - Modify: `apps/api/src/jhin_api/connections/schemas.py`
 - Modify: `apps/api/src/jhin_api/connections/service.py`
 - Modify: `apps/api/src/jhin_api/connections/router.py`
@@ -405,13 +415,18 @@ git commit -m "fix: harden scoped tool approval authorization"
 - Test: `packages/connectors/tests/test_manifest_registry.py`
 - Test: `packages/connectors/tests/test_endpoints.py`
 - Test: `packages/connectors/tests/test_http_client.py`
+- Test: `packages/connectors/tests/test_client_endpoint_security.py`
+- Test: `packages/connectors/tests/github/test_tools_against_fake.py`
+- Test: `packages/connectors/tests/linear/test_linear_tools_against_fake.py`
+- Test: `packages/connectors/tests/cli/test_executors.py`
 - Test: `packages/events/tests/test_subjects.py`
 - Test: `apps/api/tests/test_connections_unit.py`
 - Test: `apps/api/tests/test_webhooks_unit.py`
+- Test: `tests/test_compose_connector_allowlist.py`
 
 **Interfaces:**
 - Consumes: `ConnectorManifest`, `ConfigFieldSpec`, `Connector.verify_connection`, generic connection create/rotate, and generic webhook ingress.
-- Produces: `ConfigFieldKind = Literal["text", "integer", "boolean", "string_list"]`; auth-specific fields/defaults/bounds; `WebhookSecretMode = Literal["none", "generated", "provider_supplied"]`; normalized settings; provider-secret write-only endpoint; webhook configured status; exact outbound target validation; shared redirect-free streaming provider HTTP with a 512 KiB cap; dotted ingress events; deterministic ingress event IDs; bounded webhook body reader.
+- Produces: `ConfigFieldKind = Literal["text", "integer", "boolean", "string_list"]`; auth-specific fields/defaults/bounds; `WebhookSecretMode = Literal["none", "generated", "provider_supplied"]`; normalized settings; provider-secret write-only endpoint; webhook configured status; credential-safe bounded parsing for every connection secret write; safe filtering of legacy public config; exact outbound target validation; shared redirect-free streaming provider HTTP with a 512 KiB cap and optional exact-success-status contract; runtime endpoint enforcement for both new and legacy GitHub/Linear connection rows; dotted ingress events; deterministic ingress event IDs; bounded webhook body reader.
 
 - [ ] **Step 1: Write failing manifest, endpoint-policy, and shared HTTP tests**
 
@@ -479,7 +494,7 @@ Add `test_ingress_event_id_is_stable_for_connector_connection_and_delivery` and 
 Run:
 
 ```bash
-uv run pytest packages/connectors/tests/test_manifest_registry.py packages/connectors/tests/test_endpoints.py packages/connectors/tests/test_http_client.py packages/events/tests/test_subjects.py apps/api/tests/test_connections_unit.py apps/api/tests/test_webhooks_unit.py -q
+uv run pytest packages/connectors/tests/test_manifest_registry.py packages/connectors/tests/test_endpoints.py packages/connectors/tests/test_http_client.py packages/connectors/tests/test_client_endpoint_security.py packages/connectors/tests/github/test_tools_against_fake.py packages/connectors/tests/linear/test_linear_tools_against_fake.py packages/connectors/tests/cli/test_executors.py packages/events/tests/test_subjects.py apps/api/tests/test_connections_unit.py apps/api/tests/test_webhooks_unit.py tests/test_compose_connector_allowlist.py -q
 ```
 
 Expected: FAIL because typed/auth-specific fields, endpoint policy, bounded shared HTTP, `provider_supplied`, deterministic ingress IDs, dotted event handling, and body caps do not exist.
@@ -506,6 +521,10 @@ Return normalized safe endpoints; never return or interpolate a DSN into an exce
 
 Implement `http_client.py` around `AsyncClient.send(request, stream=True, follow_redirects=False)`. Reject every `3xx` without resolving or following `Location`; reject an oversized numeric `Content-Length` before iterating; otherwise consume `aiter_bytes()` and check `len(body) + len(chunk)` before extending the `bytearray`. Close the response in all paths, parse JSON only after the bounded byte body is complete, reject malformed/non-JSON provider responses with a stable safe error, and redact every exception before it crosses the connector boundary. Provider-specific clients in Tasks 3 and 5 must build an `httpx.Request` and use this helper rather than calling `response.json()`, `response.aread()`, or maintaining another cap.
 
+Retrofit the existing GitHub REST/GitHub App token and Linear GraphQL clients in this task as well. Validate the exact official or operator-allowlisted origin at every credentialed outbound boundary, including execution from legacy stored connection rows, before building or sending a request. Apply the same validation before deriving the Git clone URL or resolving a PAT for `cli.repository.checkout`, so an old `base_url` cannot send a token into an attacker-controlled sandbox clone. Route every provider response through `send_bounded_json`; preserve GitHub App token creation's exact `201` requirement through the helper's optional expected-status argument. Convert transport, request-build, response-close, and provider-shape failures into stable provider-specific errors `from None`, never provider response text, credentials, arbitrary URLs, or raw exception strings. Fake-provider tests must opt their ephemeral origin in explicitly rather than weakening production policy.
+
+Set the GitHub and Linear `base_url` config fields to typed text defaults for their official origins. Override each connector's `validate_settings` hook so creation validates and stores only the normalized official or exact operator-allowlisted origin; reject URL credentials, paths, queries, fragments, and unapproved origins before any secret or connection row is created. Keep the outbound revalidation above for legacy rows. Document both operator-only allowlists in `.env.example` as empty-by-default comma-separated exact entries with warnings; do not wire either variable into production compose.
+
 - [ ] **Step 5: Implement provider-supplied webhook setup and body limits**
 
 Make connection creation mode-specific:
@@ -520,6 +539,8 @@ else:
 ```
 
 Add `WebhookSecretWrite(secret: str = Field(min_length=16, max_length=4096))` and admin/CSRF-protected `PUT /api/v1/workspaces/{workspace_id}/connections/{connection_id}/webhook-secret`. It accepts only `provider_supplied` connectors, creates or rotates the encrypted `WEBHOOK_SECRET`, audits `connection.webhook_secret_configured` or `.rotated`, and returns `204`. `ConnectionOut` exposes only `webhook_secret_configured: bool`. `WebhookSetupOut` exposes `url_path`, nullable `secret`, `secret_mode`, `signature_algorithm`, and `help`; it never exposes a stored provider secret.
+
+Treat connection creation, credential rotation, and provider webhook-secret writes as one credential boundary. Read each request incrementally under a 65,536-byte pre-copy cap, strict-decode JSON (including duplicate-key/non-finite rejection), and manually validate the extra-forbidden Pydantic model so FastAPI cannot echo plaintext through its default validation response. Return only stable credential-free `413`/`422` details, while preserving the three request schemas explicitly in OpenAPI. Credential-field validation errors must never interpolate submitted map keys or values. When serializing `ConnectionOut`, filter `config_json` to manifest-declared fields for the stored auth type and re-run generic plus connector-specific validation; invalid or unknown legacy values are omitted with no raw fallback, while runtime clients still revalidate stored endpoints before use.
 
 Read the webhook stream incrementally:
 
@@ -547,9 +568,12 @@ Replace random webhook ingress IDs with `ingress_event_id(connector_type, connec
 Run:
 
 ```bash
-uv run pytest packages/connectors/tests/test_manifest_registry.py packages/connectors/tests/test_endpoints.py packages/connectors/tests/test_http_client.py packages/events/tests/test_subjects.py apps/api/tests/test_connections_unit.py apps/api/tests/test_webhooks_unit.py -q
-uv run ruff check packages/connectors packages/events apps/api
+uv run pytest packages/connectors/tests/test_manifest_registry.py packages/connectors/tests/test_endpoints.py packages/connectors/tests/test_http_client.py packages/connectors/tests/test_client_endpoint_security.py packages/connectors/tests/github/test_tools_against_fake.py packages/connectors/tests/linear/test_linear_tools_against_fake.py packages/connectors/tests/cli/test_executors.py packages/events/tests/test_subjects.py apps/api/tests/test_connections_unit.py apps/api/tests/test_webhooks_unit.py tests/test_compose_connector_allowlist.py -q
+uv run ruff check packages/connectors packages/events apps/api tests/test_compose_connector_allowlist.py
+uv run ruff format --check packages/connectors packages/events apps/api tests/test_compose_connector_allowlist.py
 uv run mypy
+docker compose -f compose.yaml -f compose.dev.yaml config --format json >/dev/null
+docker compose -f compose.yaml config --format json >/dev/null
 git diff --check
 ```
 
@@ -558,7 +582,7 @@ Expected: PASS with GitHub/Linear behavior preserved, every provider response bo
 Commit:
 
 ```bash
-git add packages/connectors packages/events/src/jhin_events/subjects.py packages/events/tests/test_subjects.py apps/api/src/jhin_api/connections apps/api/src/jhin_api/webhooks apps/api/tests/test_connections_unit.py apps/api/tests/test_webhooks_unit.py
+git add packages/connectors packages/events/src/jhin_events/subjects.py packages/events/tests/test_subjects.py apps/api/src/jhin_api/connections apps/api/src/jhin_api/webhooks apps/api/tests/test_connections_unit.py apps/api/tests/test_webhooks_unit.py .env.example compose.dev.yaml tests/test_compose_connector_allowlist.py docs/superpowers/plans/2026-08-17-phase-9-vercel-supabase.md
 git commit -m "feat: add secure connector setup contracts"
 ```
 

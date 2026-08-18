@@ -24,6 +24,18 @@ def test_ingress_and_audit_and_dlq_subjects() -> None:
     assert dlq_subject("EVENTS") == "jhin.dlq.events"
 
 
+def test_dotted_ingress_event_becomes_individual_subject_tokens() -> None:
+    assert ingress_subject("w1", "vercel", "deployment.ready") == (
+        "jhin.v1.w1.ingress.vercel.deployment.ready"
+    )
+
+
+@pytest.mark.parametrize("event", [".ready", "deployment.", "deployment..ready"])
+def test_ingress_subject_rejects_empty_dotted_event_segments(event: str) -> None:
+    with pytest.raises(ValueError):
+        ingress_subject("w1", "vercel", event)
+
+
 @pytest.mark.parametrize(
     "event_type",
     ["", "created", "unknown.domain.event", "ingress.linear.x", "audit.x", "task.cre ated"],

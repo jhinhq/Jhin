@@ -5,18 +5,19 @@ keys are sent as the bare ``Authorization`` header value — no ``Bearer``
 prefix (that is Linear's documented scheme for API keys; OAuth access tokens
 would use ``Bearer`` when OAuth support arrives).
 
-Error mapping is conservative: only the HTTP status and the first GraphQL
-error message (truncated) enter exception text — never the request payload,
-never the API key. The process redactor scrubs anything that slips through
-before persistence (plan 13.5, 48.9).
+The exact destination origin is validated at the final outbound boundary,
+and every response uses the shared redirect-free streaming cap. Error
+mapping never includes provider bodies, request payloads, URLs, or API keys.
 """
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import httpx
+
+from jhin_connectors.endpoints import EndpointPolicyError, validate_http_origin
+from jhin_connectors.http_client import ProviderHTTPError, send_bounded_json
 
 DEFAULT_BASE_URL = "https://api.linear.app"
 USER_AGENT = "jhin-connector-linear"
@@ -25,7 +26,6 @@ AUTH_API_KEY = "api_key"
 AUTH_OAUTH = "oauth"
 
 _TIMEOUT_SECONDS = 30.0
-_MAX_ERROR_DETAIL_CHARS = 300
 
 
 class LinearApiError(Exception):
@@ -45,12 +45,12 @@ def linear_headers(api_key: str) -> dict[str, str]:
     }
 
 
-def _first_error_message(payload: Any) -> str:
-    if isinstance(payload, dict):
-        errors = payload.get("errors")
-        if isinstance(errors, list) and errors and isinstance(errors[0], dict):
-            return str(errors[0].get("message", "unknown GraphQL error"))
-    return "unknown GraphQL error"
+def validate_linear_base_url(base_url: str) -> str:
+    """Return a normalized approved Linear origin without rendering the input."""
+    try:
+        return validate_http_origin(base_url, official_origins=(DEFAULT_BASE_URL,))
+    except EndpointPolicyError:
+        raise LinearApiError("Linear API target is not allowed") from None
 
 
 async def linear_graphql(
@@ -64,31 +64,33 @@ async def linear_graphql(
     Raises :class:`LinearApiError` for transport failures, non-2xx statuses,
     and GraphQL-level errors.
     """
-    url = f"{base_url.rstrip('/')}/graphql"
+    safe_base_url = validate_linear_base_url(base_url)
+    url = f"{safe_base_url}/graphql"
     body: dict[str, Any] = {"query": query}
     if variables:
         body["variables"] = variables
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
-            response = await client.post(url, headers=linear_headers(api_key), json=body)
-    except httpx.HTTPError as exc:
-        raise LinearApiError(f"Linear API request failed: {type(exc).__name__}") from None
-    if response.status_code >= 400:
+            request = client.build_request(
+                "POST",
+                url,
+                headers=linear_headers(api_key),
+                json=body,
+            )
+            payload = await send_bounded_json(client, request)
+    except ProviderHTTPError as exc:
         raise LinearApiError(
-            f"Linear API request failed ({response.status_code}): "
-            f"{response.text[:_MAX_ERROR_DETAIL_CHARS]}",
-            status_code=response.status_code,
-        )
-    try:
-        payload = response.json()
-    except (json.JSONDecodeError, ValueError):
-        raise LinearApiError("Linear API returned a non-JSON response") from None
+            f"Linear API request failed: {exc}",
+            status_code=exc.status_code,
+        ) from None
+    except Exception:
+        raise LinearApiError("Linear API request failed") from None
     if not isinstance(payload, dict):
         raise LinearApiError("Linear API returned an unexpected response shape")
     if payload.get("errors"):
         raise LinearApiError(
-            f"Linear GraphQL error: {_first_error_message(payload)[:_MAX_ERROR_DETAIL_CHARS]}",
-            status_code=response.status_code,
+            "Linear GraphQL request failed",
+            status_code=200,
         )
     data = payload.get("data")
     if not isinstance(data, dict):

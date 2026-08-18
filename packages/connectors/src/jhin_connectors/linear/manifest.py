@@ -1,5 +1,6 @@
 """Static declaration of the Linear connector (plan 11.1, 11.3)."""
 
+from jhin_connectors.linear.client import DEFAULT_BASE_URL
 from jhin_connectors.linear.webhook import WEBHOOK_EVENTS
 from jhin_connectors.manifest import (
     AuthSchemeSpec,
@@ -60,6 +61,8 @@ LINEAR_MANIFEST = ConnectorManifest(
             required=False,
             placeholder="https://api.linear.app",
             help="Override for a test server (e.g. the dev stack's fake Linear).",
+            kind="text",
+            default=DEFAULT_BASE_URL,
         ),
     ),
     webhook_events=WEBHOOK_EVENTS,
@@ -71,5 +74,8 @@ LINEAR_MANIFEST = ConnectorManifest(
     ),
     capabilities=LINEAR_CAPABILITIES,
     docs_url="https://linear.app/developers/graphql",
+    webhook_secret_mode="generated",
+    webhook_signature_algorithm="hmac-sha256",
+    webhook_setup_help="Use the generated secret when configuring this webhook in Linear.",
     supports_webhooks=True,
 )

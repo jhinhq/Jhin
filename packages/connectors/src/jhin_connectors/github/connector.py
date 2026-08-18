@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from typing import Any
 
 from jhin_connectors.base import (
     ConnectionHealth,
@@ -24,6 +25,7 @@ from jhin_connectors.github.client import (
     DEFAULT_BASE_URL,
     GitHubApiError,
     github_request,
+    validate_github_base_url,
 )
 from jhin_connectors.github.manifest import GITHUB_MANIFEST
 from jhin_connectors.github.tools import GITHUB_TOOLS
@@ -40,6 +42,18 @@ from jhin_tools.builtin import ToolExecutor
 
 class GitHubConnector(Connector):
     manifest = GITHUB_MANIFEST
+
+    def validate_settings(self, _auth_type: str, config: dict[str, Any]) -> dict[str, Any]:
+        """Normalize and approve the public API origin before persistence."""
+        normalized = dict(config)
+        base_url = normalized.get("base_url", DEFAULT_BASE_URL)
+        if not isinstance(base_url, str):
+            raise ValueError("config field 'base_url' must be text")
+        try:
+            normalized["base_url"] = validate_github_base_url(base_url)
+        except GitHubApiError:
+            raise ValueError("config field 'base_url' is not allowed") from None
+        return normalized
 
     async def verify_connection(self, ctx: VerifyContext) -> ConnectionHealth:
         base_url = str(ctx.config.get("base_url") or DEFAULT_BASE_URL)

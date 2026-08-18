@@ -31,5 +31,8 @@ EXAMPLE_MANIFEST = ConnectorManifest(
     ),
     webhook_events=("ping",),
     capabilities=("example.ping",),
+    webhook_secret_mode="generated",
+    webhook_signature_algorithm="hmac-sha256",
+    webhook_setup_help="Use the generated secret when configuring the example webhook.",
     supports_webhooks=True,
 )

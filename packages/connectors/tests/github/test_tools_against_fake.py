@@ -29,8 +29,9 @@ EXECUTORS = {definition.name: executor for definition, executor in GitHubConnect
 
 
 @pytest.fixture
-def fake_github() -> Iterator[FakeGitHubServer]:
+def fake_github(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeGitHubServer]:
     with FakeGitHubServer() as server:
+        monkeypatch.setenv("JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS", server.base_url)
         yield server
 
 

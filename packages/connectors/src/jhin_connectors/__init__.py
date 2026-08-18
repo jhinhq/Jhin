@@ -21,16 +21,29 @@ from jhin_connectors.base import (
     VerifyContext,
     WebhookVerificationError,
 )
+from jhin_connectors.endpoints import (
+    EndpointPolicyError,
+    validate_http_origin,
+    validate_postgres_target,
+)
 from jhin_connectors.execution import (
     ConnectionResolutionError,
     ResolvedConnection,
     resolve_connection,
 )
+from jhin_connectors.http_client import (
+    MAX_PROVIDER_RESPONSE_BYTES,
+    ProviderHTTPError,
+    send_bounded_json,
+)
 from jhin_connectors.manifest import (
     AuthSchemeSpec,
+    ConfigFieldKind,
     ConfigFieldSpec,
     ConnectorManifest,
     SecretFieldSpec,
+    WebhookSecretMode,
+    normalize_config,
 )
 from jhin_connectors.registry import (
     DEFAULT_CONNECTORS,
@@ -41,7 +54,9 @@ from jhin_connectors.registry import (
 
 __all__ = [
     "DEFAULT_CONNECTORS",
+    "MAX_PROVIDER_RESPONSE_BYTES",
     "AuthSchemeSpec",
+    "ConfigFieldKind",
     "ConfigFieldSpec",
     "ConnectionHealth",
     "ConnectionResolutionError",
@@ -49,13 +64,20 @@ __all__ = [
     "ConnectorError",
     "ConnectorManifest",
     "ConnectorRegistry",
+    "EndpointPolicyError",
     "NormalizedEvent",
+    "ProviderHTTPError",
     "RawWebhookEvent",
     "ResolvedConnection",
     "SecretFieldSpec",
     "VerifyContext",
+    "WebhookSecretMode",
     "WebhookVerificationError",
     "build_default_catalog",
     "default_registry",
+    "normalize_config",
     "resolve_connection",
+    "send_bounded_json",
+    "validate_http_origin",
+    "validate_postgres_target",
 ]

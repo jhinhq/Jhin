@@ -5,6 +5,11 @@ services:
   api:
     environment:
       APP_ENV: dev
+      JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS: http://fake-github:8080,http://fake-linear:8080
+
+  agent-worker:
+    environment:
+      JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS: http://fake-github:8080,http://fake-linear:8080
 
   # Dev/test-only fake OpenAI-compatible provider so agents can run without
   # real API keys (plan 32.2, 38). Reused agent-worker image; never part of

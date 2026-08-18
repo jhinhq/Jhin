@@ -1,5 +1,6 @@
 """Static declaration of the GitHub connector (plan 11.1, 11.2)."""
 
+from jhin_connectors.github.client import DEFAULT_BASE_URL
 from jhin_connectors.github.webhook import WEBHOOK_EVENTS
 from jhin_connectors.manifest import (
     AuthSchemeSpec,
@@ -64,10 +65,15 @@ GITHUB_MANIFEST = ConnectorManifest(
             required=False,
             placeholder="https://api.github.com",
             help="Override for GitHub Enterprise Server or a test server.",
+            kind="text",
+            default=DEFAULT_BASE_URL,
         ),
     ),
     webhook_events=WEBHOOK_EVENTS,
     capabilities=GITHUB_CAPABILITIES,
     docs_url="https://docs.github.com/en/rest",
+    webhook_secret_mode="generated",
+    webhook_signature_algorithm="hmac-sha256",
+    webhook_setup_help="Use the generated secret when configuring this webhook in GitHub.",
     supports_webhooks=True,
 )

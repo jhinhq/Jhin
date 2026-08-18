@@ -29,7 +29,12 @@ from datetime import UTC, datetime
 import httpx
 import jwt
 
-from jhin_connectors.github.client import API_VERSION, GitHubApiError, error_from_response
+from jhin_connectors.github.client import (
+    API_VERSION,
+    GitHubApiError,
+    validate_github_base_url,
+)
+from jhin_connectors.http_client import ProviderHTTPError, send_bounded_json
 from jhin_secrets.redaction import get_redactor
 
 AUTH_PAT = "pat"
@@ -133,23 +138,37 @@ async def mint_installation_token(
     base_url: str, credentials: dict[str, str], *, now: float | None = None
 ) -> _CachedToken:
     """One uncached exchange: app JWT -> installation access token."""
+    safe_base_url = validate_github_base_url(base_url)
     installation_id = credentials.get("installation_id", "").strip()
     if not installation_id:
         raise GitHubAuthError("GitHub App credential is missing installation_id")
     app_jwt = build_app_jwt(credentials, now=now)
-    url = f"{base_url.rstrip('/')}/app/installations/{installation_id}/access_tokens"
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(
-            url,
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": f"Bearer {app_jwt}",
-                "X-GitHub-Api-Version": API_VERSION,
-            },
-        )
-    if response.status_code != 201:
-        raise error_from_response("POST", "/app/installations/.../access_tokens", response)
-    payload = response.json()
+    url = f"{safe_base_url}/app/installations/{installation_id}/access_tokens"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            request = client.build_request(
+                "POST",
+                url,
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "Authorization": f"Bearer {app_jwt}",
+                    "X-GitHub-Api-Version": API_VERSION,
+                },
+            )
+            payload = await send_bounded_json(
+                client,
+                request,
+                expected_status_codes=(201,),
+            )
+    except ProviderHTTPError as exc:
+        raise GitHubApiError(
+            f"GitHub installation token request failed: {exc}",
+            status_code=exc.status_code,
+        ) from None
+    except Exception:
+        raise GitHubApiError("GitHub installation token request failed") from None
+    if not isinstance(payload, dict):
+        raise GitHubAuthError("token exchange returned an unexpected response shape")
     token = str(payload.get("token", ""))
     if not token:
         raise GitHubAuthError("token exchange response contained no token")
