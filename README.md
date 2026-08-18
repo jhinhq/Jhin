@@ -11,22 +11,14 @@ backbone, and PostgreSQL is the system of record. A FastAPI control-plane API
 owns configuration and authorization, and a Next.js frontend provides the
 operations UI.
 
-> Status: Phase 7 — the flagship vertical slice is live: a Linear issue
-> moving into **Todo** automatically starts exactly one SWE task whose agent
-> checks the repository out in an ephemeral sandbox, fixes the failing test,
-> pushes an agent branch, opens a GitHub pull request, and comments the
-> outcome back on the issue. A new Linear connector (GraphQL, API-key auth,
-> HMAC-verified webhooks) normalizes issue/comment events — preserving
-> Linear's `updatedFrom` as a `changed_from` mirror so state *transitions*
-> are detectable. A connector-agnostic trigger engine (`jhin_triggers`)
-> evaluates a safe JSON filter DSL (all/any groups; eq/neq/in/not_in/
-> contains/exists/gt/gte/lt/lte plus first-class `transitioned_to`) against
-> canonical events in the event worker, and duplicates never duplicate work:
-> webhook delivery dedupe, a deterministic trigger idempotency key
-> (unique-indexed `trigger_invocation` rows), and Temporal's duplicate-start
-> policy on deterministic workflow ids. The Triggers page offers a
-> WHEN/IF/THEN builder with per-condition dry-run testing, and task details
-> show trigger origin. See docs/architecture/events.md for the full flow.
+> Status: Phase 8 — teams can now perform durable SWE/QA handoffs through
+> direct coordination or a CTO-owned coordinator task. Delegations use
+> authorized, structured messages; blocking parents park durably while child
+> tasks run, and failed reviews enter a bounded fix/retest loop. Task details
+> expose the full lineage, artifacts, risks, verdicts, and visible agent- or
+> workspace-concurrency queuing. See
+> [Delegation and Teams](docs/architecture/delegation-and-teams.md) for the
+> workflow, policy, durability, and admission model.
 
 ## Quick start
 
@@ -165,6 +157,17 @@ SDK and how to contribute a connector. In the dev overlay the `fake-github`
 and `fake-linear` services let the GitHub and Linear flows run without real
 credentials (point a connection's `base_url` at `http://fake-github:8080`
 or `http://fake-linear:8080`).
+
+### Delegation and teams
+
+Create a reporting hierarchy, grant an agent the `organization.delegate`
+capability for the intended relationship scope, and choose the engineering
+ticket template on a trigger. Direct mode assigns the root ticket to the SWE;
+coordinator mode keeps the CTO-owned root model-free and routes implementation
+to the configured SWE. Optional manager and QA reviews use real child tasks,
+with bounded fix/retest cycles after a failed verdict. Follow the delegation
+chain and structured results on the task page; tasks waiting for an agent or
+workspace run slot remain visibly queued until capacity is available.
 
 ### Triggers — the showcase demo
 

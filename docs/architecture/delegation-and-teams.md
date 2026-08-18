@@ -162,10 +162,36 @@ The focused Phase 8 integration suite defines five repository scenarios:
 5. A second task queues behind an agent-held approval slot, remains durable
    across an agent-worker restart, and starts only after the slot is released.
 
-**Repository-wide verification pending Task 3.**
+On 2026-08-17, Phase 8 closure was verified from freshly built images and a
+freshly started local stack:
 
-This document does not claim the focused scenarios or repository-wide gates
-have been rerun for closure; Task 3 records fresh commands and counts.
+- `docker compose --profile build build sandbox-image` built
+  `jhin-sandbox:latest`; `docker compose build api agent-worker
+  workflow-worker event-worker web` built all five service images.
+- `docker compose up -d` and `docker compose ps` started a healthy
+  production-shaped stack. The integration harness requires the repository's
+  documented localhost port bindings, so the stack was then started with
+  `docker compose -f compose.yaml -f compose.dev.yaml up -d`; every required
+  service was healthy and ports 55432, 4222, 7233, and 8093 were published.
+  `docker compose exec -T api jhin-db-migrate` reported migrations at `head`.
+- `uv run pytest -m integration tests/integration/test_phase8_exit.py -v`
+  passed all 5 focused Phase 8 scenarios in 57.16 seconds.
+- `uv run ruff check .` passed; `uv run ruff format --check .` reported 313
+  files already formatted; `uv run mypy` found no issues in 240 source files;
+  and `uv run pytest -m "not integration"` passed 451 tests with 46 deselected
+  in 32.08 seconds. The unit run emitted one existing Starlette deprecation
+  warning from FastAPI's `TestClient`/httpx boundary.
+- `pnpm --filter jhin-web lint` and `pnpm --filter jhin-web typecheck` passed;
+  `pnpm --filter jhin-web test` passed 61 tests across 9 files in 2.08 seconds;
+  and `pnpm --filter jhin-web exec next build --webpack` produced 15 static
+  routes and one dynamic route. Vitest emitted a forward-looking Vite native
+  config-loader warning for ESM syntax in `vitest.config.ts`.
+- `uv run pytest -m integration tests/integration -v` passed all 46 integration
+  scenarios in 160.22 seconds. The first run against plain production Compose
+  produced 26 passes, 13 failures, and 7 errors because its localhost test
+  ports were intentionally absent; after applying the dev overlay, six
+  representative formerly failing scenarios passed before the complete rerun.
+  No source change was required.
 
 ## Deferred scope
 

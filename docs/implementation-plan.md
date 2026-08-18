@@ -3258,16 +3258,16 @@ Each phase must end in independently testable software. Do not build all infrast
 
 **Deliverable:** CTO/SWE/QA style hierarchical work.
 
-- [ ] Structured agent messages.
-- [ ] Delegation tool.
-- [ ] Child Temporal workflows.
-- [ ] Delegation permissions.
-- [ ] Manager result summaries.
-- [ ] Task parent/child display.
-- [ ] Engineering template.
-- [ ] QA workflow.
-- [ ] failure/fix/retest loop.
-- [ ] Concurrency controls.
+- [x] Structured agent messages.
+- [x] Delegation tool.
+- [x] Child Temporal workflows.
+- [x] Delegation permissions.
+- [x] Manager result summaries.
+- [x] Task parent/child display.
+- [x] Engineering template.
+- [x] QA workflow.
+- [x] failure/fix/retest loop.
+- [x] Concurrency controls.
 
 **Exit test:** SWE can delegate QA or manager can route QA; failed QA returns work and retest completes.
 
