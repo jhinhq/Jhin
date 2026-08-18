@@ -9,6 +9,7 @@ import { Check, ChevronLeft, ChevronRight, Lock } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
 import { PageHeader } from "@/components/app-shell";
+import { ScopeEditor } from "@/components/scope-editor";
 import {
   Badge,
   Button,
@@ -20,10 +21,9 @@ import {
   Textarea,
 } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
-import { buildConnectorScope, capabilityConnectorType } from "@/lib/connectors";
+import { missingRequiredScopeKeys } from "@/lib/connectors";
 import {
   useConnections,
-  useConnectors,
   useInvalidateOrg,
   useModelProfiles,
   useOrgGraph,
@@ -37,7 +37,8 @@ import {
   canSubmit,
   EMPTY_WIZARD,
   toCreatePayload,
-  toggleCapability,
+  grantPayloadsForTools,
+  toggleTool,
   validateStep,
   WIZARD_STEPS,
   type WizardState,
@@ -111,7 +112,6 @@ function WizardInner() {
   const graph = useOrgGraph(workspaceId);
   const profiles = useModelProfiles(workspaceId);
   const tools = useTools(workspaceId);
-  const connectors = useConnectors();
   const connections = useConnections(workspaceId);
   const workspaceDetail = useWorkspaceDetail(workspaceId);
   const invalidate = useInvalidateOrg(workspaceId);
@@ -132,20 +132,10 @@ function WizardInner() {
         method: "POST",
         body: toCreatePayload(state),
       });
-      // Apply tool grants and the approval policy chosen in steps 5-6.
-      // Connector capabilities carry the connection/repository scope (plan 11).
-      const connectorTypes = (connectors.data ?? []).map((c) => c.connector_type);
-      for (const capability of state.grantCapabilities) {
-        const isConnector = capabilityConnectorType(capability, connectorTypes) !== null;
+      for (const grant of grantPayloadsForTools(state, tools.data ?? [])) {
         await api(`/api/v1/workspaces/${workspaceId}/agents/${agent.id}/grants`, {
           method: "POST",
-          body: {
-            capability,
-            scope: isConnector
-              ? buildConnectorScope(state.grantConnectionId, state.grantRepository, "")
-              : {},
-            effect: "allow",
-          },
+          body: grant,
         });
       }
       await api(`/api/v1/workspaces/${workspaceId}/agents/${agent.id}/policy`, {
@@ -329,7 +319,7 @@ function WizardInner() {
             >
               <div className="space-y-2 pt-1">
                 {(tools.data ?? []).map((tool) => {
-                  const checked = state.grantCapabilities.includes(tool.required_capability);
+                  const checked = state.grantToolNames.includes(tool.name);
                   return (
                     <label
                       key={tool.name}
@@ -340,7 +330,7 @@ function WizardInner() {
                       <input
                         type="checkbox"
                         checked={checked}
-                        onChange={() => setState(toggleCapability(state, tool.required_capability))}
+                        onChange={() => setState(toggleTool(state, tool.name))}
                         className="mt-0.5 accent-[var(--accent)]"
                       />
                       <span className="min-w-0 flex-1">
@@ -349,6 +339,9 @@ function WizardInner() {
                           <Badge tone={riskTone(tool.risk)}>{tool.risk}</Badge>
                         </span>
                         <span className="mt-0.5 block text-xs text-dim">{tool.description}</span>
+                        <code className="mt-1 block text-[11px] text-faint">
+                          {tool.required_capability}
+                        </code>
                       </span>
                     </label>
                   );
@@ -356,39 +349,25 @@ function WizardInner() {
                 {tools.isPending ? <Spinner /> : null}
               </div>
             </Field>
-            {state.grantCapabilities.some(
-              (capability) =>
-                capabilityConnectorType(
-                  capability,
-                  (connectors.data ?? []).map((c) => c.connector_type),
-                ) !== null,
-            ) ? (
-              <div className="grid gap-3 rounded-lg border border-line bg-surface px-4 py-3 sm:grid-cols-2">
-                <Field
-                  label="Connection for connector tools"
-                  hint="Restricts the granted connector capabilities to one connection."
-                >
-                  <Select
-                    value={state.grantConnectionId}
-                    onChange={(e) => patch({ grantConnectionId: e.target.value })}
-                  >
-                    <option value="">Any connection</option>
-                    {(connections.data ?? []).map((connection) => (
-                      <option key={connection.id} value={connection.id}>
-                        {connection.name} ({connection.connector_type})
-                      </option>
-                    ))}
-                  </Select>
-                </Field>
-                <Field label="Repository scope" hint="Exact or glob, e.g. octo/* — empty = any.">
-                  <Input
-                    value={state.grantRepository}
-                    onChange={(e) => patch({ grantRepository: e.target.value })}
-                    placeholder="octo/alpha"
+            {(tools.data ?? []).filter((tool) => state.grantToolNames.includes(tool.name)).map((tool) => (
+              tool.scope_keys.length > 0 ? (
+                <div key={tool.name} className="space-y-2 rounded-lg border border-line bg-surface px-4 py-3">
+                  <p className="text-xs font-medium">
+                    <code>{tool.name}</code> scope
+                  </p>
+                  <ScopeEditor
+                    tool={tool}
+                    connections={(connections.data ?? []).filter(
+                      (connection) => connection.connector_type === tool.name.split(".", 1)[0],
+                    )}
+                    values={state.grantScopes[tool.name] ?? {}}
+                    onChange={(values) => patch({
+                      grantScopes: { ...state.grantScopes, [tool.name]: values },
+                    })}
                   />
-                </Field>
-              </div>
-            ) : null}
+                </div>
+              ) : null
+            ))}
           </div>
         ) : step === 6 ? (
           <div className="space-y-4">
@@ -476,11 +455,11 @@ function WizardInner() {
               <ReviewRow
                 label="Tools"
                 value={
-                  state.grantCapabilities.length > 0 ? (
+                  state.grantToolNames.length > 0 ? (
                     <span className="text-xs">
-                      {state.grantCapabilities.map((capability) => (
-                        <code key={capability} className="ml-1.5 text-[12px]">
-                          {capability}
+                      {state.grantToolNames.map((toolName) => (
+                        <code key={toolName} className="ml-1.5 text-[12px]">
+                          {toolName}
                         </code>
                       ))}
                     </span>
@@ -524,7 +503,14 @@ function WizardInner() {
           ) : (
             <Button
               variant="primary"
-              disabled={!canSubmit(state) || create.isPending}
+              disabled={
+                !canSubmit(state) ||
+                create.isPending ||
+                (tools.data ?? []).some(
+                  (tool) => state.grantToolNames.includes(tool.name) &&
+                    missingRequiredScopeKeys(tool, state.grantScopes[tool.name] ?? {}).length > 0,
+                )
+              }
               onClick={() => create.mutate()}
             >
               <Check size={14} /> {create.isPending ? "Creating…" : "Create agent"}

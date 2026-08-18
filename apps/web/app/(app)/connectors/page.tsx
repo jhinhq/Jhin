@@ -17,6 +17,7 @@ import {
 import { useState } from "react";
 import { PageHeader } from "@/components/app-shell";
 import { ConnectorsGallery } from "@/components/connectors-gallery";
+import { ConnectionAccessSummary } from "@/components/connection-access-summary";
 import {
   Badge,
   Button,
@@ -32,15 +33,19 @@ import {
 import { api, ApiError } from "@/lib/api";
 import {
   findAuthScheme,
+  coerceConnectorConfig,
+  configFieldsForAuth,
   validateConnectionForm,
   webhookPayloadUrl,
 } from "@/lib/connectors";
 import { formatDateTime } from "@/lib/format";
 import {
   useConnections,
+  useConnectionAccessSummary,
   useConnectionToolCalls,
   useConnectors,
   useInvalidateConnections,
+  useMarkConnectionWebhookConfigured,
 } from "@/lib/hooks";
 import type {
   ConnectionCreated,
@@ -68,13 +73,14 @@ export default function ConnectorsPage() {
   const connectors = useConnectors();
   const connections = useConnections(workspaceId, isAdmin);
   const invalidate = useInvalidateConnections(workspaceId);
+  const markWebhookConfigured = useMarkConnectionWebhookConfigured(workspaceId);
 
   const [createFor, setCreateFor] = useState<ConnectorInfo | null>(null);
   const [webhookOnce, setWebhookOnce] = useState<{
-    connectionName: string;
+    connection: ConnectionInfo;
     webhook: WebhookSetup;
   } | null>(null);
-  const [detail, setDetail] = useState<ConnectionInfo | null>(null);
+  const [detailId, setDetailId] = useState<string | null>(null);
 
   if (connectors.isPending) {
     return (
@@ -89,6 +95,9 @@ export default function ConnectorsPage() {
 
   const connectorList = connectors.data ?? [];
   const connectionList = connections.data ?? [];
+  const detail = detailId
+    ? connectionList.find((connection) => connection.id === detailId) ?? null
+    : null;
   const detailConnector = detail
     ? connectorList.find((c) => c.connector_type === detail.connector_type)
     : undefined;
@@ -126,7 +135,7 @@ export default function ConnectorsPage() {
                     key={connection.id}
                     type="button"
                     data-testid={`connection-${connection.name}`}
-                    onClick={() => setDetail(connection)}
+                    onClick={() => setDetailId(connection.id)}
                     className="flex flex-col gap-2 rounded-xl border border-line bg-surface px-5 py-4 text-left transition-colors hover:border-line-strong"
                   >
                     <header className="flex items-center justify-between gap-2">
@@ -169,7 +178,7 @@ export default function ConnectorsPage() {
             setCreateFor(null);
             if (created.webhook) {
               setWebhookOnce({
-                connectionName: created.connection.name,
+                connection: created.connection,
                 webhook: created.webhook,
               });
             }
@@ -179,9 +188,15 @@ export default function ConnectorsPage() {
 
       {webhookOnce ? (
         <WebhookSecretDialog
-          connectionName={webhookOnce.connectionName}
+          connectionName={webhookOnce.connection.name}
+          connectionId={webhookOnce.connection.id}
+          workspaceId={workspaceId}
           webhook={webhookOnce.webhook}
           onClose={() => setWebhookOnce(null)}
+          onStored={() => {
+            markWebhookConfigured(webhookOnce.connection);
+            invalidate();
+          }}
         />
       ) : null}
 
@@ -190,10 +205,10 @@ export default function ConnectorsPage() {
           workspaceId={workspaceId}
           connection={detail}
           connector={detailConnector}
-          onClose={() => setDetail(null)}
+          onClose={() => setDetailId(null)}
           onChanged={() => {
             invalidate();
-            setDetail(null);
+            setDetailId(null);
           }}
         />
       ) : null}
@@ -215,7 +230,19 @@ function CreateConnectionDialog({
   const [name, setName] = useState("");
   const [authType, setAuthType] = useState(connector.auth_schemes[0]?.type ?? "");
   const [credentials, setCredentials] = useState<Record<string, string>>({});
-  const [config, setConfig] = useState<Record<string, string>>({});
+  const initialConfig = (selectedAuth: string) => Object.fromEntries(
+    configFieldsForAuth(connector, selectedAuth)
+      .filter((field) => field.default !== null)
+      .map((field) => [
+        field.name,
+        Array.isArray(field.default)
+          ? field.default.join("\n")
+          : typeof field.default === "boolean"
+            ? field.default
+            : String(field.default),
+      ]),
+  );
+  const [config, setConfig] = useState<Record<string, string | boolean>>(() => initialConfig(authType));
   const [formErrors, setFormErrors] = useState<string[]>([]);
 
   const scheme = findAuthScheme(connector, authType);
@@ -231,9 +258,7 @@ function CreateConnectionDialog({
           credentials: Object.fromEntries(
             Object.entries(credentials).filter(([, value]) => value.trim() !== ""),
           ),
-          config: Object.fromEntries(
-            Object.entries(config).filter(([, value]) => value.trim() !== ""),
-          ),
+          config: coerceConnectorConfig(configFieldsForAuth(connector, authType), config),
         },
       }),
     onSuccess: onCreated,
@@ -266,6 +291,7 @@ function CreateConnectionDialog({
             onChange={(e) => {
               setAuthType(e.target.value);
               setCredentials({});
+              setConfig(initialConfig(e.target.value));
             }}
           >
             {connector.auth_schemes.map((s) => (
@@ -309,16 +335,56 @@ function CreateConnectionDialog({
           </Field>
         ))}
 
-        {connector.config_fields.map((field) => (
-          <Field key={field.name} label={field.label} hint={field.help}>
-            <Input
-              value={config[field.name] ?? ""}
-              onChange={(e) => setConfig((prev) => ({ ...prev, [field.name]: e.target.value }))}
-              placeholder={field.placeholder}
-              required={field.required}
-            />
-          </Field>
-        ))}
+        {configFieldsForAuth(connector, authType)
+          .filter((field) => field.name !== "allow_writes")
+          .map((field) => (
+            <Field key={field.name} label={field.label} hint={field.help}>
+              {field.kind === "boolean" ? (
+                <input
+                  aria-label={field.label}
+                  type="checkbox"
+                  checked={config[field.name] === true}
+                  onChange={(e) => setConfig((prev) => ({ ...prev, [field.name]: e.target.checked }))}
+                />
+              ) : field.kind === "string_list" ? (
+                <Textarea
+                  rows={3}
+                  value={String(config[field.name] ?? "")}
+                  onChange={(e) => setConfig((prev) => ({ ...prev, [field.name]: e.target.value }))}
+                  placeholder={field.placeholder}
+                  required={field.required}
+                />
+              ) : (
+                <Input
+                  type={field.kind === "integer" ? "number" : "text"}
+                  min={field.minimum ?? undefined}
+                  max={field.maximum ?? undefined}
+                  value={String(config[field.name] ?? "")}
+                  onChange={(e) => setConfig((prev) => ({ ...prev, [field.name]: e.target.value }))}
+                  placeholder={field.placeholder}
+                  required={field.required}
+                />
+              )}
+            </Field>
+          ))}
+
+        {configFieldsForAuth(connector, authType).some((field) => field.name === "allow_writes") ? (
+          <details className="rounded-lg border border-warn/30 bg-warn/5 px-3 py-2.5">
+            <summary className="cursor-pointer text-xs font-semibold">Advanced database access</summary>
+            <label className="mt-3 flex items-start gap-2 text-sm">
+              <input
+                aria-label="Allow database writes"
+                type="checkbox"
+                checked={config.allow_writes === true}
+                onChange={(e) => setConfig((prev) => ({ ...prev, allow_writes: e.target.checked }))}
+              />
+              <span>
+                Allow database writes
+                <span className="block text-xs text-dim">Off by default. DDL is never available to agents.</span>
+              </span>
+            </label>
+          </details>
+        ) : null}
 
         {formErrors.length > 0 ? <ErrorNote message={formErrors.join(" ")} /> : null}
         <ErrorNote message={errText(create.error, "Creating the connection failed.")} />
@@ -361,38 +427,84 @@ function CopyRow({ label, value }: { label: string; value: string }) {
 }
 
 function WebhookSecretDialog({
+  workspaceId,
+  connectionId,
   connectionName,
   webhook,
   onClose,
+  onStored,
 }: {
+  workspaceId: string;
+  connectionId: string;
   connectionName: string;
   webhook: WebhookSetup;
   onClose: () => void;
+  onStored: () => Promise<void> | void;
 }) {
   const origin = typeof window === "undefined" ? "" : window.location.origin;
+  const [providerSecret, setProviderSecret] = useState("");
+  const storeSecret = useMutation({
+    mutationFn: () => api(
+      `/api/v1/workspaces/${workspaceId}/connections/${connectionId}/webhook-secret`,
+      { method: "PUT", body: { secret: providerSecret } },
+    ),
+    onSuccess: async () => {
+      setProviderSecret("");
+      await onStored();
+      onClose();
+    },
+  });
+  const providerSupplied = webhook.secret_mode === "provider_supplied";
   return (
-    <Dialog title="Webhook setup — shown once" open onClose={onClose}>
+    <Dialog title={providerSupplied ? "Webhook setup" : "Webhook secret — shown once"} open onClose={onClose}>
       <div className="space-y-4">
         <p className="text-sm text-dim">
-          Configure the provider webhook for <strong className="text-ink">{connectionName}</strong>{" "}
-          with this payload URL and signing secret. The secret is{" "}
-          <strong className="text-ink">not retrievable later</strong> — store it now.
+          Configure the provider webhook for <strong className="text-ink">{connectionName}</strong>.
         </p>
-        <CopyRow label="Payload URL" value={webhookPayloadUrl(webhook.url_path, origin)} />
-        <CopyRow label="Signing secret" value={webhook.secret} />
-        <p className="rounded-md border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-warn">
-          Choose content type “application/json” and secret-based HMAC (SHA-256) signing.
-          Deliveries with a missing or invalid signature are rejected.
-        </p>
+        <CopyRow
+          label={providerSupplied ? "Callback URL" : "Payload URL"}
+          value={webhookPayloadUrl(webhook.url_path, origin)}
+        />
+        {providerSupplied ? (
+          <form className="space-y-3" onSubmit={(event) => { event.preventDefault(); storeSecret.mutate(); }}>
+            <p className="rounded-md border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-warn">
+              Create the webhook in Vercel. Jhin verifies the x-vercel-signature header with HMAC SHA1.
+            </p>
+            <Field label="Provider-generated signing secret" hint="Write-only: the stored value is never displayed.">
+              <Input
+                type="password"
+                autoComplete="off"
+                minLength={16}
+                required
+                value={providerSecret}
+                onChange={(event) => setProviderSecret(event.target.value)}
+              />
+            </Field>
+            <Button type="submit" variant="primary" disabled={storeSecret.isPending || providerSecret.length < 16}>
+              {storeSecret.isPending ? "Storing…" : "Store provider secret"}
+            </Button>
+            <ErrorNote message={errText(storeSecret.error, "Storing the webhook secret failed.")} />
+          </form>
+        ) : webhook.secret ? (
+          <>
+            <CopyRow label="Signing secret" value={webhook.secret} />
+            <p className="rounded-md border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-warn">
+              This generated secret is shown once and cannot be retrieved later.
+            </p>
+          </>
+        ) : null}
+        {webhook.help ? <p className="text-xs text-dim">{webhook.help}</p> : null}
         <div className="flex justify-end">
-          <Button variant="primary" onClick={onClose}>
-            I stored the secret
+          <Button variant={providerSupplied ? "ghost" : "primary"} onClick={onClose}>
+            {providerSupplied ? "Close" : "I stored the secret"}
           </Button>
         </div>
       </div>
     </Dialog>
   );
 }
+
+ConnectorsPage.WebhookSecretDialog = WebhookSecretDialog;
 
 function ConnectionDetailDialog({
   workspaceId,
@@ -409,9 +521,11 @@ function ConnectionDetailDialog({
 }) {
   const base = `/api/v1/workspaces/${workspaceId}/connections/${connection.id}`;
   const toolCalls = useConnectionToolCalls(workspaceId, connection.id);
+  const accessSummary = useConnectionAccessSummary(workspaceId, connection.id);
   const [verifyResult, setVerifyResult] = useState<VerifyResult | null>(null);
   const [rotating, setRotating] = useState(false);
   const [rotateCredentials, setRotateCredentials] = useState<Record<string, string>>({});
+  const [webhookSecret, setWebhookSecret] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   const scheme = findAuthScheme(connector, connection.auth_type);
@@ -457,6 +571,18 @@ function ConnectionDetailDialog({
     mutationFn: () => api<void>(base, { method: "DELETE" }),
     onSuccess: onChanged,
     onError: (err) => setError(errText(err, "Deleting the connection failed.")),
+  });
+
+  const storeWebhookSecret = useMutation({
+    mutationFn: () => api(`${base}/webhook-secret`, {
+      method: "PUT",
+      body: { secret: webhookSecret },
+    }),
+    onSuccess: () => {
+      setWebhookSecret("");
+      onChanged();
+    },
+    onError: (err) => setError(errText(err, "Storing the webhook secret failed.")),
   });
 
   const calls = toolCalls.data ?? [];
@@ -521,9 +647,42 @@ function ConnectionDetailDialog({
               )}
             />
             <p className="text-[11px] text-faint">
-              The signing secret was shown once at creation and cannot be retrieved. Delete and
-              recreate the connection if it was lost.
+              {connection.webhook_secret_configured
+                ? "Webhook secret configured"
+                : connector.webhook_secret_mode === "provider_supplied"
+                  ? "Webhook secret not configured. Store the provider-generated secret from setup."
+                  : "Webhook secret is not configured."}
             </p>
+            {connector.webhook_secret_mode === "provider_supplied" ? (
+              <form
+                className="space-y-2 border-t border-line pt-2"
+                onSubmit={(event) => { event.preventDefault(); storeWebhookSecret.mutate(); }}
+              >
+                <p className="text-xs text-dim">
+                  Vercel signs the callback in the x-vercel-signature header with HMAC SHA1.
+                </p>
+                <Field
+                  label="Provider-generated signing secret"
+                  hint="Paste the Vercel secret here. It is write-only and cannot be read back."
+                >
+                  <Input
+                    type="password"
+                    autoComplete="off"
+                    minLength={16}
+                    required
+                    value={webhookSecret}
+                    onChange={(event) => setWebhookSecret(event.target.value)}
+                  />
+                </Field>
+                <Button
+                  type="submit"
+                  size="sm"
+                  disabled={storeWebhookSecret.isPending || webhookSecret.length < 16}
+                >
+                  {storeWebhookSecret.isPending ? "Storing…" : "Store provider secret"}
+                </Button>
+              </form>
+            ) : null}
           </div>
         ) : null}
 
@@ -573,6 +732,17 @@ function ConnectionDetailDialog({
             </div>
           </form>
         ) : null}
+
+        <section>
+          <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-dim">
+            Agent access
+          </h3>
+          {accessSummary.isPending ? <Spinner /> : accessSummary.data ? (
+            <ConnectionAccessSummary summary={accessSummary.data} />
+          ) : (
+            <p className="text-xs text-danger">Access summary could not be loaded.</p>
+          )}
+        </section>
 
         <section>
           <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-dim">

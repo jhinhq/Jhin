@@ -6,7 +6,10 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-DEV_CONNECTOR_ORIGINS = "http://fake-github:8080,http://fake-linear:8080"
+DEV_CONNECTOR_ORIGINS = (
+    "http://fake-github:8080,http://fake-linear:8080,"
+    "http://fake-vercel:8080,http://fake-supabase:8080"
+)
 
 
 def _render_compose(*files: str) -> dict[str, Any]:

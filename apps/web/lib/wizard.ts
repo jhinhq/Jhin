@@ -3,7 +3,8 @@
  * and pure validation functions (unit-tested).
  */
 
-import type { ApprovalPreset, AutonomyLevel } from "@/lib/types";
+import type { ApprovalPreset, AutonomyLevel, ToolInfo } from "@/lib/types";
+import { buildToolScope, type ToolScopeValues } from "@/lib/connectors";
 
 export interface WizardState {
   name: string;
@@ -15,11 +16,8 @@ export interface WizardState {
   /** Empty string = use the workspace default profile (plan 15.2). */
   modelProfileId: string;
   /** Capabilities to allow-grant right after creation (plan 12.3). */
-  grantCapabilities: string[];
-  /** Scope applied to connector-capability grants (plan 11): restrict to one
-   * connection and optional repository glob. Empty = unscoped. */
-  grantConnectionId: string;
-  grantRepository: string;
+  grantToolNames: string[];
+  grantScopes: Record<string, ToolScopeValues>;
   approvalPreset: ApprovalPreset;
   autonomyLevel: AutonomyLevel;
 }
@@ -32,9 +30,8 @@ export const EMPTY_WIZARD: WizardState = {
   teamId: "",
   managerAgentId: "",
   modelProfileId: "",
-  grantCapabilities: [],
-  grantConnectionId: "",
-  grantRepository: "",
+  grantToolNames: [],
+  grantScopes: {},
   approvalPreset: "balanced",
   autonomyLevel: "supervised",
 };
@@ -187,12 +184,28 @@ export function toCreatePayload(state: WizardState): Record<string, unknown> {
 }
 
 /** Toggle a capability in the wizard's grant list (pure, unit-tested). */
-export function toggleCapability(state: WizardState, capability: string): WizardState {
-  const has = state.grantCapabilities.includes(capability);
+export function toggleTool(state: WizardState, toolName: string): WizardState {
+  const has = state.grantToolNames.includes(toolName);
   return {
     ...state,
-    grantCapabilities: has
-      ? state.grantCapabilities.filter((entry) => entry !== capability)
-      : [...state.grantCapabilities, capability],
+    grantToolNames: has
+      ? state.grantToolNames.filter((entry) => entry !== toolName)
+      : [...state.grantToolNames, toolName],
   };
+}
+
+export function grantPayloadsForTools(
+  state: WizardState,
+  tools: ToolInfo[],
+): { capability: string; scope: Record<string, string>; effect: "allow" }[] {
+  const selected = new Set(state.grantToolNames);
+  const seen = new Set<string>();
+  return tools.flatMap((tool) => {
+    if (!selected.has(tool.name)) return [];
+    const scope = buildToolScope(tool, state.grantScopes[tool.name] ?? {});
+    const key = `${tool.required_capability}\0${JSON.stringify(Object.entries(scope).sort())}`;
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [{ capability: tool.required_capability, scope, effect: "allow" as const }];
+  });
 }

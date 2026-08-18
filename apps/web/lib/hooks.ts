@@ -11,6 +11,7 @@ import type {
   AuditEventPage,
   BootstrapStatus,
   ConnectionInfo,
+  ConnectionAccessSummaryOut,
   ConnectorInfo,
   Grant,
   Member,
@@ -310,11 +311,42 @@ export function useConnectionToolCalls(workspaceId: string, connectionId: string
   });
 }
 
+export function useConnectionAccessSummary(workspaceId: string, connectionId: string | null) {
+  return useQuery({
+    queryKey: ["connection-access-summary", workspaceId, connectionId],
+    queryFn: () =>
+      api<ConnectionAccessSummaryOut>(
+        `/api/v1/workspaces/${workspaceId}/connections/${connectionId}/access-summary`,
+      ),
+    enabled: connectionId !== null,
+  });
+}
+
 export function useInvalidateConnections(workspaceId: string) {
   const queryClient = useQueryClient();
   return () => {
     void queryClient.invalidateQueries({ queryKey: ["connections", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["connection-tool-calls", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["connection-access-summary", workspaceId] });
+  };
+}
+
+/** Apply the write response synchronously so UI state never waits on refetch. */
+export function useMarkConnectionWebhookConfigured(workspaceId: string) {
+  const queryClient = useQueryClient();
+  return (connection: ConnectionInfo) => {
+    const configured = { ...connection, webhook_secret_configured: true };
+    queryClient.setQueryData<ConnectionInfo[]>(
+      ["connections", workspaceId],
+      (current) => {
+        if (!current) return [configured];
+        return current.some((item) => item.id === connection.id)
+          ? current.map((item) => item.id === connection.id
+            ? { ...item, webhook_secret_configured: true }
+            : item)
+          : [...current, configured];
+      },
+    );
   };
 }
 

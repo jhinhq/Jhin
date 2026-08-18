@@ -21,6 +21,9 @@ const GITHUB: ConnectorInfo = {
   canonical_events: [],
   capabilities: ["github.repository.read", "github.branch.create"],
   supports_webhooks: true,
+  webhook_secret_mode: "generated",
+  webhook_signature_algorithm: "hmac-sha256",
+  webhook_setup_help: "Store the generated secret.",
   docs_url: "",
 };
 
@@ -45,12 +48,21 @@ describe("ConnectorsGallery", () => {
 
   it("shows upcoming connectors greyed out with their phase", () => {
     render(<ConnectorsGallery connectors={[GITHUB]} canManage onConnect={() => {}} />);
-    expect(screen.getByText("Linear")).toBeDefined();
-    expect(screen.getByText("Vercel")).toBeDefined();
-    expect(screen.getByText("Supabase")).toBeDefined();
     expect(screen.getByText("HTTP")).toBeDefined();
     // CLI is live since Phase 6 — no longer in the upcoming list.
     expect(screen.queryByText("CLI")).toBeNull();
-    expect(screen.getAllByText(/Arrives in Phase \d+/).length).toBe(4);
+    expect(screen.getAllByText(/Future work/).length).toBe(1);
+  });
+
+  it("renders Linear, Vercel, and Supabase exactly once when supplied live", () => {
+    const live = ["linear", "vercel", "supabase"].map((connector_type) => ({
+      ...GITHUB,
+      connector_type,
+      display_name: connector_type[0].toUpperCase() + connector_type.slice(1),
+    }));
+    render(<ConnectorsGallery connectors={live} canManage onConnect={() => {}} />);
+    for (const name of ["Linear", "Vercel", "Supabase"]) {
+      expect(screen.getAllByText(name)).toHaveLength(1);
+    }
   });
 });

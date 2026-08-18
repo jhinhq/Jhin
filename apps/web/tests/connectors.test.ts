@@ -2,16 +2,20 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  buildToolScope,
   buildCliScope,
   buildConnectorScope,
   capabilityConnectorType,
   CLI_SCOPE_FIELDS,
+  coerceConnectorConfig,
+  configFieldsForAuth,
   findAuthScheme,
+  missingRequiredScopeKeys,
   UPCOMING_CONNECTORS,
   validateConnectionForm,
   webhookPayloadUrl,
 } from "@/lib/connectors";
-import type { ConnectorInfo } from "@/lib/types";
+import type { ConnectorInfo, ToolInfo } from "@/lib/types";
 
 const GITHUB: ConnectorInfo = {
   connector_type: "github",
@@ -55,6 +59,9 @@ const GITHUB: ConnectorInfo = {
   canonical_events: [],
   capabilities: ["github.repository.read"],
   supports_webhooks: true,
+  webhook_secret_mode: "generated",
+  webhook_signature_algorithm: "hmac-sha256",
+  webhook_setup_help: "Store the generated secret.",
   docs_url: "",
 };
 
@@ -83,6 +90,29 @@ describe("validateConnectionForm", () => {
 });
 
 describe("connector scope helpers", () => {
+  const tool: ToolInfo = {
+    name: "vercel.deployment.read",
+    description: "Read deployment",
+    risk: "read",
+    required_capability: "vercel.deployment.read",
+    supports_approval: false,
+    scope_keys: ["connection_id", "project_id", "deployment_id"],
+    required_grant_scope_keys: ["connection_id", "project_id"],
+    input_schema: {},
+  };
+
+  it("builds only declared per-tool scope and identifies missing required keys", () => {
+    expect(buildToolScope(tool, {
+      connection_id: " conn-1 ",
+      project_id: "prj-1",
+      deployment_id: "",
+      repository: "must-not-leak",
+    })).toEqual({ connection_id: "conn-1", project_id: "prj-1" });
+    expect(missingRequiredScopeKeys(tool, { connection_id: "conn-1", project_id: " " })).toEqual([
+      "project_id",
+    ]);
+  });
+
   it("maps capabilities to their owning connector", () => {
     expect(capabilityConnectorType("github.pull_request.create", ["github"])).toBe("github");
     expect(capabilityConnectorType("system.echo", ["github"])).toBeNull();
@@ -127,11 +157,9 @@ describe("connector scope helpers", () => {
 describe("gallery data", () => {
   it("lists the roadmap connectors with phases", () => {
     const types = UPCOMING_CONNECTORS.map((c) => c.connector_type);
-    expect(types).toEqual(["linear", "vercel", "supabase", "http"]);
+    expect(types).toEqual(["http"]);
     expect(types).not.toContain("cli"); // live since Phase 6
-    for (const upcoming of UPCOMING_CONNECTORS) {
-      expect(upcoming.phase).toMatch(/^Phase \d+$/);
-    }
+    expect(UPCOMING_CONNECTORS[0].phase).toBe("Future work");
   });
 
   it("finds auth schemes and builds webhook URLs", () => {
@@ -140,5 +168,47 @@ describe("gallery data", () => {
     expect(webhookPayloadUrl("/api/v1/webhooks/github/abc", "https://jhin.example/")).toBe(
       "https://jhin.example/api/v1/webhooks/github/abc",
     );
+  });
+});
+
+describe("typed connector config", () => {
+  const connector: ConnectorInfo = {
+    ...GITHUB,
+    connector_type: "supabase",
+    config_fields: [
+      { name: "project_ref", label: "Project reference", required: true, placeholder: "", help: "", kind: "text", auth_types: ["management_token", "postgres"], default: null, minimum: null, maximum: null },
+      { name: "base_url", label: "Base URL", required: false, placeholder: "", help: "", kind: "text", auth_types: ["management_token"], default: "https://api.supabase.com", minimum: null, maximum: null },
+      { name: "allowed_schemas", label: "Allowed schemas", required: false, placeholder: "", help: "", kind: "string_list", auth_types: ["postgres"], default: ["public"], minimum: null, maximum: null },
+      { name: "allow_writes", label: "Allow writes", required: false, placeholder: "", help: "", kind: "boolean", auth_types: ["postgres"], default: false, minimum: null, maximum: null },
+      { name: "max_rows", label: "Max rows", required: false, placeholder: "", help: "", kind: "integer", auth_types: ["postgres"], default: 200, minimum: 1, maximum: 1000 },
+    ],
+  };
+
+  it("filters fields by auth and excludes values from the previous scheme", () => {
+    expect(configFieldsForAuth(connector, "management_token").map((field) => field.name)).toEqual([
+      "project_ref",
+      "base_url",
+    ]);
+    expect(configFieldsForAuth(connector, "postgres").map((field) => field.name)).toEqual([
+      "project_ref",
+      "allowed_schemas",
+      "allow_writes",
+      "max_rows",
+    ]);
+  });
+
+  it("coerces integer, boolean, and newline-separated list values", () => {
+    const fields = configFieldsForAuth(connector, "postgres");
+    expect(coerceConnectorConfig(fields, {
+      project_ref: "project-1",
+      allowed_schemas: "public\naudit\npublic",
+      allow_writes: false,
+      max_rows: "250",
+    })).toEqual({
+      project_ref: "project-1",
+      allowed_schemas: ["public", "audit"],
+      allow_writes: false,
+      max_rows: 250,
+    });
   });
 });

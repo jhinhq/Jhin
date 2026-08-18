@@ -1364,6 +1364,7 @@ git commit -m "feat: add bounded Supabase SQL execution"
 ### Task 7: Make connector setup and grant scopes data-driven; wire dev fakes and clean image builds
 
 **Files:**
+- Modify: `docs/superpowers/plans/2026-08-17-phase-9-vercel-supabase.md`
 - Create: `apps/web/components/scope-editor.tsx`
 - Create: `apps/web/tests/scope-editor.test.tsx`
 - Create: `apps/web/components/connection-access-summary.tsx`
@@ -1381,12 +1382,15 @@ git commit -m "feat: add bounded Supabase SQL execution"
 - Modify: `apps/web/app/(app)/agents/new/page.tsx`
 - Modify: `apps/web/app/(app)/connectors/page.tsx`
 - Modify: `apps/web/tests/connectors.test.ts`
+- Test: `apps/web/tests/connectors-page.test.tsx`
 - Modify: `apps/web/tests/connectors-gallery.test.tsx`
 - Modify: `apps/web/tests/wizard.test.ts`
 - Modify: `apps/web/tests/org-tree-render.test.tsx`
 - Modify: `docker/python.Dockerfile`
 - Modify: `compose.dev.yaml`
 - Modify: `.env.example`
+- Test: `tests/test_compose_connector_allowlist.py`
+- Test: `tests/test_compose_phase9_dev_fakes.py`
 
 **Interfaces:**
 - Consumes: API `ConfigFieldOut` auth types/kinds/defaults/bounds, `ToolOut.scope_keys`, `ToolOut.required_grant_scope_keys`, webhook mode/setup/configured status, fake provider modules, Supabase DB settings, and Task 6's existing `fake-supabase-db` service/fixture.
@@ -1449,7 +1453,7 @@ class ConnectionAccessSummaryOut(BaseModel):
     agents: list[ConnectionAgentAccessOut]
 ```
 
-Seed multiple workspaces, two agents, exact `connection_id` allow/deny grants, an unscoped grant, a grant for another connection, a wildcard capability, and a grant missing another required tool scope. The response includes only agents/grants relevant to this connection and installed connector capabilities, preserves each exact scope/effect, marks missing-required-scope grants ineligible, applies deny precedence when deriving `authorized_tool_names`, sorts deterministically, and never returns policy JSON, config secrets, credential IDs, or ciphertext. An admin receives `200`; a viewer receives `403`; a cross-workspace connection ID receives `404` with no agent/grant existence leak.
+Seed multiple workspaces, two agents, exact `connection_id` allow/deny grants, an unscoped allow, an unscoped/broad deny, a grant for another connection, a wildcard capability, and a grant missing another required tool scope. The response includes only agents/grants relevant to this connection and installed connector capabilities, preserves each exact scope/effect, marks missing-required-scope allows ineligible, applies runtime-compatible deny precedence when deriving `authorized_tool_names`, sorts deterministically, and never returns policy JSON, config secrets, credential IDs, or ciphertext. An admin receives `200`; a viewer receives `403`; a cross-workspace connection ID receives `404` with no agent/grant existence leak.
 
 Assert:
 
@@ -1474,7 +1478,7 @@ Run:
 
 ```bash
 uv run pytest apps/api/tests/test_connections_unit.py -q
-pnpm --filter jhin-web test -- connectors.test.ts connectors-gallery.test.tsx wizard.test.ts scope-editor.test.tsx connection-access-summary.test.tsx org-tree-render.test.tsx
+pnpm --filter jhin-web test -- connectors.test.ts connectors-page.test.tsx connectors-gallery.test.tsx wizard.test.ts scope-editor.test.tsx connection-access-summary.test.tsx org-tree-render.test.tsx
 ```
 
 Expected: FAIL because the access-summary route/component, scopes, config controls, and webhook setup do not exist or remain hard-coded.
@@ -1489,7 +1493,7 @@ Render config controls by manifest kind: text/password as appropriate, bounded i
 
 For `provider_supplied`, show setup metadata after create and in connection detail, accept the provider-generated secret through the new `PUT /webhook-secret` route, then discard the local form state. Remove Linear/Vercel/Supabase from `UPCOMING_CONNECTORS`; leave HTTP as future work without assigning it to completed Phase 9.
 
-Implement the access summary with one workspace-filtered query over `AgentCapabilityGrant` joined to `Agent`, then evaluate only the selected connector's registered tool definitions. A grant is relevant only when its exact scope contains this `connection_id` and its capability/pattern can match one of those tools; never treat an unscoped grant as connection authorization. For each matching tool, require every `required_grant_scope_key` to exist and apply existing capability/scope deny precedence before adding the tool name to `authorized_tool_names`. Return agents with relevant rows even when all rows are denied/incomplete so administrators can diagnose access, but set `authorized=True` only when at least one tool remains eligible. Render authorized agents first and place exact grants/scopes in an Advanced disclosure on the connection detail page.
+Implement the access summary with one streamed workspace-filtered query over `AgentCapabilityGrant` joined to `Agent`, filtered in SQL to the exact/prefix-wildcard/universal capability patterns that can match the selected connector's registered tools. Fetch in bounded driver batches, apply exact connection relevance before counting rows, retain at most 256 relevant rows, and return a stable generic `503` on the 257th; thousands of nonmatching glob denies must not consume the relevant-row cap. An allow is relevant only when its exact scope contains this `connection_id`; never treat an unscoped/broad allow as connection authorization. A deny is relevant when its exact or fnmatch-style `connection_id` scope covers this connection, including an unscoped connector deny. Required grant-scope keys constrain allows only; connection-only or broad denies still affect every matching tool. For each matching tool, apply existing capability/scope deny precedence before adding the tool name to `authorized_tool_names`; when two non-connection glob scope languages may overlap, conservatively report the tool as denied rather than claim authorization that a runtime invocation could lose. Return agents with relevant rows even when all rows are denied/incomplete so administrators can diagnose access, but set `authorized=True` only when at least one tool remains eligible. Render authorized agents first and place exact grants/scopes in an Advanced disclosure on the connection detail page.
 
 - [ ] **Step 5: Add the two dev HTTP fakes and clean-build coverage**
 
@@ -1500,7 +1504,7 @@ fake-vercel       module jhin_connectors.testing.fake_vercel, host port 8094
 fake-supabase     module jhin_connectors.testing.fake_supabase, host port 8095
 ```
 
-Build each from the agent-worker image, run its module on container port 8080, bind only `127.0.0.1:${FAKE_VERCEL_DEV_PORT:-8094}` or `127.0.0.1:${FAKE_SUPABASE_DEV_PORT:-8095}`, give `/_state` health checks, and attach only to the dev `data` network. Set `JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS` for both API and agent-worker to exactly `http://fake-vercel:8080,http://fake-supabase:8080`; production `compose.yaml` receives neither service nor this allowlist. Document the two override ports in `.env.example` without real credentials.
+Build each from the agent-worker image, run its module on container port 8080, bind only `127.0.0.1:${FAKE_VERCEL_DEV_PORT:-8094}` or `127.0.0.1:${FAKE_SUPABASE_DEV_PORT:-8095}`, give `/_state` health checks, and attach only to the dev `data` network. Preserve Task 2's GitHub/Linear development endpoints and extend `JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS` for both API and agent-worker to exactly `http://fake-github:8080,http://fake-linear:8080,http://fake-vercel:8080,http://fake-supabase:8080` in that stable order. Replacing the prior origins would regress existing connector verification and worker tools. Production `compose.yaml` receives neither service nor this allowlist. Document the two override ports in `.env.example` without real credentials.
 
 In the dependency-cache stage of `docker/python.Dockerfile`, add the missing workspace manifests:
 
@@ -1516,6 +1520,7 @@ Run:
 
 ```bash
 uv run pytest apps/api/tests/test_connections_unit.py -q
+uv run pytest tests/test_compose_phase9_dev_fakes.py tests/test_compose_connector_allowlist.py tests/test_compose_supabase_db_fixture.py -q
 pnpm --filter jhin-web lint
 pnpm --filter jhin-web typecheck
 pnpm --filter jhin-web test
@@ -1531,7 +1536,7 @@ Expected: connection access-summary RBAC/query tests and web gates pass; Compose
 - [ ] **Step 7: Commit UI and dev infrastructure**
 
 ```bash
-git add apps/api/src/jhin_api/connections apps/api/tests/test_connections_unit.py apps/web docker/python.Dockerfile compose.dev.yaml .env.example
+git add docs/superpowers/plans/2026-08-17-phase-9-vercel-supabase.md apps/api/src/jhin_api/connections apps/api/tests/test_connections_unit.py apps/web docker/python.Dockerfile compose.dev.yaml .env.example tests/test_compose_connector_allowlist.py tests/test_compose_phase9_dev_fakes.py
 git commit -m "feat: add scoped production connector setup"
 ```
 

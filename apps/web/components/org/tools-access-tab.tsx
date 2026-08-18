@@ -6,19 +6,14 @@
 import { useMutation } from "@tanstack/react-query";
 import { Plus, ShieldCheck, ShieldOff, Trash2 } from "lucide-react";
 import { useState } from "react";
-import { Badge, Button, ErrorNote, Field, Input, Select, Spinner } from "@/components/ui";
+import { Badge, Button, ErrorNote, Field, Select, Spinner } from "@/components/ui";
+import { ScopeEditor } from "@/components/scope-editor";
 import { api, ApiError } from "@/lib/api";
-import {
-  buildCliScope,
-  buildConnectorScope,
-  capabilityConnectorType,
-  CLI_SCOPE_FIELDS,
-} from "@/lib/connectors";
+import { buildToolScope, missingRequiredScopeKeys, type ToolScopeValues } from "@/lib/connectors";
 import {
   useAgentGrants,
   useAgentPolicy,
   useConnections,
-  useConnectors,
   useInvalidateAgentAccess,
   useTools,
 } from "@/lib/hooks";
@@ -42,27 +37,25 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
   const grants = useAgentGrants(workspaceId, agent.id);
   const policy = useAgentPolicy(workspaceId, agent.id);
   const tools = useTools(workspaceId);
-  const connectors = useConnectors();
   const connections = useConnections(workspaceId, can("admin"));
   const invalidate = useInvalidateAgentAccess(workspaceId, agent.id);
 
-  const [capability, setCapability] = useState("");
+  const [toolName, setToolName] = useState("");
   const [effect, setEffect] = useState<GrantEffect>("allow");
-  const [connectionId, setConnectionId] = useState("");
-  const [repoScope, setRepoScope] = useState("");
-  const [branchScope, setBranchScope] = useState("");
-  const [cliScope, setCliScope] = useState<Record<string, string>>({});
+  const [scopeValues, setScopeValues] = useState<ToolScopeValues>({});
   const [delegationTargets, setDelegationTargets] = useState("subordinates");
   const [error, setError] = useState<string | null>(null);
 
-  const connectorTypes = (connectors.data ?? []).map((c) => c.connector_type);
-  const grantConnectorType = capabilityConnectorType(capability, connectorTypes);
-  const isCli = grantConnectorType === "cli";
+  const toolList = tools.data ?? [];
+  const selectedTool = toolList.find((tool) => tool.name === toolName);
+  const capability = selectedTool?.required_capability ?? "";
   const isDelegate = capability === "organization.delegate";
-  const cliFields = isCli ? (CLI_SCOPE_FIELDS[capability] ?? []) : [];
   const matchingConnections = (connections.data ?? []).filter(
-    (connection) => connection.connector_type === grantConnectorType,
+    (connection) => connection.connector_type === selectedTool?.name.split(".", 1)[0],
   );
+  const missingRequired = selectedTool
+    ? missingRequiredScopeKeys(selectedTool, scopeValues)
+    : [];
 
   const addGrant = useMutation({
     mutationFn: () =>
@@ -72,21 +65,16 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
           capability,
           scope: isDelegate
             ? { targets: delegationTargets }
-            : isCli
-              ? buildCliScope(capability, connectionId, cliScope)
-              : grantConnectorType
-                ? buildConnectorScope(connectionId, repoScope, branchScope)
-                : {},
+            : selectedTool
+              ? buildToolScope(selectedTool, scopeValues)
+              : {},
           effect,
         },
       }),
     onSuccess: () => {
       setError(null);
-      setCapability("");
-      setConnectionId("");
-      setRepoScope("");
-      setBranchScope("");
-      setCliScope({});
+      setToolName("");
+      setScopeValues({});
       invalidate();
     },
     onError: (err) => setError(err instanceof ApiError ? err.detail : "Adding the grant failed."),
@@ -122,7 +110,6 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
   }
 
   const grantList = sortGrants(grants.data ?? []);
-  const toolList = tools.data ?? [];
   const currentPreset = policy.data?.preset ?? null;
   const rules = policy.data?.rules ?? [];
 
@@ -179,20 +166,25 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
             className="mt-3 space-y-2"
             onSubmit={(event) => {
               event.preventDefault();
-              if (capability) addGrant.mutate();
+              if (selectedTool && missingRequired.length === 0) addGrant.mutate();
             }}
           >
             <div className="flex items-end gap-2">
               <div className="flex-1">
                 <Field label="Capability">
-                  <Select value={capability} onChange={(e) => setCapability(e.target.value)}>
+                  <Select
+                    value={toolName}
+                    onChange={(e) => {
+                      setToolName(e.target.value);
+                      setScopeValues({});
+                    }}
+                  >
                     <option value="">Choose a capability…</option>
                     {toolList.map((tool) => (
-                      <option key={tool.name} value={tool.required_capability}>
-                        {tool.required_capability} ({tool.risk})
+                      <option key={tool.name} value={tool.name}>
+                        {tool.name} — {tool.required_capability} ({tool.risk})
                       </option>
                     ))}
-                    <option value="system.*">system.* (all system tools)</option>
                   </Select>
                 </Field>
               </div>
@@ -210,7 +202,7 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
               <Button
                 type="submit"
                 variant="primary"
-                disabled={!capability || addGrant.isPending}
+                disabled={!selectedTool || missingRequired.length > 0 || addGrant.isPending}
               >
                 <Plus size={13} /> Add
               </Button>
@@ -236,117 +228,17 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
                   </Select>
                 </Field>
               </div>
-            ) : isCli ? (
+            ) : selectedTool && selectedTool.scope_keys.length > 0 ? (
               <div
-                data-testid="cli-scope"
-                className="grid gap-2 rounded-lg border border-line bg-surface px-3 py-2.5 sm:grid-cols-3"
+                data-testid={selectedTool.name.startsWith("cli.") ? "cli-scope" : "connector-scope"}
+                className="rounded-lg border border-line bg-surface px-3 py-2.5"
               >
-                <Field label="Connection" hint="Restricts the grant to one CLI connection.">
-                  <Select
-                    value={connectionId}
-                    onChange={(e) => setConnectionId(e.target.value)}
-                  >
-                    <option value="">Any connection</option>
-                    {matchingConnections.map((connection) => (
-                      <option key={connection.id} value={connection.id}>
-                        {connection.name}
-                      </option>
-                    ))}
-                  </Select>
-                </Field>
-                {cliFields.includes("command") ? (
-                  <Field label="Command pattern" hint="Glob on the full command — empty = any.">
-                    <Input
-                      value={cliScope.command ?? ""}
-                      onChange={(e) =>
-                        setCliScope((prev) => ({ ...prev, command: e.target.value }))
-                      }
-                      placeholder="git *"
-                    />
-                  </Field>
-                ) : null}
-                {cliFields.includes("image") ? (
-                  <Field
-                    label="Image"
-                    hint="Allowed job image glob. Constrained grants require calls to name an image."
-                  >
-                    <Input
-                      value={cliScope.image ?? ""}
-                      onChange={(e) => setCliScope((prev) => ({ ...prev, image: e.target.value }))}
-                      placeholder="jhin-sandbox:*"
-                    />
-                  </Field>
-                ) : null}
-                {cliFields.includes("network") ? (
-                  <Field
-                    label="Network"
-                    hint="Constrained grants require calls to name a network."
-                  >
-                    <Select
-                      value={cliScope.network ?? ""}
-                      onChange={(e) =>
-                        setCliScope((prev) => ({ ...prev, network: e.target.value }))
-                      }
-                    >
-                      <option value="">Any</option>
-                      <option value="none">none (isolated)</option>
-                      <option value="internet">internet (sandbox bridge)</option>
-                    </Select>
-                  </Field>
-                ) : null}
-                {cliFields.includes("repository") ? (
-                  <Field label="Repository" hint="Exact or glob, e.g. octo/* — empty = any.">
-                    <Input
-                      value={cliScope.repository ?? ""}
-                      onChange={(e) =>
-                        setCliScope((prev) => ({ ...prev, repository: e.target.value }))
-                      }
-                      placeholder="octo/alpha"
-                    />
-                  </Field>
-                ) : null}
-                {cliFields.includes("path") ? (
-                  <Field label="Path pattern" hint="Glob on the workspace path — empty = any.">
-                    <Input
-                      value={cliScope.path ?? ""}
-                      onChange={(e) => setCliScope((prev) => ({ ...prev, path: e.target.value }))}
-                      placeholder="src/*"
-                    />
-                  </Field>
-                ) : null}
-              </div>
-            ) : grantConnectorType ? (
-              <div
-                data-testid="connector-scope"
-                className="grid gap-2 rounded-lg border border-line bg-surface px-3 py-2.5 sm:grid-cols-3"
-              >
-                <Field label="Connection" hint="Restricts the grant to one connection.">
-                  <Select
-                    value={connectionId}
-                    onChange={(e) => setConnectionId(e.target.value)}
-                  >
-                    <option value="">Any connection</option>
-                    {matchingConnections.map((connection) => (
-                      <option key={connection.id} value={connection.id}>
-                        {connection.name}
-                      </option>
-                    ))}
-                  </Select>
-                </Field>
-                <Field label="Repository" hint="Exact or glob, e.g. octo/* — empty = any.">
-                  <Input
-                    value={repoScope}
-                    onChange={(e) => setRepoScope(e.target.value)}
-                    placeholder="octo/alpha"
-                  />
-                </Field>
-                <Field label="Branch" hint="Glob like agent/* — empty = any.">
-                  <Input
-                    value={branchScope}
-                    onChange={(e) => setBranchScope(e.target.value)}
-                    placeholder="agent/*"
-                  />
-                </Field>
+                <ScopeEditor
+                  tool={selectedTool}
+                  connections={matchingConnections}
+                  values={scopeValues}
+                  onChange={setScopeValues}
+                />
               </div>
             ) : null}
           </form>

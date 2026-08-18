@@ -97,6 +97,34 @@ class ConnectionOut(BaseModel):
     webhook_secret_configured: bool = False
 
 
+class ConnectionGrantSummaryOut(BaseModel):
+    """One connection-scoped grant, safe to expose to workspace admins."""
+
+    grant_id: UUID
+    capability: str
+    effect: Literal["allow", "deny"]
+    scope: dict[str, str]
+    eligible_tool_names: list[str]
+    eligibility_reason: str | None
+
+
+class ConnectionAgentAccessOut(BaseModel):
+    """Effective connector access for one agent, independent of approval policy."""
+
+    agent_id: UUID
+    agent_name: str
+    authorized: bool
+    authorized_tool_names: list[str]
+    grants: list[ConnectionGrantSummaryOut]
+
+
+class ConnectionAccessSummaryOut(BaseModel):
+    """Workspace-local connection access diagnostics for administrators."""
+
+    connection_id: UUID
+    agents: list[ConnectionAgentAccessOut]
+
+
 class WebhookSetupOut(BaseModel):
     """Shown once at creation: where to point the provider and the signing
     secret to paste there. The secret is not retrievable afterwards."""

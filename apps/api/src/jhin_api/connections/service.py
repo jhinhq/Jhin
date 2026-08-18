@@ -14,7 +14,8 @@ import math
 import secrets as stdlib_secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import cast
+from fnmatch import fnmatchcase
+from typing import Any, cast
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -32,9 +33,10 @@ from jhin_connectors import (
     default_registry,
     normalize_config,
 )
-from jhin_db.models import Connection, ToolCall
+from jhin_db.models import Agent, AgentCapabilityGrant, Connection, ToolCall
 from jhin_db.models.connection import new_public_id
 from jhin_domain import ConnectionStatus, SecretType
+from jhin_policy import ToolDefinition, capability_matches, scope_matches
 from jhin_secrets import (
     SecretCrypto,
     SecretMaterialError,
@@ -48,6 +50,9 @@ _MAX_PROVIDER_OUTPUT_STRING_CHARS = 2_000
 _MAX_PROVIDER_OUTPUT_BYTES = 32_768
 _MAX_PROVIDER_OUTPUT_ITEMS = 256
 _MAX_PROVIDER_OUTPUT_DEPTH = 16
+_MAX_CONNECTION_ACCESS_SUMMARY_ROWS = 256
+_CONNECTION_ACCESS_SUMMARY_STREAM_BATCH_SIZE = 64
+_ACCESS_SUMMARY_UNAVAILABLE_DETAIL = "Connection access summary is temporarily unavailable"
 
 
 class _ProviderOutputLimitError(ValueError):
@@ -70,6 +75,14 @@ def _not_found() -> HTTPException:
 
 def _bad_request(detail: str) -> HTTPException:
     return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=detail)
+
+
+def _access_summary_unavailable() -> HTTPException:
+    """Fail closed without exposing grant cardinality or row details."""
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail=_ACCESS_SUMMARY_UNAVAILABLE_DETAIL,
+    )
 
 
 def _decode_stored_credentials(plaintext: str) -> dict[str, str]:
@@ -292,6 +305,314 @@ async def get_connection(db: AsyncSession, workspace_id: UUID, connection_id: UU
     if connection is None:
         raise _not_found()
     return connection
+
+
+def _connection_tools(connection: Connection) -> tuple[ToolDefinition, ...]:
+    """The selected connector's registered tools, in a stable display order."""
+    connector = get_connector(connection.connector_type)
+    definitions = (definition for definition, _executor in connector.tools())
+    return tuple(sorted(definitions, key=lambda tool: tool.name))
+
+
+def _capability_pattern_candidates(tools: tuple[ToolDefinition, ...]) -> tuple[str, ...]:
+    """All persisted grant patterns that can match one selected connector tool."""
+    candidates = {"*"}
+    for tool in tools:
+        parts = tool.required_capability.split(".")
+        candidates.add(tool.required_capability)
+        candidates.update(".".join(parts[:index]) + ".*" for index in range(1, len(parts)))
+    return tuple(sorted(candidates))
+
+
+def _string_scope(scope: object) -> dict[str, str] | None:
+    """Return a scope safe for the string-only summary response schema."""
+    if not isinstance(scope, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in scope.items()
+    ):
+        return None
+    return dict(scope)
+
+
+def _raw_scope_is_relevant_to_connection(scope: object, effect: str, connection_id: str) -> bool:
+    """Check target relevance before rejecting unsupported summary scope values.
+
+    Runtime scope matching supports list-valued ``any-of`` constraints. This
+    endpoint intentionally cannot serialize or model those values precisely,
+    but it must still recognize when they could influence this connection.
+    """
+    if not isinstance(scope, dict) or not all(isinstance(key, str) for key in scope):
+        # A malformed candidate scope cannot be proven irrelevant without
+        # changing runtime semantics, so fail closed rather than overreport.
+        return True
+    if effect == "allow" and "connection_id" not in scope:
+        # Broad allows remain excluded from connection authorization.
+        return False
+    connection_scope: dict[str, Any] = (
+        {"connection_id": scope["connection_id"]} if "connection_id" in scope else {}
+    )
+    return scope_matches(connection_scope, {"connection_id": connection_id})
+
+
+def _is_scope_glob(value: str) -> bool:
+    """Whether a grant value uses fnmatch's pattern language."""
+    return any(character in value for character in "*?[")
+
+
+def _glob_literal_prefix(pattern: str) -> str:
+    """The initial literal segment of a glob, useful for proving disjointness."""
+    for index, character in enumerate(pattern):
+        if character in "*?[":
+            return pattern[:index]
+    return pattern
+
+
+def _scope_values_overlap(allow_value: str, deny_value: str) -> bool:
+    """Conservatively decide whether two string grant languages overlap."""
+    allow_is_glob = _is_scope_glob(allow_value)
+    deny_is_glob = _is_scope_glob(deny_value)
+    if not allow_is_glob and not deny_is_glob:
+        return allow_value == deny_value
+    if not allow_is_glob:
+        return fnmatchcase(allow_value, deny_value)
+    if not deny_is_glob:
+        return fnmatchcase(deny_value, allow_value)
+    if allow_value == deny_value:
+        return True
+    allow_prefix = _glob_literal_prefix(allow_value)
+    deny_prefix = _glob_literal_prefix(deny_value)
+    are_provably_disjoint = bool(
+        allow_prefix
+        and deny_prefix
+        and not allow_prefix.startswith(deny_prefix)
+        and not deny_prefix.startswith(allow_prefix)
+    )
+    # The remaining glob intersection cases are deliberately conservative:
+    # a false deny is safer than reporting authorization that could be denied.
+    return not are_provably_disjoint
+
+
+def _grant_applies_to_tool(
+    tool: ToolDefinition,
+    *,
+    capability: str,
+    scope: dict[str, str],
+    effect: str,
+    connection_id: str,
+) -> bool:
+    """Whether a grant structurally applies to this tool on this connection."""
+    if not capability_matches(capability, tool.required_capability):
+        return False
+    if effect == "allow":
+        # Connection allows are intentionally exact; broad allows never
+        # authorize this summary. Other scope values are structural because
+        # this endpoint has no concrete project/deployment invocation value.
+        if scope.get("connection_id") != connection_id:
+            return False
+        if not set(tool.required_grant_scope_keys).issubset(scope):
+            return False
+    elif effect == "deny":
+        # A deny may be broad, and its connection glob must be evaluated
+        # against the actual selected connection rather than against itself.
+        if not _deny_is_relevant_to_connection(scope, connection_id):
+            return False
+    else:
+        return False
+    return set(scope).issubset(tool.scope_keys)
+
+
+def _eligibility_reason(
+    tools: tuple[ToolDefinition, ...], capability: str, scope: dict[str, str], effect: str
+) -> str | None:
+    matching_tools = [
+        tool for tool in tools if capability_matches(capability, tool.required_capability)
+    ]
+    if effect == "allow":
+        missing = sorted(
+            {
+                key
+                for tool in matching_tools
+                for key in tool.required_grant_scope_keys
+                if key not in scope
+            }
+        )
+        if missing:
+            return f"Missing required scope keys: {', '.join(missing)}"
+    return "Grant scope does not match a selected connector tool"
+
+
+def _grant_summary(
+    grant: AgentCapabilityGrant,
+    scope: dict[str, str],
+    tools: tuple[ToolDefinition, ...],
+    connection_id: str,
+) -> dict[str, object]:
+    eligible_tool_names = [
+        tool.name
+        for tool in tools
+        if _grant_applies_to_tool(
+            tool,
+            capability=grant.capability,
+            scope=scope,
+            effect=grant.effect,
+            connection_id=connection_id,
+        )
+    ]
+    return {
+        "grant_id": grant.id,
+        "capability": grant.capability,
+        "effect": grant.effect,
+        "scope": scope,
+        "eligible_tool_names": eligible_tool_names,
+        "eligibility_reason": (
+            None
+            if eligible_tool_names
+            else _eligibility_reason(tools, grant.capability, scope, grant.effect)
+        ),
+    }
+
+
+def _tool_is_authorized(
+    tool: ToolDefinition,
+    grants: list[tuple[AgentCapabilityGrant, dict[str, str]]],
+    connection_id: str,
+) -> bool:
+    """Apply scoped explicit-deny precedence without consulting approval policy."""
+    for allow, allow_scope in grants:
+        if allow.effect != "allow" or not _grant_applies_to_tool(
+            tool,
+            capability=allow.capability,
+            scope=allow_scope,
+            effect=allow.effect,
+            connection_id=connection_id,
+        ):
+            continue
+        denied = any(
+            deny.effect == "deny"
+            and capability_matches(deny.capability, tool.required_capability)
+            and _deny_overlaps_allow_scope(tool, allow_scope, deny_scope, connection_id)
+            for deny, deny_scope in grants
+        )
+        if not denied:
+            return True
+    return False
+
+
+def _deny_overlaps_allow_scope(
+    tool: ToolDefinition,
+    allow_scope: dict[str, str],
+    deny_scope: dict[str, str],
+    connection_id: str,
+) -> bool:
+    """Whether this deny could overlap this allow for the selected connection.
+
+    The summary has no concrete project/deployment input, so non-connection
+    dimensions compare their scope languages. Any deny key absent from the
+    allow is treated as potentially overlapping; this can underreport partial
+    access but never reports authorization where a runtime call may be denied.
+    """
+    if not set(deny_scope).issubset(tool.scope_keys):
+        return False
+    for key, deny_value in deny_scope.items():
+        if key == "connection_id":
+            if not fnmatchcase(connection_id, deny_value):
+                return False
+            continue
+        allow_value = allow_scope.get(key)
+        if allow_value is not None and not _scope_values_overlap(allow_value, deny_value):
+            return False
+    return True
+
+
+def _deny_is_relevant_to_connection(scope: dict[str, str], connection_id: str) -> bool:
+    """Whether a scoped or broad deny can apply to this connection at runtime."""
+    connection_scope = {"connection_id": scope["connection_id"]} if "connection_id" in scope else {}
+    return scope_matches(connection_scope, {"connection_id": connection_id})
+
+
+async def connection_access_summary(
+    db: AsyncSession, workspace_id: UUID, connection_id: UUID
+) -> dict[str, object]:
+    """Return exact, connection-scoped grants and their effective tool access.
+
+    The connection lookup occurs before querying grants, preserving the same
+    workspace-local 404 behavior as every other connection endpoint.  The
+    single joined query deliberately loads no connection credentials, config,
+    or approval-policy JSON.
+    """
+    connection = await get_connection(db, workspace_id, connection_id)
+    tools = _connection_tools(connection)
+    target_connection_id = str(connection.id)
+    capability_candidates = _capability_pattern_candidates(tools)
+    result = await db.stream(
+        select(Agent.id, Agent.name, AgentCapabilityGrant)
+        .join(AgentCapabilityGrant, AgentCapabilityGrant.agent_id == Agent.id)
+        .where(
+            Agent.workspace_id == workspace_id,
+            AgentCapabilityGrant.workspace_id == workspace_id,
+            AgentCapabilityGrant.capability.in_(capability_candidates),
+            AgentCapabilityGrant.effect.in_(("allow", "deny")),
+        )
+        # This bounds driver fetch batches, not the total scan. Only rows that
+        # survive exact Python relevance checks count against the public cap.
+        .execution_options(yield_per=_CONNECTION_ACCESS_SUMMARY_STREAM_BATCH_SIZE)
+    )
+    relevant_by_agent: dict[
+        UUID, tuple[str, list[tuple[AgentCapabilityGrant, dict[str, str]]]]
+    ] = {}
+    relevant_row_count = 0
+    try:
+        async for agent_id, agent_name, grant in result.tuples():
+            raw_scope = grant.scope_json
+            if not _raw_scope_is_relevant_to_connection(
+                raw_scope, grant.effect, target_connection_id
+            ):
+                continue
+            scope = _string_scope(raw_scope)
+            if scope is None:
+                raise _access_summary_unavailable()
+            relevant_row_count += 1
+            if relevant_row_count > _MAX_CONNECTION_ACCESS_SUMMARY_ROWS:
+                raise _access_summary_unavailable()
+            if agent_id not in relevant_by_agent:
+                relevant_by_agent[agent_id] = (agent_name, [])
+            relevant_by_agent[agent_id][1].append((grant, scope))
+    finally:
+        await result.close()
+
+    agents: list[dict[str, object]] = []
+    for agent_id, (agent_name, grants) in relevant_by_agent.items():
+        authorized_tool_names = [
+            tool.name for tool in tools if _tool_is_authorized(tool, grants, target_connection_id)
+        ]
+        ordered_grants = sorted(
+            grants,
+            key=lambda row: (
+                row[0].capability,
+                row[0].effect,
+                json.dumps(row[1], sort_keys=True, separators=(",", ":")),
+                str(row[0].id),
+            ),
+        )
+        agents.append(
+            {
+                "agent_id": agent_id,
+                "agent_name": agent_name,
+                "authorized": bool(authorized_tool_names),
+                "authorized_tool_names": authorized_tool_names,
+                "grants": [
+                    _grant_summary(grant, scope, tools, target_connection_id)
+                    for grant, scope in ordered_grants
+                ],
+            }
+        )
+    agents.sort(
+        key=lambda item: (
+            not bool(item["authorized"]),
+            str(item["agent_name"]).casefold(),
+            str(item["agent_id"]),
+        )
+    )
+    return {"connection_id": connection.id, "agents": agents}
 
 
 async def create_connection(

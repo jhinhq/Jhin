@@ -5,12 +5,12 @@ services:
   api:
     environment:
       APP_ENV: dev
-      JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS: http://fake-github:8080,http://fake-linear:8080
+      JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS: http://fake-github:8080,http://fake-linear:8080,http://fake-vercel:8080,http://fake-supabase:8080
       JHIN_CONNECTOR_ALLOWED_DB_HOSTS: fake-supabase-db:5432
 
   agent-worker:
     environment:
-      JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS: http://fake-github:8080,http://fake-linear:8080
+      JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS: http://fake-github:8080,http://fake-linear:8080,http://fake-vercel:8080,http://fake-supabase:8080
       JHIN_CONNECTOR_ALLOWED_DB_HOSTS: fake-supabase-db:5432
 
   # Dev/test-only PostgreSQL 17 target for Supabase database connector tests.
@@ -123,6 +123,62 @@ services:
       FAKE_LINEAR_API_KEY: ${FAKE_LINEAR_API_KEY:-fake-linear-api-key}
     ports:
       - "127.0.0.1:${FAKE_LINEAR_DEV_PORT:-8092}:8080"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8080/_state', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks: [data]
+    restart: unless-stopped
+
+  # Dev/test-only fake Vercel REST API. Connections point at it via
+  # config_json.base_url (in-network: http://fake-vercel:8080).
+  fake-vercel:
+    build:
+      context: .
+      dockerfile: docker/python.Dockerfile
+      args:
+        SERVICE_PACKAGE: jhin-agent-worker
+    command: ["python", "-m", "jhin_connectors.testing.fake_vercel"]
+    environment:
+      FAKE_VERCEL_PORT: "8080"
+    ports:
+      - "127.0.0.1:${FAKE_VERCEL_DEV_PORT:-8094}:8080"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8080/_state', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks: [data]
+    restart: unless-stopped
+
+  # Dev/test-only fake Supabase Management API. Connections point at it via
+  # config_json.base_url (in-network: http://fake-supabase:8080).
+  fake-supabase:
+    build:
+      context: .
+      dockerfile: docker/python.Dockerfile
+      args:
+        SERVICE_PACKAGE: jhin-agent-worker
+    command: ["python", "-m", "jhin_connectors.testing.fake_supabase"]
+    environment:
+      FAKE_SUPABASE_PORT: "8080"
+    ports:
+      - "127.0.0.1:${FAKE_SUPABASE_DEV_PORT:-8095}:8080"
     healthcheck:
       test:
         [

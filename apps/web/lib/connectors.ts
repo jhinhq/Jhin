@@ -3,7 +3,7 @@
  * connector-scoped grants (plan 11, 17.9). React-free and unit-tested.
  */
 
-import type { AuthSchemeSpec, ConnectorInfo } from "@/lib/types";
+import type { AuthSchemeSpec, ConfigFieldSpec, ConnectorInfo, ToolInfo } from "@/lib/types";
 
 /** Connectors on the roadmap, shown greyed-out in the gallery. */
 export interface UpcomingConnector {
@@ -15,30 +15,58 @@ export interface UpcomingConnector {
 
 export const UPCOMING_CONNECTORS: UpcomingConnector[] = [
   {
-    connector_type: "linear",
-    display_name: "Linear",
-    description: "Issues, projects, and triage automation.",
-    phase: "Phase 7",
-  },
-  {
-    connector_type: "vercel",
-    display_name: "Vercel",
-    description: "Deployments, preview URLs, and rollbacks.",
-    phase: "Phase 8",
-  },
-  {
-    connector_type: "supabase",
-    display_name: "Supabase",
-    description: "Database, auth, and storage operations.",
-    phase: "Phase 8",
-  },
-  {
     connector_type: "http",
     display_name: "HTTP",
     description: "Generic authenticated HTTP requests.",
-    phase: "Phase 9",
+    phase: "Future work",
   },
 ];
+
+export type ToolScopeValues = Record<string, string>;
+
+export function buildToolScope(tool: ToolInfo, values: ToolScopeValues): Record<string, string> {
+  return Object.fromEntries(
+    tool.scope_keys.flatMap((key) => {
+      const value = (values[key] ?? "").trim();
+      return value ? [[key, value]] : [];
+    }),
+  );
+}
+
+export function missingRequiredScopeKeys(tool: ToolInfo, values: ToolScopeValues): string[] {
+  return tool.required_grant_scope_keys.filter((key) => !(values[key] ?? "").trim());
+}
+
+export function configFieldsForAuth(
+  connector: ConnectorInfo,
+  authType: string,
+): ConfigFieldSpec[] {
+  return connector.config_fields.filter(
+    (field) => field.auth_types.length === 0 || field.auth_types.includes(authType),
+  );
+}
+
+export function coerceConnectorConfig(
+  fields: ConfigFieldSpec[],
+  raw: Record<string, string | boolean>,
+): Record<string, string | number | boolean | string[]> {
+  const config: Record<string, string | number | boolean | string[]> = {};
+  for (const field of fields) {
+    const value = raw[field.name] ?? field.default;
+    if (value === null || value === undefined || value === "") continue;
+    if (field.kind === "integer") {
+      config[field.name] = typeof value === "number" ? value : Number(value);
+    } else if (field.kind === "boolean") {
+      config[field.name] = value === true;
+    } else if (field.kind === "string_list") {
+      const entries = Array.isArray(value) ? value : String(value).split("\n");
+      config[field.name] = [...new Set(entries.map((entry) => entry.trim()).filter(Boolean))];
+    } else {
+      config[field.name] = String(value).trim();
+    }
+  }
+  return config;
+}
 
 export function findAuthScheme(
   connector: ConnectorInfo | undefined,

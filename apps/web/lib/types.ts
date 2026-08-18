@@ -294,6 +294,8 @@ export interface ToolInfo {
   risk: RiskLevel;
   required_capability: string;
   supports_approval: boolean;
+  scope_keys: string[];
+  required_grant_scope_keys: string[];
   input_schema: Record<string, unknown>;
 }
 
@@ -363,6 +365,11 @@ export interface ConfigFieldSpec {
   required: boolean;
   placeholder: string;
   help: string;
+  kind: "text" | "integer" | "boolean" | "string_list";
+  auth_types: string[];
+  default: string | number | boolean | string[] | null;
+  minimum: number | null;
+  maximum: number | null;
 }
 
 export interface ConnectorInfo {
@@ -376,6 +383,9 @@ export interface ConnectorInfo {
   canonical_events: string[];
   capabilities: string[];
   supports_webhooks: boolean;
+  webhook_secret_mode: "none" | "generated" | "provider_supplied";
+  webhook_signature_algorithm: string;
+  webhook_setup_help: string;
   docs_url: string;
 }
 
@@ -393,11 +403,37 @@ export interface ConnectionInfo {
   created_at: string;
   last_verified_at: string | null;
   last_error: string | null;
+  webhook_secret_configured: boolean;
 }
 
 export interface WebhookSetup {
   url_path: string;
-  secret: string;
+  secret: string | null;
+  secret_mode: "generated" | "provider_supplied";
+  signature_algorithm: string;
+  help: string;
+}
+
+export interface ConnectionGrantSummaryOut {
+  grant_id: string;
+  capability: string;
+  effect: GrantEffect;
+  scope: Record<string, string>;
+  eligible_tool_names: string[];
+  eligibility_reason: string | null;
+}
+
+export interface ConnectionAgentAccessOut {
+  agent_id: string;
+  agent_name: string;
+  authorized: boolean;
+  authorized_tool_names: string[];
+  grants: ConnectionGrantSummaryOut[];
+}
+
+export interface ConnectionAccessSummaryOut {
+  connection_id: string;
+  agents: ConnectionAgentAccessOut[];
 }
 
 export interface ConnectionCreated {

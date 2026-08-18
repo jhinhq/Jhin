@@ -73,7 +73,7 @@ export function ConnectorsGallery({
                 {upcoming.display_name}
               </h3>
             </div>
-            <Badge tone="accent">Arrives in {upcoming.phase}</Badge>
+            <Badge tone="accent">{upcoming.phase}</Badge>
           </header>
           <p className="text-xs leading-relaxed text-faint">{upcoming.description}</p>
         </article>

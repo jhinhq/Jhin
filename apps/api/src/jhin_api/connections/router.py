@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from jhin_api.connections import service
 from jhin_api.connections.schemas import (
+    ConnectionAccessSummaryOut,
     ConnectionCreate,
     ConnectionCreated,
     ConnectionOut,
@@ -183,6 +184,15 @@ async def create_connection(
 @router.get("/{connection_id}")
 async def get_connection(connection_id: UUID, ctx: AdminCtx, db: DbSession) -> ConnectionOut:
     return _out(await service.get_connection(db, ctx.workspace_id, connection_id))
+
+
+@router.get("/{connection_id}/access-summary")
+async def get_connection_access_summary(
+    connection_id: UUID, ctx: AdminCtx, db: DbSession
+) -> ConnectionAccessSummaryOut:
+    return ConnectionAccessSummaryOut.model_validate(
+        await service.connection_access_summary(db, ctx.workspace_id, connection_id)
+    )
 
 
 @router.get("/{connection_id}/tool-calls")

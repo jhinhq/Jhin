@@ -3,7 +3,7 @@
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TypedDict
 from uuid import UUID, uuid4
 
 import httpx
@@ -28,17 +28,26 @@ from jhin_connectors import (
 )
 from jhin_connectors.testing.fake_github import FakeGitHubServer
 from jhin_db.models import (
+    Agent,
+    AgentCapabilityGrant,
     AuditEvent,
     Connection,
     Secret,
     User,
     UserSession,
+    Workspace,
     WorkspaceMembership,
 )
 from jhin_domain import ConnectionStatus, WorkspaceRole, new_uuid7
-from jhin_secrets import SecretCrypto, SecretStore
+from jhin_secrets import SecretCrypto, SecretStore  # type: ignore[import-untyped]
 
-REQ = {"request_id": new_uuid7(), "ip_hash": "test"}
+
+class _RequestAuditArgs(TypedDict):
+    request_id: UUID
+    ip_hash: str
+
+
+REQ: _RequestAuditArgs = {"request_id": new_uuid7(), "ip_hash": "test"}
 CSRF_TOKEN = "connection-route-csrf"
 CSRF_HEADERS = {"x-csrf-token": CSRF_TOKEN}
 MAX_SENSITIVE_CONNECTION_BODY_BYTES = 65_536
@@ -1193,6 +1202,694 @@ async def test_connection_out_never_exposes_secret_material(
     assert webhook_secret is not None and webhook_secret not in serialized
     forbidden = {"credentials", "encrypted_secret_id", "webhook_secret_id", "ciphertext"}
     assert set(ConnectionOut.model_fields) & forbidden == set()
+
+
+async def test_access_summary_reports_exact_relevant_grants_and_effective_access(
+    connection_routes: ConnectionRouteHarness,
+    session: AsyncSession,
+) -> None:
+    """The summary is connection-scoped and explains, but never widens, access."""
+    connection_marker = "connection-config-secret-must-not-leak"
+    connection = Connection(
+        workspace_id=connection_routes.workspace_id,
+        connector_type="vercel",
+        name="Vercel production",
+        auth_type="access_token",
+        config_json={"private_marker": connection_marker},
+    )
+    authorized_agent = Agent(
+        workspace_id=connection_routes.workspace_id,
+        name="Ada Authorized",
+        slug=f"ada-{new_uuid7().hex[:8]}",
+        approval_policy_json=[{"private_policy": "must-not-leak"}],
+    )
+    incomplete_agent = Agent(
+        workspace_id=connection_routes.workspace_id,
+        name="Zed Incomplete",
+        slug=f"zed-{new_uuid7().hex[:8]}",
+    )
+    other_connection = Connection(
+        workspace_id=connection_routes.workspace_id,
+        connector_type="vercel",
+        name="Other Vercel",
+        auth_type="access_token",
+    )
+    session.add_all([connection, authorized_agent, incomplete_agent, other_connection])
+    await session.flush()
+    connection_id = str(connection.id)
+    project_scope = {"connection_id": connection_id, "project_id": "project-a"}
+    session.add_all(
+        [
+            # An exact matching allow and deny prove deny precedence.
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=authorized_agent.id,
+                capability="vercel.project.read",
+                scope_json=project_scope,
+                effect="allow",
+            ),
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=authorized_agent.id,
+                capability="vercel.project.read",
+                scope_json=project_scope,
+                effect="deny",
+            ),
+            # This exact connection scope remains authorized.
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=authorized_agent.id,
+                capability="vercel.project.list",
+                scope_json={"connection_id": connection_id},
+                effect="allow",
+            ),
+            # A wildcard capability is relevant, but a deployment read grant
+            # without deployment_id is not eligible for that tool.
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=authorized_agent.id,
+                capability="vercel.*",
+                scope_json=project_scope,
+                effect="allow",
+            ),
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=authorized_agent.id,
+                capability="vercel.deployment.read",
+                scope_json=project_scope,
+                effect="allow",
+            ),
+            # Neither broad nor another-connection grants are relevant to
+            # this connection summary.
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=authorized_agent.id,
+                capability="vercel.project.read",
+                scope_json={},
+                effect="allow",
+            ),
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=authorized_agent.id,
+                capability="vercel.project.read",
+                scope_json={"connection_id": str(other_connection.id), "project_id": "project-a"},
+                effect="allow",
+            ),
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=authorized_agent.id,
+                capability="github.repository.read",
+                scope_json={"connection_id": connection_id, "repository": "acme/app"},
+                effect="allow",
+            ),
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=incomplete_agent.id,
+                capability="vercel.deployment.read",
+                scope_json=project_scope,
+                effect="allow",
+            ),
+        ]
+    )
+    await session.commit()
+
+    response = await connection_routes.client.get(
+        f"/api/v1/workspaces/{connection_routes.workspace_id}/connections/{connection.id}/access-summary"
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["connection_id"] == connection_id
+    assert [agent["agent_name"] for agent in payload["agents"]] == [
+        "Ada Authorized",
+        "Zed Incomplete",
+    ]
+    ada, zed = payload["agents"]
+    assert ada["authorized"] is True
+    assert ada["authorized_tool_names"] == sorted(ada["authorized_tool_names"])
+    assert "vercel.project.list" in ada["authorized_tool_names"]
+    assert "vercel.project.read" not in ada["authorized_tool_names"]
+    assert zed["authorized"] is False
+    assert zed["authorized_tool_names"] == []
+
+    ada_grants = {(grant["capability"], grant["effect"]): grant for grant in ada["grants"]}
+    assert set(ada_grants) == {
+        ("vercel.project.read", "allow"),
+        ("vercel.project.read", "deny"),
+        ("vercel.project.list", "allow"),
+        ("vercel.*", "allow"),
+        ("vercel.deployment.read", "allow"),
+    }
+    assert ada_grants[("vercel.project.read", "allow")]["scope"] == project_scope
+    assert ada_grants[("vercel.project.read", "deny")]["scope"] == project_scope
+    incomplete = ada_grants[("vercel.deployment.read", "allow")]
+    assert incomplete["eligible_tool_names"] == []
+    assert "deployment_id" in incomplete["eligibility_reason"]
+    assert zed["grants"][0]["eligibility_reason"] is not None
+    serialized = response.text
+    for marker in (connection_marker, "must-not-leak", "encrypted_secret_id", "ciphertext"):
+        assert marker not in serialized
+
+
+async def test_access_summary_is_admin_only_and_hides_cross_workspace_connections(
+    connection_routes: ConnectionRouteHarness,
+    session: AsyncSession,
+) -> None:
+    connection = Connection(
+        workspace_id=connection_routes.workspace_id,
+        connector_type="vercel",
+        name="Admin-only summary",
+        auth_type="access_token",
+    )
+    other_workspace = Workspace(name="Other", slug=f"other-{new_uuid7().hex[:8]}")
+    session.add_all([connection, other_workspace])
+    await session.flush()
+    foreign_connection = Connection(
+        workspace_id=other_workspace.id,
+        connector_type="vercel",
+        name="Foreign connection",
+        auth_type="access_token",
+    )
+    session.add(foreign_connection)
+    await session.commit()
+    base = f"/api/v1/workspaces/{connection_routes.workspace_id}/connections"
+
+    connection_routes.actor["user"] = connection_routes.users["viewer"]
+    forbidden = await connection_routes.client.get(f"{base}/{connection.id}/access-summary")
+    assert forbidden.status_code == 403, forbidden.text
+
+    connection_routes.actor["user"] = connection_routes.users["admin"]
+    missing = await connection_routes.client.get(f"{base}/{foreign_connection.id}/access-summary")
+    assert missing.status_code == 404, missing.text
+    assert "Foreign connection" not in missing.text
+
+
+async def test_access_summary_applies_unscoped_connector_deny_to_exact_allow(
+    connection_routes: ConnectionRouteHarness,
+    session: AsyncSession,
+) -> None:
+    connection = Connection(
+        workspace_id=connection_routes.workspace_id,
+        connector_type="vercel",
+        name="Broad deny",
+        auth_type="access_token",
+    )
+    agent = Agent(
+        workspace_id=connection_routes.workspace_id,
+        name="Denied agent",
+        slug=f"denied-{new_uuid7().hex[:8]}",
+    )
+    session.add_all([connection, agent])
+    await session.flush()
+    scope = {"connection_id": str(connection.id), "project_id": "project-a"}
+    session.add_all(
+        [
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=agent.id,
+                capability="vercel.project.read",
+                scope_json=scope,
+                effect="allow",
+            ),
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=agent.id,
+                capability="vercel.*",
+                scope_json={},
+                effect="deny",
+            ),
+        ]
+    )
+    await session.commit()
+
+    response = await connection_routes.client.get(
+        f"/api/v1/workspaces/{connection_routes.workspace_id}/connections/{connection.id}/access-summary"
+    )
+
+    assert response.status_code == 200, response.text
+    summary = response.json()["agents"][0]
+    assert summary["authorized"] is False
+    assert summary["authorized_tool_names"] == []
+    deny = next(grant for grant in summary["grants"] if grant["effect"] == "deny")
+    assert "vercel.project.read" in deny["eligible_tool_names"]
+    assert deny["eligibility_reason"] is None
+
+
+async def test_access_summary_connection_only_deny_covers_tools_without_allow_scope_keys(
+    connection_routes: ConnectionRouteHarness,
+    session: AsyncSession,
+) -> None:
+    connection = Connection(
+        workspace_id=connection_routes.workspace_id,
+        connector_type="vercel",
+        name="Connection-only deny",
+        auth_type="access_token",
+    )
+    agent = Agent(
+        workspace_id=connection_routes.workspace_id,
+        name="Connection-only denied",
+        slug=f"connection-denied-{new_uuid7().hex[:8]}",
+    )
+    session.add_all([connection, agent])
+    await session.flush()
+    connection_id = str(connection.id)
+    session.add_all(
+        [
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=agent.id,
+                capability="vercel.deployment.read",
+                scope_json={
+                    "connection_id": connection_id,
+                    "project_id": "project-a",
+                    "deployment_id": "deployment-a",
+                },
+                effect="allow",
+            ),
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=agent.id,
+                capability="vercel.*",
+                scope_json={"connection_id": connection_id},
+                effect="deny",
+            ),
+        ]
+    )
+    await session.commit()
+
+    response = await connection_routes.client.get(
+        f"/api/v1/workspaces/{connection_routes.workspace_id}/connections/{connection.id}/access-summary"
+    )
+
+    assert response.status_code == 200, response.text
+    summary = response.json()["agents"][0]
+    assert summary["authorized"] is False
+    deny = next(grant for grant in summary["grants"] if grant["effect"] == "deny")
+    assert {"vercel.project.read", "vercel.deployment.read"}.issubset(deny["eligible_tool_names"])
+    assert deny["eligibility_reason"] is None
+
+
+async def test_access_summary_filters_unrelated_rows_before_enforcing_result_cap(
+    connection_routes: ConnectionRouteHarness,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(service, "_MAX_CONNECTION_ACCESS_SUMMARY_ROWS", 1, raising=False)
+    connection = Connection(
+        workspace_id=connection_routes.workspace_id,
+        connector_type="vercel",
+        name="Bounded summary",
+        auth_type="access_token",
+    )
+    agent = Agent(
+        workspace_id=connection_routes.workspace_id,
+        name="Bounded agent",
+        slug=f"bounded-{new_uuid7().hex[:8]}",
+    )
+    session.add_all([connection, agent])
+    await session.flush()
+    connection_id = str(connection.id)
+    session.add_all(
+        [
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=agent.id,
+                capability="github.repository.read",
+                scope_json={"connection_id": connection_id, "repository": "acme/one"},
+                effect="allow",
+            ),
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=agent.id,
+                capability="github.repository.read",
+                scope_json={"connection_id": connection_id, "repository": "acme/two"},
+                effect="allow",
+            ),
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=agent.id,
+                capability="vercel.project.list",
+                scope_json={"connection_id": connection_id},
+                effect="allow",
+            ),
+        ]
+    )
+    await session.commit()
+    url = (
+        f"/api/v1/workspaces/{connection_routes.workspace_id}/connections/"
+        f"{connection.id}/access-summary"
+    )
+
+    at_cap = await connection_routes.client.get(url)
+    assert at_cap.status_code == 200, at_cap.text
+    assert [grant["capability"] for grant in at_cap.json()["agents"][0]["grants"]] == [
+        "vercel.project.list"
+    ]
+
+    session.add(
+        AgentCapabilityGrant(
+            workspace_id=connection_routes.workspace_id,
+            agent_id=agent.id,
+            capability="vercel.project.read",
+            scope_json={"connection_id": connection_id, "project_id": "project-a"},
+            effect="allow",
+        )
+    )
+    await session.commit()
+
+    over_cap = await connection_routes.client.get(url)
+    assert over_cap.status_code == 503, over_cap.text
+    assert over_cap.json() == {"detail": "Connection access summary is temporarily unavailable"}
+
+
+async def test_access_summary_does_not_count_nonmatching_glob_denies_toward_row_cap(
+    connection_routes: ConnectionRouteHarness,
+    session: AsyncSession,
+) -> None:
+    connection = Connection(
+        workspace_id=connection_routes.workspace_id,
+        connector_type="vercel",
+        name="Glob cap exclusion",
+        auth_type="access_token",
+    )
+    agent = Agent(
+        workspace_id=connection_routes.workspace_id,
+        name="Glob cap agent",
+        slug=f"glob-cap-{new_uuid7().hex[:8]}",
+    )
+    session.add_all([connection, agent])
+    await session.flush()
+    connection_id = str(connection.id)
+    session.add_all(
+        [
+            *[
+                AgentCapabilityGrant(
+                    workspace_id=connection_routes.workspace_id,
+                    agent_id=agent.id,
+                    capability="vercel.*",
+                    scope_json={"connection_id": "not-this-connection-*"},
+                    effect="deny",
+                )
+                for _ in range(257)
+            ],
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=agent.id,
+                capability="vercel.project.list",
+                scope_json={"connection_id": connection_id},
+                effect="allow",
+            ),
+        ]
+    )
+    await session.commit()
+
+    response = await connection_routes.client.get(
+        f"/api/v1/workspaces/{connection_routes.workspace_id}/connections/{connection.id}/access-summary"
+    )
+
+    assert response.status_code == 200, response.text
+    summary = response.json()["agents"][0]
+    assert summary["authorized_tool_names"] == ["vercel.project.list"]
+    assert [grant["effect"] for grant in summary["grants"]] == ["allow"]
+
+
+async def test_access_summary_fails_closed_at_257_exact_relevant_rows(
+    connection_routes: ConnectionRouteHarness,
+    session: AsyncSession,
+) -> None:
+    connection = Connection(
+        workspace_id=connection_routes.workspace_id,
+        connector_type="vercel",
+        name="Exact cap",
+        auth_type="access_token",
+    )
+    agent = Agent(
+        workspace_id=connection_routes.workspace_id,
+        name="Exact cap agent",
+        slug=f"exact-cap-{new_uuid7().hex[:8]}",
+    )
+    session.add_all([connection, agent])
+    await session.flush()
+    session.add_all(
+        [
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=agent.id,
+                capability="vercel.project.list",
+                scope_json={"connection_id": str(connection.id)},
+                effect="allow",
+            )
+            for _ in range(257)
+        ]
+    )
+    await session.commit()
+
+    response = await connection_routes.client.get(
+        f"/api/v1/workspaces/{connection_routes.workspace_id}/connections/{connection.id}/access-summary"
+    )
+
+    assert response.status_code == 503, response.text
+    assert response.json() == {"detail": "Connection access summary is temporarily unavailable"}
+
+
+async def test_access_summary_applies_bracket_connection_deny_and_lists_affected_tools(
+    connection_routes: ConnectionRouteHarness,
+    session: AsyncSession,
+) -> None:
+    connection = Connection(
+        workspace_id=connection_routes.workspace_id,
+        connector_type="vercel",
+        name="Bracket deny",
+        auth_type="access_token",
+    )
+    agent = Agent(
+        workspace_id=connection_routes.workspace_id,
+        name="Bracket deny agent",
+        slug=f"bracket-deny-{new_uuid7().hex[:8]}",
+    )
+    session.add_all([connection, agent])
+    await session.flush()
+    connection_id = str(connection.id)
+    matching_pattern = f"[{connection_id[0]}]{connection_id[1:]}"
+    session.add_all(
+        [
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=agent.id,
+                capability="vercel.project.read",
+                scope_json={"connection_id": connection_id, "project_id": "project-a"},
+                effect="allow",
+            ),
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=agent.id,
+                capability="vercel.*",
+                scope_json={"connection_id": matching_pattern},
+                effect="deny",
+            ),
+        ]
+    )
+    await session.commit()
+
+    response = await connection_routes.client.get(
+        f"/api/v1/workspaces/{connection_routes.workspace_id}/connections/{connection.id}/access-summary"
+    )
+
+    assert response.status_code == 200, response.text
+    summary = response.json()["agents"][0]
+    assert summary["authorized"] is False
+    deny = next(grant for grant in summary["grants"] if grant["effect"] == "deny")
+    assert deny["scope"]["connection_id"] == matching_pattern
+    assert "vercel.project.read" in deny["eligible_tool_names"]
+    assert deny["eligibility_reason"] is None
+
+
+async def test_access_summary_denies_equal_bracket_project_scope_patterns(
+    connection_routes: ConnectionRouteHarness,
+    session: AsyncSession,
+) -> None:
+    connection = Connection(
+        workspace_id=connection_routes.workspace_id,
+        connector_type="vercel",
+        name="Bracket project overlap",
+        auth_type="access_token",
+    )
+    agent = Agent(
+        workspace_id=connection_routes.workspace_id,
+        name="Bracket project agent",
+        slug=f"bracket-project-{new_uuid7().hex[:8]}",
+    )
+    session.add_all([connection, agent])
+    await session.flush()
+    scope = {"connection_id": str(connection.id), "project_id": "project-[ab]"}
+    session.add_all(
+        [
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=agent.id,
+                capability="vercel.project.read",
+                scope_json=scope,
+                effect="allow",
+            ),
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=agent.id,
+                capability="vercel.project.read",
+                scope_json=scope,
+                effect="deny",
+            ),
+        ]
+    )
+    await session.commit()
+
+    response = await connection_routes.client.get(
+        f"/api/v1/workspaces/{connection_routes.workspace_id}/connections/{connection.id}/access-summary"
+    )
+
+    assert response.status_code == 200, response.text
+    summary = response.json()["agents"][0]
+    assert summary["authorized"] is False
+    assert "vercel.project.read" not in summary["authorized_tool_names"]
+
+
+async def test_access_summary_keeps_disjoint_exact_project_scope_authorized(
+    connection_routes: ConnectionRouteHarness,
+    session: AsyncSession,
+) -> None:
+    connection = Connection(
+        workspace_id=connection_routes.workspace_id,
+        connector_type="vercel",
+        name="Disjoint project scopes",
+        auth_type="access_token",
+    )
+    agent = Agent(
+        workspace_id=connection_routes.workspace_id,
+        name="Disjoint project agent",
+        slug=f"disjoint-project-{new_uuid7().hex[:8]}",
+    )
+    session.add_all([connection, agent])
+    await session.flush()
+    connection_id = str(connection.id)
+    session.add_all(
+        [
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=agent.id,
+                capability="vercel.project.read",
+                scope_json={"connection_id": connection_id, "project_id": "project-a"},
+                effect="allow",
+            ),
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=agent.id,
+                capability="vercel.project.read",
+                scope_json={"connection_id": connection_id, "project_id": "project-b"},
+                effect="deny",
+            ),
+        ]
+    )
+    await session.commit()
+
+    response = await connection_routes.client.get(
+        f"/api/v1/workspaces/{connection_routes.workspace_id}/connections/{connection.id}/access-summary"
+    )
+
+    assert response.status_code == 200, response.text
+    summary = response.json()["agents"][0]
+    assert summary["authorized"] is True
+    assert "vercel.project.read" in summary["authorized_tool_names"]
+
+
+async def test_access_summary_fails_closed_for_list_valued_target_deny_scope(
+    connection_routes: ConnectionRouteHarness,
+    session: AsyncSession,
+) -> None:
+    connection = Connection(
+        workspace_id=connection_routes.workspace_id,
+        connector_type="vercel",
+        name="List-valued deny",
+        auth_type="access_token",
+    )
+    agent = Agent(
+        workspace_id=connection_routes.workspace_id,
+        name="List-valued deny agent",
+        slug=f"list-deny-{new_uuid7().hex[:8]}",
+    )
+    session.add_all([connection, agent])
+    await session.flush()
+    connection_id = str(connection.id)
+    session.add_all(
+        [
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=agent.id,
+                capability="vercel.project.read",
+                scope_json={"connection_id": connection_id, "project_id": "project-a"},
+                effect="allow",
+            ),
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=agent.id,
+                capability="vercel.project.read",
+                scope_json={"connection_id": [connection_id], "project_id": ["project-a"]},
+                effect="deny",
+            ),
+        ]
+    )
+    await session.commit()
+
+    response = await connection_routes.client.get(
+        f"/api/v1/workspaces/{connection_routes.workspace_id}/connections/{connection.id}/access-summary"
+    )
+
+    assert response.status_code == 503, response.text
+    assert response.json() == {"detail": "Connection access summary is temporarily unavailable"}
+
+
+async def test_access_summary_fails_closed_for_malformed_target_legacy_scope(
+    connection_routes: ConnectionRouteHarness,
+    session: AsyncSession,
+) -> None:
+    connection = Connection(
+        workspace_id=connection_routes.workspace_id,
+        connector_type="vercel",
+        name="Malformed legacy deny",
+        auth_type="access_token",
+    )
+    agent = Agent(
+        workspace_id=connection_routes.workspace_id,
+        name="Malformed legacy agent",
+        slug=f"malformed-deny-{new_uuid7().hex[:8]}",
+    )
+    session.add_all([connection, agent])
+    await session.flush()
+    connection_id = str(connection.id)
+    session.add_all(
+        [
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=agent.id,
+                capability="vercel.project.read",
+                scope_json={"connection_id": connection_id, "project_id": "project-a"},
+                effect="allow",
+            ),
+            AgentCapabilityGrant(
+                workspace_id=connection_routes.workspace_id,
+                agent_id=agent.id,
+                capability="vercel.project.read",
+                scope_json={"connection_id": connection_id, "project_id": 7},
+                effect="deny",
+            ),
+        ]
+    )
+    await session.commit()
+
+    response = await connection_routes.client.get(
+        f"/api/v1/workspaces/{connection_routes.workspace_id}/connections/{connection.id}/access-summary"
+    )
+
+    assert response.status_code == 503, response.text
+    assert response.json() == {"detail": "Connection access summary is temporarily unavailable"}
 
 
 @pytest.mark.parametrize(
