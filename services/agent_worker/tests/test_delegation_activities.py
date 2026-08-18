@@ -16,6 +16,7 @@ from uuid import UUID
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
 from jhin_agent_worker.activities import AgentActivities
@@ -268,18 +269,27 @@ async def test_deliver_writes_observation_and_resumes_run(world: World) -> None:
         verdict="pass",
         reported=True,
     )
+    gateway_tool_call_id = "13ae7bd1-99c4-5c2f-b73b-5ae3aa201a21"
+    delivery = DeliverDelegationResultInput(
+        workspace_id=str(world.workspace.id),
+        task_id=str(world.parent_task.id),
+        run_id=str(run_id),
+        agent_id=str(world.cto.id),
+        child_task_id=str(world.child_task.id),
+        provider_call_id="call-9",
+        gateway_tool_call_id=gateway_tool_call_id,
+        kind="review_request",
+        summary=summary,
+    )
     await ActivityEnvironment().run(
         world.activities.deliver_delegation_result_activity,
-        DeliverDelegationResultInput(
-            workspace_id=str(world.workspace.id),
-            task_id=str(world.parent_task.id),
-            run_id=str(run_id),
-            agent_id=str(world.cto.id),
-            child_task_id=str(world.child_task.id),
-            provider_call_id="call-9",
-            kind="review_request",
-            summary=summary,
-        ),
+        delivery,
+    )
+    # A lost activity response retries the same canonical delivery. The DB
+    # bundle is single-copy, while the best-effort wake-up may be republished.
+    await ActivityEnvironment().run(
+        world.activities.deliver_delegation_result_activity,
+        delivery,
     )
     async with world.session_factory() as session:
         run = await session.get(AgentRun, run_id)
@@ -289,7 +299,8 @@ async def test_deliver_writes_observation_and_resumes_run(world: World) -> None:
             select(Message).where(Message.message_type == "tool_result")
         )
         assert observation is not None
-        assert observation.content_json["tool_call_id"] == "call-9"
+        assert observation.content_json["tool_call_id"] == gateway_tool_call_id
+        assert observation.content_json["provider_call_id"] == "call-9"
         assert observation.content_json["tool_name"] == "organization.delegate_task"
         payload = json.loads(observation.content_json["result"])
         assert payload["verdict"] == "pass"
@@ -299,7 +310,135 @@ async def test_deliver_writes_observation_and_resumes_run(world: World) -> None:
         )
         assert event is not None
         assert event.payload_json["verdict"] == "pass"
-    assert any(e.event_type == "agent.run.resumed" for e in world.publisher.events)
+        assert event.payload_json["tool_call_id"] == gateway_tool_call_id
+        assert (
+            await session.scalar(
+                select(AuditEvent.id).where(
+                    AuditEvent.action == "delegation.legacy_tool_call_binding"
+                )
+            )
+            is None
+        )
+        assert (
+            len(
+                list(
+                    await session.scalars(
+                        select(Message).where(Message.message_type == "tool_result")
+                    )
+                )
+            )
+            == 1
+        )
+        assert (
+            len(
+                list(
+                    await session.scalars(
+                        select(RunEvent).where(RunEvent.event_type == "delegation.result")
+                    )
+                )
+            )
+            == 1
+        )
+    assert [
+        event.event_type
+        for event in world.publisher.events
+        if event.event_type == "agent.run.resumed"
+    ] == ["agent.run.resumed", "agent.run.resumed"]
+
+
+async def test_legacy_delegation_uses_bounded_provider_binding_and_audits(
+    world: World,
+) -> None:
+    async with world.session_factory() as session:
+        run = AgentRun(
+            workspace_id=world.workspace.id,
+            agent_id=world.cto.id,
+            task_id=world.parent_task.id,
+            status=RunStatus.WAITING_DELEGATION.value,
+        )
+        session.add(run)
+        await session.commit()
+        run_id = run.id
+
+    await ActivityEnvironment().run(
+        world.activities.deliver_delegation_result_activity,
+        DeliverDelegationResultInput(
+            workspace_id=str(world.workspace.id),
+            task_id=str(world.parent_task.id),
+            run_id=str(run_id),
+            agent_id=str(world.cto.id),
+            child_task_id=str(world.child_task.id),
+            provider_call_id="legacy-provider-call",
+            gateway_tool_call_id="",
+            kind="delegation",
+            summary=DelegationSummary(
+                task_id=str(world.child_task.id),
+                status="completed",
+                summary="Legacy child completed.",
+                reported=True,
+            ),
+        ),
+    )
+
+    async with world.session_factory() as session:
+        observation = await session.scalar(
+            select(Message).where(Message.message_type == "tool_result")
+        )
+        assert observation is not None
+        assert observation.content_json["tool_call_id"] == "legacy-provider-call"
+        assert observation.content_json["provider_call_id"] == "legacy-provider-call"
+        event = await session.scalar(
+            select(RunEvent).where(RunEvent.event_type == "delegation.result")
+        )
+        assert event is not None
+        assert event.payload_json["tool_call_id"] == "legacy-provider-call"
+        audit = await session.scalar(
+            select(AuditEvent).where(AuditEvent.action == "delegation.legacy_tool_call_binding")
+        )
+        assert audit is not None
+        assert audit.target_id == run_id
+
+
+@pytest.mark.parametrize("bad_tool_call_id", ["not-a-uuid", "x" * 10_000])
+async def test_delegation_rejects_invalid_canonical_tool_call_id(
+    world: World,
+    bad_tool_call_id: str,
+) -> None:
+    async with world.session_factory() as session:
+        run = AgentRun(
+            workspace_id=world.workspace.id,
+            agent_id=world.cto.id,
+            task_id=world.parent_task.id,
+            status=RunStatus.WAITING_DELEGATION.value,
+        )
+        session.add(run)
+        await session.commit()
+        run_id = run.id
+
+    with pytest.raises(ApplicationError, match="invalid canonical tool call identity"):
+        await ActivityEnvironment().run(
+            world.activities.deliver_delegation_result_activity,
+            DeliverDelegationResultInput(
+                workspace_id=str(world.workspace.id),
+                task_id=str(world.parent_task.id),
+                run_id=str(run_id),
+                agent_id=str(world.cto.id),
+                child_task_id=str(world.child_task.id),
+                provider_call_id="provider-id-must-not-be-used",
+                gateway_tool_call_id=bad_tool_call_id,
+                kind="delegation",
+                summary=DelegationSummary(
+                    task_id=str(world.child_task.id),
+                    status="completed",
+                    summary="Must not persist.",
+                    reported=True,
+                ),
+            ),
+        )
+
+    async with world.session_factory() as session:
+        assert list(await session.scalars(select(Message))) == []
+        assert list(await session.scalars(select(RunEvent))) == []
 
 
 # --- concurrency admission (plan 30) ---

@@ -89,3 +89,4 @@ class DeliverDelegationResultInput:
     provider_call_id: str
     kind: str
     summary: DelegationSummary
+    gateway_tool_call_id: str = ""

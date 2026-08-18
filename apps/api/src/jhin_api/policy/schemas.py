@@ -68,4 +68,6 @@ class ToolOut(BaseModel):
     risk: str
     required_capability: str
     supports_approval: bool
+    scope_keys: tuple[str, ...]
+    required_grant_scope_keys: tuple[str, ...]
     input_schema: dict[str, Any]

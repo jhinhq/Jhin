@@ -156,8 +156,29 @@ def evaluate(
             code="no_grant",
             reason=f"agent has no capability grant matching '{capability}'",
         )
+    required_scope_keys = set(tool.required_grant_scope_keys)
+    if not required_scope_keys.issubset(scope):
+        return PolicyDecision(
+            decision=DecisionType.DENY,
+            code="required_scope_missing",
+            reason=f"call for '{capability}' is missing a required scope dimension",
+        )
+
+    # Required scope keys are a property of each allow grant, not of the
+    # capability name. Consequently even broad ``*`` grants cannot widen
+    # production connector access into an unscoped permission.
+    scoped_allow_grants = [
+        grant for grant in allow_grants if required_scope_keys.issubset(grant.scope)
+    ]
+    if not scoped_allow_grants:
+        return PolicyDecision(
+            decision=DecisionType.DENY,
+            code="required_scope_missing",
+            reason=f"grant for '{capability}' is missing a required scope dimension",
+        )
+
     if not tool.defers_scope and not any(
-        scope_matches(grant.scope, scope) for grant in allow_grants
+        scope_matches(grant.scope, scope) for grant in scoped_allow_grants
     ):
         return PolicyDecision(
             decision=DecisionType.DENY,

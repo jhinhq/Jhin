@@ -13,6 +13,7 @@ Two defenses, applied in order:
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
 from jhin_secrets.redaction import SecretRedactor, get_redactor
@@ -23,6 +24,41 @@ MAX_STRING_CHARS = 8_192
 MAX_DOCUMENT_BYTES = 32_768
 
 TRUNCATION_MARKER = "…[truncated]"
+_MIN_KEY_CAP_CHARS = len(TRUNCATION_MARKER) + 8
+
+
+class StrictJSONError(ValueError):
+    """The document uses syntax Python accepts but RFC JSON forbids."""
+
+
+def _reject_nonstandard_json_constant(value: str) -> None:
+    raise StrictJSONError(f"non-standard JSON constant is not allowed: {value}")
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise StrictJSONError(f"duplicate JSON object key is not allowed: {key}")
+        result[key] = value
+    return result
+
+
+def _decode_finite_json_float(value: str) -> float:
+    decoded = float(value)
+    if not math.isfinite(decoded):
+        raise StrictJSONError("non-finite JSON number is not allowed")
+    return decoded
+
+
+def strict_json_loads(document: str) -> Any:
+    """Decode RFC-compatible JSON without non-finite numbers or duplicate keys."""
+    return json.loads(
+        document,
+        parse_constant=_reject_nonstandard_json_constant,
+        parse_float=_decode_finite_json_float,
+        object_pairs_hook=_reject_duplicate_json_keys,
+    )
 
 
 def _truncate_string(value: str, max_chars: int) -> str:
@@ -31,14 +67,40 @@ def _truncate_string(value: str, max_chars: int) -> str:
     return value[: max_chars - len(TRUNCATION_MARKER)] + TRUNCATION_MARKER
 
 
+def _unique_bounded_key(
+    key: str,
+    existing: dict[str, Any],
+    max_string_chars: int,
+) -> str:
+    """Keep every value when redaction/truncation makes mapping keys collide."""
+    if key not in existing:
+        return key
+    collision = 2
+    while True:
+        suffix = f"#{collision}"
+        candidate = f"{key[: max_string_chars - len(suffix)]}{suffix}"
+        if candidate not in existing:
+            return candidate
+        collision += 1
+
+
 def _sanitize_value(value: Any, redactor: SecretRedactor, max_string_chars: int) -> Any:
     if isinstance(value, str):
         return _truncate_string(redactor.redact_text(value), max_string_chars)
     if isinstance(value, dict):
-        return {
-            str(key): _sanitize_value(item, redactor, max_string_chars)
-            for key, item in value.items()
-        }
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            # Keys are provider-controlled strings too. Redact the complete
+            # key before applying the cap so truncation cannot strand a
+            # recognizable prefix of a credential.
+            bounded_key = _truncate_string(redactor.redact_text(str(key)), max_string_chars)
+            safe_key = _unique_bounded_key(
+                bounded_key,
+                sanitized,
+                max_string_chars,
+            )
+            sanitized[safe_key] = _sanitize_value(item, redactor, max_string_chars)
+        return sanitized
     if isinstance(value, (list, tuple)):
         return [_sanitize_value(item, redactor, max_string_chars) for item in value]
     if isinstance(value, (int, float, bool)) or value is None:
@@ -60,6 +122,8 @@ def sanitize_payload(
     payload is replaced by a marker object carrying a redacted preview — the
     original is intentionally lost (plan 21.8).
     """
+    if max_string_chars < _MIN_KEY_CAP_CHARS:
+        raise ValueError(f"max_string_chars must be at least {_MIN_KEY_CAP_CHARS} characters")
     active_redactor = redactor if redactor is not None else get_redactor()
     sanitized = _sanitize_value(payload, active_redactor, max_string_chars)
     serialized = json.dumps(sanitized, ensure_ascii=False, default=str)

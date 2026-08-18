@@ -286,6 +286,8 @@ class ToolCallStatus(StrEnum):
     """
 
     PENDING_APPROVAL = "pending_approval"
+    EXECUTING = "executing"
+    EXECUTION_UNKNOWN = "execution_unknown"
     COMPLETED = "completed"
     FAILED = "failed"
     DENIED = "denied"

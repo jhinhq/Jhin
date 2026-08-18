@@ -90,7 +90,16 @@ async def decide(
     request_id: UUID,
     ip_hash: str,
 ) -> Approval:
-    approval = await get_approval(db, ctx.workspace_id, approval_id)
+    approval = await db.scalar(
+        select(Approval)
+        .where(
+            Approval.id == approval_id,
+            Approval.workspace_id == ctx.workspace_id,
+        )
+        .with_for_update()
+    )
+    if approval is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Approval not found")
 
     already_this_decision = approval.status == decision
     if approval.status != ApprovalStatus.PENDING.value and not already_this_decision:
@@ -99,28 +108,35 @@ async def decide(
             detail=f"Approval is already {approval.status}",
         )
 
-    if not already_this_decision:
-        approval.status = decision
-        approval.decided_at = datetime.now(UTC)
-        approval.decided_by_user_id = ctx.user.id
-        audit.record(
-            db,
-            action=f"approval.{decision}",
-            target_type="approval",
-            target_id=approval.id,
-            workspace_id=ctx.workspace_id,
-            actor_id=ctx.user.id,
-            request_id=request_id,
-            ip_hash=ip_hash,
-            metadata={
-                "action_type": approval.action_type,
-                "task_id": str(approval.task_id) if approval.task_id else None,
-                "run_id": str(approval.run_id) if approval.run_id else None,
-            },
-        )
-        # Commit before signaling: the worker activity re-reads this row as
-        # the sole authority for what was decided (plan 52).
+    if already_this_decision:
+        # Release the row lock, then retry the same idempotent wake-up. This
+        # repairs a commit -> Temporal signal failure without recording a
+        # second decision or allowing the opposite decision to win.
         await db.commit()
+        await signal_workflow(temporal, db, approval, decision)
+        return approval
+
+    approval.status = decision
+    approval.decided_at = datetime.now(UTC)
+    approval.decided_by_user_id = ctx.user.id
+    audit.record(
+        db,
+        action=f"approval.{decision}",
+        target_type="approval",
+        target_id=approval.id,
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user.id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        metadata={
+            "action_type": approval.action_type,
+            "task_id": str(approval.task_id) if approval.task_id else None,
+            "run_id": str(approval.run_id) if approval.run_id else None,
+        },
+    )
+    # Commit before signaling: the worker activity re-reads this row as
+    # the sole authority for what was decided (plan 52).
+    await db.commit()
 
     await signal_workflow(temporal, db, approval, decision)
     return approval

@@ -1,6 +1,7 @@
 """Policy evaluator decision matrix (plan 12.2, 42; exit-test foundation)."""
 
-from pydantic import BaseModel
+import pytest
+from pydantic import BaseModel, ValidationError
 
 from jhin_policy import (
     ApprovalPreset,
@@ -27,7 +28,12 @@ class _Out(BaseModel):
 
 
 def _tool(
-    risk: RiskLevel, *, capability: str = "system.demo", supports_approval: bool = True
+    risk: RiskLevel,
+    *,
+    capability: str = "system.demo",
+    supports_approval: bool = True,
+    scope_keys: tuple[str, ...] = (),
+    required_grant_scope_keys: tuple[str, ...] = (),
 ) -> ToolDefinition:
     return ToolDefinition(
         name=capability,
@@ -37,6 +43,8 @@ def _tool(
         output_model=_Out,
         required_capability=capability,
         supports_approval=supports_approval,
+        scope_keys=scope_keys,
+        required_grant_scope_keys=required_grant_scope_keys,
     )
 
 
@@ -144,6 +152,145 @@ class TestScopes:
         )
         assert denied.code == "explicit_deny"
         assert allowed.allowed
+
+    def test_required_grant_scope_rejects_unscoped_exact_and_wildcard_allows(self) -> None:
+        tool = _tool(
+            RiskLevel.READ,
+            scope_keys=("connection_id", "schema"),
+            required_grant_scope_keys=("connection_id", "schema"),
+        )
+        requested = {"connection_id": "connection-1", "schema": "public"}
+
+        for capability in ("system.demo", "system.*", "*"):
+            decision = evaluate(
+                tool,
+                grants=[Grant(capability=capability, effect=GrantEffect.ALLOW)],
+                rules=[],
+                requested_scope=requested,
+            )
+            assert decision.decision is DecisionType.DENY
+            assert decision.code == "required_scope_missing"
+
+    def test_required_grant_scope_accepts_only_a_fully_scoped_allow(self) -> None:
+        tool = _tool(
+            RiskLevel.READ,
+            scope_keys=("connection_id", "schema"),
+            required_grant_scope_keys=("connection_id", "schema"),
+        )
+        requested = {"connection_id": "connection-1", "schema": "public"}
+        partial = Grant(
+            capability="system.*",
+            scope={"connection_id": "connection-1"},
+            effect=GrantEffect.ALLOW,
+        )
+        complete = Grant(
+            capability="system.*",
+            scope={"connection_id": "connection-1", "schema": "public"},
+            effect=GrantEffect.ALLOW,
+        )
+
+        assert (
+            evaluate(tool, grants=[partial], rules=[], requested_scope=requested).code
+            == "required_scope_missing"
+        )
+        assert evaluate(
+            tool, grants=[partial, complete], rules=[], requested_scope=requested
+        ).allowed
+
+    def test_required_grant_scope_value_mismatch_is_scope_mismatch(self) -> None:
+        tool = _tool(
+            RiskLevel.READ,
+            scope_keys=("connection_id", "schema"),
+            required_grant_scope_keys=("connection_id", "schema"),
+        )
+        decision = evaluate(
+            tool,
+            grants=[
+                Grant(
+                    capability="system.demo",
+                    scope={"connection_id": "connection-1", "schema": "private"},
+                )
+            ],
+            rules=[],
+            requested_scope={"connection_id": "connection-1", "schema": "public"},
+        )
+
+        assert decision.code == "scope_mismatch"
+
+    def test_missing_required_requested_scope_has_a_distinct_denial_code(self) -> None:
+        tool = _tool(
+            RiskLevel.READ,
+            scope_keys=("connection_id", "schema"),
+            required_grant_scope_keys=("connection_id", "schema"),
+        )
+        decision = evaluate(
+            tool,
+            grants=[
+                Grant(
+                    capability="system.demo",
+                    scope={"connection_id": "connection-1", "schema": "public"},
+                )
+            ],
+            rules=[],
+            requested_scope={"connection_id": "connection-1"},
+        )
+        assert decision.code == "required_scope_missing"
+
+    def test_required_grant_scope_does_not_weaken_explicit_deny(self) -> None:
+        tool = _tool(
+            RiskLevel.READ,
+            scope_keys=("connection_id",),
+            required_grant_scope_keys=("connection_id",),
+        )
+        decision = evaluate(
+            tool,
+            grants=[
+                Grant(
+                    capability="system.demo",
+                    scope={"connection_id": "connection-1"},
+                    effect=GrantEffect.ALLOW,
+                ),
+                Grant(capability="system.*", effect=GrantEffect.DENY),
+            ],
+            rules=[],
+            requested_scope={"connection_id": "connection-1"},
+        )
+        assert decision.code == "explicit_deny"
+
+    @pytest.mark.parametrize(
+        ("scope_keys", "required_scope_keys"),
+        [
+            (("connection_id",), ("schema",)),
+            (("connection_id",), ("connection_id", "connection_id")),
+            (("connection_id",), ("",)),
+            (("connection_id",), ("bad key",)),
+        ],
+    )
+    def test_tool_definition_rejects_invalid_required_scope_contract(
+        self,
+        scope_keys: tuple[str, ...],
+        required_scope_keys: tuple[str, ...],
+    ) -> None:
+        with pytest.raises(ValidationError, match="required grant scope"):
+            _tool(
+                RiskLevel.READ,
+                scope_keys=scope_keys,
+                required_grant_scope_keys=required_scope_keys,
+            )
+
+    def test_deferred_scope_cannot_also_require_generic_grant_dimensions(self) -> None:
+        with pytest.raises(ValidationError, match="defers_scope"):
+            ToolDefinition(
+                name="system.deferred_demo",
+                description="",
+                risk=RiskLevel.READ,
+                input_model=_In,
+                output_model=_Out,
+                required_capability="system.deferred_demo",
+                scope_keys=("relationship",),
+                required_grant_scope_keys=("relationship",),
+                defers_scope=True,
+            )
 
 
 class TestRiskDefaults:

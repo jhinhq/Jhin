@@ -21,9 +21,10 @@ def configure_logging(
 ) -> None:
     """Route all logging (structlog + stdlib) to JSON lines on stdout.
 
-    ``extra_processors`` run on every record (structlog and stdlib) before
-    rendering — services that handle credentials pass the secret redaction
-    processor here (plan 13.5) without this package depending on it.
+    ``extra_processors`` run on every record (structlog and stdlib) after
+    exception tracebacks have been converted to structured data and before
+    JSON rendering. Services that handle credentials pass the secret
+    redaction processor here (plan 13.5) without this package depending on it.
     """
 
     def add_service(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
@@ -36,7 +37,6 @@ def configure_logging(
         structlog.stdlib.add_logger_name,
         add_service,
         structlog.processors.TimeStamper(fmt="iso", utc=True),
-        *(extra_processors or []),
     ]
 
     structlog.configure(
@@ -54,6 +54,7 @@ def configure_logging(
         processors=[
             structlog.stdlib.ProcessorFormatter.remove_processors_meta,
             structlog.processors.dict_tracebacks,
+            *(extra_processors or []),
             structlog.processors.JSONRenderer(),
         ],
     )

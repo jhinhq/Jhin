@@ -349,6 +349,7 @@ class AgentTaskWorkflow:
                 provider_call_id=request.provider_call_id,
                 kind=request.kind,
                 summary=delegated.summary,
+                gateway_tool_call_id=request.gateway_tool_call_id,
             ),
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=_FINALIZE_RETRY,

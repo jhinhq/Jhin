@@ -9,6 +9,7 @@ from jhin_connectors.example.schemas import PingInput, PingOutput
 from jhin_connectors.execution import ConnectionResolutionError, resolve_connection
 from jhin_db.models import Workspace
 from jhin_domain import new_uuid7
+from jhin_secrets import SecretStore
 from jhin_tools.builtin import ToolExecutionContext
 
 
@@ -68,6 +69,27 @@ async def test_missing_crypto_is_rejected(
 async def test_invalid_uuid_is_rejected(context: ToolExecutionContext) -> None:
     with pytest.raises(ConnectionResolutionError, match="not a valid UUID"):
         await resolve_connection(context, "not-a-uuid", connector_type="github")
+
+
+@pytest.mark.parametrize("malformed", ["not-json-secret", '["token-value"]', '{"token": 7}'])
+async def test_malformed_stored_credentials_fail_without_leaking(
+    workspace: Workspace,
+    context: ToolExecutionContext,
+    make_connection,
+    malformed: str,
+) -> None:
+    connection = await make_connection(workspace)
+    assert context.crypto is not None
+    assert connection.encrypted_secret_id is not None
+    await SecretStore(context.session, context.crypto).rotate(
+        workspace.id, connection.encrypted_secret_id, malformed
+    )
+
+    with pytest.raises(ConnectionResolutionError) as excinfo:
+        await resolve_connection(context, connection.id, connector_type="github")
+
+    assert "malformed" in str(excinfo.value)
+    assert malformed not in str(excinfo.value)
 
 
 async def test_example_ping_tool_executes_through_resolution(

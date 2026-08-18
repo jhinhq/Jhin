@@ -40,6 +40,8 @@ async def list_tools(ctx: ViewerCtx) -> list[ToolOut]:
             risk=definition.risk.value,
             required_capability=definition.required_capability,
             supports_approval=definition.supports_approval,
+            scope_keys=definition.scope_keys,
+            required_grant_scope_keys=definition.required_grant_scope_keys,
             input_schema=definition.input_json_schema(),
         )
         for definition in build_default_catalog().definitions()

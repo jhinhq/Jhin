@@ -82,7 +82,9 @@ async def run_workflow(stubs: Stubs, params: DelegatedTaskInput) -> Any:
 
 async def test_runs_child_under_task_id_convention_and_summarizes() -> None:
     stubs = Stubs()
-    params = make_input()
+    # Keep the success case deterministic: the stub deliberately treats child
+    # task ids beginning with ``f`` as failures for the test below.
+    params = make_input(child_task_id="10000000-0000-4000-8000-000000000001")
     result = await run_workflow(stubs, params)
     assert result.child_task_id == params.child_task_id
     assert result.run_status == "completed"

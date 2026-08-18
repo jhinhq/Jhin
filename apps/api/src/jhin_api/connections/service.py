@@ -10,8 +10,11 @@ tool executors at execution time — plaintext is never returned by any route.
 from __future__ import annotations
 
 import json
+import math
 import secrets as stdlib_secrets
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import cast
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -25,9 +28,33 @@ from jhin_connectors import ConnectionHealth, Connector, VerifyContext, default_
 from jhin_db.models import Connection, ToolCall
 from jhin_db.models.connection import new_public_id
 from jhin_domain import ConnectionStatus, SecretType
-from jhin_secrets import SecretCrypto, SecretStore
+from jhin_secrets import (
+    SecretCrypto,
+    SecretMaterialError,
+    SecretStore,
+    decode_string_secret_map,
+    get_redactor,
+)
 
 _REGISTRY = default_registry()
+_MAX_PROVIDER_OUTPUT_STRING_CHARS = 2_000
+_MAX_PROVIDER_OUTPUT_BYTES = 32_768
+_MAX_PROVIDER_OUTPUT_ITEMS = 256
+_MAX_PROVIDER_OUTPUT_DEPTH = 16
+
+
+class _ProviderOutputLimitError(ValueError):
+    pass
+
+
+@dataclass
+class _ProviderOutputBudget:
+    items: int = 0
+
+    def consume_item(self) -> None:
+        self.items += 1
+        if self.items > _MAX_PROVIDER_OUTPUT_ITEMS:
+            raise _ProviderOutputLimitError("provider output exceeds the item limit")
 
 
 def _not_found() -> HTTPException:
@@ -36,6 +63,109 @@ def _not_found() -> HTTPException:
 
 def _bad_request(detail: str) -> HTTPException:
     return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=detail)
+
+
+def _decode_stored_credentials(plaintext: str) -> dict[str, str]:
+    try:
+        return decode_string_secret_map(plaintext)
+    except SecretMaterialError:
+        raise _bad_request("Stored connection credential is malformed") from None
+
+
+def _safe_provider_text(value: str) -> str:
+    """Redact the complete provider value before applying the persistence cap."""
+    return get_redactor().redact_text(value)[:_MAX_PROVIDER_OUTPUT_STRING_CHARS]
+
+
+def _safe_provider_key(value: object) -> str:
+    try:
+        rendered = str(value)
+    except Exception:
+        rendered = "[unsupported provider key]"
+    return _safe_provider_text(rendered)
+
+
+def _unique_provider_key(key: str, existing: dict[str, object]) -> str:
+    """Preserve values when stringification/redaction makes keys collide."""
+    if key not in existing:
+        return key
+    collision = 2
+    while True:
+        suffix = f"#{collision}"
+        candidate = f"{key[: _MAX_PROVIDER_OUTPUT_STRING_CHARS - len(suffix)]}{suffix}"
+        if candidate not in existing:
+            return candidate
+        collision += 1
+
+
+def _sanitize_provider_value(
+    value: object,
+    *,
+    budget: _ProviderOutputBudget,
+    depth: int = 0,
+) -> object:
+    """Recursively scrub provider-controlled metadata without changing containers."""
+    if depth > _MAX_PROVIDER_OUTPUT_DEPTH:
+        raise _ProviderOutputLimitError("provider output exceeds the depth limit")
+    if isinstance(value, str):
+        return _safe_provider_text(value)
+    if isinstance(value, dict):
+        sanitized: dict[str, object] = {}
+        for key, item in value.items():
+            budget.consume_item()
+            safe_key = _unique_provider_key(_safe_provider_key(key), sanitized)
+            sanitized[safe_key] = _sanitize_provider_value(
+                item,
+                budget=budget,
+                depth=depth + 1,
+            )
+        return sanitized
+    if isinstance(value, list):
+        sanitized_list: list[object] = []
+        for item in value:
+            budget.consume_item()
+            sanitized_list.append(_sanitize_provider_value(item, budget=budget, depth=depth + 1))
+        return sanitized_list
+    if isinstance(value, tuple):
+        sanitized_items: list[object] = []
+        for item in value:
+            budget.consume_item()
+            sanitized_items.append(_sanitize_provider_value(item, budget=budget, depth=depth + 1))
+        return tuple(sanitized_items)
+    if isinstance(value, (int, bool)) or value is None:
+        return value
+    if isinstance(value, float) and math.isfinite(value):
+        return value
+    return _safe_provider_key(value)
+
+
+def _sanitize_provider_document(value: object) -> object:
+    """Sanitize one provider document and enforce aggregate in-process bounds."""
+    try:
+        sanitized = _sanitize_provider_value(
+            value,
+            budget=_ProviderOutputBudget(),
+        )
+        encoded = json.dumps(
+            sanitized,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode()
+    except _ProviderOutputLimitError:
+        raise
+    except Exception:
+        raise _ProviderOutputLimitError("provider output is not safely serializable") from None
+    if len(encoded) > _MAX_PROVIDER_OUTPUT_BYTES:
+        raise _ProviderOutputLimitError("provider output exceeds the byte limit")
+    return sanitized
+
+
+def _unsafe_provider_output() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail="Provider returned an unsafe or oversized response",
+    )
 
 
 def get_connector(connector_type: str) -> Connector:
@@ -191,14 +321,36 @@ async def verify_connection(
 
     store = SecretStore(db, crypto)
     plaintext = await store.reveal(ctx.workspace_id, connection.encrypted_secret_id)
-    credentials = json.loads(plaintext)
-    health = await connector.verify_connection(
-        VerifyContext(
-            auth_type=connection.auth_type,
-            credentials=credentials,
-            config=dict(connection.config_json),
+    credentials = _decode_stored_credentials(plaintext)
+    try:
+        provider_health = await connector.verify_connection(
+            VerifyContext(
+                auth_type=connection.auth_type,
+                credentials=credentials,
+                config=dict(connection.config_json),
+            )
         )
-    )
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Provider connection verification failed",
+        ) from None
+    try:
+        safe_health = _sanitize_provider_document(
+            {
+                "message": provider_health.message,
+                "details": provider_health.details,
+            }
+        )
+        if not isinstance(safe_health, dict):
+            raise _ProviderOutputLimitError("provider health has an invalid shape")
+        health = ConnectionHealth(
+            ok=provider_health.ok,
+            message=safe_health["message"],
+            details=safe_health["details"],
+        )
+    except (_ProviderOutputLimitError, KeyError, TypeError, ValueError):
+        raise _unsafe_provider_output() from None
     connection.last_verified_at = datetime.now(UTC)
     if health.ok:
         connection.status = ConnectionStatus.ACTIVE.value
@@ -234,11 +386,12 @@ async def fetch_metadata(
         raise _bad_request("Connection has no stored credential")
     store = SecretStore(db, crypto)
     plaintext = await store.reveal(ctx.workspace_id, connection.encrypted_secret_id)
+    credentials = _decode_stored_credentials(plaintext)
     try:
-        return await connector.fetch_metadata(
+        provider_metadata = await connector.fetch_metadata(
             VerifyContext(
                 auth_type=connection.auth_type,
-                credentials=json.loads(plaintext),
+                credentials=credentials,
                 config=dict(connection.config_json),
             )
         )
@@ -246,7 +399,14 @@ async def fetch_metadata(
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Provider metadata fetch failed: {type(exc).__name__}",
-        ) from exc
+        ) from None
+    try:
+        safe_metadata = _sanitize_provider_document(provider_metadata)
+        if not isinstance(safe_metadata, dict):
+            raise _ProviderOutputLimitError("provider metadata has an invalid shape")
+    except _ProviderOutputLimitError:
+        raise _unsafe_provider_output() from None
+    return cast(dict[str, object], safe_metadata)
 
 
 async def rotate_credentials(

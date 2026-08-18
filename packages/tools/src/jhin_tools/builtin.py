@@ -18,7 +18,7 @@ from typing import cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from jhin_db.models import AuditEvent, Message
 from jhin_domain import ActorType, MessageVisibility, RecipientType, SenderType
@@ -51,6 +51,7 @@ class ToolExecutionContext:
     agent_id: UUID
     agent_name: str
     crypto: SecretCrypto | None = None
+    session_factory: async_sessionmaker[AsyncSession] | None = None
     tool_call_id: UUID | None = None
 
 

@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from jhin_db.models import Secret
 from jhin_domain import SecretType
 from jhin_secrets.crypto import EncryptedPayload, SecretCrypto
-from jhin_secrets.redaction import get_redactor
+from jhin_secrets.material import register_secret_material
 
 MASK_CHAR = "\u2022"  # •
 
@@ -48,6 +48,7 @@ class SecretStore:
         secret_type: SecretType = SecretType.API_KEY,
         created_by_user_id: UUID | None = None,
     ) -> Secret:
+        register_secret_material(plaintext)
         payload = self._crypto.encrypt(plaintext)
         secret = Secret(
             workspace_id=workspace_id,
@@ -61,7 +62,6 @@ class SecretStore:
             masked_hint=mask_hint(plaintext),
             created_by_user_id=created_by_user_id,
         )
-        get_redactor().register(plaintext)
         self._session.add(secret)
         await self._session.flush()
         return secret
@@ -92,12 +92,15 @@ class SecretStore:
                 fingerprint=secret.secret_fingerprint,
             )
         )
-        get_redactor().register(plaintext)
+        register_secret_material(plaintext)
         secret.last_used_at = datetime.now(UTC)
         return plaintext
 
     async def rotate(self, workspace_id: UUID, secret_id: UUID, new_plaintext: str) -> Secret:
         secret = await self.get(workspace_id, secret_id)
+        # Validate/register before mutating the ORM row. If validation fails,
+        # even a later caller commit cannot persist a half-rotated secret.
+        register_secret_material(new_plaintext)
         payload = self._crypto.encrypt(new_plaintext)
         secret.ciphertext = payload.ciphertext
         secret.nonce = payload.nonce
@@ -106,7 +109,6 @@ class SecretStore:
         secret.secret_fingerprint = payload.fingerprint
         secret.masked_hint = mask_hint(new_plaintext)
         secret.rotated_at = datetime.now(UTC)
-        get_redactor().register(new_plaintext)
         await self._session.flush()
         return secret
 

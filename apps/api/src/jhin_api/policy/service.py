@@ -48,27 +48,40 @@ async def create_grant(
     request_id: UUID,
     ip_hash: str,
 ) -> AgentCapabilityGrant:
-    await agents_service.get_agent(db, ctx.workspace_id, agent_id)
+    # Serialize grant-set mutations on the owning agent. PostgreSQL releases
+    # this row lock only after the insert/duplicate decision commits, so two
+    # concurrent identical requests cannot both pass the pre-insert check.
+    locked_agent_id = await db.scalar(
+        select(Agent.id)
+        .where(Agent.id == agent_id, Agent.workspace_id == ctx.workspace_id)
+        .with_for_update()
+    )
+    if locked_agent_id is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
-    duplicate = await db.scalar(
-        select(AgentCapabilityGrant.id).where(
+    same_capability_rows = await db.scalars(
+        select(AgentCapabilityGrant).where(
             AgentCapabilityGrant.agent_id == agent_id,
             AgentCapabilityGrant.workspace_id == ctx.workspace_id,
             AgentCapabilityGrant.capability == capability,
             AgentCapabilityGrant.effect == effect,
         )
     )
-    if duplicate is not None:
+    requested_scope = dict(scope)
+    if any(row.scope_json == requested_scope for row in same_capability_rows):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"A '{effect}' grant for '{capability}' already exists on this agent",
+            detail=(
+                f"An identical '{effect}' grant for '{capability}' and this scope "
+                "already exists on this agent"
+            ),
         )
 
     grant = AgentCapabilityGrant(
         workspace_id=ctx.workspace_id,
         agent_id=agent_id,
         capability=capability,
-        scope_json=dict(scope),
+        scope_json=requested_scope,
         effect=effect,
     )
     db.add(grant)

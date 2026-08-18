@@ -15,11 +15,12 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from jhin_policy.risk import RiskLevel
 
 _CAPABILITY_RE = re.compile(r"^[a-z0-9_]+(\.[a-z0-9_]+)*$")
+_SCOPE_KEY_RE = re.compile(r"^[a-z0-9_]+$")
 
 # Capabilities agents must never hold: anything that would let an agent grant
 # itself (or another agent) power, alter policy, or read stored credentials
@@ -86,6 +87,10 @@ class ToolDefinition(BaseModel):
     # these from the validated input and matches them against grant scopes.
     # Phase 4 system tools are unscoped.
     scope_keys: tuple[str, ...] = ()
+    # Some provider operations must never be authorized by an unscoped
+    # exact or wildcard capability grant. Every matching allow grant must
+    # carry these keys, and they must cover the requested values.
+    required_grant_scope_keys: tuple[str, ...] = ()
     # True for tools whose grant scopes carry semantics the generic fnmatch
     # matcher cannot express (e.g. organization.delegate relationship scopes,
     # plan 7.5). The generic evaluator then checks capability + rules only
@@ -99,6 +104,35 @@ class ToolDefinition(BaseModel):
         if not is_valid_capability(value):
             raise ValueError(f"not a valid dotted capability name: {value!r}")
         return value
+
+    @model_validator(mode="after")
+    def _validate_scope_contract(self) -> ToolDefinition:
+        for field_name, keys in (
+            ("scope_keys", self.scope_keys),
+            ("required_grant_scope_keys", self.required_grant_scope_keys),
+        ):
+            display_name = (
+                "required grant scope keys"
+                if field_name == "required_grant_scope_keys"
+                else "scope keys"
+            )
+            if len(keys) != len(set(keys)):
+                raise ValueError(f"{display_name} must contain unique keys")
+            invalid = [key for key in keys if not _SCOPE_KEY_RE.fullmatch(key)]
+            if invalid:
+                raise ValueError(f"{display_name} contain invalid scope key(s): {invalid!r}")
+        missing = set(self.required_grant_scope_keys) - set(self.scope_keys)
+        if missing:
+            raise ValueError(
+                "required grant scope keys must be a subset of scope keys; "
+                f"missing {sorted(missing)!r}"
+            )
+        if self.defers_scope and self.required_grant_scope_keys:
+            raise ValueError(
+                "defers_scope tools cannot declare required grant scope keys; "
+                "their validator owns the complete scope contract"
+            )
+        return self
 
     def input_json_schema(self) -> dict[str, object]:
         """JSON schema advertised to the model as the function signature."""

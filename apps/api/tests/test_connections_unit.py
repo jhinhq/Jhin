@@ -3,6 +3,7 @@ encrypted credential storage, once-only webhook secret, verify/rotate/delete
 lifecycle — all against in-memory SQLite and the in-process fake GitHub."""
 
 from collections.abc import Iterator
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -13,12 +14,78 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from jhin_api.connections import service
 from jhin_api.connections.schemas import ConnectionOut
 from jhin_api.deps import WorkspaceContext
+from jhin_connectors import ConnectionHealth, VerifyContext
 from jhin_connectors.testing.fake_github import FakeGitHubServer
 from jhin_db.models import Connection, Secret
 from jhin_domain import ConnectionStatus, new_uuid7
-from jhin_secrets import SecretCrypto
+from jhin_secrets import SecretCrypto, SecretStore
 
 REQ = {"request_id": new_uuid7(), "ip_hash": "test"}
+
+
+class _EchoingProviderConnector:
+    """Provider double that deliberately reflects credentials in its output."""
+
+    async def verify_connection(self, ctx: VerifyContext) -> ConnectionHealth:
+        token = ctx.credentials["token"]
+        return ConnectionHealth(
+            ok=False,
+            message=f"{'m' * 1_990}{token}:{'m' * 3_000}",
+            details={
+                f"{'k' * 1_990}{token}:{'k' * 3_000}": f"{token}:{'d' * 3_000}",
+                f"{'k' * 1_990}[REDACTED]": "collision-value",
+            },
+        )
+
+    async def fetch_metadata(self, ctx: VerifyContext) -> dict[Any, Any]:
+        token = ctx.credentials["token"]
+        metadata: dict[Any, Any] = {
+            _ProviderMetadataKey(f"{'k' * 1_990}{token}:{'k' * 3_000}"): token,
+            7: "integer-key-value",
+            "7": "string-key-value",
+            "nested": [
+                {"label": f"{token}:{'n' * 3_000}"},
+                (token, f"{'t' * 1_990}{token}:{'t' * 3_000}"),
+            ],
+        }
+        return metadata
+
+
+class _ProviderMetadataKey:
+    """Hashable provider key whose string form deliberately contains a secret."""
+
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def __str__(self) -> str:
+        return self._value
+
+
+class _OversizedProviderConnector:
+    def __init__(self, metadata: dict[str, Any] | None = None) -> None:
+        self._metadata = metadata or {}
+
+    async def verify_connection(self, _ctx: VerifyContext) -> ConnectionHealth:
+        return ConnectionHealth(
+            ok=True,
+            message="ok",
+            details={f"detail-{index}": "value" for index in range(300)},
+        )
+
+    async def fetch_metadata(self, _ctx: VerifyContext) -> dict[str, Any]:
+        return self._metadata
+
+
+class _RaisingProviderConnector:
+    async def verify_connection(self, ctx: VerifyContext) -> ConnectionHealth:
+        raise RuntimeError(f"provider reflected credential {ctx.credentials['token']}")
+
+
+def _deep_provider_metadata(depth: int) -> dict[str, Any]:
+    value: dict[str, Any] = {"leaf": "value"}
+    for _ in range(depth):
+        value = {"nested": value}
+    return value
 
 
 @pytest.fixture
@@ -151,6 +218,201 @@ async def test_verify_failure_sets_error_status_without_leaking_token(
     assert updated.status == ConnectionStatus.ERROR.value
     assert updated.last_error is not None
     assert "wrong-token-abc" not in updated.last_error
+
+
+async def test_verify_redacts_then_bounds_all_provider_health_strings(
+    session: AsyncSession,
+    crypto: SecretCrypto,
+    admin_ctx: WorkspaceContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = f"provider-echo-secret-{new_uuid7()}"
+    connection, _ = await create_github_connection(
+        session,
+        crypto,
+        admin_ctx,
+        token=token,
+        name="Echoing provider health",
+    )
+    connector = _EchoingProviderConnector()
+    monkeypatch.setattr(service, "get_connector", lambda _connector_type: connector)
+
+    updated, health = await service.verify_connection(
+        session, crypto, admin_ctx, connection.id, **REQ
+    )
+
+    assert health.ok is False
+    assert token not in health.message
+    assert len(health.message) == 2_000
+    assert health.message.endswith("[REDACTED]")
+    assert len(health.details) == 2
+    [(detail_key, detail_value), (collision_key, collision_value)] = health.details.items()
+    assert token not in detail_key
+    assert token not in detail_value
+    assert len(detail_key) == 2_000
+    assert detail_key.endswith("[REDACTED]")
+    assert len(detail_value) == 2_000
+    assert collision_key.endswith("#2")
+    assert collision_value == "collision-value"
+    assert updated.last_error == health.message
+    assert updated.last_error is not None
+    assert token not in updated.last_error
+    assert len(updated.last_error) == 2_000
+
+
+async def test_verify_hides_arbitrary_provider_exception_and_raw_cause(
+    session: AsyncSession,
+    crypto: SecretCrypto,
+    admin_ctx: WorkspaceContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = f"verify-exception-secret-{new_uuid7()}"
+    connection, _ = await create_github_connection(
+        session,
+        crypto,
+        admin_ctx,
+        token=token,
+        name="Raising provider health",
+    )
+    monkeypatch.setattr(
+        service,
+        "get_connector",
+        lambda _connector_type: _RaisingProviderConnector(),
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        await service.verify_connection(session, crypto, admin_ctx, connection.id, **REQ)
+
+    assert excinfo.value.status_code == 502
+    assert excinfo.value.detail == "Provider connection verification failed"
+    assert token not in str(excinfo.value)
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__suppress_context__ is True
+    assert connection.last_error is None
+
+
+async def test_verify_rejects_malformed_stored_credentials_without_leaking(
+    session: AsyncSession, crypto: SecretCrypto, admin_ctx: WorkspaceContext
+) -> None:
+    connection, _ = await create_github_connection(session, crypto, admin_ctx)
+    assert connection.encrypted_secret_id is not None
+    malformed = '{"token": {"nested": "never-leak-this-secret"}}'
+    await SecretStore(session, crypto).rotate(
+        admin_ctx.workspace_id, connection.encrypted_secret_id, malformed
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        await service.verify_connection(session, crypto, admin_ctx, connection.id, **REQ)
+
+    assert excinfo.value.status_code == 422
+    assert "malformed" in str(excinfo.value.detail).lower()
+    assert "never-leak-this-secret" not in str(excinfo.value.detail)
+
+
+async def test_metadata_redacts_then_bounds_nested_provider_strings(
+    session: AsyncSession,
+    crypto: SecretCrypto,
+    admin_ctx: WorkspaceContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = f"metadata-echo-secret-{new_uuid7()}"
+    connection, _ = await create_github_connection(
+        session,
+        crypto,
+        admin_ctx,
+        token=token,
+        name="Echoing provider metadata",
+    )
+    connector = _EchoingProviderConnector()
+    monkeypatch.setattr(service, "get_connector", lambda _connector_type: connector)
+
+    metadata = await service.fetch_metadata(session, crypto, admin_ctx, connection.id)
+
+    [(redacted_key, redacted_value), *other_items] = metadata.items()
+    assert token not in redacted_key
+    assert len(redacted_key) == 2_000
+    assert redacted_key.endswith("[REDACTED]")
+    assert redacted_value == "[REDACTED]"
+    assert all(isinstance(key, str) for key in metadata)
+    assert metadata["7"] == "integer-key-value"
+    assert metadata["7#2"] == "string-key-value"
+    assert len(other_items) == 3
+    nested_value = metadata["nested"]
+    assert isinstance(nested_value, list)
+    assert isinstance(nested_value[0], dict)
+    nested_label = nested_value[0]["label"]
+    assert isinstance(nested_label, str)
+    assert token not in nested_label
+    assert len(nested_label) == 2_000
+    assert isinstance(nested_value[1], tuple)
+    assert nested_value[1][0] == "[REDACTED]"
+    assert token not in nested_value[1][1]
+    assert len(nested_value[1][1]) == 2_000
+    assert nested_value[1][1].endswith("[REDACTED]")
+
+
+async def test_metadata_rejects_malformed_stored_credentials_as_422(
+    session: AsyncSession, crypto: SecretCrypto, admin_ctx: WorkspaceContext
+) -> None:
+    connection, _ = await create_github_connection(
+        session, crypto, admin_ctx, name="Malformed metadata credential"
+    )
+    assert connection.encrypted_secret_id is not None
+    malformed = '{"token": {"nested": "metadata-never-leak-secret"}}'
+    await SecretStore(session, crypto).rotate(
+        admin_ctx.workspace_id, connection.encrypted_secret_id, malformed
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        await service.fetch_metadata(session, crypto, admin_ctx, connection.id)
+
+    assert excinfo.value.status_code == 422
+    assert "malformed" in str(excinfo.value.detail).lower()
+    assert "metadata-never-leak-secret" not in str(excinfo.value.detail)
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {f"item-{index}": index for index in range(300)},
+        {"nested": {f"k-{i}": "x" * 2_000 for i in range(20)}},
+        _deep_provider_metadata(20),
+    ],
+    ids=["too-many-items", "too-many-total-bytes", "too-deep"],
+)
+async def test_metadata_rejects_oversized_provider_collections(
+    session: AsyncSession,
+    crypto: SecretCrypto,
+    admin_ctx: WorkspaceContext,
+    monkeypatch: pytest.MonkeyPatch,
+    metadata: dict[str, Any],
+) -> None:
+    connection, _ = await create_github_connection(session, crypto, admin_ctx)
+    connector = _OversizedProviderConnector(metadata)
+    monkeypatch.setattr(service, "get_connector", lambda _connector_type: connector)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await service.fetch_metadata(session, crypto, admin_ctx, connection.id)
+
+    assert excinfo.value.status_code == 502
+    assert "provider" in str(excinfo.value.detail).lower()
+
+
+async def test_verify_rejects_oversized_provider_details_without_persisting_them(
+    session: AsyncSession,
+    crypto: SecretCrypto,
+    admin_ctx: WorkspaceContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection, _ = await create_github_connection(session, crypto, admin_ctx)
+    connector = _OversizedProviderConnector()
+    monkeypatch.setattr(service, "get_connector", lambda _connector_type: connector)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await service.verify_connection(session, crypto, admin_ctx, connection.id, **REQ)
+
+    assert excinfo.value.status_code == 502
+    assert connection.last_error is None
 
 
 async def test_rotate_replaces_credential_and_resets_health(

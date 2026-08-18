@@ -37,6 +37,8 @@ from jhin_workflows.delegated_task import (
     DeliverDelegationResultInput,
 )
 
+_GATEWAY_TOOL_CALL_ID = "13ae7bd1-99c4-5c2f-b73b-5ae3aa201a21"
+
 
 @workflow.defn(name="DelegatedTaskWorkflow")
 class StubDelegatedTaskWorkflow:
@@ -143,6 +145,7 @@ def delegation_step(*, blocking: bool, kind: str = "delegation") -> StepResult:
                 blocking=blocking,
                 kind=kind,
                 provider_call_id="call-1",
+                gateway_tool_call_id=_GATEWAY_TOOL_CALL_ID,
             )
         ],
     )
@@ -184,6 +187,7 @@ async def test_blocking_delegation_parks_and_delivers_summary() -> None:
     request = step.delegations[0]
     assert delivered.child_task_id == request.child_task_id
     assert delivered.provider_call_id == "call-1"
+    assert delivered.gateway_tool_call_id == _GATEWAY_TOOL_CALL_ID
     assert delivered.task_id == params.task_id
     assert delivered.run_id == stubs.run_id
     # The stub child echoed the parent linkage through the summary.

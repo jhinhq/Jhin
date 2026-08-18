@@ -3,6 +3,19 @@
 from jhin_secrets.redaction import REDACTED, SecretRedactor, get_redactor, redact_event_dict
 
 
+class _SecretBearingKey:
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def __str__(self) -> str:
+        return self._value
+
+
+class _UnrenderableValue:
+    def __str__(self) -> str:
+        raise RuntimeError("stringification failed")
+
+
 def test_redactor_strips_known_secret() -> None:
     redactor = SecretRedactor()
     redactor.register("sk-live-abc123def456")
@@ -22,6 +35,14 @@ def test_redactor_handles_multiple_occurrences_and_values() -> None:
     assert result.count(REDACTED) == 3
 
 
+def test_redactor_replaces_longest_overlapping_secret_first() -> None:
+    redactor = SecretRedactor()
+    redactor.register("token-secret")
+    redactor.register("token-secret-extended")
+
+    assert redactor.redact_text("token-secret-extended token-secret") == (f"{REDACTED} {REDACTED}")
+
+
 def test_short_values_are_not_registered() -> None:
     redactor = SecretRedactor()
     redactor.register("ab")
@@ -37,10 +58,64 @@ def test_redact_value_recurses_containers() -> None:
     assert result["items"][1] == REDACTED
 
 
+def test_redact_value_scrubs_nested_mapping_keys_without_collision_loss() -> None:
+    redactor = SecretRedactor()
+    redactor.register("provider-secret-one")
+    redactor.register("provider-secret-two")
+    value = {
+        "nested": {
+            _SecretBearingKey("label-provider-secret-one"): "first",
+            "label-provider-secret-two": "second",
+            "label-[REDACTED]#2": "third",
+        }
+    }
+
+    first = redactor.redact_value(value)
+    second = redactor.redact_value(value)
+
+    assert first == second
+    nested = first["nested"]
+    assert len(nested) == 3
+    assert set(nested.values()) == {"first", "second", "third"}
+    assert all(isinstance(key, str) for key in nested)
+    assert all("provider-secret" not in key for key in nested)
+
+
+def test_redact_value_replaces_objects_that_cannot_be_stringified() -> None:
+    redactor = SecretRedactor()
+
+    assert redactor.redact_value(_UnrenderableValue()) == "[unsupported log value]"
+
+
+def test_redact_value_preserves_json_primitive_types() -> None:
+    redactor = SecretRedactor()
+
+    assert redactor.redact_value([1, 2.5, True, None]) == [1, 2.5, True, None]
+
+
 def test_structlog_processor_scrubs_event_dict() -> None:
     get_redactor().register("proc-secret-value")
     try:
         event = redact_event_dict(None, "info", {"event": "call failed: proc-secret-value"})
         assert event["event"] == f"call failed: {REDACTED}"
+    finally:
+        get_redactor().clear()
+
+
+def test_structlog_processor_scrubs_secret_bearing_event_keys() -> None:
+    get_redactor().register("processor-key-secret")
+    try:
+        event = redact_event_dict(
+            None,
+            "info",
+            {
+                _SecretBearingKey("label-processor-key-secret"): "first",
+                "label-[REDACTED]": "second",
+            },
+        )
+        assert len(event) == 2
+        assert set(event.values()) == {"first", "second"}
+        assert all(isinstance(key, str) for key in event)
+        assert all("processor-key-secret" not in key for key in event)
     finally:
         get_redactor().clear()

@@ -57,6 +57,8 @@ class DelegationRequest:
     # The model's tool-call id, so the blocking result can be stitched back
     # into the transcript as this call's observation.
     provider_call_id: str = ""
+    # Canonical gateway invocation id used for durable transcript pairing.
+    gateway_tool_call_id: str = ""
 
 
 @dataclass
@@ -85,6 +87,10 @@ class StepResult:
     # DelegatedTaskWorkflow per entry and awaits the blocking one (at most
     # one — the step parks immediately after a blocking delegation).
     delegations: list[DelegationRequest] = field(default_factory=list)
+    # A claimed mutation whose terminal outcome cannot be proven. The
+    # activity persists this before failing non-retryably so the workflow
+    # cannot advance to another model step and repeat the effect.
+    execution_unknown_tool_call_id: str | None = None
 
 
 @dataclass

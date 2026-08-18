@@ -10,7 +10,6 @@ never reach persisted output.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
@@ -19,7 +18,7 @@ from sqlalchemy import select
 
 from jhin_db.models import Connection
 from jhin_domain import ConnectionStatus
-from jhin_secrets import SecretStore
+from jhin_secrets import SecretMaterialError, SecretStore, decode_string_secret_map
 from jhin_tools.builtin import ToolExecutionContext
 
 
@@ -77,15 +76,9 @@ async def resolve_connection(
     store = SecretStore(ctx.session, ctx.crypto)
     plaintext = await store.reveal(ctx.workspace_id, connection.encrypted_secret_id)
     try:
-        parsed = json.loads(plaintext)
-    except json.JSONDecodeError:
+        parsed = decode_string_secret_map(plaintext)
+    except SecretMaterialError:
         raise ConnectionResolutionError(
             f"stored credential for '{connection.name}' is malformed"
         ) from None
-    if not isinstance(parsed, dict) or not all(
-        isinstance(key, str) and isinstance(value, str) for key, value in parsed.items()
-    ):
-        raise ConnectionResolutionError(
-            f"stored credential for '{connection.name}' has an unexpected shape"
-        )
     return ResolvedConnection(connection=connection, credentials=parsed)

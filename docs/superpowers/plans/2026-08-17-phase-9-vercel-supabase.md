@@ -116,6 +116,7 @@ Expected: the plan is tracked before the first implementation commit, so later t
 ### Task 1: Harden scoped grants, approval resume, and credential redaction
 
 **Files:**
+- Modify: `docs/superpowers/plans/2026-08-17-phase-9-vercel-supabase.md`
 - Create: `packages/secrets/src/jhin_secrets/material.py`
 - Modify: `packages/secrets/src/jhin_secrets/__init__.py`
 - Modify: `packages/secrets/src/jhin_secrets/store.py`
@@ -128,11 +129,14 @@ Expected: the plan is tracked before the first implementation commit, so later t
 - Modify: `packages/tools/src/jhin_tools/__init__.py`
 - Modify: `packages/tools/src/jhin_tools/builtin.py`
 - Modify: `packages/tools/src/jhin_tools/gateway.py`
+- Modify: `packages/tools/src/jhin_tools/sanitize.py`
+- Modify: `packages/observability/src/jhin_observability/logging.py`
 - Modify: `packages/workflows/src/jhin_workflows/agent_task/shared.py`
 - Modify: `packages/workflows/src/jhin_workflows/agent_task/workflows.py`
 - Modify: `packages/workflows/src/jhin_workflows/delegated_task/shared.py`
 - Modify: `services/agent_worker/src/jhin_agent_worker/activities.py`
 - Modify: `apps/api/src/jhin_api/connections/service.py`
+- Modify: `apps/api/src/jhin_api/approvals/service.py`
 - Modify: `apps/api/src/jhin_api/policy/schemas.py`
 - Modify: `apps/api/src/jhin_api/policy/router.py`
 - Modify: `apps/api/src/jhin_api/policy/service.py`
@@ -143,12 +147,17 @@ Expected: the plan is tracked before the first implementation commit, so later t
 - Test: `packages/tools/tests/test_invocation.py`
 - Test: `packages/tools/tests/test_gateway.py`
 - Test: `packages/tools/tests/test_gateway_concurrency.py`
+- Test: `packages/tools/tests/test_sanitize.py`
+- Test: `packages/observability/tests/test_logging.py`
 - Test: `packages/workflows/tests/test_agent_task_delegation.py`
-- Test: `services/agent_worker/tests/test_activities.py`
+- Test: `packages/workflows/tests/test_delegated_task_workflow.py`
 - Test: `services/agent_worker/tests/test_approval_activity.py`
 - Test: `services/agent_worker/tests/test_delegation_activities.py`
+- Test: `services/agent_worker/tests/test_phase9_invocation_activity.py`
 - Test: `apps/api/tests/test_connections_unit.py`
+- Test: `apps/api/tests/test_approvals_unit.py`
 - Test: `apps/api/tests/test_policy_unit.py`
+- Test: `apps/api/tests/test_policy_rbac.py`
 - Test: `tests/integration/test_phase9_authorization.py`
 
 **Interfaces:**
@@ -283,6 +292,10 @@ In `test_gateway_concurrency.py` and `test_phase9_authorization.py`, cover immed
 
 Assert the run-step activity passes stable `step_index` and call ordinal, enumerated in the provider-returned order, to the gateway; it must not use `provider_call_id` as the database key. Persisted transcript pairing uses the internal invocation UUID, so a retried LLM response that chooses a different provider call ID cannot create a new execution identity.
 
+Before effect zero, add activity tests for a durable, ordered, provider-independent whole-step manifest. Prove dropped, appended, reordered, renamed, and changed-input calls on a retry cannot execute a new effect; JSON whitespace/key order and regenerated provider IDs remain equivalent. The persisted manifest may contain only redact-then-bounded tool names and canonical strict-JSON arguments for which `sanitize_payload` is structurally lossless—never raw/unsalted hashes, provider IDs, credentials, or any argument changed by sanitization. A first non-lossless response stops the run before any claim/effect; a differing overlapping retry is retryable and must not poison the canonical attempt. Reject `NaN`, positive/negative `Infinity`, exponent-overflow numbers that decode non-finite, duplicate JSON keys, invalid JSON, and non-object arguments before the manifest or gateway can dispatch an executor.
+
+Add approval-decision service tests proving a row-locked pending transition has one durable winner, an opposite concurrent decision receives `409`, the decision audit is single-copy, and only the winning decision is signaled. A same-decision retry must re-signal without adding another audit so a commit-to-Temporal-signal failure is repairable. Add delegated-result stitching tests proving the canonical gateway UUID is forwarded, validated, and used for an idempotent message/event bundle; retain an explicitly audited provider-ID fallback only for already-running pre-Phase-9 workflows whose serialized request lacks the new field.
+
 Implement `test_approval_staging_rejects_non_lossless_sanitized_input` twice through the existing gateway fixture: once with a schema-valid string of `MAX_STRING_CHARS + 1` characters, and once with a schema-valid string containing a value pre-registered in `get_redactor()`. In both cases assert `outcome.status == "denied"`, `outcome.decision_code == "approval_input_not_lossless"`, the executor effect list is empty, and a query for pending `Approval` rows returns zero.
 
 Add an API service test in `apps/api/tests/test_policy_unit.py` that creates two `allow` grants for the same capability/effect with distinct `scope_json`, then proves an exact duplicate still returns `409`. Use two PostgreSQL sessions to prove the target-agent row lock serializes racing exact duplicates.
@@ -292,7 +305,7 @@ Add an API service test in `apps/api/tests/test_policy_unit.py` that creates two
 Run:
 
 ```bash
-uv run pytest packages/tools/tests/test_invocation.py packages/tools/tests/test_gateway.py packages/tools/tests/test_gateway_concurrency.py services/agent_worker/tests/test_activities.py apps/api/tests/test_policy_unit.py -q
+uv run pytest packages/tools/tests/test_invocation.py packages/tools/tests/test_gateway.py packages/tools/tests/test_gateway_concurrency.py packages/tools/tests/test_sanitize.py services/agent_worker/tests/test_phase9_invocation_activity.py apps/api/tests/test_policy_unit.py apps/api/tests/test_approvals_unit.py -q
 ```
 
 Expected: FAIL because immediate calls have no stable durable claim/replay path, approval resume is workspace-only, sanitizer changes can be staged, and duplicate lookup ignores scope.
@@ -316,9 +329,11 @@ def stable_tool_invocation_id(
 
 `run_agent_step` enumerates model tool calls in their returned order and passes the durable step index plus ordinal to `ToolGateway.request`; the gateway derives and uses that UUID as `ToolCall.id`. The provider call ID may be checked/bound as bounded transcript metadata, but never changes this identity. Use the canonical UUID string for persisted `tool_call`/`tool_result` message pairing. Run gateway authorization/execution in a fresh database session, separate from the activity's pending transcript/run-event transaction, so committing a pre-effect claim cannot accidentally commit half of an outer activity bundle.
 
-For every call, first look up/lock the deterministic row. Require the existing workspace/run/agent/tool/connection and exact validated JSON input to match; otherwise audit and return `invocation_mismatch`. Replay terminal rows and the same pending approval without creating a row or side effect. For a newly immediate `ALLOW`, atomically insert the row as `executing`, add the requested/claimed audits, and commit before calling the executor. Approval staging inserts the same deterministic row as `pending_approval`; approval resolution atomically changes it to `executing` and commits before execution. A duplicate observer of `executing` must not invoke the executor; after a retry/crash it records or returns `execution_unknown`. Commit a definitive terminal result before returning it to the activity. A failure proven to occur before any external dispatch may be `failed`; a timeout, connection loss, process crash, or database-commit ambiguity after dispatch is `execution_unknown`. Neither state is automatically executed again.
+For every call, first look up/lock the deterministic row. Require the existing workspace/run/agent/tool/connection and exact validated JSON input to match; otherwise audit and return `invocation_mismatch`. Replay terminal rows and the same pending approval without creating a row or side effect. For a newly immediate `ALLOW`, atomically insert the row as `executing`, add the requested/claimed audits, and commit before calling the executor. Approval staging inserts the same deterministic row as `pending_approval`; approval resolution atomically changes it to `executing` and commits before execution. Hold a PostgreSQL session-level advisory lifecycle lock keyed from the invocation UUID across claim commit, dispatch, and terminal commit (with an in-process keyed fallback only for portable SQLite tests). A live duplicate waits and then replays; only a duplicate that acquires the released lock and finds an orphan `executing` claim may mark it `execution_unknown`. Commit a definitive terminal result before returning it to the activity. A failure proven to occur before any external dispatch may be `failed`; a timeout, connection loss, process crash, or database-commit ambiguity after dispatch is `execution_unknown`. Neither state is automatically executed again.
 
 After the gateway returns, the activity writes the canonical transcript/run-event bundle under the internal invocation UUID and checks for an existing bundle first. Thus a crash after the gateway's terminal commit but before the outer bundle commit is repaired on activity retry without a second executor call or duplicate messages/events. Extend `GatewayStatus`/`ToolCallStatus` and observation handling for `executing` and `execution_unknown`; an unknown result is committed and then fails the step non-retryably so the workflow cannot advance to a new model step and repeat the uncertain mutation. Carry the canonical invocation ID through approval and delegated-result stitching. Do not add a migration because the existing `ToolCall.id` UUID and string status columns carry the new protocol.
+
+Bind the complete ordered call set before effect zero under an `AgentRun FOR UPDATE` lock. Store only canonical strict-JSON objects and tool names that remain byte-for-byte equivalent after recursive redaction and configured bounds; exclude provider IDs and never persist a hash of raw arguments. A first non-lossless response durably stops before a tool claim, while a different overlapping retry rolls back and raises retryably so it cannot poison a canonical attempt already in flight. Persist the full step result as an `agent.step.committed` marker in the same transaction as counters/transcript/events; activity replay returns that marker without calling the model again. Canonical delegated-result delivery similarly locks the parent run and deduplicates the message/event bundle by gateway UUID; an empty UUID is accepted only as an audited compatibility path for pre-upgrade workflows and falls back to a redacted, bounded provider ID.
 
 Before creating an `Approval`, require structural equality between the JSON-mode validated input and `sanitized_input`. If redaction or truncation changed it, record a denied tool call with `approval_input_not_lossless`; do not persist an approval. Persist `approval_format_version=2`, the tool capability/risk, and—when `connection_id` is present—a one-way authorization digest over connection ID, auth type, status, canonical public config, and current secret fingerprint/key version. Never persist raw fingerprint or credential material. Bound approved/rejected resolution to all of:
 
@@ -347,14 +362,17 @@ The same claim helper serves immediate and approved calls; do not maintain an ap
 
 In `create_grant`, lock the target agent row before checking/inserting and include exact JSON scope equality in the duplicate predicate so only `(agent, capability, effect, scope)` duplicates conflict under concurrent requests.
 
+In the approval API, lock the pending approval row before deciding. Opposing decisions have exactly one durable winner and one audit/signal; same-decision retries re-signal the already-durable decision without duplicating its transition. Run finalization takes the same approval row lock and cancels only an approval still pending plus a tool-call row still `pending_approval`, so it cannot overwrite an approved/rejected decision or an executing/terminal call. Redact and bound every provider-controlled value before persistence or response, including mapping keys and rendered exception tracebacks. Run traceback redaction after `dict_tracebacks`, safely stringify unknown log objects before rendering, and raise sanitized provider activity/API errors `from None` so raw credential-reflecting causes are not retained.
+
 - [ ] **Step 7: Run focused regressions and commit**
 
 Run:
 
 ```bash
-uv run pytest packages/policy/tests packages/tools/tests packages/secrets/tests packages/connectors/tests/test_execution.py packages/workflows/tests apps/api/tests/test_connections_unit.py apps/api/tests/test_policy_unit.py services/agent_worker/tests -q
+uv run pytest packages/policy/tests packages/tools/tests packages/secrets/tests packages/connectors/tests/test_execution.py packages/observability/tests/test_logging.py packages/workflows/tests apps/api/tests/test_approvals_unit.py apps/api/tests/test_connections_unit.py apps/api/tests/test_policy_unit.py apps/api/tests/test_policy_rbac.py services/agent_worker/tests -q
 uv run pytest -m integration tests/integration/test_phase9_authorization.py -v
-uv run ruff check packages/domain packages/policy packages/tools packages/secrets packages/connectors packages/workflows apps/api services/agent_worker
+uv run ruff check packages/domain packages/policy packages/tools packages/secrets packages/connectors packages/observability packages/workflows apps/api services/agent_worker tests/integration/test_phase9_authorization.py
+uv run ruff format --check packages/domain packages/policy packages/tools packages/secrets packages/connectors packages/observability packages/workflows apps/api services/agent_worker tests/integration/test_phase9_authorization.py
 uv run mypy
 git diff --check
 ```
@@ -364,7 +382,7 @@ Expected: PASS, including immediate-policy crash/race/replay/unknown behavior, r
 Commit:
 
 ```bash
-git add packages/domain/src/jhin_domain/enums.py packages/policy/src/jhin_policy/capabilities.py packages/policy/src/jhin_policy/evaluator.py packages/policy/tests/test_evaluator.py packages/tools/src/jhin_tools/__init__.py packages/tools/src/jhin_tools/builtin.py packages/tools/src/jhin_tools/invocation.py packages/tools/src/jhin_tools/gateway.py packages/tools/tests/test_invocation.py packages/tools/tests/test_gateway.py packages/tools/tests/test_gateway_concurrency.py packages/secrets/src/jhin_secrets/__init__.py packages/secrets/src/jhin_secrets/material.py packages/secrets/src/jhin_secrets/store.py packages/secrets/src/jhin_secrets/redaction.py packages/secrets/tests/test_store.py packages/secrets/tests/test_redaction.py packages/connectors/src/jhin_connectors/execution.py packages/connectors/tests/test_execution.py packages/workflows/src/jhin_workflows/agent_task/shared.py packages/workflows/src/jhin_workflows/agent_task/workflows.py packages/workflows/src/jhin_workflows/delegated_task/shared.py packages/workflows/tests/test_agent_task_delegation.py apps/api/src/jhin_api/connections/service.py apps/api/src/jhin_api/policy/schemas.py apps/api/src/jhin_api/policy/router.py apps/api/src/jhin_api/policy/service.py apps/api/tests/test_connections_unit.py apps/api/tests/test_policy_unit.py services/agent_worker/src/jhin_agent_worker/activities.py services/agent_worker/tests/test_activities.py services/agent_worker/tests/test_approval_activity.py services/agent_worker/tests/test_delegation_activities.py tests/integration/test_phase9_authorization.py docs/superpowers/plans/2026-08-17-phase-9-vercel-supabase.md
+git add packages/domain/src/jhin_domain/enums.py packages/policy/src/jhin_policy/capabilities.py packages/policy/src/jhin_policy/evaluator.py packages/policy/tests/test_evaluator.py packages/tools/src/jhin_tools/__init__.py packages/tools/src/jhin_tools/builtin.py packages/tools/src/jhin_tools/invocation.py packages/tools/src/jhin_tools/gateway.py packages/tools/src/jhin_tools/sanitize.py packages/tools/tests/test_invocation.py packages/tools/tests/test_gateway.py packages/tools/tests/test_gateway_concurrency.py packages/tools/tests/test_sanitize.py packages/secrets/src/jhin_secrets/__init__.py packages/secrets/src/jhin_secrets/material.py packages/secrets/src/jhin_secrets/store.py packages/secrets/src/jhin_secrets/redaction.py packages/secrets/tests/test_store.py packages/secrets/tests/test_redaction.py packages/connectors/src/jhin_connectors/execution.py packages/connectors/tests/test_execution.py packages/observability/src/jhin_observability/logging.py packages/observability/tests/test_logging.py packages/workflows/src/jhin_workflows/agent_task/shared.py packages/workflows/src/jhin_workflows/agent_task/workflows.py packages/workflows/src/jhin_workflows/delegated_task/shared.py packages/workflows/tests/test_agent_task_delegation.py packages/workflows/tests/test_delegated_task_workflow.py apps/api/src/jhin_api/approvals/service.py apps/api/src/jhin_api/connections/service.py apps/api/src/jhin_api/policy/schemas.py apps/api/src/jhin_api/policy/router.py apps/api/src/jhin_api/policy/service.py apps/api/tests/test_approvals_unit.py apps/api/tests/test_connections_unit.py apps/api/tests/test_policy_unit.py apps/api/tests/test_policy_rbac.py services/agent_worker/src/jhin_agent_worker/activities.py services/agent_worker/tests/test_approval_activity.py services/agent_worker/tests/test_delegation_activities.py services/agent_worker/tests/test_phase9_invocation_activity.py tests/integration/test_phase9_authorization.py docs/superpowers/plans/2026-08-17-phase-9-vercel-supabase.md
 git commit -m "fix: harden scoped tool approval authorization"
 ```
 
