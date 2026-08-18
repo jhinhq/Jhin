@@ -840,7 +840,7 @@ git commit -m "refactor: split agent reasoning from tool projection"
 
 **Interfaces:**
 - Consumes: `build_default_catalog()`, `allowed_tool_definitions`, live `AgentCapabilityGrant`, scalar JSON paths from existing manifest `RunEvent` entries, `ToolGateway`, existing `ToolCall`/`Approval` claims, and current approval authority. It never consumes `agent.step.reasoning` or the whole `RunEvent.payload_json` column.
-- Produces: `ToolDefinitionCatalog`; `build_default_definition_catalog() -> ToolDefinitionCatalog`; internal scalar-only `BoundManifestEntry`; `bound_manifest_entry_statement(params: ExecuteBoundToolInput) -> Select[tuple[int | None, bool | None, str | None, str | None]]`; `ToolActivities.resolve_advertised_tools_activity(params: ResolveAdvertisedToolsInput) -> list[AdvertisedTool]`; `execute_bound_tool_activity(params: ExecuteBoundToolInput) -> BoundToolResult`; `resolve_bound_tool_approval_activity(params: ResolveBoundToolApprovalInput) -> BoundToolResult`; existing deterministic `ToolCall`/`Approval` rows as the only gateway outcome authority; a workspace-registered `jhin-tool-worker` package.
+- Produces: `ToolDefinitionCatalog`; `build_default_definition_catalog() -> ToolDefinitionCatalog`; internal scalar-only `BoundManifestEntry`; `bound_manifest_entry_statement(params: ExecuteBoundToolInput) -> Select[tuple[int | None, bool | None, str | None, str | None]]`; `ToolActivities.resolve_advertised_tools_activity(params: ResolveAdvertisedToolsInput) -> list[AdvertisedTool]`; `execute_bound_tool_activity(params: ExecuteBoundToolInput) -> BoundToolResult`; `resolve_bound_tool_approval_activity(params: ResolveBoundToolApprovalInput) -> BoundToolResult`; `configure_current_logging(log_level: str) -> None`; existing deterministic `ToolCall`/`Approval` rows as the only gateway outcome authority; a workspace-registered `jhin-tool-worker` package with no telemetry-subproject dependency.
 
 - [ ] **Step 1: Write failing catalog and ordinary-call tests**
 
@@ -1119,7 +1119,6 @@ dependencies = [
   "jhin-db",
   "jhin-domain",
   "jhin-events",
-  "jhin-observability",
   "jhin-secrets",
   "jhin-tools",
   "jhin-workflows",
@@ -1130,7 +1129,6 @@ jhin-connectors = { workspace = true }
 jhin-db = { workspace = true }
 jhin-domain = { workspace = true }
 jhin-events = { workspace = true }
-jhin-observability = { workspace = true }
 jhin-secrets = { workspace = true }
 jhin-tools = { workspace = true }
 jhin-workflows = { workspace = true }
@@ -1143,7 +1141,22 @@ build-backend = "hatchling.build"
 packages = ["src/jhin_tool_worker"]
 ```
 
-Tool settings include `app_env: str = Field(default="development", validation_alias="APP_ENV")` and the three Task 0 barrier fields and reject each individual control in production with the same validator. Then run `uv lock`; do not defer membership or lock changes to worker registration.
+Tool settings include `app_env: str = Field(default="development", validation_alias="APP_ENV")` and the three Task 0 barrier fields and reject each individual control in production with the same validator. Subproject 1 deliberately has no `jhin-observability` dependency or import: `main.py` follows the existing worker lifecycle shape (settings, bounded Temporal/resource connection retries, explicit signal event, worker context, resource close) and uses this dependency-free bootstrap until telemetry subproject 2 adds shared observability:
+
+```python
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def configure_current_logging(log_level: str) -> None:
+    logging.basicConfig(
+        level=log_level.upper(),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+```
+
+Call `configure_current_logging(settings.log_level)` immediately after `ToolWorkerSettings()` and before connection retries. Log only bounded service state through positional formatting; never log DSNs, credentials, tokens, or payloads. Then run `uv lock`; do not defer membership or lock changes to worker registration.
 `ToolWorkerResources.create` builds the Task 0 `CrashBarrier` from those settings, and `ToolActivities` passes it into every gateway context; this is how the integration harness reaches both exact tool failpoints without a production endpoint.
 
 - [ ] **Step 7: Run GREEN and commit every Task 3 path**
@@ -1546,10 +1559,28 @@ def test_distribution_dependencies_and_imports_are_one_way() -> None:
     assert "jhin-connectors" not in agent_dependencies
     assert "jhin-agents" not in tool_dependencies
     assert "jhin-models" not in tool_dependencies
+    assert "jhin-observability" not in tool_dependencies
     assert not imports_under("services/agent_worker/src", "jhin_connectors")
     assert not imports_under("services/agent_worker/src", "jhin_connectors.cli.runner_client")
     assert not imports_under("services/tool_worker/src", "jhin_agents")
     assert not imports_under("services/tool_worker/src", "jhin_models")
+    assert not imports_under("services/tool_worker/src", "jhin_observability")
+
+
+def test_tool_worker_uses_current_dependency_free_logging_bootstrap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        logging,
+        "basicConfig",
+        lambda **kwargs: configured.append(kwargs),
+    )
+    configure_current_logging("warning")
+    assert configured == [{
+        "level": "WARNING",
+        "format": "%(asctime)s %(levelname)s %(name)s %(message)s",
+    }]
 
 
 def test_tool_worker_never_imports_or_queries_agent_reasoning_authority() -> None:
@@ -1628,7 +1659,7 @@ Expected: FAIL because agent-worker still depends on/imports connectors, tool-wo
 
 Agent-worker registers `AgentTaskWorkflow`, `TriggeredTaskWorkflow`, `DelegatedTaskWorkflow`, and `EngineeringTicketWorkflow`; agent-side snapshot/reason/commit/finalize/delegation/engineering activities; and legacy `run_agent_step`, `resolve_approval`, `finalize_run`, `sync_external` coordinator names. It does not instantiate a catalog.
 
-Tool-worker registers all five compatibility workflows and only these effect activities: `resolve_advertised_tools`, `execute_bound_tool`, `resolve_bound_tool_approval`, `sync_external_tool`, and `cleanup_run_workspace`. Its settings have database/NATS/Temporal/log values and no model-provider fields.
+Tool-worker registers all five compatibility workflows and only these effect activities: `resolve_advertised_tools`, `execute_bound_tool`, `resolve_bound_tool_approval`, `sync_external_tool`, and `cleanup_run_workspace`. Its settings have database/NATS/Temporal/log values and no model-provider fields. Startup calls Task 3's `configure_current_logging` and has no `jhin_observability` import; telemetry subproject 2 owns the later migration to shared structured logging/tracing/metrics.
 
 Add exactly:
 
