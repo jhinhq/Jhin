@@ -879,11 +879,11 @@ async def test_concurrency_queues_second_task_and_survives_worker_restart(
 
     # max_concurrent_runs defaults to 1. Task 1 parks on an approval gate
     # (waiting_approval holds the slot); task 2 must queue behind it.
-    agent = await _make_agent(client, ws, f"P8e worker {tag}", grants={"system.echo": {}})
-    await client.put(
-        f"{API_URL}/api/v1/workspaces/{ws}/agents/{agent['id']}/policy",
-        json={"rules": [{"capability": "system.echo", "action": "approval"}]},
-        headers=_csrf(client),
+    agent = await _make_agent(
+        client,
+        ws,
+        f"P8e worker {tag}",
+        grants={"system.demo.destructive": {}},
     )
 
     first = await _assign(
@@ -891,7 +891,7 @@ async def test_concurrency_queues_second_task_and_survives_worker_restart(
         ws,
         agent["id"],
         f"P8e first {tag}",
-        f'[[tool:system.echo {{"text": "hold the slot {tag}"}}]]',
+        f'[[tool:system.demo.destructive {{"label": "hold-slot-{tag}"}}]]',
     )
 
     # Wait until task 1 genuinely holds the slot (run parked on approval).
