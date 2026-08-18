@@ -29,8 +29,8 @@ class AgentMembershipOut(BaseModel):
 
 
 class MembershipReplace(BaseModel):
-    primary_team_id: UUID | None = None
-    secondary_team_ids: list[UUID] = Field(default_factory=list, max_length=100)
+    primary_team_id: UUID | None
+    secondary_team_ids: list[UUID] = Field(max_length=100)
 
 
 class RelationshipCreate(BaseModel):

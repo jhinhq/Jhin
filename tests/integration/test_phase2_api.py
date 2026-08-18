@@ -252,7 +252,7 @@ async def test_cycle_rejection_for_agents_and_teams(api: ApiHarness) -> None:
         json={"name": "Spy", "manager_agent_id": cto["id"]},
         headers=api.csrf(),
     )
-    assert foreign.status_code == 422
+    assert foreign.status_code == 404
 
 
 async def test_rbac_roles_and_workspace_isolation(api: ApiHarness) -> None:

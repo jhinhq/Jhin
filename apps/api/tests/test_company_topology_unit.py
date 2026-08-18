@@ -156,6 +156,35 @@ async def test_legacy_agent_update_keeps_primary_pointer_and_memberships_in_sync
     }
 
 
+async def test_legacy_team_patch_promotes_an_existing_secondary_membership(
+    session: AsyncSession, admin_ctx: WorkspaceContext
+) -> None:
+    primary = await _team(session, admin_ctx.workspace_id, "Engineering")
+    promoted = await _team(session, admin_ctx.workspace_id, "Research")
+    agent = await service.create_agent(
+        session,
+        admin_ctx,
+        values={
+            "name": "Builder",
+            "team_id": primary.id,
+            "secondary_team_ids": [promoted.id],
+        },
+        **_request_meta(),
+    )
+
+    updated = await service.update_agent(
+        session,
+        admin_ctx,
+        agent.id,
+        changes={"team_id": promoted.id},
+        **_request_meta(),
+    )
+    memberships = await _active_memberships(session, admin_ctx.workspace_id, agent.id)
+
+    assert updated.team_id == promoted.id
+    assert [(row.team_id, row.is_primary) for row in memberships] == [(promoted.id, True)]
+
+
 async def test_replace_memberships_changes_primary_and_handles_last_primary_removal(
     session: AsyncSession, admin_ctx: WorkspaceContext
 ) -> None:
@@ -587,6 +616,7 @@ async def test_topology_routes_hide_cross_workspace_resources(
     foreign_workspace = Workspace(name="Foreign Route", slug=f"foreign-{new_uuid7().hex[:8]}")
     session.add(foreign_workspace)
     await session.flush()
+    foreign_team = await _team(session, foreign_workspace.id, "Foreign Route Team")
     foreign_agent = await _agent(session, foreign_workspace.id, "Foreign Route Agent")
     await session.commit()
     headers = {"x-csrf-token": "test-csrf"}
@@ -605,6 +635,63 @@ async def test_topology_routes_hide_cross_workspace_resources(
         headers=headers,
     )
     assert create.status_code == 404
+
+    headers = {"x-csrf-token": "test-csrf"}
+    for payload in (
+        {"name": "Foreign Primary", "team_id": str(foreign_team.id)},
+        {"name": "Foreign Manager", "manager_agent_id": str(foreign_agent.id)},
+    ):
+        response = await client.post(
+            f"/api/v1/workspaces/{admin_ctx.workspace_id}/agents",
+            json=payload,
+            headers=headers,
+        )
+        assert response.status_code == 404, response.text
+    for payload in (
+        {"team_id": str(foreign_team.id)},
+        {"manager_agent_id": str(foreign_agent.id)},
+    ):
+        response = await client.patch(
+            f"/api/v1/workspaces/{admin_ctx.workspace_id}/agents/{source.id}",
+            json=payload,
+            headers=headers,
+        )
+        assert response.status_code == 404, response.text
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{}, {"primary_team_id": None}, {"secondary_team_ids": []}],
+)
+async def test_membership_replacement_requires_the_complete_document(
+    topology_client: tuple[httpx.AsyncClient, dict[str, User], Agent, Agent],
+    session: AsyncSession,
+    admin_ctx: WorkspaceContext,
+    payload: dict[str, Any],
+) -> None:
+    client, users, source, _ = topology_client
+    actor: dict[str, User] = client.actor  # type: ignore[attr-defined]
+    actor["user"] = users["admin"]
+    team = await _team(session, admin_ctx.workspace_id, "Required Payload Team")
+    source.team_id = team.id
+    session.add(
+        AgentTeamMembership(
+            workspace_id=admin_ctx.workspace_id,
+            agent_id=source.id,
+            team_id=team.id,
+            is_primary=True,
+        )
+    )
+    await session.commit()
+
+    response = await client.put(
+        f"/api/v1/workspaces/{admin_ctx.workspace_id}/agents/{source.id}/memberships",
+        json=payload,
+        headers={"x-csrf-token": "test-csrf"},
+    )
+    assert response.status_code == 422
+    memberships = await _active_memberships(session, admin_ctx.workspace_id, source.id)
+    assert [(row.team_id, row.is_primary) for row in memberships] == [(team.id, True)]
 
 
 def test_topology_schemas_reject_malformed_literals_and_bounds() -> None:

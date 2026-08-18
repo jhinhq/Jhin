@@ -54,6 +54,19 @@ async def _get_locked_agent(db: AsyncSession, workspace_id: UUID, agent_id: UUID
     return agent
 
 
+async def _lock_workspace_agents(db: AsyncSession, workspace_id: UUID) -> dict[UUID, Agent]:
+    """Serialize reporting-line changes on a stable workspace-scoped lock set."""
+    agents = list(
+        await db.scalars(
+            select(Agent)
+            .where(Agent.workspace_id == workspace_id)
+            .order_by(Agent.id)
+            .with_for_update()
+        )
+    )
+    return {agent.id: agent for agent in agents}
+
+
 async def _unique_slug(db: AsyncSession, workspace_id: UUID, name: str) -> str:
     slug = slugify(name)
     taken = await db.scalar(
@@ -69,35 +82,32 @@ async def _validate_team(db: AsyncSession, workspace_id: UUID, team_id: UUID | N
         select(Team.id).where(Team.id == team_id, Team.workspace_id == workspace_id)
     )
     if not exists:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="team_id does not reference a team in this workspace",
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
 
 
-async def _validate_manager(
+async def _validate_new_agent_manager(
     db: AsyncSession,
     workspace_id: UUID,
-    agent_id: UUID | None,
     manager_agent_id: UUID | None,
 ) -> None:
-    """Manager must exist in this workspace; the chain must stay acyclic."""
     if manager_agent_id is None:
         return
-    exists = await db.scalar(
-        select(Agent.id).where(Agent.id == manager_agent_id, Agent.workspace_id == workspace_id)
-    )
-    if not exists:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="manager_agent_id does not reference an agent in this workspace",
-        )
-    if agent_id is None:
-        return  # a brand-new agent has no subordinates, so no cycle is possible
-    result = await db.execute(
-        select(Agent.id, Agent.manager_agent_id).where(Agent.workspace_id == workspace_id)
-    )
-    managers: dict[UUID, UUID | None] = {row[0]: row[1] for row in result.all()}
+    await get_agent(db, workspace_id, manager_agent_id)
+
+
+def _validate_manager_change(
+    agent_id: UUID,
+    manager_agent_id: UUID | None,
+    workspace_agents: dict[UUID, Agent],
+) -> None:
+    if manager_agent_id is None:
+        return
+    if manager_agent_id not in workspace_agents:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+    managers = {
+        current_agent.id: current_agent.manager_agent_id
+        for current_agent in workspace_agents.values()
+    }
     if would_create_cycle(agent_id, manager_agent_id, managers):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -408,7 +418,7 @@ async def create_agent(
     await _validate_team(db, ctx.workspace_id, primary_team_id)
     _validate_membership_duplicates(primary_team_id, secondary_team_ids)
     await _validate_membership_teams(db, ctx.workspace_id, primary_team_id, secondary_team_ids)
-    await _validate_manager(db, ctx.workspace_id, None, values.get("manager_agent_id"))
+    await _validate_new_agent_manager(db, ctx.workspace_id, values.get("manager_agent_id"))
     await _validate_model_profile(db, ctx.workspace_id, values.get("model_profile_id"))
     agent = Agent(
         workspace_id=ctx.workspace_id,
@@ -448,14 +458,26 @@ async def update_agent(
     request_id: UUID,
     ip_hash: str,
 ) -> Agent:
-    agent = await get_agent(db, ctx.workspace_id, agent_id)
+    changes = dict(changes)
     changed_fields = set(changes)
     secondary_team_ids = changes.pop("secondary_team_ids", None)
     topology_changed = "team_id" in changes or secondary_team_ids is not None
+    manager_changed = "manager_agent_id" in changes
+    workspace_agents: dict[UUID, Agent] | None = None
+    if manager_changed:
+        workspace_agents = await _lock_workspace_agents(db, ctx.workspace_id)
+        agent = workspace_agents.get(agent_id)
+        if agent is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+    elif topology_changed:
+        agent = await _get_locked_agent(db, ctx.workspace_id, agent_id)
+    else:
+        agent = await get_agent(db, ctx.workspace_id, agent_id)
     if "team_id" in changes:
         await _validate_team(db, ctx.workspace_id, changes["team_id"])
-    if "manager_agent_id" in changes:
-        await _validate_manager(db, ctx.workspace_id, agent.id, changes["manager_agent_id"])
+    if manager_changed:
+        assert workspace_agents is not None
+        _validate_manager_change(agent.id, changes["manager_agent_id"], workspace_agents)
     if "model_profile_id" in changes:
         await _validate_model_profile(db, ctx.workspace_id, changes["model_profile_id"])
     primary_team_id = changes.pop("team_id", agent.team_id)
@@ -463,8 +485,22 @@ async def update_agent(
         setattr(agent, field, value)
     if topology_changed:
         if secondary_team_ids is None:
-            active = await list_memberships(db, ctx.workspace_id, agent.id)
-            secondary_team_ids = [row.team_id for row in active if not row.is_primary]
+            active = list(
+                await db.scalars(
+                    select(AgentTeamMembership)
+                    .where(
+                        AgentTeamMembership.workspace_id == ctx.workspace_id,
+                        AgentTeamMembership.agent_id == agent.id,
+                        AgentTeamMembership.left_at.is_(None),
+                    )
+                    .with_for_update()
+                )
+            )
+            secondary_team_ids = [
+                row.team_id
+                for row in active
+                if not row.is_primary and row.team_id != primary_team_id
+            ]
         await _replace_memberships_locked(
             db,
             ctx.workspace_id,
