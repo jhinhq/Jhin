@@ -2258,11 +2258,48 @@ def test_one_shot_lifecycle_publishes_lease_before_child_and_cleans_every_exit(
             authority,
             scenario=scenario,
             lease_path=lease,
-            runner=child_runner,
+            child_runner=child_runner,
         )
         assert result.returncode == 0
         assert observed == ["start", "child", "cleanup"]
         assert not lease.exists()
+    finally:
+        lease.unlink(missing_ok=True)
+        authority.remove_runtime_paths()
+
+
+def test_one_shot_withholds_cleanup_if_owned_child_group_survives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _authority_for_recorder()
+    lease = Path("/tmp") / f"jhin-p10-one-shot-{uuid.uuid4().hex}.json"
+    cleanup_calls: list[bool] = []
+    monkeypatch.setattr(
+        ComposeAuthority,
+        "preflight",
+        lambda self, *, runner: None,
+    )
+    monkeypatch.setattr(
+        ComposeAuthority,
+        "down_and_cleanup",
+        lambda self, *, runner, upgrade=False: cleanup_calls.append(upgrade),
+    )
+
+    def surviving_child_group(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise lifecycle._OwnedProcessGroupSurvived(4242)
+
+    scenario = LiveScenario(nodes=("signal-probe",), expected_tests=1, start_stack=False)
+    try:
+        with pytest.raises(RuntimeError, match=r"4242.*survived"):
+            execute_one_shot(
+                authority,
+                scenario=scenario,
+                lease_path=lease,
+                child_runner=surviving_child_group,
+            )
+        assert cleanup_calls == []
+        assert lease.is_file()
     finally:
         lease.unlink(missing_ok=True)
         authority.remove_runtime_paths()
@@ -2277,6 +2314,7 @@ def _spawn_signal_lifecycle_probe(
     token = uuid.uuid4().hex[:12]
     lease = Path("/tmp") / f"jhin-p10-signal-{token}.json"
     script = r"""
+import json
 import os
 import sys
 import time
@@ -2289,7 +2327,9 @@ root = Path(sys.argv[2])
 repo = Path(sys.argv[3])
 lease = Path(sys.argv[4])
 token = sys.argv[5]
-child_pid_path = root / "child.pid"
+child_pid_path = root / "child.json"
+grandchild_pid_path = root / "grandchild.json"
+mutation_path = root / "grandchild-mutations"
 cleanup_started = root / "cleanup-started"
 cleanup_state = root / "cleanup-state"
 survivor_check = root / "survivor-check"
@@ -2308,23 +2348,76 @@ def no_preflight(self, *, runner):
 
 def observed_cleanup(self, *, runner, upgrade=False):
     del self, runner, upgrade
-    child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+    child = json.loads(child_pid_path.read_text(encoding="utf-8"))
+    grandchild = json.loads(grandchild_pid_path.read_text(encoding="utf-8"))
+
+    def alive(pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
     try:
-        os.kill(child_pid, 0)
+        os.killpg(child["pgid"], 0)
     except ProcessLookupError:
-        state = "exited"
+        group_alive = False
     else:
-        state = "alive"
-    cleanup_state.write_text(state, encoding="utf-8")
+        group_alive = True
+    before = mutation_path.stat().st_size
+    time.sleep(0.15)
+    after = mutation_path.stat().st_size
+    cleanup_state.write_text(
+        json.dumps(
+            {
+                "harness_pid": os.getpid(),
+                "harness_pgid": os.getpgrp(),
+                "child_pid": child["pid"],
+                "child_pgid": child["pgid"],
+                "child_alive": alive(child["pid"]),
+                "grandchild_pid": grandchild["pid"],
+                "grandchild_pgid": grandchild["pgid"],
+                "grandchild_alive": alive(grandchild["pid"]),
+                "group_alive": group_alive,
+                "mutation_stable": before == after,
+            }
+        ),
+        encoding="utf-8",
+    )
     cleanup_started.write_text("started", encoding="utf-8")
     if mode == "second-signal":
         time.sleep(1.0)
     survivor_check.write_text("checked", encoding="utf-8")
 
+grandchild_code = (
+    "import json,os,signal,sys,time\n"
+    "from pathlib import Path\n"
+    "state = Path(sys.argv[1])\n"
+    "mutations = Path(sys.argv[2])\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    "state.write_text(json.dumps({'pid': os.getpid(), 'pgid': os.getpgrp()}), "
+    "encoding='utf-8')\n"
+    "while True:\n"
+    "    with mutations.open('a', encoding='utf-8') as stream:\n"
+    "        stream.write('mutation\\n')\n"
+    "        stream.flush()\n"
+    "        os.fsync(stream.fileno())\n"
+    "    time.sleep(0.02)\n"
+)
 child_code = (
-    "import os,sys,time; from pathlib import Path; "
-    "Path(sys.argv[1]).write_text(str(os.getpid()), encoding='utf-8'); "
-    "time.sleep(300)"
+    "import json,os,sys\n"
+    "from pathlib import Path\n"
+    "from tests.integration import phase10_upgrade_harness as nested_lifecycle\n"
+    "Path(sys.argv[1]).write_text(json.dumps({'pid': os.getpid(), "
+    "'pgid': os.getpgrp()}), encoding='utf-8')\n"
+    f"grandchild_code = {grandchild_code!r}\n"
+    "nested_lifecycle.run_command(\n"
+    "    (sys.executable, '-c', grandchild_code, sys.argv[2], sys.argv[3]),\n"
+    "    env=os.environ.copy(),\n"
+    "    cwd=Path.cwd(),\n"
+    "    timeout=300.0,\n"
+    "    check=True,\n"
+    ")\n"
 )
 lifecycle.ComposeAuthority.preflight = no_preflight
 lifecycle.ComposeAuthority.down_and_cleanup = observed_cleanup
@@ -2333,6 +2426,8 @@ lifecycle.build_live_pytest_command = lambda scenario: (
     "-c",
     child_code,
     str(child_pid_path),
+    str(grandchild_pid_path),
+    str(mutation_path),
 )
 scenario = lifecycle.LiveScenario(
     nodes=("signal-probe",),
@@ -2351,12 +2446,19 @@ finally:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        start_new_session=True,
     )
-    child_pid_path = tmp_path / "child.pid"
+    child_pid_path = tmp_path / "child.json"
     deadline = time.monotonic() + 10.0
-    while not child_pid_path.is_file() and process.poll() is None and time.monotonic() < deadline:
+    grandchild_pid_path = tmp_path / "grandchild.json"
+    mutation_path = tmp_path / "grandchild-mutations"
+    while (
+        not (child_pid_path.is_file() and grandchild_pid_path.is_file() and mutation_path.is_file())
+        and process.poll() is None
+        and time.monotonic() < deadline
+    ):
         time.sleep(0.02)
-    if not child_pid_path.is_file():
+    if not (child_pid_path.is_file() and grandchild_pid_path.is_file() and mutation_path.is_file()):
         stdout, stderr = process.communicate(timeout=5.0)
         pytest.fail(f"signal lifecycle child did not start: {stdout=} {stderr=}")
     return process, child_pid_path, lease
@@ -2367,19 +2469,165 @@ def _finish_signal_lifecycle_probe(
     child_pid_path: Path,
     lease: Path,
 ) -> tuple[str, str, bool]:
+    child_group: int | None = None
     try:
         stdout, stderr = process.communicate(timeout=10.0)
         return stdout, stderr, lease.exists()
     finally:
-        emergency_cleanup = process.poll() is None
-        if emergency_cleanup:
-            process.kill()
+        # Always reap every recorded owned group, even if the harness already
+        # exited before this test's emergency cleanup begins.
+        if child_pid_path.is_file():
+            child = json.loads(child_pid_path.read_text(encoding="utf-8"))
+            child_group = int(child["pgid"])
+            _signal_test_process_group(child_group)
+        if process.poll() is None:
+            _signal_test_process_group(process.pid)
             process.wait(timeout=5.0)
-        if emergency_cleanup and child_pid_path.is_file():
-            child_pid = int(child_pid_path.read_text(encoding="utf-8"))
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(child_pid, signal.SIGKILL)
+        _wait_for_test_process_group_exit(process.pid)
+        if child_group is not None:
+            _wait_for_test_process_group_exit(child_group)
         lease.unlink(missing_ok=True)
+
+
+def _signal_test_process_group(process_group: int) -> None:
+    assert process_group > 1
+    assert process_group != os.getpgrp()
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(process_group, signal.SIGKILL)
+
+
+def _wait_for_test_process_group_exit(process_group: int) -> None:
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            pass
+        _signal_test_process_group(process_group)
+        time.sleep(0.02)
+    raise AssertionError(f"test process group {process_group} survived emergency cleanup")
+
+
+def _owned_child_timeout_command(tmp_path: Path) -> tuple[str, ...]:
+    child_state = tmp_path / "timeout-child.json"
+    grandchild_state = tmp_path / "timeout-grandchild.json"
+    mutation_path = tmp_path / "timeout-mutations"
+    grandchild_code = (
+        "import json,os,signal,sys,time\n"
+        "from pathlib import Path\n"
+        "state = Path(sys.argv[1])\n"
+        "mutations = Path(sys.argv[2])\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "state.write_text(json.dumps({'pid': os.getpid(), 'pgid': os.getpgrp()}), "
+        "encoding='utf-8')\n"
+        "while True:\n"
+        "    with mutations.open('a', encoding='utf-8') as stream:\n"
+        "        stream.write('mutation\\n')\n"
+        "        stream.flush()\n"
+        "        os.fsync(stream.fileno())\n"
+        "    time.sleep(0.02)\n"
+    )
+    child_code = (
+        "import json,os,sys\n"
+        "from pathlib import Path\n"
+        "from tests.integration import phase10_upgrade_harness as nested_lifecycle\n"
+        "Path(sys.argv[1]).write_text(json.dumps({'pid': os.getpid(), "
+        "'pgid': os.getpgrp()}), encoding='utf-8')\n"
+        "print('child-ready', flush=True)\n"
+        f"grandchild_code = {grandchild_code!r}\n"
+        "nested_lifecycle.run_command(\n"
+        "    (sys.executable, '-c', grandchild_code, sys.argv[2], sys.argv[3]),\n"
+        "    env=os.environ.copy(),\n"
+        "    cwd=Path.cwd(),\n"
+        "    timeout=300.0,\n"
+        "    check=True,\n"
+        ")\n"
+    )
+    return (
+        sys.executable,
+        "-c",
+        child_code,
+        str(child_state),
+        str(grandchild_state),
+        str(mutation_path),
+    )
+
+
+def _pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def test_owned_live_child_timeout_reaps_nested_process_group(tmp_path: Path) -> None:
+    command = _owned_child_timeout_command(tmp_path)
+    child_state_path = tmp_path / "timeout-child.json"
+    grandchild_state_path = tmp_path / "timeout-grandchild.json"
+    mutation_path = tmp_path / "timeout-mutations"
+    child_group: int | None = None
+    try:
+        with pytest.raises(subprocess.TimeoutExpired) as raised:
+            lifecycle.run_live_child_command(
+                command,
+                env=os.environ.copy(),
+                cwd=Path(__file__).resolve().parents[2],
+                timeout=1.0,
+                check=True,
+            )
+        assert "child-ready" in cast(str, raised.value.stdout)
+        child = json.loads(child_state_path.read_text(encoding="utf-8"))
+        grandchild = json.loads(grandchild_state_path.read_text(encoding="utf-8"))
+        child_group = int(child["pgid"])
+        assert child_group == int(child["pid"])
+        assert int(grandchild["pgid"]) == child_group
+        assert not _pid_exists(int(child["pid"]))
+        assert not _pid_exists(int(grandchild["pid"]))
+        with pytest.raises(ProcessLookupError):
+            os.killpg(child_group, 0)
+        before = mutation_path.stat().st_size
+        time.sleep(0.15)
+        assert mutation_path.stat().st_size == before
+    finally:
+        if child_group is None and child_state_path.is_file():
+            child_group = int(json.loads(child_state_path.read_text(encoding="utf-8"))["pgid"])
+        if child_group is not None:
+            _signal_test_process_group(child_group)
+            _wait_for_test_process_group_exit(child_group)
+
+
+def test_owned_live_child_preserves_output_and_check_semantics(tmp_path: Path) -> None:
+    command = (
+        sys.executable,
+        "-c",
+        "import sys; print('stdout-value'); print('stderr-value', file=sys.stderr); "
+        "raise SystemExit(7)",
+    )
+    result = lifecycle.run_live_child_command(
+        command,
+        env=os.environ.copy(),
+        cwd=tmp_path,
+        timeout=5.0,
+        check=False,
+    )
+    assert result.returncode == 7
+    assert result.stdout == "stdout-value\n"
+    assert result.stderr == "stderr-value\n"
+
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        lifecycle.run_live_child_command(
+            command,
+            env=os.environ.copy(),
+            cwd=tmp_path,
+            timeout=5.0,
+            check=True,
+        )
+    assert raised.value.returncode == 7
+    assert raised.value.stdout == "stdout-value\n"
+    assert raised.value.stderr == "stderr-value\n"
 
 
 def test_signal_waits_for_real_pytest_child_exit_before_cleanup(tmp_path: Path) -> None:
@@ -2388,7 +2636,14 @@ def test_signal_waits_for_real_pytest_child_exit_before_cleanup(tmp_path: Path) 
     stdout, stderr, lease_survived = _finish_signal_lifecycle_probe(process, child_pid_path, lease)
     assert process.returncode == 128 + signal.SIGTERM, (stdout, stderr)
     assert lease_survived is False
-    assert (tmp_path / "cleanup-state").read_text(encoding="utf-8") == "exited"
+    cleanup_state = json.loads((tmp_path / "cleanup-state").read_text(encoding="utf-8"))
+    assert cleanup_state["child_pgid"] == cleanup_state["child_pid"]
+    assert cleanup_state["grandchild_pgid"] == cleanup_state["child_pgid"]
+    assert cleanup_state["child_pgid"] != cleanup_state["harness_pgid"]
+    assert cleanup_state["child_alive"] is False
+    assert cleanup_state["grandchild_alive"] is False
+    assert cleanup_state["group_alive"] is False
+    assert cleanup_state["mutation_stable"] is True
     assert (tmp_path / "survivor-check").read_text(encoding="utf-8") == "checked"
 
 
@@ -2407,7 +2662,11 @@ def test_second_signal_cannot_interrupt_final_survivor_checks(tmp_path: Path) ->
     stdout, stderr, lease_survived = _finish_signal_lifecycle_probe(process, child_pid_path, lease)
     assert process.returncode == 128 + signal.SIGTERM, (stdout, stderr)
     assert lease_survived is False
-    assert (tmp_path / "cleanup-state").read_text(encoding="utf-8") == "exited"
+    cleanup_state = json.loads((tmp_path / "cleanup-state").read_text(encoding="utf-8"))
+    assert cleanup_state["child_alive"] is False
+    assert cleanup_state["grandchild_alive"] is False
+    assert cleanup_state["group_alive"] is False
+    assert cleanup_state["mutation_stable"] is True
     assert (tmp_path / "survivor-check").read_text(encoding="utf-8") == "checked"
 
 
@@ -2421,6 +2680,7 @@ def test_one_shot_upgrade_build_uses_the_injected_selected_daemon_runner(
     }
     lease = Path("/tmp") / f"jhin-p10-one-shot-{uuid.uuid4().hex}.json"
     build_runners: list[Any] = []
+    child_commands: list[tuple[str, ...]] = []
     frozen = FrozenPhase9Image(
         source_ref="6318781b57692bf39f37cd428d73de115d7458e2",
         tag=authority.phase9_image_tag("6318781b57692bf39f37cd428d73de115d7458e2"),
@@ -2460,6 +2720,14 @@ def test_one_shot_upgrade_build_uses_the_injected_selected_daemon_runner(
         **kwargs: Any,
     ) -> subprocess.CompletedProcess[str]:
         del kwargs
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def selected_child_runner(
+        command: tuple[str, ...],
+        **kwargs: Any,
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        child_commands.append(command)
         return subprocess.CompletedProcess(command, 0, "passed\n", "")
 
     scenario = LiveScenario(
@@ -2473,8 +2741,10 @@ def test_one_shot_upgrade_build_uses_the_injected_selected_daemon_runner(
             scenario=scenario,
             lease_path=lease,
             runner=selected_runner,
+            child_runner=selected_child_runner,
         )
         assert build_runners == [selected_runner]
+        assert child_commands == [build_live_pytest_command(scenario)]
     finally:
         lease.unlink(missing_ok=True)
         authority.remove_runtime_paths()

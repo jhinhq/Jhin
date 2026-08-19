@@ -144,6 +144,14 @@ class _LifecycleSignal(BaseException):
         self.signum = signum
 
 
+class _OwnedProcessGroupSurvived(RuntimeError):
+    """The isolated live-child process group survived bounded termination."""
+
+    def __init__(self, process_group: int) -> None:
+        super().__init__(f"owned live-child process group {process_group} survived SIGKILL")
+        self.process_group = process_group
+
+
 CommandRunner = Callable[..., subprocess.CompletedProcess[Any]]
 
 _COUNTING_PROVIDER_SCRIPT = r"""
@@ -485,7 +493,7 @@ def run_command(
     check: bool,
     input_bytes: bytes | None = None,
 ) -> subprocess.CompletedProcess[Any]:
-    """Execute one bounded external boundary with an explicit environment."""
+    """Execute one bounded command, inheriting the caller's process group."""
     result = subprocess.run(
         command,
         cwd=cwd,
@@ -495,6 +503,153 @@ def run_command(
         text=input_bytes is None,
         timeout=timeout,
         check=False,
+    )
+    if check and result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode,
+            command,
+            output=result.stdout,
+            stderr=result.stderr,
+        )
+    return result
+
+
+def _owned_process_group_exists(process_group: int) -> bool:
+    try:
+        os.killpg(process_group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Darwin can transiently report EPERM while a killed orphan is being
+        # adopted/reaped.  It is still a survivor until an ESRCH recheck.
+        return True
+    return True
+
+
+def _signal_owned_process_group(process_group: int, signum: int) -> None:
+    if process_group <= 1 or process_group == os.getpgrp():
+        raise RuntimeError("refusing to signal a non-isolated process group")
+    try:
+        os.killpg(process_group, signum)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        # A concurrently dying Darwin group may be visible but unsignalable.
+        # The bounded ESRCH proof below still decides whether it survived.
+        return
+
+
+def _ignore_catchable_signals() -> dict[int, Any]:
+    previous_handlers: dict[int, Any] = {}
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        try:
+            previous_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, signal.SIG_IGN)
+        except ValueError:
+            previous_handlers.clear()
+            break
+    return previous_handlers
+
+
+def _restore_signal_handlers(previous_handlers: Mapping[int, Any]) -> None:
+    for signum, previous in previous_handlers.items():
+        signal.signal(signum, previous)
+
+
+def _terminate_owned_process_group(
+    process: subprocess.Popen[Any],
+    *,
+    process_group: int,
+) -> tuple[Any, Any]:
+    """Terminate, reap, and prove absence of one isolated process group."""
+    previous_handlers = _ignore_catchable_signals()
+    stdout: Any = None
+    stderr: Any = None
+    try:
+        if _owned_process_group_exists(process_group):
+            _signal_owned_process_group(process_group, signal.SIGTERM)
+        try:
+            stdout, stderr = process.communicate(timeout=0.5)
+        except subprocess.TimeoutExpired as error:
+            stdout, stderr = error.output, error.stderr
+
+        if _owned_process_group_exists(process_group):
+            _signal_owned_process_group(process_group, signal.SIGKILL)
+        try:
+            stdout, stderr = process.communicate(timeout=5.0)
+        except subprocess.TimeoutExpired as error:
+            stdout, stderr = error.output, error.stderr
+
+        deadline = time.monotonic() + 5.0
+        while _owned_process_group_exists(process_group):
+            if time.monotonic() >= deadline:
+                raise _OwnedProcessGroupSurvived(process_group)
+            time.sleep(0.02)
+
+        if process.poll() is None:
+            try:
+                stdout, stderr = process.communicate(timeout=1.0)
+            except subprocess.TimeoutExpired as error:
+                raise _OwnedProcessGroupSurvived(process_group) from error
+        return stdout, stderr
+    finally:
+        _restore_signal_handlers(previous_handlers)
+
+
+def run_live_child_command(
+    command: tuple[str, ...],
+    *,
+    env: dict[str, str],
+    cwd: Path,
+    timeout: float,
+    check: bool,
+    input_bytes: bytes | None = None,
+) -> subprocess.CompletedProcess[Any]:
+    """Run pytest in one owned session and exhaust all of its descendants."""
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=env,
+        stdin=subprocess.PIPE if input_bytes is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=input_bytes is None,
+        start_new_session=True,
+    )
+    process_group = process.pid
+    try:
+        stdout, stderr = process.communicate(input=input_bytes, timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        try:
+            stdout, stderr = _terminate_owned_process_group(
+                process,
+                process_group=process_group,
+            )
+        except BaseException as teardown_error:
+            raise BaseExceptionGroup(
+                "live child timed out and its process group survived",
+                [error, teardown_error],
+            ) from error
+        error.output = stdout
+        error.stderr = stderr
+        raise
+    except BaseException as error:
+        try:
+            _terminate_owned_process_group(process, process_group=process_group)
+        except BaseException as teardown_error:
+            raise BaseExceptionGroup(
+                "live child failed and its process group survived",
+                [error, teardown_error],
+            ) from error
+        raise
+
+    if _owned_process_group_exists(process_group):
+        _terminate_owned_process_group(process, process_group=process_group)
+    result = subprocess.CompletedProcess(
+        command,
+        cast(int, process.returncode),
+        stdout,
+        stderr,
     )
     if check and result.returncode != 0:
         raise subprocess.CalledProcessError(
@@ -3696,12 +3851,21 @@ def build_child_environment(
     return environment
 
 
+def _contains_owned_process_group_survivor(error: BaseException | None) -> bool:
+    if isinstance(error, _OwnedProcessGroupSurvived):
+        return True
+    if isinstance(error, BaseExceptionGroup):
+        return any(_contains_owned_process_group_survivor(nested) for nested in error.exceptions)
+    return False
+
+
 def execute_one_shot(
     authority: ComposeAuthority,
     *,
     scenario: LiveScenario,
     lease_path: Path | None = None,
     runner: CommandRunner = run_command,
+    child_runner: CommandRunner = run_live_child_command,
 ) -> subprocess.CompletedProcess[Any]:
     """Own stack→child-pytest→exhaustive-cleanup as one signal-safe lifecycle."""
     lease = (
@@ -3741,9 +3905,12 @@ def execute_one_shot(
     def handle_signal(signum: int, frame: Any) -> None:
         nonlocal interrupted_signum
         del frame
-        if interrupted_signum is None:
-            interrupted_signum = signum
-        raise _LifecycleSignal(interrupted_signum)
+        if interrupted_signum is not None:
+            return
+        interrupted_signum = signum
+        for caught_signal in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(caught_signal, signal.SIG_IGN)
+        raise _LifecycleSignal(signum)
 
     atexit.register(cleanup)
     for signum in (signal.SIGINT, signal.SIGTERM):
@@ -3803,7 +3970,7 @@ def execute_one_shot(
                 }
             )
         write_authority_lease(live_authority, lease)
-        result = runner(
+        result = child_runner(
             build_live_pytest_command(scenario),
             env=child_environment,
             cwd=live_authority.repo,
@@ -3823,7 +3990,12 @@ def execute_one_shot(
     finally:
         for signal_number in previous_handlers:
             signal.signal(signal_number, signal.SIG_IGN)
-        cleanup()
+        child_group_survived = _contains_owned_process_group_survivor(primary_error)
+        if not child_group_survived:
+            cleanup()
+        # If bounded SIGKILL could not prove the child group absent, even
+        # local lease teardown is withheld: descendants may still be using
+        # that authority and no cleanup may race them.
         atexit.unregister(cleanup)
         for signal_number, previous in previous_handlers.items():
             signal.signal(signal_number, previous)
