@@ -202,14 +202,39 @@ async def _wait_for_job_container_removal(job_id: str) -> None:
 
 
 async def _emergency_force_remove_job_container(job_id: str) -> None:
-    """Force-remove one labeled survivor, then prove the host is clean."""
+    """Attempt every exact-label removal, then surface all retained invariants."""
     label_filter = f"label=jhin.sandbox.job={job_id}"
-    identifiers = _docker("ps", "-aq", "--filter", label_filter).splitlines()
-    assert len(identifiers) <= 1, f"job label matched multiple containers: {identifiers}"
-    if identifiers:
-        _docker("rm", "-f", identifiers[0])
-    remaining = _docker("ps", "-aq", "--filter", label_filter)
-    assert remaining == "", f"job {job_id} survived emergency force removal: {remaining}"
+    errors: list[BaseException] = []
+    identifiers: tuple[str, ...] = ()
+
+    try:
+        identifiers = tuple(_docker("ps", "-aq", "--filter", label_filter).splitlines())
+    except BaseException as exc:
+        errors.append(exc)
+
+    if len(identifiers) > 1:
+        errors.append(AssertionError(f"job label matched multiple containers: {list(identifiers)}"))
+
+    for identifier in identifiers:
+        try:
+            _docker("rm", "-f", identifier)
+        except BaseException as exc:
+            errors.append(exc)
+
+    try:
+        remaining = tuple(_docker("ps", "-aq", "--filter", label_filter).splitlines())
+    except BaseException as exc:
+        errors.append(exc)
+    else:
+        if remaining:
+            errors.append(
+                AssertionError(f"job {job_id} survived emergency force removal: {list(remaining)}")
+            )
+
+    if len(errors) == 1:
+        raise errors[0]
+    if errors:
+        raise BaseExceptionGroup("emergency job-container cleanup failed", errors)
 
 
 async def cleanup_live_job(

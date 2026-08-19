@@ -1511,6 +1511,162 @@ async def test_emergency_removal_force_removes_and_verifies_the_exact_job_label(
     ]
 
 
+async def test_emergency_removal_cleans_every_duplicate_before_raising_invariant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tests.integration.test_phase6_security as security
+
+    job_id = "phase10-duplicate-job"
+    state = {"identifiers": ["phase10-first", "phase10-second"]}
+    calls: list[tuple[str, ...]] = []
+
+    def fake_docker(*args: str) -> str:
+        calls.append(args)
+        if args[:2] == ("ps", "-aq"):
+            return "\n".join(state["identifiers"])
+        if args[:2] == ("rm", "-f"):
+            state["identifiers"].remove(args[2])
+            return args[2]
+        raise AssertionError(f"unexpected Docker argv: {args}")
+
+    monkeypatch.setattr(security, "_docker", fake_docker)
+
+    with pytest.raises(AssertionError, match=r"matched multiple containers"):
+        await security._emergency_force_remove_job_container(job_id)
+
+    assert state["identifiers"] == []
+    assert calls == [
+        ("ps", "-aq", "--filter", f"label=jhin.sandbox.job={job_id}"),
+        ("rm", "-f", "phase10-first"),
+        ("rm", "-f", "phase10-second"),
+        ("ps", "-aq", "--filter", f"label=jhin.sandbox.job={job_id}"),
+    ]
+
+
+async def test_emergency_removal_continues_after_first_rm_failure_and_retains_all_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tests.integration.test_phase6_security as security
+
+    job_id = "phase10-rm-failure-job"
+    state = {"identifiers": ["phase10-first", "phase10-second"]}
+    calls: list[tuple[str, ...]] = []
+
+    def fake_docker(*args: str) -> str:
+        calls.append(args)
+        if args[:2] == ("ps", "-aq"):
+            return "\n".join(state["identifiers"])
+        if args[:2] == ("rm", "-f") and args[2] == "phase10-first":
+            raise SystemExit("first force removal failed")
+        if args[:2] == ("rm", "-f"):
+            state["identifiers"].remove(args[2])
+            return args[2]
+        raise AssertionError(f"unexpected Docker argv: {args}")
+
+    monkeypatch.setattr(security, "_docker", fake_docker)
+
+    with pytest.raises(BaseExceptionGroup) as captured:
+        await security._emergency_force_remove_job_container(job_id)
+
+    assert [str(error) for error in captured.value.exceptions] == [
+        "job label matched multiple containers: ['phase10-first', 'phase10-second']",
+        "first force removal failed",
+        "job phase10-rm-failure-job survived emergency force removal: ['phase10-first']",
+    ]
+    assert calls == [
+        ("ps", "-aq", "--filter", f"label=jhin.sandbox.job={job_id}"),
+        ("rm", "-f", "phase10-first"),
+        ("rm", "-f", "phase10-second"),
+        ("ps", "-aq", "--filter", f"label=jhin.sandbox.job={job_id}"),
+    ]
+
+
+async def test_emergency_removal_retains_a_final_query_survivor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tests.integration.test_phase6_security as security
+
+    job_id = "phase10-surviving-job"
+    calls: list[tuple[str, ...]] = []
+
+    def fake_docker(*args: str) -> str:
+        calls.append(args)
+        if args[:2] == ("ps", "-aq"):
+            return "phase10-survivor"
+        if args[:2] == ("rm", "-f"):
+            return args[2]
+        raise AssertionError(f"unexpected Docker argv: {args}")
+
+    monkeypatch.setattr(security, "_docker", fake_docker)
+
+    with pytest.raises(AssertionError, match=r"survived emergency force removal"):
+        await security._emergency_force_remove_job_container(job_id)
+
+    assert calls == [
+        ("ps", "-aq", "--filter", f"label=jhin.sandbox.job={job_id}"),
+        ("rm", "-f", "phase10-survivor"),
+        ("ps", "-aq", "--filter", f"label=jhin.sandbox.job={job_id}"),
+    ]
+
+
+async def test_emergency_removal_rechecks_after_initial_query_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tests.integration.test_phase6_security as security
+
+    job_id = "phase10-query-failure-job"
+    calls: list[tuple[str, ...]] = []
+
+    def fake_docker(*args: str) -> str:
+        calls.append(args)
+        if len(calls) == 1:
+            raise RuntimeError("initial label query failed")
+        assert args[:2] == ("ps", "-aq")
+        return ""
+
+    monkeypatch.setattr(security, "_docker", fake_docker)
+
+    with pytest.raises(RuntimeError, match=r"initial label query failed"):
+        await security._emergency_force_remove_job_container(job_id)
+
+    assert calls == [
+        ("ps", "-aq", "--filter", f"label=jhin.sandbox.job={job_id}"),
+        ("ps", "-aq", "--filter", f"label=jhin.sandbox.job={job_id}"),
+    ]
+
+
+async def test_emergency_removal_retains_rm_and_final_query_base_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tests.integration.test_phase6_security as security
+
+    job_id = "phase10-final-query-failure-job"
+    calls: list[tuple[str, ...]] = []
+
+    def fake_docker(*args: str) -> str:
+        calls.append(args)
+        if len(calls) == 1:
+            return "phase10-survivor"
+        if args[:2] == ("rm", "-f"):
+            raise RuntimeError("force removal failed")
+        raise SystemExit("final label query failed")
+
+    monkeypatch.setattr(security, "_docker", fake_docker)
+
+    with pytest.raises(BaseExceptionGroup) as captured:
+        await security._emergency_force_remove_job_container(job_id)
+
+    assert [str(error) for error in captured.value.exceptions] == [
+        "force removal failed",
+        "final label query failed",
+    ]
+    assert calls == [
+        ("ps", "-aq", "--filter", f"label=jhin.sandbox.job={job_id}"),
+        ("rm", "-f", "phase10-survivor"),
+        ("ps", "-aq", "--filter", f"label=jhin.sandbox.job={job_id}"),
+    ]
+
+
 async def test_live_job_cleanup_attempts_wait_and_removal_after_cancel_raises() -> None:
     from tests.integration.test_phase6_security import cleanup_live_job
 
@@ -1650,3 +1806,97 @@ async def test_live_job_cleanup_retains_product_and_emergency_failures() -> None
         "product removal invariant failed",
         "emergency force removal failed",
     }
+
+
+async def test_live_job_cleanup_retains_product_and_duplicate_emergency_invariants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tests.integration.test_phase6_security as security
+
+    job_id = "phase10-outer-cleanup-job"
+    state = {"identifiers": ["phase10-first", "phase10-second"]}
+
+    def fake_docker(*args: str) -> str:
+        if args[:2] == ("ps", "-aq"):
+            return "\n".join(state["identifiers"])
+        if args[:2] == ("rm", "-f"):
+            state["identifiers"].remove(args[2])
+            return args[2]
+        raise AssertionError(f"unexpected Docker argv: {args}")
+
+    async def cancel() -> SimpleNamespace:
+        return SimpleNamespace(status_code=200, text="cancelled")
+
+    async def wait_terminal() -> dict[str, Any]:
+        return {"status": "cancelled"}
+
+    async def prove_product_removal() -> None:
+        pytest.fail("product removal invariant failed")
+
+    monkeypatch.setattr(security, "_docker", fake_docker)
+
+    with pytest.raises(BaseExceptionGroup) as captured:
+        await security.cleanup_live_job(
+            cancel=cancel,
+            wait_terminal=wait_terminal,
+            remove_container=prove_product_removal,
+            emergency_remove_container=lambda: security._emergency_force_remove_job_container(
+                job_id
+            ),
+        )
+
+    assert [str(error) for error in captured.value.exceptions] == [
+        "product removal invariant failed",
+        "job label matched multiple containers: ['phase10-first', 'phase10-second']",
+    ]
+    assert state["identifiers"] == []
+
+
+async def test_live_job_cleanup_retains_nested_emergency_failure_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tests.integration.test_phase6_security as security
+
+    job_id = "phase10-outer-group-job"
+    state = {"identifiers": ["phase10-first", "phase10-second"]}
+
+    def fake_docker(*args: str) -> str:
+        if args[:2] == ("ps", "-aq"):
+            return "\n".join(state["identifiers"])
+        if args[:2] == ("rm", "-f") and args[2] == "phase10-first":
+            raise RuntimeError("first force removal failed")
+        if args[:2] == ("rm", "-f"):
+            state["identifiers"].remove(args[2])
+            return args[2]
+        raise AssertionError(f"unexpected Docker argv: {args}")
+
+    async def cancel() -> SimpleNamespace:
+        return SimpleNamespace(status_code=200, text="cancelled")
+
+    async def wait_terminal() -> dict[str, Any]:
+        return {"status": "cancelled"}
+
+    async def prove_product_removal() -> None:
+        pytest.fail("product removal invariant failed")
+
+    monkeypatch.setattr(security, "_docker", fake_docker)
+
+    with pytest.raises(BaseExceptionGroup) as captured:
+        await security.cleanup_live_job(
+            cancel=cancel,
+            wait_terminal=wait_terminal,
+            remove_container=prove_product_removal,
+            emergency_remove_container=lambda: security._emergency_force_remove_job_container(
+                job_id
+            ),
+        )
+
+    assert str(captured.value.exceptions[0]) == "product removal invariant failed"
+    emergency_group = captured.value.exceptions[1]
+    assert isinstance(emergency_group, BaseExceptionGroup)
+    assert [str(error) for error in emergency_group.exceptions] == [
+        "job label matched multiple containers: ['phase10-first', 'phase10-second']",
+        "first force removal failed",
+        "job phase10-outer-group-job survived emergency force removal: ['phase10-first']",
+    ]
+    assert state["identifiers"] == ["phase10-first"]
