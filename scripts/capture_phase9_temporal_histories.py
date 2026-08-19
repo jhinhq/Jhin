@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
+import json
 import os
 import subprocess
 from dataclasses import dataclass
@@ -107,9 +109,61 @@ FIXTURE_ROOT = (
     / "fixtures"
     / "phase9_temporal"
 )
+CAPTURE_CRITICAL_SOURCE_PATHS = (
+    "pyproject.toml",
+    "uv.lock",
+    "services/agent_worker/src",
+    "packages/agents/src",
+    "packages/connectors/src",
+    "packages/db/src",
+    "packages/domain/src",
+    "packages/events/src",
+    "packages/models/src",
+    "packages/observability/src",
+    "packages/policy/src",
+    "packages/secrets/src",
+    "packages/tools/src",
+    "packages/workflows/src",
+)
+_INTENTIONAL_CAPTURE_DIRTY_FILES = frozenset(
+    {
+        "apps/api/tests/test_approvals_unit.py",
+        "packages/workflows/tests/test_phase10_history_replay.py",
+        "scripts/capture_phase9_temporal_histories.py",
+        "tests/test_capture_phase9_temporal_histories.py",
+    }
+)
+_INTENTIONAL_CAPTURE_DIRTY_PREFIXES = (
+    "packages/workflows/tests/fixtures/phase9_temporal/",
+)
 
 _READ_TOOL = "capture.phase9.read"
 _APPROVAL_TOOL = "capture.phase9.destructive"
+_EXPECTED_POST_BIND_PAYLOAD: dict[str, Any] = {
+    "step": 0,
+    "manifest": {
+        "count": 1,
+        "calls": [
+            {
+                "ordinal": 0,
+                "lossless": True,
+                "tool_name": _READ_TOOL,
+                "arguments_json": '{"value":"phase9-canonical-argument"}',
+            }
+        ],
+    },
+}
+_TEMPORAL_SDK_VERSION = "1.31.0"
+_TERMINAL_WORKFLOW_EVENTS = frozenset(
+    {
+        "EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED",
+        "EVENT_TYPE_WORKFLOW_EXECUTION_FAILED",
+        "EVENT_TYPE_WORKFLOW_EXECUTION_TIMED_OUT",
+        "EVENT_TYPE_WORKFLOW_EXECUTION_CANCELED",
+        "EVENT_TYPE_WORKFLOW_EXECUTION_TERMINATED",
+        "EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -224,7 +278,44 @@ async def save_history(handle: Any, destination: Path, *, workflow_id: str) -> N
     )
 
 
-def _readme(source_ref: str) -> str:
+def _fixture_evidence(path: Path) -> dict[str, Any]:
+    raw = path.read_bytes()
+    document = json.loads(raw)
+    events = document.get("events")
+    if not isinstance(events, list) or not events:
+        raise RuntimeError(f"captured history has no events: {path.name}")
+    sdk_versions = {
+        event.get("workflowTaskCompletedEventAttributes", {})
+        .get("sdkMetadata", {})
+        .get("sdkVersion")
+        for event in events
+        if event.get("workflowTaskCompletedEventAttributes", {})
+        .get("sdkMetadata", {})
+        .get("sdkVersion")
+    }
+    if sdk_versions and sdk_versions != {_TEMPORAL_SDK_VERSION}:
+        raise RuntimeError(
+            f"captured history SDK version is not {_TEMPORAL_SDK_VERSION}: {path.name}"
+        )
+    started = events[0].get("workflowExecutionStartedEventAttributes", {})
+    workflow_type = started.get("workflowType", {}).get("name", "")
+    task_queue = started.get("taskQueue", {}).get("name", "")
+    return {
+        "closed": any(event.get("eventType") in _TERMINAL_WORKFLOW_EVENTS for event in events),
+        "event_count": len(events),
+        "last_event_type": events[-1].get("eventType", ""),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "task_queue": task_queue,
+        "workflow_type": workflow_type,
+    }
+
+
+def _readme(source_ref: str, fixtures: dict[str, dict[str, Any]]) -> str:
+    evidence = {
+        "fixtures": fixtures,
+        "source_ref": source_ref,
+        "temporal_sdk_version": _TEMPORAL_SDK_VERSION,
+    }
     lines = (
         "# Frozen Phase 9 Temporal histories",
         "",
@@ -249,22 +340,31 @@ def _readme(source_ref: str) -> str:
             "and pending-approval `ToolCall`; workflow open |"
         ),
         (
-            "| `agent-finalization.json` | `AgentTaskWorkflow` | `finalize_run` started "
-            "and parked before sandbox cleanup |"
+            "| `agent-finalization.json` | `AgentTaskWorkflow` | `finalize_run` scheduled; "
+            "worker parked before sandbox cleanup |"
         ),
         (
-            "| `triggered-sync.json` | `TriggeredTaskWorkflow` | `sync_external` started "
-            "and parked before connector dispatch |"
+            "| `triggered-sync.json` | `TriggeredTaskWorkflow` | `sync_external` scheduled; "
+            "worker parked before connector dispatch |"
         ),
         (
             "| `engineering-sync.json` | `EngineeringTicketWorkflow` | ticket finalized; "
-            "`sync_external` parked before connector dispatch |"
+            "sync scheduled and worker parked before connector dispatch |"
         ),
         "",
         "Expected legacy activity names are `resolve_snapshot`, `run_agent_step`,",
         "`resolve_approval`, `finalize_run`, `prepare_triggered_task`, `sync_external`,",
         "`resolve_engineering_plan`, and `finalize_engineering_ticket`. No file contains",
         "the Phase 10 patch marker or Phase 10 activity command names.",
+        "",
+        "The following machine-readable manifest is the committed evidence authority.",
+        "Tests bind every fixture's exact bytes, metadata, event count, and end state.",
+        "",
+        "<!-- phase9-evidence:start -->",
+        "```json",
+        json.dumps(evidence, indent=2, sort_keys=True),
+        "```",
+        "<!-- phase9-evidence:end -->",
     )
     return "\n".join(lines) + "\n"
 
@@ -274,6 +374,7 @@ async def generate(destination: Path, *, source_ref: str) -> None:
     captures: dict[str, CapturedWorkflow] = await capture_scenarios()
     if tuple(captures) != SCENARIOS:
         raise RuntimeError("Phase 9 capture scenarios are incomplete or reordered")
+    fixture_evidence: dict[str, dict[str, Any]] = {}
     for scenario, captured in captures.items():
         fixture = destination / f"{scenario}.json"
         await save_history(captured.handle, fixture, workflow_id=captured.workflow_id)
@@ -281,9 +382,10 @@ async def generate(destination: Path, *, source_ref: str) -> None:
         restored = WorkflowHistory.from_json(captured.workflow_id, fixture_text)
         if restored.workflow_id != captured.workflow_id:
             raise RuntimeError(f"caller workflow ID was not preserved for {scenario}")
+        fixture_evidence[fixture.name] = await asyncio.to_thread(_fixture_evidence, fixture)
     await asyncio.to_thread(
         (destination / "README.md").write_text,
-        _readme(source_ref),
+        _readme(source_ref, fixture_evidence),
         encoding="utf-8",
     )
     await asyncio.to_thread(
@@ -304,20 +406,49 @@ def _git(*args: str) -> str:
     return completed.stdout.strip()
 
 
+def unexpected_capture_dirty_paths(porcelain: str) -> tuple[str, ...]:
+    unexpected: list[str] = []
+    for line in porcelain.splitlines():
+        if len(line) < 4:
+            unexpected.append(line)
+            continue
+        raw_path = line[3:]
+        paths = raw_path.split(" -> ") if " -> " in raw_path else [raw_path]
+        for path in paths:
+            allowed = path in _INTENTIONAL_CAPTURE_DIRTY_FILES or any(
+                path.startswith(prefix) for prefix in _INTENTIONAL_CAPTURE_DIRTY_PREFIXES
+            )
+            if not allowed:
+                unexpected.append(path)
+    return tuple(unexpected)
+
+
+def _phase10_marker_present() -> bool:
+    repository_root = Path(__file__).resolve().parents[1]
+    for relative in CAPTURE_CRITICAL_SOURCE_PATHS:
+        candidate = repository_root / relative
+        paths = (candidate,) if candidate.is_file() else candidate.rglob("*.py")
+        if any(
+            PHASE10_PATCH_MARKER in path.read_text(encoding="utf-8")
+            for path in paths
+        ):
+            return True
+    return False
+
+
 def validate_phase9_source() -> str:
     source_ref = _git("rev-parse", "HEAD")
     if source_ref != TASK0_PHASE9_REF:
         raise RuntimeError(
             f"Phase 9 capture requires {TASK0_PHASE9_REF}, found {source_ref}"
         )
-    dirty = _git("status", "--porcelain", "--", "packages/workflows/src")
+    dirty = unexpected_capture_dirty_paths(
+        _git("status", "--porcelain", "--untracked-files=all")
+    )
     if dirty:
-        raise RuntimeError("Phase 9 workflow source is dirty; refusing to capture")
-    workflow_root = Path(__file__).resolve().parents[1] / "packages" / "workflows" / "src"
-    if any(
-        PHASE10_PATCH_MARKER in path.read_text(encoding="utf-8")
-        for path in workflow_root.rglob("*.py")
-    ):
+        joined = ", ".join(dirty)
+        raise RuntimeError(f"Phase 9 capture-critical source is dirty: {joined}")
+    if _phase10_marker_present():
         raise RuntimeError("Phase 10 workflow patch is already present; refusing to capture")
     return source_ref
 
@@ -570,9 +701,31 @@ async def _wait_for_pending_approval(
             await asyncio.sleep(0.02)
 
 
+def assert_exact_post_bind_state(
+    *,
+    manifest_payloads: list[dict[str, Any]],
+    reasoning_count: int,
+    tool_count: int,
+    stable_tool_present: bool,
+    effect_started: bool,
+) -> None:
+    if manifest_payloads != [_EXPECTED_POST_BIND_PAYLOAD]:
+        raise RuntimeError("post-bind capture does not contain the exact canonical manifest")
+    if reasoning_count != 0:
+        raise RuntimeError("post-bind capture contains a reasoning event")
+    if tool_count != 0:
+        raise RuntimeError("post-bind capture contains a ToolCall")
+    if stable_tool_present:
+        raise RuntimeError("post-bind capture claimed the stable tool invocation")
+    if effect_started:
+        raise RuntimeError("post-bind capture started the external effect")
+
+
 async def _assert_post_bind_database_state(
     sessions: async_sessionmaker[AsyncSession],
     run_id: UUID,
+    *,
+    effect_started: bool,
 ) -> None:
     expected_invocation = stable_tool_invocation_id(run_id, 0, 0)
     async with sessions() as session:
@@ -594,14 +747,13 @@ async def _assert_post_bind_database_state(
             select(func.count(ToolCall.id)).where(ToolCall.run_id == run_id)
         )
         expected_tool = await session.get(ToolCall, expected_invocation)
-    if len(manifests) != 1:
-        raise RuntimeError("post-bind capture must contain exactly one tool manifest")
-    manifest = manifests[0].payload_json.get("manifest")
-    calls = manifest.get("calls") if isinstance(manifest, dict) else None
-    if not isinstance(calls, list) or len(calls) != 1 or calls[0].get("lossless") is not True:
-        raise RuntimeError("post-bind capture manifest is not one lossless ordered call")
-    if reasoning_count != 0 or tool_count != 0 or expected_tool is not None:
-        raise RuntimeError("post-bind capture crossed the Phase 9 pre-effect boundary")
+    assert_exact_post_bind_state(
+        manifest_payloads=[event.payload_json for event in manifests],
+        reasoning_count=reasoning_count or 0,
+        tool_count=tool_count or 0,
+        stable_tool_present=expected_tool is not None,
+        effect_started=effect_started,
+    )
 
 
 async def _fetch_all_before_close(
@@ -741,9 +893,11 @@ async def capture_scenarios() -> dict[str, CapturedWorkflow]:
                     task_queue=AGENT_TASK_QUEUE,
                 )
                 await _wait_for_marker(post_root, PHASE9_AFTER_MANIFEST)
-                await _assert_post_bind_database_state(sessions, post_run)
-                if post_run in effect_runs:
-                    raise RuntimeError("post-bind tool effect started before fixture capture")
+                await _assert_post_bind_database_state(
+                    sessions,
+                    post_run,
+                    effect_started=post_run in effect_runs,
+                )
                 handles["agent-post-bind-pre-effect"] = (post_id, post)
 
                 resources.test_barrier = CrashBarrier(CrashBarrierConfig())
