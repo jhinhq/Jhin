@@ -16,6 +16,7 @@
 - PostgreSQL remains product authority, Temporal remains workflow authority, and NATS remains transport. Health and telemetry are diagnostic and never grant authority or change task, event, approval, retry, audit, budget, concurrency, or credential behavior.
 - Consume prior-plan names exactly: distribution `jhin-tool-worker`, service `tool-worker`, module `jhin_tool_worker`, `WORKFLOW_TASK_QUEUE = "jhin-workflow-queue"`, `AGENT_TASK_QUEUE = "jhin-agent-queue"`, and `TOOL_TASK_QUEUE = "jhin-tool-queue"`.
 - Consume telemetry through `jhin_observability.get_runtime().status() -> TelemetryExporterStatus`; monitoring remains optional and its state is excluded from overall product readiness.
+- Preserve telemetry's API-to-Temporal trace path: the single app-lifetime `TemporalClientProvider` receives the initialized `ObservabilityRuntime` and passes `temporal_client_interceptors(runtime)` on its only connect path. Health reuses that provider and must never replace it with an uninstrumented client/cache.
 - Use Python `>=3.13`, Temporal SDK `>=1.31` with the lock remaining at 1.31.0, SQLAlchemy `>=2.0.36`, FastAPI `>=0.115`, and Next.js 16.3.1. Do not introduce a package beyond the already locked stack; Task 2 must declare the already-used `httpx` package directly in tool-worker rather than relying on a transitive dependency.
 - The tool-worker and telemetry subprojects add no migration: Phase 9 revision `0014` remains their head. Protected health is additive revision `0015`; keep exactly one head and test empty database `base -> head`, `0014 -> 0015`, and `0015 -> 0014 -> 0015` on real PostgreSQL. No existing product column is removed or rewritten.
 - Heartbeat interval is exactly 10 seconds, staleness is exactly 30 seconds, and retention is exactly seven days. Heartbeat writes use a separate short transaction and never become a liveness grant.
@@ -27,12 +28,11 @@
 - `GET /api/v1/workspaces/{workspace_id}/operations/health` requires `AdminCtx`. A non-member receives 404, a viewer/member receives 403, and no response contains another workspace's connection, secret, failure, task, user, or resource identifiers.
 - Protected components contain only `name`, `status`, `checked_at`, optional `latency_ms`, closed `reason_code`, and closed `action`. Counts are carried only by the bounded typed summaries defined below. Raw exception text, dependency addresses, ports, DSNs, hostnames, SQL, provider messages, and tracebacks are never returned.
 - Overall `down` is reserved for unavailable product-critical PostgreSQL, NATS, or Temporal. Schema mismatch, backlog/redelivery, missing or stale heartbeat-bearing workers, missing/invalid queue capability metadata, sandbox failure, connection failure, or key rollout mismatch is `degraded`. A retained or recently accessed Temporal poller is never a liveness grant. Optional telemetry state never changes overall status.
-- Every task follows RED -> focused GREEN -> affected regression -> lint/typecheck -> scoped commit. Never use `git add .`; never edit, stage, rename, delete, or commit `orgforge-production-implementation-plan.md`.
+- Every implementation task (Tasks 1–7) follows RED -> focused GREEN -> affected regression -> lint/typecheck -> scoped commit. Task 0 is a read-only predecessor/checkpoint gate: it must not modify the worktree or index and creates no commit. Never use `git add .`; never read, edit, stage, rename, delete, or commit `orgforge-production-implementation-plan.md`. The only exception to “read” is the three metadata-only commands named after the File Map; agents must never open, print, search, parse, or otherwise inspect that file's contents.
 
 ## File Map
 
 ```text
-docs/superpowers/plans/2026-08-18-phase-10-protected-health.md reviewed execution baseline
 packages/db/src/jhin_db/models/operations.py                   heartbeat ORM only
 packages/db/src/jhin_db/models/__init__.py                     heartbeat model export
 packages/db/src/jhin_db/heartbeat.py                           validated upsert/loop/purge contract
@@ -48,7 +48,6 @@ packages/events/src/jhin_events/streams.py                     canonical durable
 packages/events/tests/test_streams.py                          consumer-name contract
 packages/workflows/src/jhin_workflows/poller_health.py          retained/recent Temporal capability diagnostics
 packages/workflows/tests/test_poller_health.py                  timestamp-sanitization/capability CLI tests
-apps/api/src/jhin_api/temporal.py                              app-lifetime Temporal provider
 apps/api/src/jhin_api/deps.py                                  business dependency reuses provider
 apps/api/src/jhin_api/health/schemas.py                         opaque/public + bounded protected DTOs
 apps/api/src/jhin_api/health/checks.py                          bounded dependency probes, no HTTP policy
@@ -79,17 +78,24 @@ apps/web/tests/operations-navigation.test.tsx                  role/nav/direct-a
 tests/integration/test_phase10_protected_health_migration.py    owned two-DB PG fixture/base/reversal proof
 tests/integration/test_phase10_protected_health.py              live RBAC/opacity/kill/recovery proof
 tests/test_phase10_protected_health_harness.py                  executable Make/helper mode contract
+scripts/run_phase10_protected_health.sh                         isolated live-stack orchestration
 tests/integration/conftest.py                                  rootful/rootless Compose harness
 tests/integration/test_stack_health.py                         opaque stack-health assertions
 Makefile                                                       render/rootful/rootless health gates
 docs/operations/protected-health.md                            operator interpretation/runbook
 README.md                                                      opaque endpoint/admin-surface index
-
-Read-only prior-plan inputs: compose.yaml, compose.dev.yaml, compose.rootless.yaml,
-compose.rootful.yaml,
-services/workflow_worker/src/jhin_workflow_worker/main.py, and
-orgforge-production-implementation-plan.md. No task stages or commits those files.
 ```
+
+Read-only checkpoint/prior-plan inputs:
+docs/superpowers/plans/2026-08-18-phase-10-telemetry-core.md,
+docs/superpowers/plans/2026-08-18-phase-10-protected-health.md,
+compose.yaml, compose.dev.yaml, compose.rootless.yaml, compose.rootful.yaml,
+and services/workflow_worker/src/jhin_workflow_worker/main.py. No task stages or commits those files.
+
+Metadata-only external sentinel: `orgforge-production-implementation-plan.md`. It is not a
+read-only implementation input and no agent may open or inspect its contents. Its only permitted
+checks are path-scoped `git status --short`, `stat -c %s`, and `shasum -a 256`, solely to verify its
+untracked state, byte size, and SHA-256 without exposing content.
 
 ## Shared Interfaces
 
@@ -190,7 +196,11 @@ async def workflow_poller_diagnostics(
 
 # apps/api/src/jhin_api/temporal.py
 class TemporalClientProvider:
-    def __init__(self, settings: Settings) -> None: ...
+    def __init__(
+        self,
+        settings: Settings,
+        observability: ObservabilityRuntime,
+    ) -> None: ...
     async def get(self) -> temporalio.client.Client: ...
 
 # apps/api/src/jhin_api/health/service.py
@@ -418,7 +428,9 @@ class OperationsHealthSnapshot(BaseModel):
     ]
     keyring: KeyHealthSummary
     telemetry: TelemetryHealthSummary
+```
 
+```typescript
 # apps/web/components/app-shell.tsx
 interface NavItem {
   href: string;
@@ -430,31 +442,70 @@ interface NavItem {
 
 ---
 
-### Task 0: Check In the Reviewed Protected-Health Execution Baseline
-
-**Files:**
-- Create: `docs/superpowers/plans/2026-08-18-phase-10-protected-health.md`
+### Task 0: Verify the Two-Plan Checkpoint and Telemetry Acceptance
 
 **Interfaces:**
-- Consumes: the corrected Phase 10 design plus completed subprojects 1 and 2.
-- Produces: a tracked implementation sequence; no runtime behavior.
+- Consumes: baseline `50d3261`, telemetry's exact `docs: align Phase 10 telemetry and health plans` two-plan checkpoint, and completed telemetry acceptance evidence.
+- Produces: a no-write predecessor gate. This task creates/modifies/stages/commits no file; Task 1 is the first implementation mutation.
 
-- [ ] **Step 1: Stage only this plan and inspect the index**
-
-```bash
-git add docs/superpowers/plans/2026-08-18-phase-10-protected-health.md
-git diff --cached --name-only
-git diff --cached --check
-test "$(git status --short -- orgforge-production-implementation-plan.md)" = "?? orgforge-production-implementation-plan.md"
-```
-
-Expected: the cached-name output is exactly the protected-health plan path and the user-owned production plan remains untracked.
-
-- [ ] **Step 2: Commit the plan baseline**
+- [ ] **Step 1: Verify the sole two-plan checkpoint without changing the index**
 
 ```bash
-git commit -m "docs: add Phase 10 protected health plan"
+set -euo pipefail
+mapfile -t checkpoint_commits < <(git log --format=%H --fixed-strings \
+  --grep='docs: align Phase 10 telemetry and health plans')
+test "${#checkpoint_commits[@]}" -eq 1
+checkpoint_commit="${checkpoint_commits[0]}"
+git merge-base --is-ancestor 50d3261 "$checkpoint_commit"
+git merge-base --is-ancestor "$checkpoint_commit" HEAD
+test "$(git show -s --format=%s "$checkpoint_commit")" = \
+  "docs: align Phase 10 telemetry and health plans"
+test "$(git diff-tree --no-commit-id --name-only -r "$checkpoint_commit" | LC_ALL=C sort)" = \
+  "$(printf '%s\n' \
+    docs/superpowers/plans/2026-08-18-phase-10-protected-health.md \
+    docs/superpowers/plans/2026-08-18-phase-10-telemetry-core.md | LC_ALL=C sort)"
+for path in \
+  docs/superpowers/plans/2026-08-18-phase-10-protected-health.md \
+  docs/superpowers/plans/2026-08-18-phase-10-telemetry-core.md; do
+  git ls-files --error-unmatch "$path"
+  git diff --quiet -- "$path"
+  git diff --cached --quiet -- "$path"
+done
+test -z "$(git diff --cached --name-only)"
 ```
+
+Expected: exactly one ancestor checkpoint has the exact two plan paths and subject, both plans
+match their tracked checkpoint state, and the index is empty. Any failure stops before Task 1;
+this protected-health plan never stages or recommits either plan.
+
+- [ ] **Step 2: Prove the telemetry predecessor is implemented and accepted**
+
+```bash
+set -euo pipefail
+test -f apps/api/src/jhin_api/temporal.py
+test -f apps/api/tests/test_temporal_provider.py
+test -f docs/evidence/phase10-telemetry.md
+test -f scripts/record_phase10_telemetry_evidence.py
+for path in \
+  apps/api/src/jhin_api/temporal.py \
+  apps/api/tests/test_temporal_provider.py \
+  docs/evidence/phase10-telemetry.md \
+  scripts/record_phase10_telemetry_evidence.py \
+  tests/test_phase10_telemetry_evidence.py \
+  tests/test_phase10_telemetry_harness.py; do
+  git ls-files --error-unmatch "$path"
+  git diff --quiet -- "$path"
+  git diff --cached --quiet -- "$path"
+done
+uv run pytest tests/test_phase10_telemetry_evidence.py \
+  apps/api/tests/test_temporal_provider.py tests/test_phase10_telemetry_harness.py -q
+! rg -n 'FAIL|INCOMPLETE|PENDING RESULT|not run' docs/evidence/phase10-telemetry.md
+test -z "$(git diff --cached --name-only)"
+```
+
+Expected: the committed telemetry evidence exists, contains no non-pass marker, every consumed
+provider/evidence/harness path is tracked and clean, and the focused predecessor tests pass. A
+failure stops before Task 1. No staging or commit command exists in this verification-only task.
 
 ### Task 1: Add the Additive Heartbeat Model and Reversible `0015` Migration
 
@@ -1235,10 +1286,9 @@ Expected before commit: the cached-name output is exactly the 14 paths in the `g
 - Modify: `services/event_worker/src/jhin_event_worker/settings.py`
 - Modify: `packages/workflows/src/jhin_workflows/poller_health.py`
 - Modify: `packages/workflows/tests/test_poller_health.py`
-- Create: `apps/api/src/jhin_api/temporal.py`
 - Modify: `apps/api/src/jhin_api/deps.py`
 - Modify: `apps/api/src/jhin_api/main.py`
-- Create: `apps/api/tests/test_temporal_provider.py`
+- Modify: `apps/api/tests/test_temporal_provider.py`
 - Modify: `apps/api/src/jhin_api/health/schemas.py`
 - Create: `apps/api/src/jhin_api/health/checks.py`
 - Modify: `apps/api/src/jhin_api/health/service.py`
@@ -1246,8 +1296,8 @@ Expected before commit: the cached-name output is exactly the 14 paths in the `g
 - Modify: `apps/api/tests/test_health.py`
 
 **Interfaces:**
-- Consumes: the prior tool plan's poller CLI, the existing business `TemporalDep`, canonical task queues/streams, `AsyncEngine`, NATS JetStream info, Alembic packaged head, and safe telemetry logging.
-- Produces: one app-lifetime `TemporalClientProvider`, `WorkflowPollerDiagnostics(retained, recently_accessed, invalid_last_access_timestamps)`, opaque public responses, heartbeat-based live-worker readiness, bounded internal database/NATS/Temporal snapshots, and canonical event-consumer constants.
+- Consumes: telemetry's existing interceptor-aware app-lifetime `TemporalClientProvider`, its `api_temporal_runtime` fixture and `StackContract`/`compose` harness, the prior tool plan's poller CLI, the existing business `TemporalDep`, canonical task queues/streams, `AsyncEngine`, NATS JetStream info, Alembic packaged head, and safe telemetry logging.
+- Produces: health reuse tests for the existing provider, `WorkflowPollerDiagnostics(retained, recently_accessed, invalid_last_access_timestamps)`, opaque public responses, heartbeat-based live-worker readiness, bounded internal database/NATS/Temporal snapshots, and canonical event-consumer constants. It never creates or replaces the provider or its Temporal interceptors.
 
 - [ ] **Step 1: Write all public, provider, heartbeat-liveness, poller-diagnostic, and probe tests first**
 
@@ -1520,23 +1570,45 @@ Also assert a workflow-queue row has `fresh_owner_instances is None`: because wo
 In `test_temporal_provider.py`, make concurrent business and health access share one connection:
 
 ```python
+from unittest.mock import Mock
+
+from temporalio.client import Interceptor
+
+
 async def test_provider_connects_once_for_concurrent_callers(
-    settings: Settings, monkeypatch: pytest.MonkeyPatch
+    api_temporal_runtime: ObservabilityRuntime,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    settings = Settings(
+        temporal_address="temporal.test:7233",
+        temporal_namespace="phase10-health-test",
+    )
     calls = 0
     expected = cast(TemporalClient, object())
+    expected_interceptors = [cast(Interceptor, object())]
+    interceptor_builder = Mock(return_value=expected_interceptors)
+    monkeypatch.setattr(
+        "jhin_api.temporal.temporal_client_interceptors", interceptor_builder
+    )
 
-    async def connect(address: str, *, namespace: str) -> TemporalClient:
+    async def connect(
+        address: str,
+        *,
+        namespace: str,
+        interceptors: list[Interceptor],
+    ) -> TemporalClient:
         nonlocal calls
         calls += 1
         await asyncio.sleep(0)
         assert (address, namespace) == (settings.temporal_address, settings.temporal_namespace)
+        assert interceptors is expected_interceptors
         return expected
 
     monkeypatch.setattr(TemporalClient, "connect", connect)
-    provider = TemporalClientProvider(settings)
+    provider = TemporalClientProvider(settings, api_temporal_runtime)
     first, second = await asyncio.gather(provider.get(), provider.get())
     assert (first, second, calls) == (expected, expected, 1)
+    interceptor_builder.assert_called_once_with(api_temporal_runtime)
 
 
 async def test_business_dependency_uses_lifespan_provider() -> None:
@@ -1611,12 +1683,19 @@ async def workflow_poller_diagnostics(
 
 Recent access is inclusive at exactly 30 seconds, but it is diagnostic only. Old valid timestamps reduce only `recently_accessed`; missing, future, or protobuf timestamps whose `ToDatetime()` raises `ValueError` or `OverflowError` increment `invalid_last_access_timestamps`. All returned pollers increment `retained`, and none of these fields is a worker lease or kill-to-zero timer. The standalone prior-plan CLI may make its own short-lived connection because it is a separate process, but it delegates to this function with `datetime.now(UTC)`, returns success from `retained > 0` as a queue-registration capability check, and never defines a second API connection path.
 
-- [ ] **Step 4: Replace the API's parallel Temporal cache with one lifespan provider**
+- [ ] **Step 4: Preserve telemetry's one lifespan provider and reuse it for health**
+
+The telemetry predecessor has already implemented the following provider shape. Treat this block as a read-only invariant, not production code to recreate:
 
 ```python
 class TemporalClientProvider:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        observability: ObservabilityRuntime,
+    ) -> None:
         self._settings = settings
+        self._observability = observability
         self._client: TemporalClient | None = None
         self._lock = asyncio.Lock()
 
@@ -1628,11 +1707,12 @@ class TemporalClientProvider:
                 self._client = await TemporalClient.connect(
                     self._settings.temporal_address,
                     namespace=self._settings.temporal_namespace,
+                    interceptors=temporal_client_interceptors(self._observability),
                 )
             return self._client
 ```
 
-Create `app.state.temporal_provider = TemporalClientProvider(settings)` once in the API lifespan before heartbeat/readiness work starts. Remove `app.state.temporal_client` and `temporal_connect_lock`. The pinned SDK exposes no public client close operation; on shutdown, cancel/await health and heartbeat tasks first, dispose other owned resources, and let the lifespan release the one provider/client reference. Change `get_temporal_client` to call the provider and translate only `RPCError`/`OSError` to the existing business 503. `probe_temporal` also calls this provider; it catches and sanitizes the error itself. Thus health and product requests can never create competing API clients.
+Import and reuse the telemetry plan's exact `TemporalClientProvider`, `ObservabilityRuntime`, and `temporal_client_interceptors` contracts; do not edit the provider merely to add a health path, create a second interceptor builder, or create a health-only Temporal client. Extend the existing provider regression in `test_temporal_provider.py` to prove its only `TemporalClient.connect` call includes `interceptors=temporal_client_interceptors(...)`, and that both the business dependency and the new health probe reuse the same `app.state.temporal_provider`. In `main.py`, retain `app.state.temporal_provider = TemporalClientProvider(settings, runtime)` after observability initialization and before heartbeat/readiness work. Add health tasks around that order without reinitializing observability or Temporal. `probe_temporal` accepts the provider; it catches and sanitizes its own health error. Thus health and product requests can never create competing API clients or drop API-to-Temporal trace propagation.
 
 - [ ] **Step 5: Implement strict bounded schemas and dependency probes**
 
@@ -1842,13 +1922,13 @@ uv run pytest packages/events/tests/test_streams.py packages/workflows/tests/tes
 uv run pytest apps/api/tests/test_tasks_unit.py apps/api/tests/test_approvals_unit.py -q
 uv run ruff check packages/events packages/workflows apps/api/src/jhin_api/temporal.py apps/api/src/jhin_api/deps.py apps/api/src/jhin_api/main.py apps/api/src/jhin_api/health apps/api/tests/test_temporal_provider.py apps/api/tests/test_health.py
 uv run mypy packages/events/src packages/workflows/src apps/api/src
-git add packages/events/src/jhin_events/streams.py packages/events/tests/test_streams.py services/event_worker/src/jhin_event_worker/settings.py packages/workflows/src/jhin_workflows/poller_health.py packages/workflows/tests/test_poller_health.py apps/api/src/jhin_api/temporal.py apps/api/src/jhin_api/deps.py apps/api/src/jhin_api/main.py apps/api/tests/test_temporal_provider.py apps/api/src/jhin_api/health/schemas.py apps/api/src/jhin_api/health/checks.py apps/api/src/jhin_api/health/service.py apps/api/src/jhin_api/health/router.py apps/api/tests/test_health.py
+git add packages/events/src/jhin_events/streams.py packages/events/tests/test_streams.py services/event_worker/src/jhin_event_worker/settings.py packages/workflows/src/jhin_workflows/poller_health.py packages/workflows/tests/test_poller_health.py apps/api/src/jhin_api/deps.py apps/api/src/jhin_api/main.py apps/api/tests/test_temporal_provider.py apps/api/src/jhin_api/health/schemas.py apps/api/src/jhin_api/health/checks.py apps/api/src/jhin_api/health/service.py apps/api/src/jhin_api/health/router.py apps/api/tests/test_health.py
 git diff --cached --name-only
 git diff --cached --check
 git commit -m "fix: make public readiness opaque"
 ```
 
-Expected before commit: the cached-name output is exactly the fourteen paths in the `git add` command.
+Expected before commit: the cached-name output is exactly the thirteen paths in the `git add` command. The telemetry-owned `apps/api/src/jhin_api/temporal.py` remains byte-for-byte unchanged in this commit.
 
 ### Task 4: Add the Workspace-Admin Protected Health Projection
 
@@ -2413,13 +2493,14 @@ Expected before commit: the cached-name output is exactly the eight paths in the
 **Files:**
 - Create: `tests/integration/test_phase10_protected_health.py`
 - Create: `tests/test_phase10_protected_health_harness.py`
+- Create: `scripts/run_phase10_protected_health.sh`
 - Modify: `tests/integration/conftest.py`
 - Modify: `tests/integration/test_stack_health.py`
 - Modify: `Makefile`
 
 **Interfaces:**
 - Consumes: complete Tasks 1-5 plus prior-plan `compose.rootful.yaml`, `compose.rootless.yaml`, actual Docker socket modes, and tool/telemetry topology.
-- Produces: `phase10_compose_files(...)`, an executable Make/live-harness contract, and live evidence for anonymous opacity, workspace isolation, dependency failure/recovery, heartbeat freshness, diagnostic Temporal capability, consumer visibility, sandbox reporting, and agent/tool/event kill/recovery in both supported socket modes.
+- Produces: a backward-compatible `JHIN_PHASE10_SUITE=protected-health` extension to telemetry's `StackContract`/`resolve_stack_contract(...)`/`compose(...)` authority, self-contained `scripts/run_phase10_protected_health.sh --mode rootful|rootless [--project NAME]`, an executable Make/live-harness contract, and live evidence for anonymous opacity, workspace isolation, dependency failure/recovery, heartbeat freshness, diagnostic Temporal capability, consumer visibility, sandbox reporting, and agent/tool/event kill/recovery in both supported socket modes.
 
 - [ ] **Step 1: Write the failing live acceptance and harness-contract tests first**
 
@@ -2528,7 +2609,10 @@ async def test_sandbox_failure_degrades_and_recovers_anonymous_readiness(
             timeout=25.0,
         )
     finally:
-        compose("up", "-d", "--wait", "sandbox-runner")
+        compose(
+            "up", "-d", "--wait", "--wait-timeout", "60", "sandbox-runner",
+            timeout=70,
+        )
 
     assert await wait_public_readiness(
         anonymous_client, status_code=200, status="ok", timeout=30.0
@@ -2557,16 +2641,113 @@ In the same test-first step, create `tests/test_phase10_protected_health_harness
 ```python
 from __future__ import annotations
 
+import inspect
+import json
+import os
 import re
+import socket
+import stat
+import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from tests.integration.conftest import phase10_compose_files
+from tests.integration.conftest import compose, resolve_stack_contract
 
 ROOT = Path(__file__).resolve().parents[1]
-ROOTFUL_FILES = "compose.yaml:compose.dev.yaml:compose.rootful.yaml"
-ROOTLESS_FILES = "compose.yaml:compose.dev.yaml:compose.rootless.yaml"
+PROTECTED_HEALTH_SERVICES = frozenset({
+    "api", "web", "workflow-worker", "agent-worker", "tool-worker",
+    "event-worker", "sandbox-runner", "postgres", "nats", "temporal",
+})
+PORT_ENV = (
+    "WEB_PORT", "API_PORT", "FAKE_SUPABASE_DB_DEV_PORT",
+    "FAKE_PROVIDER_DEV_PORT", "FAKE_GITHUB_DEV_PORT", "FAKE_LINEAR_DEV_PORT",
+    "FAKE_VERCEL_DEV_PORT", "FAKE_SUPABASE_DEV_PORT", "SANDBOX_RUNNER_DEV_PORT",
+    "POSTGRES_DEV_PORT", "NATS_DEV_PORT", "NATS_MONITOR_DEV_PORT",
+    "TEMPORAL_DEV_PORT", "TEMPORAL_UI_DEV_PORT",
+)
+
+FAKE_TOOL = r'''#!/usr/bin/env python3
+import json
+import os
+import stat
+import sys
+from pathlib import Path
+
+tool = Path(sys.argv[0]).name
+args = sys.argv[1:]
+trace_path = Path(os.environ["FAKE_COMMAND_TRACE"])
+entry = {
+    "tool": tool,
+    "args": args,
+    "project": os.environ.get("JHIN_TEST_COMPOSE_PROJECT"),
+    "suite": os.environ.get("JHIN_PHASE10_SUITE"),
+    "mode": os.environ.get("PHASE10_SOCKET_MODE"),
+    "gid": os.environ.get("SANDBOX_DOCKER_GID"),
+    "socket": os.environ.get("SANDBOX_DOCKER_SOCKET_HOST"),
+    "ports": {
+        name: os.environ.get(name)
+        for name in os.environ.get("FAKE_PORT_ENV", "").split(",")
+    },
+    "api_url": os.environ.get("JHIN_API_URL"),
+    "postgres_port": os.environ.get("JHIN_POSTGRES_PORT"),
+}
+
+
+def record() -> None:
+    with trace_path.open("a") as stream:
+        stream.write(json.dumps(entry, sort_keys=True) + "\n")
+
+if tool == "stat":
+    if args[:2] == ["-c", "%u"]:
+        print(os.environ.get("FAKE_SOCKET_UID", "10001"))
+    elif args[:2] == ["-c", "%g"]:
+        print(os.environ.get("FAKE_SOCKET_GID", "4242"))
+    else:
+        raise SystemExit(64)
+elif tool == "uv":
+    if args[:3] == ["run", "python", "scripts/generate_master_key.py"]:
+        key = Path(args[3])
+        key.write_text("phase10-master-key-canary\n")
+        key.chmod(0o600)
+    elif args[:2] == ["run", "pytest"]:
+        record()
+        raise SystemExit(int(os.environ.get("FAKE_PYTEST_STATUS", "0")))
+    else:
+        raise SystemExit(64)
+elif tool == "docker":
+    dirty = os.environ.get("FAKE_DIRTY_KIND")
+    if args[:2] == ["ps", "-aq"]:
+        if dirty == "container":
+            print("container-id")
+        record()
+    elif args[:2] == ["network", "ls"]:
+        if dirty == "network":
+            print("network-id")
+        record()
+    elif args[:2] == ["volume", "ls"]:
+        if dirty == "volume":
+            print("volume-id")
+        record()
+    elif args and args[0] in {"rm", "network", "volume"}:
+        record()
+    elif args and args[0] == "compose":
+        if "port" in args:
+            index = args.index("port")
+            service, private = args[index + 1:index + 3]
+            port = 31000 + sum(map(ord, service)) % 700 + int(private) % 97
+            print(f"127.0.0.1:{port}")
+        elif "up" in args:
+            key = Path(os.environ["MASTER_KEY_FILE_HOST"])
+            entry["key_mode"] = stat.S_IMODE(key.stat().st_mode)
+            entry["key_dir_mode"] = stat.S_IMODE(key.parent.stat().st_mode)
+        record()
+    else:
+        raise SystemExit(64)
+else:
+    raise SystemExit(64)
+'''
 
 
 def recipe(name: str) -> str:
@@ -2576,48 +2757,210 @@ def recipe(name: str) -> str:
     return match.group(1)
 
 
-def test_compose_files_are_explicit_and_mode_bounded() -> None:
-    assert phase10_compose_files(
-        {"PHASE10_COMPOSE_FILES": ROOTFUL_FILES}
-    ) == ("compose.yaml", "compose.dev.yaml", "compose.rootful.yaml")
-    assert phase10_compose_files(
-        {"PHASE10_COMPOSE_FILES": ROOTLESS_FILES}
-    ) == ("compose.yaml", "compose.dev.yaml", "compose.rootless.yaml")
-    with pytest.raises(ValueError):
-        phase10_compose_files({"PHASE10_COMPOSE_FILES": "compose.yaml"})
-    with pytest.raises(ValueError):
-        phase10_compose_files({"PHASE10_COMPOSE_FILES": f"{ROOTFUL_FILES}:"})
+def install_fake_tools(root: Path) -> Path:
+    binary = root / "bin"
+    binary.mkdir()
+    for name in ("docker", "stat", "uv"):
+        path = binary / name
+        path.write_text(FAKE_TOOL)
+        path.chmod(0o755)
+    return binary
 
 
-def test_live_targets_start_the_exact_mode_before_the_socket_probe() -> None:
+def unix_socket(path: Path) -> socket.socket:
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(path)
+    return server
+
+
+def trace_rows(path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def test_protected_health_extends_the_telemetry_stack_contract() -> None:
+    contract = resolve_stack_contract({
+        "JHIN_PHASE10_SUITE": "protected-health",
+        "JHIN_TEST_COMPOSE_PROJECT": "jhin-phase10-health-contract",
+        "PHASE10_SOCKET_MODE": "rootful",
+        "SANDBOX_DOCKER_GID": "4242",
+    })
+    assert contract.project == "jhin-phase10-health-contract"
+    assert contract.suite == "protected-health"
+    assert contract.telemetry_mode is None
+    assert contract.socket_mode == "rootful"
+    assert contract.required_services == PROTECTED_HEALTH_SERVICES
+    assert {"project", "socket_mode"} <= set(inspect.signature(compose).parameters)
+    with pytest.raises(ValueError):
+        resolve_stack_contract({"JHIN_PHASE10_SUITE": "unknown"})
+    with pytest.raises(ValueError):
+        resolve_stack_contract({
+            "JHIN_PHASE10_SUITE": "protected-health",
+            "JHIN_TELEMETRY_MODE": "base",
+        })
+
+
+def test_live_targets_delegate_only_to_the_isolated_runner() -> None:
     rootful = recipe("test-protected-health-integration-rootful")
     rootless = recipe("test-protected-health-integration-rootless")
-    assert rootful.index(" up -d --build --wait") < rootful.index(
-        "$(MAKE) test-sandbox-socket-rootful"
+    assert rootful.strip() == (
+        "@bash scripts/run_phase10_protected_health.sh --mode rootful"
     )
-    assert rootless.index(" up -d --build --wait") < rootless.index(
-        "$(MAKE) test-sandbox-socket-rootless"
+    assert rootless.strip() == (
+        "@bash scripts/run_phase10_protected_health.sh --mode rootless"
     )
-    assert (
-        "docker compose -f compose.yaml -f compose.dev.yaml "
-        "-f compose.rootful.yaml up -d --build --wait"
-    ) in rootful
-    assert (
-        "docker compose -f compose.yaml -f compose.dev.yaml "
-        "-f compose.rootless.yaml up -d --build --wait"
-    ) in rootless
-    rootful_env = (
-        'SANDBOX_DOCKER_SOCKET_HOST="$$socket" SANDBOX_DOCKER_GID="$$gid" '
-        'PHASE10_COMPOSE_FILES="$$files"'
+
+
+def test_runner_installs_cleanup_before_mutation_and_bounds_the_stack() -> None:
+    source = (ROOT / "scripts/run_phase10_protected_health.sh").read_text()
+    assert source.startswith("#!/usr/bin/env bash\nset -Eeuo pipefail\n")
+    assert source.index("trap cleanup EXIT") < source.index("mktemp -d")
+    assert '"${compose[@]}" down -v --remove-orphans' in source
+    assert '"${compose[@]}" --profile build build sandbox-image' in source
+    assert "up -d --build --wait --wait-timeout 240" in source
+    assert 'export "$name=0"' in source
+    assert all(name in source for name in PORT_ENV)
+    assert "docker ps -aq --filter" in source
+    assert "docker network ls -q --filter" in source
+    assert "docker volume ls -q --filter" in source
+    assert "docker rm -f" in source
+    assert "docker network rm" in source
+    assert "docker volume rm -f" in source
+    assert "set -x" not in source
+
+
+@pytest.mark.parametrize("mode", ["rootful", "rootless"])
+def test_runner_isolated_modes_preserve_failure_and_cleanup(
+    tmp_path: Path, mode: str,
+) -> None:
+    binary = install_fake_tools(tmp_path)
+    trace = tmp_path / "trace.jsonl"
+    socket_path = tmp_path / "docker.sock"
+    server = unix_socket(socket_path)
+    project = f"jhin-phase10-health-{mode}-contract"
+    environment = {
+        **os.environ,
+        "PATH": f"{binary}{os.pathsep}{os.environ['PATH']}",
+        "FAKE_COMMAND_TRACE": str(trace),
+        "FAKE_PORT_ENV": ",".join(PORT_ENV),
+        "FAKE_PYTEST_STATUS": "23",
+        "FAKE_SOCKET_UID": "10001",
+        "FAKE_SOCKET_GID": "4242",
+        "JHIN_PHASE10_KEY_TMPDIR": str(tmp_path),
+        "SANDBOX_DOCKER_SOCKET_HOST": str(socket_path),
+        "PHASE10_ROOTLESS_DOCKER_SOCKET": str(socket_path),
+    }
+    try:
+        completed = subprocess.run(
+            [
+                "bash", "scripts/run_phase10_protected_health.sh",
+                "--mode", mode, "--project", project,
+            ],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    finally:
+        server.close()
+
+    assert completed.returncode == 23
+    rows = trace_rows(trace)
+    for row in rows:
+        assert row["project"] == project
+        assert row["suite"] == "protected-health"
+        assert row["mode"] == mode
+        assert row["socket"] == str(socket_path)
+        assert (row["gid"] == "4242") is (mode == "rootful")
+    compose_rows = [
+        row for row in rows
+        if row["tool"] == "docker" and row["args"][0] == "compose"
+    ]
+    assert compose_rows
+    for row in compose_rows:
+        args = row["args"]
+        assert args[1:3] == ["-p", project]
+        assert args.count(f"compose.{mode}.yaml") == 1
+        other = "rootless" if mode == "rootful" else "rootful"
+        assert f"compose.{other}.yaml" not in args
+        assert all(value == "0" for value in row["ports"].values())
+    command_lists = [row["args"] for row in compose_rows]
+    docker_args = [row["args"] for row in rows if row["tool"] == "docker"]
+    assert sum(args[:2] == ["ps", "-aq"] for args in docker_args) >= 3
+    assert sum(args[:2] == ["network", "ls"] for args in docker_args) >= 3
+    assert sum(args[:2] == ["volume", "ls"] for args in docker_args) >= 3
+    build = next(args for args in command_lists if "build" in args)
+    up = next(args for args in command_lists if "up" in args)
+    down = next(args for args in command_lists if "down" in args)
+    assert build[-4:] == ["--profile", "build", "build", "sandbox-image"]
+    assert up[-6:] == [
+        "up", "-d", "--build", "--wait", "--wait-timeout", "240",
+    ]
+    assert down[-3:] == ["down", "-v", "--remove-orphans"]
+    up_row = next(row for row in compose_rows if "up" in row["args"])
+    assert up_row["key_mode"] == 0o404
+    assert up_row["key_dir_mode"] == 0o711
+    assert up_row["key_mode"] & stat.S_IROTH
+    expected_port_calls = {
+        ("api", "8000"), ("web", "3000"), ("postgres", "5432"),
+        ("fake-supabase-db", "5432"), ("nats", "4222"),
+        ("nats", "8222"), ("temporal", "7233"),
+        ("sandbox-runner", "8085"), ("fake-provider", "8080"),
+        ("fake-github", "8080"), ("fake-linear", "8080"),
+        ("fake-vercel", "8080"), ("fake-supabase", "8080"),
+    }
+    assert {
+        (args[-2], args[-1]) for args in command_lists if "port" in args
+    } == expected_port_calls
+    pytest_row = next(
+        row for row in rows if row["tool"] == "uv" and "pytest" in row["args"]
     )
-    rootless_env = (
-        'env -u SANDBOX_DOCKER_GID SANDBOX_DOCKER_SOCKET_HOST="$$socket" '
-        'PHASE10_ROOTLESS_DOCKER_SOCKET="$$socket" '
-        'PHASE10_COMPOSE_FILES="$$files"'
+    assert pytest_row["api_url"].startswith("http://127.0.0.1:31")
+    assert pytest_row["postgres_port"].isdigit()
+    assert not list(tmp_path.glob("jhin-phase10-health-key.*"))
+    rendered = completed.stdout + completed.stderr + trace.read_text()
+    assert "phase10-master-key-canary" not in rendered
+
+
+def test_dirty_project_fails_before_any_mutation(tmp_path: Path) -> None:
+    binary = install_fake_tools(tmp_path)
+    trace = tmp_path / "trace.jsonl"
+    socket_path = tmp_path / "docker.sock"
+    server = unix_socket(socket_path)
+    environment = {
+        **os.environ,
+        "PATH": f"{binary}{os.pathsep}{os.environ['PATH']}",
+        "FAKE_COMMAND_TRACE": str(trace),
+        "FAKE_PORT_ENV": ",".join(PORT_ENV),
+        "FAKE_DIRTY_KIND": "volume",
+        "SANDBOX_DOCKER_SOCKET_HOST": str(socket_path),
+        "JHIN_PHASE10_KEY_TMPDIR": str(tmp_path),
+    }
+    try:
+        completed = subprocess.run(
+            [
+                "bash", "scripts/run_phase10_protected_health.sh",
+                "--mode", "rootful",
+                "--project", "jhin-phase10-health-rootful-dirty-contract",
+            ],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    finally:
+        server.close()
+    assert completed.returncode != 0
+    rows = trace_rows(trace)
+    assert not any(row["tool"] == "uv" for row in rows)
+    assert not any(
+        row["tool"] == "docker" and row["args"][0] == "compose"
+        for row in rows
     )
-    assert rootful.count(rootful_env) == 3  # up, nested probe, pytest
-    assert rootless.count(rootless_env) == 3
-    assert "SANDBOX_DOCKER_GID=10001" not in rootful
+    assert not list(tmp_path.glob("jhin-phase10-health-key.*"))
 ```
 
 - [ ] **Step 2: Run the executable RED harness contract before adding helper/Make support**
@@ -2626,53 +2969,294 @@ def test_live_targets_start_the_exact_mode_before_the_socket_probe() -> None:
 uv run pytest tests/test_phase10_protected_health_harness.py -q
 ```
 
-Expected: FAIL during ordinary pytest execution because `phase10_compose_files` and/or the two protected-health live targets do not exist. Do not implement the helper or Make recipes before observing it. The live acceptance module is also already present from Step 1, but is run only after the correct-mode stack is started in Step 4.
+Expected: FAIL during ordinary pytest execution because telemetry's `resolve_stack_contract` does
+not yet understand the protected-health suite, the isolated runner/Make targets do not exist, and
+the executable fake-tool cases cannot observe fail-fast cleanup. Do not extend the helper or add
+the runner/Make recipes before observing it. The legacy and telemetry harness tests must remain
+green after the extension. The live acceptance module is already present from Step 1, but runs only
+after the correct-mode stack starts in Step 4.
 
 - [ ] **Step 3: Implement mode-aware helpers and focused Make targets**
 
-Extend `tests/integration/conftest.py` with the exact helper under test, and make `compose(...)` build its `-f` arguments from it:
+Extend telemetry's already-committed `tests/integration/conftest.py` contract; do not replace its `compose_files(...)`, `StackContract`, `resolve_stack_contract(...)`, `compose(...)`, legacy fallback, or telemetry mode authority. Add one optional field at the end of the existing frozen dataclass so existing keyword and positional consumers remain valid:
 
 ```python
-_PHASE10_COMPOSE_FILE_SETS = {
-    ("compose.yaml", "compose.dev.yaml"),
-    ("compose.yaml", "compose.dev.yaml", "compose.rootful.yaml"),
-    ("compose.yaml", "compose.dev.yaml", "compose.rootless.yaml"),
-}
+Phase10Suite = Literal["protected-health"]
 
 
-def phase10_compose_files(
-    environ: Mapping[str, str] | None = None,
-) -> tuple[str, ...]:
-    source = os.environ if environ is None else environ
-    raw = source.get("PHASE10_COMPOSE_FILES")
-    files = (
-        ("compose.yaml", "compose.dev.yaml")
-        if raw is None
-        else tuple(raw.split(":"))
-    )
-    if files not in _PHASE10_COMPOSE_FILE_SETS:
-        raise ValueError("PHASE10_COMPOSE_FILES must select one supported exact mode")
-    return files
+@dataclass(frozen=True)
+class StackContract:
+    project: str
+    telemetry_mode: Literal["base", "observed"] | None
+    socket_mode: SocketMode
+    required_services: frozenset[str]
+    suite: Phase10Suite | None = None
 
 
-def compose(*args: str, timeout: float = 120.0) -> subprocess.CompletedProcess[str]:
-    project = validate_compose_project(os.environ.get("JHIN_TEST_COMPOSE_PROJECT", "jhin"))
-    file_args = [item for path in phase10_compose_files() for item in ("-f", path)]
-    return subprocess.run(
-        ["docker", "compose", "-p", project, *file_args, *args],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=True,
-    )
+PROTECTED_HEALTH_REQUIRED_SERVICES = frozenset({
+    "api", "web", "workflow-worker", "agent-worker", "tool-worker",
+    "event-worker", "sandbox-runner", "postgres", "nats", "temporal",
+})
 ```
 
-Import `Mapping` from `collections.abc`. Remove the fixed module-level `COMPOSE` list so there is one mode source. Add a context fixture around ordinary `docker compose pause/unpause` for the reporter mismatch test. Every teardown restarts or unpauses changed services and waits for health; production Compose receives no test-only heartbeat control.
+At the beginning of the existing `resolve_stack_contract(environ)` implementation, add this validation, then retain telemetry's existing mode/project/socket validation exactly:
 
-Add render-only and live targets. The literal `SANDBOX_DOCKER_GID=10001` is permitted only to render the rootful model; no live target uses it:
+```python
+raw_suite = environ.get("JHIN_PHASE10_SUITE")
+if raw_suite is not None and raw_suite != "protected-health":
+    raise ValueError("JHIN_PHASE10_SUITE must be protected-health")
+if raw_suite is not None and environ.get("JHIN_TELEMETRY_MODE") is not None:
+    raise ValueError("protected-health and telemetry integration modes are exclusive")
+if raw_suite is not None and environ.get("JHIN_TEST_COMPOSE_PROJECT") is None:
+    raise ValueError("JHIN_TEST_COMPOSE_PROJECT is required for protected health")
+```
 
-Append `test-protected-health`, `test-protected-health-render`, `test-protected-health-integration-rootful`, and `test-protected-health-integration-rootless` to `.PHONY` before adding these recipes.
+After telemetry computes its legacy/base/observed `required` set, override it only for this suite and carry the suite in the existing keyword-based return:
+
+```python
+suite = cast(Phase10Suite | None, raw_suite)
+if suite == "protected-health":
+    required = PROTECTED_HEALTH_REQUIRED_SERVICES
+return StackContract(
+    project=project,
+    telemetry_mode=cast(Literal["base", "observed"] | None, raw_mode),
+    socket_mode=cast(SocketMode, raw_socket_mode),
+    required_services=frozenset(required),
+    suite=suite,
+)
+```
+
+Do not change telemetry's `compose(*args, timeout, project, socket_mode)` signature or `compose_files(socket_mode)` selection. The existing session-autouse `_require_stack` continues to call `resolve_stack_contract` and therefore uses the protected service set only when this suite is explicit; ordinary `make test-integration` and both telemetry modes retain their prior semantics. Update its error branch to name `contract.suite or contract.telemetry_mode or "legacy"` without changing authorization or startup behavior. Run the predecessor's legacy and telemetry harness tests jointly with the new protected-health harness. Add a context fixture around ordinary `compose("pause"/"unpause")` for the reporter mismatch test. Every teardown restarts or unpauses changed services and waits for health; production Compose receives no test-only heartbeat control.
+
+Preserve every existing endpoint environment fallback, but let isolated callers give the host-side
+PostgreSQL port a name distinct from Compose's published-port request. Replace only the existing
+`POSTGRES_PORT` assignment with:
+
+```python
+POSTGRES_PORT = int(
+    os.environ.get(
+        "JHIN_POSTGRES_PORT",
+        os.environ.get("POSTGRES_DEV_PORT", "55432"),
+    )
+)
+```
+
+Legacy/telemetry callers remain byte-for-byte compatible. The protected runner leaves
+`POSTGRES_DEV_PORT=0` in every Compose child so Docker retains its dynamically allocated binding,
+and supplies the discovered integer only as `JHIN_POSTGRES_PORT` to pytest.
+
+Create `scripts/run_phase10_protected_health.sh` as the one executable owner of a live project. The
+literal `SANDBOX_DOCKER_GID=10001` remains render-only; this runner discovers the live rootful GID
+or validates the live rootless UID and never changes socket permissions:
+
+```bash
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+mode=""
+project="${JHIN_TEST_COMPOSE_PROJECT:-}"
+while (($#)); do
+  case "$1" in
+    --mode)
+      mode="${2:-}"
+      shift 2
+      ;;
+    --project)
+      project="${2:-}"
+      shift 2
+      ;;
+    *)
+      echo "unrecognized protected-health runner argument" >&2
+      exit 2
+      ;;
+  esac
+done
+[[ "$mode" == "rootful" || "$mode" == "rootless" ]] || {
+  echo "--mode must be rootful or rootless" >&2
+  exit 2
+}
+[[ -z "${JHIN_TELEMETRY_MODE:-}" ]] || {
+  echo "JHIN_TELEMETRY_MODE must be unset for protected health" >&2
+  exit 2
+}
+if [[ -z "$project" ]]; then
+  suffix="$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
+  project="jhin-phase10-health-${mode}-${suffix}"
+fi
+[[ "$project" =~ ^jhin-phase10-health-${mode}-[a-z0-9][a-z0-9_-]{5,31}$ ]] || {
+  echo "protected-health project must be unique, mode-specific, and lowercase" >&2
+  exit 2
+}
+
+if [[ "$mode" == "rootful" ]]; then
+  socket_path="${SANDBOX_DOCKER_SOCKET_HOST:-/var/run/docker.sock}"
+  [[ -S "$socket_path" ]] || { echo "rootful Docker socket is unavailable" >&2; exit 2; }
+  socket_gid="$(stat -c %g "$socket_path")"
+  [[ "$socket_gid" =~ ^[0-9]+$ && "$socket_gid" -gt 0 ]] || {
+    echo "rootful Docker socket group must be nonzero" >&2
+    exit 2
+  }
+  export SANDBOX_DOCKER_GID="$socket_gid"
+  unset PHASE10_ROOTLESS_DOCKER_SOCKET
+else
+  socket_path="${PHASE10_ROOTLESS_DOCKER_SOCKET:-}"
+  [[ -n "$socket_path" && -S "$socket_path" ]] || {
+    echo "PHASE10_ROOTLESS_DOCKER_SOCKET must name a Unix socket" >&2
+    exit 2
+  }
+  [[ "$(stat -c %u "$socket_path")" == "10001" ]] || {
+    echo "rootless Docker socket must be owned by UID 10001" >&2
+    exit 2
+  }
+  unset SANDBOX_DOCKER_GID
+  export PHASE10_ROOTLESS_DOCKER_SOCKET="$socket_path"
+fi
+
+export JHIN_TEST_COMPOSE_PROJECT="$project"
+export JHIN_PHASE10_SUITE="protected-health"
+export PHASE10_SOCKET_MODE="$mode"
+export SANDBOX_DOCKER_SOCKET_HOST="$socket_path"
+compose=(
+  docker compose -p "$project"
+  -f compose.yaml -f compose.dev.yaml -f "compose.${mode}.yaml"
+)
+project_label="label=com.docker.compose.project=${project}"
+
+[[ -z "$(docker ps -aq --filter "$project_label")" ]] || {
+  echo "protected-health project already owns containers" >&2
+  exit 2
+}
+[[ -z "$(docker network ls -q --filter "$project_label")" ]] || {
+  echo "protected-health project already owns networks" >&2
+  exit 2
+}
+[[ -z "$(docker volume ls -q --filter "$project_label")" ]] || {
+  echo "protected-health project already owns volumes" >&2
+  exit 2
+}
+
+port_variables=(
+  WEB_PORT API_PORT FAKE_SUPABASE_DB_DEV_PORT FAKE_PROVIDER_DEV_PORT
+  FAKE_GITHUB_DEV_PORT FAKE_LINEAR_DEV_PORT FAKE_VERCEL_DEV_PORT
+  FAKE_SUPABASE_DEV_PORT SANDBOX_RUNNER_DEV_PORT POSTGRES_DEV_PORT
+  NATS_DEV_PORT NATS_MONITOR_DEV_PORT TEMPORAL_DEV_PORT TEMPORAL_UI_DEV_PORT
+)
+for name in "${port_variables[@]}"; do
+  export "$name=0"
+done
+
+key_dir=""
+key_file=""
+cleanup() {
+  body_status=$?
+  trap - EXIT HUP INT TERM
+  set +e
+  cleanup_status=0
+  "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || cleanup_status=1
+
+  container_ids="$(docker ps -aq --filter "$project_label")" || cleanup_status=1
+  [[ -z "$container_ids" ]] || docker rm -f $container_ids >/dev/null 2>&1 || cleanup_status=1
+  network_ids="$(docker network ls -q --filter "$project_label")" || cleanup_status=1
+  [[ -z "$network_ids" ]] || docker network rm $network_ids >/dev/null 2>&1 || cleanup_status=1
+  volume_ids="$(docker volume ls -q --filter "$project_label")" || cleanup_status=1
+  [[ -z "$volume_ids" ]] || docker volume rm -f $volume_ids >/dev/null 2>&1 || cleanup_status=1
+
+  remaining_containers="$(docker ps -aq --filter "$project_label")" || cleanup_status=1
+  remaining_networks="$(docker network ls -q --filter "$project_label")" || cleanup_status=1
+  remaining_volumes="$(docker volume ls -q --filter "$project_label")" || cleanup_status=1
+  [[ -z "$remaining_containers" ]] || cleanup_status=1
+  [[ -z "$remaining_networks" ]] || cleanup_status=1
+  [[ -z "$remaining_volumes" ]] || cleanup_status=1
+  if [[ -n "$key_file" ]]; then
+    chmod 0600 "$key_file" >/dev/null 2>&1 || cleanup_status=1
+    rm -f -- "$key_file" >/dev/null 2>&1 || cleanup_status=1
+  fi
+  if [[ -n "$key_dir" ]]; then
+    rmdir -- "$key_dir" >/dev/null 2>&1 || cleanup_status=1
+  fi
+  if ((body_status != 0)); then
+    exit "$body_status"
+  fi
+  exit "$cleanup_status"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+key_root="${JHIN_PHASE10_KEY_TMPDIR:-/tmp}"
+[[ -d "$key_root" ]] || { echo "protected-health key temp root is unavailable" >&2; exit 2; }
+key_dir="$(mktemp -d "${key_root%/}/jhin-phase10-health-key.XXXXXX")"
+chmod 0711 "$key_dir"
+key_file="$key_dir/jhin_master_key"
+uv run python scripts/generate_master_key.py "$key_file" >/dev/null
+chmod 0404 "$key_file"
+export MASTER_KEY_FILE_HOST="$key_file"
+
+"${compose[@]}" --profile build build sandbox-image
+"${compose[@]}" up -d --build --wait --wait-timeout 240
+
+published_port() {
+  binding="$("${compose[@]}" port "$1" "$2")"
+  port="${binding##*:}"
+  [[ "$port" =~ ^[0-9]+$ && "$port" -gt 0 && "$port" -le 65535 ]] || {
+    echo "Compose did not publish a valid isolated port" >&2
+    return 2
+  }
+  printf '%s' "$port"
+}
+
+api_port="$(published_port api 8000)"
+web_port="$(published_port web 3000)"
+postgres_port="$(published_port postgres 5432)"
+fake_db_port="$(published_port fake-supabase-db 5432)"
+nats_port="$(published_port nats 4222)"
+nats_monitor_port="$(published_port nats 8222)"
+temporal_port="$(published_port temporal 7233)"
+sandbox_port="$(published_port sandbox-runner 8085)"
+fake_provider_port="$(published_port fake-provider 8080)"
+fake_github_port="$(published_port fake-github 8080)"
+fake_linear_port="$(published_port fake-linear 8080)"
+fake_vercel_port="$(published_port fake-vercel 8080)"
+fake_supabase_port="$(published_port fake-supabase 8080)"
+
+export JHIN_API_URL="http://127.0.0.1:${api_port}"
+export JHIN_WEB_URL="http://127.0.0.1:${web_port}"
+export JHIN_POSTGRES_PORT="$postgres_port"
+export JHIN_NATS_URL="nats://127.0.0.1:${nats_port}"
+export JHIN_NATS_MONITOR_URL="http://127.0.0.1:${nats_monitor_port}"
+export JHIN_TEMPORAL_ADDRESS="127.0.0.1:${temporal_port}"
+export SANDBOX_RUNNER_DEV_URL="http://127.0.0.1:${sandbox_port}"
+export JHIN_FAKE_PROVIDER_URL="http://127.0.0.1:${fake_provider_port}"
+export JHIN_FAKE_GITHUB_URL="http://127.0.0.1:${fake_github_port}"
+export JHIN_FAKE_LINEAR_URL="http://127.0.0.1:${fake_linear_port}"
+export JHIN_FAKE_VERCEL_URL="http://127.0.0.1:${fake_vercel_port}"
+export JHIN_FAKE_SUPABASE_URL="http://127.0.0.1:${fake_supabase_port}"
+export JHIN_PHASE9_DB_READER_DSN="postgresql://jhin_reader:reader-pass@127.0.0.1:${fake_db_port}/supabase_fixture"
+export JHIN_PHASE9_DB_WRITER_DSN="postgresql://jhin_writer:writer-pass@127.0.0.1:${fake_db_port}/supabase_fixture"
+export JHIN_PHASE9_DB_ADMIN_DSN="postgresql://postgres:phase9-fixture-admin-only@127.0.0.1:${fake_db_port}/supabase_fixture"
+
+uv run pytest -m integration tests/integration/test_phase10_sandbox_socket_modes.py -v
+uv run pytest -m integration \
+  tests/integration/test_phase10_protected_health_migration.py \
+  tests/integration/test_phase10_protected_health.py \
+  tests/integration/test_stack_health.py \
+  tests/integration/test_phase9_authorization.py -v
+```
+
+The `0404` key is newly generated test-only material inside an unlistable random `0711` directory:
+the UID-10001 daemon can read the exact file but no command prints, traces, uploads, or reuses its
+contents. The EXIT/signal traps are installed before `mktemp`, build, or `up`; cleanup first runs the
+exact project/vector `down -v --remove-orphans`, narrowly removes any residual resource carrying
+the validated project label, verifies zero containers/networks/volumes, deletes the key, and then
+returns the original body/signal status (or fails a previously successful run if cleanup failed).
+All fourteen published-port variables remain `0` for every Compose call; only discovered ports are
+exposed through `JHIN_*` test-client variables. Thus later `compose(...)` calls retain the same
+dynamic Compose model while legacy and telemetry callers keep their existing defaults.
+
+Append `test-protected-health`, `test-protected-health-render`,
+`test-protected-health-integration-rootful`, and
+`test-protected-health-integration-rootless` to `.PHONY`, then add these exact recipes:
 
 ```make
 test-protected-health:
@@ -2684,47 +3268,45 @@ test-protected-health-render:
 	env -u SANDBOX_DOCKER_GID docker compose -f compose.yaml -f compose.dev.yaml -f compose.rootless.yaml config --quiet
 
 test-protected-health-integration-rootful:
-	@socket="$${SANDBOX_DOCKER_SOCKET_HOST:-/var/run/docker.sock}"; \
-	gid="$$(uv run python -c 'import os,stat,sys; value=os.stat(sys.argv[1]); assert stat.S_ISSOCK(value.st_mode), "not a socket"; assert value.st_gid > 0, "rootful socket group must be nonzero"; print(value.st_gid)' "$$socket")"; \
-	files="compose.yaml:compose.dev.yaml:compose.rootful.yaml"; \
-	SANDBOX_DOCKER_SOCKET_HOST="$$socket" SANDBOX_DOCKER_GID="$$gid" PHASE10_COMPOSE_FILES="$$files" docker compose -f compose.yaml -f compose.dev.yaml -f compose.rootful.yaml up -d --build --wait; \
-	SANDBOX_DOCKER_SOCKET_HOST="$$socket" SANDBOX_DOCKER_GID="$$gid" PHASE10_COMPOSE_FILES="$$files" $(MAKE) test-sandbox-socket-rootful; \
-	SANDBOX_DOCKER_SOCKET_HOST="$$socket" SANDBOX_DOCKER_GID="$$gid" PHASE10_COMPOSE_FILES="$$files" uv run pytest -m integration tests/integration/test_phase10_protected_health_migration.py tests/integration/test_phase10_protected_health.py tests/integration/test_stack_health.py -v
+	@bash scripts/run_phase10_protected_health.sh --mode rootful
 
 test-protected-health-integration-rootless:
-	@socket="$${PHASE10_ROOTLESS_DOCKER_SOCKET:-}"; \
-	test -n "$$socket" || (echo "PHASE10_ROOTLESS_DOCKER_SOCKET is required" >&2; exit 2); \
-	uv run python -c 'import os,stat,sys; value=os.stat(sys.argv[1]); assert stat.S_ISSOCK(value.st_mode), "not a socket"; assert value.st_uid == 10001, "rootless socket must be owned by UID 10001"' "$$socket"; \
-	files="compose.yaml:compose.dev.yaml:compose.rootless.yaml"; \
-	env -u SANDBOX_DOCKER_GID SANDBOX_DOCKER_SOCKET_HOST="$$socket" PHASE10_ROOTLESS_DOCKER_SOCKET="$$socket" PHASE10_COMPOSE_FILES="$$files" docker compose -f compose.yaml -f compose.dev.yaml -f compose.rootless.yaml up -d --build --wait; \
-	env -u SANDBOX_DOCKER_GID SANDBOX_DOCKER_SOCKET_HOST="$$socket" PHASE10_ROOTLESS_DOCKER_SOCKET="$$socket" PHASE10_COMPOSE_FILES="$$files" $(MAKE) test-sandbox-socket-rootless; \
-	env -u SANDBOX_DOCKER_GID SANDBOX_DOCKER_SOCKET_HOST="$$socket" PHASE10_ROOTLESS_DOCKER_SOCKET="$$socket" PHASE10_COMPOSE_FILES="$$files" uv run pytest -m integration tests/integration/test_phase10_protected_health_migration.py tests/integration/test_phase10_protected_health.py tests/integration/test_stack_health.py -v
+	@bash scripts/run_phase10_protected_health.sh --mode rootless
 ```
-
-Both live targets validate only the mode inputs needed to start, run the correct overlay's `up -d --build --wait`, and only then invoke the prior plan's corresponding live socket connection/job probe. Rootful must discover the exact mounted Unix-socket GID with `os.stat` before Compose can render `group_add`, reject group 0, and pass the identical `PHASE10_COMPOSE_FILES`, socket, and actual GID environment to `up`, the nested probe, and pytest; it never chmods/chowns. Rootless requires an already-running socket owned by UID 10001, passes the identical compose-file/socket environment to all three commands, explicitly unsets `SANDBOX_DOCKER_GID` for all three, uses `compose.rootless.yaml`, and never infers or changes ownership. The pre-up `stat` calls validate mode inputs; the nested connection/job probe is the live socket probe and is ordered after `up --wait`.
 
 - [ ] **Step 4: Run focused/render tests, then each available live mode**
 
 ```bash
 uv run pytest tests/test_phase10_protected_health_harness.py -q
+uv run pytest tests/test_phase10_telemetry_harness.py tests/test_phase9_production_compose.py -q
 make test-protected-health
 make test-protected-health-render
 make test-protected-health-integration-rootful
-PHASE10_ROOTLESS_DOCKER_SOCKET=/run/user/10001/docker.sock make test-protected-health-integration-rootless
+PHASE10_ROOTLESS_DOCKER_SOCKET=/run/user/10001/docker.sock \
+  make test-protected-health-integration-rootless
 ```
 
-Run the rootful target only on a host with a nonzero-group rootful socket and the rootless target only on a host with the required UID-10001 daemon. CI may schedule them on separate compatible hosts; neither mode is silently skipped or emulated by the other. Expected: public health remains opaque, authorization/isolation passes, each induced failure is observed after its exact freshness bound, and every component returns to its prior healthy state.
+Run the rootful target only on a host with a nonzero-group rootful socket and the rootless target
+only on a host with the required UID-10001 daemon. CI may schedule them on separate compatible
+hosts; neither mode is silently skipped or emulated by the other. Expected: public health remains
+opaque, authorization/isolation passes, each induced failure is observed after its exact freshness
+bound, and every component returns to its prior healthy state. Each target generates a distinct
+project when none is supplied and, after either success or failure, leaves no container, network,
+volume, or master-key fixture for that project.
 
 - [ ] **Step 5: Commit integration evidence with an exact staging audit**
 
 ```bash
-git add tests/integration/test_phase10_protected_health.py tests/test_phase10_protected_health_harness.py tests/integration/conftest.py tests/integration/test_stack_health.py Makefile
+git add tests/integration/test_phase10_protected_health.py \
+  tests/test_phase10_protected_health_harness.py \
+  scripts/run_phase10_protected_health.sh tests/integration/conftest.py \
+  tests/integration/test_stack_health.py Makefile
 git diff --cached --name-only
 git diff --cached --check
 git commit -m "test: verify protected health recovery"
 ```
 
-Expected before commit: the cached-name output is exactly the five paths in the `git add` command.
+Expected before commit: the cached-name output is exactly the six paths in the `git add` command.
 
 ### Task 7: Document the Safe Health Contract and Run the Complete Gate
 
@@ -2769,8 +3351,8 @@ pnpm typecheck
 pnpm build
 make test-protected-health-render
 make test-protected-health-integration-rootful
-PHASE10_ROOTLESS_DOCKER_SOCKET=/run/user/10001/docker.sock make test-protected-health-integration-rootless
-uv run pytest -m integration tests/integration/test_phase9_authorization.py -v
+PHASE10_ROOTLESS_DOCKER_SOCKET=/run/user/10001/docker.sock \
+  make test-protected-health-integration-rootless
 git diff --check
 ```
 
@@ -2794,14 +3376,48 @@ git diff --cached --name-only
 git diff --cached --check
 git commit -m "docs: explain protected health operations"
 git diff --cached --quiet
-git status --short -- docs/superpowers/plans/2026-08-18-phase-10-protected-health.md packages/db/src/jhin_db/models/operations.py packages/db/src/jhin_db/models/__init__.py packages/db/src/jhin_db/heartbeat.py packages/db/src/jhin_db/__init__.py packages/db/src/jhin_db/alembic/versions/20260818_0015_protected_health.py packages/db/tests/test_migration_graph.py packages/db/tests/test_service_instance_heartbeat.py packages/db/tests/test_heartbeat.py packages/secrets/src/jhin_secrets/crypto.py packages/secrets/tests/test_crypto.py packages/events/src/jhin_events/streams.py packages/events/tests/test_streams.py packages/workflows/src/jhin_workflows/poller_health.py packages/workflows/tests/test_poller_health.py apps/api/src/jhin_api/temporal.py apps/api/src/jhin_api/deps.py apps/api/src/jhin_api/health/schemas.py apps/api/src/jhin_api/health/checks.py apps/api/src/jhin_api/health/service.py apps/api/src/jhin_api/health/router.py apps/api/src/jhin_api/main.py apps/api/tests/test_temporal_provider.py apps/api/tests/test_health.py apps/api/tests/test_operations_health.py apps/api/tests/conftest.py services/agent_worker/src/jhin_agent_worker/main.py services/event_worker/src/jhin_event_worker/main.py services/event_worker/src/jhin_event_worker/settings.py services/tool_worker/src/jhin_tool_worker/main.py services/tool_worker/src/jhin_tool_worker/resources.py services/tool_worker/pyproject.toml services/tool_worker/tests/test_health_heartbeat.py tests/test_service_heartbeat_wiring.py tests/test_phase10_protected_health_harness.py uv.lock apps/web/lib/types.ts apps/web/lib/hooks.ts apps/web/components/app-shell.tsx 'apps/web/app/(app)/page.tsx' 'apps/web/app/(app)/operations/page.tsx' apps/web/tests/operations-page.test.tsx apps/web/tests/overview-health.test.tsx apps/web/tests/operations-navigation.test.tsx tests/integration/test_phase10_protected_health_migration.py tests/integration/test_phase10_protected_health.py tests/integration/conftest.py tests/integration/test_stack_health.py Makefile docs/operations/protected-health.md README.md > /tmp/jhin-phase10-protected-health-status
+git status --short -- packages/db/src/jhin_db/models/operations.py packages/db/src/jhin_db/models/__init__.py packages/db/src/jhin_db/heartbeat.py packages/db/src/jhin_db/__init__.py packages/db/src/jhin_db/alembic/versions/20260818_0015_protected_health.py packages/db/tests/test_migration_graph.py packages/db/tests/test_service_instance_heartbeat.py packages/db/tests/test_heartbeat.py packages/secrets/src/jhin_secrets/crypto.py packages/secrets/tests/test_crypto.py packages/events/src/jhin_events/streams.py packages/events/tests/test_streams.py packages/workflows/src/jhin_workflows/poller_health.py packages/workflows/tests/test_poller_health.py apps/api/src/jhin_api/deps.py apps/api/src/jhin_api/health/schemas.py apps/api/src/jhin_api/health/checks.py apps/api/src/jhin_api/health/service.py apps/api/src/jhin_api/health/router.py apps/api/src/jhin_api/main.py apps/api/tests/test_temporal_provider.py apps/api/tests/test_health.py apps/api/tests/test_operations_health.py apps/api/tests/conftest.py services/agent_worker/src/jhin_agent_worker/main.py services/event_worker/src/jhin_event_worker/main.py services/event_worker/src/jhin_event_worker/settings.py services/tool_worker/src/jhin_tool_worker/main.py services/tool_worker/src/jhin_tool_worker/resources.py services/tool_worker/pyproject.toml services/tool_worker/tests/test_health_heartbeat.py tests/test_service_heartbeat_wiring.py tests/test_phase10_protected_health_harness.py scripts/run_phase10_protected_health.sh uv.lock apps/web/lib/types.ts apps/web/lib/hooks.ts apps/web/components/app-shell.tsx 'apps/web/app/(app)/page.tsx' 'apps/web/app/(app)/operations/page.tsx' apps/web/tests/operations-page.test.tsx apps/web/tests/overview-health.test.tsx apps/web/tests/operations-navigation.test.tsx tests/integration/test_phase10_protected_health_migration.py tests/integration/test_phase10_protected_health.py tests/integration/conftest.py tests/integration/test_stack_health.py Makefile docs/operations/protected-health.md README.md > /tmp/jhin-phase10-protected-health-status
 test ! -s /tmp/jhin-phase10-protected-health-status
 git status --short -- compose.yaml compose.dev.yaml compose.rootless.yaml compose.rootful.yaml services/workflow_worker/src/jhin_workflow_worker/main.py > /tmp/jhin-phase10-protected-health-readonly-status
 test ! -s /tmp/jhin-phase10-protected-health-readonly-status
+for path in \
+  docs/superpowers/plans/2026-08-18-phase-10-protected-health.md \
+  docs/superpowers/plans/2026-08-18-phase-10-telemetry-core.md; do
+  git diff --quiet -- "$path"
+  git diff --cached --quiet -- "$path"
+done
+mapfile -t telemetry_tips < <(git log --format=%H --fixed-strings \
+  --grep='docs(observability): record Phase 10 telemetry evidence')
+test "${#telemetry_tips[@]}" -eq 1
+telemetry_tip="${telemetry_tips[0]}"
+test "$(git rev-list --count "$telemetry_tip"..HEAD)" = "7"
+test "$(git log --reverse --format=%s "$telemetry_tip"..HEAD)" = \
+  "$(printf '%s\n' \
+    'feat: add durable service heartbeats' \
+    'feat: publish sanitized service heartbeats' \
+    'fix: make public readiness opaque' \
+    'feat: expose admin protected health' \
+    'feat: add protected operations health view' \
+    'test: verify protected health recovery' \
+    'docs: explain protected health operations')"
+mapfile -t checkpoint_commits < <(git log --format=%H --fixed-strings \
+  --grep='docs: align Phase 10 telemetry and health plans')
+test "${#checkpoint_commits[@]}" -eq 1
+test "$(git rev-list --count "${checkpoint_commits[0]}^"..HEAD)" = "20"
 test "$(git status --short -- orgforge-production-implementation-plan.md)" = "?? orgforge-production-implementation-plan.md"
+test "$(shasum -a 256 orgforge-production-implementation-plan.md | cut -d' ' -f1)" = \
+  "ddb4d42cda623bad3fc2fb36d9092aaba6e8293533b29c80994cd738d6167513"
+test "$(stat -c %s orgforge-production-implementation-plan.md)" = "82118"
 ```
 
-Expected before the docs commit: exactly the two documentation paths are staged. Expected after it: both temporary status files are empty, so every created/modified File Map path is committed, the prior-plan Compose/workflow inputs are untouched, the index is empty, and `orgforge-production-implementation-plan.md` remains the sole explicitly preserved user-owned path. Do not mark Phase 10 subprojects 4-7 or the fourteen Phase 10 production checkboxes complete.
+Expected before the docs commit: exactly the two documentation paths are staged. Expected after it:
+both temporary status files are empty, all 50 writable File Map paths are committed, both checkpoint
+plans and all prior-plan Compose/workflow inputs are unchanged, and the protected implementation is
+exactly the seven listed commits after telemetry's final evidence commit. Together with telemetry's
+13 commits, the checkpoint-through-protected sequence is exactly 20 commits, counting the two-plan
+checkpoint once. The metadata-only OrgForge external sentinel remains untracked at the exact
+SHA-256 and 82,118-byte size above; no task opens or inspects its contents.
+Do not mark Phase 10 subprojects 4–7 or the fourteen Phase 10 production checkboxes complete.
 
 ## Execution Notes
 
