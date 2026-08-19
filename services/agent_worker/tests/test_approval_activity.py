@@ -166,6 +166,8 @@ async def _seed_terminal_approval(
     existing_bundle: bool,
     terminal_status: str = ToolCallStatus.COMPLETED.value,
     include_reasoning: bool = True,
+    approval_status: str = ApprovalStatus.APPROVED.value,
+    run_status: str = RunStatus.RUNNING.value,
 ) -> CommitApprovalProjectionInput:
     async with sessions() as session:
         workspace = Workspace(name="Approval", slug=f"approval-{new_uuid7().hex[:8]}")
@@ -186,7 +188,7 @@ async def _seed_terminal_approval(
             workspace_id=workspace.id,
             agent_id=agent.id,
             task_id=task.id,
-            status=RunStatus.RUNNING.value,
+            status=run_status,
         )
         session.add(run)
         await session.flush()
@@ -212,7 +214,7 @@ async def _seed_terminal_approval(
                 "tool_call_id": str(tool_call_id),
             },
             reason="approved",
-            status=ApprovalStatus.APPROVED.value,
+            status=approval_status,
             requested_at=run.created_at,
         )
         session.add(approval)
@@ -423,4 +425,59 @@ async def test_execution_unknown_approval_stops_and_replays_without_resuming(
         assert messages[0].content_json["status"] == "execution_unknown"
         event_count = await session.scalar(select(func.count(RunEvent.id)))
         assert event_count == (3 if existing_bundle else 4)
+    assert resources.publisher.events == []
+
+
+async def test_cancelled_approval_never_resumes_its_run(
+    activity_world: ActivityWorld,
+) -> None:
+    activities, resources, sessions = activity_world
+    params = await _seed_terminal_approval(
+        sessions,
+        existing_bundle=False,
+        terminal_status=ToolCallStatus.REJECTED.value,
+        approval_status=ApprovalStatus.CANCELLED.value,
+    )
+
+    with pytest.raises(ApplicationError) as error:
+        await ActivityEnvironment().run(
+            activities.commit_approval_projection_activity,
+            params,
+        )
+
+    assert error.value.type == "approval_cancelled"
+    assert error.value.non_retryable is True
+    async with sessions() as session:
+        run = await session.get(AgentRun, UUID(params.run_id))
+        assert run is not None
+        assert run.status == RunStatus.RUNNING.value
+        assert await session.scalar(select(func.count(Message.id))) == 0
+        assert await session.scalar(select(func.count(RunEvent.id))) == 2
+    assert resources.publisher.events == []
+
+
+async def test_delayed_approval_never_reopens_an_already_terminal_run(
+    activity_world: ActivityWorld,
+) -> None:
+    activities, resources, sessions = activity_world
+    params = await _seed_terminal_approval(
+        sessions,
+        existing_bundle=False,
+        run_status=RunStatus.COMPLETED.value,
+    )
+
+    with pytest.raises(ApplicationError) as error:
+        await ActivityEnvironment().run(
+            activities.commit_approval_projection_activity,
+            params,
+        )
+
+    assert error.value.type == "run_already_terminal"
+    assert error.value.non_retryable is True
+    async with sessions() as session:
+        run = await session.get(AgentRun, UUID(params.run_id))
+        assert run is not None
+        assert run.status == RunStatus.COMPLETED.value
+        assert await session.scalar(select(func.count(Message.id))) == 0
+        assert await session.scalar(select(func.count(RunEvent.id))) == 2
     assert resources.publisher.events == []

@@ -55,7 +55,16 @@ async def _seed_manifest(
     world: ReasoningWorld,
     *,
     value: str,
+    step: Any = 0,
+    entry_overrides: dict[str, Any] | None = None,
 ) -> None:
+    entry: dict[str, Any] = {
+        "ordinal": 0,
+        "lossless": True,
+        "tool_name": "system.echo",
+        "arguments_json": f'{{"value":"{value}"}}',
+    }
+    entry.update(entry_overrides or {})
     async with world.sessions() as session:
         session.add(
             RunEvent(
@@ -65,17 +74,10 @@ async def _seed_manifest(
                 seq=0,
                 event_type="agent.step.tool_manifest",
                 payload_json={
-                    "step": 0,
+                    "step": step,
                     "manifest": {
                         "count": 1,
-                        "calls": [
-                            {
-                                "ordinal": 0,
-                                "lossless": True,
-                                "tool_name": "system.echo",
-                                "arguments_json": f'{{"value":"{value}"}}',
-                            }
-                        ],
+                        "calls": [entry],
                     },
                 },
             )
@@ -125,3 +127,40 @@ async def test_phase9_sidecar_repair_rejects_canonical_drift_before_effect(
     assert await reasoning_world.count_events("agent.step.reasoning") == 0
     async with reasoning_world.sessions() as session:
         assert await session.scalar(select(func.count(ToolCall.id))) == 0
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    [
+        ("step", False),
+        ("ordinal", "0"),
+        ("ordinal", False),
+        ("ordinal", 0.0),
+        ("lossless", 1),
+    ],
+)
+async def test_legacy_sidecar_repair_rejects_coercible_manifest_scalars(
+    reasoning_world: ReasoningWorld,
+    field: str,
+    wrong_value: Any,
+) -> None:
+    await _seed_manifest(
+        reasoning_world,
+        value="same",
+        step=wrong_value if field == "step" else 0,
+        entry_overrides=None if field == "step" else {field: wrong_value},
+    )
+    reasoning_world.model.responses.append(
+        model_call("replacement-provider-id", "system.echo", {"value": "same"})
+    )
+
+    with pytest.raises(ApplicationError) as error:
+        await reasoning_world.reasoning.reason_agent_step(
+            reasoning_world.params,
+            legacy_sidecar_repair=True,
+        )
+
+    assert error.value.type == "tool_step_manifest_invalid"
+    assert error.value.non_retryable is True
+    assert reasoning_world.model.requests == []
+    assert await reasoning_world.count_events("agent.step.reasoning") == 0

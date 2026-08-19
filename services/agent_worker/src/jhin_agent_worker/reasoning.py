@@ -118,7 +118,7 @@ class AgentStepReasoningRecord(BaseModel):
 class ManifestCall(BaseModel):
     """Validated internal view of one immutable canonical manifest entry."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     ordinal: int = Field(ge=0)
     lossless: Literal[True]
@@ -203,7 +203,12 @@ def manifest_calls_from_payload(
     expected_step: int,
 ) -> tuple[ManifestCall, ...]:
     """Validate an existing manifest before it is used by agent projections."""
-    if set(payload) != {"step", "manifest"} or payload.get("step") != expected_step:
+    raw_step = payload.get("step")
+    if (
+        set(payload) != {"step", "manifest"}
+        or type(raw_step) is not int
+        or raw_step != expected_step
+    ):
         raise ApplicationError(
             "agent step tool manifest is malformed",
             type="tool_step_manifest_invalid",
@@ -233,6 +238,14 @@ def manifest_calls_from_payload(
     calls: list[ManifestCall] = []
     try:
         for ordinal, raw_call in enumerate(raw_calls):
+            if (
+                not isinstance(raw_call, dict)
+                or type(raw_call.get("ordinal")) is not int
+                or raw_call.get("lossless") is not True
+                or type(raw_call.get("tool_name")) is not str
+                or type(raw_call.get("arguments_json")) is not str
+            ):
+                raise ValueError("manifest entry scalars are not exact")
             call = ManifestCall.model_validate(raw_call)
             decoded = strict_json_loads(call.arguments_json)
             canonical = json.dumps(

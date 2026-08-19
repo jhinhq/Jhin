@@ -249,6 +249,7 @@ class AgentProjectionActivities:
         task_id: UUID,
         run_id: UUID,
         step_index: int,
+        gateway_tool_call_ids: list[str] | None = None,
     ) -> StepResult | None:
         event = await load_step_event(
             session,
@@ -260,6 +261,26 @@ class AgentProjectionActivities:
         )
         if event is None:
             return None
+        if gateway_tool_call_ids is not None:
+            bound_ids = event.payload_json.get("gateway_tool_call_ids")
+            if not isinstance(bound_ids, list) or any(
+                not isinstance(tool_call_id, str) for tool_call_id in bound_ids
+            ):
+                raise ApplicationError(
+                    "committed step tool ID binding is malformed",
+                    type="step_result_malformed",
+                    non_retryable=True,
+                )
+            canonical_ids = [
+                str(stable_tool_invocation_id(run_id, step_index, ordinal))
+                for ordinal in range(len(bound_ids))
+            ]
+            if bound_ids != canonical_ids or gateway_tool_call_ids != bound_ids:
+                raise ApplicationError(
+                    "step projection retry changed its canonical tool ID binding",
+                    type="tool_projection_binding_mismatch",
+                    non_retryable=True,
+                )
         raw_result = event.payload_json.get("result")
         if not isinstance(raw_result, dict):
             raise ApplicationError(
@@ -421,6 +442,12 @@ class AgentProjectionActivities:
             run_id=run_id,
             agent_id=agent_id,
         )
+        if status == "needs_approval" and approval is None:
+            raise ApplicationError(
+                "pending tool call has no matching approval evidence",
+                type="tool_projection_binding_mismatch",
+                non_retryable=True,
+            )
         payload = approval.action_payload_sanitized if approval is not None else {}
         risk_value = payload.get("risk")
         risk = (
@@ -579,6 +606,7 @@ class AgentProjectionActivities:
                     task_id=task_id,
                     run_id=run_id,
                     step_index=params.step_index,
+                    gateway_tool_call_ids=params.gateway_tool_call_ids,
                 )
             if committed is not None:
                 await session.rollback()
@@ -633,6 +661,17 @@ class AgentProjectionActivities:
                         agent_id=agent_id,
                     )
                 )
+
+            for earlier in projected[:-1]:
+                delegation = self._delegation_request(earlier)
+                if earlier.status in {"needs_approval", "execution_unknown"} or (
+                    delegation is not None and delegation.blocking
+                ):
+                    raise ApplicationError(
+                        "step projection contains a tool outcome after a durable stop",
+                        type="tool_projection_binding_mismatch",
+                        non_retryable=True,
+                    )
 
             if len(projected) < len(calls):
                 if not projected:
@@ -954,6 +993,29 @@ class AgentProjectionActivities:
                 )
             if approval.status == ApprovalStatus.PENDING.value:
                 raise ApplicationError("approval still pending", type="approval_pending")
+            if approval.status == ApprovalStatus.CANCELLED.value:
+                raise ApplicationError(
+                    "cancelled approval cannot resume an agent run",
+                    type="approval_cancelled",
+                    non_retryable=True,
+                )
+            if run.status in {
+                RunStatus.COMPLETED.value,
+                RunStatus.FAILED.value,
+                RunStatus.CANCELLED.value,
+            }:
+                if run.error_code == "tool_execution_unknown":
+                    raise ApplicationError(
+                        run.error_message
+                        or "tool execution outcome is unknown; manual reconciliation is required",
+                        type="tool_execution_unknown",
+                        non_retryable=True,
+                    )
+                raise ApplicationError(
+                    "approval cannot resume an already-terminal agent run",
+                    type="run_already_terminal",
+                    non_retryable=True,
+                )
             row = await session.get(ToolCall, tool_call_id)
             if row is None or row.approval_id != approval_id:
                 raise ApplicationError(
@@ -1219,42 +1281,58 @@ class AgentProjectionActivities:
         async with self._resources.session_factory() as session:
             if params.run_id is not None:
                 run_id = UUID(params.run_id)
+                run = await session.scalar(
+                    select(AgentRun)
+                    .where(
+                        AgentRun.id == run_id,
+                        AgentRun.workspace_id == workspace_id,
+                        AgentRun.task_id == task_id,
+                    )
+                    .with_for_update()
+                )
+                if run is None:
+                    raise ApplicationError(
+                        "agent run not found for final projection",
+                        type="run_not_found",
+                        non_retryable=True,
+                    )
+                if run.completed_at is not None:
+                    await session.rollback()
+                    return
                 await _cancel_pending_run_approvals(
                     session,
                     workspace_id=workspace_id,
                     run_id=run_id,
                 )
-                run = await session.get(AgentRun, run_id)
-                if run is not None and run.workspace_id == workspace_id:
-                    freed_agent_id = run.agent_id
-                    if run.error_code in _PRESERVED_FINAL_ERRORS:
-                        effective_error_code = run.error_code
-                        effective_error_message = run.error_message
-                    run.status = params.status
-                    run.completed_at = datetime.now(UTC)
-                    run.steps_used = max(run.steps_used, params.steps_used)
-                    run.error_code = effective_error_code
-                    run.error_message = effective_error_message
-                    run_totals = {
-                        "input_tokens": run.input_tokens,
-                        "output_tokens": run.output_tokens,
-                        "cost_micros": run.estimated_cost_micros,
-                    }
-                    seq = await self._next_seq(session, run.id)
-                    self._add_run_event(
-                        session,
-                        workspace_id=workspace_id,
-                        run_id=run.id,
-                        task_id=task_id,
-                        seq=seq,
-                        event_type=f"run.{params.status}",
-                        payload={
-                            **run_totals,
-                            "steps_used": params.steps_used,
-                            "error_code": effective_error_code,
-                            "error_message": effective_error_message,
-                        },
-                    )
+                freed_agent_id = run.agent_id
+                if run.error_code in _PRESERVED_FINAL_ERRORS:
+                    effective_error_code = run.error_code
+                    effective_error_message = run.error_message
+                run.status = params.status
+                run.completed_at = datetime.now(UTC)
+                run.steps_used = max(run.steps_used, params.steps_used)
+                run.error_code = effective_error_code
+                run.error_message = effective_error_message
+                run_totals = {
+                    "input_tokens": run.input_tokens,
+                    "output_tokens": run.output_tokens,
+                    "cost_micros": run.estimated_cost_micros,
+                }
+                seq = await self._next_seq(session, run.id)
+                self._add_run_event(
+                    session,
+                    workspace_id=workspace_id,
+                    run_id=run.id,
+                    task_id=task_id,
+                    seq=seq,
+                    event_type=f"run.{params.status}",
+                    payload={
+                        **run_totals,
+                        "steps_used": params.steps_used,
+                        "error_code": effective_error_code,
+                        "error_message": effective_error_message,
+                    },
+                )
 
             task = await session.scalar(
                 select(Task).where(Task.id == task_id, Task.workspace_id == workspace_id)
