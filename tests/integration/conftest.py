@@ -9,11 +9,13 @@ import os
 import re
 import subprocess
 from pathlib import Path
+from typing import Literal, cast
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-COMPOSE = ["docker", "compose", "-f", "compose.yaml", "-f", "compose.dev.yaml"]
+COMPOSE_BASE = ("compose.yaml", "compose.dev.yaml")
+ComposeMode = Literal["rootful", "rootless"]
 
 API_URL = os.environ.get("JHIN_API_URL", "http://localhost:8000")
 WEB_URL = os.environ.get("JHIN_WEB_URL", "http://localhost:3000")
@@ -42,6 +44,39 @@ PHASE9_DB_ADMIN_DSN = os.environ.get(
 _COMPOSE_PROJECT_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]*\Z")
 
 
+def selected_compose_mode(value: str | None = None) -> ComposeMode:
+    """Return the explicitly selected socket mode (rootful for legacy unit seams)."""
+    selected = value if value is not None else os.environ.get("PHASE10_SOCKET_MODE", "rootful")
+    if selected not in {"rootful", "rootless"}:
+        raise ValueError("PHASE10_SOCKET_MODE must be exactly rootful or rootless")
+    return cast(ComposeMode, selected)
+
+
+def compose_files_for_mode(mode: ComposeMode) -> tuple[str, ...]:
+    """Build the one-authority integration vector for a selected mode."""
+    return (*COMPOSE_BASE, f"compose.{mode}.yaml")
+
+
+def required_services_for_mode(mode: str) -> set[str]:
+    """Services whose presence and health gate the selected integration stack."""
+    selected = selected_compose_mode(mode)
+    required = {
+        "api",
+        "web",
+        "workflow-worker",
+        "agent-worker",
+        "tool-worker",
+        "sandbox-runner",
+        "event-worker",
+        "postgres",
+        "nats",
+        "temporal",
+    }
+    if selected == "rootless":
+        required.add("rootless-docker-transport")
+    return required
+
+
 def validate_compose_project(project: str) -> str:
     """Validate an explicit Compose project before it reaches ``-p``."""
     if _COMPOSE_PROJECT_PATTERN.fullmatch(project) is None:
@@ -55,8 +90,13 @@ def validate_compose_project(project: str) -> str:
 def compose(*args: str, timeout: float = 120.0) -> subprocess.CompletedProcess[str]:
     """Run a docker compose subcommand against the dev stack."""
     project = validate_compose_project(os.environ.get("JHIN_TEST_COMPOSE_PROJECT", "jhin"))
+    selected = os.environ.get("PHASE10_SOCKET_MODE")
+    files = compose_files_for_mode(selected_compose_mode(selected)) if selected else COMPOSE_BASE
+    command = ["docker", "compose", "-p", project]
+    for filename in files:
+        command.extend(("-f", filename))
     return subprocess.run(
-        [*COMPOSE[:2], "-p", project, *COMPOSE[2:], *args],
+        [*command, *args],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
@@ -73,7 +113,7 @@ def _require_stack() -> None:
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
         pytest.fail(f"docker compose stack not reachable: {exc}")
     running = set(result.stdout.split())
-    required = {"api", "web", "workflow-worker", "event-worker", "postgres", "nats", "temporal"}
+    required = required_services_for_mode(selected_compose_mode())
     missing = required - running
     if missing:
         pytest.fail(

@@ -2,29 +2,60 @@
 
 from __future__ import annotations
 
+import json
 import time
+from typing import Any
 
 import httpx
 import pytest
 
-from tests.integration.conftest import API_URL, WEB_URL, compose
+from tests.integration.conftest import (
+    API_URL,
+    WEB_URL,
+    compose,
+    required_services_for_mode,
+    selected_compose_mode,
+)
 
 pytestmark = pytest.mark.integration
+
+
+def unhealthy_expected_services(output: str, expected: set[str]) -> dict[str, str]:
+    """Return every missing, stopped, blank, or non-healthy expected service."""
+    decoded: object = json.loads(output)
+    rows = decoded if isinstance(decoded, list) else [decoded]
+    by_service = {
+        str(row.get("Service", "")): row
+        for row in rows
+        if isinstance(row, dict) and row.get("Service")
+    }
+    failures: dict[str, str] = {}
+    for service in sorted(expected):
+        row: dict[str, Any] | None = by_service.get(service)
+        if row is None:
+            failures[service] = "missing"
+            continue
+        state = str(row.get("State", "")).strip()
+        health = str(row.get("Health", "")).strip()
+        if state != "running" or health != "healthy":
+            failures[service] = f"state={state or '<blank>'} health={health or '<blank>'}"
+    return failures
 
 
 def test_all_compose_services_healthy() -> None:
     # Poll: sibling tests restart services, whose healthchecks have a
     # start_period during which they report "starting".
     deadline = time.monotonic() + 90
+    expected = required_services_for_mode(selected_compose_mode())
     while True:
-        result = compose("ps", "--format", "{{.Service}} {{.Health}}")
-        statuses = dict(
-            line.split(maxsplit=1) for line in result.stdout.strip().splitlines() if " " in line
-        )
-        unhealthy = {s: h for s, h in statuses.items() if h != "healthy"}
+        result = compose("ps", "--all", "--format", "json")
+        unhealthy = unhealthy_expected_services(result.stdout, expected)
         if not unhealthy:
             break
-        if time.monotonic() > deadline or any(h == "unhealthy" for h in unhealthy.values()):
+        if time.monotonic() > deadline or any(
+            "health=unhealthy" in status or "state=exited" in status
+            for status in unhealthy.values()
+        ):
             pytest.fail(f"services not healthy: {unhealthy}")
         time.sleep(3)
 

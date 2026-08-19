@@ -111,7 +111,7 @@ def test_only_database_callers_receive_the_dev_fixture_allowlist() -> None:
         for service_name, service in development["services"].items()
         if "JHIN_CONNECTOR_ALLOWED_DB_HOSTS" in service.get("environment", {})
     }
-    assert recipients == {"api", "agent-worker"}
+    assert recipients == {"api", "tool-worker"}
     for service_name in recipients:
         assert (
             development["services"][service_name]["environment"]["JHIN_CONNECTOR_ALLOWED_DB_HOSTS"]

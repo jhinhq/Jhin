@@ -32,14 +32,17 @@ def test_connector_origin_allowlist_is_exact_and_dev_only() -> None:
     development = _render_compose("compose.yaml", "compose.dev.yaml")
     production = _render_compose("compose.yaml")
 
-    for service_name in ("api", "agent-worker"):
+    recipients = {
+        name
+        for name, service in development["services"].items()
+        if "JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS" in service.get("environment", {})
+    }
+    assert recipients == {"api", "tool-worker"}
+    for service_name in recipients:
         assert (
             development["services"][service_name]["environment"][
                 "JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS"
             ]
             == DEV_CONNECTOR_ORIGINS
         )
-        assert (
-            "JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS"
-            not in production["services"][service_name]["environment"]
-        )
+    assert "JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS" not in json.dumps(production)

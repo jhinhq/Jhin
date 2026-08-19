@@ -43,6 +43,22 @@ RUNNER_TOKEN = os.environ.get("SANDBOX_RUNNER_TOKEN", "dev-sandbox-runner-token"
 FAKE_PROVIDER_URL = "http://fake-provider:8080/v1"
 JOB_WAIT_SECONDS = 90.0
 TASK_TIMEOUT_SECONDS = 120.0
+FORBIDDEN_JOB_SOCKET_PATHS = (
+    "/var/run/docker.sock",
+    "/run/jhin/docker.sock",
+    "/run/host/docker.sock",
+)
+FORBIDDEN_JOB_DNS_NAMES = (
+    "postgres",
+    "api",
+    "temporal",
+    "nats",
+    "sandbox-runner",
+    "agent-worker",
+    "tool-worker",
+    "rootless-docker-transport",
+)
+FORBIDDEN_JOB_NETWORK_NAMES = ("runner", "engine")
 
 
 def _job_id() -> str:
@@ -90,6 +106,45 @@ def _docker(*args: str) -> str:
     return result.stdout.strip()
 
 
+def assert_job_boundary_denials(output: str) -> None:
+    """Assert a live job cannot discover any Docker-authority boundary."""
+    for path in FORBIDDEN_JOB_SOCKET_PATHS:
+        assert f"socket-denied:{path}" in output, output
+    for name in FORBIDDEN_JOB_DNS_NAMES:
+        assert f"dns-denied:{name}" in output, output
+    for name in FORBIDDEN_JOB_NETWORK_NAMES:
+        assert f"network-denied:{name}" in output, output
+    assert "adapter-tcp-denied" in output, output
+    assert "sandbox-docker-env-denied" in output, output
+    assert "group-add-denied" in output, output
+
+
+def _job_boundary_probe() -> str:
+    socket_paths = " ".join(FORBIDDEN_JOB_SOCKET_PATHS)
+    dns_names = " ".join(FORBIDDEN_JOB_DNS_NAMES)
+    network_names = " ".join(FORBIDDEN_JOB_NETWORK_NAMES)
+    return (
+        f"for p in {socket_paths}; do "
+        '  if test ! -e "$p" && ! grep -Fq "$p" /proc/self/mountinfo; then '
+        "    echo socket-denied:$p; "
+        "  fi; "
+        "done; "
+        f"for h in {dns_names}; do "
+        '  getent hosts "$h" >/dev/null 2>&1 || echo dns-denied:$h; '
+        "done; "
+        f"for n in {network_names}; do "
+        '  getent hosts "$n" >/dev/null 2>&1 || echo network-denied:$n; '
+        "done; "
+        "curl -fsS --max-time 3 http://rootless-docker-transport:2375/_ping "
+        ">/dev/null 2>&1 || echo adapter-tcp-denied; "
+        "if ! env | grep -q '^SANDBOX_DOCKER_'; then echo sandbox-docker-env-denied; fi; "
+        "primary_gid=$(id -g); "
+        'extra_groups=$(awk \'/^Groups:/ {$1=""; sub(/^ +/, ""); print}\' '
+        "/proc/self/status | tr ' ' '\\n' | grep -Ev \"^$|^${primary_gid}$\" || true); "
+        'if test -z "$extra_groups"; then echo group-add-denied; fi'
+    )
+
+
 @pytest.fixture
 async def runner() -> AsyncIterator[httpx.AsyncClient]:
     async with httpx.AsyncClient(base_url=RUNNER_URL, timeout=30.0) as client:
@@ -117,14 +172,10 @@ async def test_runner_rejects_missing_or_wrong_token(runner: httpx.AsyncClient) 
 async def test_job_has_no_docker_socket(runner: httpx.AsyncClient) -> None:
     job = await _run_job(
         runner,
-        command=_bash(
-            "stat /var/run/docker.sock 2>&1; "
-            "grep -c docker.sock /proc/self/mountinfo || echo no-socket-mount"
-        ),
+        command=_bash(_job_boundary_probe()),
     )
     assert job["status"] == "completed", job
-    assert "No such file or directory" in job["stdout"]
-    assert "no-socket-mount" in job["stdout"]
+    assert_job_boundary_denials(job["stdout"])
 
 
 async def test_job_is_non_root_with_readonly_rootfs(runner: httpx.AsyncClient) -> None:
@@ -157,7 +208,8 @@ async def test_network_none_blocks_all_egress(runner: httpx.AsyncClient) -> None
             "curl -s -m 4 http://fake-github:8080/_state >/dev/null 2>&1 "
             "|| echo fake-github-unreachable; "
             "curl -s -m 4 http://example.com >/dev/null 2>&1 || echo external-unreachable; "
-            "for h in postgres api temporal nats sandbox-runner; do "
+            "for h in postgres api temporal nats sandbox-runner agent-worker tool-worker "
+            "rootless-docker-transport; do "
             "  getent hosts $h >/dev/null 2>&1 || echo no-dns-$h; "
             "done; "
             "echo interfaces=$(ls /sys/class/net | sort | tr '\\n' ',')"
@@ -168,7 +220,7 @@ async def test_network_none_blocks_all_egress(runner: httpx.AsyncClient) -> None
     assert "fake-github-unreachable" in out
     assert "external-unreachable" in out
     # Control-plane service names must not even resolve (plan 14.4).
-    for host in ("postgres", "api", "temporal", "nats", "sandbox-runner"):
+    for host in FORBIDDEN_JOB_DNS_NAMES:
         assert f"no-dns-{host}" in out, out
     # No veth into any bridge — only loopback and inert kernel tunnel stubs.
     interfaces_line = next(line for line in out.splitlines() if line.startswith("interfaces="))
@@ -186,7 +238,8 @@ async def test_network_internet_reaches_sandbox_bridge_only(runner: httpx.AsyncC
         network_policy="internet",
         command=_bash(
             "curl -s -m 5 http://fake-github:8080/_state >/dev/null && echo fake-github-ok; "
-            "for h in postgres api temporal nats sandbox-runner; do "
+            "for h in postgres api temporal nats sandbox-runner agent-worker tool-worker "
+            "rootless-docker-transport; do "
             "  getent hosts $h >/dev/null 2>&1 || echo no-dns-$h; "
             "done"
         ),
@@ -194,7 +247,7 @@ async def test_network_internet_reaches_sandbox_bridge_only(runner: httpx.AsyncC
     assert job["status"] == "completed", job
     out = job["stdout"]
     assert "fake-github-ok" in out
-    for host in ("postgres", "api", "temporal", "nats", "sandbox-runner"):
+    for host in FORBIDDEN_JOB_DNS_NAMES:
         assert f"no-dns-{host}" in out, out
 
 

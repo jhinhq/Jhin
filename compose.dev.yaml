@@ -10,8 +10,23 @@ services:
 
   agent-worker:
     environment:
+      APP_ENV: ${APP_ENV:-dev}
+      JHIN_TEST_CRASH_BARRIER_DIR: ${JHIN_TEST_CRASH_BARRIER_DIR:-}
+      JHIN_TEST_CRASH_BARRIER_NAME: ${JHIN_TEST_CRASH_BARRIER_NAME:-}
+      JHIN_TEST_CRASH_BARRIER_MATCH: ${JHIN_TEST_CRASH_BARRIER_MATCH:-}
+    volumes:
+      - ${JHIN_TEST_CRASH_BARRIER_HOST_DIR:-/tmp/jhin-disabled-barriers}:/run/jhin/test-barriers
+
+  tool-worker:
+    environment:
+      APP_ENV: ${APP_ENV:-dev}
       JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS: http://fake-github:8080,http://fake-linear:8080,http://fake-vercel:8080,http://fake-supabase:8080
       JHIN_CONNECTOR_ALLOWED_DB_HOSTS: fake-supabase-db:5432
+      JHIN_TEST_CRASH_BARRIER_DIR: ${JHIN_TEST_CRASH_BARRIER_DIR:-}
+      JHIN_TEST_CRASH_BARRIER_NAME: ${JHIN_TEST_CRASH_BARRIER_NAME:-}
+      JHIN_TEST_CRASH_BARRIER_MATCH: ${JHIN_TEST_CRASH_BARRIER_MATCH:-}
+    volumes:
+      - ${JHIN_TEST_CRASH_BARRIER_HOST_DIR:-/tmp/jhin-disabled-barriers}:/run/jhin/test-barriers
 
   # Dev/test-only PostgreSQL 17 target for Supabase database connector tests.
   # It is intentionally separate from Jhin's own postgres service and data.
@@ -81,7 +96,7 @@ services:
       context: .
       dockerfile: docker/python.Dockerfile
       args:
-        SERVICE_PACKAGE: jhin-agent-worker
+        SERVICE_PACKAGE: jhin-tool-worker
         INSTALL_GIT: "1"
     command: ["python", "-m", "jhin_connectors.testing.fake_github"]
     environment:
@@ -116,7 +131,7 @@ services:
       context: .
       dockerfile: docker/python.Dockerfile
       args:
-        SERVICE_PACKAGE: jhin-agent-worker
+        SERVICE_PACKAGE: jhin-tool-worker
     command: ["python", "-m", "jhin_connectors.testing.fake_linear"]
     environment:
       FAKE_LINEAR_PORT: "8080"
@@ -145,7 +160,7 @@ services:
       context: .
       dockerfile: docker/python.Dockerfile
       args:
-        SERVICE_PACKAGE: jhin-agent-worker
+        SERVICE_PACKAGE: jhin-tool-worker
     command: ["python", "-m", "jhin_connectors.testing.fake_vercel"]
     environment:
       FAKE_VERCEL_PORT: "8080"
@@ -173,7 +188,7 @@ services:
       context: .
       dockerfile: docker/python.Dockerfile
       args:
-        SERVICE_PACKAGE: jhin-agent-worker
+        SERVICE_PACKAGE: jhin-tool-worker
     command: ["python", "-m", "jhin_connectors.testing.fake_supabase"]
     environment:
       FAKE_SUPABASE_PORT: "8080"
