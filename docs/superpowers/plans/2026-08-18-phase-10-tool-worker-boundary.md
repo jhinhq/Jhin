@@ -25,7 +25,7 @@
 - Do not call `workflow.deprecate_patch`; do not remove a legacy handler or compatibility workflow until every pre-patch history has closed and can no longer be queried.
 - `execution_unknown` is persisted and projected before the outer workflow stops non-retryably; no automatic retry may repeat an ambiguous effect.
 - Test crash barriers cover the exact reasoning/tool matrix: agent pre-bind and post-bind, plus tool pre-claim, post-claim/pre-effect, and post-effect/pre-commit. They are selected by exact versioned names and stable UUIDs, persist fsynced arrival/release markers on a test-only mount, are no-ops when unconfigured, and make agent/tool startup fail in production if any barrier setting is present.
-- Sandbox-runner runs with a nonzero UID/GID. Docker access is either a rootless socket owned by that UID or a rootful socket whose exact numeric group is the only supplemental Compose group. There is no root, privileged, sudo, chmod, socket-ownership mutation, or fallback path. Job containers remain `1000:1000` and receive neither socket nor supplemental group.
+- Sandbox-runner runs as `10001:10001`, unprivileged and with no supplemental group. In rootful mode only, it receives the rootful socket whose exact numeric group is its sole supplemental Compose group. In rootless mode the runner receives no socket mount: a private `rootless-docker-transport` sidecar, running as container UID 0 only inside the already-verified rootless daemon user namespace, owns the sole socket bind and relays a fixed TCP endpoint on an internal engine network. The sidecar is not privileged, has no capabilities, host network, or configurable upstream, and its container root maps to the unprivileged rootless-daemon host user. There is no runner-root fallback, privileged container, sudo, chmod, socket-ownership mutation, or permission relaxation. Job containers remain `1000:1000` and receive neither endpoint/network, socket, nor supplemental group.
 - Every task follows RED → focused GREEN → affected regression → scoped commit. Never use `git add .`, and never edit, stage, rename, delete, or commit the user-owned `orgforge-production-implementation-plan.md`.
 
 ## Complete File Map
@@ -39,7 +39,7 @@ The task-local `Files` blocks are the staging authority; this index is the compl
 - **Patched orchestration:** `packages/workflows/src/jhin_workflows/agent_task/workflows.py`, `packages/workflows/tests/test_agent_task_tool_routing.py`, `packages/workflows/tests/test_agent_task_delegation.py`, `packages/workflows/tests/test_phase10_history_replay.py`.
 - **Compatibility/sync/cleanup:** `packages/workflows/src/jhin_workflows/tool_compat/__init__.py`, `packages/workflows/src/jhin_workflows/tool_compat/shared.py`, `packages/workflows/src/jhin_workflows/tool_compat/workflows.py`, `services/agent_worker/src/jhin_agent_worker/compatibility.py`, `services/agent_worker/src/jhin_agent_worker/trigger_activities.py`, `services/tool_worker/src/jhin_tool_worker/trigger_activities.py`, `services/tool_worker/src/jhin_tool_worker/cleanup_activities.py`, `packages/workflows/tests/test_tool_compat_workflows.py`, `services/agent_worker/tests/test_compatibility_coordinators.py`, `services/tool_worker/tests/test_trigger_sync_and_cleanup.py`, `packages/tools/src/jhin_tools/invocation.py`, `packages/tools/src/jhin_tools/__init__.py`, `packages/tools/tests/test_invocation.py`, `packages/workflows/src/jhin_workflows/triggered_task/shared.py`, `packages/workflows/src/jhin_workflows/triggered_task/workflows.py`, `packages/workflows/tests/test_triggered_task_workflow.py`, `packages/workflows/src/jhin_workflows/engineering_ticket/shared.py`, `packages/workflows/src/jhin_workflows/engineering_ticket/workflows.py`, `packages/workflows/tests/test_engineering_ticket_workflow.py`.
 - **Worker distributions/poller:** `services/tool_worker/src/jhin_tool_worker/main.py`, `services/tool_worker/tests/test_worker_registration.py`, `services/agent_worker/src/jhin_agent_worker/main.py`, `services/agent_worker/pyproject.toml`, `services/tool_worker/pyproject.toml`, `packages/workflows/pyproject.toml`, `packages/workflows/src/jhin_workflows/poller_health.py`, `packages/workflows/tests/test_poller_health.py`, `docker/python.Dockerfile`, `tests/test_worker_dependency_boundaries.py`, `tests/test_executable_catalog_boundary.py`.
-- **Sandbox socket boundary:** `services/sandbox_runner/src/jhin_sandbox_runner/docker_socket.py`, `services/sandbox_runner/src/jhin_sandbox_runner/settings.py`, `services/sandbox_runner/src/jhin_sandbox_runner/jobs.py`, `services/sandbox_runner/src/jhin_sandbox_runner/main.py`, `services/sandbox_runner/tests/test_docker_socket.py`, `services/sandbox_runner/tests/test_job_config.py`, `services/sandbox_runner/tests/test_job_lifecycle.py`.
+- **Sandbox socket boundary:** `services/sandbox_runner/src/jhin_sandbox_runner/docker_socket.py`, `services/sandbox_runner/src/jhin_sandbox_runner/rootless_transport.py`, `services/sandbox_runner/src/jhin_sandbox_runner/settings.py`, `services/sandbox_runner/src/jhin_sandbox_runner/jobs.py`, `services/sandbox_runner/src/jhin_sandbox_runner/main.py`, `services/sandbox_runner/tests/test_docker_socket.py`, `services/sandbox_runner/tests/test_rootless_transport.py`, `services/sandbox_runner/tests/test_job_config.py`, `services/sandbox_runner/tests/test_job_lifecycle.py`.
 - **Compose topology:** `compose.yaml`, `compose.dev.yaml`, `compose.rootless.yaml`, `compose.rootful.yaml`, `.env.example`, `scripts/assert_phase10_tool_worker_compose.py`, `tests/test_phase10_tool_worker_compose.py`, `tests/test_compose_connector_allowlist.py`, `tests/test_compose_phase9_dev_fakes.py`, `tests/test_compose_supabase_db_fixture.py`, `tests/integration/conftest.py`, `tests/integration/test_stack_health.py`, `tests/integration/test_phase6_security.py`.
 - **Documentation:** `docs/architecture/tool-worker-boundary.md`, `docs/architecture/connectors.md`, `docs/architecture/sandboxing.md`, `README.md`, `.env.example`, `tests/test_tool_worker_docs.py`.
 - **Live/upgrade acceptance:** `tests/integration/test_phase10_tool_worker_boundary.py`, `tests/integration/test_phase10_sandbox_socket_modes.py`, `tests/integration/phase10_upgrade_harness.py`, `tests/integration/test_phase10_live_upgrade.py`, `tests/integration/compose.phase10-upgrade.yaml`, `tests/integration/test_phase3_exit.py`, `tests/integration/test_phase6_exit.py`, `tests/integration/test_phase7_exit.py`, `tests/integration/test_phase9_exit.py`, `Makefile`, `.github/workflows/ci.yml`.
@@ -1723,42 +1723,69 @@ git add services/agent_worker/src/jhin_agent_worker/main.py services/agent_worke
 git commit -m "build: register isolated agent and tool workers"
 ```
 
-### Task 7: Make sandbox-runner non-root with exact socket identity validation
+### Task 7: Make sandbox-runner non-root with exact Docker authority validation
 
 **Files:**
 - Create: `services/sandbox_runner/src/jhin_sandbox_runner/docker_socket.py`
+- Create: `services/sandbox_runner/src/jhin_sandbox_runner/rootless_transport.py`
 - Modify: `services/sandbox_runner/src/jhin_sandbox_runner/settings.py`
 - Modify: `services/sandbox_runner/src/jhin_sandbox_runner/jobs.py`
 - Modify: `services/sandbox_runner/src/jhin_sandbox_runner/main.py`
 - Create: `services/sandbox_runner/tests/test_docker_socket.py`
+- Create: `services/sandbox_runner/tests/test_rootless_transport.py`
 - Modify: `services/sandbox_runner/tests/test_job_config.py`
 - Modify: `services/sandbox_runner/tests/test_job_lifecycle.py`
 
 **Interfaces:**
-- Consumes: mounted Unix socket, process effective UID/groups, documented `rootless|rootful` mode.
-- Produces: `validate_docker_socket(path: Path, *, mode: DockerSocketMode, configured_gid: int | None, effective_uid: int, supplemental_groups: set[int]) -> str`; fatal startup on mismatch; explicit aiodocker URL; unchanged job-container isolation.
+- Consumes: a rootful mounted Unix socket or the exact private rootless transport URL, process effective UID/groups, and documented `rootless|rootful` mode.
+- Produces: `validate_docker_authority(*, mode: DockerSocketMode, socket_path: Path | None, transport_url: str | None, configured_gid: int | None, effective_uid: int, supplemental_groups: set[int]) -> str`; fixed-upstream `python -m jhin_sandbox_runner.rootless_transport`; fatal startup on mismatch; explicit aiodocker URL; unchanged job-container isolation.
 
-- [ ] **Step 1: Write failing socket and job-boundary tests**
+- [ ] **Step 1: Write failing authority, transport, and job-boundary tests**
 
-Create real temporary Unix sockets and use these concrete identity/job tests:
+Create a real temporary Unix socket and a fake Docker HTTP server behind it. The rootless runner must accept only the private in-project endpoint, never a socket path; the adapter must relay bytes in both directions without interpreting or logging request payloads:
 
 ```python
-def test_rootless_socket_requires_process_ownership(unix_socket: Path) -> None:
-    assert validate_docker_socket(
-        unix_socket,
+def test_rootless_runner_requires_private_transport_and_no_socket() -> None:
+    assert validate_docker_authority(
         mode="rootless",
+        socket_path=None,
+        transport_url="http://rootless-docker-transport:2375",
         configured_gid=None,
-        effective_uid=unix_socket.stat().st_uid,
+        effective_uid=10001,
         supplemental_groups=set(),
-    ) == f"unix://{unix_socket}"
-    with pytest.raises(DockerSocketConfigurationError, match="owner"):
-        validate_docker_socket(
-            unix_socket,
+    ) == "http://rootless-docker-transport:2375"
+    with pytest.raises(DockerSocketConfigurationError, match="no socket mount"):
+        validate_docker_authority(
             mode="rootless",
+            socket_path=Path("/run/host/docker.sock"),
+            transport_url="http://rootless-docker-transport:2375",
             configured_gid=None,
-            effective_uid=unix_socket.stat().st_uid + 1,
+            effective_uid=10001,
             supplemental_groups=set(),
         )
+
+
+async def test_rootless_transport_relays_fixed_unix_upstream(
+    fake_docker_socket: Path, unused_tcp_port: int,
+) -> None:
+    task = asyncio.create_task(
+        serve_rootless_transport(
+            upstream=fake_docker_socket,
+            listen_host="127.0.0.1",
+            listen_port=unused_tcp_port,
+            connection_limit=4,
+        )
+    )
+    await wait_for_tcp("127.0.0.1", unused_tcp_port)
+    reader, writer = await asyncio.open_connection("127.0.0.1", unused_tcp_port)
+    writer.write(b"GET /_ping HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n")
+    await writer.drain()
+    assert b"200 OK" in await asyncio.wait_for(reader.read(), timeout=1)
+    writer.close()
+    await writer.wait_closed()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 def test_job_never_inherits_runner_socket_identity(request: JobRequest, settings: Settings) -> None:
@@ -1781,14 +1808,16 @@ def test_rootful_requires_exact_socket_gid_and_membership(
     supplied = socket_gid if configured_gid == 12001 else socket_gid + 1
     member_groups = {socket_gid} if groups else set()
     if matches:
-        assert validate_docker_socket(
-            unix_socket, mode="rootful", configured_gid=supplied,
+        assert validate_docker_authority(
+            mode="rootful", socket_path=unix_socket, transport_url=None,
+            configured_gid=supplied,
             effective_uid=os.geteuid(), supplemental_groups=member_groups,
         ).startswith("unix://")
     else:
         with pytest.raises(DockerSocketConfigurationError):
-            validate_docker_socket(
-                unix_socket, mode="rootful", configured_gid=supplied,
+            validate_docker_authority(
+                mode="rootful", socket_path=unix_socket, transport_url=None,
+                configured_gid=supplied,
                 effective_uid=os.geteuid(), supplemental_groups=member_groups,
             )
 
@@ -1811,39 +1840,50 @@ def test_socket_boundary_contains_no_identity_or_permission_mutation() -> None:
 uv run pytest services/sandbox_runner/tests/test_docker_socket.py services/sandbox_runner/tests/test_job_config.py services/sandbox_runner/tests/test_job_lifecycle.py -q
 ```
 
-Expected: FAIL importing `validate_docker_socket`; current runner still starts as root in Compose and creates a Docker client without identity validation.
+Expected: FAIL importing `validate_docker_authority` and `serve_rootless_transport`; current runner still creates a Docker client without an authority boundary.
 
-- [ ] **Step 3: Implement fail-closed validation before Docker client creation**
+- [ ] **Step 3: Implement fail-closed validation and the fixed rootless transport**
 
 ```python
 DockerSocketMode = Literal["rootless", "rootful"]
+ROOTLESS_TRANSPORT_URL = "http://rootless-docker-transport:2375"
 
-def validate_docker_socket(
-    path: Path,
+def validate_docker_authority(
     *,
     mode: DockerSocketMode,
+    socket_path: Path | None,
+    transport_url: str | None,
     configured_gid: int | None,
     effective_uid: int,
     supplemental_groups: set[int],
 ) -> str:
-    info = path.stat()
-    if not stat.S_ISSOCK(info.st_mode):
-        raise DockerSocketConfigurationError("configured Docker endpoint is not a Unix socket")
     if effective_uid == 0:
         raise DockerSocketConfigurationError("sandbox runner must not run as root")
-    if mode == "rootless" and info.st_uid != effective_uid:
-        raise DockerSocketConfigurationError("rootless Docker socket owner does not match runner UID")
-    if mode == "rootful":
-        if configured_gid is None or info.st_gid != configured_gid:
-            raise DockerSocketConfigurationError("Docker socket group does not match SANDBOX_DOCKER_GID")
-        if configured_gid not in supplemental_groups:
-            raise DockerSocketConfigurationError("runner does not hold the configured Docker socket group")
-    if not os.access(path, os.R_OK | os.W_OK):
+    if mode == "rootless":
+        if socket_path is not None:
+            raise DockerSocketConfigurationError("rootless runner requires no socket mount")
+        if configured_gid is not None or supplemental_groups:
+            raise DockerSocketConfigurationError("rootless runner requires no supplemental group")
+        if transport_url != ROOTLESS_TRANSPORT_URL:
+            raise DockerSocketConfigurationError("rootless transport URL is not the private endpoint")
+        return ROOTLESS_TRANSPORT_URL
+    if socket_path is None or transport_url is not None:
+        raise DockerSocketConfigurationError("rootful runner requires one Unix socket only")
+    info = socket_path.stat()
+    if not stat.S_ISSOCK(info.st_mode):
+        raise DockerSocketConfigurationError("configured Docker endpoint is not a Unix socket")
+    if configured_gid is None or configured_gid <= 0 or info.st_gid != configured_gid:
+        raise DockerSocketConfigurationError("Docker socket group does not match SANDBOX_DOCKER_GID")
+    if supplemental_groups != {configured_gid}:
+        raise DockerSocketConfigurationError("runner requires the exact Docker socket group only")
+    if not os.access(socket_path, os.R_OK | os.W_OK):
         raise DockerSocketConfigurationError("Docker socket is not readable and writable by the runner")
-    return f"unix://{path}"
+    return f"unix://{socket_path}"
 ```
 
-Settings add `sandbox_docker_mode`, `sandbox_docker_socket`, and optional validated positive `sandbox_docker_gid`. `JobManager.start()` validates and then constructs `aiodocker.Docker(url=validated_url)`, calls `version()`, and aborts startup on failure. It never catches the configuration error to continue degraded.
+`rootless_transport.py` is a 64-KiB-chunk, maximum-32-connection, header-agnostic `asyncio.start_server` TCP-to-Unix relay. Its production entry point rejects every CLI argument and environment override, requires effective UID 0 inside the adapter container, requires `/run/host/docker.sock` to be a socket owned by in-container UID 0, and listens only on `0.0.0.0:2375`. It opens only that fixed path, emits readiness/error codes but never request bytes, headers, socket paths, or daemon responses, and exits on an upstream failure. The injected `serve_rootless_transport(...)` arguments above exist only for the unit seam. Use two bounded copy tasks per connection and always close both peers in `finally`.
+
+Settings add `sandbox_docker_mode`, optional `sandbox_docker_socket`, exact `sandbox_docker_transport_url`, and optional validated positive `sandbox_docker_gid`. Rootless settings reject a socket/GID and require the exact private URL; rootful settings reject a URL. `JobManager.start()` validates and then constructs `aiodocker.Docker(url=validated_url)`, calls `version()`, verifies the selected daemon API reports `SecurityOptions` containing `name=rootless` in rootless mode, and aborts startup on failure. It never catches the configuration error to continue degraded. The daemon check prevents an attacker-controlled TCP endpoint or a rootful daemon from satisfying the rootless shape.
 
 - [ ] **Step 4: Run GREEN and commit**
 
@@ -1851,8 +1891,8 @@ Settings add `sandbox_docker_mode`, `sandbox_docker_socket`, and optional valida
 uv run pytest services/sandbox_runner/tests -q
 uv run ruff check services/sandbox_runner
 uv run mypy services/sandbox_runner/src
-git add services/sandbox_runner/src/jhin_sandbox_runner/docker_socket.py services/sandbox_runner/src/jhin_sandbox_runner/settings.py services/sandbox_runner/src/jhin_sandbox_runner/jobs.py services/sandbox_runner/src/jhin_sandbox_runner/main.py services/sandbox_runner/tests/test_docker_socket.py services/sandbox_runner/tests/test_job_config.py services/sandbox_runner/tests/test_job_lifecycle.py
-git commit -m "fix: run sandbox socket boundary without root"
+git add services/sandbox_runner/src/jhin_sandbox_runner/docker_socket.py services/sandbox_runner/src/jhin_sandbox_runner/rootless_transport.py services/sandbox_runner/src/jhin_sandbox_runner/settings.py services/sandbox_runner/src/jhin_sandbox_runner/jobs.py services/sandbox_runner/src/jhin_sandbox_runner/main.py services/sandbox_runner/tests/test_docker_socket.py services/sandbox_runner/tests/test_rootless_transport.py services/sandbox_runner/tests/test_job_config.py services/sandbox_runner/tests/test_job_lifecycle.py
+git commit -m "fix: isolate sandbox Docker authority"
 ```
 
 ### Task 8: Wire and assert the final Compose topology
@@ -1923,18 +1963,40 @@ def test_rootful_render_has_exact_service_boundary() -> None:
 
 def test_rootless_render_never_interpolates_gid() -> None:
     services = render_compose(
-        "compose.yaml", "compose.rootless.yaml", env_without={"SANDBOX_DOCKER_GID"}
+        "compose.yaml", "compose.rootless.yaml",
+        env={"PHASE10_ROOTLESS_DOCKER_SOCKET": "/run/user/10001/docker.sock"},
+        env_without={"SANDBOX_DOCKER_GID"},
     )["services"]
     runner = services["sandbox-runner"]
     assert runner.get("group_add", []) == []
     assert runner["environment"]["SANDBOX_DOCKER_MODE"] == "rootless"
+    assert runner["environment"]["SANDBOX_DOCKER_TRANSPORT_URL"] == (
+        "http://rootless-docker-transport:2375"
+    )
+    assert runner.get("volumes", []) == []
+    assert set(runner["networks"]) == {"runner", "engine"}
     assert "SANDBOX_DOCKER_GID" not in runner["environment"]
+    transport = services["rootless-docker-transport"]
+    assert transport["user"] == "0:0"
+    assert transport["privileged"] is False
+    assert transport["cap_drop"] == ["ALL"]
+    assert transport["read_only"] is True
+    assert set(transport["networks"]) == {"engine"}
+    assert transport["volumes"] == [
+        {
+            "type": "bind", "source": "/run/user/10001/docker.sock",
+            "target": "/run/host/docker.sock", "read_only": False,
+            "bind": {"create_host_path": False},
+        }
+    ]
+    assert "engine" not in services["tool-worker"]["networks"]
 ```
 
 ```python
 def test_dev_fakes_and_healthchecks_follow_worker_ownership() -> None:
     services = render_compose(
         "compose.yaml", "compose.dev.yaml", "compose.rootless.yaml",
+        env={"PHASE10_ROOTLESS_DOCKER_SOCKET": "/run/user/10001/docker.sock"},
         env_without={"APP_ENV", "SANDBOX_DOCKER_GID"},
     )["services"]
     for key in (
@@ -1954,7 +2016,10 @@ def test_dev_fakes_and_healthchecks_follow_worker_ownership() -> None:
 def test_dev_overlay_propagates_explicit_test_app_env() -> None:
     services = render_compose(
         "compose.yaml", "compose.dev.yaml", "compose.rootless.yaml",
-        env={"APP_ENV": "test"},
+        env={
+            "APP_ENV": "test",
+            "PHASE10_ROOTLESS_DOCKER_SOCKET": "/run/user/10001/docker.sock",
+        },
         env_without={"SANDBOX_DOCKER_GID"},
     )["services"]
     assert services["agent-worker"]["environment"]["APP_ENV"] == "test"
@@ -2029,7 +2094,7 @@ In the existing `test_phase9_http_fakes_are_dev_only_healthy_and_loopback_bound`
 - [ ] **Step 2: Run RED against all three rendered modes**
 
 ```bash
-env -u SANDBOX_DOCKER_GID docker compose -f compose.yaml -f compose.rootless.yaml config --format json
+env -u SANDBOX_DOCKER_GID PHASE10_ROOTLESS_DOCKER_SOCKET=/run/user/10001/docker.sock docker compose -f compose.yaml -f compose.rootless.yaml config --format json
 SANDBOX_DOCKER_GID=10001 docker compose -f compose.yaml -f compose.rootful.yaml config --format json
 uv run pytest tests/test_phase10_tool_worker_compose.py tests/test_compose_connector_allowlist.py tests/test_compose_phase9_dev_fakes.py tests/test_compose_supabase_db_fixture.py -q
 ```
@@ -2038,27 +2103,56 @@ Expected: FAIL because tool-worker, the mode overlays, propagated test environme
 
 - [ ] **Step 3: Implement services and mode-specific non-root runner shape**
 
-Add base `tool-worker` with command `jhin-tool-worker`, `APP_ENV: ${APP_ENV:-production}`, database/NATS/Temporal/master-key/runner variables, networks `[control, data, runner]`, and no port/model variables. Add the same `APP_ENV: ${APP_ENV:-production}` mapping to agent-worker. Remove connector/runner variables and `runner` network from agent-worker. In `compose.dev.yaml`, use `APP_ENV: ${APP_ENV:-dev}` on both workers so an explicit test value is not overwritten, and move exactly `JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS` and `JHIN_CONNECTOR_ALLOWED_DB_HOSTS` from agent-worker to tool-worker while retaining their API entries. Build `fake-github`, `fake-linear`, `fake-vercel`, and `fake-supabase` from `SERVICE_PACKAGE: jhin-tool-worker`; only `fake-provider` continues to use `jhin-agent-worker`. Use:
+Add base `tool-worker` with command `jhin-tool-worker`, `APP_ENV: ${APP_ENV:-production}`, database/NATS/Temporal/master-key/runner variables, networks `[control, data, runner]`, and no port/model variables. Add the same `APP_ENV: ${APP_ENV:-production}` mapping to agent-worker. Remove connector/runner variables and `runner` network from agent-worker. In `compose.dev.yaml`, use `APP_ENV: ${APP_ENV:-dev}` on both workers so an explicit test value is not overwritten, and move exactly `JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS` and `JHIN_CONNECTOR_ALLOWED_DB_HOSTS` from agent-worker to tool-worker while retaining their API entries. Build `fake-github`, `fake-linear`, `fake-vercel`, and `fake-supabase` from `SERVICE_PACKAGE: jhin-tool-worker`; only `fake-provider` continues to use `jhin-agent-worker`. The base runner has no Docker endpoint, socket mount, or engine network; exactly one mode overlay must supply them:
 
 ```yaml
 sandbox-runner:
   user: "10001:10001"
   privileged: false
-  environment:
-    SANDBOX_DOCKER_MODE: rootless
-    SANDBOX_DOCKER_SOCKET: /run/jhin/docker.sock
-  volumes:
-    - ${SANDBOX_DOCKER_SOCKET_HOST:-/run/user/10001/docker.sock}:/run/jhin/docker.sock
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  networks: [runner]
 ```
 
-Keep `compose.rootless.yaml` explicit but free of every GID interpolation:
+Keep `compose.rootless.yaml` explicit, free of every GID interpolation, and require the already-running host socket instead of silently creating a path. Only the adapter is container root, and only inside the verified rootless user namespace; the runner remains `10001:10001`:
 
 ```yaml
 # compose.rootless.yaml
 services:
+  rootless-docker-transport:
+    image: ${SANDBOX_RUNNER_IMAGE:-jhin-sandbox-runner:local}
+    command: ["python", "-m", "jhin_sandbox_runner.rootless_transport"]
+    user: "0:0"
+    privileged: false
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: [/tmp]
+    volumes:
+      - type: bind
+        source: ${PHASE10_ROOTLESS_DOCKER_SOCKET:?set the verified rootless socket}
+        target: /run/host/docker.sock
+        bind:
+          create_host_path: false
+    networks: [engine]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket;s=socket.create_connection(('127.0.0.1',2375),2);s.close()"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
   sandbox-runner:
+    depends_on:
+      rootless-docker-transport:
+        condition: service_healthy
     environment:
       SANDBOX_DOCKER_MODE: rootless
+      SANDBOX_DOCKER_TRANSPORT_URL: http://rootless-docker-transport:2375
+    networks: [runner, engine]
+
+networks:
+  engine:
+    internal: true
 ```
 
 Put the entire rootful group contract in the rootful overlay only:
@@ -2072,11 +2166,12 @@ services:
     environment:
       SANDBOX_DOCKER_MODE: rootful
       SANDBOX_DOCKER_GID: "${SANDBOX_DOCKER_GID:?set SANDBOX_DOCKER_GID}"
+      SANDBOX_DOCKER_SOCKET: /run/jhin/docker.sock
     volumes:
       - ${SANDBOX_DOCKER_SOCKET_HOST:-/var/run/docker.sock}:/run/jhin/docker.sock
 ```
 
-The mounted rootless socket owner must be UID 10001. In rootful mode only, `SANDBOX_DOCKER_GID` must equal the socket's exact nonzero group. `compose.yaml`, `compose.dev.yaml`, and `compose.rootless.yaml` must contain neither `${SANDBOX_DOCKER_GID...}` nor a `group_add` key. Do not default to group 0.
+On the host the rootless socket must be owned by UID 10001; inside a rootless container that bind is UID 0, which is why it is mounted only into the isolated adapter. Sandbox-runner has no socket volume and connects to the private endpoint as UID 10001. The adapter is unreachable from tool-worker and all jobs, cannot publish a port, and cannot join `runner`, `control`, `data`, or the default network. In rootful mode only, `SANDBOX_DOCKER_GID` must equal the socket's exact nonzero group. `compose.yaml`, `compose.dev.yaml`, and `compose.rootless.yaml` must contain neither `${SANDBOX_DOCKER_GID...}` nor a `group_add` key. Do not default to group 0 or add a runner-root fallback.
 
 Only `compose.dev.yaml` exposes disabled-by-default crash-barrier controls, to both workers for the required live matrix; empty names normalize to `None`:
 
@@ -2105,9 +2200,9 @@ tool-worker:
 - [ ] **Step 4: Run unit/render gates and commit**
 
 ```bash
-env -u SANDBOX_DOCKER_GID docker compose -f compose.yaml -f compose.rootless.yaml config --format json >/tmp/jhin-phase10-rootless-compose.json
+env -u SANDBOX_DOCKER_GID PHASE10_ROOTLESS_DOCKER_SOCKET=/run/user/10001/docker.sock docker compose -f compose.yaml -f compose.rootless.yaml config --format json >/tmp/jhin-phase10-rootless-compose.json
 SANDBOX_DOCKER_GID=10001 docker compose -f compose.yaml -f compose.rootful.yaml config --format json >/tmp/jhin-phase10-rootful-compose.json
-env -u SANDBOX_DOCKER_GID uv run python scripts/assert_phase10_tool_worker_compose.py --mode rootless
+env -u SANDBOX_DOCKER_GID PHASE10_ROOTLESS_DOCKER_SOCKET=/run/user/10001/docker.sock uv run python scripts/assert_phase10_tool_worker_compose.py --mode rootless
 SANDBOX_DOCKER_GID=10001 uv run python scripts/assert_phase10_tool_worker_compose.py --mode rootful
 uv run pytest tests/test_phase10_tool_worker_compose.py tests/test_phase9_production_compose.py tests/test_compose_connector_allowlist.py tests/test_compose_phase9_dev_fakes.py tests/test_compose_supabase_db_fixture.py services/agent_worker/tests/test_upgrade_crash_barriers.py services/tool_worker/tests/test_bound_tool_execution.py -q
 git add compose.yaml compose.dev.yaml compose.rootless.yaml compose.rootful.yaml .env.example scripts/assert_phase10_tool_worker_compose.py tests/test_phase10_tool_worker_compose.py tests/test_compose_connector_allowlist.py tests/test_compose_phase9_dev_fakes.py tests/test_compose_supabase_db_fixture.py tests/integration/conftest.py tests/integration/test_stack_health.py tests/integration/test_phase6_security.py
@@ -2193,7 +2288,7 @@ Expected: the first search returns no stale ownership/root claims; the second fi
 
 **Interfaces:**
 - Consumes: the complete Task 1–9 system.
-- Produces: live evidence for ordinary tools, advertised filtering, approvals, trigger sync, cleanup, queue loss/recovery, non-root socket access, dependency/network separation, agent pre-bind/post-bind hard kills, tool pre-claim/post-claim/post-effect hard kills, and true Phase 9→10 in-flight history completion in one PostgreSQL/Temporal environment.
+- Produces: live evidence for ordinary tools, advertised filtering, approvals, trigger sync, cleanup, queue loss/recovery, rootful socket and private rootless-transport access, rootless privileged-port/cgroup support, dependency/network separation, agent pre-bind/post-bind hard kills, tool pre-claim/post-claim/post-effect hard kills, and true Phase 9→10 in-flight history completion in one PostgreSQL/Temporal environment.
 
 - [ ] **Step 1: Write failing end-to-end assertions**
 
@@ -2390,7 +2485,7 @@ The queue-loss and live container test is:
 
 ```python
 async def test_tool_queue_loss_blocks_effect_and_live_networks_are_isolated(
-    stack: ComposeStack, expected_gid: str
+    stack: ComposeStack, expected_groups: list[str]
 ) -> None:
     stack.stop("tool-worker")
     async with definition_only_resolver(stack):
@@ -2403,7 +2498,7 @@ async def test_tool_queue_loss_blocks_effect_and_live_networks_are_isolated(
     runner = stack.inspect("sandbox-runner")
     assert runner["Config"]["User"] != "0:0"
     assert runner["HostConfig"]["Privileged"] is False
-    assert runner["HostConfig"]["GroupAdd"] == [expected_gid]
+    assert runner["HostConfig"]["GroupAdd"] == expected_groups
     assert stack.agent_runner_dns_probe().returncode != 0
     assert stack.tool_runner_health_probe().returncode == 0
     job = stack.inspect_last_job()
@@ -2413,7 +2508,9 @@ async def test_tool_queue_loss_blocks_effect_and_live_networks_are_isolated(
     assert all("docker.sock" not in bind for bind in job["HostConfig"].get("Binds", []))
 ```
 
-In `test_phase10_sandbox_socket_modes.py`, parameterize the live probe from `PHASE10_SOCKET_MODE`. Rootful asserts the configured numeric GID is the container's sole supplemental group and a runner `/health` plus one no-op job succeeds. Rootless asserts the mounted socket owner equals the runner's effective UID, `GroupAdd == []`, and the same health/job probe succeeds. A `wrong-gid` case starts only sandbox-runner with a known-incorrect nonzero GID, asserts startup exits nonzero with the bounded configuration error, and asserts socket mode/UID/GID are unchanged before and after. Do not skip a requested mode; skip only when `PHASE10_SOCKET_MODE` is absent from an unrelated integration invocation.
+In `test_phase10_sandbox_socket_modes.py`, parameterize the live probe from `PHASE10_SOCKET_MODE`. Rootful asserts the configured numeric GID is the container's sole supplemental group and a runner `/health` plus one no-op job succeeds. Rootless first snapshots the host socket inode/mode/UID/GID and requires UID 10001, calls that socket's daemon `/info` and requires `name=rootless`, and then performs two disposable-daemon probes: a UID-10001/cap-drop-ALL process binds port 80, and a container launched with `--memory 64m --cpus 0.25 --pids-limit 32` reads cgroup v2 `memory.max == 67108864`, `cpu.max == "25000 100000"`, and `pids.max == "32"`. Missing cgroup v2, nondelegated controllers, ignored limits, or inability to bind the privileged port fails the requested mode before the stack starts; the harness never changes a sysctl or cgroup setting.
+
+The rootless live stack then asserts sandbox-runner is `10001:10001`, `GroupAdd == []`, has no bind mount or Unix-socket setting, and joins exactly `runner` and `engine`. It asserts `rootless-docker-transport` is the only container with the host socket bind; is UID 0 inside the verified rootless user namespace; has `Privileged == false`, `CapDrop == ["ALL"]`, `ReadonlyRootfs == true`, no published ports, and exactly the internal `engine` network; and sees that bind as a UID-0 socket. Tool-worker, agent-worker, and the job have no `engine` attachment. The runner's Docker `/version`, `/health`, and one no-op job must succeed through `http://rootless-docker-transport:2375`, while tool-worker cannot resolve or connect to that endpoint. Re-stat the host socket after teardown and require the same inode/mode/UID/GID. A `wrong-gid` case starts only sandbox-runner with a known-incorrect nonzero GID, asserts startup exits nonzero with the bounded configuration error, and asserts socket mode/UID/GID are unchanged before and after. Do not skip a requested mode; skip only when `PHASE10_SOCKET_MODE` is absent from an unrelated integration invocation.
 
 - [ ] **Step 2: Write the failing true-upgrade test and harness contract**
 
@@ -2490,7 +2587,7 @@ Expected: FAIL because the three integration files, `UpgradeHarness`, and crash-
 
 - [ ] **Step 4: Implement integration helpers and focused/full Make targets**
 
-Add `test-tool-worker-boundary` for unit/replay/render gates, `test-tool-worker-boundary-integration` for the live boundary/crash files, `test-tool-worker-live-upgrade` for the true image swap, and explicit `test-sandbox-socket-rootful`, `test-sandbox-socket-rootless`, and `test-sandbox-socket-wrong-gid` targets. The rootless target requires `PHASE10_ROOTLESS_DOCKER_SOCKET` to name an already-running UID-10001 rootless daemon socket; no target infers or changes socket permissions. Extend the Docker build matrix with `tool-worker` and `sandbox-runner`, make the Python CI job run `test-tool-worker-boundary`, and set `actions/checkout` `fetch-depth: 0` in the upgrade job so the exact SHA in `phase9-ref.txt` is available to `git archive`.
+Add `test-tool-worker-boundary` for unit/replay/render gates, `test-tool-worker-boundary-integration` for the live boundary/crash files, `test-tool-worker-live-upgrade` for the true image swap, and explicit `test-sandbox-socket-rootful`, `test-sandbox-socket-rootless`, and `test-sandbox-socket-wrong-gid` targets. The rootless target requires `PHASE10_ROOTLESS_DOCKER_SOCKET` to name an already-running host-UID-10001 rootless daemon socket, proves daemon rootlessness plus privileged-port and delegated-cgroup support through the live tests, and passes the socket only as the adapter mount source; no target infers or changes socket permissions, starts a rootful fallback, or runs sandbox-runner as root. Extend the Docker build matrix with `tool-worker` and `sandbox-runner`, make the Python CI job run `test-tool-worker-boundary`, and set `actions/checkout` `fetch-depth: 0` in the upgrade job so the exact SHA in `phase9-ref.txt` is available to `git archive`.
 
 ```make
 test-tool-worker-live-upgrade:
@@ -2498,7 +2595,8 @@ test-tool-worker-live-upgrade:
 
 test-sandbox-socket-rootless:
 	test -S "$(PHASE10_ROOTLESS_DOCKER_SOCKET)"
-	env -u SANDBOX_DOCKER_GID SANDBOX_DOCKER_SOCKET_HOST="$(PHASE10_ROOTLESS_DOCKER_SOCKET)" PHASE10_SOCKET_MODE=rootless uv run pytest -m integration tests/integration/test_phase10_sandbox_socket_modes.py -v
+	test "$$(stat -c %u "$(PHASE10_ROOTLESS_DOCKER_SOCKET)")" = "10001"
+	env -u SANDBOX_DOCKER_GID PHASE10_ROOTLESS_DOCKER_SOCKET="$(PHASE10_ROOTLESS_DOCKER_SOCKET)" PHASE10_SOCKET_MODE=rootless uv run pytest -m integration tests/integration/test_phase10_sandbox_socket_modes.py -v
 
 test-sandbox-socket-rootful:
 	test -n "$(SANDBOX_DOCKER_GID)"
@@ -2531,7 +2629,7 @@ phase10-live-upgrade:
 
 ```bash
 uv run pytest packages/workflows/tests/test_agent_task_tool_routing.py packages/workflows/tests/test_tool_compat_workflows.py packages/workflows/tests/test_phase10_history_replay.py services/agent_worker/tests/test_reasoning_manifest.py services/agent_worker/tests/test_legacy_manifest_sidecar.py services/agent_worker/tests/test_step_projection.py services/agent_worker/tests/test_compatibility_coordinators.py services/tool_worker/tests services/sandbox_runner/tests tests/test_worker_dependency_boundaries.py tests/test_executable_catalog_boundary.py tests/test_phase10_tool_worker_compose.py -q
-env -u SANDBOX_DOCKER_GID uv run python scripts/assert_phase10_tool_worker_compose.py --mode rootless
+env -u SANDBOX_DOCKER_GID PHASE10_ROOTLESS_DOCKER_SOCKET=/run/user/10001/docker.sock uv run python scripts/assert_phase10_tool_worker_compose.py --mode rootless
 SANDBOX_DOCKER_GID=10001 uv run python scripts/assert_phase10_tool_worker_compose.py --mode rootful
 uv run ruff check .
 uv run ruff format --check .
@@ -2554,11 +2652,11 @@ Run both documented socket modes and the negative boundary on a Linux acceptance
 
 ```bash
 SANDBOX_DOCKER_GID="$(stat -c %g /var/run/docker.sock)" PHASE10_SOCKET_MODE=rootful uv run pytest -m integration tests/integration/test_phase10_sandbox_socket_modes.py -v
-PHASE10_ROOTLESS_DOCKER_SOCKET=/run/user/10001/docker.sock PHASE10_SOCKET_MODE=rootless uv run pytest -m integration tests/integration/test_phase10_sandbox_socket_modes.py -v
+env -u SANDBOX_DOCKER_GID PHASE10_ROOTLESS_DOCKER_SOCKET=/run/user/10001/docker.sock PHASE10_SOCKET_MODE=rootless uv run pytest -m integration tests/integration/test_phase10_sandbox_socket_modes.py -v
 SANDBOX_DOCKER_GID="$(stat -c %g /var/run/docker.sock)" PHASE10_SOCKET_MODE=wrong-gid uv run pytest -m integration tests/integration/test_phase10_sandbox_socket_modes.py -v
 ```
 
-Expected: both connection/job probes PASS and the deliberate wrong-GID runner fails closed without changing the socket.
+Expected: both connection/job probes PASS; rootless also proves the private adapter, nonroot privileged-port bind, and enforced cgroup-v2 limits; and the deliberate wrong-GID runner fails closed without changing either socket.
 
 - [ ] **Step 7: Run the full repository gate**
 
