@@ -217,9 +217,7 @@ async def world() -> AsyncIterator[ToolWorld]:
         effect.values.append(parsed.value)
         return _EffectOutput(receipt=f"receipt-{len(effect.values)}")
 
-    async def execute_connected_effect(
-        ctx: ToolExecutionContext, payload: BaseModel
-    ) -> BaseModel:
+    async def execute_connected_effect(ctx: ToolExecutionContext, payload: BaseModel) -> BaseModel:
         parsed = _ConnectedEffectInput.model_validate(payload.model_dump())
         connection = await ctx.session.get(Connection, UUID(parsed.connection_id))
         if connection is None or connection.status != ConnectionStatus.ACTIVE.value:

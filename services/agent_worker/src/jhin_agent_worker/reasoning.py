@@ -586,9 +586,7 @@ class AgentReasoningActivities:
                 except Exception as error:
                     logger.warning(
                         "model.client_close_failed",
-                        error=(
-                            redact_text(str(error))[:2_000] or "model client close failed"
-                        ),
+                        error=(redact_text(str(error))[:2_000] or "model client close failed"),
                     )
 
             if len(outcome.tool_calls) > MAX_TOOL_CALLS_PER_STEP:
@@ -612,8 +610,7 @@ class AgentReasoningActivities:
                     :_MAX_PROVIDER_TEXT_CHARS
                 ],
                 provider_call_ids=tuple(
-                    redact_text(call.id)[:_MAX_PROVIDER_TEXT_CHARS]
-                    for call in outcome.tool_calls
+                    redact_text(call.id)[:_MAX_PROVIDER_TEXT_CHARS] for call in outcome.tool_calls
                 ),
                 transitions=tuple(
                     sanitize_transition(transition)
@@ -723,9 +720,7 @@ class AgentReasoningActivities:
                     await test_barrier.arrive_and_wait(PHASE9_AFTER_MANIFEST, run_id)
                 return ReasonAgentStepResult(call_count=len(existing_calls))
 
-            manifest_is_lossless = all(
-                bool(entry.get("lossless")) for entry in manifest["calls"]
-            )
+            manifest_is_lossless = all(bool(entry.get("lossless")) for entry in manifest["calls"])
             if not manifest_is_lossless:
                 run.status = RunStatus.FAILED.value
                 run.error_code = "tool_step_manifest_not_lossless"

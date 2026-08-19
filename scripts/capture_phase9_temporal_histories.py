@@ -27,15 +27,15 @@ from temporalio.client import WorkflowHandle, WorkflowHistory
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
-import jhin_agent_worker.activities as agent_activities_module  # type: ignore[import-untyped]
-import jhin_agent_worker.trigger_activities as trigger_activities_module  # type: ignore[import-untyped]
+import jhin_agent_worker.activities as agent_activities_module
+import jhin_agent_worker.trigger_activities as trigger_activities_module
 from jhin_agent_worker.activities import AgentActivities
-from jhin_agent_worker.engineering_activities import (  # type: ignore[import-untyped]
+from jhin_agent_worker.engineering_activities import (
     EngineeringActivities,
 )
-from jhin_agent_worker.resources import Resources  # type: ignore[import-untyped]
+from jhin_agent_worker.resources import Resources
 from jhin_agent_worker.trigger_activities import TriggerActivities
-from jhin_agents.snapshot import (  # type: ignore[import-untyped]
+from jhin_agents.snapshot import (
     AgentExecutionSnapshot,
     ModelProfileSnapshot,
     RunLimits,
@@ -59,7 +59,7 @@ from jhin_db.models import (
 )
 from jhin_domain import ApprovalStatus, RunStatus, TaskState, new_uuid7
 from jhin_events import EventEnvelope
-from jhin_models import (  # type: ignore[import-untyped]
+from jhin_models import (
     ModelRequest,
     ModelResponse,
     ModelToolCall,
@@ -96,9 +96,7 @@ SCENARIOS = (
     "engineering-sync",
 )
 
-DEFAULT_CAPTURE_DATABASE_URL = (
-    "postgresql+asyncpg://jhin:jhin@127.0.0.1:55432/jhin"
-)
+DEFAULT_CAPTURE_DATABASE_URL = "postgresql+asyncpg://jhin:jhin@127.0.0.1:55432/jhin"
 TASK0_PHASE9_REF = "6318781b57692bf39f37cd428d73de115d7458e2"
 PHASE10_PATCH_MARKER = "PHASE10_TOOL_WORKER_PATCH"
 FIXTURE_ROOT = (
@@ -133,9 +131,7 @@ _INTENTIONAL_CAPTURE_DIRTY_FILES = frozenset(
         "tests/test_capture_phase9_temporal_histories.py",
     }
 )
-_INTENTIONAL_CAPTURE_DIRTY_PREFIXES = (
-    "packages/workflows/tests/fixtures/phase9_temporal/",
-)
+_INTENTIONAL_CAPTURE_DIRTY_PREFIXES = ("packages/workflows/tests/fixtures/phase9_temporal/",)
 
 _READ_TOOL = "capture.phase9.read"
 _APPROVAL_TOOL = "capture.phase9.destructive"
@@ -262,10 +258,7 @@ class _CaptureResolveSnapshot:
         seeded = self._seeded_results.get(params.task_id)
         if seeded is not None:
             return seeded
-        return cast(
-            SnapshotResult,
-            await self._real_activities.resolve_snapshot_activity(params),
-        )
+        return await self._real_activities.resolve_snapshot_activity(params)
 
 
 async def save_history(handle: Any, destination: Path, *, workflow_id: str) -> None:
@@ -428,10 +421,7 @@ def _phase10_marker_present() -> bool:
     for relative in CAPTURE_CRITICAL_SOURCE_PATHS:
         candidate = repository_root / relative
         paths = (candidate,) if candidate.is_file() else candidate.rglob("*.py")
-        if any(
-            PHASE10_PATCH_MARKER in path.read_text(encoding="utf-8")
-            for path in paths
-        ):
+        if any(PHASE10_PATCH_MARKER in path.read_text(encoding="utf-8") for path in paths):
             return True
     return False
 
@@ -439,12 +429,8 @@ def _phase10_marker_present() -> bool:
 def validate_phase9_source() -> str:
     source_ref = _git("rev-parse", "HEAD")
     if source_ref != TASK0_PHASE9_REF:
-        raise RuntimeError(
-            f"Phase 9 capture requires {TASK0_PHASE9_REF}, found {source_ref}"
-        )
-    dirty = unexpected_capture_dirty_paths(
-        _git("status", "--porcelain", "--untracked-files=all")
-    )
+        raise RuntimeError(f"Phase 9 capture requires {TASK0_PHASE9_REF}, found {source_ref}")
+    dirty = unexpected_capture_dirty_paths(_git("status", "--porcelain", "--untracked-files=all"))
     if dirty:
         joined = ", ".join(dirty)
         raise RuntimeError(f"Phase 9 capture-critical source is dirty: {joined}")
@@ -771,9 +757,7 @@ async def _fetch_all_before_close(
 
 
 async def capture_scenarios() -> dict[str, CapturedWorkflow]:
-    database_url = os.environ.get(
-        "PHASE9_CAPTURE_DATABASE_URL", DEFAULT_CAPTURE_DATABASE_URL
-    )
+    database_url = os.environ.get("PHASE9_CAPTURE_DATABASE_URL", DEFAULT_CAPTURE_DATABASE_URL)
     engine = create_engine(database_url)
     sessions = create_session_factory(engine)
     seeded = await _seed_database(sessions)
@@ -799,10 +783,10 @@ async def capture_scenarios() -> dict[str, CapturedWorkflow]:
     }
     resolver = _CaptureResolveSnapshot(agent_activities, seeded_results)
 
-    original_catalog = agent_activities_module.build_default_catalog
-    original_model_factory = agent_activities_module.build_model_client
-    original_cleanup = agent_activities_module.delete_sandbox_workspace
-    original_linear_tools = trigger_activities_module.LINEAR_TOOLS
+    original_catalog = agent_activities_module.build_default_catalog  # type: ignore[attr-defined]
+    original_model_factory = agent_activities_module.build_model_client  # type: ignore[attr-defined]
+    original_cleanup = agent_activities_module.delete_sandbox_workspace  # type: ignore[attr-defined]
+    original_linear_tools = trigger_activities_module.LINEAR_TOOLS  # type: ignore[attr-defined]
 
     async def delete_capture_workspace(workspace_key: str) -> bool:
         assert workspace_key.startswith("run-")
@@ -824,10 +808,12 @@ async def capture_scenarios() -> dict[str, CapturedWorkflow]:
         for definition, _executor in original_linear_tools
         if definition.name == "linear.comment.create"
     )
-    agent_activities_module.build_default_catalog = lambda: catalog
-    agent_activities_module.build_model_client = lambda *_args, **_kwargs: _CaptureModelClient()
-    agent_activities_module.delete_sandbox_workspace = delete_capture_workspace
-    trigger_activities_module.LINEAR_TOOLS = ((sync_definition, execute_sync),)
+    agent_activities_module.build_default_catalog = lambda: catalog  # type: ignore[attr-defined]
+    agent_activities_module.build_model_client = lambda *_args, **_kwargs: _CaptureModelClient()  # type: ignore[attr-defined]
+    agent_activities_module.delete_sandbox_workspace = delete_capture_workspace  # type: ignore[attr-defined]
+    trigger_activities_module.LINEAR_TOOLS = (  # type: ignore[attr-defined]
+        (sync_definition, execute_sync),
+    )
 
     try:
         env = await WorkflowEnvironment.start_time_skipping()
@@ -845,13 +831,13 @@ async def capture_scenarios() -> dict[str, CapturedWorkflow]:
                 ],
                 activities=[
                     resolver.resolve_snapshot_activity,
-                    agent_activities.run_agent_step_activity,
-                    agent_activities.resolve_approval_activity,
-                    agent_activities.finalize_run_activity,
+                    agent_activities.run_agent_step_activity,  # type: ignore[attr-defined]
+                    agent_activities.resolve_approval_activity,  # type: ignore[attr-defined]
+                    agent_activities.finalize_run_activity,  # type: ignore[attr-defined]
                     agent_activities.summarize_delegation_activity,
                     agent_activities.deliver_delegation_result_activity,
                     trigger_activities.prepare_triggered_task_activity,
-                    trigger_activities.sync_external_activity,
+                    trigger_activities.sync_external_activity,  # type: ignore[attr-defined]
                     engineering_activities.resolve_engineering_plan_activity,
                     engineering_activities.create_engineering_child_task_activity,
                     engineering_activities.finalize_engineering_ticket_activity,
@@ -975,10 +961,10 @@ async def capture_scenarios() -> dict[str, CapturedWorkflow]:
 
                 return await _fetch_all_before_close(handles)
     finally:
-        agent_activities_module.build_default_catalog = original_catalog
-        agent_activities_module.build_model_client = original_model_factory
-        agent_activities_module.delete_sandbox_workspace = original_cleanup
-        trigger_activities_module.LINEAR_TOOLS = original_linear_tools
+        agent_activities_module.build_default_catalog = original_catalog  # type: ignore[attr-defined]
+        agent_activities_module.build_model_client = original_model_factory  # type: ignore[attr-defined]
+        agent_activities_module.delete_sandbox_workspace = original_cleanup  # type: ignore[attr-defined]
+        trigger_activities_module.LINEAR_TOOLS = original_linear_tools  # type: ignore[attr-defined]
         await engine.dispose()
 
 

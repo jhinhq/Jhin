@@ -286,9 +286,7 @@ async def test_nonlossless_reasoning_fails_before_effects(
         from jhin_secrets import get_redactor
 
         get_redactor().register("reasoning-manifest-secret")
-        call = call.model_copy(
-            update={"arguments_json": '{"value":"reasoning-manifest-secret"}'}
-        )
+        call = call.model_copy(update={"arguments_json": '{"value":"reasoning-manifest-secret"}'})
     world.model.responses.append(response.model_copy(update={"tool_calls": (call,)}))
     try:
         with pytest.raises(ApplicationError) as error:

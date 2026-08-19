@@ -75,9 +75,7 @@ _SAFE_STATUS_REASONS = {
     "denied": "tool call denied",
     "rejected": "tool approval was rejected",
     "needs_approval": "tool call requires human approval",
-    "execution_unknown": (
-        "tool execution outcome is unknown; manual reconciliation is required"
-    ),
+    "execution_unknown": ("tool execution outcome is unknown; manual reconciliation is required"),
 }
 _PRESERVED_FINAL_ERRORS = frozenset(
     {
@@ -326,13 +324,9 @@ class AgentProjectionActivities:
                 cost_micros=int(raw_result.get("cost_micros", 0)),
                 waiting_approval_id=raw_result.get("waiting_approval_id"),
                 delegations=[
-                    DelegationRequest(**item)
-                    for item in raw_delegations
-                    if isinstance(item, dict)
+                    DelegationRequest(**item) for item in raw_delegations if isinstance(item, dict)
                 ],
-                execution_unknown_tool_call_id=raw_result.get(
-                    "execution_unknown_tool_call_id"
-                ),
+                execution_unknown_tool_call_id=raw_result.get("execution_unknown_tool_call_id"),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ApplicationError(
@@ -576,9 +570,7 @@ class AgentProjectionActivities:
                 "reason": result.decision_reason,
                 "error_code": result.row.error_code,
                 "duration_ms": result.row.duration_ms,
-                "approval_id": (
-                    str(result.approval.id) if result.approval is not None else None
-                ),
+                "approval_id": (str(result.approval.id) if result.approval is not None else None),
             },
         )
         return seq

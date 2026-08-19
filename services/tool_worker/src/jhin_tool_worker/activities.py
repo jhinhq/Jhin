@@ -126,8 +126,7 @@ async def _load_runtime_context(
             select(AgentRun.task_id, AgentRun.agent_id, Agent.name)
             .join(
                 Agent,
-                (Agent.id == AgentRun.agent_id)
-                & (Agent.workspace_id == AgentRun.workspace_id),
+                (Agent.id == AgentRun.agent_id) & (Agent.workspace_id == AgentRun.workspace_id),
             )
             .where(
                 AgentRun.id == run_id,
@@ -201,10 +200,14 @@ async def _validate_approval_manifest_binding(
     catalog: ToolCatalog,
 ) -> None:
     rows = (
-        await session.execute(
-            _approval_manifest_steps_statement(workspace_id=workspace_id, run_id=run_id)
+        (
+            await session.execute(
+                _approval_manifest_steps_statement(workspace_id=workspace_id, run_id=run_id)
+            )
         )
-    ).tuples().all()
+        .tuples()
+        .all()
+    )
     for step_index, call_count in rows:
         if (
             type(step_index) is not int

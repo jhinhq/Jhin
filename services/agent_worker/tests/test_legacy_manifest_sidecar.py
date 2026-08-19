@@ -111,9 +111,7 @@ async def test_phase9_sidecar_repair_rejects_canonical_drift_before_effect(
     reasoning_world: ReasoningWorld,
 ) -> None:
     await _seed_manifest(reasoning_world, value="bound")
-    reasoning_world.model.responses.append(
-        model_call("retry", "system.echo", {"value": "changed"})
-    )
+    reasoning_world.model.responses.append(model_call("retry", "system.echo", {"value": "changed"}))
 
     with pytest.raises(ApplicationError) as error:
         await reasoning_world.reasoning.reason_agent_step(

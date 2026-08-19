@@ -123,9 +123,7 @@ async def test_generate_writes_exact_ref_and_reconstructs_each_caller_id(
         committed = evidence["fixtures"][f"{scenario}.json"]
         assert committed["sha256"] == hashlib.sha256(fixture.read_bytes()).hexdigest()
         assert committed["event_count"] == 1
-        assert committed["last_event_type"] == (
-            "EVENT_TYPE_WORKFLOW_EXECUTION_STARTED"
-        )
+        assert committed["last_event_type"] == ("EVENT_TYPE_WORKFLOW_EXECUTION_STARTED")
 
 
 @pytest.mark.parametrize(

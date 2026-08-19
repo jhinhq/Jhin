@@ -353,11 +353,15 @@ async def test_ambiguous_approved_effect_returns_durable_unknown(world: Approval
         world.approval_params(parked.approval_id or "")
     )
 
-    assert first == second == BoundToolResult(
-        tool_call_id=parked.tool_call_id,
-        status="execution_unknown",
-        approval_id=parked.approval_id,
-        stop_reason="execution_unknown",
+    assert (
+        first
+        == second
+        == BoundToolResult(
+            tool_call_id=parked.tool_call_id,
+            status="execution_unknown",
+            approval_id=parked.approval_id,
+            stop_reason="execution_unknown",
+        )
     )
     assert world.effect.count == 0
 
@@ -398,10 +402,14 @@ async def test_postgres_resolution_survives_gateway_rollback_and_replays_without
         world.approval_params(parked.approval_id)
     )
 
-    assert first == replay == BoundToolResult(
-        tool_call_id=parked.tool_call_id,
-        status=expected_status,
-        approval_id=parked.approval_id,
+    assert (
+        first
+        == replay
+        == BoundToolResult(
+            tool_call_id=parked.tool_call_id,
+            status=expected_status,
+            approval_id=parked.approval_id,
+        )
     )
     assert world.effect.count == expected_effect_count
     async with world.sessions() as session:

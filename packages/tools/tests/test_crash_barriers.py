@@ -17,7 +17,9 @@ from jhin_tools import (
 
 
 async def wait_until(
-    predicate: Callable[[], bool], *, timeout: float = 1.0  # noqa: ASYNC109
+    predicate: Callable[[], bool],
+    *,
+    timeout: float = 1.0,  # noqa: ASYNC109
 ) -> None:
     async with asyncio.timeout(timeout):
         while not predicate():  # noqa: ASYNC110
