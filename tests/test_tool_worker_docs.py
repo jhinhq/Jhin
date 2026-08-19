@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import shlex
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypedDict, cast
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 README = ROOT / "README.md"
@@ -13,11 +19,34 @@ BOUNDARY_DOC = ROOT / "docs" / "architecture" / "tool-worker-boundary.md"
 SANDBOX_DOC = ROOT / "docs" / "architecture" / "sandboxing.md"
 ENV_EXAMPLE = ROOT / ".env.example"
 
+TARGET_SENSITIVE_ENV = (
+    "APP_ENV",
+    "COMPOSE_FILE",
+    "COMPOSE_PROFILES",
+    "COMPOSE_PROJECT_NAME",
+    "COMPOSE_REMOVE_ORPHANS",
+    "COMPOSE_IGNORE_ORPHANS",
+    "COMPOSE_ENV_FILES",
+    "DOCKER_HOST",
+    "DOCKER_CONTEXT",
+    "DOCKER_TLS",
+    "DOCKER_TLS_VERIFY",
+    "DOCKER_CERT_PATH",
+    "DOCKER_API_VERSION",
+    "DOCKER_DEFAULT_PLATFORM",
+)
+
 
 @dataclass(frozen=True)
 class ComposeCommand:
     files: tuple[str, ...]
     arguments: tuple[str, ...]
+
+
+class AuditEvent(TypedDict):
+    program: str
+    args: list[str]
+    env: dict[str, str | None]
 
 
 def fenced_command_after(document: str, heading: str) -> str:
@@ -67,32 +96,120 @@ def _assert_exact_mode_commands(
         for command in commands
     )
 
-    up_commands = [command for command in commands if command.arguments[:1] == ("up",)]
-    assert len(up_commands) == 1
-    timeout = up_commands[0].arguments[5]
-    assert up_commands[0].arguments == (
-        "up",
-        "-d",
-        "--build",
-        "--wait",
-        "--wait-timeout",
-        timeout,
+    lifecycle = tuple(_compose_lifecycle_phase(command) for command in commands)
+    expected = (
+        (
+            "runner-build",
+            "sandbox-image-build",
+            "up",
+            "adapter-ping",
+            "runner-health",
+            "migrate",
+            "ps",
+        )
+        if overlay == "compose.rootless.yaml"
+        else ("sandbox-image-build", "up", "runner-health", "migrate", "ps")
     )
-    assert timeout.isdecimal() and 1 <= int(timeout) <= 300
+    assert lifecycle == expected
 
-    ps_commands = [command for command in commands if command.arguments[:1] == ("ps",)]
-    assert len(ps_commands) == 1
-    assert ps_commands[0].arguments == ("ps", "--all")
 
-    migrate_commands = [command for command in commands if command.arguments[:1] == ("run",)]
-    assert len(migrate_commands) == 1
-    assert migrate_commands[0].arguments == (
-        "run",
-        "--rm",
-        "--no-deps",
-        "api",
-        "jhin-db-migrate",
+def _compose_lifecycle_phase(command: ComposeCommand) -> str:
+    arguments = command.arguments
+    if arguments == ("build", "sandbox-runner"):
+        return "runner-build"
+    if arguments == ("--profile", "build", "build", "sandbox-image"):
+        return "sandbox-image-build"
+    if arguments == ("up", "-d", "--build", "--wait", "--wait-timeout", "180"):
+        return "up"
+    if arguments[:3] == ("exec", "-T", "rootless-docker-transport"):
+        assert arguments[:5] == ("exec", "-T", "rootless-docker-transport", "python", "-c")
+        assert len(arguments) == 6 and "/_ping" in arguments[-1]
+        return "adapter-ping"
+    if arguments[:3] == ("exec", "-T", "sandbox-runner"):
+        assert arguments[:5] == ("exec", "-T", "sandbox-runner", "python", "-c")
+        assert len(arguments) == 6 and "127.0.0.1:8085/health" in arguments[-1]
+        return "runner-health"
+    if arguments == ("run", "--rm", "--no-deps", "api", "jhin-db-migrate"):
+        return "migrate"
+    if arguments == ("ps", "--all"):
+        return "ps"
+    raise AssertionError(f"unexpected Compose command: {arguments!r}")
+
+
+def _write_audit_stub(path: Path, program: str) -> None:
+    path.write_text(
+        f"""#!/usr/bin/env python3
+import json
+import os
+import sys
+
+names = os.environ["JHIN_DOC_AUDIT_NAMES"].split(",")
+event = {{
+    "program": {program!r},
+    "args": sys.argv[1:],
+    "env": {{name: os.environ.get(name) for name in names}},
+}}
+with open(os.environ["JHIN_DOC_AUDIT_LOG"], "a", encoding="utf-8") as stream:
+    stream.write(json.dumps(event) + "\\n")
+if {program!r} == "docker" and sys.argv[1:2] == ["--host"]:
+    print('["name=rootless"]')
+if {program!r} == "python" and "/var/run/docker.sock" in sys.argv[1:]:
+    print("4321")
+""",
+        encoding="utf-8",
     )
+    path.chmod(0o755)
+
+
+def _execute_fence_with_poisoned_environment(
+    command: str, tmp_path: Path
+) -> tuple[AuditEvent, ...]:
+    binary_dir = tmp_path / "bin"
+    binary_dir.mkdir()
+    for program in ("docker", "python", "uv"):
+        _write_audit_stub(binary_dir / program, program)
+
+    audit_log = tmp_path / "audit.jsonl"
+    environment = os.environ.copy()
+    environment.update({name: f"poison-{name.casefold()}" for name in TARGET_SENSITIVE_ENV})
+    environment["COMPOSE_DISABLE_ENV_FILE"] = "poison-disable-env-file"
+    environment["JHIN_DOC_AUDIT_LOG"] = str(audit_log)
+    environment["JHIN_DOC_AUDIT_NAMES"] = ",".join(
+        (*TARGET_SENSITIVE_ENV, "COMPOSE_DISABLE_ENV_FILE", "PHASE10_SOCKET_MODE")
+    )
+    environment["PATH"] = f"{binary_dir}{os.pathsep}{environment['PATH']}"
+
+    result = subprocess.run(
+        ["bash"],
+        input=command,
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    return tuple(
+        cast(AuditEvent, json.loads(line))
+        for line in audit_log.read_text(encoding="utf-8").splitlines()
+    )
+
+
+def _executed_lifecycle(events: tuple[AuditEvent, ...]) -> tuple[str, ...]:
+    lifecycle: list[str] = []
+    for event in events:
+        if event["program"] == "python":
+            lifecycle.append("socket-preflight")
+        elif event["program"] == "uv":
+            lifecycle.append("compose-assertion")
+        elif event["args"][:1] == ["--host"]:
+            lifecycle.append("daemon-preflight")
+        else:
+            parsed = compose_commands(f"docker {shlex.join(event['args'])}")
+            assert len(parsed) == 1
+            lifecycle.append(_compose_lifecycle_phase(parsed[0]))
+    return tuple(lifecycle)
 
 
 def test_documented_socket_commands_are_executable_and_mutually_exclusive() -> None:
@@ -148,6 +265,83 @@ def test_documented_socket_commands_are_executable_and_mutually_exclusive() -> N
     assert "app_env=production" not in command_text
     for unsafe in ("chmod", "chown", "sudo", "--privileged", "user: 0:0"):
         assert unsafe not in command_text
+
+
+@pytest.mark.parametrize(
+    ("heading", "mode", "socket_url"),
+    (
+        (
+            "### Rootless Docker socket (Linux)",
+            "rootless",
+            "unix:///run/user/10001/docker.sock",
+        ),
+        (
+            "### Rootful Docker socket (Linux)",
+            "rootful",
+            "unix:///var/run/docker.sock",
+        ),
+    ),
+)
+def test_documented_socket_fences_scrub_poisoned_environment_and_execute_exact_lifecycle(
+    heading: str,
+    mode: str,
+    socket_url: str,
+    tmp_path: Path,
+) -> None:
+    command = fenced_command_after(README.read_text(encoding="utf-8"), heading)
+    events = _execute_fence_with_poisoned_environment(command, tmp_path)
+
+    assertion_index = next(index for index, event in enumerate(events) if event["program"] == "uv")
+    for event in events:
+        assert event["env"]["COMPOSE_DISABLE_ENV_FILE"] == "1"
+        assert event["env"]["COMPOSE_PROJECT_NAME"] == "jhin"
+        assert event["env"]["PHASE10_SOCKET_MODE"] == mode
+        for name in TARGET_SENSITIVE_ENV:
+            if name not in {"COMPOSE_PROJECT_NAME", "DOCKER_HOST"}:
+                assert event["env"][name] is None
+
+    assert all(event["env"]["DOCKER_HOST"] is None for event in events[:assertion_index])
+    assert all(event["env"]["DOCKER_HOST"] == socket_url for event in events[assertion_index:])
+
+    assertion = events[assertion_index]
+    assert assertion["args"] == [
+        "run",
+        "python",
+        "scripts/assert_phase10_tool_worker_compose.py",
+        "--mode",
+        mode,
+    ]
+    if mode == "rootless":
+        daemon_preflight = events[1]
+        assert daemon_preflight["args"][:3] == ["--host", socket_url, "info"]
+        assert daemon_preflight["env"]["DOCKER_HOST"] is None
+    else:
+        assert events[0]["args"] == ["-", "/var/run/docker.sock"]
+    expected_lifecycle = (
+        (
+            "socket-preflight",
+            "daemon-preflight",
+            "compose-assertion",
+            "runner-build",
+            "sandbox-image-build",
+            "up",
+            "adapter-ping",
+            "runner-health",
+            "migrate",
+            "ps",
+        )
+        if mode == "rootless"
+        else (
+            "socket-preflight",
+            "compose-assertion",
+            "sandbox-image-build",
+            "up",
+            "runner-health",
+            "migrate",
+            "ps",
+        )
+    )
+    assert _executed_lifecycle(events) == expected_lifecycle
 
 
 def test_boundary_document_binds_ownership_ids_and_compatibility_lifetime() -> None:

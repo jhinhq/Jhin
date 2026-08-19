@@ -29,10 +29,12 @@ cp .env.example .env
 make master-key          # one-time: generate the secret-store master key
 ```
 
-On Linux, choose exactly one Docker socket mode below. The commands deliberately
-disable implicit `.env` loading: export any reviewed infrastructure values in
-the operator environment, but do not put credentials or tokens on the command
-line. A base-only start and a start containing both overlays are invalid.
+On Linux, choose exactly one Docker socket mode below. The commands disable
+implicit `.env` loading, scrub inherited Compose and Docker targeting controls,
+and pin the Compose project to `jhin`: export any reviewed infrastructure
+values in the operator environment, but do not put credentials or tokens on
+the command line. A base-only start and a start containing both overlays are
+invalid. Both modes build the sandbox job image before starting the stack.
 
 ### Rootless Docker socket (Linux)
 
@@ -44,8 +46,23 @@ image is built explicitly before the image-only adapter starts; the adapter has
 
 ```bash
 set -euo pipefail
+unset \
+  APP_ENV \
+  COMPOSE_FILE \
+  COMPOSE_PROFILES \
+  COMPOSE_PROJECT_NAME \
+  COMPOSE_REMOVE_ORPHANS \
+  COMPOSE_IGNORE_ORPHANS \
+  COMPOSE_ENV_FILES \
+  DOCKER_HOST \
+  DOCKER_CONTEXT \
+  DOCKER_TLS \
+  DOCKER_TLS_VERIFY \
+  DOCKER_CERT_PATH \
+  DOCKER_API_VERSION \
+  DOCKER_DEFAULT_PLATFORM
 export COMPOSE_DISABLE_ENV_FILE=1
-unset APP_ENV COMPOSE_FILE COMPOSE_PROFILES
+export COMPOSE_PROJECT_NAME=jhin
 export PHASE10_SOCKET_MODE=rootless
 export PHASE10_ROOTLESS_DOCKER_SOCKET=/run/user/10001/docker.sock
 python - "$PHASE10_ROOTLESS_DOCKER_SOCKET" <<'PY'
@@ -74,6 +91,11 @@ docker compose \
   -f compose.yaml \
   -f compose.rootless.yaml \
   build sandbox-runner
+docker compose \
+  -f compose.yaml \
+  -f compose.rootless.yaml \
+  --profile build \
+  build sandbox-image
 docker compose \
   -f compose.yaml \
   -f compose.rootless.yaml \
@@ -114,8 +136,23 @@ permissions or running Jhin as root.
 
 ```bash
 set -euo pipefail
+unset \
+  APP_ENV \
+  COMPOSE_FILE \
+  COMPOSE_PROFILES \
+  COMPOSE_PROJECT_NAME \
+  COMPOSE_REMOVE_ORPHANS \
+  COMPOSE_IGNORE_ORPHANS \
+  COMPOSE_ENV_FILES \
+  DOCKER_HOST \
+  DOCKER_CONTEXT \
+  DOCKER_TLS \
+  DOCKER_TLS_VERIFY \
+  DOCKER_CERT_PATH \
+  DOCKER_API_VERSION \
+  DOCKER_DEFAULT_PLATFORM
 export COMPOSE_DISABLE_ENV_FILE=1
-unset APP_ENV COMPOSE_FILE COMPOSE_PROFILES
+export COMPOSE_PROJECT_NAME=jhin
 export PHASE10_SOCKET_MODE=rootful
 export SANDBOX_DOCKER_SOCKET_HOST=/var/run/docker.sock
 SANDBOX_DOCKER_GID="$(python - "$SANDBOX_DOCKER_SOCKET_HOST" <<'PY'
@@ -138,6 +175,11 @@ PY
 export SANDBOX_DOCKER_GID
 export DOCKER_HOST="unix://$SANDBOX_DOCKER_SOCKET_HOST"
 uv run python scripts/assert_phase10_tool_worker_compose.py --mode rootful
+docker compose \
+  -f compose.yaml \
+  -f compose.rootful.yaml \
+  --profile build \
+  build sandbox-image
 docker compose \
   -f compose.yaml \
   -f compose.rootful.yaml \
