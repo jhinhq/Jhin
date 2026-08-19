@@ -940,6 +940,8 @@ class ToolGateway:
                 {"approval_id": str(approval_id), "tool_name": tool_name},
             )
             await self._ctx.session.commit()
+            if self._ctx.test_barrier is not None:
+                await self._ctx.test_barrier.arrive_and_wait(TOOL_AFTER_CLAIM, row_id)
         else:
             await self._ctx.session.rollback()
         if claimed_id is not None:
@@ -1643,6 +1645,10 @@ class ToolGateway:
             await self._ctx.session.rollback()
         async with self._invocation_lifecycle_lock(invocation_id) as gateway:
             try:
+                if gateway._ctx.test_barrier is not None:
+                    await gateway._ctx.test_barrier.arrive_and_wait(
+                        TOOL_BEFORE_CLAIM, invocation_id
+                    )
                 outcome = await gateway._resolve_approved_once(approval_id)
                 await gateway._ctx.session.commit()
                 return outcome
