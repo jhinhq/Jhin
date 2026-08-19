@@ -227,16 +227,22 @@ class JobManager:
         effective_gid = os.getegid()
         if self._settings.sandbox_docker_mode == "rootless" and effective_gid != 10001:
             raise DockerSocketConfigurationError("rootless runner requires UID/GID 10001:10001")
+        authority_groups = normalize_supplemental_groups(
+            effective_gid=effective_gid,
+            process_groups=os.getgroups(),
+        )
+        if (
+            self._settings.sandbox_docker_mode == "rootful"
+            and self._settings.sandbox_docker_gid == effective_gid
+        ):
+            authority_groups.add(effective_gid)
         validated_url = validate_docker_authority(
             mode=self._settings.sandbox_docker_mode,
             socket_path=self._settings.sandbox_docker_socket,
             transport_url=self._settings.sandbox_docker_transport_url,
             configured_gid=self._settings.sandbox_docker_gid,
             effective_uid=effective_uid,
-            supplemental_groups=normalize_supplemental_groups(
-                effective_gid=effective_gid,
-                process_groups=os.getgroups(),
-            ),
+            supplemental_groups=authority_groups,
         )
         client = aiodocker.Docker(url=validated_url)
         self._docker = client

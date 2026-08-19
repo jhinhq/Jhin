@@ -420,6 +420,56 @@ async def test_rootful_start_allows_only_the_normalized_socket_group(
         assert startup_docker.instances == []
 
 
+@pytest.mark.parametrize(
+    ("process_groups", "accepted"),
+    [
+        ([], True),
+        ([10001], True),
+        ([10001, 10001], True),
+        ([20002], False),
+        ([10001, 20002], False),
+        ([10001, 10001, 20002], False),
+        ([0], False),
+        ([0, 10001], False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_rootful_start_accepts_primary_gid_as_the_exact_socket_authority(
+    startup_docker: type[_StartupDocker],
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    process_groups: list[int],
+    accepted: bool,
+) -> None:
+    socket_path = tmp_path / "docker.sock"
+    socket_path.touch()
+    fake_stat = type("SocketStat", (), {"st_mode": 0o140000, "st_uid": 0, "st_gid": 10001})()
+    monkeypatch.setattr(type(socket_path), "lstat", lambda _path: fake_stat)
+    monkeypatch.setattr(
+        jobs_module.os,
+        "access",
+        lambda _path, _mode, *, effective_ids: True,
+    )
+    monkeypatch.setattr(jobs_module.os, "getgroups", lambda: process_groups)
+    startup_docker.security_options = []
+    manager = JobManager(
+        runner_settings(
+            sandbox_docker_mode="rootful",
+            sandbox_docker_socket=socket_path,
+            sandbox_docker_transport_url=None,
+            sandbox_docker_gid=10001,
+        )
+    )
+
+    if accepted:
+        await manager.start()
+        assert len(startup_docker.instances) == 1
+    else:
+        with pytest.raises(DockerSocketConfigurationError, match="exact Docker socket group"):
+            await manager.start()
+        assert startup_docker.instances == []
+
+
 @pytest.mark.asyncio
 async def test_rootful_start_does_not_require_rootless_security_option(
     startup_docker: type[_StartupDocker],
