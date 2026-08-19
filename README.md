@@ -54,6 +54,8 @@ unset \
   COMPOSE_REMOVE_ORPHANS \
   COMPOSE_IGNORE_ORPHANS \
   COMPOSE_ENV_FILES \
+  BUILDX_BUILDER \
+  BUILDKIT_HOST \
   DOCKER_HOST \
   DOCKER_CONTEXT \
   DOCKER_TLS \
@@ -86,6 +88,7 @@ case "$rootless_security" in
   *) echo "configured daemon is not rootless" >&2; exit 1 ;;
 esac
 export DOCKER_HOST="unix://$PHASE10_ROOTLESS_DOCKER_SOCKET"
+export BUILDX_BUILDER=default
 uv run python scripts/assert_phase10_tool_worker_compose.py --mode rootless
 docker compose \
   -f compose.yaml \
@@ -144,6 +147,8 @@ unset \
   COMPOSE_REMOVE_ORPHANS \
   COMPOSE_IGNORE_ORPHANS \
   COMPOSE_ENV_FILES \
+  BUILDX_BUILDER \
+  BUILDKIT_HOST \
   DOCKER_HOST \
   DOCKER_CONTEXT \
   DOCKER_TLS \
@@ -174,6 +179,7 @@ PY
 )"
 export SANDBOX_DOCKER_GID
 export DOCKER_HOST="unix://$SANDBOX_DOCKER_SOCKET_HOST"
+export BUILDX_BUILDER=default
 uv run python scripts/assert_phase10_tool_worker_compose.py --mode rootful
 docker compose \
   -f compose.yaml \

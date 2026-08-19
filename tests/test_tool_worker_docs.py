@@ -27,6 +27,8 @@ TARGET_SENSITIVE_ENV = (
     "COMPOSE_REMOVE_ORPHANS",
     "COMPOSE_IGNORE_ORPHANS",
     "COMPOSE_ENV_FILES",
+    "BUILDX_BUILDER",
+    "BUILDKIT_HOST",
     "DOCKER_HOST",
     "DOCKER_CONTEXT",
     "DOCKER_TLS",
@@ -173,9 +175,15 @@ def _execute_fence_with_poisoned_environment(
     environment = os.environ.copy()
     environment.update({name: f"poison-{name.casefold()}" for name in TARGET_SENSITIVE_ENV})
     environment["COMPOSE_DISABLE_ENV_FILE"] = "poison-disable-env-file"
+    environment["DOCKER_CONFIG"] = "preserved-registry-auth"
     environment["JHIN_DOC_AUDIT_LOG"] = str(audit_log)
     environment["JHIN_DOC_AUDIT_NAMES"] = ",".join(
-        (*TARGET_SENSITIVE_ENV, "COMPOSE_DISABLE_ENV_FILE", "PHASE10_SOCKET_MODE")
+        (
+            *TARGET_SENSITIVE_ENV,
+            "COMPOSE_DISABLE_ENV_FILE",
+            "PHASE10_SOCKET_MODE",
+            "DOCKER_CONFIG",
+        )
     )
     environment["PATH"] = f"{binary_dir}{os.pathsep}{environment['PATH']}"
 
@@ -296,12 +304,30 @@ def test_documented_socket_fences_scrub_poisoned_environment_and_execute_exact_l
         assert event["env"]["COMPOSE_DISABLE_ENV_FILE"] == "1"
         assert event["env"]["COMPOSE_PROJECT_NAME"] == "jhin"
         assert event["env"]["PHASE10_SOCKET_MODE"] == mode
+        assert event["env"]["DOCKER_CONFIG"] == "preserved-registry-auth"
         for name in TARGET_SENSITIVE_ENV:
-            if name not in {"COMPOSE_PROJECT_NAME", "DOCKER_HOST"}:
+            if name not in {
+                "COMPOSE_PROJECT_NAME",
+                "DOCKER_HOST",
+                "BUILDX_BUILDER",
+                "BUILDKIT_HOST",
+            }:
                 assert event["env"][name] is None
 
     assert all(event["env"]["DOCKER_HOST"] is None for event in events[:assertion_index])
     assert all(event["env"]["DOCKER_HOST"] == socket_url for event in events[assertion_index:])
+    assert all(
+        {
+            "BUILDX_BUILDER": event["env"]["BUILDX_BUILDER"],
+            "BUILDKIT_HOST": event["env"]["BUILDKIT_HOST"],
+        }
+        == {"BUILDX_BUILDER": None, "BUILDKIT_HOST": None}
+        for event in events[:assertion_index]
+    )
+    assert all(
+        event["env"]["BUILDX_BUILDER"] == "default" and event["env"]["BUILDKIT_HOST"] is None
+        for event in events[assertion_index:]
+    )
 
     assertion = events[assertion_index]
     assert assertion["args"] == [
