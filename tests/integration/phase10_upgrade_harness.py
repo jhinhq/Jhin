@@ -72,6 +72,7 @@ PUBLISHED_ENDPOINTS = (
 )
 
 _MODE_ERROR = "mode must be exactly rootful or rootless"
+_PERSISTENT_COMPOSE_TIMEOUT_SECONDS = 1200.0
 _TARGET_ENVIRONMENT = {
     "APP_ENV",
     "COMPOSE_FILE",
@@ -539,21 +540,132 @@ def _signal_owned_process_group(process_group: int, signum: int) -> None:
         return
 
 
-def _ignore_catchable_signals() -> dict[int, Any]:
-    previous_handlers: dict[int, Any] = {}
-    for signum in (signal.SIGINT, signal.SIGTERM):
+_CATCHABLE_SIGNALS = (signal.SIGINT, signal.SIGTERM)
+_CATCHABLE_SIGNAL_SET = frozenset(_CATCHABLE_SIGNALS)
+
+
+def _atomic_signal_handler_transition(handlers: Mapping[signal.Signals, Any]) -> None:
+    """Change the catchable handler pair without exposing a half-transition."""
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, _CATCHABLE_SIGNAL_SET)
+    previous_handlers = {signum: signal.getsignal(signum) for signum in handlers}
+    transition_errors: list[BaseException] = []
+    for signum, handler in handlers.items():
         try:
-            previous_handlers[signum] = signal.getsignal(signum)
-            signal.signal(signum, signal.SIG_IGN)
-        except ValueError:
-            previous_handlers.clear()
+            signal.signal(signum, handler)
+        except BaseException as error:
+            transition_errors.append(error)
             break
-    return previous_handlers
+    if transition_errors:
+        rollback_errors: list[BaseException] = []
+        for signum, handler in previous_handlers.items():
+            try:
+                signal.signal(signum, handler)
+            except BaseException as error:
+                rollback_errors.append(error)
+        if rollback_errors:
+            # A half-restored pair is safe only while both catchable signals
+            # remain blocked.  The caller receives all transition evidence and
+            # must not begin external or local cleanup.
+            raise BaseExceptionGroup(
+                "catchable signal handler transition and rollback failed",
+                [*transition_errors, *rollback_errors],
+            )
+        try:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        except BaseException as error:
+            transition_errors.append(error)
+        raise BaseExceptionGroup(
+            "catchable signal handler transition failed",
+            transition_errors,
+        )
+    errors: list[BaseException] = []
+    try:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+    except BaseException as error:
+        errors.append(error)
+    if errors:
+        raise BaseExceptionGroup("catchable signal handler transition failed", errors)
 
 
-def _restore_signal_handlers(previous_handlers: Mapping[int, Any]) -> None:
-    for signum, previous in previous_handlers.items():
-        signal.signal(signum, previous)
+@dataclass
+class _CatchableSignalLifecycle:
+    """Prepared signal ownership whose mask stays blocked until activation."""
+
+    previous_handlers: dict[signal.Signals, Any]
+    previous_mask: set[int | signal.Signals]
+    interrupted_signum: int | None = None
+    state: Literal["prepared", "active", "closed"] = "prepared"
+
+    @classmethod
+    def prepare(cls) -> _CatchableSignalLifecycle:
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, _CATCHABLE_SIGNAL_SET)
+        previous_handlers = {signum: signal.getsignal(signum) for signum in _CATCHABLE_SIGNALS}
+        lifecycle = cls(
+            previous_handlers=previous_handlers,
+            previous_mask=previous_mask,
+        )
+        try:
+            for signum in _CATCHABLE_SIGNALS:
+                signal.signal(signum, lifecycle.handle)
+        except BaseException as install_error:
+            restore_errors: list[BaseException] = []
+            for signum, handler in previous_handlers.items():
+                try:
+                    signal.signal(signum, handler)
+                except BaseException as error:
+                    restore_errors.append(error)
+            if restore_errors:
+                raise BaseExceptionGroup(
+                    "catchable signal lifecycle installation and restoration failed",
+                    [install_error, *restore_errors],
+                ) from install_error
+            try:
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+            except BaseException as error:
+                raise BaseExceptionGroup(
+                    "catchable signal lifecycle installation and mask restoration failed",
+                    [install_error, error],
+                ) from install_error
+            raise
+        return lifecycle
+
+    def activate(self) -> None:
+        if self.state != "prepared":
+            return
+        self.state = "active"
+        signal.pthread_sigmask(signal.SIG_SETMASK, self.previous_mask)
+
+    def handle(self, signum: int, frame: Any) -> None:
+        del frame
+        if self.interrupted_signum is not None:
+            return
+        self.interrupted_signum = signum
+        self.ignore()
+        raise _LifecycleSignal(signum)
+
+    def ignore(self) -> None:
+        _atomic_signal_handler_transition(dict.fromkeys(_CATCHABLE_SIGNALS, signal.SIG_IGN))
+
+    def restore(self) -> None:
+        if self.state == "closed":
+            return
+        if self.state == "prepared":
+            restore_errors: list[BaseException] = []
+            for signum, handler in self.previous_handlers.items():
+                try:
+                    signal.signal(signum, handler)
+                except BaseException as error:
+                    restore_errors.append(error)
+            if restore_errors:
+                raise BaseExceptionGroup(
+                    "prepared catchable signal lifecycle restoration failed",
+                    restore_errors,
+                )
+            signal.pthread_sigmask(signal.SIG_SETMASK, self.previous_mask)
+            self.state = "closed"
+            return
+        _atomic_signal_handler_transition(self.previous_handlers)
+        self.state = "closed"
 
 
 def _terminate_owned_process_group(
@@ -562,9 +674,17 @@ def _terminate_owned_process_group(
     process_group: int,
 ) -> tuple[Any, Any]:
     """Terminate, reap, and prove absence of one isolated process group."""
-    previous_handlers = _ignore_catchable_signals()
+    try:
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, _CATCHABLE_SIGNAL_SET)
+    except BaseException as mask_error:
+        raise BaseExceptionGroup(
+            "owned process-group termination could not acquire signal ownership",
+            [mask_error, _OwnedProcessGroupSurvived(process_group)],
+        ) from mask_error
     stdout: Any = None
     stderr: Any = None
+    primary_error: BaseException | None = None
+    absence_proven = False
     try:
         if _owned_process_group_exists(process_group):
             _signal_owned_process_group(process_group, signal.SIGTERM)
@@ -591,9 +711,31 @@ def _terminate_owned_process_group(
                 stdout, stderr = process.communicate(timeout=1.0)
             except subprocess.TimeoutExpired as error:
                 raise _OwnedProcessGroupSurvived(process_group) from error
-        return stdout, stderr
-    finally:
-        _restore_signal_handlers(previous_handlers)
+        absence_proven = True
+    except BaseException as error:
+        primary_error = error
+    restore_error: BaseException | None = None
+    try:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+    except BaseException as error:
+        restore_error = error
+    if restore_error is not None:
+        primary_error = (
+            restore_error
+            if primary_error is None
+            else BaseExceptionGroup(
+                "owned process-group termination and signal restoration failed",
+                [primary_error, restore_error],
+            )
+        )
+    if primary_error is not None:
+        if not absence_proven and not _contains_owned_process_group_survivor(primary_error):
+            primary_error = BaseExceptionGroup(
+                "owned process-group absence was not proven",
+                [primary_error, _OwnedProcessGroupSurvived(process_group)],
+            )
+        raise primary_error
+    return stdout, stderr
 
 
 def run_owned_command(
@@ -608,6 +750,12 @@ def run_owned_command(
     """Run one external command in an owned session and exhaust its descendants."""
     catchable_signals = {signal.SIGINT, signal.SIGTERM}
     previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, catchable_signals)
+
+    def restore_child_signal_state() -> None:
+        for signum in _CATCHABLE_SIGNALS:
+            signal.signal(signum, signal.SIG_DFL)
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
     try:
         process = subprocess.Popen(
             command,
@@ -618,6 +766,7 @@ def run_owned_command(
             stderr=subprocess.PIPE,
             text=input_bytes is None,
             start_new_session=True,
+            preexec_fn=restore_child_signal_state,
         )
     except BaseException:
         signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
@@ -628,6 +777,22 @@ def run_owned_command(
         signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
         mask_restored = True
         stdout, stderr = process.communicate(input=input_bytes, timeout=timeout)
+        if _owned_process_group_exists(process_group):
+            _terminate_owned_process_group(process, process_group=process_group)
+        result = subprocess.CompletedProcess(
+            command,
+            cast(int, process.returncode),
+            stdout,
+            stderr,
+        )
+        if check and result.returncode != 0:
+            raise subprocess.CalledProcessError(
+                result.returncode,
+                command,
+                output=result.stdout,
+                stderr=result.stderr,
+            )
+        return result
     except subprocess.TimeoutExpired as error:
         try:
             stdout, stderr = _terminate_owned_process_group(
@@ -654,23 +819,6 @@ def run_owned_command(
     finally:
         if not mask_restored:
             signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
-
-    if _owned_process_group_exists(process_group):
-        _terminate_owned_process_group(process, process_group=process_group)
-    result = subprocess.CompletedProcess(
-        command,
-        cast(int, process.returncode),
-        stdout,
-        stderr,
-    )
-    if check and result.returncode != 0:
-        raise subprocess.CalledProcessError(
-            result.returncode,
-            command,
-            output=result.stdout,
-            stderr=result.stderr,
-        )
-    return result
 
 
 @dataclass(frozen=True)
@@ -1346,6 +1494,11 @@ class ComposeAuthority:
                 raise RuntimeError("frozen Phase 9 image ID is malformed")
             return FrozenPhase9Image(source_ref=source_ref, tag=tag, image_id=ids[0])
         except BaseException as build_error:
+            if _contains_owned_process_group_survivor(build_error):
+                # The build group can still be mutating the selected daemon.
+                # No inspect/remove command is safe until a recovery operator
+                # has conclusively exhausted that group.
+                raise
             cleanup_error: BaseException | None = None
             try:
                 self.remove_phase9_agent_image(source_ref, runner=runner)
@@ -2868,6 +3021,8 @@ class ComposeAuthority:
                 local_errors,
             ) from authority_error
 
+        fail_closed_runner = _FailClosedCommandRunner(runner)
+        runner = fail_closed_runner
         errors: list[BaseException] = []
         sandbox_artifacts: tuple[SandboxArtifact, ...] = ()
         direct_artifact_filters: tuple[tuple[Literal["container", "volume"], str], ...] = ()
@@ -3062,14 +3217,17 @@ class ComposeAuthority:
         except BaseException as error:
             errors.append(error)
         finally:
-            try:
-                self.assert_socket_unchanged()
-            except BaseException as error:
-                errors.append(error)
-            try:
-                self.remove_runtime_paths()
-            except BaseException as error:
-                errors.append(error)
+            if fail_closed_runner.survivor is None:
+                try:
+                    self.assert_socket_unchanged()
+                except BaseException as error:
+                    errors.append(error)
+                try:
+                    self.remove_runtime_paths()
+                except BaseException as error:
+                    errors.append(error)
+            elif not any(_contains_owned_process_group_survivor(error) for error in errors):
+                errors.append(fail_closed_runner.survivor)
         if errors:
             raise BaseExceptionGroup("Phase 10 cleanup invariants failed", errors)
 
@@ -3631,6 +3789,56 @@ def write_authority_lease(authority: ComposeAuthority, path: Path) -> None:
         os.close(descriptor)
 
 
+def _replace_authority_lease(authority: ComposeAuthority, path: Path) -> None:
+    """Atomically refresh a validated lease without a missing/partial window."""
+    if path.parent != Path("/tmp") or not path.is_absolute():
+        raise ValueError("authority lease must live directly below /tmp")
+    current_descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    temporary_descriptor = -1
+    temporary_path: Path | None = None
+    try:
+        current = os.fstat(current_descriptor)
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or current.st_uid != os.getuid()
+            or stat.S_IMODE(current.st_mode) != 0o600
+        ):
+            raise ValueError("authority lease replacement target is not owner-only")
+        temporary_descriptor, raw_temporary = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+        )
+        temporary_path = Path(raw_temporary)
+        payload = (json.dumps(_authority_record(authority), sort_keys=True) + "\n").encode()
+        written = 0
+        while written < len(payload):
+            written += os.write(temporary_descriptor, payload[written:])
+        os.fchmod(temporary_descriptor, 0o600)
+        os.fsync(temporary_descriptor)
+        os.close(temporary_descriptor)
+        temporary_descriptor = -1
+        os.replace(temporary_path, path)
+        temporary_path = None
+        resolved_parent = path.parent.resolve(strict=True)
+        if resolved_parent != Path("/tmp").resolve(strict=True):
+            raise RuntimeError("authority lease parent identity changed during refresh")
+        directory = os.open(
+            resolved_parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        os.close(current_descriptor)
+        if temporary_descriptor >= 0:
+            os.close(temporary_descriptor)
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
 def _lease_path(value: Any, *, field: str) -> Path:
     if not isinstance(value, str):
         raise ValueError(f"authority lease {field} is malformed")
@@ -3877,6 +4085,41 @@ def _contains_owned_process_group_survivor(error: BaseException | None) -> bool:
     return False
 
 
+def _only_lifecycle_signal(error: BaseException | None) -> int | None:
+    """Return one signum only when every nested failure is that lifecycle signal."""
+    if error is None:
+        return None
+    if isinstance(error, _LifecycleSignal):
+        return error.signum
+    if not isinstance(error, BaseExceptionGroup) or not error.exceptions:
+        return None
+    nested = [_only_lifecycle_signal(item) for item in error.exceptions]
+    if any(signum is None for signum in nested):
+        return None
+    signums = {cast(int, signum) for signum in nested}
+    if len(signums) != 1:
+        return None
+    return next(iter(signums))
+
+
+@dataclass
+class _FailClosedCommandRunner:
+    """Latch the first unexhausted group and issue no later external command."""
+
+    delegate: CommandRunner
+    survivor: BaseException | None = None
+
+    def __call__(self, *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        if self.survivor is not None:
+            raise self.survivor
+        try:
+            return self.delegate(*args, **kwargs)
+        except BaseException as error:
+            if _contains_owned_process_group_survivor(error):
+                self.survivor = error
+            raise
+
+
 def execute_one_shot(
     authority: ComposeAuthority,
     *,
@@ -3884,6 +4127,7 @@ def execute_one_shot(
     lease_path: Path | None = None,
     runner: CommandRunner = run_owned_command,
     child_runner: CommandRunner = run_owned_command,
+    _signal_lifecycle: _CatchableSignalLifecycle | None = None,
 ) -> subprocess.CompletedProcess[Any]:
     """Own stack→child-pytest→exhaustive-cleanup as one signal-safe lifecycle."""
     lease = (
@@ -3894,9 +4138,11 @@ def execute_one_shot(
     if lease.parent != Path("/tmp") or not lease.is_absolute():
         raise ValueError("one-shot authority lease must live directly below /tmp")
 
+    signal_lifecycle = _signal_lifecycle or _CatchableSignalLifecycle.prepare()
     live_authority = authority
     cleaned = False
     cleaning = False
+    external_started = False
     cleanup_errors: list[BaseException] = []
 
     def cleanup() -> None:
@@ -3904,86 +4150,101 @@ def execute_one_shot(
         if cleaned or cleaning:
             return
         cleaning = True
-        latched_group_error: BaseException | None = None
-
-        def fail_closed_cleanup_runner(*args: Any, **kwargs: Any) -> Any:
-            nonlocal latched_group_error
-            if latched_group_error is not None:
-                raise latched_group_error
-            try:
-                return runner(*args, **kwargs)
-            except BaseException as error:
-                if _contains_owned_process_group_survivor(error):
-                    latched_group_error = error
-                raise
-
         try:
+            try:
+                signal_lifecycle.ignore()
+            except BaseException as error:
+                cleanup_errors.append(error)
+                return
+            if not external_started:
+                local_error: BaseException | None = None
+                try:
+                    live_authority.remove_runtime_paths()
+                except BaseException as error:
+                    local_error = error
+                    cleanup_errors.append(error)
+                if local_error is None:
+                    try:
+                        lease.unlink(missing_ok=True)
+                    except BaseException as error:
+                        cleanup_errors.append(error)
+                cleaned = local_error is None
+                return
+
+            cleanup_runner = _FailClosedCommandRunner(runner)
             down_error: BaseException | None = None
             try:
                 live_authority.down_and_cleanup(
-                    runner=fail_closed_cleanup_runner,
+                    runner=cleanup_runner,
                     upgrade=scenario.upgrade,
                 )
             except BaseException as error:
                 down_error = error
                 cleanup_errors.append(error)
-            if latched_group_error is not None and (
+            if cleanup_runner.survivor is not None and (
                 down_error is None or not _contains_owned_process_group_survivor(down_error)
             ):
-                cleanup_errors.append(latched_group_error)
-            if latched_group_error is None:
+                cleanup_errors.append(cleanup_runner.survivor)
+            group_survived = cleanup_runner.survivor is not None or (
+                down_error is not None and _contains_owned_process_group_survivor(down_error)
+            )
+            if not group_survived:
                 try:
                     lease.unlink(missing_ok=True)
                 except BaseException as error:
                     cleanup_errors.append(error)
+            cleaned = down_error is None and not group_survived
         finally:
-            cleaned = True
             cleaning = False
 
-    previous_handlers: dict[int, Any] = {}
-    interrupted_signum: int | None = None
-
-    def handle_signal(signum: int, frame: Any) -> None:
-        nonlocal interrupted_signum
-        del frame
-        if interrupted_signum is not None:
-            return
-        interrupted_signum = signum
-        for caught_signal in (signal.SIGINT, signal.SIGTERM):
-            signal.signal(caught_signal, signal.SIG_IGN)
-        raise _LifecycleSignal(signum)
-
     atexit.register(cleanup)
-    for signum in (signal.SIGINT, signal.SIGTERM):
-        try:
-            previous_handlers[signum] = signal.getsignal(signum)
-            signal.signal(signum, handle_signal)
-        except ValueError:
-            # Signal handlers are process-main-thread infrastructure. Tests may
-            # exercise this function from a worker thread without installing one.
-            previous_handlers.clear()
-            break
 
     primary_error: BaseException | None = None
     result: subprocess.CompletedProcess[Any] | None = None
     try:
+        signal_lifecycle.activate()
         scenario_name = next(
             (name for name, candidate in LIVE_SCENARIOS.items() if candidate == scenario),
             "custom",
         )
+        write_authority_lease(live_authority, lease)
+        external_started = True
         if scenario.start_stack:
             ports = live_authority.start_stack(runner=runner)
             live_authority = live_authority.with_published_ports(ports)
+            _replace_authority_lease(live_authority, lease)
             if scenario.upgrade:
                 source_ref = read_phase9_source_ref(
                     live_authority.repo,
                     runner=runner,
                     environment=live_authority.environment,
                 )
+                planned_environment = live_authority.environment
+                planned_environment.update(
+                    {
+                        "PHASE10_UPGRADE_PHASE9_TAG": live_authority.phase9_image_tag(source_ref),
+                        "PHASE10_UPGRADE_SOURCE_REF": source_ref,
+                    }
+                )
+                live_authority = replace(
+                    live_authority,
+                    _environment_items=tuple(sorted(planned_environment.items())),
+                )
+                _replace_authority_lease(live_authority, lease)
                 frozen = live_authority.build_phase9_agent_image(source_ref, runner=runner)
                 try:
-                    live_authority = live_authority.with_upgrade_runtime(frozen)
+                    previous_mask = signal.pthread_sigmask(
+                        signal.SIG_BLOCK,
+                        _CATCHABLE_SIGNAL_SET,
+                    )
+                    try:
+                        live_authority = live_authority.with_upgrade_runtime(frozen)
+                        _replace_authority_lease(live_authority, lease)
+                    finally:
+                        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
                 except BaseException as setup_error:
+                    if _contains_owned_process_group_survivor(setup_error):
+                        raise
                     try:
                         live_authority.remove_phase9_agent_image(
                             frozen.source_ref,
@@ -4014,7 +4275,6 @@ def execute_one_shot(
                     "JHIN_TEST_COMPOSE_PROJECT": live_authority.project,
                 }
             )
-        write_authority_lease(live_authority, lease)
         result = child_runner(
             build_live_pytest_command(scenario),
             env=child_environment,
@@ -4033,17 +4293,23 @@ def execute_one_shot(
     except BaseException as error:
         primary_error = error
     finally:
-        for signal_number in previous_handlers:
-            signal.signal(signal_number, signal.SIG_IGN)
         child_group_survived = _contains_owned_process_group_survivor(primary_error)
-        if not child_group_survived:
+        transition_safe = True
+        try:
+            signal_lifecycle.ignore()
+        except BaseException as error:
+            transition_safe = False
+            cleanup_errors.append(error)
+        if not child_group_survived and transition_safe:
             cleanup()
         # If bounded SIGKILL could not prove the child group absent, even
         # local lease teardown is withheld: descendants may still be using
         # that authority and no cleanup may race them.
         atexit.unregister(cleanup)
-        for signal_number, previous in previous_handlers.items():
-            signal.signal(signal_number, previous)
+        try:
+            signal_lifecycle.restore()
+        except BaseException as error:
+            cleanup_errors.append(error)
 
     if isinstance(primary_error, _LifecycleSignal):
         primary_error = SystemExit(128 + primary_error.signum)
@@ -4061,6 +4327,30 @@ def execute_one_shot(
     return result
 
 
+def _execute_selected_one_shot(
+    *,
+    repo: Path,
+    mode: str,
+    scenario: LiveScenario,
+) -> subprocess.CompletedProcess[Any]:
+    """Acquire signal ownership before allocating the one-shot authority."""
+    signal_lifecycle = _CatchableSignalLifecycle.prepare()
+    authority: ComposeAuthority | None = None
+    try:
+        authority = select_live_authority(repo=repo, mode=mode)
+        return execute_one_shot(
+            authority,
+            scenario=scenario,
+            _signal_lifecycle=signal_lifecycle,
+        )
+    except BaseException:
+        if authority is not None and signal_lifecycle.state == "prepared":
+            authority.remove_runtime_paths()
+        if signal_lifecycle.state != "closed":
+            signal_lifecycle.restore()
+        raise
+
+
 def _persistent_up(
     *,
     repo: Path,
@@ -4070,70 +4360,92 @@ def _persistent_up(
     lease = lease_path_for(repo)
     if lease.exists() or lease.is_symlink():
         raise FileExistsError(f"persistent Phase 10 lease already exists: {lease}")
-    authority = select_live_authority(repo=repo, mode=mode)
-    previous_handlers: dict[int, Any] = {}
-    interrupted_signum: int | None = None
-
-    def handle_signal(signum: int, frame: Any) -> None:
-        nonlocal interrupted_signum
-        del frame
-        if interrupted_signum is not None:
-            return
-        interrupted_signum = signum
-        for caught_signal in (signal.SIGINT, signal.SIGTERM):
-            signal.signal(caught_signal, signal.SIG_IGN)
-        raise _LifecycleSignal(signum)
-
-    for signum in (signal.SIGINT, signal.SIGTERM):
-        try:
-            previous_handlers[signum] = signal.getsignal(signum)
-            signal.signal(signum, handle_signal)
-        except ValueError:
-            previous_handlers.clear()
-            break
-
-    primary_error: BaseException | None = None
+    signal_lifecycle = _CatchableSignalLifecycle.prepare()
+    authority: ComposeAuthority | None = None
+    external_started = False
+    cleaning = False
+    cleaned = False
     cleanup_errors: list[BaseException] = []
-    try:
-        ports = authority.start_stack(runner=runner)
-        authority = authority.with_published_ports(ports)
-        write_authority_lease(authority, lease)
-    except BaseException as error:
-        primary_error = error
-    finally:
-        for signal_number in previous_handlers:
-            signal.signal(signal_number, signal.SIG_IGN)
-        if primary_error is not None and not _contains_owned_process_group_survivor(primary_error):
-            latched_group_error: BaseException | None = None
 
-            def fail_closed_cleanup_runner(*args: Any, **kwargs: Any) -> Any:
-                nonlocal latched_group_error
-                if latched_group_error is not None:
-                    raise latched_group_error
+    def cleanup() -> None:
+        nonlocal cleaning, cleaned
+        if authority is None or cleaning or cleaned:
+            return
+        cleaning = True
+        try:
+            try:
+                signal_lifecycle.ignore()
+            except BaseException as error:
+                cleanup_errors.append(error)
+                return
+            if not external_started:
+                local_error: BaseException | None = None
                 try:
-                    return runner(*args, **kwargs)
-                except BaseException as cleanup_runner_error:
-                    if _contains_owned_process_group_survivor(cleanup_runner_error):
-                        latched_group_error = cleanup_runner_error
-                    raise
+                    authority.remove_runtime_paths()
+                except BaseException as error:
+                    local_error = error
+                    cleanup_errors.append(error)
+                if local_error is None:
+                    try:
+                        lease.unlink(missing_ok=True)
+                    except BaseException as error:
+                        cleanup_errors.append(error)
+                cleaned = local_error is None
+                return
 
+            cleanup_runner = _FailClosedCommandRunner(runner)
             down_error: BaseException | None = None
             try:
-                authority.down_and_cleanup(runner=fail_closed_cleanup_runner)
+                authority.down_and_cleanup(runner=cleanup_runner)
             except BaseException as error:
                 down_error = error
                 cleanup_errors.append(error)
-            if latched_group_error is not None and (
+            if cleanup_runner.survivor is not None and (
                 down_error is None or not _contains_owned_process_group_survivor(down_error)
             ):
-                cleanup_errors.append(latched_group_error)
-            if latched_group_error is None:
+                cleanup_errors.append(cleanup_runner.survivor)
+            group_survived = cleanup_runner.survivor is not None or (
+                down_error is not None and _contains_owned_process_group_survivor(down_error)
+            )
+            if not group_survived:
                 try:
                     lease.unlink(missing_ok=True)
                 except BaseException as error:
                     cleanup_errors.append(error)
-        for signal_number, previous in previous_handlers.items():
-            signal.signal(signal_number, previous)
+            cleaned = down_error is None and not group_survived
+        finally:
+            cleaning = False
+
+    primary_error: BaseException | None = None
+    atexit.register(cleanup)
+    try:
+        authority = select_live_authority(repo=repo, mode=mode)
+        signal_lifecycle.activate()
+        write_authority_lease(authority, lease)
+        external_started = True
+        ports = authority.start_stack(runner=runner)
+        authority = authority.with_published_ports(ports)
+        _replace_authority_lease(authority, lease)
+    except BaseException as error:
+        primary_error = error
+    finally:
+        transition_safe = True
+        try:
+            signal_lifecycle.ignore()
+        except BaseException as error:
+            transition_safe = False
+            cleanup_errors.append(error)
+        if (
+            primary_error is not None
+            and not _contains_owned_process_group_survivor(primary_error)
+            and transition_safe
+        ):
+            cleanup()
+        atexit.unregister(cleanup)
+        try:
+            signal_lifecycle.restore()
+        except BaseException as error:
+            cleanup_errors.append(error)
 
     if isinstance(primary_error, _LifecycleSignal):
         primary_error = SystemExit(128 + primary_error.signum)
@@ -4146,6 +4458,7 @@ def _persistent_up(
         raise primary_error
     if cleanup_errors:
         raise BaseExceptionGroup("persistent Phase 10 startup cleanup failed", cleanup_errors)
+    assert authority is not None
     return authority
 
 
@@ -4157,30 +4470,110 @@ def _load_persistent(repo: Path) -> tuple[Path, ComposeAuthority]:
 def _persistent_down(
     *,
     repo: Path,
-    runner: CommandRunner = run_command,
+    runner: CommandRunner = run_owned_command,
 ) -> None:
-    lease, authority = _load_persistent(repo)
+    signal_lifecycle = _CatchableSignalLifecycle.prepare()
+    lease: Path | None = None
+    authority: ComposeAuthority | None = None
+    primary_error: BaseException | None = None
+    conclusive_signal: int | None = None
+    transition_errors: list[BaseException] = []
     try:
+        lease, authority = _load_persistent(repo)
+        signal_lifecycle.activate()
         authority.assert_socket_unchanged()
         authority.down_and_cleanup(runner=runner)
+    except BaseException as error:
+        primary_error = error
+        nested_signal = _only_lifecycle_signal(error)
+        if (
+            nested_signal is not None
+            and authority is not None
+            and not authority.runtime_dir.exists()
+            and not authority.barrier_root.exists()
+        ):
+            conclusive_signal = nested_signal
     finally:
-        lease.unlink(missing_ok=True)
+        transition_safe = True
+        try:
+            signal_lifecycle.ignore()
+        except BaseException as error:
+            transition_safe = False
+            transition_errors.append(error)
+        if (
+            (primary_error is None or conclusive_signal is not None)
+            and transition_safe
+            and lease is not None
+        ):
+            try:
+                lease.unlink(missing_ok=True)
+            except BaseException as error:
+                transition_errors.append(error)
+        try:
+            signal_lifecycle.restore()
+        except BaseException as error:
+            transition_errors.append(error)
+
+    if conclusive_signal is not None:
+        primary_error = SystemExit(128 + conclusive_signal)
+    elif isinstance(primary_error, _LifecycleSignal):
+        primary_error = SystemExit(128 + primary_error.signum)
+    if primary_error is not None and transition_errors:
+        raise BaseExceptionGroup(
+            "persistent Phase 10 teardown and signal handoff both failed",
+            [primary_error, *transition_errors],
+        )
+    if primary_error is not None:
+        raise primary_error
+    if transition_errors:
+        raise BaseExceptionGroup("persistent Phase 10 teardown handoff failed", transition_errors)
 
 
 def _persistent_compose(
     *,
     repo: Path,
     arguments: Sequence[str],
-    runner: CommandRunner = run_command,
+    runner: CommandRunner = run_owned_command,
 ) -> subprocess.CompletedProcess[Any]:
-    _lease, authority = _load_persistent(repo)
-    authority.assert_socket_unchanged()
-    selected_arguments = validate_persistent_compose_arguments(arguments)
-    return authority._run(
-        authority.compose_command(*selected_arguments),
-        runner=runner,
-        timeout=1200.0,
-    )
+    signal_lifecycle = _CatchableSignalLifecycle.prepare()
+    primary_error: BaseException | None = None
+    transition_errors: list[BaseException] = []
+    result: subprocess.CompletedProcess[Any] | None = None
+    try:
+        _lease, authority = _load_persistent(repo)
+        signal_lifecycle.activate()
+        authority.assert_socket_unchanged()
+        selected_arguments = validate_persistent_compose_arguments(arguments)
+        result = authority._run(
+            authority.compose_command(*selected_arguments),
+            runner=runner,
+            timeout=_PERSISTENT_COMPOSE_TIMEOUT_SECONDS,
+        )
+    except BaseException as error:
+        primary_error = error
+    finally:
+        try:
+            signal_lifecycle.ignore()
+        except BaseException as error:
+            transition_errors.append(error)
+        try:
+            signal_lifecycle.restore()
+        except BaseException as error:
+            transition_errors.append(error)
+
+    if isinstance(primary_error, _LifecycleSignal):
+        primary_error = SystemExit(128 + primary_error.signum)
+    if primary_error is not None and transition_errors:
+        raise BaseExceptionGroup(
+            "persistent Phase 10 Compose command and signal handoff both failed",
+            [primary_error, *transition_errors],
+        )
+    if primary_error is not None:
+        raise primary_error
+    if transition_errors:
+        raise BaseExceptionGroup("persistent Phase 10 Compose handoff failed", transition_errors)
+    assert result is not None
+    return result
 
 
 _PERSISTENT_COMPOSE_ALLOWLIST = frozenset(
@@ -4221,8 +4614,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     repo = Path(__file__).resolve().parents[2]
     if args.command == "run":
-        authority = select_live_authority(repo=repo, mode=cast(str, args.mode))
-        execute_one_shot(authority, scenario=LIVE_SCENARIOS[cast(str, args.scenario)])
+        _execute_selected_one_shot(
+            repo=repo,
+            mode=cast(str, args.mode),
+            scenario=LIVE_SCENARIOS[cast(str, args.scenario)],
+        )
         return 0
     if args.command == "up":
         authority = _persistent_up(repo=repo, mode=cast(str, args.mode))

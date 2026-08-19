@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import os
+import shutil
 import signal
 import stat
 import subprocess
@@ -467,6 +468,34 @@ def test_frozen_phase9_build_timeout_attempts_only_exact_tag_cleanup() -> None:
         assert authority.docker_command("image", "rm", tag) in calls
         assert calls.count(authority.docker_command("image", "inspect", tag)) == 2
         assert not any("compose" in call for call in calls)
+    finally:
+        authority.remove_runtime_paths()
+
+
+def test_frozen_phase9_build_group_survivor_starts_no_cleanup_command() -> None:
+    authority = _authority_for_recorder()
+    source_ref = "6318781b57692bf39f37cd428d73de115d7458e2"
+    calls: list[tuple[str, ...]] = []
+
+    def surviving_build_runner(
+        command: tuple[str, ...],
+        **kwargs: Any,
+    ) -> subprocess.CompletedProcess[bytes]:
+        del kwargs
+        calls.append(command)
+        if command == authority.phase9_archive_command(source_ref):
+            return subprocess.CompletedProcess(command, 0, b"phase9-tar-stream", b"")
+        if command == authority.phase9_build_command(source_ref):
+            raise lifecycle._OwnedProcessGroupSurvived(4747)
+        return subprocess.CompletedProcess(command, 1, b"", b"not found")
+
+    try:
+        with pytest.raises(RuntimeError, match=r"4747.*survived"):
+            authority.build_phase9_agent_image(source_ref, runner=surviving_build_runner)
+        assert calls == [
+            authority.phase9_archive_command(source_ref),
+            authority.phase9_build_command(source_ref),
+        ]
     finally:
         authority.remove_runtime_paths()
 
@@ -2335,6 +2364,42 @@ def test_one_shot_withholds_cleanup_if_owned_child_group_survives(
         authority.remove_runtime_paths()
 
 
+def test_one_shot_journals_recovery_lease_before_first_mutating_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _authority_for_recorder()
+    lease = Path("/tmp") / f"jhin-p10-recovery-before-start-{uuid.uuid4().hex}.json"
+    lease_seen_before_start: list[bool] = []
+    cleanup_calls: list[bool] = []
+
+    def surviving_start(self: ComposeAuthority, *, runner: Any) -> dict[str, int]:
+        del self, runner
+        lease_seen_before_start.append(lease.is_file())
+        raise lifecycle._OwnedProcessGroupSurvived(4243)
+
+    monkeypatch.setattr(ComposeAuthority, "start_stack", surviving_start)
+    monkeypatch.setattr(
+        ComposeAuthority,
+        "down_and_cleanup",
+        lambda self, *, runner, upgrade=False: cleanup_calls.append(upgrade),
+    )
+    scenario = LiveScenario(nodes=("recovery-lease",), expected_tests=1)
+    try:
+        with pytest.raises(RuntimeError, match=r"4243.*survived"):
+            execute_one_shot(authority, scenario=scenario, lease_path=lease)
+        assert lease_seen_before_start == [True]
+        assert cleanup_calls == []
+        loaded = read_authority_lease(lease, expected_repo=authority.repo)
+        assert loaded.project == authority.project
+        assert loaded.runtime_dir == authority.runtime_dir
+        assert loaded.published_ports == {}
+        assert authority.runtime_dir.is_dir()
+        assert authority.barrier_root.is_dir()
+    finally:
+        lease.unlink(missing_ok=True)
+        authority.remove_runtime_paths()
+
+
 def test_one_shot_cleanup_stops_commands_and_withholds_lease_on_group_survivor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2391,6 +2456,51 @@ def test_one_shot_cleanup_stops_commands_and_withholds_lease_on_group_survivor(
             )
         assert runner_calls == [("cleanup-first",)]
         assert lease.is_file()
+    finally:
+        lease.unlink(missing_ok=True)
+        authority.remove_runtime_paths()
+
+
+def test_real_cleanup_survivor_retains_lease_key_and_runtime_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _authority_for_recorder()
+    lease = Path("/tmp") / f"jhin-p10-real-cleanup-survivor-{uuid.uuid4().hex}.json"
+    authority.master_key_path.write_bytes(b"k" * 32)
+    os.chmod(authority.master_key_path, 0o400)
+    runner_calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(ComposeAuthority, "preflight", lambda self, *, runner: None)
+
+    def surviving_cleanup_group(command: tuple[str, ...], **kwargs: Any) -> Any:
+        del kwargs
+        runner_calls.append(command)
+        raise lifecycle._OwnedProcessGroupSurvived(4646)
+
+    def child_runner(command: tuple[str, ...], **kwargs: Any) -> Any:
+        del kwargs
+        return subprocess.CompletedProcess(command, 0, "passed\n", "")
+
+    scenario = LiveScenario(nodes=("real-cleanup-survivor",), expected_tests=1, start_stack=False)
+    try:
+        with pytest.raises(BaseExceptionGroup, match="cleanup") as raised:
+            execute_one_shot(
+                authority,
+                scenario=scenario,
+                lease_path=lease,
+                runner=surviving_cleanup_group,
+                child_runner=child_runner,
+            )
+        assert lifecycle._contains_owned_process_group_survivor(raised.value)
+        assert len(runner_calls) == 1
+        assert lease.is_file()
+        assert authority.runtime_dir.is_dir()
+        assert authority.barrier_root.is_dir()
+        assert authority.master_key_path.read_bytes() == b"k" * 32
+        assert stat.S_IMODE(authority.master_key_path.lstat().st_mode) == 0o400
+        loaded = read_authority_lease(lease, expected_repo=authority.repo)
+        assert loaded.runtime_dir == authority.runtime_dir
+        assert loaded.barrier_root == authority.barrier_root
+        assert loaded.master_key_path == authority.master_key_path
     finally:
         lease.unlink(missing_ok=True)
         authority.remove_runtime_paths()
@@ -2472,6 +2582,7 @@ def _spawn_signal_lifecycle_probe(
     script = r"""
 import json
 import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -2575,7 +2686,7 @@ child_code = (
 )
 
 def selected_preflight(self, *, runner):
-    if stage in {"preflight", "preflight-timeout"}:
+    if stage in {"preflight", "preflight-timeout", "termination-transition"}:
         runner(
             (
                 sys.executable,
@@ -2587,13 +2698,31 @@ def selected_preflight(self, *, runner):
             ),
             env=self.environment,
             cwd=repo,
-            timeout=0.5 if stage == "preflight-timeout" else 300.0,
+            timeout=0.5 if stage in {"preflight-timeout", "termination-transition"} else 300.0,
             check=True,
             input_bytes=None,
         )
 
 lifecycle.ComposeAuthority.preflight = selected_preflight
 lifecycle.ComposeAuthority.down_and_cleanup = observed_cleanup
+if stage == "termination-transition":
+    real_signal = lifecycle.signal.signal
+    transition_injected = False
+
+    def inject_signal_during_ignore(signum, handler):
+        global transition_injected
+        result = real_signal(signum, handler)
+        if (
+            not transition_injected
+            and handler is signal.SIG_IGN
+            and child_pid_path.is_file()
+            and grandchild_pid_path.is_file()
+        ):
+            transition_injected = True
+            os.kill(os.getpid(), signal.SIGTERM)
+        return result
+
+    lifecycle.signal.signal = inject_signal_during_ignore
 if stage == "pytest":
     lifecycle.build_live_pytest_command = lambda scenario: (
         sys.executable,
@@ -2798,6 +2927,131 @@ finally:
     return process, child_state, lease
 
 
+def _spawn_post_communicate_signal_probe(
+    tmp_path: Path,
+) -> tuple[subprocess.Popen[str], Path, Path]:
+    repo = Path(__file__).resolve().parents[2]
+    token = uuid.uuid4().hex[:12]
+    lease = Path("/tmp") / f"jhin-p10-post-communicate-{token}.json"
+    script = r"""
+import json
+import os
+import signal
+import subprocess
+import sys
+from pathlib import Path
+
+from tests.integration import phase10_upgrade_harness as lifecycle
+
+root = Path(sys.argv[1])
+repo = Path(sys.argv[2])
+lease = Path(sys.argv[3])
+token = sys.argv[4]
+descendant_state = root / "post-communicate-descendant.json"
+cleanup_state = root / "post-communicate-cleanup.json"
+
+authority = lifecycle.ComposeAuthority.create(
+    repo=repo,
+    mode="rootful",
+    socket_path=Path("/var/run/docker.sock"),
+    socket_gid=123,
+    token=token,
+    source_environment={"PATH": os.environ.get("PATH", "/usr/bin")},
+)
+
+def no_preflight(self, *, runner):
+    del self, runner
+
+def observed_cleanup(self, *, runner, upgrade=False):
+    del self, runner, upgrade
+    descendant = json.loads(descendant_state.read_text(encoding="utf-8"))
+    try:
+        os.kill(descendant["pid"], 0)
+    except ProcessLookupError:
+        descendant_alive = False
+    else:
+        descendant_alive = True
+    try:
+        os.killpg(descendant["pgid"], 0)
+    except ProcessLookupError:
+        group_alive = False
+    else:
+        group_alive = True
+    cleanup_state.write_text(
+        json.dumps(
+            {"descendant_alive": descendant_alive, "group_alive": group_alive}
+        ),
+        encoding="utf-8",
+    )
+
+descendant_code = (
+    "import signal,time\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    "time.sleep(300)\n"
+)
+child_code = (
+    "import json,os,subprocess,sys\n"
+    "from pathlib import Path\n"
+    f"descendant_code = {descendant_code!r}\n"
+    "descendant = subprocess.Popen(\n"
+    "    (sys.executable, '-c', descendant_code),\n"
+    "    stdin=subprocess.DEVNULL,\n"
+    "    stdout=subprocess.DEVNULL,\n"
+    "    stderr=subprocess.DEVNULL,\n"
+    "    close_fds=True,\n"
+    ")\n"
+    "Path(sys.argv[1]).write_text(json.dumps({'pid': descendant.pid, "
+    "'pgid': os.getpgid(descendant.pid)}), encoding='utf-8')\n"
+)
+
+lifecycle.ComposeAuthority.preflight = no_preflight
+lifecycle.ComposeAuthority.down_and_cleanup = observed_cleanup
+lifecycle.build_live_pytest_command = lambda scenario: (
+    sys.executable,
+    "-c",
+    child_code,
+    str(descendant_state),
+)
+real_group_exists = lifecycle._owned_process_group_exists
+signal_injected = False
+
+def inject_signal_on_post_communicate_check(process_group):
+    global signal_injected
+    if not signal_injected and descendant_state.is_file():
+        signal_injected = True
+        os.kill(os.getpid(), signal.SIGTERM)
+    return real_group_exists(process_group)
+
+lifecycle._owned_process_group_exists = inject_signal_on_post_communicate_check
+scenario = lifecycle.LiveScenario(
+    nodes=("post-communicate",),
+    expected_tests=1,
+    start_stack=False,
+)
+try:
+    lifecycle.execute_one_shot(authority, scenario=scenario, lease_path=lease)
+finally:
+    authority.remove_runtime_paths()
+"""
+    process = subprocess.Popen(
+        (sys.executable, "-c", script, str(tmp_path), str(repo), str(lease), token),
+        cwd=repo,
+        env=os.environ.copy(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    descendant_state = tmp_path / "post-communicate-descendant.json"
+    deadline = time.monotonic() + 10.0
+    while not descendant_state.is_file() and process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    if not descendant_state.is_file():
+        stdout, stderr = process.communicate(timeout=5.0)
+        pytest.fail(f"post-communicate descendant did not start: {stdout=} {stderr=}")
+    return process, descendant_state, lease
+
+
 def _spawn_persistent_start_probe(
     tmp_path: Path,
     *,
@@ -2963,6 +3217,315 @@ finally:
     return process, child_state, lease
 
 
+def _spawn_authority_selection_signal_probe(
+    tmp_path: Path,
+    *,
+    operation: str,
+) -> tuple[subprocess.Popen[str], Path, Path]:
+    repo = Path(__file__).resolve().parents[2]
+    token = uuid.uuid4().hex[:12]
+    lease = lease_path_for(repo)
+    assert not lease.exists() and not lease.is_symlink()
+    script = r"""
+import json
+import os
+import signal
+import sys
+from pathlib import Path
+
+from tests.integration import phase10_upgrade_harness as lifecycle
+
+operation = sys.argv[1]
+root = Path(sys.argv[2])
+repo = Path(sys.argv[3])
+token = sys.argv[4]
+authority_state = root / "selection-authority.json"
+
+def signal_after_selection(*, repo, mode):
+    authority = lifecycle.ComposeAuthority.create(
+        repo=repo,
+        mode=mode,
+        socket_path=Path("/var/run/docker.sock"),
+        socket_gid=123,
+        token=token,
+        source_environment={"PATH": os.environ.get("PATH", "/usr/bin")},
+    )
+    authority_state.write_text(
+        json.dumps(
+            {
+                "runtime": str(authority.runtime_dir),
+                "barrier": str(authority.barrier_root),
+            }
+        ),
+        encoding="utf-8",
+    )
+    os.kill(os.getpid(), signal.SIGTERM)
+    return authority
+
+lifecycle.select_live_authority = signal_after_selection
+if operation == "run":
+    lifecycle.main(("run", "--mode", "rootful", "--scenario", "wrong-gid"))
+elif operation == "persistent-up":
+    lifecycle.main(("up", "--mode", "rootful"))
+else:
+    raise AssertionError(f"unknown operation: {operation}")
+"""
+    process = subprocess.Popen(
+        (sys.executable, "-c", script, operation, str(tmp_path), str(repo), token),
+        cwd=repo,
+        env=os.environ.copy(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    authority_state = tmp_path / "selection-authority.json"
+    deadline = time.monotonic() + 10.0
+    while not authority_state.is_file() and process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    if not authority_state.is_file():
+        stdout, stderr = process.communicate(timeout=5.0)
+        pytest.fail(f"selection authority was not allocated: {stdout=} {stderr=}")
+    return process, authority_state, lease
+
+
+def _spawn_persistent_command_probe(
+    tmp_path: Path,
+    *,
+    operation: str,
+    failure: str,
+) -> tuple[subprocess.Popen[str], Path, Path, Path]:
+    repo = Path(__file__).resolve().parents[2]
+    token = uuid.uuid4().hex[:12]
+    lease = lease_path_for(repo)
+    assert not lease.exists() and not lease.is_symlink()
+    script = r"""
+import json
+import os
+import sys
+from pathlib import Path
+
+from tests.integration import phase10_upgrade_harness as lifecycle
+
+operation = sys.argv[1]
+failure = sys.argv[2]
+root = Path(sys.argv[3])
+repo = Path(sys.argv[4])
+token = sys.argv[5]
+child_state = root / "persistent-command-child.json"
+grandchild_state = root / "persistent-command-grandchild.json"
+mutation_path = root / "persistent-command-mutations"
+authority_state = root / "persistent-command-authority.json"
+
+authority = lifecycle.ComposeAuthority.create(
+    repo=repo,
+    mode="rootful",
+    socket_path=Path("/var/run/docker.sock"),
+    socket_gid=123,
+    token=token,
+    source_environment={"PATH": os.environ.get("PATH", "/usr/bin")},
+)
+lifecycle.write_authority_lease(authority, lifecycle.lease_path_for(repo))
+authority_state.write_text(
+    json.dumps(
+        {"runtime": str(authority.runtime_dir), "barrier": str(authority.barrier_root)}
+    ),
+    encoding="utf-8",
+)
+
+grandchild_code = (
+    "import json,os,signal,sys,time\n"
+    "from pathlib import Path\n"
+    "state = Path(sys.argv[1])\n"
+    "mutations = Path(sys.argv[2])\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    "state.write_text(json.dumps({'pid': os.getpid(), 'pgid': os.getpgrp()}), "
+    "encoding='utf-8')\n"
+    "while True:\n"
+    "    with mutations.open('a', encoding='utf-8') as stream:\n"
+    "        stream.write('mutation\\n')\n"
+    "        stream.flush()\n"
+    "        os.fsync(stream.fileno())\n"
+    "    time.sleep(0.02)\n"
+)
+child_code = (
+    "import json,os,sys\n"
+    "from pathlib import Path\n"
+    "from tests.integration import phase10_upgrade_harness as nested_lifecycle\n"
+    "Path(sys.argv[1]).write_text(json.dumps({'pid': os.getpid(), "
+    "'pgid': os.getpgrp()}), encoding='utf-8')\n"
+    f"grandchild_code = {grandchild_code!r}\n"
+    "nested_lifecycle.run_command(\n"
+    "    (sys.executable, '-c', grandchild_code, sys.argv[2], sys.argv[3]),\n"
+    "    env=os.environ.copy(),\n"
+    "    cwd=Path.cwd(),\n"
+    "    timeout=300.0,\n"
+    "    check=True,\n"
+    ")\n"
+)
+child_command = (
+    sys.executable,
+    "-c",
+    child_code,
+    str(child_state),
+    str(grandchild_state),
+    str(mutation_path),
+)
+
+def run_child(self, *, runner, upgrade=False):
+    del upgrade
+    runner(
+        child_command,
+        env=self.environment,
+        cwd=repo,
+        timeout=0.5 if failure == "timeout" else 300.0,
+        check=True,
+        input_bytes=None,
+    )
+
+def compose_child(self, *args, upgrade=False):
+    del self, args, upgrade
+    return child_command
+
+lifecycle.ComposeAuthority.down_and_cleanup = run_child
+lifecycle.ComposeAuthority.compose_command = compose_child
+if failure == "timeout":
+    lifecycle._PERSISTENT_COMPOSE_TIMEOUT_SECONDS = 0.5
+if operation == "down":
+    lifecycle.main(("down",))
+elif operation == "compose":
+    lifecycle.main(
+        ("compose", "--", "run", "--rm", "--no-deps", "api", "jhin-db-migrate")
+    )
+else:
+    raise AssertionError(f"unknown persistent operation: {operation}")
+"""
+    process = subprocess.Popen(
+        (
+            sys.executable,
+            "-c",
+            script,
+            operation,
+            failure,
+            str(tmp_path),
+            str(repo),
+            token,
+        ),
+        cwd=repo,
+        env=os.environ.copy(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    child_state = tmp_path / "persistent-command-child.json"
+    grandchild_state = tmp_path / "persistent-command-grandchild.json"
+    mutation_path = tmp_path / "persistent-command-mutations"
+    deadline = time.monotonic() + 10.0
+    while (
+        not (child_state.is_file() and grandchild_state.is_file() and mutation_path.is_file())
+        and process.poll() is None
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.02)
+    if not (child_state.is_file() and grandchild_state.is_file() and mutation_path.is_file()):
+        stdout, stderr = process.communicate(timeout=5.0)
+        pytest.fail(f"persistent command descendants did not start: {stdout=} {stderr=}")
+    return process, child_state, mutation_path, lease
+
+
+def _spawn_persistent_cleanup_handoff_probe(
+    tmp_path: Path,
+) -> tuple[subprocess.Popen[str], Path, Path]:
+    repo = Path(__file__).resolve().parents[2]
+    token = uuid.uuid4().hex[:12]
+    lease = lease_path_for(repo)
+    assert not lease.exists() and not lease.is_symlink()
+    script = r"""
+import json
+import os
+import signal
+import sys
+from pathlib import Path
+
+from tests.integration import phase10_upgrade_harness as lifecycle
+
+root = Path(sys.argv[1])
+repo = Path(sys.argv[2])
+token = sys.argv[3]
+startup_failed = root / "persistent-handoff-startup-failed"
+cleanup_finished = root / "persistent-handoff-cleanup-finished"
+authority_state = root / "persistent-handoff-authority.json"
+
+authority = lifecycle.ComposeAuthority.create(
+    repo=repo,
+    mode="rootful",
+    socket_path=Path("/var/run/docker.sock"),
+    socket_gid=123,
+    token=token,
+    source_environment={"PATH": os.environ.get("PATH", "/usr/bin")},
+)
+authority_state.write_text(
+    json.dumps(
+        {"runtime": str(authority.runtime_dir), "barrier": str(authority.barrier_root)}
+    ),
+    encoding="utf-8",
+)
+
+def select_authority(*, repo, mode):
+    del repo, mode
+    return authority
+
+def fail_start(self, *, runner):
+    del self, runner
+    startup_failed.write_text("failed", encoding="utf-8")
+    raise RuntimeError("synthetic persistent startup failure")
+
+def conclusive_cleanup(self, *, runner, upgrade=False):
+    del runner, upgrade
+    self.remove_runtime_paths()
+    cleanup_finished.write_text("finished", encoding="utf-8")
+
+lifecycle.select_live_authority = select_authority
+lifecycle.ComposeAuthority.start_stack = fail_start
+lifecycle.ComposeAuthority.down_and_cleanup = conclusive_cleanup
+real_signal = lifecycle.signal.signal
+transition_injected = False
+
+def inject_signal_during_cleanup_handoff(signum, handler):
+    global transition_injected
+    result = real_signal(signum, handler)
+    if (
+        not transition_injected
+        and handler is signal.SIG_IGN
+        and startup_failed.is_file()
+    ):
+        transition_injected = True
+        os.kill(os.getpid(), signal.SIGTERM)
+    return result
+
+lifecycle.signal.signal = inject_signal_during_cleanup_handoff
+lifecycle.main(("up", "--mode", "rootful"))
+"""
+    process = subprocess.Popen(
+        (sys.executable, "-c", script, str(tmp_path), str(repo), token),
+        cwd=repo,
+        env=os.environ.copy(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    authority_state = tmp_path / "persistent-handoff-authority.json"
+    deadline = time.monotonic() + 10.0
+    while not authority_state.is_file() and process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    if not authority_state.is_file():
+        stdout, stderr = process.communicate(timeout=5.0)
+        pytest.fail(f"persistent handoff authority did not start: {stdout=} {stderr=}")
+    return process, authority_state, lease
+
+
 def _finish_persistent_start_probe(
     process: subprocess.Popen[str],
     child_state_path: Path,
@@ -3125,6 +3688,105 @@ def test_owned_live_child_preserves_output_and_check_semantics(tmp_path: Path) -
     assert raised.value.stderr == "stderr-value\n"
 
 
+def test_owned_child_restores_the_callers_exact_signal_mask(tmp_path: Path) -> None:
+    catchable = {signal.SIGINT, signal.SIGTERM}
+    original_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    original_handlers = {
+        signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+    caller_mask = (original_mask - catchable) | {signal.SIGUSR1}
+    signal.pthread_sigmask(signal.SIG_SETMASK, caller_mask)
+    for signum in catchable:
+        signal.signal(signum, signal.SIG_IGN)
+    command = (
+        sys.executable,
+        "-c",
+        "import json,signal\n"
+        "def describe(item):\n"
+        "    handler = signal.getsignal(item)\n"
+        "    if handler is signal.default_int_handler:\n"
+        "        return 'default_int_handler'\n"
+        "    return int(handler)\n"
+        "print(json.dumps({'mask': sorted(int(item) for item in "
+        "signal.pthread_sigmask(signal.SIG_BLOCK, set())), 'handlers': [describe("
+        "item) for item in (signal.SIGINT, signal.SIGTERM)]}))",
+    )
+    try:
+        result = lifecycle.run_owned_command(
+            command,
+            env=os.environ.copy(),
+            cwd=tmp_path,
+            timeout=5.0,
+            check=True,
+        )
+        restored_parent_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, original_mask)
+        for signum, handler in original_handlers.items():
+            signal.signal(signum, handler)
+
+    child_state = json.loads(cast(str, result.stdout))
+    assert child_state == {
+        "mask": sorted(int(item) for item in caller_mask),
+        "handlers": ["default_int_handler", int(signal.SIG_DFL)],
+    }
+    assert restored_parent_mask == caller_mask
+
+
+def test_owned_timeout_delivers_term_handler_before_considering_kill(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    child_state = tmp_path / "term-grace-child.json"
+    term_marker = tmp_path / "term-grace-handler"
+    delivered: list[int] = []
+    real_signal_group = lifecycle._signal_owned_process_group
+
+    def record_signal(process_group: int, signum: int) -> None:
+        delivered.append(signum)
+        real_signal_group(process_group, signum)
+
+    monkeypatch.setattr(lifecycle, "_signal_owned_process_group", record_signal)
+    child_code = (
+        "import json,os,signal,sys,time\n"
+        "from pathlib import Path\n"
+        "state = Path(sys.argv[1])\n"
+        "marker = Path(sys.argv[2])\n"
+        "def terminate(signum, frame):\n"
+        "    del signum, frame\n"
+        "    marker.write_text('term', encoding='utf-8')\n"
+        "    raise SystemExit(0)\n"
+        "signal.signal(signal.SIGTERM, terminate)\n"
+        "state.write_text(json.dumps({'pid': os.getpid(), 'pgid': os.getpgrp()}), "
+        "encoding='utf-8')\n"
+        "while True:\n"
+        "    time.sleep(0.02)\n"
+    )
+    child_group: int | None = None
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            lifecycle.run_owned_command(
+                (sys.executable, "-c", child_code, str(child_state), str(term_marker)),
+                env=os.environ.copy(),
+                cwd=tmp_path,
+                timeout=1.0,
+                check=True,
+            )
+        state = json.loads(child_state.read_text(encoding="utf-8"))
+        child_group = int(state["pgid"])
+        assert child_group == int(state["pid"])
+        assert term_marker.read_text(encoding="utf-8") == "term"
+        assert delivered == [signal.SIGTERM]
+        with pytest.raises(ProcessLookupError):
+            os.killpg(child_group, 0)
+    finally:
+        if child_group is None and child_state.is_file():
+            child_group = int(json.loads(child_state.read_text(encoding="utf-8"))["pgid"])
+        if child_group is not None:
+            _signal_test_process_group(child_group)
+            _wait_for_test_process_group_exit(child_group)
+
+
 @pytest.mark.parametrize("signum", (signal.SIGINT, signal.SIGTERM))
 def test_owned_spawn_window_defers_signal_until_group_can_be_exhausted(
     tmp_path: Path,
@@ -3189,6 +3851,156 @@ def test_owned_spawn_failure_restores_catchable_signal_mask(
     assert restored_mask == original_mask
 
 
+@pytest.mark.parametrize("rollback_fails", (False, True))
+def test_atomic_handler_transition_rolls_back_or_keeps_signals_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+    rollback_fails: bool,
+) -> None:
+    caught = (signal.SIGINT, signal.SIGTERM)
+    original_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    original_handlers = {signum: signal.getsignal(signum) for signum in caught}
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, set(caught))
+    real_signal = signal.signal
+    target_failed = False
+    rollback_failed = False
+
+    def fail_second_target_then_optional_rollback(signum: int, handler: Any) -> Any:
+        nonlocal target_failed, rollback_failed
+        if signum == signal.SIGTERM and handler is signal.SIG_IGN and not target_failed:
+            target_failed = True
+            raise RuntimeError("synthetic second-handler transition failure")
+        if (
+            rollback_fails
+            and target_failed
+            and not rollback_failed
+            and signum == signal.SIGINT
+            and handler == original_handlers[signal.SIGINT]
+        ):
+            rollback_failed = True
+            raise RuntimeError("synthetic handler rollback failure")
+        return real_signal(signum, handler)
+
+    monkeypatch.setattr(signal, "signal", fail_second_target_then_optional_rollback)
+    try:
+        with pytest.raises(BaseExceptionGroup, match="handler transition"):
+            lifecycle._atomic_signal_handler_transition(dict.fromkeys(caught, signal.SIG_IGN))
+        observed_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        observed_handlers = {signum: signal.getsignal(signum) for signum in caught}
+        if rollback_fails:
+            assert set(caught) <= observed_mask
+        else:
+            assert observed_mask == original_mask
+            assert observed_handlers == original_handlers
+    finally:
+        monkeypatch.setattr(signal, "signal", real_signal)
+        for signum, handler in original_handlers.items():
+            real_signal(signum, handler)
+        signal.pthread_sigmask(signal.SIG_SETMASK, original_mask)
+
+
+def test_signal_lifecycle_prepare_rollback_failure_keeps_signals_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    caught = (signal.SIGINT, signal.SIGTERM)
+    original_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    original_handlers = {signum: signal.getsignal(signum) for signum in caught}
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, set(caught))
+    real_signal = signal.signal
+    target_failed = False
+    rollback_failed = False
+
+    def fail_install_and_rollback(signum: int, handler: Any) -> Any:
+        nonlocal target_failed, rollback_failed
+        if (
+            signum == signal.SIGTERM
+            and handler != original_handlers[signal.SIGTERM]
+            and not target_failed
+        ):
+            target_failed = True
+            raise RuntimeError("synthetic lifecycle install failure")
+        if (
+            signum == signal.SIGINT
+            and handler == original_handlers[signal.SIGINT]
+            and target_failed
+            and not rollback_failed
+        ):
+            rollback_failed = True
+            raise RuntimeError("synthetic lifecycle rollback failure")
+        return real_signal(signum, handler)
+
+    monkeypatch.setattr(signal, "signal", fail_install_and_rollback)
+    try:
+        with pytest.raises(BaseExceptionGroup, match="installation and restoration"):
+            lifecycle._CatchableSignalLifecycle.prepare()
+        assert set(caught) <= signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    finally:
+        monkeypatch.setattr(signal, "signal", real_signal)
+        for signum, handler in original_handlers.items():
+            real_signal(signum, handler)
+        signal.pthread_sigmask(signal.SIG_SETMASK, original_mask)
+
+
+def test_prepared_signal_lifecycle_restore_failure_keeps_signals_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    caught = (signal.SIGINT, signal.SIGTERM)
+    original_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    original_handlers = {signum: signal.getsignal(signum) for signum in caught}
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, set(caught))
+    signal_lifecycle = lifecycle._CatchableSignalLifecycle.prepare()
+    real_signal = signal.signal
+    failed = False
+
+    def fail_second_restore(signum: int, handler: Any) -> Any:
+        nonlocal failed
+        if signum == signal.SIGTERM and handler == original_handlers[signal.SIGTERM] and not failed:
+            failed = True
+            raise RuntimeError("synthetic prepared lifecycle restore failure")
+        return real_signal(signum, handler)
+
+    monkeypatch.setattr(signal, "signal", fail_second_restore)
+    try:
+        with pytest.raises(BaseExceptionGroup, match="prepared catchable"):
+            signal_lifecycle.restore()
+        assert set(caught) <= signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    finally:
+        monkeypatch.setattr(signal, "signal", real_signal)
+        for signum, handler in original_handlers.items():
+            real_signal(signum, handler)
+        signal.pthread_sigmask(signal.SIG_SETMASK, original_mask)
+
+
+def test_post_communicate_signal_exhausts_same_group_descendant_before_cleanup(
+    tmp_path: Path,
+) -> None:
+    process, descendant_state_path, lease = _spawn_post_communicate_signal_probe(tmp_path)
+    descendant_group: int | None = None
+    try:
+        stdout, stderr = process.communicate(timeout=10.0)
+        assert process.returncode == 128 + signal.SIGTERM, (stdout, stderr)
+        descendant = json.loads(descendant_state_path.read_text(encoding="utf-8"))
+        descendant_group = int(descendant["pgid"])
+        cleanup = json.loads(
+            (tmp_path / "post-communicate-cleanup.json").read_text(encoding="utf-8")
+        )
+        assert cleanup == {"descendant_alive": False, "group_alive": False}
+        with pytest.raises(ProcessLookupError):
+            os.killpg(descendant_group, 0)
+        assert not lease.exists()
+    finally:
+        if descendant_group is None and descendant_state_path.is_file():
+            descendant_group = int(
+                json.loads(descendant_state_path.read_text(encoding="utf-8"))["pgid"]
+            )
+        if descendant_group is not None:
+            _signal_test_process_group(descendant_group)
+            _wait_for_test_process_group_exit(descendant_group)
+        if process.poll() is None:
+            _signal_test_process_group(process.pid)
+            process.wait(timeout=5.0)
+        lease.unlink(missing_ok=True)
+
+
 @pytest.mark.parametrize(
     ("mode", "signal_number", "expected_returncode"),
     (
@@ -3250,10 +4062,163 @@ def test_persistent_start_withholds_cleanup_for_unexhausted_process_group(
         with pytest.raises(RuntimeError, match=r"4545.*survived"):
             lifecycle._persistent_up(repo=tmp_path, mode="rootful")
         assert cleanup_calls == []
-        assert not lease_path_for(tmp_path).exists()
+        lease = lease_path_for(tmp_path)
+        assert lease.is_file()
+        loaded = read_authority_lease(lease, expected_repo=tmp_path)
+        assert loaded.project == authority.project
+        assert loaded.runtime_dir == authority.runtime_dir
+        assert loaded.published_ports == {}
     finally:
         lease_path_for(tmp_path).unlink(missing_ok=True)
         authority.remove_runtime_paths()
+
+
+def test_persistent_down_unlinks_lease_after_conclusive_nested_signal_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    authority = ComposeAuthority.create(
+        repo=tmp_path,
+        mode="rootful",
+        socket_path=Path("/var/run/docker.sock"),
+        socket_gid=123,
+        token=uuid.uuid4().hex[:12],
+        source_environment={"PATH": os.environ.get("PATH", "/usr/bin")},
+    )
+    lease = lease_path_for(tmp_path)
+    write_authority_lease(authority, lease)
+
+    def conclusive_interrupted_cleanup(
+        self: ComposeAuthority,
+        *,
+        runner: Any,
+        upgrade: bool = False,
+    ) -> None:
+        del runner, upgrade
+        self.remove_runtime_paths()
+        raise BaseExceptionGroup(
+            "cleanup recorded an interrupted diagnostic",
+            [lifecycle._LifecycleSignal(signal.SIGTERM)],
+        )
+
+    monkeypatch.setattr(ComposeAuthority, "down_and_cleanup", conclusive_interrupted_cleanup)
+    try:
+        with pytest.raises(SystemExit) as raised:
+            lifecycle._persistent_down(repo=tmp_path)
+        assert raised.value.code == 128 + signal.SIGTERM
+        assert not lease.exists()
+        assert not authority.runtime_dir.exists()
+        assert not authority.barrier_root.exists()
+    finally:
+        lease.unlink(missing_ok=True)
+        authority.remove_runtime_paths()
+
+
+@pytest.mark.parametrize("operation", ("run", "persistent-up"))
+def test_signal_after_authority_selection_removes_unpublished_runtime_paths(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    process, authority_state_path, lease = _spawn_authority_selection_signal_probe(
+        tmp_path,
+        operation=operation,
+    )
+    state = json.loads(authority_state_path.read_text(encoding="utf-8"))
+    paths = (Path(state["runtime"]), Path(state["barrier"]))
+    try:
+        stdout, stderr = process.communicate(timeout=10.0)
+        assert process.returncode == 128 + signal.SIGTERM, (stdout, stderr)
+        assert all(not path.exists() for path in paths)
+        assert not lease.exists()
+    finally:
+        if process.poll() is None:
+            _signal_test_process_group(process.pid)
+            process.wait(timeout=5.0)
+        for path in paths:
+            if path.exists():
+                os.chmod(path, 0o700, follow_symlinks=False)
+                shutil.rmtree(path)
+        lease.unlink(missing_ok=True)
+
+
+@pytest.mark.parametrize("operation", ("down", "compose"))
+@pytest.mark.parametrize("failure", ("signal", "timeout"))
+def test_failed_persistent_command_exhausts_descendants_and_retains_lease(
+    tmp_path: Path,
+    operation: str,
+    failure: str,
+) -> None:
+    process, child_state_path, mutation_path, lease = _spawn_persistent_command_probe(
+        tmp_path,
+        operation=operation,
+        failure=failure,
+    )
+    child = json.loads(child_state_path.read_text(encoding="utf-8"))
+    child_group = int(child["pgid"])
+    try:
+        if failure == "signal":
+            os.kill(process.pid, signal.SIGTERM)
+        stdout, stderr = process.communicate(timeout=10.0)
+        expected = 128 + signal.SIGTERM if failure == "signal" else 1
+        assert process.returncode == expected, (stdout, stderr)
+        if failure == "timeout":
+            assert "TimeoutExpired" in stderr
+        grandchild = json.loads(
+            (tmp_path / "persistent-command-grandchild.json").read_text(encoding="utf-8")
+        )
+        assert not _pid_exists(int(child["pid"]))
+        assert not _pid_exists(int(grandchild["pid"]))
+        with pytest.raises(ProcessLookupError):
+            os.killpg(child_group, 0)
+        before = mutation_path.stat().st_size
+        time.sleep(0.15)
+        assert mutation_path.stat().st_size == before
+        assert lease.is_file()
+        loaded = read_authority_lease(lease, expected_repo=Path(__file__).resolve().parents[2])
+        assert loaded.runtime_dir.is_dir()
+        assert loaded.barrier_root.is_dir()
+    finally:
+        _signal_test_process_group(child_group)
+        if process.poll() is None:
+            _signal_test_process_group(process.pid)
+            process.wait(timeout=5.0)
+        _wait_for_test_process_group_exit(process.pid)
+        if child_group != process.pid:
+            _wait_for_test_process_group_exit(child_group)
+        authority_state_path = tmp_path / "persistent-command-authority.json"
+        if authority_state_path.is_file():
+            state = json.loads(authority_state_path.read_text(encoding="utf-8"))
+            for key in ("runtime", "barrier"):
+                path = Path(state[key])
+                if path.exists():
+                    os.chmod(path, 0o700, follow_symlinks=False)
+                    shutil.rmtree(path)
+        lease.unlink(missing_ok=True)
+
+
+def test_signal_during_persistent_cleanup_handoff_cannot_skip_cleanup(
+    tmp_path: Path,
+) -> None:
+    process, authority_state_path, lease = _spawn_persistent_cleanup_handoff_probe(tmp_path)
+    state = json.loads(authority_state_path.read_text(encoding="utf-8"))
+    paths = (Path(state["runtime"]), Path(state["barrier"]))
+    try:
+        stdout, stderr = process.communicate(timeout=10.0)
+        assert process.returncode == 1, (stdout, stderr)
+        assert "synthetic persistent startup failure" in stderr
+        assert (tmp_path / "persistent-handoff-cleanup-finished").is_file()
+        assert all(not path.exists() for path in paths)
+        assert not lease.exists()
+    finally:
+        if process.poll() is None:
+            _signal_test_process_group(process.pid)
+            process.wait(timeout=5.0)
+        for path in paths:
+            if path.exists():
+                os.chmod(path, 0o700, follow_symlinks=False)
+                shutil.rmtree(path)
+        lease.unlink(missing_ok=True)
 
 
 def test_signal_waits_for_real_pytest_child_exit_before_cleanup(tmp_path: Path) -> None:
@@ -3317,6 +4282,30 @@ def test_preflight_timeout_reaps_real_descendants_before_cleanup(tmp_path: Path)
     assert cleanup_state["child_pgid"] == cleanup_state["child_pid"]
     assert cleanup_state["grandchild_pgid"] == cleanup_state["child_pgid"]
     assert cleanup_state["child_pgid"] != cleanup_state["harness_pgid"]
+    assert cleanup_state["child_alive"] is False
+    assert cleanup_state["grandchild_alive"] is False
+    assert cleanup_state["group_alive"] is False
+    assert cleanup_state["mutation_stable"] is True
+    assert (tmp_path / "survivor-check").read_text(encoding="utf-8") == "checked"
+
+
+def test_concurrent_signal_during_timeout_handoff_cannot_escape_group_reaping(
+    tmp_path: Path,
+) -> None:
+    process, child_pid_path, lease = _spawn_signal_lifecycle_probe(
+        tmp_path,
+        mode="first-signal",
+        stage="termination-transition",
+    )
+    stdout, stderr, lease_survived = _finish_signal_lifecycle_probe(
+        process,
+        child_pid_path,
+        lease,
+    )
+    assert process.returncode == 1, (stdout, stderr)
+    assert "TimeoutExpired" in stderr
+    assert lease_survived is False
+    cleanup_state = json.loads((tmp_path / "cleanup-state").read_text(encoding="utf-8"))
     assert cleanup_state["child_alive"] is False
     assert cleanup_state["grandchild_alive"] is False
     assert cleanup_state["group_alive"] is False
@@ -3424,6 +4413,73 @@ def test_one_shot_upgrade_build_uses_the_injected_selected_daemon_runner(
         assert child_commands == [build_live_pytest_command(scenario)]
     finally:
         lease.unlink(missing_ok=True)
+        authority.remove_runtime_paths()
+
+
+def test_upgrade_runtime_binding_is_signal_atomic_before_cleanup_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _authority_for_recorder()
+    ports = {
+        variable: 52500 + index
+        for index, (variable, _service, _container_port) in enumerate(PUBLISHED_ENDPOINTS)
+    }
+    lease = Path("/tmp") / f"jhin-p10-upgrade-signal-{uuid.uuid4().hex}.json"
+    source_ref = "6318781b57692bf39f37cd428d73de115d7458e2"
+    frozen = FrozenPhase9Image(
+        source_ref=source_ref,
+        tag=authority.phase9_image_tag(source_ref),
+        image_id="sha256:" + "a" * 64,
+    )
+    extra_barrier = Path("/tmp") / f"jhin-p10-upgrade-signal-barrier-{uuid.uuid4().hex}"
+
+    monkeypatch.setattr(ComposeAuthority, "start_stack", lambda self, *, runner: ports)
+    monkeypatch.setattr(lifecycle, "read_phase9_source_ref", lambda *args, **kwargs: source_ref)
+    monkeypatch.setattr(
+        ComposeAuthority,
+        "build_phase9_agent_image",
+        lambda self, selected_ref, *, runner: frozen,
+    )
+    monkeypatch.setattr(
+        ComposeAuthority,
+        "remove_phase9_agent_image",
+        lambda self, selected_ref, *, runner: None,
+    )
+
+    def signal_before_return(
+        self: ComposeAuthority,
+        prepared: FrozenPhase9Image,
+    ) -> ComposeAuthority:
+        del prepared
+        extra_barrier.mkdir(mode=0o700)
+        environment = self.environment
+        environment["PHASE10_UPGRADE_BARRIER_NORMAL_HOST"] = str(extra_barrier)
+        selected = replace(self, _environment_items=tuple(sorted(environment.items())))
+        os.kill(os.getpid(), signal.SIGTERM)
+        return selected
+
+    def local_cleanup(
+        self: ComposeAuthority,
+        *,
+        runner: Any,
+        upgrade: bool = False,
+    ) -> None:
+        del runner, upgrade
+        self.remove_runtime_paths()
+
+    monkeypatch.setattr(ComposeAuthority, "with_upgrade_runtime", signal_before_return)
+    monkeypatch.setattr(ComposeAuthority, "down_and_cleanup", local_cleanup)
+    scenario = LiveScenario(nodes=("upgrade-signal-atomic",), expected_tests=1, upgrade=True)
+    try:
+        with pytest.raises(SystemExit) as raised:
+            execute_one_shot(authority, scenario=scenario, lease_path=lease)
+        assert raised.value.code == 128 + signal.SIGTERM
+        assert not extra_barrier.exists()
+        assert not lease.exists()
+    finally:
+        lease.unlink(missing_ok=True)
+        if extra_barrier.exists():
+            shutil.rmtree(extra_barrier)
         authority.remove_runtime_paths()
 
 
