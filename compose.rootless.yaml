@@ -44,4 +44,6 @@ services:
 # while the runner's daemon-backed /health remains 503 until Docker recovers.
 networks:
   engine:
+    driver: bridge
+    external: false
     internal: true

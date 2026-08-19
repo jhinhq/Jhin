@@ -6,6 +6,7 @@ import copy
 import importlib.util
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -23,6 +24,7 @@ ROOTLESS_GID_CANARY = "phase10-rootless-gid-canary-73191"
 ROOTFUL_TEST_GID = 10001
 DEFAULT_SANDBOX_NETWORK = "jhin_sandbox"
 UNIQUE_SANDBOX_NETWORK = "jhin-phase10-contract-sandbox"
+MAX_SANDBOX_NETWORK_LENGTH = 63
 
 
 class ComposeContractModule(Protocol):
@@ -209,6 +211,24 @@ def test_default_sandbox_network_is_explicitly_asserted_in_production_and_dev() 
             assert "sandbox" not in rendered["networks"]
 
 
+@pytest.mark.parametrize("dev", [False, True])
+def test_every_rendered_boundary_network_is_an_owned_bridge(dev: bool) -> None:
+    contract = _load_contract()
+    rendered = contract.render_compose(
+        "rootless",
+        dev=dev,
+        env={"PHASE10_ROOTLESS_DOCKER_SOCKET": ROOTLESS_SOCKET},
+    )
+    expected = {"edge", "control", "data", "runner", "engine"}
+    if dev:
+        expected.add("sandbox")
+    assert set(rendered["networks"]) == expected
+    for name in expected:
+        network = rendered["networks"][name]
+        assert network["driver"] == "bridge", name
+        assert network.get("external", False) is False, name
+
+
 @pytest.mark.parametrize(
     "value",
     [
@@ -221,10 +241,27 @@ def test_default_sandbox_network_is_explicitly_asserted_in_production_and_dev() 
         "none",
         "\tnone\n",
         "default",
+        "runner",
+        "RUNNER",
+        "engine",
+        " Engine ",
         "container:abc123",
         " Container:abc123 ",
         "container : abc123",
+        "container:\nabc123",
+        "container \n : abc123",
+        "con\ntainer:abc123",
         " jhin_unique_sandbox ",
+        "Jhin_unique_sandbox",
+        "_jhin_sandbox",
+        "-jhin_sandbox",
+        ".jhin_sandbox",
+        "jhin/sandbox",
+        "jhin:sandbox",
+        "jhin sandbox",
+        "jhin\nsandbox",
+        "jhin\x00sandbox",
+        "a" * (MAX_SANDBOX_NETWORK_LENGTH + 1),
     ],
 )
 def test_sandbox_network_validation_rejects_reserved_or_ambiguous_values(value: str) -> None:
@@ -238,6 +275,8 @@ def test_sandbox_network_validation_preserves_a_unique_explicit_name() -> None:
     contract = _load_contract()
 
     assert contract.validate_sandbox_network(UNIQUE_SANDBOX_NETWORK) == UNIQUE_SANDBOX_NETWORK
+    maximum = "a" * MAX_SANDBOX_NETWORK_LENGTH
+    assert contract.validate_sandbox_network(maximum) == maximum
 
 
 @pytest.mark.parametrize(
@@ -371,6 +410,41 @@ def test_shared_contract_rejects_expected_sandbox_network_mismatch() -> None:
             dev=True,
             expected_app_env="dev",
             expected_sandbox_network="other-unique-sandbox",
+            expected_socket_source=ROOTLESS_SOCKET,
+        )
+
+
+@pytest.mark.parametrize(
+    ("network_name", "field", "value"),
+    [
+        (network_name, field, value)
+        for network_name in ("edge", "control", "data", "runner", "engine", "sandbox")
+        for field, value in (("driver", "host"), ("external", True))
+    ],
+)
+def test_shared_contract_rejects_nonbridge_or_external_boundary_networks(
+    network_name: str,
+    field: str,
+    value: Any,
+) -> None:
+    contract = _load_contract()
+    rendered = contract.render_compose(
+        "rootless",
+        dev=True,
+        env={
+            "PHASE10_ROOTLESS_DOCKER_SOCKET": ROOTLESS_SOCKET,
+            "SANDBOX_NETWORK": UNIQUE_SANDBOX_NETWORK,
+        },
+    )
+    rendered["networks"][network_name][field] = value
+
+    with pytest.raises(ValueError, match=r"bridge|external|network"):
+        contract.assert_rendered_contract(
+            rendered,
+            mode="rootless",
+            dev=True,
+            expected_app_env="dev",
+            expected_sandbox_network=UNIQUE_SANDBOX_NETWORK,
             expected_socket_source=ROOTLESS_SOCKET,
         )
 
@@ -645,6 +719,11 @@ def test_semantic_source_contract_accepts_unambiguous_safe_anchors(
             "  rootless-docker-transport:\n"
             "    volumes:\n"
             f"      - {volume_reference}\n"
+            "networks:\n"
+            "  engine:\n"
+            "    driver: bridge\n"
+            "    external: false\n"
+            "    internal: true\n"
         ),
     }
     for filename, source in overlays.items():
@@ -672,6 +751,11 @@ def test_semantic_source_contract_rejects_unsafe_anchor_override(
         "    volumes:\n"
         "      - <<: *phase10-safe-bind\n"
         "        bind: {}\n"
+        "networks:\n"
+        "  engine:\n"
+        "    driver: bridge\n"
+        "    external: false\n"
+        "    internal: true\n"
     )
     (tmp_path / "compose.rootless.yaml").write_text(source, encoding="utf-8")
     monkeypatch.setattr(contract, "ROOT", tmp_path)
@@ -707,6 +791,52 @@ def test_semantic_source_contract_rejects_network_interpolation_decoys(
     monkeypatch.setattr(contract, "ROOT", tmp_path)
 
     with pytest.raises(ValueError, match=r"SANDBOX_NETWORK|sandbox network"):
+        contract.assert_source_contract()
+
+
+@pytest.mark.parametrize(
+    ("filename", "network_name", "replacement"),
+    [
+        (
+            "compose.yaml",
+            "sandbox",
+            "  sandbox:\n    name: ${SANDBOX_NETWORK:-jhin_sandbox}\n    driver: bridge\n",
+        ),
+        (
+            "compose.yaml",
+            "runner",
+            "  runner:\n    driver: bridge\n    external: true\n",
+        ),
+        (
+            "compose.yaml",
+            "edge",
+            "  edge:\n    driver: host\n    external: false\n",
+        ),
+        (
+            "compose.rootless.yaml",
+            "engine",
+            "  engine:\n    driver: bridge\n    external: true\n    internal: true\n",
+        ),
+    ],
+)
+def test_semantic_source_contract_rejects_unowned_or_nonbridge_network_maps(
+    filename: str,
+    network_name: str,
+    replacement: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _load_contract()
+    _copy_source_contract(tmp_path)
+    source_path = tmp_path / filename
+    source = source_path.read_text(encoding="utf-8")
+    pattern = rf"(?m)^  {re.escape(network_name)}:\n(?:    [^\n]*\n)*"
+    mutated, count = re.subn(pattern, replacement, source, count=1)
+    assert count == 1
+    source_path.write_text(mutated, encoding="utf-8")
+    monkeypatch.setattr(contract, "ROOT", tmp_path)
+
+    with pytest.raises(ValueError, match=r"network|bridge|external|owned"):
         contract.assert_source_contract()
 
 
@@ -1296,6 +1426,91 @@ def test_host_inspection_rejects_every_job_authority_mutation(
         )
 
 
+async def test_product_removal_waiter_never_converts_a_survivor_to_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tests.integration.test_phase6_security as security
+
+    state = {"identifiers": ["phase10-survivor"]}
+    clock = iter((0.0, 31.0))
+
+    def fake_docker(*args: str) -> str:
+        if args[:2] == ("ps", "-aq"):
+            return "\n".join(state["identifiers"])
+        if args[:2] == ("rm", "-f"):
+            state["identifiers"].remove(args[2])
+            return args[2]
+        raise AssertionError(f"unexpected Docker argv: {args}")
+
+    monkeypatch.setattr(security, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    monkeypatch.setattr(security, "_docker", fake_docker)
+
+    with pytest.raises(BaseException, match=r"survived cancellation"):
+        await security._wait_for_job_container_removal("phase10-job")
+
+    assert state["identifiers"] == ["phase10-survivor"]
+
+
+async def test_product_removal_waiter_accepts_final_deadline_race_removal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tests.integration.test_phase6_security as security
+
+    clock = iter((0.0, 31.0))
+
+    def fake_docker(*args: str) -> str:
+        assert args == (
+            "ps",
+            "-aq",
+            "--filter",
+            "label=jhin.sandbox.job=phase10-job",
+        )
+        return ""
+
+    monkeypatch.setattr(security, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    monkeypatch.setattr(security, "_docker", fake_docker)
+
+    await security._wait_for_job_container_removal("phase10-job")
+
+
+async def test_emergency_removal_force_removes_and_verifies_the_exact_job_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tests.integration.test_phase6_security as security
+
+    job_id = "phase10-emergency-job"
+    state = {"identifiers": ["phase10-survivor"]}
+    calls: list[tuple[str, ...]] = []
+
+    def fake_docker(*args: str) -> str:
+        calls.append(args)
+        if args[:2] == ("ps", "-aq"):
+            assert args[2:] == ("--filter", f"label=jhin.sandbox.job={job_id}")
+            return "\n".join(state["identifiers"])
+        if args[:2] == ("rm", "-f"):
+            assert args[2] == "phase10-survivor"
+            state["identifiers"].remove(args[2])
+            return args[2]
+        raise AssertionError(f"unexpected Docker argv: {args}")
+
+    monkeypatch.setattr(security, "_docker", fake_docker)
+    emergency_remove = getattr(
+        security,
+        "_emergency_force_remove_job_container",
+        None,
+    )
+    assert callable(emergency_remove), "a separate emergency removal helper is required"
+
+    await emergency_remove(job_id)
+
+    assert state["identifiers"] == []
+    assert calls == [
+        ("ps", "-aq", "--filter", f"label=jhin.sandbox.job={job_id}"),
+        ("rm", "-f", "phase10-survivor"),
+        ("ps", "-aq", "--filter", f"label=jhin.sandbox.job={job_id}"),
+    ]
+
+
 async def test_live_job_cleanup_attempts_wait_and_removal_after_cancel_raises() -> None:
     from tests.integration.test_phase6_security import cleanup_live_job
 
@@ -1312,7 +1527,38 @@ async def test_live_job_cleanup_attempts_wait_and_removal_after_cancel_raises() 
     async def remove_container() -> None:
         events.append("remove")
 
-    with pytest.raises(ExceptionGroup, match=r"cleanup"):
+    with pytest.raises(RuntimeError, match=r"cancel transport failed"):
+        await cleanup_live_job(
+            cancel=cancel,
+            wait_terminal=wait_terminal,
+            remove_container=remove_container,
+        )
+
+    assert events == ["cancel", "wait", "remove"]
+
+
+@pytest.mark.parametrize("failure_kind", ["pytest", "system-exit"])
+async def test_live_job_cleanup_base_exception_from_wait_cannot_skip_removal(
+    failure_kind: str,
+) -> None:
+    from tests.integration.test_phase6_security import cleanup_live_job
+
+    events: list[str] = []
+
+    async def cancel() -> SimpleNamespace:
+        events.append("cancel")
+        return SimpleNamespace(status_code=200, text="cancelled")
+
+    async def wait_terminal() -> dict[str, Any]:
+        events.append("wait")
+        if failure_kind == "pytest":
+            pytest.fail("terminal wait failed")
+        raise SystemExit("terminal wait exited")
+
+    async def remove_container() -> None:
+        events.append("remove")
+
+    with pytest.raises(BaseException, match=r"terminal wait"):
         await cleanup_live_job(
             cancel=cancel,
             wait_terminal=wait_terminal,
@@ -1346,3 +1592,61 @@ async def test_live_job_cleanup_asserts_cancel_result_only_after_removal() -> No
         )
 
     assert events == ["cancel", "wait", "remove"]
+
+
+async def test_live_job_cleanup_force_removes_survivor_but_retains_product_failure() -> None:
+    from tests.integration.test_phase6_security import cleanup_live_job
+
+    state = {"survivor": True}
+
+    async def cancel() -> SimpleNamespace:
+        return SimpleNamespace(status_code=200, text="cancelled")
+
+    async def wait_terminal() -> dict[str, Any]:
+        return {"status": "cancelled"}
+
+    async def prove_product_removal() -> None:
+        pytest.fail("product removal invariant failed")
+
+    async def emergency_force_remove() -> None:
+        state["survivor"] = False
+
+    with pytest.raises(BaseException, match=r"product removal invariant failed"):
+        await cleanup_live_job(
+            cancel=cancel,
+            wait_terminal=wait_terminal,
+            remove_container=prove_product_removal,
+            emergency_remove_container=emergency_force_remove,
+        )
+
+    assert state["survivor"] is False
+
+
+async def test_live_job_cleanup_retains_product_and_emergency_failures() -> None:
+    from tests.integration.test_phase6_security import cleanup_live_job
+
+    async def cancel() -> SimpleNamespace:
+        return SimpleNamespace(status_code=200, text="cancelled")
+
+    async def wait_terminal() -> dict[str, Any]:
+        return {"status": "cancelled"}
+
+    async def prove_product_removal() -> None:
+        pytest.fail("product removal invariant failed")
+
+    async def emergency_force_remove() -> None:
+        raise SystemExit("emergency force removal failed")
+
+    with pytest.raises(BaseExceptionGroup) as captured:
+        await cleanup_live_job(
+            cancel=cancel,
+            wait_terminal=wait_terminal,
+            remove_container=prove_product_removal,
+            emergency_remove_container=emergency_force_remove,
+        )
+
+    messages = {str(error) for error in captured.value.exceptions}
+    assert messages == {
+        "product removal invariant failed",
+        "emergency force removal failed",
+    }

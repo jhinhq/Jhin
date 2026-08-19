@@ -21,7 +21,17 @@ _ROOTLESS_TRANSPORT_URL = "http://rootless-docker-transport:2375"
 _RUNNER_IMAGE = "jhin-sandbox-runner:local"
 _DEFAULT_SANDBOX_NETWORK = "jhin_sandbox"
 _SANDBOX_NETWORK_INTERPOLATION = "${SANDBOX_NETWORK:-jhin_sandbox}"
-_RESERVED_SANDBOX_NETWORKS = {"bridge", "default", "host", "none"}
+_SANDBOX_NETWORK_MAX_LENGTH = 63
+_SANDBOX_NETWORK_PATTERN = re.compile(r"[a-z0-9][a-z0-9_.-]*\Z")
+_RESERVED_SANDBOX_NETWORKS = {
+    "bridge",
+    "default",
+    "engine",
+    "host",
+    "none",
+    "runner",
+}
+_BOUNDARY_NETWORKS = {"control", "data", "edge", "engine", "runner", "sandbox"}
 _RUNNER_HEALTHCHECK = {
     "interval": "10s",
     "retries": 5,
@@ -223,7 +233,11 @@ def validate_rootful_socket(
 
 
 def validate_sandbox_network(value: str) -> str:
-    """Reject Docker-reserved or whitespace-ambiguous job network authority."""
+    """Reject ambiguous or unsafe job-network authority names.
+
+    The 63-character cap is deliberately conservative for Task 10's
+    project-scoped Docker bridge names and keeps them DNS-label sized.
+    """
     stripped = value.strip()
     _require(bool(stripped), "SANDBOX_NETWORK must be nonempty")
     _require(value == stripped, "SANDBOX_NETWORK must not contain surrounding whitespace")
@@ -233,8 +247,16 @@ def validate_sandbox_network(value: str) -> str:
         "SANDBOX_NETWORK must not use a Docker reserved network mode",
     )
     _require(
-        re.fullmatch(r"container\s*:.*", normalized) is None,
+        not re.sub(r"\s+", "", normalized).startswith("container:"),
         "SANDBOX_NETWORK must not use Docker container network mode",
+    )
+    _require(
+        len(normalized) <= _SANDBOX_NETWORK_MAX_LENGTH,
+        f"SANDBOX_NETWORK must be at most {_SANDBOX_NETWORK_MAX_LENGTH} characters",
+    )
+    _require(
+        _SANDBOX_NETWORK_PATTERN.fullmatch(stripped) is not None,
+        "SANDBOX_NETWORK must match [a-z0-9][a-z0-9_.-]*",
     )
     return value
 
@@ -321,10 +343,35 @@ def assert_source_contract() -> None:
         "compose.yaml runner SANDBOX_NETWORK interpolation drifted",
     )
     networks = _require_mapping(base.get("networks"), "compose.yaml networks must be a mapping")
-    sandbox = networks.get("sandbox")
     _require(
-        isinstance(sandbox, dict) and sandbox.get("name") == _SANDBOX_NETWORK_INTERPOLATION,
-        "compose.yaml sandbox network interpolation drifted",
+        networks
+        == {
+            "edge": {"driver": "bridge", "external": False},
+            "control": {"driver": "bridge", "external": False},
+            "data": {"driver": "bridge", "external": False},
+            "runner": {"driver": "bridge", "external": False},
+            "sandbox": {
+                "name": _SANDBOX_NETWORK_INTERPOLATION,
+                "driver": "bridge",
+                "external": False,
+            },
+        },
+        "compose.yaml boundary networks must be exact owned nonexternal bridges",
+    )
+    rootless_networks = _require_mapping(
+        rootless.get("networks"),
+        "compose.rootless.yaml networks must be a mapping",
+    )
+    _require(
+        rootless_networks
+        == {
+            "engine": {
+                "driver": "bridge",
+                "external": False,
+                "internal": True,
+            }
+        },
+        "compose.rootless.yaml engine must be an exact owned internal bridge",
     )
 
     _require_source_socket_bind(
@@ -466,6 +513,15 @@ def _assert_sandbox_network_contract(
             network_value,
             f"network {logical_name} must be a mapping",
         )
+        if logical_name in _BOUNDARY_NETWORKS:
+            _require(
+                network.get("driver") == "bridge",
+                f"network {logical_name} must use the bridge driver",
+            )
+            _require(
+                network.get("external", False) is False,
+                f"network {logical_name} must be nonexternal and Compose-owned",
+            )
         physical_name = network.get("name")
         _require(
             isinstance(physical_name, str) and bool(physical_name),

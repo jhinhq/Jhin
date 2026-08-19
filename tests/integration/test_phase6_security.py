@@ -196,10 +196,20 @@ async def _wait_for_job_container_removal(job_id: str) -> None:
         await asyncio.sleep(0.2)
     identifiers = _docker("ps", "-aq", "--filter", f"label=jhin.sandbox.job={job_id}").splitlines()
     assert len(identifiers) <= 1, f"job label matched multiple containers: {identifiers}"
+    if not identifiers:
+        return
+    pytest.fail(f"job {job_id} container survived cancellation: {identifiers}")
+
+
+async def _emergency_force_remove_job_container(job_id: str) -> None:
+    """Force-remove one labeled survivor, then prove the host is clean."""
+    label_filter = f"label=jhin.sandbox.job={job_id}"
+    identifiers = _docker("ps", "-aq", "--filter", label_filter).splitlines()
+    assert len(identifiers) <= 1, f"job label matched multiple containers: {identifiers}"
     if identifiers:
         _docker("rm", "-f", identifiers[0])
-    remaining = _docker("ps", "-aq", "--filter", f"label=jhin.sandbox.job={job_id}")
-    assert remaining == "", f"job {job_id} container survived forced cleanup: {remaining}"
+    remaining = _docker("ps", "-aq", "--filter", label_filter)
+    assert remaining == "", f"job {job_id} survived emergency force removal: {remaining}"
 
 
 async def cleanup_live_job(
@@ -207,32 +217,69 @@ async def cleanup_live_job(
     cancel: Callable[[], Awaitable[object]],
     wait_terminal: Callable[[], Awaitable[dict[str, Any]]],
     remove_container: Callable[[], Awaitable[None]],
+    emergency_remove_container: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Attempt every cleanup step before surfacing cancellation or cleanup failures."""
     cancelled: object | None = None
     terminal: dict[str, Any] | None = None
-    cleanup_errors: list[Exception] = []
+    cleanup_errors: list[BaseException] = []
+    cancel_completed = False
+    wait_completed = False
+    product_removal_failed = False
 
     try:
-        cancelled = await cancel()
-    except Exception as exc:
-        cleanup_errors.append(exc)
-    try:
-        terminal = await wait_terminal()
-    except Exception as exc:
-        cleanup_errors.append(exc)
-    try:
-        await remove_container()
-    except Exception as exc:
-        cleanup_errors.append(exc)
+        try:
+            cancelled = await cancel()
+            cancel_completed = True
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+    finally:
+        try:
+            try:
+                terminal = await wait_terminal()
+                wait_completed = True
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+        finally:
+            try:
+                try:
+                    await remove_container()
+                except BaseException as exc:
+                    product_removal_failed = True
+                    cleanup_errors.append(exc)
+            finally:
+                if product_removal_failed:
+                    if emergency_remove_container is None:
+                        cleanup_errors.append(
+                            RuntimeError(
+                                "product removal failed without an emergency cleanup callback"
+                            )
+                        )
+                    else:
+                        try:
+                            await emergency_remove_container()
+                        except BaseException as exc:
+                            cleanup_errors.append(exc)
 
+    if cancel_completed:
+        try:
+            assert cancelled is not None, "cancel did not return a response"
+            cancellation_result = cast(CancelResponse, cancelled)
+            assert cancellation_result.status_code == 200, (
+                f"cancel: {cancellation_result.status_code} {cancellation_result.text}"
+            )
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+    if wait_completed:
+        try:
+            assert terminal is not None, "terminal wait returned no job"
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+
+    if len(cleanup_errors) == 1:
+        raise cleanup_errors[0]
     if cleanup_errors:
-        raise ExceptionGroup("live job cleanup failed", cleanup_errors)
-    assert cancelled is not None
-    cancellation_result = cast(CancelResponse, cancelled)
-    assert cancellation_result.status_code == 200, (
-        f"cancel: {cancellation_result.status_code} {cancellation_result.text}"
-    )
+        raise BaseExceptionGroup("live job cleanup failed", cleanup_errors)
     assert terminal is not None
     return terminal
 
@@ -330,6 +377,9 @@ async def test_live_job_has_no_docker_authority(
             ),
             wait_terminal=lambda: _wait(runner, body["job_id"]),
             remove_container=lambda: _wait_for_job_container_removal(body["job_id"]),
+            emergency_remove_container=lambda: _emergency_force_remove_job_container(
+                body["job_id"]
+            ),
         )
 
     assert inspected is not None

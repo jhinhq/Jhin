@@ -311,11 +311,19 @@ services:
 
 networks:
   edge:
+    driver: bridge
+    external: false
   control:
+    driver: bridge
+    external: false
   data:
+    driver: bridge
+    external: false
   # tool-worker ↔ sandbox-runner only (plan 24.1). Job containers are NOT
   # on this network: they get "none" or the jhin_sandbox bridge below.
   runner:
+    driver: bridge
+    external: false
   # Dedicated bridge for network_policy=internet jobs (plan 14.4). No
   # control-plane service may ever attach to it; in production nothing in
   # this file references it and the runner creates it via the Docker API.
@@ -323,6 +331,8 @@ networks:
   # compose project name.
   sandbox:
     name: ${SANDBOX_NETWORK:-jhin_sandbox}
+    driver: bridge
+    external: false
 
 volumes:
   postgres_data:
