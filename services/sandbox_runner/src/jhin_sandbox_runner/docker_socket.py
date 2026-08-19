@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import stat
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Literal
 
@@ -13,6 +14,11 @@ ROOTLESS_TRANSPORT_URL = "http://rootless-docker-transport:2375"
 
 class DockerSocketConfigurationError(RuntimeError):
     """The configured Docker authority does not match the selected mode."""
+
+
+def normalize_supplemental_groups(*, effective_gid: int, process_groups: Iterable[int]) -> set[int]:
+    """Return group authorities other than the process's primary group."""
+    return set(process_groups) - {effective_gid}
 
 
 def validate_docker_authority(
@@ -69,7 +75,7 @@ def validate_docker_authority(
         )
     if supplemental_groups != {configured_gid}:
         raise DockerSocketConfigurationError("runner requires the exact Docker socket group only")
-    if not os.access(socket_path, os.R_OK | os.W_OK):
+    if not os.access(socket_path, os.R_OK | os.W_OK, effective_ids=True):
         raise DockerSocketConfigurationError(
             "Docker socket is not readable and writable by the runner"
         )

@@ -429,6 +429,8 @@ async def test_repeated_bare_health_connections_do_not_exhaust_limit(
         ({"effective_uid": 1}, "UID/GID 0:0"),
         ({"effective_gid": 1}, "UID/GID 0:0"),
         ({"supplemental_groups": {1}}, "no supplemental groups"),
+        ({"supplemental_groups": {0, 1}}, "no supplemental groups"),
+        ({"supplemental_groups": {10001}}, "no supplemental groups"),
     ],
 )
 def test_production_boundary_rejects_identity_arguments_and_overrides(
@@ -455,6 +457,33 @@ def test_production_boundary_rejects_identity_arguments_and_overrides(
     values.update(overrides)
     with pytest.raises(RootlessTransportConfigurationError, match=message):
         validate_production_boundary(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("process_groups", [set(), {0}])
+def test_production_boundary_accepts_empty_or_primary_only_process_groups(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_groups: set[int],
+) -> None:
+    upstream = tmp_path / "docker.sock"
+    upstream.touch()
+    monkeypatch.setattr(
+        Path,
+        "lstat",
+        lambda _path: SimpleNamespace(st_mode=stat.S_IFSOCK, st_uid=0, st_gid=0),
+    )
+
+    assert (
+        validate_production_boundary(
+            argv=[],
+            environ={},
+            effective_uid=0,
+            effective_gid=0,
+            supplemental_groups=process_groups,
+            upstream=upstream,
+        )
+        == upstream
+    )
 
 
 @pytest.mark.parametrize(

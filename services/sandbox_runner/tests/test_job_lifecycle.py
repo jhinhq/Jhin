@@ -194,7 +194,7 @@ def startup_docker(monkeypatch: pytest.MonkeyPatch) -> type[_StartupDocker]:
     monkeypatch.setattr(jobs_module.aiodocker, "Docker", _StartupDocker)
     monkeypatch.setattr(jobs_module.os, "geteuid", lambda: 10001)
     monkeypatch.setattr(jobs_module.os, "getegid", lambda: 10001)
-    monkeypatch.setattr(jobs_module.os, "getgroups", lambda: [])
+    monkeypatch.setattr(jobs_module.os, "getgroups", lambda: [10001])
     return _StartupDocker
 
 
@@ -335,6 +335,91 @@ async def test_rootless_start_requires_exact_runtime_identity_before_connect(
     assert startup_docker.instances == []
 
 
+@pytest.mark.parametrize("process_groups", [[10001], [10001, 10001], []])
+@pytest.mark.asyncio
+async def test_rootless_start_accepts_empty_or_primary_only_process_groups(
+    startup_docker: type[_StartupDocker],
+    monkeypatch: pytest.MonkeyPatch,
+    process_groups: list[int],
+) -> None:
+    monkeypatch.setattr(jobs_module.os, "getgroups", lambda: process_groups)
+
+    manager = JobManager(runner_settings())
+    await manager.start()
+
+    assert len(startup_docker.instances) == 1
+
+
+@pytest.mark.parametrize(
+    "process_groups",
+    [[20002], [10001, 20002], [0, 10001], [0, 10001, 20002]],
+)
+@pytest.mark.asyncio
+async def test_rootless_start_rejects_every_non_primary_process_group(
+    startup_docker: type[_StartupDocker],
+    monkeypatch: pytest.MonkeyPatch,
+    process_groups: list[int],
+) -> None:
+    monkeypatch.setattr(jobs_module.os, "getgroups", lambda: process_groups)
+
+    manager = JobManager(runner_settings())
+    with pytest.raises(DockerSocketConfigurationError, match="no supplemental groups"):
+        await manager.start()
+
+    assert startup_docker.instances == []
+
+
+@pytest.mark.parametrize(
+    ("process_groups", "accepted"),
+    [
+        ([10001, 12001], True),
+        ([10001, 12001, 12001], True),
+        ([12001], True),
+        ([12001, 12001], True),
+        ([], False),
+        ([10001], False),
+        ([10001, 13000], False),
+        ([10001, 12001, 13000], False),
+        ([0, 12001], False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_rootful_start_allows_only_the_normalized_socket_group(
+    startup_docker: type[_StartupDocker],
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    process_groups: list[int],
+    accepted: bool,
+) -> None:
+    socket_path = tmp_path / "docker.sock"
+    socket_path.touch()
+    fake_stat = type("SocketStat", (), {"st_mode": 0o140000, "st_uid": 0, "st_gid": 12001})()
+    monkeypatch.setattr(type(socket_path), "lstat", lambda _path: fake_stat)
+    monkeypatch.setattr(
+        jobs_module.os,
+        "access",
+        lambda _path, _mode, *, effective_ids: True,
+    )
+    monkeypatch.setattr(jobs_module.os, "getgroups", lambda: process_groups)
+    startup_docker.security_options = []
+    manager = JobManager(
+        runner_settings(
+            sandbox_docker_mode="rootful",
+            sandbox_docker_socket=socket_path,
+            sandbox_docker_transport_url=None,
+            sandbox_docker_gid=12001,
+        )
+    )
+
+    if accepted:
+        await manager.start()
+        assert len(startup_docker.instances) == 1
+    else:
+        with pytest.raises(DockerSocketConfigurationError, match="exact Docker socket group"):
+            await manager.start()
+        assert startup_docker.instances == []
+
+
 @pytest.mark.asyncio
 async def test_rootful_start_does_not_require_rootless_security_option(
     startup_docker: type[_StartupDocker],
@@ -345,7 +430,11 @@ async def test_rootful_start_does_not_require_rootless_security_option(
     socket_path.touch()
     fake_stat = type("SocketStat", (), {"st_mode": 0o140000, "st_uid": 0, "st_gid": 12001})()
     monkeypatch.setattr(type(socket_path), "lstat", lambda _path: fake_stat)
-    monkeypatch.setattr(jobs_module.os, "access", lambda _path, _mode: True)
+    monkeypatch.setattr(
+        jobs_module.os,
+        "access",
+        lambda _path, _mode, *, effective_ids: True,
+    )
     monkeypatch.setattr(jobs_module.os, "getgroups", lambda: [12001])
     startup_docker.security_options = []
     manager = JobManager(

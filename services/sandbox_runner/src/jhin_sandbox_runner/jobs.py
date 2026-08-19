@@ -31,6 +31,7 @@ from aiodocker.exceptions import DockerError
 from jhin_observability import get_logger
 from jhin_sandbox_runner.docker_socket import (
     DockerSocketConfigurationError,
+    normalize_supplemental_groups,
     validate_docker_authority,
 )
 from jhin_sandbox_runner.schemas import SandboxJobRequest, SandboxJobStatusResponse
@@ -232,7 +233,10 @@ class JobManager:
             transport_url=self._settings.sandbox_docker_transport_url,
             configured_gid=self._settings.sandbox_docker_gid,
             effective_uid=effective_uid,
-            supplemental_groups=set(os.getgroups()),
+            supplemental_groups=normalize_supplemental_groups(
+                effective_gid=effective_gid,
+                process_groups=os.getgroups(),
+            ),
         )
         client = aiodocker.Docker(url=validated_url)
         self._docker = client

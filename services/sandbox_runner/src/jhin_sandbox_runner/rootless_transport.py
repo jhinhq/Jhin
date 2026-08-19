@@ -15,6 +15,8 @@ import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from jhin_sandbox_runner.docker_socket import normalize_supplemental_groups
+
 logger = logging.getLogger(__name__)
 
 _FIXED_UPSTREAM = Path("/run/host/docker.sock")
@@ -57,7 +59,11 @@ def validate_production_boundary(
         )
     if effective_uid != 0 or effective_gid != 0:
         raise RootlessTransportConfigurationError("transport requires UID/GID 0:0")
-    if supplemental_groups:
+    authority_groups = normalize_supplemental_groups(
+        effective_gid=effective_gid,
+        process_groups=supplemental_groups,
+    )
+    if authority_groups:
         raise RootlessTransportConfigurationError("transport requires no supplemental groups")
     try:
         info = upstream.lstat()
