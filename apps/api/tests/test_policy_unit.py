@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import jhin_connectors.registry
 from jhin_api.deps import WorkspaceContext
 from jhin_api.policy import router, service
 from jhin_api.policy.router import list_tools
@@ -13,7 +14,7 @@ from jhin_api.policy.schemas import ToolOut
 from jhin_db.models import Agent, AgentCapabilityGrant
 from jhin_domain import new_uuid7
 from jhin_policy import RiskLevel, ToolDefinition
-from jhin_tools import ToolCatalog, ToolExecutionContext
+from jhin_tools import ToolDefinitionCatalog
 
 
 class _CatalogInput(BaseModel):
@@ -22,10 +23,6 @@ class _CatalogInput(BaseModel):
 
 class _CatalogOutput(BaseModel):
     ok: bool
-
-
-async def _catalog_executor(_ctx: ToolExecutionContext, _payload: BaseModel) -> _CatalogOutput:
-    return _CatalogOutput(ok=True)
 
 
 async def _agent(session: AsyncSession, ctx: WorkspaceContext) -> Agent:
@@ -100,7 +97,7 @@ async def test_tool_catalog_exposes_declared_and_required_scope_keys(
 ) -> None:
     assert {"scope_keys", "required_grant_scope_keys"} <= set(ToolOut.model_fields)
 
-    catalog = ToolCatalog()
+    catalog = ToolDefinitionCatalog()
     catalog.register(
         ToolDefinition(
             name="test.scoped_catalog",
@@ -111,12 +108,25 @@ async def test_tool_catalog_exposes_declared_and_required_scope_keys(
             required_capability="test.scoped_catalog",
             scope_keys=("connection_id",),
             required_grant_scope_keys=("connection_id",),
-        ),
-        _catalog_executor,
+        )
     )
-    monkeypatch.setattr(router, "build_default_catalog", lambda: catalog)
+    monkeypatch.setattr(router, "build_default_definition_catalog", lambda: catalog)
 
     tools = await list_tools(ctx=None)  # type: ignore[arg-type]
     scoped = next(tool for tool in tools if tool.name == "test.scoped_catalog")
     assert scoped.scope_keys == ("connection_id",)
     assert scoped.required_grant_scope_keys == ("connection_id",)
+
+
+async def test_tools_endpoint_uses_definition_only_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        jhin_connectors.registry,
+        "build_default_catalog",
+        lambda: pytest.fail("API attempted executable catalog construction"),
+    )
+
+    tools = await list_tools(ctx=None)  # type: ignore[arg-type]
+
+    assert {tool.name for tool in tools} >= {"system.echo", "linear.issue.read"}

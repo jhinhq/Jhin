@@ -10,7 +10,12 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 
 from jhin_connectors.base import Connector, ConnectorError
-from jhin_tools import ToolCatalog, build_builtin_catalog
+from jhin_tools import (
+    ToolCatalog,
+    ToolDefinitionCatalog,
+    build_builtin_catalog,
+    builtin_tool_definitions,
+)
 
 
 class ConnectorRegistry:
@@ -94,4 +99,17 @@ def build_default_catalog(registry: ConnectorRegistry | None = None) -> ToolCata
     for connector in registry if registry is not None else default_registry():
         for definition, executor in connector.tools():
             catalog.register(definition, executor)
+    return catalog
+
+
+def build_default_definition_catalog(
+    registry: ConnectorRegistry | None = None,
+) -> ToolDefinitionCatalog:
+    """Built-in and connector definitions without executable callables."""
+    catalog = ToolDefinitionCatalog()
+    for definition in builtin_tool_definitions():
+        catalog.register(definition)
+    for connector in registry if registry is not None else default_registry():
+        for definition in connector.tool_definitions():
+            catalog.register(definition)
     return catalog

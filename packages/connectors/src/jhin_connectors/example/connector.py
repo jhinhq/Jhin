@@ -28,5 +28,8 @@ class ExampleConnector(Connector):
     def tools(self) -> tuple[tuple[ToolDefinition, ToolExecutor], ...]:
         return EXAMPLE_TOOLS
 
+    def tool_definitions(self) -> tuple[ToolDefinition, ...]:
+        return tuple(definition for definition, _executor in EXAMPLE_TOOLS)
+
     def normalize_event(self, raw: RawWebhookEvent) -> list[NormalizedEvent]:
         return normalize(raw)

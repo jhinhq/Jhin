@@ -173,5 +173,11 @@ class SupabaseConnector(Connector):
     def tools(self) -> tuple[tuple[ToolDefinition, ToolExecutor], ...]:
         return SUPABASE_MANAGEMENT_TOOLS + SUPABASE_DATABASE_TOOLS
 
+    def tool_definitions(self) -> tuple[ToolDefinition, ...]:
+        return tuple(
+            definition
+            for definition, _executor in SUPABASE_MANAGEMENT_TOOLS + SUPABASE_DATABASE_TOOLS
+        )
+
 
 __all__ = ["SupabaseConnector", "validate_allowed_schemas", "validate_project_ref"]

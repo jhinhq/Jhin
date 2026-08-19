@@ -4,8 +4,10 @@ agent tool call (plan section 12) — plus the Phase 4 built-in system tools."""
 from jhin_tools.builtin import (
     BUILTIN_TOOLS,
     ToolCatalog,
+    ToolDefinitionCatalog,
     ToolExecutionContext,
     allowed_tool_definitions,
+    builtin_tool_definitions,
     build_builtin_catalog,
 )
 from jhin_tools.errors import ToolExecutionError
@@ -63,10 +65,12 @@ __all__ = [
     "GatewayOutcome",
     "GatewayStateError",
     "ToolCatalog",
+    "ToolDefinitionCatalog",
     "ToolExecutionContext",
     "ToolExecutionError",
     "ToolGateway",
     "allowed_tool_definitions",
+    "builtin_tool_definitions",
     "build_builtin_catalog",
     "release_barrier",
     "sanitize_payload",
