@@ -277,6 +277,44 @@ def test_barrier_root_is_directly_under_tmp_and_cross_uid_writable() -> None:
     assert not barrier.root.exists()
 
 
+def test_child_barrier_intent_is_fsynced_before_the_first_mkdir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _authority_for_recorder().with_child_barrier_journal()
+    journal = authority.child_barrier_journal_path
+    failpoint = "phase10.tool.after_claim.before_effect.v1"
+    observed: list[dict[str, str]] = []
+    real_mkdir = Path.mkdir
+    monkeypatch.setenv("JHIN_PHASE10_CHILD_BARRIER_JOURNAL", str(journal))
+
+    def inspect_before_mkdir(
+        path: Path,
+        mode: int = 0o777,
+        parents: bool = False,
+        exist_ok: bool = False,
+    ) -> None:
+        if path.parent == Path("/tmp") and path.name.startswith("jhin-p10-barrier-"):
+            lines = journal.read_text(encoding="utf-8").splitlines()
+            assert len(lines) == 1
+            record = cast(dict[str, str], json.loads(lines[0]))
+            assert record == {"failpoint": failpoint, "root": str(path)}
+            observed.append(record)
+        real_mkdir(path, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    monkeypatch.setattr(Path, "mkdir", inspect_before_mkdir)
+    barrier: Any = None
+    try:
+        barrier = create_barrier_root(failpoint)
+        assert observed == [{"failpoint": failpoint, "root": str(barrier.root)}]
+        authority.remove_recovery_paths()
+        assert not barrier.root.exists()
+    finally:
+        if barrier is not None and barrier.root.exists():
+            barrier.cleanup()
+        if authority.runtime_dir.exists() or authority.barrier_root.exists():
+            authority.remove_runtime_paths()
+
+
 def test_barrier_arrival_wait_requires_one_fsynced_uuid_marker() -> None:
     barrier = create_barrier_root("phase10.tool.before_claim.v1")
     identity = "018f4d52-8b93-7d41-8ac7-7f190f091111"
@@ -1864,7 +1902,7 @@ def test_cleanup_rechecks_each_removed_image_and_fails_on_exact_survivors() -> N
             authority.remove_runtime_paths()
 
 
-def test_cleanup_socket_authority_loss_makes_zero_daemon_calls(
+def test_cleanup_socket_authority_loss_makes_zero_daemon_calls_and_retains_recovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     authority = replace(
@@ -1891,11 +1929,14 @@ def test_cleanup_socket_authority_loss_makes_zero_daemon_calls(
             )
         ),
     )
-    with pytest.raises(ExceptionGroup, match=r"authority lost.*survivors.*unknown"):
-        authority.down_and_cleanup(runner=recorder)
-    assert recorder.calls == []
-    assert not authority.runtime_dir.exists()
-    assert not authority.barrier_root.exists()
+    try:
+        with pytest.raises(ExceptionGroup, match=r"authority lost.*survivors.*unknown"):
+            authority.down_and_cleanup(runner=recorder)
+        assert recorder.calls == []
+        assert authority.runtime_dir.is_dir()
+        assert authority.barrier_root.is_dir()
+    finally:
+        authority.remove_runtime_paths()
 
 
 def test_authority_lease_round_trip_is_private_and_exact() -> None:
@@ -1925,6 +1966,113 @@ def test_authority_lease_round_trip_is_private_and_exact() -> None:
         assert loaded.environment == authority.environment
         assert loaded.published_ports == authority.published_ports
         assert loaded.compose_command("ps") == authority.compose_command("ps")
+    finally:
+        lease.unlink(missing_ok=True)
+        authority.remove_runtime_paths()
+
+
+def test_initial_authority_lease_retries_short_writes_and_fsyncs_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _authority_for_recorder()
+    lease = Path("/tmp") / f"jhin-p10-short-write-{uuid.uuid4().hex}.json"
+    real_write = os.write
+    real_fsync = os.fsync
+    writes: list[int] = []
+    fsynced_modes: list[int] = []
+
+    def short_write(descriptor: int, payload: bytes) -> int:
+        chunk = payload[:7]
+        writes.append(len(chunk))
+        return real_write(descriptor, chunk)
+
+    def recording_fsync(descriptor: int) -> None:
+        fsynced_modes.append(os.fstat(descriptor).st_mode)
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(os, "write", short_write)
+    monkeypatch.setattr(os, "fsync", recording_fsync)
+    try:
+        ownership = write_authority_lease(authority, lease)
+        assert ownership.path == lease
+        assert ownership.authority_token == authority.token
+        assert (ownership.device, ownership.inode) == (
+            lease.lstat().st_dev,
+            lease.lstat().st_ino,
+        )
+        assert len(writes) > 1
+        assert sum(stat.S_ISDIR(mode) for mode in fsynced_modes) >= 1
+        assert read_authority_lease(lease, expected_repo=authority.repo) == authority
+        lifecycle._unlink_owned_authority_lease(ownership)
+        assert not lease.exists()
+    finally:
+        lease.unlink(missing_ok=True)
+        authority.remove_runtime_paths()
+
+
+def test_initial_authority_lease_rejects_zero_write_and_removes_only_its_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _authority_for_recorder()
+    lease = Path("/tmp") / f"jhin-p10-zero-write-{uuid.uuid4().hex}.json"
+    temporary_pattern = f".{lease.name}.*.tmp"
+    before = set(Path("/tmp").glob(temporary_pattern))
+    monkeypatch.setattr(os, "write", lambda descriptor, payload: 0)
+    try:
+        with pytest.raises(RuntimeError, match="zero progress"):
+            write_authority_lease(authority, lease)
+        assert not lease.exists()
+        assert set(Path("/tmp").glob(temporary_pattern)) == before
+    finally:
+        lease.unlink(missing_ok=True)
+        authority.remove_runtime_paths()
+
+
+def test_one_shot_does_not_unlink_a_preexisting_unowned_lease() -> None:
+    authority = _authority_for_recorder()
+    lease = Path("/tmp") / f"jhin-p10-unowned-one-shot-{uuid.uuid4().hex}.json"
+    sentinel = b"pre-existing recovery owner\n"
+    lease.write_bytes(sentinel)
+    lease.chmod(0o600)
+    identity = lease.lstat().st_dev, lease.lstat().st_ino
+    scenario = LiveScenario(nodes=("unowned-lease",), expected_tests=1, start_stack=False)
+    try:
+        with pytest.raises(FileExistsError, match="already exists"):
+            execute_one_shot(authority, scenario=scenario, lease_path=lease)
+        assert lease.read_bytes() == sentinel
+        assert (lease.lstat().st_dev, lease.lstat().st_ino) == identity
+    finally:
+        lease.unlink(missing_ok=True)
+        authority.remove_runtime_paths()
+
+
+def test_persistent_start_does_not_unlink_a_racing_unowned_lease(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    authority = ComposeAuthority.create(
+        repo=tmp_path,
+        mode="rootful",
+        socket_path=Path("/var/run/docker.sock"),
+        socket_gid=123,
+        token=uuid.uuid4().hex[:12],
+        source_environment={"PATH": os.environ.get("PATH", "/usr/bin")},
+    )
+    lease = lease_path_for(tmp_path)
+    sentinel = b"racing recovery owner\n"
+
+    def select_after_racing_lease(**kwargs: Any) -> ComposeAuthority:
+        del kwargs
+        lease.write_bytes(sentinel)
+        lease.chmod(0o600)
+        return authority
+
+    monkeypatch.setattr(lifecycle, "select_live_authority", select_after_racing_lease)
+    try:
+        with pytest.raises(FileExistsError, match="already exists"):
+            lifecycle._persistent_up(repo=tmp_path, mode="rootful")
+        assert lease.read_bytes() == sentinel
     finally:
         lease.unlink(missing_ok=True)
         authority.remove_runtime_paths()
@@ -2080,6 +2228,46 @@ def test_persistent_lease_path_is_stable_per_repo_and_directly_under_tmp() -> No
     assert first.parent == Path("/tmp")
     assert first.name.startswith("jhin-p10-worktree-")
     assert lease_path_for(repo.parent) != first
+
+
+def test_persistent_operation_lock_rejects_symlink_and_loose_mode_without_running(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    lock = lifecycle.persistent_operation_lock_path(tmp_path)
+    target = Path("/tmp") / f"jhin-p10-lock-target-{uuid.uuid4().hex}"
+    calls: list[tuple[str, ...]] = []
+
+    def forbidden_runner(command: tuple[str, ...], **kwargs: Any) -> Any:
+        del kwargs
+        calls.append(command)
+        raise AssertionError("lock rejection must happen before any command")
+
+    try:
+        target.write_text("foreign\n", encoding="utf-8")
+        target.chmod(0o600)
+        lock.symlink_to(target)
+        with pytest.raises(OSError):
+            lifecycle._persistent_compose(
+                repo=tmp_path,
+                arguments=("run", "--rm", "--no-deps", "api", "jhin-db-migrate"),
+                runner=forbidden_runner,
+            )
+        assert target.read_text(encoding="utf-8") == "foreign\n"
+        lock.unlink()
+
+        lock.write_text("loose\n", encoding="utf-8")
+        lock.chmod(0o644)
+        with pytest.raises(RuntimeError, match="owner-only"):
+            lifecycle._persistent_compose(
+                repo=tmp_path,
+                arguments=("run", "--rm", "--no-deps", "api", "jhin-db-migrate"),
+                runner=forbidden_runner,
+            )
+        assert calls == []
+    finally:
+        lock.unlink(missing_ok=True)
+        target.unlink(missing_ok=True)
 
 
 def test_live_preflight_binds_socket_daemon_and_reserved_resource_snapshot(
@@ -2501,6 +2689,43 @@ def test_real_cleanup_survivor_retains_lease_key_and_runtime_authority(
         assert loaded.runtime_dir == authority.runtime_dir
         assert loaded.barrier_root == authority.barrier_root
         assert loaded.master_key_path == authority.master_key_path
+    finally:
+        lease.unlink(missing_ok=True)
+        authority.remove_runtime_paths()
+
+
+def test_one_shot_indeterminate_cleanup_retains_readable_recovery_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _authority_for_recorder()
+    lease = Path("/tmp") / f"jhin-p10-indeterminate-one-shot-{uuid.uuid4().hex}.json"
+    authority.master_key_path.write_bytes(b"r" * 32)
+    authority.master_key_path.chmod(0o400)
+    monkeypatch.setattr(ComposeAuthority, "preflight", lambda self, *, runner: None)
+
+    def successful_child(command: tuple[str, ...], **kwargs: Any) -> Any:
+        del kwargs
+        return subprocess.CompletedProcess(command, 0, "passed\n", "")
+
+    def indeterminate_runner(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise TimeoutError("indeterminate Docker cleanup")
+
+    scenario = LiveScenario(nodes=("indeterminate-cleanup",), expected_tests=1, start_stack=False)
+    try:
+        with pytest.raises(BaseExceptionGroup, match="cleanup"):
+            execute_one_shot(
+                authority,
+                scenario=scenario,
+                lease_path=lease,
+                runner=indeterminate_runner,
+                child_runner=successful_child,
+            )
+        loaded = read_authority_lease(lease, expected_repo=authority.repo)
+        assert loaded.runtime_dir == authority.runtime_dir
+        assert authority.runtime_dir.is_dir()
+        assert authority.barrier_root.is_dir()
+        assert authority.master_key_path.read_bytes() == b"r" * 32
     finally:
         lease.unlink(missing_ok=True)
         authority.remove_runtime_paths()
@@ -3621,6 +3846,32 @@ def _pid_exists(pid: int) -> bool:
     return True
 
 
+def _fork_phase10_operation(callback: Any, error_path: Path) -> int:
+    pid = os.fork()
+    if pid != 0:
+        return pid
+    try:
+        callback()
+    except BaseException as error:
+        error_path.write_text(repr(error), encoding="utf-8")
+        os._exit(1)
+    os._exit(0)
+
+
+def _wait_phase10_operation(pid: int, error_path: Path) -> None:
+    waited, status = os.waitpid(pid, 0)
+    assert waited == pid
+    detail = error_path.read_text(encoding="utf-8") if error_path.exists() else ""
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, detail
+
+
+def _wait_for_path(path: Path, *, timeout: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not path.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert path.exists(), f"timed out waiting for {path}"
+
+
 def test_owned_live_child_timeout_reaps_nested_process_group(tmp_path: Path) -> None:
     command = _owned_child_timeout_command(tmp_path)
     child_state_path = tmp_path / "timeout-child.json"
@@ -4115,6 +4366,258 @@ def test_persistent_down_unlinks_lease_after_conclusive_nested_signal_cleanup(
         authority.remove_runtime_paths()
 
 
+def test_persistent_down_indeterminate_cleanup_retains_readable_recovery_authority(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    authority = ComposeAuthority.create(
+        repo=tmp_path,
+        mode="rootful",
+        socket_path=Path("/var/run/docker.sock"),
+        socket_gid=123,
+        token=uuid.uuid4().hex[:12],
+        source_environment={"PATH": os.environ.get("PATH", "/usr/bin")},
+    )
+    authority.master_key_path.write_bytes(b"d" * 32)
+    authority.master_key_path.chmod(0o400)
+    lease = lease_path_for(tmp_path)
+    write_authority_lease(authority, lease)
+
+    def indeterminate_runner(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise TimeoutError("indeterminate Docker cleanup")
+
+    try:
+        with pytest.raises(BaseExceptionGroup, match="cleanup"):
+            lifecycle._persistent_down(repo=tmp_path, runner=indeterminate_runner)
+        loaded = read_authority_lease(lease, expected_repo=tmp_path)
+        assert loaded.runtime_dir == authority.runtime_dir
+        assert authority.runtime_dir.is_dir()
+        assert authority.barrier_root.is_dir()
+        assert authority.master_key_path.read_bytes() == b"d" * 32
+    finally:
+        lease.unlink(missing_ok=True)
+        authority.remove_runtime_paths()
+
+
+def test_persistent_down_never_unlinks_a_replaced_unowned_lease(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    authority = ComposeAuthority.create(
+        repo=tmp_path,
+        mode="rootful",
+        socket_path=Path("/var/run/docker.sock"),
+        socket_gid=123,
+        token=uuid.uuid4().hex[:12],
+        source_environment={"PATH": os.environ.get("PATH", "/usr/bin")},
+    )
+    lease = lease_path_for(tmp_path)
+    write_authority_lease(authority, lease)
+    replacement = b"replacement recovery owner\n"
+
+    def replace_during_cleanup(
+        self: ComposeAuthority,
+        *,
+        runner: Any,
+        upgrade: bool = False,
+    ) -> None:
+        del runner, upgrade
+        self.remove_runtime_paths()
+        lease.unlink()
+        lease.write_bytes(replacement)
+        lease.chmod(0o600)
+
+    monkeypatch.setattr(ComposeAuthority, "down_and_cleanup", replace_during_cleanup)
+    try:
+        with pytest.raises(BaseExceptionGroup, match="handoff"):
+            lifecycle._persistent_down(repo=tmp_path)
+        assert lease.read_bytes() == replacement
+    finally:
+        lease.unlink(missing_ok=True)
+        lease.with_suffix(".lock").unlink(missing_ok=True)
+        authority.remove_runtime_paths()
+
+
+def test_persistent_compose_and_down_are_serialized_across_processes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    authority = ComposeAuthority.create(
+        repo=tmp_path,
+        mode="rootful",
+        socket_path=Path("/var/run/docker.sock"),
+        socket_gid=123,
+        token=uuid.uuid4().hex[:12],
+        source_environment={"PATH": os.environ.get("PATH", "/usr/bin")},
+    )
+    lease = lease_path_for(tmp_path)
+    write_authority_lease(authority, lease)
+    compose_started = tmp_path / "compose-started"
+    compose_release = tmp_path / "compose-release"
+    down_entered = tmp_path / "down-entered"
+    compose_error = tmp_path / "compose-error"
+    down_error = tmp_path / "down-error"
+    children: set[int] = set()
+
+    def compose_operation() -> None:
+        def blocking_runner(command: tuple[str, ...], **kwargs: Any) -> Any:
+            del kwargs
+            compose_started.touch()
+            _wait_for_path(compose_release)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        lifecycle._persistent_compose(
+            repo=tmp_path,
+            arguments=("run", "--rm", "--no-deps", "api", "jhin-db-migrate"),
+            runner=blocking_runner,
+        )
+
+    def down_operation() -> None:
+        def conclusive_cleanup(
+            self: ComposeAuthority,
+            *,
+            runner: Any,
+            upgrade: bool = False,
+        ) -> None:
+            del runner, upgrade
+            down_entered.touch()
+            self.remove_runtime_paths()
+
+        monkeypatch.setattr(ComposeAuthority, "down_and_cleanup", conclusive_cleanup)
+        lifecycle._persistent_down(repo=tmp_path)
+
+    try:
+        compose_pid = _fork_phase10_operation(compose_operation, compose_error)
+        children.add(compose_pid)
+        _wait_for_path(compose_started)
+        down_pid = _fork_phase10_operation(down_operation, down_error)
+        children.add(down_pid)
+        time.sleep(0.25)
+        assert not down_entered.exists()
+        compose_release.touch()
+        _wait_phase10_operation(compose_pid, compose_error)
+        children.remove(compose_pid)
+        _wait_phase10_operation(down_pid, down_error)
+        children.remove(down_pid)
+        assert down_entered.is_file()
+        assert not lease.exists()
+    finally:
+        for pid in children:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(pid, 0)
+        compose_release.touch(exist_ok=True)
+        lease.unlink(missing_ok=True)
+        lease.with_suffix(".lock").unlink(missing_ok=True)
+        authority.remove_runtime_paths()
+
+
+def test_provisional_persistent_up_and_down_are_serialized_across_processes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    lease = lease_path_for(tmp_path)
+    up_started = tmp_path / "up-started.json"
+    up_release = tmp_path / "up-release"
+    down_entered = tmp_path / "provisional-down-entered"
+    up_error = tmp_path / "up-error"
+    down_error = tmp_path / "provisional-down-error"
+    children: set[int] = set()
+    ports = {
+        variable: 54000 + index
+        for index, (variable, _service, _container_port) in enumerate(PUBLISHED_ENDPOINTS)
+    }
+
+    def up_operation() -> None:
+        authority = ComposeAuthority.create(
+            repo=tmp_path,
+            mode="rootful",
+            socket_path=Path("/var/run/docker.sock"),
+            socket_gid=123,
+            token=uuid.uuid4().hex[:12],
+            source_environment={"PATH": os.environ.get("PATH", "/usr/bin")},
+        )
+
+        def select_authority(**kwargs: Any) -> ComposeAuthority:
+            del kwargs
+            return authority
+
+        def blocking_start(self: ComposeAuthority, *, runner: Any) -> dict[str, int]:
+            del runner
+            up_started.write_text(
+                json.dumps({"runtime": str(self.runtime_dir), "barrier": str(self.barrier_root)}),
+                encoding="utf-8",
+            )
+            _wait_for_path(up_release)
+            return ports
+
+        def local_cleanup(
+            self: ComposeAuthority,
+            *,
+            runner: Any,
+            upgrade: bool = False,
+        ) -> None:
+            del runner, upgrade
+            self.remove_runtime_paths()
+
+        monkeypatch.setattr(lifecycle, "select_live_authority", select_authority)
+        monkeypatch.setattr(ComposeAuthority, "start_stack", blocking_start)
+        monkeypatch.setattr(ComposeAuthority, "down_and_cleanup", local_cleanup)
+        lifecycle._persistent_up(repo=tmp_path, mode="rootful")
+
+    def down_operation() -> None:
+        def conclusive_cleanup(
+            self: ComposeAuthority,
+            *,
+            runner: Any,
+            upgrade: bool = False,
+        ) -> None:
+            del runner, upgrade
+            down_entered.touch()
+            self.remove_runtime_paths()
+
+        monkeypatch.setattr(ComposeAuthority, "down_and_cleanup", conclusive_cleanup)
+        lifecycle._persistent_down(repo=tmp_path)
+
+    paths: tuple[Path, ...] = ()
+    try:
+        up_pid = _fork_phase10_operation(up_operation, up_error)
+        children.add(up_pid)
+        _wait_for_path(up_started)
+        state = json.loads(up_started.read_text(encoding="utf-8"))
+        paths = (Path(state["runtime"]), Path(state["barrier"]))
+        down_pid = _fork_phase10_operation(down_operation, down_error)
+        children.add(down_pid)
+        time.sleep(0.25)
+        assert not down_entered.exists()
+        up_release.touch()
+        _wait_phase10_operation(up_pid, up_error)
+        children.remove(up_pid)
+        _wait_phase10_operation(down_pid, down_error)
+        children.remove(down_pid)
+        assert down_entered.is_file()
+        assert not lease.exists()
+        assert all(not path.exists() for path in paths)
+    finally:
+        for pid in children:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(pid, 0)
+        up_release.touch(exist_ok=True)
+        lease.unlink(missing_ok=True)
+        lease.with_suffix(".lock").unlink(missing_ok=True)
+        for path in paths:
+            if path.exists():
+                os.chmod(path, 0o700, follow_symlinks=False)
+                shutil.rmtree(path)
+
+
 @pytest.mark.parametrize("operation", ("run", "persistent-up"))
 def test_signal_after_authority_selection_removes_unpublished_runtime_paths(
     tmp_path: Path,
@@ -4334,6 +4837,132 @@ def test_second_signal_cannot_interrupt_final_survivor_checks(tmp_path: Path) ->
     assert cleanup_state["group_alive"] is False
     assert cleanup_state["mutation_stable"] is True
     assert (tmp_path / "survivor-check").read_text(encoding="utf-8") == "checked"
+
+
+def test_outer_signal_exhausts_child_journaled_barrier_before_lease_removal(
+    tmp_path: Path,
+) -> None:
+    repo = Path(__file__).resolve().parents[2]
+    token = uuid.uuid4().hex[:12]
+    lease = Path("/tmp") / f"jhin-p10-child-barrier-signal-{token}.json"
+    script = r"""
+import json
+import os
+import sys
+from pathlib import Path
+
+from tests.integration import phase10_upgrade_harness as lifecycle
+
+root = Path(sys.argv[1])
+repo = Path(sys.argv[2])
+lease = Path(sys.argv[3])
+token = sys.argv[4]
+authority_state = root / "journal-authority.json"
+child_state = root / "journal-child.json"
+cleanup_state = root / "journal-cleanup.json"
+authority = lifecycle.ComposeAuthority.create(
+    repo=repo,
+    mode="rootful",
+    socket_path=Path("/var/run/docker.sock"),
+    socket_gid=123,
+    token=token,
+    source_environment={"PATH": os.environ.get("PATH", "/usr/bin")},
+)
+authority_state.write_text(
+    json.dumps(
+        {"runtime": str(authority.runtime_dir), "barrier": str(authority.barrier_root)}
+    ),
+    encoding="utf-8",
+)
+
+child_code = r'''import json,os,time
+from pathlib import Path
+from tests.integration.phase10_upgrade_harness import create_barrier_root
+barrier = create_barrier_root("phase10.tool.after_claim.before_effect.v1")
+Path(os.environ["PHASE10_CHILD_STATE"]).write_text(
+    json.dumps({"pid": os.getpid(), "pgid": os.getpgrp(), "barrier": str(barrier.root)}),
+    encoding="utf-8",
+)
+while True:
+    time.sleep(1)
+'''
+child_command = (sys.executable, "-c", child_code)
+
+def no_preflight(self, *, runner):
+    del self, runner
+
+def selected_command(scenario):
+    del scenario
+    return child_command
+
+def local_cleanup(self, *, runner, upgrade=False):
+    del runner, upgrade
+    barrier = Path(json.loads(child_state.read_text(encoding="utf-8"))["barrier"])
+    self.remove_recovery_paths()
+    cleanup_state.write_text(
+        json.dumps({"barrier_exists": barrier.exists()}),
+        encoding="utf-8",
+    )
+
+lifecycle.ComposeAuthority.preflight = no_preflight
+lifecycle.ComposeAuthority.down_and_cleanup = local_cleanup
+lifecycle.build_live_pytest_command = selected_command
+environment = authority.environment
+environment["PHASE10_CHILD_STATE"] = str(child_state)
+authority = lifecycle.replace(
+    authority,
+    _environment_items=tuple(sorted(environment.items())),
+)
+scenario = lifecycle.LiveScenario(
+    nodes=("journaled-child-barrier",), expected_tests=1, start_stack=False
+)
+lifecycle.execute_one_shot(authority, scenario=scenario, lease_path=lease)
+"""
+    process = subprocess.Popen(
+        (sys.executable, "-c", script, str(tmp_path), str(repo), str(lease), token),
+        cwd=repo,
+        env=os.environ.copy(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    authority_state = tmp_path / "journal-authority.json"
+    child_state = tmp_path / "journal-child.json"
+    _wait_for_path(child_state)
+    child = json.loads(child_state.read_text(encoding="utf-8"))
+    child_group = int(child["pgid"])
+    child_barrier = Path(child["barrier"])
+    authority_paths: tuple[Path, ...] = ()
+    if authority_state.is_file():
+        state = json.loads(authority_state.read_text(encoding="utf-8"))
+        authority_paths = (Path(state["runtime"]), Path(state["barrier"]))
+    try:
+        os.kill(process.pid, signal.SIGTERM)
+        stdout, stderr = process.communicate(timeout=10.0)
+        assert process.returncode == 128 + signal.SIGTERM, (stdout, stderr)
+        assert not _pid_exists(int(child["pid"]))
+        with pytest.raises(ProcessLookupError):
+            os.killpg(child_group, 0)
+        assert not child_barrier.exists()
+        assert json.loads((tmp_path / "journal-cleanup.json").read_text(encoding="utf-8")) == {
+            "barrier_exists": False
+        }
+        assert not lease.exists()
+        assert all(not path.exists() for path in authority_paths)
+    finally:
+        _signal_test_process_group(child_group)
+        if process.poll() is None:
+            _signal_test_process_group(process.pid)
+            process.wait(timeout=5.0)
+        if child_barrier.exists():
+            os.chmod(child_barrier, 0o700, follow_symlinks=False)
+            shutil.rmtree(child_barrier)
+        for path in authority_paths:
+            if path.exists():
+                os.chmod(path, 0o700, follow_symlinks=False)
+                shutil.rmtree(path)
+        lease.unlink(missing_ok=True)
 
 
 def test_one_shot_upgrade_build_uses_the_injected_selected_daemon_runner(

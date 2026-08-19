@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import fcntl
 import hashlib
 import json
 import os
@@ -131,6 +132,8 @@ _UPGRADE_COMPOSE_AUTO_IMAGE_SERVICES = tuple(
     for kind in ("agent", "tool")
     for scenario in _UPGRADE_SCENARIOS
 )
+_CHILD_BARRIER_JOURNAL_NAME = "phase10-child-barriers.jsonl"
+_CHILD_BARRIER_JOURNAL_ENV = "JHIN_PHASE10_CHILD_BARRIER_JOURNAL"
 
 
 class ComposePsError(ValueError):
@@ -1119,20 +1122,132 @@ class BarrierRoot:
         shutil.rmtree(self.root)
 
 
+def _validate_child_barrier_journal(path: Path) -> os.stat_result:
+    if (
+        not path.is_absolute()
+        or path.name != _CHILD_BARRIER_JOURNAL_NAME
+        or path.parent.parent != Path("/tmp")
+        or re.fullmatch(r"jhin-p10-runtime-[0-9a-f]{8,16}-[A-Za-z0-9_]+", path.parent.name) is None
+    ):
+        raise RuntimeError("child barrier journal escaped its leased runtime directory")
+    runtime_metadata = path.parent.lstat()
+    if (
+        stat.S_ISLNK(runtime_metadata.st_mode)
+        or not stat.S_ISDIR(runtime_metadata.st_mode)
+        or runtime_metadata.st_uid != os.getuid()
+        or stat.S_IMODE(runtime_metadata.st_mode) != 0o711
+    ):
+        raise RuntimeError("child barrier journal runtime identity changed")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        metadata = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        raise RuntimeError("child barrier journal is not owner-only")
+    return metadata
+
+
+def _append_child_barrier_intent(journal: Path, *, root: Path, failpoint: str) -> None:
+    expected_journal = _validate_child_barrier_journal(journal)
+    if (
+        root.parent != Path("/tmp")
+        or re.fullmatch(r"jhin-p10-barrier-[0-9a-f]{32}", root.name) is None
+    ):
+        raise RuntimeError("child barrier intent path is invalid")
+    payload = (
+        json.dumps(
+            {"failpoint": failpoint, "root": str(root)},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode()
+    descriptor = os.open(journal, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_dev != expected_journal.st_dev
+            or metadata.st_ino != expected_journal.st_ino
+        ):
+            raise RuntimeError("child barrier journal is not owner-only")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        try:
+            _write_all(descriptor, payload, description="child barrier journal")
+            os.fsync(descriptor)
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+    directory = os.open(journal.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 def create_barrier_root(failpoint: str) -> BarrierRoot:
     if not failpoint or "/" in failpoint or failpoint in {".", ".."}:
         raise ValueError("invalid barrier failpoint")
-    root = Path(tempfile.mkdtemp(prefix="jhin-p10-barrier-", dir="/tmp"))
+    raw_journal = os.environ.get(_CHILD_BARRIER_JOURNAL_ENV)
+    if raw_journal is None:
+        root = Path(tempfile.mkdtemp(prefix="jhin-p10-barrier-", dir="/tmp"))
+        selected = root / failpoint
+        try:
+            selected.mkdir(mode=0o700)
+            os.chmod(selected, 0o1777, follow_symlinks=False)
+            os.chmod(root, 0o711, follow_symlinks=False)
+        except BaseException:
+            os.chmod(root, 0o700, follow_symlinks=False)
+            shutil.rmtree(root)
+            raise
+        return BarrierRoot(root=root, failpoint=failpoint)
+
+    journal = Path(raw_journal)
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, _CATCHABLE_SIGNAL_SET)
+    root = Path("/tmp") / f"jhin-p10-barrier-{secrets.token_hex(16)}"
     selected = root / failpoint
+    root_created = False
     try:
-        selected.mkdir()
+        try:
+            root.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            raise RuntimeError("unpredictable child barrier path already exists")
+        # Publish and fsync the exact cleanup intent before the first mkdir.
+        # A pending outer signal is delivered only after both journal and
+        # directory construction have transferred ownership to the parent.
+        _append_child_barrier_intent(journal, root=root, failpoint=failpoint)
+        root.mkdir(mode=0o700)
+        root_created = True
+        selected.mkdir(mode=0o700)
         os.chmod(selected, 0o1777, follow_symlinks=False)
         os.chmod(root, 0o711, follow_symlinks=False)
-    except BaseException:
-        os.chmod(root, 0o700, follow_symlinks=False)
-        shutil.rmtree(root)
+        return BarrierRoot(root=root, failpoint=failpoint)
+    except BaseException as error:
+        cleanup_errors: list[BaseException] = []
+        if root_created:
+            try:
+                os.chmod(root, 0o700, follow_symlinks=False)
+                shutil.rmtree(root)
+            except BaseException as cleanup_error:
+                cleanup_errors.append(cleanup_error)
+        if cleanup_errors:
+            raise BaseExceptionGroup(
+                "child barrier creation and rollback failed",
+                [error, *cleanup_errors],
+            ) from error
         raise
-    return BarrierRoot(root=root, failpoint=failpoint)
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
 
 def _events(history_or_events: Any) -> Sequence[Any]:
@@ -1350,6 +1465,86 @@ class ComposeAuthority:
         return dict(self._environment_items)
 
     @property
+    def child_barrier_journal_path(self) -> Path:
+        return self.runtime_dir / _CHILD_BARRIER_JOURNAL_NAME
+
+    def with_child_barrier_journal(self) -> ComposeAuthority:
+        """Prepublish the fsynced child-barrier recovery journal."""
+        environment = self.environment
+        existing = environment.get(_CHILD_BARRIER_JOURNAL_ENV)
+        expected = self.child_barrier_journal_path
+        if existing is not None:
+            if Path(existing) != expected:
+                raise RuntimeError("child barrier journal authority changed")
+            _validate_child_barrier_journal(expected)
+            return self
+
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, _CATCHABLE_SIGNAL_SET)
+        descriptor = -1
+        created_stat: os.stat_result | None = None
+        primary_error: BaseException | None = None
+        prepared: ComposeAuthority | None = None
+        try:
+            descriptor = os.open(
+                expected,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+            )
+            created_stat = os.fstat(descriptor)
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+            os.close(descriptor)
+            descriptor = -1
+            directory = os.open(
+                self.runtime_dir,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            )
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+            environment[_CHILD_BARRIER_JOURNAL_ENV] = str(expected)
+            prepared = replace(
+                self,
+                _environment_items=tuple(sorted(environment.items())),
+            )
+        except BaseException as error:
+            primary_error = error
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            try:
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+            except BaseException as error:
+                primary_error = (
+                    error
+                    if primary_error is None
+                    else BaseExceptionGroup(
+                        "child barrier journal setup and signal restoration failed",
+                        [primary_error, error],
+                    )
+                )
+        if primary_error is not None:
+            rollback_errors: list[BaseException] = []
+            if created_stat is not None:
+                try:
+                    _unlink_exact_file(
+                        expected,
+                        device=created_stat.st_dev,
+                        inode=created_stat.st_ino,
+                    )
+                except BaseException as error:
+                    rollback_errors.append(error)
+            if rollback_errors:
+                raise BaseExceptionGroup(
+                    "child barrier journal setup and rollback failed",
+                    [primary_error, *rollback_errors],
+                ) from primary_error
+            raise primary_error
+        assert prepared is not None
+        return prepared
+
+    @property
     def published_ports(self) -> dict[str, int]:
         return dict(self._published_port_items)
 
@@ -1559,6 +1754,111 @@ class ComposeAuthority:
             command.extend(("-f", filename))
         command.extend(args)
         return tuple(command)
+
+    def _child_barrier_journal(self) -> Path | None:
+        raw = self.environment.get(_CHILD_BARRIER_JOURNAL_ENV)
+        if raw is None:
+            return None
+        journal = Path(raw)
+        if journal != self.child_barrier_journal_path:
+            raise RuntimeError("child barrier journal does not belong to this authority")
+        _validate_child_barrier_journal(journal)
+        return journal
+
+    def cleanup_child_barriers(self) -> None:
+        """Validate and exhaust every child-created direct-/tmp barrier intent."""
+        journal = self._child_barrier_journal()
+        if journal is None:
+            return
+        expected_journal = _validate_child_barrier_journal(journal)
+        descriptor = os.open(journal, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            opened_journal = os.fstat(descriptor)
+            if (
+                opened_journal.st_dev != expected_journal.st_dev
+                or opened_journal.st_ino != expected_journal.st_ino
+            ):
+                raise RuntimeError("child barrier journal identity changed")
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            try:
+                raw = os.read(descriptor, 1024 * 1024 + 1)
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+        if len(raw) > 1024 * 1024:
+            raise RuntimeError("child barrier journal is too large")
+        if raw and not raw.endswith(b"\n"):
+            raise RuntimeError("child barrier journal has a partial record")
+
+        records: dict[Path, str] = {}
+        for line in raw.splitlines():
+            try:
+                decoded = json.loads(line)
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise RuntimeError("child barrier journal is malformed") from error
+            if not isinstance(decoded, dict) or set(decoded) != {"failpoint", "root"}:
+                raise RuntimeError("child barrier journal record schema is invalid")
+            failpoint = decoded["failpoint"]
+            raw_root = decoded["root"]
+            if (
+                not isinstance(failpoint, str)
+                or not failpoint
+                or "/" in failpoint
+                or failpoint in {".", ".."}
+                or not isinstance(raw_root, str)
+            ):
+                raise RuntimeError("child barrier journal record identity is invalid")
+            root = Path(raw_root)
+            if (
+                root.parent != Path("/tmp")
+                or re.fullmatch(r"jhin-p10-barrier-[0-9a-f]{32}", root.name) is None
+            ):
+                raise RuntimeError("child barrier journal root is outside exact authority")
+            previous = records.setdefault(root, failpoint)
+            if previous != failpoint:
+                raise RuntimeError("child barrier journal reused one root identity")
+
+        errors: list[BaseException] = []
+        for root, failpoint in records.items():
+            try:
+                try:
+                    root_metadata = root.lstat()
+                except FileNotFoundError:
+                    continue
+                if (
+                    stat.S_ISLNK(root_metadata.st_mode)
+                    or not stat.S_ISDIR(root_metadata.st_mode)
+                    or root_metadata.st_uid != os.getuid()
+                    or stat.S_IMODE(root_metadata.st_mode) not in {0o700, 0o711}
+                ):
+                    raise RuntimeError(f"child barrier root identity changed: {root}")
+                entries = list(root.iterdir())
+                if any(entry.name != failpoint for entry in entries) or len(entries) > 1:
+                    raise RuntimeError(f"child barrier root has unexpected entries: {root}")
+                if entries:
+                    selected = entries[0]
+                    selected_metadata = selected.lstat()
+                    if (
+                        stat.S_ISLNK(selected_metadata.st_mode)
+                        or not stat.S_ISDIR(selected_metadata.st_mode)
+                        or selected_metadata.st_uid != os.getuid()
+                        or stat.S_IMODE(selected_metadata.st_mode) not in {0o700, 0o1777}
+                    ):
+                        raise RuntimeError(f"child barrier failpoint identity changed: {selected}")
+                os.chmod(root, 0o700, follow_symlinks=False)
+                shutil.rmtree(root)
+                if root.exists() or root.is_symlink():
+                    raise RuntimeError(f"child barrier survived exact cleanup: {root}")
+            except BaseException as error:
+                errors.append(error)
+        if errors:
+            raise BaseExceptionGroup("failed to exhaust child barrier journal", errors)
+
+    def remove_recovery_paths(self) -> None:
+        """Remove journaled child barriers before their leased parent paths."""
+        self.cleanup_child_barriers()
+        self.remove_runtime_paths()
 
     def remove_runtime_paths(self) -> None:
         errors: list[BaseException] = []
@@ -3011,14 +3311,9 @@ class ComposeAuthority:
         try:
             self.assert_socket_unchanged()
         except BaseException as authority_error:
-            local_errors: list[BaseException] = [authority_error]
-            try:
-                self.remove_runtime_paths()
-            except BaseException as cleanup_error:
-                local_errors.append(cleanup_error)
             raise BaseExceptionGroup(
                 "Phase 10 cleanup authority lost; Docker survivors are unknown",
-                local_errors,
+                [authority_error],
             ) from authority_error
 
         fail_closed_runner = _FailClosedCommandRunner(runner)
@@ -3222,10 +3517,11 @@ class ComposeAuthority:
                     self.assert_socket_unchanged()
                 except BaseException as error:
                     errors.append(error)
-                try:
-                    self.remove_runtime_paths()
-                except BaseException as error:
-                    errors.append(error)
+                if not errors:
+                    try:
+                        self.remove_recovery_paths()
+                    except BaseException as error:
+                        errors.append(error)
             elif not any(_contains_owned_process_group_survivor(error) for error in errors):
                 errors.append(fail_closed_runner.survivor)
         if errors:
@@ -3763,10 +4059,99 @@ def _authority_record(authority: ComposeAuthority) -> dict[str, Any]:
     }
 
 
-def write_authority_lease(authority: ComposeAuthority, path: Path) -> None:
-    """Atomically create a private, no-follow lease; never overwrite one."""
+@dataclass(frozen=True)
+class AuthorityLeaseOwnership:
+    """Stable proof that this lifecycle published one exact recovery lease."""
+
+    path: Path
+    device: int
+    inode: int
+    authority_token: str
+
+
+def _validate_direct_tmp_path(path: Path, *, description: str) -> None:
     if path.parent != Path("/tmp") or not path.is_absolute():
-        raise ValueError("authority lease must live directly below /tmp")
+        raise ValueError(f"{description} must live directly below /tmp")
+
+
+def _fsync_tmp_directory() -> None:
+    resolved_tmp = Path("/tmp").resolve(strict=True)
+    directory = os.open(resolved_tmp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def _write_all(descriptor: int, payload: bytes, *, description: str) -> None:
+    written = 0
+    while written < len(payload):
+        progress = os.write(descriptor, payload[written:])
+        if progress <= 0:
+            raise RuntimeError(f"{description} write made zero progress")
+        written += progress
+
+
+def _unlink_exact_file(path: Path, *, device: int, inode: int) -> bool:
+    """Unlink one owner-created name only while its stable inode still matches."""
+    try:
+        current = path.lstat()
+    except FileNotFoundError:
+        return False
+    if current.st_dev != device or current.st_ino != inode or not stat.S_ISREG(current.st_mode):
+        raise RuntimeError(f"refusing to unlink replaced owner-created file: {path}")
+    path.unlink()
+    return True
+
+
+def _owned_lease_descriptor(ownership: AuthorityLeaseOwnership) -> int:
+    _validate_direct_tmp_path(ownership.path, description="authority lease")
+    descriptor = os.open(ownership.path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        current = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or current.st_uid != os.getuid()
+            or stat.S_IMODE(current.st_mode) != 0o600
+            or current.st_dev != ownership.device
+            or current.st_ino != ownership.inode
+        ):
+            raise RuntimeError("authority lease ownership identity changed")
+        payload = os.read(descriptor, 1024 * 1024 + 1)
+        if len(payload) > 1024 * 1024:
+            raise RuntimeError("authority lease ownership payload is too large")
+        record = json.loads(payload)
+        if not isinstance(record, dict) or record.get("token") != ownership.authority_token:
+            raise RuntimeError("authority lease ownership token changed")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _unlink_owned_authority_lease(ownership: AuthorityLeaseOwnership) -> None:
+    """Remove only the exact lease inode and token published by this lifecycle."""
+    try:
+        descriptor = _owned_lease_descriptor(ownership)
+    except FileNotFoundError:
+        return
+    try:
+        _unlink_exact_file(
+            ownership.path,
+            device=ownership.device,
+            inode=ownership.inode,
+        )
+        _fsync_tmp_directory()
+    finally:
+        os.close(descriptor)
+
+
+def write_authority_lease(
+    authority: ComposeAuthority,
+    path: Path,
+) -> AuthorityLeaseOwnership:
+    """Durably publish a private, no-follow lease without overwriting one."""
+    _validate_direct_tmp_path(path, description="authority lease")
     try:
         existing = path.lstat()
     except FileNotFoundError:
@@ -3776,67 +4161,111 @@ def write_authority_lease(authority: ComposeAuthority, path: Path) -> None:
             raise ValueError("authority lease path is a symlink")
         raise FileExistsError(f"authority lease already exists: {path}")
     payload = (json.dumps(_authority_record(authority), sort_keys=True) + "\n").encode()
-    descriptor = os.open(
-        path,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-        0o600,
+    descriptor, raw_temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
     )
+    temporary = Path(raw_temporary)
+    temporary_stat = os.fstat(descriptor)
+    published: AuthorityLeaseOwnership | None = None
     try:
-        os.write(descriptor, payload)
+        _write_all(descriptor, payload, description="authority lease")
         os.fchmod(descriptor, 0o600)
         os.fsync(descriptor)
+        try:
+            os.link(temporary, path, follow_symlinks=False)
+        except FileExistsError as error:
+            try:
+                raced = path.lstat()
+            except FileNotFoundError:
+                raise
+            if stat.S_ISLNK(raced.st_mode):
+                raise ValueError("authority lease path is a symlink") from error
+            raise FileExistsError(f"authority lease already exists: {path}") from error
+        published = AuthorityLeaseOwnership(
+            path=path,
+            device=temporary_stat.st_dev,
+            inode=temporary_stat.st_ino,
+            authority_token=authority.token,
+        )
+        _fsync_tmp_directory()
+        _unlink_exact_file(
+            temporary,
+            device=temporary_stat.st_dev,
+            inode=temporary_stat.st_ino,
+        )
+        _fsync_tmp_directory()
+        return published
+    except BaseException as error:
+        cleanup_errors: list[BaseException] = []
+        if published is not None:
+            try:
+                _unlink_owned_authority_lease(published)
+            except BaseException as cleanup_error:
+                cleanup_errors.append(cleanup_error)
+        if cleanup_errors:
+            raise BaseExceptionGroup(
+                "authority lease publication and rollback failed",
+                [error, *cleanup_errors],
+            ) from error
+        raise
     finally:
         os.close(descriptor)
+        _unlink_exact_file(
+            temporary,
+            device=temporary_stat.st_dev,
+            inode=temporary_stat.st_ino,
+        )
 
 
-def _replace_authority_lease(authority: ComposeAuthority, path: Path) -> None:
+def _replace_authority_lease(
+    authority: ComposeAuthority,
+    ownership: AuthorityLeaseOwnership,
+) -> AuthorityLeaseOwnership:
     """Atomically refresh a validated lease without a missing/partial window."""
-    if path.parent != Path("/tmp") or not path.is_absolute():
-        raise ValueError("authority lease must live directly below /tmp")
-    current_descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    path = ownership.path
+    current_descriptor = _owned_lease_descriptor(ownership)
     temporary_descriptor = -1
     temporary_path: Path | None = None
+    temporary_stat: os.stat_result | None = None
     try:
-        current = os.fstat(current_descriptor)
-        if (
-            not stat.S_ISREG(current.st_mode)
-            or current.st_uid != os.getuid()
-            or stat.S_IMODE(current.st_mode) != 0o600
-        ):
-            raise ValueError("authority lease replacement target is not owner-only")
         temporary_descriptor, raw_temporary = tempfile.mkstemp(
             prefix=f".{path.name}.",
             suffix=".tmp",
             dir=path.parent,
         )
         temporary_path = Path(raw_temporary)
+        temporary_stat = os.fstat(temporary_descriptor)
         payload = (json.dumps(_authority_record(authority), sort_keys=True) + "\n").encode()
-        written = 0
-        while written < len(payload):
-            written += os.write(temporary_descriptor, payload[written:])
+        _write_all(temporary_descriptor, payload, description="authority lease")
         os.fchmod(temporary_descriptor, 0o600)
         os.fsync(temporary_descriptor)
         os.close(temporary_descriptor)
         temporary_descriptor = -1
+        verified_descriptor = _owned_lease_descriptor(ownership)
+        os.close(verified_descriptor)
         os.replace(temporary_path, path)
         temporary_path = None
-        resolved_parent = path.parent.resolve(strict=True)
-        if resolved_parent != Path("/tmp").resolve(strict=True):
-            raise RuntimeError("authority lease parent identity changed during refresh")
-        directory = os.open(
-            resolved_parent,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        assert temporary_stat is not None
+        refreshed = AuthorityLeaseOwnership(
+            path=path,
+            device=temporary_stat.st_dev,
+            inode=temporary_stat.st_ino,
+            authority_token=authority.token,
         )
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        _fsync_tmp_directory()
+        return refreshed
     finally:
         os.close(current_descriptor)
         if temporary_descriptor >= 0:
             os.close(temporary_descriptor)
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
+        if temporary_path is not None and temporary_stat is not None:
+            _unlink_exact_file(
+                temporary_path,
+                device=temporary_stat.st_dev,
+                inode=temporary_stat.st_ino,
+            )
 
 
 def _lease_path(value: Any, *, field: str) -> Path:
@@ -3939,6 +4368,15 @@ def read_authority_lease(path: Path, *, expected_repo: Path) -> ComposeAuthority
     }
     if any(environment.get(key) != value for key, value in required_environment.items()):
         raise ValueError("authority lease environment identity is invalid")
+    raw_child_journal = environment.get(_CHILD_BARRIER_JOURNAL_ENV)
+    if raw_child_journal is not None:
+        expected_child_journal = runtime_dir / _CHILD_BARRIER_JOURNAL_NAME
+        if raw_child_journal != str(expected_child_journal):
+            raise ValueError("authority lease child-barrier journal identity is invalid")
+        try:
+            _validate_child_barrier_journal(expected_child_journal)
+        except RuntimeError as error:
+            raise ValueError("authority lease child-barrier journal is invalid") from error
     for variable, _service, _container_port in PUBLISHED_ENDPOINTS:
         expected_value = "127.0.0.1:0" if variable in {"WEB_PORT", "API_PORT"} else "0"
         if environment.get(variable) != expected_value:
@@ -4016,6 +4454,67 @@ def lease_path_for(repo: Path) -> Path:
     """Return the per-worktree persistent lease name without creating it."""
     identity = hashlib.sha256(str(repo.resolve(strict=True)).encode()).hexdigest()[:16]
     return Path("/tmp") / f"jhin-p10-worktree-{identity}.json"
+
+
+def persistent_operation_lock_path(repo: Path) -> Path:
+    """Return the stable, per-worktree persistent lifecycle lock name."""
+    return lease_path_for(repo).with_suffix(".lock")
+
+
+@dataclass
+class _PersistentOperationLock:
+    path: Path
+    descriptor: int
+    device: int
+    inode: int
+
+    @classmethod
+    def acquire(cls, repo: Path) -> _PersistentOperationLock:
+        path = persistent_operation_lock_path(repo)
+        _validate_direct_tmp_path(path, description="persistent operation lock")
+        flags = os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
+        created = False
+        try:
+            descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+            created = True
+        except FileExistsError:
+            descriptor = os.open(path, flags)
+        try:
+            if created:
+                os.fchmod(descriptor, 0o600)
+                os.fsync(descriptor)
+                _fsync_tmp_directory()
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_nlink != 1
+            ):
+                raise RuntimeError("persistent operation lock is not owner-only")
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            named = path.lstat()
+            if named.st_dev != metadata.st_dev or named.st_ino != metadata.st_ino:
+                raise RuntimeError("persistent operation lock identity changed")
+            return cls(
+                path=path,
+                descriptor=descriptor,
+                device=metadata.st_dev,
+                inode=metadata.st_ino,
+            )
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    def __enter__(self) -> _PersistentOperationLock:
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        del exc_info
+        try:
+            fcntl.flock(self.descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(self.descriptor)
 
 
 def build_child_environment(
@@ -4143,6 +4642,7 @@ def execute_one_shot(
     cleaned = False
     cleaning = False
     external_started = False
+    lease_ownership: AuthorityLeaseOwnership | None = None
     cleanup_errors: list[BaseException] = []
 
     def cleanup() -> None:
@@ -4163,11 +4663,12 @@ def execute_one_shot(
                 except BaseException as error:
                     local_error = error
                     cleanup_errors.append(error)
-                if local_error is None:
+                if local_error is None and lease_ownership is not None:
                     try:
-                        lease.unlink(missing_ok=True)
+                        _unlink_owned_authority_lease(lease_ownership)
                     except BaseException as error:
                         cleanup_errors.append(error)
+                        local_error = error
                 cleaned = local_error is None
                 return
 
@@ -4185,15 +4686,13 @@ def execute_one_shot(
                 down_error is None or not _contains_owned_process_group_survivor(down_error)
             ):
                 cleanup_errors.append(cleanup_runner.survivor)
-            group_survived = cleanup_runner.survivor is not None or (
-                down_error is not None and _contains_owned_process_group_survivor(down_error)
-            )
-            if not group_survived:
+            if down_error is None and lease_ownership is not None:
                 try:
-                    lease.unlink(missing_ok=True)
+                    _unlink_owned_authority_lease(lease_ownership)
                 except BaseException as error:
                     cleanup_errors.append(error)
-            cleaned = down_error is None and not group_survived
+                    down_error = error
+            cleaned = down_error is None
         finally:
             cleaning = False
 
@@ -4203,16 +4702,17 @@ def execute_one_shot(
     result: subprocess.CompletedProcess[Any] | None = None
     try:
         signal_lifecycle.activate()
+        live_authority = live_authority.with_child_barrier_journal()
         scenario_name = next(
             (name for name, candidate in LIVE_SCENARIOS.items() if candidate == scenario),
             "custom",
         )
-        write_authority_lease(live_authority, lease)
+        lease_ownership = write_authority_lease(live_authority, lease)
         external_started = True
         if scenario.start_stack:
             ports = live_authority.start_stack(runner=runner)
             live_authority = live_authority.with_published_ports(ports)
-            _replace_authority_lease(live_authority, lease)
+            lease_ownership = _replace_authority_lease(live_authority, lease_ownership)
             if scenario.upgrade:
                 source_ref = read_phase9_source_ref(
                     live_authority.repo,
@@ -4230,7 +4730,7 @@ def execute_one_shot(
                     live_authority,
                     _environment_items=tuple(sorted(planned_environment.items())),
                 )
-                _replace_authority_lease(live_authority, lease)
+                lease_ownership = _replace_authority_lease(live_authority, lease_ownership)
                 frozen = live_authority.build_phase9_agent_image(source_ref, runner=runner)
                 try:
                     previous_mask = signal.pthread_sigmask(
@@ -4239,7 +4739,10 @@ def execute_one_shot(
                     )
                     try:
                         live_authority = live_authority.with_upgrade_runtime(frozen)
-                        _replace_authority_lease(live_authority, lease)
+                        lease_ownership = _replace_authority_lease(
+                            live_authority,
+                            lease_ownership,
+                        )
                     finally:
                         signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
                 except BaseException as setup_error:
@@ -4357,12 +4860,23 @@ def _persistent_up(
     mode: str,
     runner: CommandRunner = run_owned_command,
 ) -> ComposeAuthority:
+    with _PersistentOperationLock.acquire(repo):
+        return _persistent_up_locked(repo=repo, mode=mode, runner=runner)
+
+
+def _persistent_up_locked(
+    *,
+    repo: Path,
+    mode: str,
+    runner: CommandRunner,
+) -> ComposeAuthority:
     lease = lease_path_for(repo)
     if lease.exists() or lease.is_symlink():
         raise FileExistsError(f"persistent Phase 10 lease already exists: {lease}")
     signal_lifecycle = _CatchableSignalLifecycle.prepare()
     authority: ComposeAuthority | None = None
     external_started = False
+    lease_ownership: AuthorityLeaseOwnership | None = None
     cleaning = False
     cleaned = False
     cleanup_errors: list[BaseException] = []
@@ -4385,11 +4899,12 @@ def _persistent_up(
                 except BaseException as error:
                     local_error = error
                     cleanup_errors.append(error)
-                if local_error is None:
+                if local_error is None and lease_ownership is not None:
                     try:
-                        lease.unlink(missing_ok=True)
+                        _unlink_owned_authority_lease(lease_ownership)
                     except BaseException as error:
                         cleanup_errors.append(error)
+                        local_error = error
                 cleaned = local_error is None
                 return
 
@@ -4404,15 +4919,13 @@ def _persistent_up(
                 down_error is None or not _contains_owned_process_group_survivor(down_error)
             ):
                 cleanup_errors.append(cleanup_runner.survivor)
-            group_survived = cleanup_runner.survivor is not None or (
-                down_error is not None and _contains_owned_process_group_survivor(down_error)
-            )
-            if not group_survived:
+            if down_error is None and lease_ownership is not None:
                 try:
-                    lease.unlink(missing_ok=True)
+                    _unlink_owned_authority_lease(lease_ownership)
                 except BaseException as error:
                     cleanup_errors.append(error)
-            cleaned = down_error is None and not group_survived
+                    down_error = error
+            cleaned = down_error is None
         finally:
             cleaning = False
 
@@ -4421,11 +4934,11 @@ def _persistent_up(
     try:
         authority = select_live_authority(repo=repo, mode=mode)
         signal_lifecycle.activate()
-        write_authority_lease(authority, lease)
+        lease_ownership = write_authority_lease(authority, lease)
         external_started = True
         ports = authority.start_stack(runner=runner)
         authority = authority.with_published_ports(ports)
-        _replace_authority_lease(authority, lease)
+        lease_ownership = _replace_authority_lease(authority, lease_ownership)
     except BaseException as error:
         primary_error = error
     finally:
@@ -4462,9 +4975,21 @@ def _persistent_up(
     return authority
 
 
-def _load_persistent(repo: Path) -> tuple[Path, ComposeAuthority]:
+def _load_persistent(
+    repo: Path,
+) -> tuple[Path, ComposeAuthority, AuthorityLeaseOwnership]:
     lease = lease_path_for(repo)
-    return lease, read_authority_lease(lease, expected_repo=repo)
+    authority = read_authority_lease(lease, expected_repo=repo)
+    metadata = lease.lstat()
+    ownership = AuthorityLeaseOwnership(
+        path=lease,
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+        authority_token=authority.token,
+    )
+    descriptor = _owned_lease_descriptor(ownership)
+    os.close(descriptor)
+    return lease, authority, ownership
 
 
 def _persistent_down(
@@ -4472,14 +4997,24 @@ def _persistent_down(
     repo: Path,
     runner: CommandRunner = run_owned_command,
 ) -> None:
+    with _PersistentOperationLock.acquire(repo):
+        _persistent_down_locked(repo=repo, runner=runner)
+
+
+def _persistent_down_locked(
+    *,
+    repo: Path,
+    runner: CommandRunner,
+) -> None:
     signal_lifecycle = _CatchableSignalLifecycle.prepare()
     lease: Path | None = None
+    lease_ownership: AuthorityLeaseOwnership | None = None
     authority: ComposeAuthority | None = None
     primary_error: BaseException | None = None
     conclusive_signal: int | None = None
     transition_errors: list[BaseException] = []
     try:
-        lease, authority = _load_persistent(repo)
+        lease, authority, lease_ownership = _load_persistent(repo)
         signal_lifecycle.activate()
         authority.assert_socket_unchanged()
         authority.down_and_cleanup(runner=runner)
@@ -4504,9 +5039,10 @@ def _persistent_down(
             (primary_error is None or conclusive_signal is not None)
             and transition_safe
             and lease is not None
+            and lease_ownership is not None
         ):
             try:
-                lease.unlink(missing_ok=True)
+                _unlink_owned_authority_lease(lease_ownership)
             except BaseException as error:
                 transition_errors.append(error)
         try:
@@ -4535,12 +5071,26 @@ def _persistent_compose(
     arguments: Sequence[str],
     runner: CommandRunner = run_owned_command,
 ) -> subprocess.CompletedProcess[Any]:
+    with _PersistentOperationLock.acquire(repo):
+        return _persistent_compose_locked(
+            repo=repo,
+            arguments=arguments,
+            runner=runner,
+        )
+
+
+def _persistent_compose_locked(
+    *,
+    repo: Path,
+    arguments: Sequence[str],
+    runner: CommandRunner,
+) -> subprocess.CompletedProcess[Any]:
     signal_lifecycle = _CatchableSignalLifecycle.prepare()
     primary_error: BaseException | None = None
     transition_errors: list[BaseException] = []
     result: subprocess.CompletedProcess[Any] | None = None
     try:
-        _lease, authority = _load_persistent(repo)
+        _lease, authority, _lease_ownership = _load_persistent(repo)
         signal_lifecycle.activate()
         authority.assert_socket_unchanged()
         selected_arguments = validate_persistent_compose_arguments(arguments)
