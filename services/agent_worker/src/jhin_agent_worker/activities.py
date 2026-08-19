@@ -16,16 +16,21 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio import activity
 from temporalio.client import Client as TemporalClient
 from temporalio.exceptions import ApplicationError
 
+from jhin_agent_worker.projections import AgentProjectionActivities
+from jhin_agent_worker.reasoning import (
+    AgentReasoningActivities,
+    AgentStepReasoningRecord,
+    load_step_event,
+    manifest_calls_from_payload,
+)
 from jhin_agent_worker.resources import Resources
 from jhin_agents import AgentExecutionSnapshot, resolve_snapshot
-from jhin_agents.context import ConversationTurn, TaskContext
-from jhin_agents.runtime import estimate_cost_micros, execute_step
 from jhin_agents.snapshot import SnapshotError
 from jhin_connectors import build_default_catalog
 from jhin_connectors.cli.runner_client import delete_workspace as delete_sandbox_workspace
@@ -42,7 +47,6 @@ from jhin_db.models import (
     Workspace,
 )
 from jhin_domain import (
-    AGENT_MESSAGE_TYPES,
     RUN_ACTIVE_STATUSES,
     ActorType,
     ApprovalStatus,
@@ -55,37 +59,34 @@ from jhin_domain import (
     ToolCallStatus,
     structured_content,
 )
-from jhin_events import EventEnvelope, EventSource
-from jhin_models import ModelProviderError, ModelToolCall, ToolSchema, build_model_client
-from jhin_models.factory import ProviderConfigError
+from jhin_models import ModelClient, ToolSchema
+from jhin_models import build_model_client as build_model_client
 from jhin_observability import get_logger
 from jhin_policy import Grant, GrantEffect
-from jhin_secrets import SecretStore
 from jhin_secrets.redaction import redact_text
 from jhin_tools import (
-    AGENT_BEFORE_BIND,
-    MAX_TOOL_CALLS_PER_STEP,
-    PHASE9_AFTER_MANIFEST,
     PHASE9_CLEANUP_BEFORE_EFFECT,
-    GatewayOutcome,
     ToolExecutionContext,
     ToolGateway,
     allowed_tool_definitions,
     stable_tool_invocation_id,
 )
-from jhin_tools.sanitize import sanitize_payload, strict_json_loads
 from jhin_workflows.agent_task import (
     ACTIVITY_FINALIZE_RUN,
     ACTIVITY_RESOLVE_APPROVAL,
     ACTIVITY_RESOLVE_SNAPSHOT,
     ACTIVITY_RUN_AGENT_STEP,
     AgentTaskInput,
-    DelegationRequest,
     FinalizeInput,
     ResolveApprovalInput,
     RunStepInput,
     SnapshotResult,
     StepResult,
+)
+from jhin_workflows.agent_task.shared import (
+    AdvertisedTool,
+    CommitAgentStepInput,
+    ReasonAgentStepInput,
 )
 from jhin_workflows.delegated_task import (
     ACTIVITY_DELIVER_DELEGATION_RESULT,
@@ -94,14 +95,6 @@ from jhin_workflows.delegated_task import (
     DeliverDelegationResultInput,
     SummarizeDelegationInput,
 )
-
-# Cap on persisted model-produced tool arguments (they re-enter the prompt).
-_MAX_ARGUMENTS_CHARS = 8_192
-_MAX_MODEL_TEXT_CHARS = 8_192
-
-# Structured agent-to-agent message types (plan 29) rendered into history.
-_STRUCTURED_MESSAGE_TYPES = frozenset(t.value for t in AGENT_MESSAGE_TYPES)
-_MAX_STRUCTURED_TURN_CHARS = 6_000
 
 _ACTIVE_RUN_STATUSES = tuple(status.value for status in RUN_ACTIVE_STATUSES)
 
@@ -168,304 +161,34 @@ async def _cancel_pending_run_approvals(
     return len(pending)
 
 
-class AgentActivities:
+class AgentActivities(AgentReasoningActivities, AgentProjectionActivities):
     def __init__(self, resources: Resources, temporal_client: TemporalClient | None = None) -> None:
         self._resources = resources
         # Used only to nudge queued workflows when a slot frees (plan 30);
         # the poll timer in AgentTaskWorkflow is the correctness backstop.
         self._temporal_client = temporal_client
 
-    # --- Helpers ---
-
-    async def _publish(self, workspace_id: UUID, event_type: str, data: dict[str, Any]) -> None:
-        """Best-effort NATS publish; the database already holds the fact."""
-        try:
-            await self._resources.publisher.publish(
-                EventEnvelope(
-                    event_type=event_type,
-                    workspace_id=str(workspace_id),
-                    source=EventSource(type="agent_worker"),
-                    data=data,
-                )
-            )
-        except Exception as exc:
-            logger.warning(
-                "events.publish_failed", event_type=event_type, error=f"{type(exc).__name__}"
-            )
-
-    async def _next_seq(self, session: AsyncSession, run_id: UUID) -> int:
-        current = await session.scalar(
-            select(func.max(RunEvent.seq)).where(RunEvent.run_id == run_id)
-        )
-        return (current if current is not None else -1) + 1
-
-    @staticmethod
-    def _step_tool_manifest(tool_calls: tuple[ModelToolCall, ...]) -> dict[str, Any]:
-        """Provider-independent, secret-safe binding for one step's call set."""
-        calls: list[dict[str, Any]] = []
-
-        def recursively_unchanged(value: Any) -> bool:
-            if isinstance(value, str):
-                return bool(redact_text(value) == value)
-            if isinstance(value, dict):
-                return all(
-                    redact_text(str(key)) == str(key) and recursively_unchanged(child)
-                    for key, child in value.items()
-                )
-            if isinstance(value, (list, tuple)):
-                return all(recursively_unchanged(child) for child in value)
-            return True
-
-        for ordinal, call in enumerate(tool_calls):
-            valid_json_object = False
-            try:
-                decoded = strict_json_loads(call.arguments_json)
-                valid_json_object = isinstance(decoded, dict)
-                canonical_arguments = json.dumps(
-                    decoded,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
-                manifest_arguments: Any = decoded
-            except (json.JSONDecodeError, TypeError, ValueError):
-                canonical_arguments = call.arguments_json
-                manifest_arguments = call.arguments_json
-            sanitized = sanitize_payload(
-                {
-                    "tool_name": call.name,
-                    "arguments": manifest_arguments,
-                }
-            )
-            lossless = (
-                valid_json_object
-                and sanitized.get("tool_name") == call.name
-                and sanitized.get("arguments") == manifest_arguments
-                and recursively_unchanged(manifest_arguments)
-                and len(call.name) <= 200
-                and len(canonical_arguments) <= _MAX_ARGUMENTS_CHARS
-            )
-            entry: dict[str, Any] = {"ordinal": ordinal, "lossless": lossless}
-            if lossless:
-                entry.update(
-                    {
-                        "tool_name": call.name,
-                        "arguments_json": canonical_arguments,
-                    }
-                )
-            calls.append(entry)
-        return {"count": len(calls), "calls": calls}
+    def _build_model_client(
+        self,
+        provider_type: str,
+        *,
+        base_url: str | None,
+        api_key: str | None,
+    ) -> ModelClient:
+        return build_model_client(provider_type, base_url=base_url, api_key=api_key)
 
     async def _bind_step_tool_manifest(
         self,
-        session: AsyncSession,
-        *,
-        workspace_id: UUID,
-        task_id: UUID,
-        run_id: UUID,
-        agent_id: UUID,
-        step_index: int,
-        tool_calls: tuple[ModelToolCall, ...],
+        *_args: Any,
+        **_kwargs: Any,
     ) -> StepResult | None:
-        """Commit the complete call set before any tool can produce an effect."""
-        manifest = self._step_tool_manifest(tool_calls)
-        manifest_is_lossless = all(bool(entry.get("lossless")) for entry in manifest["calls"])
-        with session.no_autoflush:
-            run = await session.scalar(
-                select(AgentRun)
-                .where(
-                    AgentRun.id == run_id,
-                    AgentRun.workspace_id == workspace_id,
-                    AgentRun.agent_id == agent_id,
-                    AgentRun.task_id == task_id,
-                )
-                .with_for_update()
-            )
-            committed = await self._committed_step_result(
-                session,
-                workspace_id=workspace_id,
-                task_id=task_id,
-                run_id=run_id,
-                step_index=step_index,
-            )
-            if committed is not None:
-                await session.rollback()
-                return committed
-            manifest_events = await session.scalars(
-                select(RunEvent).where(
-                    RunEvent.workspace_id == workspace_id,
-                    RunEvent.task_id == task_id,
-                    RunEvent.run_id == run_id,
-                    RunEvent.event_type == "agent.step.tool_manifest",
-                )
-            )
-            existing = next(
-                (
-                    event
-                    for event in manifest_events
-                    if event.payload_json.get("step") == step_index
-                ),
-                None,
-            )
-        if run is None:
-            raise ApplicationError(
-                "agent run not found for tool manifest",
-                type="run_not_found",
-                non_retryable=True,
-            )
-        if run.error_code == "tool_step_manifest_not_lossless":
-            error_message = (
-                run.error_message
-                or "tool call set could not be stored safely; manual reconciliation is required"
-            )
-            await session.rollback()
-            raise ApplicationError(
-                error_message,
-                type="tool_step_manifest_not_lossless",
-                non_retryable=True,
-            )
-        if existing is not None:
-            if existing.payload_json.get("manifest") != manifest:
-                await session.rollback()
-                raise ApplicationError(
-                    "a concurrent or retried attempt returned a different tool call set; "
-                    "waiting for the canonical attempt",
-                    type="tool_step_manifest_drift",
-                )
-            await session.rollback()
-            return None
-
-        if not manifest_is_lossless:
-            run.status = RunStatus.FAILED.value
-            run.error_code = "tool_step_manifest_not_lossless"
-            run.error_message = (
-                f"tool call set for step {step_index} could not be stored safely; "
-                "manual reconciliation is required"
-            )
-            session.add(
-                AuditEvent(
-                    workspace_id=workspace_id,
-                    actor_type=ActorType.AGENT.value,
-                    actor_id=agent_id,
-                    action="agent.step.manifest_not_lossless",
-                    target_type="agent_run",
-                    target_id=run_id,
-                    metadata_json={
-                        "task_id": str(task_id),
-                        "step": step_index,
-                        "call_count": manifest["count"],
-                    },
-                )
-            )
-            await session.commit()
-            raise ApplicationError(
-                run.error_message,
-                type="tool_step_manifest_not_lossless",
-                non_retryable=True,
-            )
-
-        seq = await self._next_seq(session, run_id)
-        self._add_run_event(
-            session,
-            workspace_id=workspace_id,
-            run_id=run_id,
-            task_id=task_id,
-            seq=seq,
-            event_type="agent.step.tool_manifest",
-            payload={"step": step_index, "manifest": manifest},
-        )
-        await session.commit()
+        """Retained only as the Task 0 recording-hook surface."""
         return None
 
-    async def _committed_step_result(
-        self,
-        session: AsyncSession,
-        *,
-        workspace_id: UUID,
-        task_id: UUID,
-        run_id: UUID,
-        step_index: int,
-    ) -> StepResult | None:
-        events = await session.scalars(
-            select(RunEvent)
-            .where(
-                RunEvent.workspace_id == workspace_id,
-                RunEvent.task_id == task_id,
-                RunEvent.run_id == run_id,
-                RunEvent.event_type == "agent.step.committed",
-            )
-            .order_by(RunEvent.seq.desc())
-        )
-        for event in events:
-            payload = event.payload_json
-            if payload.get("step") != step_index:
-                continue
-            raw_result = payload.get("result")
-            if not isinstance(raw_result, dict):
-                raise ApplicationError(
-                    "committed step result is malformed",
-                    type="step_result_malformed",
-                    non_retryable=True,
-                )
-            raw_delegations = raw_result.get("delegations", [])
-            if not isinstance(raw_delegations, list):
-                raise ApplicationError(
-                    "committed step delegations are malformed",
-                    type="step_result_malformed",
-                    non_retryable=True,
-                )
-            try:
-                delegations = [
-                    DelegationRequest(**item) for item in raw_delegations if isinstance(item, dict)
-                ]
-                result = StepResult(
-                    done=raw_result["done"],
-                    input_tokens=raw_result.get("input_tokens", 0),
-                    output_tokens=raw_result.get("output_tokens", 0),
-                    cached_tokens=raw_result.get("cached_tokens", 0),
-                    cost_micros=raw_result.get("cost_micros", 0),
-                    waiting_approval_id=raw_result.get("waiting_approval_id"),
-                    delegations=delegations,
-                    execution_unknown_tool_call_id=raw_result.get("execution_unknown_tool_call_id"),
-                )
-                if result.execution_unknown_tool_call_id is not None:
-                    raise ApplicationError(
-                        "tool call "
-                        f"{result.execution_unknown_tool_call_id} execution outcome is unknown; "
-                        "manual reconciliation is required",
-                        type="tool_execution_unknown",
-                        non_retryable=True,
-                    )
-                return result
-            except (KeyError, TypeError, ValueError) as exc:
-                raise ApplicationError(
-                    "committed step result is malformed",
-                    type="step_result_malformed",
-                    non_retryable=True,
-                ) from exc
-        return None
+    async def _after_reasoning_bind_commit(self) -> None:
+        await self._bind_step_tool_manifest()
 
-    def _add_run_event(
-        self,
-        session: AsyncSession,
-        *,
-        workspace_id: UUID,
-        run_id: UUID,
-        task_id: UUID | None,
-        seq: int,
-        event_type: str,
-        payload: dict[str, Any],
-    ) -> None:
-        session.add(
-            RunEvent(
-                workspace_id=workspace_id,
-                run_id=run_id,
-                task_id=task_id,
-                seq=seq,
-                event_type=event_type,
-                payload_json=payload,
-            )
-        )
+    # --- Helpers ---
 
     async def _advertised_tools(
         self, session: AsyncSession, workspace_id: UUID, agent_id: UUID
@@ -501,122 +224,6 @@ class AgentActivities:
             )
             for definition in definitions
         )
-
-    def _add_tool_message(
-        self,
-        session: AsyncSession,
-        *,
-        workspace_id: UUID,
-        task_id: UUID,
-        run_id: UUID,
-        agent_id: UUID,
-        message_type: str,
-        content: dict[str, Any],
-    ) -> None:
-        """Internal transcript row for the tool-calling exchange; rebuilt into
-        provider messages on the next reasoning step."""
-        session.add(
-            Message(
-                workspace_id=workspace_id,
-                task_id=task_id,
-                run_id=run_id,
-                sender_type=SenderType.AGENT.value,
-                sender_id=agent_id,
-                recipient_type=RecipientType.TASK.value,
-                recipient_id=task_id,
-                message_type=message_type,
-                content_json=content,
-                visibility=MessageVisibility.INTERNAL.value,
-            )
-        )
-
-    def _record_gateway_result(
-        self,
-        session: AsyncSession,
-        *,
-        workspace_id: UUID,
-        run_id: UUID,
-        task_id: UUID,
-        seq: int,
-        step_index: int,
-        call: ModelToolCall,
-        result: GatewayOutcome,
-    ) -> int:
-        """Emit the run events for one gateway decision (plan 7.3 nodes)."""
-        base: dict[str, Any] = {
-            "step": step_index,
-            "tool_name": result.tool_name,
-            "tool_call_id": str(result.tool_call_id),
-            "risk": result.risk,
-        }
-
-        def emit(event_type: str, extra: dict[str, Any]) -> None:
-            nonlocal seq
-            self._add_run_event(
-                session,
-                workspace_id=workspace_id,
-                run_id=run_id,
-                task_id=task_id,
-                seq=seq,
-                event_type=event_type,
-                payload={**base, **extra},
-            )
-            seq += 1
-
-        emit("node.policy_check", {"decision": result.decision_code})
-        if result.status in ("executed", "failed"):
-            emit(
-                "node.execute_tool",
-                {"status": result.status, "duration_ms": result.duration_ms},
-            )
-            # Sandbox jobs surface their own timeline event so the task view
-            # can render command/exit code/output without a detail fetch
-            # (plan 14; everything here is already sanitized + size-capped).
-            if result.tool_name.startswith("cli.") and result.sanitized_output is not None:
-                output = result.sanitized_output
-                # File tools omit job fields (they raise on job failure), so
-                # a persisted executed call implies the job completed.
-                default_status = "completed" if result.status == "executed" else "failed"
-                emit(
-                    "sandbox.job",
-                    {
-                        "sandbox_job_id": output.get("sandbox_job_id"),
-                        "command": output.get("command"),
-                        "job_status": output.get("status", default_status),
-                        "exit_code": output.get("exit_code"),
-                        "job_duration_ms": output.get("duration_ms"),
-                        "stdout": output.get("stdout", ""),
-                        "stderr": output.get("stderr", ""),
-                    },
-                )
-            emit("node.observe", {"chars": len(result.observation_json())})
-        elif result.status == "denied":
-            emit("node.observe", {"denied": True, "reason": result.decision_reason})
-        elif result.status == "execution_unknown":
-            emit(
-                "node.observe",
-                {
-                    "execution_unknown": True,
-                    "manual_reconciliation_required": True,
-                },
-            )
-        elif result.status == "needs_approval":
-            emit(
-                "node.request_approval",
-                {"approval_id": str(result.approval_id), "reason": result.decision_reason},
-            )
-        emit(
-            "tool.call",
-            {
-                "status": result.status,
-                "decision": result.decision_code,
-                "reason": result.decision_reason,
-                "error_code": result.error_code,
-                "duration_ms": result.duration_ms,
-                "approval_id": str(result.approval_id) if result.approval_id else None,
-            },
-        )
-        return seq
 
     # --- Activities ---
 
@@ -785,9 +392,18 @@ class AgentActivities:
 
     @activity.defn(name=ACTIVITY_RUN_AGENT_STEP)
     async def run_agent_step_activity(self, params: RunStepInput) -> StepResult:
+        """Phase 9 name retained as a coordinator over the split boundaries.
+
+        Frozen histories still schedule ``run_agent_step`` on the agent queue.
+        The compatibility coordinator reasons/binds atomically, executes only
+        canonical manifest calls through the legacy local gateway, and then
+        delegates all transcript/timeline persistence to the ID-only
+        projection helper.
+        """
         workspace_id = UUID(params.workspace_id)
         task_id = UUID(params.task_id)
         run_id = UUID(params.run_id)
+        agent_id = UUID(params.agent_id)
         snapshot = AgentExecutionSnapshot.model_validate_json(params.snapshot_json)
 
         async with self._resources.session_factory() as session:
@@ -800,527 +416,138 @@ class AgentActivities:
             )
             if committed is not None:
                 return committed
-            task = await session.scalar(
-                select(Task).where(Task.id == task_id, Task.workspace_id == workspace_id)
-            )
-            if task is None:
-                raise ApplicationError("task not found", type="task_not_found", non_retryable=True)
+            model_tools = await self._advertised_tools(session, workspace_id, agent_id)
 
-            history = await self._load_history(session, task)
-
-            # Decrypt the provider credential at the moment of use (13.5).
-            api_key: str | None = None
-            if snapshot.model_profile.secret_id is not None:
-                api_key = await SecretStore(session, self._resources.crypto).reveal(
-                    workspace_id, snapshot.model_profile.secret_id
+        reasoning_params = ReasonAgentStepInput(
+            workspace_id=params.workspace_id,
+            task_id=params.task_id,
+            run_id=params.run_id,
+            agent_id=params.agent_id,
+            snapshot_json=params.snapshot_json,
+            step_index=params.step_index,
+            instruction=params.instruction,
+            user_instructions=list(params.user_instructions),
+            advertised_tools=[
+                AdvertisedTool(
+                    name=tool.name,
+                    description=tool.description,
+                    parameters=tool.parameters,
                 )
+                for tool in model_tools
+            ],
+        )
+        reasoned = await self.reason_agent_step(
+            reasoning_params,
+            legacy_sidecar_repair=True,
+        )
 
-            try:
-                client = build_model_client(
-                    snapshot.model_profile.provider_type,
-                    base_url=snapshot.model_profile.base_url,
-                    api_key=api_key,
-                )
-            except ProviderConfigError as exc:
-                raise ApplicationError(
-                    redact_text(str(exc))[:2_000],
-                    type="provider_config",
-                    non_retryable=True,
-                ) from None
-            except Exception as exc:
-                raise ApplicationError(
-                    redact_text(str(exc))[:2_000] or "model provider configuration failed",
-                    type="provider_config",
-                    non_retryable=True,
-                ) from None
-            del api_key  # plaintext lives only until the client holds it
-
-            tools = await self._advertised_tools(session, workspace_id, UUID(params.agent_id))
-
-            try:
-                outcome = await execute_step(
-                    client,
-                    snapshot,
-                    TaskContext(
-                        title=task.title,
-                        description=task.description,
-                        history=history,
-                        user_instructions=tuple(params.user_instructions),
-                    ),
-                    tools=tools,
-                )
-            except ModelProviderError as exc:
-                raise ApplicationError(
-                    redact_text(str(exc))[:2_000],
-                    type="model_provider_error",
-                    non_retryable=not exc.retryable,
-                ) from None
-            except Exception as exc:
-                raise ApplicationError(
-                    redact_text(str(exc))[:2_000] or "model provider request failed",
-                    type="model_provider_error",
-                ) from None
-            finally:
-                try:
-                    await client.close()
-                except Exception as exc:
-                    logger.warning(
-                        "model.client_close_failed",
-                        error=redact_text(str(exc))[:2_000] or "model client close failed",
-                    )
-
-            if len(outcome.tool_calls) > MAX_TOOL_CALLS_PER_STEP:
-                raise ApplicationError(
-                    "model returned too many tool calls in one step",
-                    type="tool_call_limit_exceeded",
-                    non_retryable=True,
-                )
-            invocation_ids = tuple(
-                stable_tool_invocation_id(run_id, params.step_index, ordinal)
-                for ordinal in range(len(outcome.tool_calls))
-            )
-            test_barrier = getattr(self._resources, "test_barrier", None)
-            if test_barrier is not None:
-                await test_barrier.arrive_and_wait(AGENT_BEFORE_BIND, run_id)
-            committed_after_model = await self._bind_step_tool_manifest(
+        async with self._resources.session_factory() as session:
+            manifest_event = await load_step_event(
                 session,
                 workspace_id=workspace_id,
                 task_id=task_id,
                 run_id=run_id,
-                agent_id=UUID(params.agent_id),
                 step_index=params.step_index,
-                tool_calls=outcome.tool_calls,
+                event_type="agent.step.tool_manifest",
             )
-            if test_barrier is not None:
-                await test_barrier.arrive_and_wait(PHASE9_AFTER_MANIFEST, run_id)
-            if committed_after_model is not None:
-                return committed_after_model
-
-            cost_micros = estimate_cost_micros(
-                outcome.usage,
-                snapshot.model_profile.input_cost_micros_per_million,
-                snapshot.model_profile.output_cost_micros_per_million,
+            reasoning_event = await load_step_event(
+                session,
+                workspace_id=workspace_id,
+                task_id=task_id,
+                run_id=run_id,
+                step_index=params.step_index,
+                event_type="agent.step.reasoning",
             )
-
-            # Tool branch: every requested call goes through the gateway —
-            # the single authorization path (plan 12). Unprocessed calls
-            # after an approval park simply vanish from the transcript; the
-            # model may re-request them once the run resumes.
-            waiting_approval_id: str | None = None
-            parked: GatewayOutcome | None = None
-            delegations: list[DelegationRequest] = []
-            blocking_delegation: DelegationRequest | None = None
-            call_results: list[tuple[ModelToolCall, GatewayOutcome]] = []
-            if outcome.tool_calls:
-                for call_ordinal, call in enumerate(outcome.tool_calls):
-                    async with self._resources.session_factory() as tool_session:
-                        gateway = ToolGateway(
-                            ToolExecutionContext(
-                                session=tool_session,
-                                workspace_id=workspace_id,
-                                task_id=task_id,
-                                run_id=run_id,
-                                agent_id=UUID(params.agent_id),
-                                agent_name=snapshot.name,
-                                crypto=self._resources.crypto,
-                                session_factory=self._resources.session_factory,
-                                test_barrier=getattr(self._resources, "test_barrier", None),
-                            ),
-                            build_default_catalog(),
-                        )
-                        result = await gateway.request(
-                            call.name,
-                            call.arguments_json,
-                            provider_call_id=call.id,
-                            invocation_id=invocation_ids[call_ordinal],
-                        )
-                        if result.decision_code == "invocation_mismatch":
-                            mismatched_run = await session.scalar(
-                                select(AgentRun)
-                                .where(
-                                    AgentRun.id == run_id,
-                                    AgentRun.workspace_id == workspace_id,
-                                )
-                                .with_for_update()
-                            )
-                            if mismatched_run is not None:
-                                mismatched_run.status = RunStatus.FAILED.value
-                                mismatched_run.error_code = "tool_invocation_mismatch"
-                                mismatched_run.error_message = (
-                                    f"tool call {invocation_ids[call_ordinal]} changed across "
-                                    "an activity retry; manual reconciliation is required"
-                                )
-                            await session.commit()
-                            raise ApplicationError(
-                                "runtime tool call changed across an activity retry; "
-                                "the run was stopped before another tool could execute",
-                                type="tool_invocation_mismatch",
-                                non_retryable=True,
-                            )
-                        await tool_session.commit()
-                    call_results.append((call, result))
-                    if result.status == "execution_unknown":
-                        break
-                    if result.status == "needs_approval":
-                        waiting_approval_id = str(result.approval_id)
-                        parked = result
-                        break
-                    if (
-                        result.status == "executed"
-                        and result.tool_name == "organization.delegate_task"
-                    ):
-                        request = self._delegation_request(
-                            result,
-                            redact_text(result.provider_call_id or call.id)[:200],
-                        )
-                        if request is not None:
-                            delegations.append(request)
-                            if request.blocking:
-                                # Park like an approval (plan 8.3): no
-                                # tool_result yet — the deliver activity
-                                # stitches the child's summary in as this
-                                # call's observation when the child finishes.
-                                blocking_delegation = request
-                                break
-
-            step_result = StepResult(
-                done=outcome.done,
-                input_tokens=outcome.usage.input_tokens,
-                output_tokens=outcome.usage.output_tokens,
-                cached_tokens=outcome.usage.cached_tokens,
-                cost_micros=cost_micros,
-                waiting_approval_id=waiting_approval_id,
-                delegations=delegations,
-                execution_unknown_tool_call_id=next(
-                    (
-                        str(result.tool_call_id)
-                        for _call, result in call_results
-                        if result.status == "execution_unknown"
-                    ),
-                    None,
-                ),
-            )
-            safe_outcome_text = redact_text(outcome.text)[:_MAX_MODEL_TEXT_CHARS]
-            safe_finish_reason = redact_text(outcome.finish_reason)[:200]
-            safe_model = redact_text(outcome.model)[:200]
-            safe_provider_request_id = (
-                redact_text(outcome.provider_request_id)[:200]
-                if outcome.provider_request_id is not None
-                else None
-            )
-
-            # Serialize the complete step bundle by run. no_autoflush is
-            # essential: a concurrent retry must inspect the marker before
-            # any duplicate deterministic gateway rows could be flushed.
-            with session.no_autoflush:
-                run = await session.scalar(
-                    select(AgentRun)
-                    .where(
-                        AgentRun.id == run_id,
-                        AgentRun.workspace_id == workspace_id,
-                        AgentRun.agent_id == UUID(params.agent_id),
-                        AgentRun.task_id == task_id,
-                    )
-                    .with_for_update()
-                )
-                committed = await self._committed_step_result(
-                    session,
-                    workspace_id=workspace_id,
-                    task_id=task_id,
-                    run_id=run_id,
-                    step_index=params.step_index,
-                )
-            if committed is not None:
-                await session.rollback()
-                return committed
-            if run is None:
+            if manifest_event is None or reasoning_event is None:
                 raise ApplicationError(
-                    "agent run not found for step",
-                    type="run_not_found",
+                    "agent step reasoning binding is incomplete",
+                    type="reasoning_bind_incomplete",
                     non_retryable=True,
                 )
+            calls = manifest_calls_from_payload(
+                manifest_event.payload_json,
+                expected_step=params.step_index,
+            )
+            reasoning = AgentStepReasoningRecord.from_payload(
+                reasoning_event.payload_json,
+                expected_step=params.step_index,
+                expected_call_count=len(calls),
+            )
+        if reasoned.call_count != len(calls):
+            raise ApplicationError(
+                "agent step reasoning count changed after binding",
+                type="reasoning_bind_incomplete",
+                non_retryable=True,
+            )
 
-            run.input_tokens += outcome.usage.input_tokens
-            run.output_tokens += outcome.usage.output_tokens
-            run.cached_tokens += outcome.usage.cached_tokens
-            run.estimated_cost_micros += cost_micros
-            run.steps_used = params.step_index + 1
-            if waiting_approval_id is not None:
-                run.status = RunStatus.WAITING_APPROVAL.value
-            elif blocking_delegation is not None:
-                run.status = RunStatus.WAITING_DELEGATION.value
-            if step_result.execution_unknown_tool_call_id is not None:
-                run.status = RunStatus.FAILED.value
-                run.error_code = "tool_execution_unknown"
-                run.error_message = (
-                    f"tool call {step_result.execution_unknown_tool_call_id} execution outcome "
-                    "is unknown; manual reconciliation is required"
-                )
-
-            if not outcome.tool_calls:
-                session.add(
-                    Message(
+        gateway_tool_call_ids: list[str] = []
+        for call in calls:
+            invocation_id = stable_tool_invocation_id(run_id, params.step_index, call.ordinal)
+            async with self._resources.session_factory() as tool_session:
+                gateway = ToolGateway(
+                    ToolExecutionContext(
+                        session=tool_session,
                         workspace_id=workspace_id,
                         task_id=task_id,
                         run_id=run_id,
-                        sender_type=SenderType.AGENT.value,
-                        sender_id=UUID(params.agent_id),
-                        recipient_type=RecipientType.TASK.value,
-                        recipient_id=task_id,
-                        message_type="text",
-                        content_json={
-                            "text": safe_outcome_text,
-                            "finish_reason": safe_finish_reason,
-                        },
-                        visibility=MessageVisibility.VISIBLE.value,
+                        agent_id=agent_id,
+                        agent_name=snapshot.name,
+                        crypto=self._resources.crypto,
+                        session_factory=self._resources.session_factory,
+                        test_barrier=getattr(self._resources, "test_barrier", None),
+                    ),
+                    build_default_catalog(),
+                )
+                result = await gateway.request(
+                    call.tool_name,
+                    call.arguments_json,
+                    provider_call_id=reasoning.provider_call_ids[call.ordinal],
+                    invocation_id=invocation_id,
+                )
+                if result.decision_code == "invocation_mismatch":
+                    mismatched_run = await tool_session.scalar(
+                        select(AgentRun)
+                        .where(
+                            AgentRun.id == run_id,
+                            AgentRun.workspace_id == workspace_id,
+                        )
+                        .with_for_update()
                     )
-                )
-
-            seq = await self._next_seq(session, run_id)
-            for transition in outcome.transitions:
-                payload: dict[str, Any] = {
-                    "detail": redact_text(transition.detail)[:2_000],
-                    "step": params.step_index,
-                }
-                if transition.node == "reason":
-                    payload.update(
-                        {
-                            "model": safe_model,
-                            "input_tokens": outcome.usage.input_tokens,
-                            "output_tokens": outcome.usage.output_tokens,
-                            "cached_tokens": outcome.usage.cached_tokens,
-                            "cost_micros": cost_micros,
-                            "latency_ms": outcome.latency_ms,
-                            "provider_request_id": safe_provider_request_id,
-                        }
+                    if mismatched_run is not None:
+                        mismatched_run.status = RunStatus.FAILED.value
+                        mismatched_run.error_code = "tool_invocation_mismatch"
+                        mismatched_run.error_message = (
+                            f"tool call {invocation_id} changed across an activity retry; "
+                            "manual reconciliation is required"
+                        )
+                    await tool_session.commit()
+                    raise ApplicationError(
+                        "runtime tool call changed across an activity retry; "
+                        "the run was stopped before another tool could execute",
+                        type="tool_invocation_mismatch",
+                        non_retryable=True,
                     )
-                self._add_run_event(
-                    session,
-                    workspace_id=workspace_id,
-                    run_id=run_id,
-                    task_id=task_id,
-                    seq=seq,
-                    event_type=f"node.{transition.node}",
-                    payload=payload,
-                )
-                seq += 1
+                await tool_session.commit()
+            gateway_tool_call_ids.append(str(result.tool_call_id))
+            if result.status in {"execution_unknown", "needs_approval"}:
+                break
+            if (
+                result.status == "executed"
+                and result.tool_name == "organization.delegate_task"
+                and bool((result.sanitized_output or {}).get("blocking", True))
+            ):
+                break
 
-            for call, result in call_results:
-                provider_call_id = redact_text(result.provider_call_id or call.id)[:200]
-                self._add_tool_message(
-                    session,
-                    workspace_id=workspace_id,
-                    task_id=task_id,
-                    run_id=run_id,
-                    agent_id=UUID(params.agent_id),
-                    message_type="tool_call",
-                    content={
-                        "text": safe_outcome_text,
-                        "tool_call_id": str(result.tool_call_id),
-                        "provider_call_id": provider_call_id[:200],
-                        "tool_name": result.tool_name,
-                        "arguments_json": json.dumps(
-                            result.sanitized_input,
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        )[:_MAX_ARGUMENTS_CHARS],
-                    },
-                )
-                seq = self._record_gateway_result(
-                    session,
-                    workspace_id=workspace_id,
-                    run_id=run_id,
-                    task_id=task_id,
-                    seq=seq,
-                    step_index=params.step_index,
-                    call=call,
-                    result=result,
-                )
-                is_blocking_delegation = (
-                    blocking_delegation is not None
-                    and blocking_delegation.gateway_tool_call_id == str(result.tool_call_id)
-                )
-                if result.status == "needs_approval" or is_blocking_delegation:
-                    continue
-                self._add_tool_message(
-                    session,
-                    workspace_id=workspace_id,
-                    task_id=task_id,
-                    run_id=run_id,
-                    agent_id=UUID(params.agent_id),
-                    message_type="tool_result",
-                    content={
-                        "tool_call_id": str(result.tool_call_id),
-                        "provider_call_id": provider_call_id[:200],
-                        "tool_name": result.tool_name,
-                        "status": result.status,
-                        "result": result.observation_json(),
-                    },
-                )
-
-            self._add_run_event(
-                session,
-                workspace_id=workspace_id,
-                run_id=run_id,
-                task_id=task_id,
-                seq=seq,
-                event_type="agent.step.committed",
-                payload={
-                    "step": params.step_index,
-                    "result": asdict(step_result),
-                    "gateway_tool_call_ids": [
-                        str(result.tool_call_id) for _call, result in call_results
-                    ],
-                },
+        return await self.commit_agent_step_activity(
+            CommitAgentStepInput(
+                workspace_id=params.workspace_id,
+                task_id=params.task_id,
+                run_id=params.run_id,
+                agent_id=params.agent_id,
+                step_index=params.step_index,
+                gateway_tool_call_ids=gateway_tool_call_ids,
             )
-            await session.commit()
-
-            if step_result.execution_unknown_tool_call_id is not None:
-                raise ApplicationError(
-                    "tool call "
-                    f"{step_result.execution_unknown_tool_call_id} execution outcome is unknown; "
-                    "manual reconciliation is required",
-                    type="tool_execution_unknown",
-                    non_retryable=True,
-                )
-
-        if waiting_approval_id is not None and parked is not None:
-            await self._publish(
-                workspace_id,
-                "approval.requested",
-                {
-                    "approval_id": waiting_approval_id,
-                    "run_id": params.run_id,
-                    "task_id": params.task_id,
-                    "agent_id": params.agent_id,
-                    "tool_name": parked.tool_name,
-                    "risk": parked.risk,
-                },
-            )
-            await self._publish(
-                workspace_id,
-                "agent.run.waiting_approval",
-                {
-                    "run_id": params.run_id,
-                    "task_id": params.task_id,
-                    "approval_id": waiting_approval_id,
-                },
-            )
-        if blocking_delegation is not None:
-            await self._publish(
-                workspace_id,
-                "agent.run.waiting_delegation",
-                {
-                    "run_id": params.run_id,
-                    "task_id": params.task_id,
-                    "child_task_id": blocking_delegation.child_task_id,
-                    "target_agent_id": blocking_delegation.target_agent_id,
-                },
-            )
-        await self._publish(
-            workspace_id,
-            "agent.run.step",
-            {
-                "run_id": params.run_id,
-                "task_id": params.task_id,
-                "step": params.step_index,
-                "done": outcome.done,
-            },
         )
-        return step_result
-
-    @staticmethod
-    def _delegation_request(
-        result: GatewayOutcome, provider_call_id: str
-    ) -> DelegationRequest | None:
-        """Lift an executed delegate_task output into the workflow contract."""
-        output = result.sanitized_output or {}
-        child_task_id = str(output.get("child_task_id", "") or "")
-        if not child_task_id:
-            return None
-        return DelegationRequest(
-            child_task_id=child_task_id,
-            target_agent_id=str(output.get("target_agent_id", "") or ""),
-            blocking=bool(output.get("blocking", True)),
-            kind=str(output.get("kind", "") or "delegation"),
-            provider_call_id=provider_call_id,
-            gateway_tool_call_id=str(result.tool_call_id),
-        )
-
-    async def _load_history(
-        self, session: AsyncSession, task: Task
-    ) -> tuple[ConversationTurn, ...]:
-        """Visible conversation plus the internal tool transcript, in order,
-        so each reasoning step rebuilds the exact provider message sequence."""
-        rows = await session.scalars(
-            select(Message)
-            .where(
-                Message.task_id == task.id,
-                or_(
-                    Message.visibility == MessageVisibility.VISIBLE.value,
-                    Message.message_type.in_(("tool_call", "tool_result")),
-                ),
-            )
-            .order_by(Message.created_at, Message.id)
-        )
-        turns: list[ConversationTurn] = []
-        for message in rows:
-            content = message.content_json
-            if message.message_type == "tool_call":
-                turns.append(
-                    ConversationTurn(
-                        role="agent",
-                        text=str(content.get("text", "") or ""),
-                        kind="tool_call",
-                        tool_call_id=str(content.get("tool_call_id", "")),
-                        tool_name=str(content.get("tool_name", "")),
-                        arguments_json=str(content.get("arguments_json", "{}")),
-                    )
-                )
-                continue
-            if message.message_type == "tool_result":
-                turns.append(
-                    ConversationTurn(
-                        role="agent",
-                        text=str(content.get("result", "")),
-                        kind="tool_result",
-                        tool_call_id=str(content.get("tool_call_id", "")),
-                        tool_name=str(content.get("tool_name", "")),
-                    )
-                )
-                continue
-            if message.message_type in _STRUCTURED_MESSAGE_TYPES:
-                # Structured agent-to-agent messages (plan 29) enter the
-                # prompt as labeled JSON. Messages from *other* agents (a
-                # delegation result, an instruction from a manager) read as
-                # user turns; this agent's own messages read as its turns.
-                if content.get("delivered") == "observation":
-                    # A blocking-delegation summary already stitched into the
-                    # transcript as the tool observation; feeding the visible
-                    # copy too would duplicate it in the prompt.
-                    continue
-                is_own = (
-                    message.sender_type == SenderType.AGENT.value
-                    and message.sender_id == task.assigned_agent_id
-                )
-                rendered = json.dumps(content, ensure_ascii=False, default=str)
-                turns.append(
-                    ConversationTurn(
-                        role="agent" if is_own else "user",
-                        text=f"[{message.message_type}] {rendered}"[:_MAX_STRUCTURED_TURN_CHARS],
-                    )
-                )
-                continue
-            text = str(content.get("text", ""))
-            if not text:
-                continue
-            role = "agent" if message.sender_type == SenderType.AGENT.value else "user"
-            # The initial user message often duplicates the task description;
-            # skip it so the prompt does not repeat itself.
-            if not turns and role == "user" and text.strip() == task.description.strip():
-                continue
-            turns.append(ConversationTurn(role=role, text=text))
-        return tuple(turns)
 
     @activity.defn(name=ACTIVITY_RESOLVE_APPROVAL)
     async def resolve_approval_activity(self, params: ResolveApprovalInput) -> StepResult:

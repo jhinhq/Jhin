@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 import pytest
 from pydantic import BaseModel, ConfigDict
@@ -19,7 +19,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from temporalio.exceptions import ApplicationError
 
 import jhin_agent_worker.activities as activities_module
+import jhin_agent_worker.reasoning as reasoning_module
 from jhin_agent_worker.activities import AgentActivities
+from jhin_agent_worker.projections import AgentProjectionActivities
 from jhin_agents.snapshot import AgentExecutionSnapshot, ModelProfileSnapshot, RunLimits
 from jhin_db.base import Base
 from jhin_db.models import (
@@ -216,6 +218,7 @@ async def _assert_one_canonical_bundle(
         assert len({event.seq for event in events}) == len(events)
         assert [event.event_type for event in events] == [
             "agent.step.tool_manifest",
+            "agent.step.reasoning",
             "node.load_context",
             "node.reason",
             "node.call_tool",
@@ -236,7 +239,7 @@ async def phase9_world(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_World]
         await connection.run_sync(Base.metadata.create_all)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     resources = _Resources(sessions)
-    activities = AgentActivities(resources)
+    activities = AgentActivities(resources)  # type: ignore[arg-type]
     client = _FakeModelClient()
     effect = _EffectState()
 
@@ -351,7 +354,7 @@ async def phase9_world(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_World]
     await engine.dispose()
 
 
-async def test_run_step_retry_with_new_provider_id_persists_one_canonical_bundle(
+async def test_run_step_retry_reuses_bound_reasoning_and_persists_one_canonical_bundle(
     phase9_world: _World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A crash before the step commit must not repeat a completed mutation."""
@@ -362,18 +365,20 @@ async def test_run_step_retry_with_new_provider_id_persists_one_canonical_bundle
             _tool_response("provider-call-after-retry", request_id="request-after-retry"),
         ]
     )
-    original = AgentActivities._record_gateway_result
+    original = AgentProjectionActivities._record_gateway_result
     crash_once = True
 
-    def fail_before_outer_bundle_commit(self: AgentActivities, *args: Any, **kwargs: Any) -> int:
+    def fail_before_outer_bundle_commit(
+        self: AgentProjectionActivities, *args: Any, **kwargs: Any
+    ) -> int:
         nonlocal crash_once
         if crash_once:
             crash_once = False
             raise RuntimeError("worker crashed before the outer bundle commit")
-        return cast(int, original(self, *args, **kwargs))
+        return original(self, *args, **kwargs)
 
     monkeypatch.setattr(
-        AgentActivities,
+        AgentProjectionActivities,
         "_record_gateway_result",
         fail_before_outer_bundle_commit,
     )
@@ -384,10 +389,9 @@ async def test_run_step_retry_with_new_provider_id_persists_one_canonical_bundle
 
     assert result.done is False
     assert world.effect.count == 1
-    assert len(world.client.requests) == 2
-    assert world.client.requests[0].messages == world.client.requests[1].messages
+    assert len(world.client.requests) == 1
     persisted, _events = await _assert_one_canonical_bundle(
-        world, provider_call_id="provider-call-after-retry"
+        world, provider_call_id="provider-call-before-crash"
     )
     assert result == persisted
 
@@ -415,7 +419,7 @@ async def test_untyped_provider_failure_is_redacted_and_has_no_raw_cause(
         async def fail_request(*_args: Any, **_kwargs: Any) -> Any:
             raise RuntimeError(f"provider reflected {secret}")
 
-        monkeypatch.setattr(activities_module, "execute_step", fail_request)
+        monkeypatch.setattr(reasoning_module, "execute_step", fail_request)
 
     try:
         with pytest.raises(ApplicationError) as error:
@@ -495,17 +499,19 @@ async def test_manifest_canonicalizes_json_order_and_ignores_provider_ids(
         }
     )
     world.client.responses.extend([first, retry])
-    original = AgentActivities._record_gateway_result
+    original = AgentProjectionActivities._record_gateway_result
     crash_once = True
 
-    def crash_before_bundle(self: AgentActivities, *args: Any, **kwargs: Any) -> int:
+    def crash_before_bundle(
+        self: AgentProjectionActivities, *args: Any, **kwargs: Any
+    ) -> int:
         nonlocal crash_once
         if crash_once:
             crash_once = False
             raise RuntimeError("canonical formatting crash")
-        return cast(int, original(self, *args, **kwargs))
+        return original(self, *args, **kwargs)
 
-    monkeypatch.setattr(AgentActivities, "_record_gateway_result", crash_before_bundle)
+    monkeypatch.setattr(AgentProjectionActivities, "_record_gateway_result", crash_before_bundle)
 
     with pytest.raises(RuntimeError, match="formatting crash"):
         await world.activities.run_agent_step_activity(world.params)
@@ -513,7 +519,8 @@ async def test_manifest_canonicalizes_json_order_and_ignores_provider_ids(
 
     assert repaired.done is False
     assert world.effect.count == 1
-    await _assert_one_canonical_bundle(world, provider_call_id="provider-format-two")
+    assert len(world.client.requests) == 1
+    await _assert_one_canonical_bundle(world, provider_call_id="provider-format-one")
 
 
 async def test_successful_two_call_step_uses_provider_order_for_canonical_ids(
@@ -592,7 +599,7 @@ async def test_successful_two_call_step_uses_provider_order_for_canonical_ids(
         ),
     ],
 )
-async def test_retry_call_set_drift_stops_before_any_additional_effect(
+async def test_retry_after_bound_call_set_skips_new_model_output_and_additional_effect(
     phase9_world: _World,
     monkeypatch: pytest.MonkeyPatch,
     initial_calls: list[tuple[str, str]],
@@ -606,35 +613,41 @@ async def test_retry_call_set_drift_stops_before_any_additional_effect(
             _calls_response(initial_calls, request_id="manifest-canonical-repair"),
         ]
     )
-    original = AgentActivities._record_gateway_result
+    original = AgentProjectionActivities._record_gateway_result
     crash_once = True
 
-    def crash_before_bundle(self: AgentActivities, *args: Any, **kwargs: Any) -> int:
+    def crash_before_bundle(
+        self: AgentProjectionActivities, *args: Any, **kwargs: Any
+    ) -> int:
         nonlocal crash_once
         if crash_once:
             crash_once = False
             raise RuntimeError("crash after effects but before bundle")
-        return cast(int, original(self, *args, **kwargs))
+        return original(self, *args, **kwargs)
 
-    monkeypatch.setattr(AgentActivities, "_record_gateway_result", crash_before_bundle)
+    monkeypatch.setattr(AgentProjectionActivities, "_record_gateway_result", crash_before_bundle)
 
     with pytest.raises(RuntimeError, match="before bundle"):
         await world.activities.run_agent_step_activity(world.params)
     effects_after_first_attempt = world.effect.count
     assert effects_after_first_attempt == len(initial_calls)
 
-    with pytest.raises(ApplicationError) as mismatch:
-        await world.activities.run_agent_step_activity(world.params)
+    repaired = await world.activities.run_agent_step_activity(world.params)
 
-    assert mismatch.value.type == "tool_step_manifest_drift"
-    assert mismatch.value.non_retryable is False
+    assert repaired.done is False
+    assert len(world.client.requests) == 1
     assert world.effect.count == effects_after_first_attempt
     async with world.sessions() as session:
         run = await session.get(AgentRun, world.run_id)
         assert run is not None
         assert run.status == RunStatus.RUNNING.value
         assert run.error_code is None
-        assert await session.scalar(select(func.count(Message.id))) == 0
+        assert (
+            await session.scalar(
+                select(func.count(Message.id)).where(Message.run_id == world.run_id)
+            )
+            == len(initial_calls) * 2
+        )
         tool_call_ids = set(
             await session.scalars(select(ToolCall.id).where(ToolCall.run_id == world.run_id))
         )
@@ -653,8 +666,8 @@ async def test_retry_call_set_drift_stops_before_any_additional_effect(
         assert len(manifests) == 1
         assert manifests[0].payload_json["manifest"]["count"] == len(initial_calls)
 
-    repaired = await world.activities.run_agent_step_activity(world.params)
-    assert repaired.done is False
+    replay = await world.activities.run_agent_step_activity(world.params)
+    assert replay == repaired
     assert world.effect.count == effects_after_first_attempt
     async with world.sessions() as session:
         assert (
@@ -891,31 +904,28 @@ async def test_lossy_retry_cannot_poison_or_reuse_canonical_manifest(
             _calls_response([(_TOOL_NAME, "canonical")], request_id="canonical-repair"),
         ]
     )
-    original = AgentActivities._record_gateway_result
+    original = AgentProjectionActivities._record_gateway_result
     crash_once = True
 
-    def crash_before_bundle(self: AgentActivities, *args: Any, **kwargs: Any) -> int:
+    def crash_before_bundle(
+        self: AgentProjectionActivities, *args: Any, **kwargs: Any
+    ) -> int:
         nonlocal crash_once
         if crash_once:
             crash_once = False
             raise RuntimeError("canonical bundle crash")
-        return cast(int, original(self, *args, **kwargs))
+        return original(self, *args, **kwargs)
 
-    monkeypatch.setattr(AgentActivities, "_record_gateway_result", crash_before_bundle)
+    monkeypatch.setattr(AgentProjectionActivities, "_record_gateway_result", crash_before_bundle)
 
     try:
         with pytest.raises(RuntimeError, match="bundle crash"):
             await world.activities.run_agent_step_activity(world.params)
         assert world.effect.count == 1
 
-        with pytest.raises(ApplicationError) as drift:
-            await world.activities.run_agent_step_activity(world.params)
-        assert drift.value.type == "tool_step_manifest_drift"
-        assert drift.value.non_retryable is False
-        assert world.effect.count == 1
-
         repaired = await world.activities.run_agent_step_activity(world.params)
         assert repaired.done is False
+        assert len(world.client.requests) == 1
         assert world.effect.count == 1
         async with world.sessions() as session:
             run = await session.get(AgentRun, world.run_id)

@@ -14,6 +14,7 @@ from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
 from jhin_agent_worker.activities import AgentActivities
+from jhin_agent_worker.reasoning import AgentStepReasoningRecord, AgentStepUsage
 from jhin_agents.snapshot import AgentExecutionSnapshot, ModelProfileSnapshot, RunLimits
 from jhin_db.base import Base
 from jhin_db.models import Agent, AgentRun, Approval, Message, RunEvent, Task, ToolCall, Workspace
@@ -26,11 +27,19 @@ from jhin_domain import (
     ToolCallStatus,
     new_uuid7,
 )
-from jhin_workflows.agent_task import ResolveApprovalInput, RunStepInput, StepResult
+from jhin_tools import stable_tool_invocation_id
+from jhin_workflows.agent_task import RunStepInput, StepResult
+from jhin_workflows.agent_task.shared import CommitApprovalProjectionInput
+
+ActivityWorld = tuple[
+    AgentActivities,
+    "_Resources",
+    async_sessionmaker[AsyncSession],
+]
 
 
 async def test_committed_step_retry_returns_durable_result_without_calling_model(
-    activity_world,
+    activity_world: ActivityWorld,
 ) -> None:
     activities, resources, sessions = activity_world
     async with sessions() as session:
@@ -141,7 +150,7 @@ class _Resources:
 
 
 @pytest.fixture
-async def activity_world() -> AsyncIterator[tuple[AgentActivities, _Resources, Any]]:
+async def activity_world() -> AsyncIterator[ActivityWorld]:
     engine = create_async_engine("sqlite+aiosqlite://")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -156,7 +165,8 @@ async def _seed_terminal_approval(
     *,
     existing_bundle: bool,
     terminal_status: str = ToolCallStatus.COMPLETED.value,
-) -> ResolveApprovalInput:
+    include_reasoning: bool = True,
+) -> CommitApprovalProjectionInput:
     async with sessions() as session:
         workspace = Workspace(name="Approval", slug=f"approval-{new_uuid7().hex[:8]}")
         session.add(workspace)
@@ -180,6 +190,7 @@ async def _seed_terminal_approval(
         )
         session.add(run)
         await session.flush()
+        tool_call_id = stable_tool_invocation_id(run.id, 0, 0)
         approval = Approval(
             workspace_id=workspace.id,
             task_id=task.id,
@@ -198,6 +209,7 @@ async def _seed_terminal_approval(
                 "input": {"label": "once"},
                 "connection_authorization_digest": None,
                 "provider_call_id": "provider-call-1",
+                "tool_call_id": str(tool_call_id),
             },
             reason="approved",
             status=ApprovalStatus.APPROVED.value,
@@ -206,6 +218,7 @@ async def _seed_terminal_approval(
         session.add(approval)
         await session.flush()
         tool_call = ToolCall(
+            id=tool_call_id,
             workspace_id=workspace.id,
             run_id=run.id,
             agent_id=agent.id,
@@ -227,6 +240,56 @@ async def _seed_terminal_approval(
         )
         session.add(tool_call)
         await session.flush()
+        session.add(
+            RunEvent(
+                workspace_id=workspace.id,
+                run_id=run.id,
+                task_id=task.id,
+                seq=0,
+                event_type="agent.step.tool_manifest",
+                payload_json={
+                    "step": 0,
+                    "manifest": {
+                        "count": 1,
+                        "calls": [
+                            {
+                                "ordinal": 0,
+                                "lossless": True,
+                                "tool_name": "system.demo.destructive",
+                                "arguments_json": '{"label":"once"}',
+                            }
+                        ],
+                    },
+                },
+            )
+        )
+        if include_reasoning:
+            session.add(
+                RunEvent(
+                    workspace_id=workspace.id,
+                    run_id=run.id,
+                    task_id=task.id,
+                    seq=1,
+                    event_type="agent.step.reasoning",
+                    payload_json=AgentStepReasoningRecord(
+                        step=0,
+                        completion_sanitized="Use the approved tool.",
+                        model="approval-test",
+                        finish_reason="tool_calls",
+                        provider_request_id="approval-request-1",
+                        provider_call_ids=("provider-call-1",),
+                        transitions=(),
+                        done=False,
+                        usage=AgentStepUsage(
+                            input_tokens=0,
+                            output_tokens=0,
+                            cached_tokens=0,
+                            cost_micros=0,
+                        ),
+                        latency_ms=0,
+                    ).to_payload(),
+                )
+            )
         if existing_bundle:
             session.add(
                 Message(
@@ -262,27 +325,56 @@ async def _seed_terminal_approval(
                     workspace_id=workspace.id,
                     run_id=run.id,
                     task_id=task.id,
-                    seq=0,
+                    seq=2,
                     event_type="tool.call",
                     payload_json={"approval_id": str(approval.id)},
                 )
             )
         await session.commit()
-        return ResolveApprovalInput(
+        return CommitApprovalProjectionInput(
             workspace_id=str(workspace.id),
             task_id=str(task.id),
             run_id=str(run.id),
             agent_id=str(agent.id),
             approval_id=str(approval.id),
-            decision="approved",
+            tool_call_id=str(tool_call.id),
         )
 
 
-async def test_terminal_retry_repairs_a_missing_outer_bundle(activity_world) -> None:
+async def test_terminal_retry_repairs_a_missing_outer_bundle(
+    activity_world: ActivityWorld,
+) -> None:
     activities, resources, sessions = activity_world
-    params = await _seed_terminal_approval(sessions, existing_bundle=False)
+    params = await _seed_terminal_approval(
+        sessions,
+        existing_bundle=False,
+        include_reasoning=False,
+    )
 
-    result = await ActivityEnvironment().run(activities.resolve_approval_activity, params)
+    result = await ActivityEnvironment().run(
+        activities.commit_approval_projection_activity,
+        params,
+    )
+
+    assert result.done is False
+    async with sessions() as session:
+        message_count = await session.scalar(select(func.count(Message.id)))
+        event_count = await session.scalar(select(func.count(RunEvent.id)))
+        assert message_count == 1
+        assert event_count == 4
+    assert len(resources.publisher.events) == 1
+
+
+async def test_terminal_retry_does_not_duplicate_an_existing_outer_bundle(
+    activity_world: ActivityWorld,
+) -> None:
+    activities, resources, sessions = activity_world
+    params = await _seed_terminal_approval(sessions, existing_bundle=True)
+
+    result = await ActivityEnvironment().run(
+        activities.commit_approval_projection_activity,
+        params,
+    )
 
     assert result.done is False
     async with sessions() as session:
@@ -290,29 +382,12 @@ async def test_terminal_retry_repairs_a_missing_outer_bundle(activity_world) -> 
         event_count = await session.scalar(select(func.count(RunEvent.id)))
         assert message_count == 1
         assert event_count == 3
-    assert len(resources.publisher.events) == 1
-
-
-async def test_terminal_retry_does_not_duplicate_an_existing_outer_bundle(
-    activity_world,
-) -> None:
-    activities, resources, sessions = activity_world
-    params = await _seed_terminal_approval(sessions, existing_bundle=True)
-
-    result = await ActivityEnvironment().run(activities.resolve_approval_activity, params)
-
-    assert result.done is False
-    async with sessions() as session:
-        message_count = await session.scalar(select(func.count(Message.id)))
-        event_count = await session.scalar(select(func.count(RunEvent.id)))
-        assert message_count == 1
-        assert event_count == 1
     assert resources.publisher.events == []
 
 
 @pytest.mark.parametrize("existing_bundle", [False, True])
 async def test_execution_unknown_approval_stops_and_replays_without_resuming(
-    activity_world,
+    activity_world: ActivityWorld,
     existing_bundle: bool,
 ) -> None:
     activities, resources, sessions = activity_world
@@ -324,7 +399,10 @@ async def test_execution_unknown_approval_stops_and_replays_without_resuming(
 
     for _attempt in range(2):
         with pytest.raises(ApplicationError) as error:
-            await ActivityEnvironment().run(activities.resolve_approval_activity, params)
+            await ActivityEnvironment().run(
+                activities.commit_approval_projection_activity,
+                params,
+            )
         assert error.value.type == "tool_execution_unknown"
         assert error.value.non_retryable is True
 
@@ -344,5 +422,5 @@ async def test_execution_unknown_approval_stops_and_replays_without_resuming(
         assert messages[0].content_json["tool_call_id"] == str(tool_call.id)
         assert messages[0].content_json["status"] == "execution_unknown"
         event_count = await session.scalar(select(func.count(RunEvent.id)))
-        assert event_count == (1 if existing_bundle else 2)
+        assert event_count == (3 if existing_bundle else 4)
     assert resources.publisher.events == []
