@@ -11,26 +11,157 @@ backbone, and PostgreSQL is the system of record. A FastAPI control-plane API
 owns configuration and authorization, and a Next.js frontend provides the
 operations UI.
 
-> Status: Phase 9 — Vercel and Supabase are now governed production
-> integrations with exact connection/project/environment/schema scopes,
-> approval-time reauthorization, bounded provider and SQL outputs, deployment
-> webhooks, and a live connection access summary. Phase 9 does not complete
-> the broader company, chat, memory, or operations redesign. See
-> [Vercel and Supabase Connectors](docs/architecture/vercel-and-supabase.md)
-> for the authority planes, least-privilege setup, and operator boundaries.
+> Status: Phase 10 operations work is in progress. Deterministic connector,
+> tool, trigger-sync, and sandbox effects now run on an isolated tool worker;
+> model reasoning and its private durable record remain on the agent worker.
+> See [Deterministic tool-worker boundary](docs/architecture/tool-worker-boundary.md)
+> and [Sandboxing architecture](docs/architecture/sandboxing.md) for the
+> ownership, compatibility, and Docker-authority contracts.
 
 ## Quick start
 
-Requirements: Docker with Compose v2.
+Requirements: Linux Docker with Compose v2, Python 3.13, `uv`, and `make`.
 
 ```bash
 git clone <this repo>
 cd jhin
 cp .env.example .env
 make master-key          # one-time: generate the secret-store master key
-docker compose up -d --build
-make migrate
 ```
+
+On Linux, choose exactly one Docker socket mode below. The commands deliberately
+disable implicit `.env` loading: export any reviewed infrastructure values in
+the operator environment, but do not put credentials or tokens on the command
+line. A base-only start and a start containing both overlays are invalid.
+
+### Rootless Docker socket (Linux)
+
+This mode requires an already-running rootless Docker daemon owned by host UID
+10001. The preflight rejects a relative path, symlink, non-socket, wrong owner,
+or a daemon whose security options do not include `name=rootless`. The runner
+image is built explicitly before the image-only adapter starts; the adapter has
+`pull_policy: never`, so both services must use that same local image.
+
+```bash
+set -euo pipefail
+export COMPOSE_DISABLE_ENV_FILE=1
+unset APP_ENV COMPOSE_FILE COMPOSE_PROFILES
+export PHASE10_SOCKET_MODE=rootless
+export PHASE10_ROOTLESS_DOCKER_SOCKET=/run/user/10001/docker.sock
+python - "$PHASE10_ROOTLESS_DOCKER_SOCKET" <<'PY'
+import stat
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    info = path.lstat()
+except OSError as error:
+    raise SystemExit(f"cannot inspect rootless Docker socket: {error}") from error
+if not path.is_absolute() or stat.S_ISLNK(info.st_mode):
+    raise SystemExit("rootless Docker socket must be an absolute non-symlink")
+if not stat.S_ISSOCK(info.st_mode) or info.st_uid != 10001:
+    raise SystemExit("rootless Docker socket must be a Unix socket owned by UID 10001")
+PY
+rootless_security="$(docker --host "unix://$PHASE10_ROOTLESS_DOCKER_SOCKET" info --format '{{json .SecurityOptions}}')"
+case "$rootless_security" in
+  *name=rootless*) ;;
+  *) echo "configured daemon is not rootless" >&2; exit 1 ;;
+esac
+export DOCKER_HOST="unix://$PHASE10_ROOTLESS_DOCKER_SOCKET"
+uv run python scripts/assert_phase10_tool_worker_compose.py --mode rootless
+docker compose \
+  -f compose.yaml \
+  -f compose.rootless.yaml \
+  build sandbox-runner
+docker compose \
+  -f compose.yaml \
+  -f compose.rootless.yaml \
+  up -d --build --wait --wait-timeout 180
+docker compose \
+  -f compose.yaml \
+  -f compose.rootless.yaml \
+  exec -T rootless-docker-transport python -c "import urllib.request; r=urllib.request.urlopen('http://127.0.0.1:2375/_ping', timeout=2); raise SystemExit(0 if r.status == 200 and r.read() == b'OK' else 1)"
+docker compose \
+  -f compose.yaml \
+  -f compose.rootless.yaml \
+  exec -T sandbox-runner python -c "import urllib.request; raise SystemExit(0 if urllib.request.urlopen('http://127.0.0.1:8085/health', timeout=3).status == 200 else 1)"
+docker compose \
+  -f compose.yaml \
+  -f compose.rootless.yaml \
+  run --rm --no-deps api jhin-db-migrate
+docker compose \
+  -f compose.yaml \
+  -f compose.rootless.yaml \
+  ps --all
+```
+
+The real Docker `GET /_ping` check must pass before the daemon-backed runner
+health check. The final `ps --all` must contain exactly `api`, `web`,
+`workflow-worker`, `agent-worker`,
+`tool-worker`, `sandbox-runner`,
+`rootless-docker-transport`, `event-worker`, `postgres`, `nats`, `temporal`,
+and `temporal-ui`; every row must be running and every health-bearing service
+must be healthy.
+
+### Rootful Docker socket (Linux)
+
+This mode accepts only an absolute, non-symlink Unix socket owned by UID 0
+with a positive numeric group. The preflight discovers that exact group without
+changing the socket. A wrong type, owner, group, or runner access check is a
+fatal startup error; repair the host's Docker installation instead of relaxing
+permissions or running Jhin as root.
+
+```bash
+set -euo pipefail
+export COMPOSE_DISABLE_ENV_FILE=1
+unset APP_ENV COMPOSE_FILE COMPOSE_PROFILES
+export PHASE10_SOCKET_MODE=rootful
+export SANDBOX_DOCKER_SOCKET_HOST=/var/run/docker.sock
+SANDBOX_DOCKER_GID="$(python - "$SANDBOX_DOCKER_SOCKET_HOST" <<'PY'
+import stat
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    info = path.lstat()
+except OSError as error:
+    raise SystemExit(f"cannot inspect rootful Docker socket: {error}") from error
+if not path.is_absolute() or stat.S_ISLNK(info.st_mode):
+    raise SystemExit("rootful Docker socket must be an absolute non-symlink")
+if not stat.S_ISSOCK(info.st_mode) or info.st_uid != 0 or info.st_gid <= 0:
+    raise SystemExit("rootful Docker socket must be owned by UID 0 and a positive GID")
+print(info.st_gid)
+PY
+)"
+export SANDBOX_DOCKER_GID
+export DOCKER_HOST="unix://$SANDBOX_DOCKER_SOCKET_HOST"
+uv run python scripts/assert_phase10_tool_worker_compose.py --mode rootful
+docker compose \
+  -f compose.yaml \
+  -f compose.rootful.yaml \
+  up -d --build --wait --wait-timeout 180
+docker compose \
+  -f compose.yaml \
+  -f compose.rootful.yaml \
+  exec -T sandbox-runner python -c "import urllib.request; raise SystemExit(0 if urllib.request.urlopen('http://127.0.0.1:8085/health', timeout=3).status == 200 else 1)"
+docker compose \
+  -f compose.yaml \
+  -f compose.rootful.yaml \
+  run --rm --no-deps api jhin-db-migrate
+docker compose \
+  -f compose.yaml \
+  -f compose.rootful.yaml \
+  ps --all
+```
+
+The final `ps --all` must contain exactly `api`, `web`, `workflow-worker`,
+`agent-worker`,
+`tool-worker`, `sandbox-runner`, `event-worker`, `postgres`,
+`nats`, `temporal`, and `temporal-ui`; every row must be running and every
+health-bearing service must be healthy. Rootful mode has no daemon sidecar and
+therefore no daemon-service dependency.
 
 The master key file (`secrets/dev/jhin_master_key` by default) encrypts every
 stored credential. Back it up; losing it makes stored secrets unreadable.
@@ -55,6 +186,7 @@ apps/
 services/
   workflow_worker/   Temporal worker (general workflows)
   agent_worker/      Temporal worker executing agent runs (model calls live here)
+  tool_worker/       Temporal worker executing deterministic tools/connectors
   event_worker/      NATS JetStream durable consumer
   sandbox_runner/    Internal-only API executing cli.* jobs in ephemeral containers
 packages/
@@ -82,7 +214,8 @@ frontend tooling uses pnpm.
 uv sync --all-packages   # install Python workspace
 pnpm install             # install frontend workspace
 
-make dev                 # full stack with dev overrides (hot reload, local ports)
+# Start with one validated socket-mode command from Quick start. A dev stack
+# also adds compose.dev.yaml before that one selected mode overlay.
 make lint                # ruff + eslint
 make typecheck           # mypy + tsc
 make test-unit           # pytest (unit) + vitest
@@ -163,7 +296,9 @@ Agents get connector tools through grants (Tools & Access tab or wizard
 step 5), scoped to the connector's required dimensions; GitHub repository and
 branch values may use patterns like `octo/*` or `agent/*`. See
 [docs/architecture/connectors.md](docs/architecture/connectors.md) for the
-SDK and how to contribute a connector. In the dev overlay the `fake-github`
+SDK and how to contribute a connector. The agent worker receives only
+advertised tool schemas; the isolated tool worker owns executable connector
+catalogs, credentials, and effects. In the dev overlay the `fake-github`
 and `fake-linear` services let the GitHub and Linear flows run without real
 credentials (point a connection's `base_url` at `http://fake-github:8080`
 or `http://fake-linear:8080`).
@@ -199,8 +334,9 @@ THEN a task is created and assigned to an agent. Every trigger can be
 dry-run against a sample event with per-condition pass/fail explanations,
 and recent invocations link to the tasks they started.
 
-To walk the flagship slice on a fresh dev environment (`make dev`,
-`make migrate`, `make seed` — the seed installs everything above):
+To walk the flagship slice after starting a dev stack with
+`compose.dev.yaml` plus the same one explicit socket-mode overlay, apply
+migrations and seed data, then:
 
 ```bash
 # 1. Point fake Linear's webhook at the seeded connection: copy the webhook
