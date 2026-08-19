@@ -2285,6 +2285,80 @@ def test_post_replace_fsync_failure_never_loses_new_lease_ownership(
                 authority.remove_runtime_paths()
 
 
+@pytest.mark.parametrize("lifecycle_kind", ("one-shot", "persistent"))
+def test_post_replace_fsync_signal_preserves_direct_lifecycle_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    lifecycle_kind: str,
+) -> None:
+    lease, created, invoke, rerun_and_recover = _lease_handoff_lifecycle_case(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        lifecycle_kind=lifecycle_kind,
+    )
+    ready = threading.Event()
+    stop = threading.Event()
+
+    def unblocked_signal_target() -> None:
+        previous = signal.pthread_sigmask(
+            signal.SIG_UNBLOCK,
+            {signal.SIGINT, signal.SIGTERM},
+        )
+        ready.set()
+        try:
+            stop.wait(timeout=10.0)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+    helper = threading.Thread(target=unblocked_signal_target, daemon=True)
+    helper.start()
+    assert ready.wait(timeout=5.0)
+    real_replace = os.replace
+    real_fsync_tmp = lifecycle._fsync_tmp_directory
+    replaced = False
+    signalled = False
+
+    def observe_replace(source: Any, destination: Any, **kwargs: Any) -> None:
+        nonlocal replaced
+        real_replace(source, destination, **kwargs)
+        if Path(destination) == lease:
+            replaced = True
+
+    def signal_after_post_replace_fsync() -> None:
+        nonlocal signalled
+        real_fsync_tmp()
+        if replaced and not signalled:
+            signalled = True
+            os.kill(os.getpid(), signal.SIGTERM)
+            # A replay/runtime helper can receive the process signal while the
+            # main thread is still returning through the refresh boundary.
+            for _index in range(1000):
+                pass
+
+    monkeypatch.setattr(os, "replace", observe_replace)
+    monkeypatch.setattr(
+        lifecycle,
+        "_fsync_tmp_directory",
+        signal_after_post_replace_fsync,
+    )
+    try:
+        with pytest.raises(SystemExit) as raised:
+            invoke()
+        assert raised.value.code == 128 + signal.SIGTERM
+        assert replaced is True
+        assert signalled is True
+        _assert_failed_handoff_is_fully_removed(lease=lease, authority=created[-1])
+        rerun_and_recover()
+    finally:
+        stop.set()
+        helper.join(timeout=5.0)
+        lease.unlink(missing_ok=True)
+        lifecycle.persistent_operation_lock_path(tmp_path).unlink(missing_ok=True)
+        for authority in created:
+            if authority.runtime_dir.exists() or authority.barrier_root.exists():
+                authority.remove_runtime_paths()
+
+
 @pytest.mark.parametrize("handoff", ("link", "replace"))
 def test_unblocked_helper_thread_cannot_split_lease_ownership_handoff(
     monkeypatch: pytest.MonkeyPatch,
@@ -3390,6 +3464,8 @@ import json
 import os
 import signal
 import sys
+import threading
+import time
 from pathlib import Path
 
 from tests.integration import phase10_upgrade_harness as lifecycle
@@ -3400,6 +3476,8 @@ repo = Path(sys.argv[3])
 lease = Path(sys.argv[4])
 token = sys.argv[5]
 child_state = root / "spawn-window-child.json"
+grandchild_state = root / "spawn-window-grandchild.json"
+mutation_path = root / "spawn-window-mutations"
 cleanup_state = root / "spawn-window-cleanup.json"
 
 authority = lifecycle.ComposeAuthority.create(
@@ -3417,33 +3495,97 @@ def no_preflight(self, *, runner):
 def observed_cleanup(self, *, runner, upgrade=False):
     del self, runner, upgrade
     child = json.loads(child_state.read_text(encoding="utf-8"))
-    try:
-        os.kill(child["pid"], 0)
-    except ProcessLookupError:
-        child_alive = False
-    else:
-        child_alive = True
+    grandchild = json.loads(grandchild_state.read_text(encoding="utf-8"))
+
+    def alive(pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
     try:
         os.killpg(child["pgid"], 0)
     except ProcessLookupError:
         group_alive = False
     else:
         group_alive = True
+    before = mutation_path.stat().st_size
+    time.sleep(0.15)
+    after = mutation_path.stat().st_size
     cleanup_state.write_text(
-        json.dumps({"child_alive": child_alive, "group_alive": group_alive}),
+        json.dumps(
+            {
+                "child_alive": alive(child["pid"]),
+                "grandchild_alive": alive(grandchild["pid"]),
+                "group_alive": group_alive,
+                "mutation_stable": before == after,
+            }
+        ),
         encoding="utf-8",
     )
 
 lifecycle.ComposeAuthority.preflight = no_preflight
 lifecycle.ComposeAuthority.down_and_cleanup = observed_cleanup
+grandchild_code = (
+    "import json,os,signal,sys,time\n"
+    "from pathlib import Path\n"
+    "state = Path(sys.argv[1])\n"
+    "mutations = Path(sys.argv[2])\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    "state.write_text(json.dumps({'pid': os.getpid(), 'pgid': os.getpgrp()}), "
+    "encoding='utf-8')\n"
+    "while True:\n"
+    "    with mutations.open('a', encoding='utf-8') as stream:\n"
+    "        stream.write('mutation\\n')\n"
+    "        stream.flush()\n"
+    "        os.fsync(stream.fileno())\n"
+    "    time.sleep(0.02)\n"
+)
+child_code = (
+    "import os,subprocess,sys,time\n"
+    f"grandchild_code = {grandchild_code!r}\n"
+    "subprocess.Popen(\n"
+    "    (sys.executable, '-c', grandchild_code, sys.argv[1], sys.argv[2]),\n"
+    "    stdin=subprocess.DEVNULL,\n"
+    "    stdout=subprocess.DEVNULL,\n"
+    "    stderr=subprocess.DEVNULL,\n"
+    ")\n"
+    "while True:\n"
+    "    time.sleep(0.02)\n"
+)
 lifecycle.build_live_pytest_command = lambda scenario: (
     sys.executable,
     "-c",
-    "import time; time.sleep(300)",
+    child_code,
+    str(grandchild_state),
+    str(mutation_path),
 )
 
 real_popen = lifecycle.subprocess.Popen
 triggered = False
+helper_ready = threading.Event()
+helper_stop = threading.Event()
+signal_requested = threading.Event()
+signal_sent = threading.Event()
+
+def unblocked_signal_target():
+    previous = signal.pthread_sigmask(
+        signal.SIG_UNBLOCK,
+        {signal.SIGINT, signal.SIGTERM},
+    )
+    helper_ready.set()
+    try:
+        if signal_requested.wait(timeout=10.0):
+            os.kill(os.getpid(), signum)
+            signal_sent.set()
+        helper_stop.wait(timeout=10.0)
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+helper = threading.Thread(target=unblocked_signal_target, daemon=True)
+helper.start()
+assert helper_ready.wait(timeout=5.0)
 
 def signal_after_real_spawn(*args, **kwargs):
     global triggered
@@ -3454,7 +3596,19 @@ def signal_after_real_spawn(*args, **kwargs):
             json.dumps({"pid": process.pid, "pgid": os.getpgid(process.pid)}),
             encoding="utf-8",
         )
-        os.kill(os.getpid(), signum)
+        deadline = time.monotonic() + 5.0
+        while (
+            not (grandchild_state.is_file() and mutation_path.is_file())
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+        if not (grandchild_state.is_file() and mutation_path.is_file()):
+            raise RuntimeError("spawn-window grandchild did not start")
+        signal_requested.set()
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            if signal_sent.is_set():
+                sum(range(100))
     return process
 
 lifecycle.subprocess.Popen = signal_after_real_spawn
@@ -3466,6 +3620,8 @@ scenario = lifecycle.LiveScenario(
 try:
     lifecycle.execute_one_shot(authority, scenario=scenario, lease_path=lease)
 finally:
+    helper_stop.set()
+    helper.join(timeout=5.0)
     authority.remove_runtime_paths()
 """
     process = subprocess.Popen(
@@ -4399,7 +4555,12 @@ def test_owned_spawn_window_defers_signal_until_group_can_be_exhausted(
         child_group = int(child["pgid"])
         assert child_group == int(child["pid"])
         cleanup = json.loads((tmp_path / "spawn-window-cleanup.json").read_text(encoding="utf-8"))
-        assert cleanup == {"child_alive": False, "group_alive": False}
+        assert cleanup == {
+            "child_alive": False,
+            "grandchild_alive": False,
+            "group_alive": False,
+            "mutation_stable": True,
+        }
         with pytest.raises(ProcessLookupError):
             os.killpg(child_group, 0)
         assert not lease.exists()

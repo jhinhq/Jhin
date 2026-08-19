@@ -547,6 +547,29 @@ _CATCHABLE_SIGNALS = (signal.SIGINT, signal.SIGTERM)
 _CATCHABLE_SIGNAL_SET = frozenset(_CATCHABLE_SIGNALS)
 
 
+@dataclass
+class _OwnedProcessPublication:
+    """Caller-bound process handle admitted before its spawn window closes."""
+
+    process: subprocess.Popen[Any] | None = None
+    process_group: int | None = None
+    pending_signum: int | None = None
+    open: bool = True
+
+    def publish(self, process: subprocess.Popen[Any]) -> None:
+        if self.process is not None or not self.open:
+            raise RuntimeError("owned process publication is inconsistent")
+        self.process = process
+        self.process_group = process.pid
+
+    def defer(self, signum: int) -> None:
+        if self.pending_signum is None:
+            self.pending_signum = signum
+
+
+_ACTIVE_OWNED_PROCESS_PUBLICATION: _OwnedProcessPublication | None = None
+
+
 def _atomic_signal_handler_transition(handlers: Mapping[signal.Signals, Any]) -> None:
     """Change the catchable handler pair without exposing a half-transition."""
     previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, _CATCHABLE_SIGNAL_SET)
@@ -643,6 +666,13 @@ class _CatchableSignalLifecycle:
         if self.interrupted_signum is not None:
             return
         self.interrupted_signum = signum
+        publication = _ACTIVE_OWNED_PROCESS_PUBLICATION
+        if publication is not None and publication.open:
+            # A process-directed signal can be delivered to an unblocked
+            # helper thread even while this spawning thread masks it.  Defer
+            # raising until the caller has a handle/PGID it can exhaust.
+            publication.defer(signum)
+            return
         self.ignore()
         raise _LifecycleSignal(signum)
 
@@ -751,16 +781,23 @@ def run_owned_command(
     input_bytes: bytes | None = None,
 ) -> subprocess.CompletedProcess[Any]:
     """Run one external command in an owned session and exhaust its descendants."""
+    global _ACTIVE_OWNED_PROCESS_PUBLICATION
+
     catchable_signals = {signal.SIGINT, signal.SIGTERM}
     previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, catchable_signals)
+    publication = _OwnedProcessPublication()
+    previous_publication = _ACTIVE_OWNED_PROCESS_PUBLICATION
+    process: subprocess.Popen[Any] | None = None
+    process_group: int | None = None
+    mask_restored = False
 
     def restore_child_signal_state() -> None:
         for signum in _CATCHABLE_SIGNALS:
             signal.signal(signum, signal.SIG_DFL)
         signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
-    try:
-        process = subprocess.Popen(
+    def spawn_and_publish() -> subprocess.Popen[Any]:
+        spawned = subprocess.Popen(
             command,
             cwd=cwd,
             env=env,
@@ -771,14 +808,23 @@ def run_owned_command(
             start_new_session=True,
             preexec_fn=restore_child_signal_state,
         )
-    except BaseException:
-        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
-        raise
-    process_group = process.pid
-    mask_restored = False
+        publication.publish(spawned)
+        return spawned
+
     try:
+        _ACTIVE_OWNED_PROCESS_PUBLICATION = publication
+        try:
+            process = spawn_and_publish()
+            process_group = publication.process_group
+        finally:
+            publication.open = False
+            _ACTIVE_OWNED_PROCESS_PUBLICATION = previous_publication
+
         signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
         mask_restored = True
+        if publication.pending_signum is not None:
+            raise _LifecycleSignal(publication.pending_signum)
+        assert process_group is not None
         stdout, stderr = process.communicate(input=input_bytes, timeout=timeout)
         if _owned_process_group_exists(process_group):
             _terminate_owned_process_group(process, process_group=process_group)
@@ -797,6 +843,10 @@ def run_owned_command(
             )
         return result
     except subprocess.TimeoutExpired as error:
+        process = publication.process
+        process_group = publication.process_group
+        if process is None or process_group is None:
+            raise
         try:
             stdout, stderr = _terminate_owned_process_group(
                 process,
@@ -811,6 +861,10 @@ def run_owned_command(
         error.stderr = stderr
         raise
     except BaseException as error:
+        process = publication.process
+        process_group = publication.process_group
+        if process is None or process_group is None:
+            raise
         try:
             _terminate_owned_process_group(process, process_group=process_group)
         except BaseException as teardown_error:
@@ -820,6 +874,9 @@ def run_owned_command(
             ) from error
         raise
     finally:
+        publication.open = False
+        if _ACTIVE_OWNED_PROCESS_PUBLICATION is publication:
+            _ACTIVE_OWNED_PROCESS_PUBLICATION = previous_publication
         if not mask_restored:
             signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
@@ -4870,7 +4927,7 @@ def execute_one_shot(
                     )
                 except _AuthorityLeaseRefreshError as error:
                     lease_ownership = error.ownership
-                    raise
+                    raise error.refresh_error from error
             if scenario.upgrade:
                 source_ref = read_phase9_source_ref(
                     live_authority.repo,
@@ -4897,7 +4954,7 @@ def execute_one_shot(
                         )
                     except _AuthorityLeaseRefreshError as error:
                         lease_ownership = error.ownership
-                        raise
+                        raise error.refresh_error from error
                 frozen = live_authority.build_phase9_agent_image(source_ref, runner=runner)
                 try:
                     previous_mask = signal.pthread_sigmask(
@@ -4915,7 +4972,7 @@ def execute_one_shot(
                                 )
                             except _AuthorityLeaseRefreshError as error:
                                 lease_ownership = error.ownership
-                                raise
+                                raise error.refresh_error from error
                     finally:
                         signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
                 except BaseException as setup_error:
@@ -5126,7 +5183,7 @@ def _persistent_up_locked(
                 )
             except _AuthorityLeaseRefreshError as error:
                 lease_ownership = error.ownership
-                raise
+                raise error.refresh_error from error
     except BaseException as error:
         primary_error = error
     finally:
