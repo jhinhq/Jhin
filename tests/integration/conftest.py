@@ -45,8 +45,10 @@ _COMPOSE_PROJECT_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]*\Z")
 
 
 def selected_compose_mode(value: str | None = None) -> ComposeMode:
-    """Return the explicitly selected socket mode (rootful for legacy unit seams)."""
-    selected = value if value is not None else os.environ.get("PHASE10_SOCKET_MODE", "rootful")
+    """Return the explicitly selected socket mode, failing closed when absent."""
+    selected = value if value is not None else os.environ.get("PHASE10_SOCKET_MODE")
+    if selected is None:
+        raise ValueError("PHASE10_SOCKET_MODE is required and must be rootful or rootless")
     if selected not in {"rootful", "rootless"}:
         raise ValueError("PHASE10_SOCKET_MODE must be exactly rootful or rootless")
     return cast(ComposeMode, selected)
@@ -90,8 +92,7 @@ def validate_compose_project(project: str) -> str:
 def compose(*args: str, timeout: float = 120.0) -> subprocess.CompletedProcess[str]:
     """Run a docker compose subcommand against the dev stack."""
     project = validate_compose_project(os.environ.get("JHIN_TEST_COMPOSE_PROJECT", "jhin"))
-    selected = os.environ.get("PHASE10_SOCKET_MODE")
-    files = compose_files_for_mode(selected_compose_mode(selected)) if selected else COMPOSE_BASE
+    files = compose_files_for_mode(selected_compose_mode())
     command = ["docker", "compose", "-p", project]
     for filename in files:
         command.extend(("-f", filename))

@@ -107,7 +107,9 @@ def test_compose_project_validation_rejects_unsafe_names(project: str) -> None:
         validate_compose_project(project)
 
 
-def test_integration_compose_uses_literal_validated_project(
+@pytest.mark.parametrize("mode", ["rootful", "rootless"])
+def test_integration_compose_uses_literal_validated_project_and_explicit_mode(
+    mode: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from tests.integration import conftest as harness
@@ -120,6 +122,7 @@ def test_integration_compose_uses_literal_validated_project(
         return subprocess.CompletedProcess(command, 0, stdout="api\n", stderr="")
 
     monkeypatch.setenv("JHIN_TEST_COMPOSE_PROJECT", "jhin-phase9-acceptance")
+    monkeypatch.setenv("PHASE10_SOCKET_MODE", mode)
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     harness.compose("ps", timeout=7.0)
@@ -134,6 +137,8 @@ def test_integration_compose_uses_literal_validated_project(
             "compose.yaml",
             "-f",
             "compose.dev.yaml",
+            "-f",
+            f"compose.{mode}.yaml",
             "ps",
         ],
         "kwargs": {

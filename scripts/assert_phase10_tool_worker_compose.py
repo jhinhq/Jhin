@@ -16,6 +16,39 @@ ROOT = Path(__file__).resolve().parents[1]
 ComposeMode = Literal["rootful", "rootless"]
 _ROOTLESS_TRANSPORT_URL = "http://rootless-docker-transport:2375"
 _RUNNER_IMAGE = "jhin-sandbox-runner:local"
+_RUNNER_HEALTHCHECK = {
+    "interval": "10s",
+    "retries": 5,
+    "start_period": "15s",
+    "test": [
+        "CMD",
+        "python",
+        "-c",
+        "import urllib.request, sys\n"
+        'sys.exit(0 if urllib.request.urlopen("http://127.0.0.1:8085/health", '
+        "timeout=3).status == 200 else 1)\n",
+    ],
+    "timeout": "5s",
+}
+_ADAPTER_HEALTHCHECK = {
+    "interval": "2s",
+    "retries": 15,
+    "test": [
+        "CMD",
+        "python",
+        "-c",
+        "import urllib.request;response=urllib.request.urlopen("
+        "'http://127.0.0.1:2375/_ping',timeout=2);body=response.read();"
+        "raise SystemExit(0 if response.status == 200 and body == b'OK' else 1)",
+    ],
+    "timeout": "2s",
+}
+_RUNNER_BASE_ENVIRONMENT_KEYS = {
+    "LOG_LEVEL",
+    "SANDBOX_DEFAULT_IMAGE",
+    "SANDBOX_NETWORK",
+    "SANDBOX_RUNNER_TOKEN",
+}
 _DEV_HTTP_ORIGINS = (
     "http://fake-github:8080,http://fake-linear:8080,"
     "http://fake-vercel:8080,http://fake-supabase:8080"
@@ -149,11 +182,40 @@ def _secret_sources(service: Mapping[str, Any]) -> set[str]:
     }
 
 
-def _assert_common_workers(services: Mapping[str, Any], *, dev: bool) -> None:
+def assert_source_contract() -> None:
+    """Assert source-only bind safety that Compose normalizes out of renders."""
+    expected_fragments = {
+        "compose.rootful.yaml": (
+            "      - type: bind\n"
+            "        source: ${SANDBOX_DOCKER_SOCKET_HOST:?set verified absolute Docker socket}\n"
+            "        target: /run/jhin/docker.sock\n"
+            "        bind:\n"
+            "          create_host_path: false"
+        ),
+        "compose.rootless.yaml": (
+            "      - type: bind\n"
+            "        source: ${PHASE10_ROOTLESS_DOCKER_SOCKET:?set the verified rootless socket}\n"
+            "        target: /run/host/docker.sock\n"
+            "        bind:\n"
+            "          create_host_path: false"
+        ),
+    }
+    for filename, fragment in expected_fragments.items():
+        source = (ROOT / filename).read_text(encoding="utf-8")
+        _require(
+            source.count(fragment) == 1,
+            f"{filename} bind must set create_host_path: false exactly once",
+        )
+
+
+def _assert_common_workers(
+    services: Mapping[str, Any],
+    *,
+    expected_app_env: str,
+) -> None:
     agent = cast(dict[str, Any], services["agent-worker"])
     tool = cast(dict[str, Any], services["tool-worker"])
     runner = cast(dict[str, Any], services["sandbox-runner"])
-    expected_app_env = "test" if dev else "production"
 
     _require(agent["command"] == ["jhin-agent-worker"], "agent command drifted")
     _require(tool["command"] == ["jhin-tool-worker"], "tool command drifted")
@@ -210,6 +272,7 @@ def _assert_common_workers(services: Mapping[str, Any], *, dev: bool) -> None:
     _require(runner.get("restart") == "unless-stopped", "runner restart policy drifted")
     _require(runner.get("image") == _RUNNER_IMAGE, "runner image tag drifted")
     _require(runner.get("pull_policy") == "build", "runner must build locally")
+    _require(runner.get("healthcheck") == _RUNNER_HEALTHCHECK, "runner health map drifted")
 
     protected = {"api", "agent-worker", "tool-worker"}
     recipients = {
@@ -320,11 +383,21 @@ def _assert_ports(services: Mapping[str, Any], *, mode: ComposeMode, dev: bool) 
 def _assert_rootless(
     config: Mapping[str, Any],
     services: Mapping[str, Any],
+    *,
+    expected_socket_source: str | None,
 ) -> None:
     runner = cast(dict[str, Any], services["sandbox-runner"])
     adapter = cast(dict[str, Any], services.get("rootless-docker-transport"))
     _require(adapter is not None, "rootless authority overlay is missing")
     runner_environment = cast(dict[str, Any], runner["environment"])
+    expected_runner_keys = _RUNNER_BASE_ENVIRONMENT_KEYS | {
+        "SANDBOX_DOCKER_MODE",
+        "SANDBOX_DOCKER_TRANSPORT_URL",
+    }
+    _require(
+        set(runner_environment) == expected_runner_keys,
+        "rootless runner environment key set drifted",
+    )
     _require(runner.get("group_add", []) == [], "rootless runner must have no group_add")
     _require(runner.get("volumes", []) == [], "rootless runner must have no socket volume")
     _require(_network_names(runner) == {"runner", "engine"}, "rootless runner networks drifted")
@@ -361,35 +434,30 @@ def _assert_rootless(
     _require(adapter.get("restart") == "unless-stopped", "adapter restart policy drifted")
     _require(adapter.get("image") == runner.get("image"), "adapter/runner images differ")
     _require(adapter.get("pull_policy") == "never", "adapter must never pull")
+    adapter_environment = adapter.get("environment", {})
+    _require(
+        isinstance(adapter_environment, dict) and set(adapter_environment) == set(),
+        "adapter environment key set drifted",
+    )
     _require(
         adapter.get("command") == ["python", "-m", "jhin_sandbox_runner.rootless_transport"],
         "adapter entrypoint drifted",
     )
-    _require(
-        adapter["healthcheck"]["test"]
-        == [
-            "CMD",
-            "python",
-            "-c",
-            "import urllib.request;response=urllib.request.urlopen("
-            "'http://127.0.0.1:2375/_ping',timeout=2);body=response.read();"
-            "raise SystemExit(0 if response.status == 200 and body == b'OK' else 1)",
-        ],
-        "adapter health must require Docker /_ping status/body",
-    )
+    _require(adapter.get("healthcheck") == _ADAPTER_HEALTHCHECK, "adapter health map drifted")
     volumes = adapter.get("volumes", [])
     _require(len(volumes) == 1, "adapter must have one socket bind")
+    _require(expected_socket_source is not None, "rootless expected socket source is required")
     volume = volumes[0]
     _require(
         volume
         == {
             "type": "bind",
-            "source": volume.get("source"),
+            "source": expected_socket_source,
             "target": "/run/host/docker.sock",
             "bind": {},
         }
-        and str(volume["source"]).startswith("/"),
-        "adapter socket bind must be canonical long syntax",
+        and str(expected_socket_source).startswith("/"),
+        "adapter socket source or canonical long bind drifted",
     )
     _require(config["networks"]["engine"].get("internal") is True, "engine must be internal")
 
@@ -405,6 +473,15 @@ def _assert_rootful(
     _require(expected_socket_source is not None, "rootful socket source is required")
     runner = cast(dict[str, Any], services["sandbox-runner"])
     environment = cast(dict[str, Any], runner["environment"])
+    expected_runner_keys = _RUNNER_BASE_ENVIRONMENT_KEYS | {
+        "SANDBOX_DOCKER_GID",
+        "SANDBOX_DOCKER_MODE",
+        "SANDBOX_DOCKER_SOCKET",
+    }
+    _require(
+        set(environment) == expected_runner_keys,
+        "rootful runner environment key set drifted",
+    )
     _require(_network_names(runner) == {"runner"}, "rootful runner networks drifted")
     _require(runner.get("group_add") == [str(expected_gid)], "rootful sole group drifted")
     _require(runner.get("depends_on", {}) == {}, "rootful runner has a daemon dependency")
@@ -437,11 +514,17 @@ def assert_rendered_contract(
     *,
     mode: str,
     dev: bool,
+    expected_app_env: str,
     expected_rootful_gid: int | None = None,
     expected_socket_source: str | None = None,
 ) -> None:
     """Assert the one exhaustive production/dev x rootful/rootless contract."""
+    assert_source_contract()
     _require(mode in {"rootful", "rootless"}, "mode must be rootful or rootless")
+    _require(
+        expected_app_env in ({"dev", "test"} if dev else {"production"}),
+        "expected APP_ENV does not match the selected production/dev contract",
+    )
     selected = cast(ComposeMode, mode)
     services = cast(dict[str, Any], config.get("services", {}))
     for required in ("api", "agent-worker", "tool-worker", "sandbox-runner"):
@@ -463,11 +546,15 @@ def assert_rendered_contract(
             "rootful authority overlay is missing",
         )
 
-    _assert_common_workers(services, dev=dev)
+    _assert_common_workers(services, expected_app_env=expected_app_env)
     _assert_dev_contract(services, dev=dev)
     _assert_ports(services, mode=selected, dev=dev)
     if selected == "rootless":
-        _assert_rootless(config, services)
+        _assert_rootless(
+            config,
+            services,
+            expected_socket_source=expected_socket_source,
+        )
     else:
         _assert_rootful(
             services,
@@ -482,6 +569,27 @@ def assert_rendered_contract(
         {"sandbox-runner", "rootless-docker-transport"} if selected == "rootless" else set()
     )
     _require(engine_users == expected_engine_users, "engine network authority leaked")
+    runner_users = {
+        name for name, service in services.items() if "runner" in _network_names(service)
+    }
+    _require(
+        runner_users == {"sandbox-runner", "tool-worker"},
+        "runner network authority leaked",
+    )
+    _require(
+        _network_names(cast(dict[str, Any], services["api"])) == {"control", "data", "edge"},
+        "api network boundary drifted",
+    )
+    networks = config.get("networks", {})
+    _require(isinstance(networks, dict), "rendered networks must be a mapping")
+    _require("default" not in networks, "implicit default network is forbidden")
+    _require(
+        all(
+            "default" not in _network_names(cast(dict[str, Any], service))
+            for service in services.values()
+        ),
+        "service retained implicit default network authority",
+    )
     _require(
         "engine" not in _network_names(cast(dict[str, Any], services["tool-worker"])),
         "tool worker reached the engine network",
@@ -499,6 +607,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     mode = cast(ComposeMode, args.mode)
     explicit_env: dict[str, str] = {}
+    expected_app_env = "production"
     expected_gid: int | None = None
     expected_socket: str | None = None
     if mode == "rootful":
@@ -516,13 +625,17 @@ def main(argv: list[str] | None = None) -> int:
         if not rootless_socket:
             raise ValueError("PHASE10_ROOTLESS_DOCKER_SOCKET is required")
         explicit_env["PHASE10_ROOTLESS_DOCKER_SOCKET"] = rootless_socket
-    if args.dev and "APP_ENV" in os.environ:
-        explicit_env["APP_ENV"] = os.environ["APP_ENV"]
+        expected_socket = rootless_socket
+    if args.dev:
+        expected_app_env = os.environ.get("APP_ENV", "dev")
+        if "APP_ENV" in os.environ:
+            explicit_env["APP_ENV"] = expected_app_env
     rendered = render_compose(mode, dev=bool(args.dev), env=explicit_env)
     assert_rendered_contract(
         rendered,
         mode=mode,
         dev=bool(args.dev),
+        expected_app_env=expected_app_env,
         expected_rootful_gid=expected_gid,
         expected_socket_source=expected_socket,
     )

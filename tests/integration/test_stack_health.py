@@ -20,15 +20,50 @@ from tests.integration.conftest import (
 pytestmark = pytest.mark.integration
 
 
+def _compose_ps_rows(output: str) -> list[dict[str, Any]]:
+    """Decode Compose v2 array or NDJSON output with unique service identities."""
+    if not output.strip():
+        raise ValueError("Compose ps output is empty")
+    try:
+        decoded: object = json.loads(output)
+    except json.JSONDecodeError:
+        decoded_rows: list[object] = []
+        for line_number, line in enumerate(output.splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                decoded_rows.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Compose ps NDJSON row {line_number} is malformed") from exc
+        decoded = decoded_rows
+
+    if isinstance(decoded, dict):
+        candidates: list[object] = [decoded]
+    elif isinstance(decoded, list):
+        candidates = decoded
+    else:
+        raise ValueError("Compose ps output must contain JSON objects")
+
+    rows: list[dict[str, Any]] = []
+    identities: set[str] = set()
+    for index, candidate in enumerate(candidates, start=1):
+        if not isinstance(candidate, dict):
+            raise ValueError(f"Compose ps row {index} must be an object")
+        raw_identity = candidate.get("Service")
+        if not isinstance(raw_identity, str) or not raw_identity.strip():
+            raise ValueError(f"Compose ps row {index} has no service identity")
+        identity = raw_identity.strip()
+        if identity in identities:
+            raise ValueError(f"Compose ps contains duplicate service identity: {identity}")
+        identities.add(identity)
+        rows.append(candidate)
+    return rows
+
+
 def unhealthy_expected_services(output: str, expected: set[str]) -> dict[str, str]:
     """Return every missing, stopped, blank, or non-healthy expected service."""
-    decoded: object = json.loads(output)
-    rows = decoded if isinstance(decoded, list) else [decoded]
-    by_service = {
-        str(row.get("Service", "")): row
-        for row in rows
-        if isinstance(row, dict) and row.get("Service")
-    }
+    rows = _compose_ps_rows(output)
+    by_service = {str(row["Service"]).strip(): row for row in rows}
     failures: dict[str, str] = {}
     for service in sorted(expected):
         row: dict[str, Any] | None = by_service.get(service)

@@ -58,7 +58,8 @@ FORBIDDEN_JOB_DNS_NAMES = (
     "tool-worker",
     "rootless-docker-transport",
 )
-FORBIDDEN_JOB_NETWORK_NAMES = ("runner", "engine")
+JOB_CONTAINER_USER = "1000:1000"
+SANDBOX_NETWORK = os.environ.get("SANDBOX_NETWORK", "jhin_sandbox")
 
 
 def _job_id() -> str:
@@ -106,23 +107,119 @@ def _docker(*args: str) -> str:
     return result.stdout.strip()
 
 
+def assert_job_container_boundary(
+    inspected: object,
+    *,
+    job_id: str,
+    network_policy: str,
+    sandbox_network: str,
+) -> None:
+    """Fail closed on the host-observed Docker authority of one live job."""
+    assert isinstance(inspected, dict), "container inspection must be an object"
+    config = inspected.get("Config")
+    host = inspected.get("HostConfig")
+    mounts = inspected.get("Mounts")
+    assert isinstance(config, dict), "container inspection Config must be an object"
+    assert isinstance(host, dict), "container inspection HostConfig must be an object"
+    assert isinstance(mounts, list), "container inspection Mounts must be a list"
+
+    expected_network = "none" if network_policy == "none" else sandbox_network
+    assert network_policy in {"none", "internet"}, "unexpected job network policy"
+    assert host.get("NetworkMode") == expected_network, "job network authority drifted"
+    assert (host.get("GroupAdd") or []) == [], "job supplemental group authority drifted"
+    assert config.get("User") == JOB_CONTAINER_USER, "job user authority drifted"
+    labels = config.get("Labels")
+    assert isinstance(labels, dict), "job labels must be an object"
+    assert labels.get("jhin.sandbox.job") == job_id, "job label identity drifted"
+
+    environment = config.get("Env") or []
+    assert isinstance(environment, list) and all(isinstance(item, str) for item in environment), (
+        "job environment must be a string list"
+    )
+    for item in environment:
+        name = item.partition("=")[0].upper()
+        assert not name.startswith(("DOCKER_", "SANDBOX_DOCKER_")), (
+            "job environment retained Docker authority"
+        )
+        assert "rootless-docker-transport" not in item.casefold(), (
+            "job environment retained adapter authority"
+        )
+        assert not any(path in item for path in FORBIDDEN_JOB_SOCKET_PATHS), (
+            "job environment retained socket authority"
+        )
+
+    binds = host.get("Binds") or []
+    assert isinstance(binds, list) and all(isinstance(bind, str) for bind in binds), (
+        "job bind authority must be a string list"
+    )
+    for bind in binds:
+        assert not any(path in bind for path in FORBIDDEN_JOB_SOCKET_PATHS), (
+            "job bind retained Docker authority"
+        )
+    for mount in mounts:
+        assert isinstance(mount, dict), "job mount inspection must be an object"
+        serialized = json.dumps(mount, sort_keys=True)
+        assert not any(path in serialized for path in FORBIDDEN_JOB_SOCKET_PATHS), (
+            "job mount retained Docker authority"
+        )
+
+
+async def _wait_for_job_container(job_id: str) -> dict[str, Any]:
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        identifiers = _docker(
+            "ps", "-aq", "--filter", f"label=jhin.sandbox.job={job_id}"
+        ).splitlines()
+        assert len(identifiers) <= 1, f"job label matched multiple containers: {identifiers}"
+        if identifiers:
+            decoded: object = json.loads(_docker("inspect", identifiers[0]))
+            assert isinstance(decoded, list) and len(decoded) == 1, (
+                "docker inspect must return exactly one job container"
+            )
+            inspected = decoded[0]
+            assert isinstance(inspected, dict), "docker inspect row must be an object"
+            return inspected
+        await asyncio.sleep(0.2)
+    pytest.fail(f"job {job_id} never produced a labeled container")
+
+
+async def _wait_for_job_container_removal(job_id: str) -> None:
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        if _docker("ps", "-aq", "--filter", f"label=jhin.sandbox.job={job_id}") == "":
+            return
+        await asyncio.sleep(0.2)
+    pytest.fail(f"job {job_id} container survived cancellation")
+
+
+async def _wait_for_boundary_probe(client: httpx.AsyncClient, job_id: str) -> None:
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        response = await client.get(
+            f"/v1/jobs/{job_id}/logs",
+            headers={"Authorization": f"Bearer {RUNNER_TOKEN}"},
+        )
+        assert response.status_code == 200, response.text
+        if "boundary-probe-complete" in response.json()["stdout"]:
+            return
+        await asyncio.sleep(0.2)
+    pytest.fail(f"job {job_id} boundary probe did not complete")
+
+
 def assert_job_boundary_denials(output: str) -> None:
     """Assert a live job cannot discover any Docker-authority boundary."""
     for path in FORBIDDEN_JOB_SOCKET_PATHS:
         assert f"socket-denied:{path}" in output, output
     for name in FORBIDDEN_JOB_DNS_NAMES:
         assert f"dns-denied:{name}" in output, output
-    for name in FORBIDDEN_JOB_NETWORK_NAMES:
-        assert f"network-denied:{name}" in output, output
     assert "adapter-tcp-denied" in output, output
     assert "sandbox-docker-env-denied" in output, output
-    assert "group-add-denied" in output, output
+    assert "boundary-probe-complete" in output, output
 
 
 def _job_boundary_probe() -> str:
     socket_paths = " ".join(FORBIDDEN_JOB_SOCKET_PATHS)
     dns_names = " ".join(FORBIDDEN_JOB_DNS_NAMES)
-    network_names = " ".join(FORBIDDEN_JOB_NETWORK_NAMES)
     return (
         f"for p in {socket_paths}; do "
         '  if test ! -e "$p" && ! grep -Fq "$p" /proc/self/mountinfo; then '
@@ -132,16 +229,10 @@ def _job_boundary_probe() -> str:
         f"for h in {dns_names}; do "
         '  getent hosts "$h" >/dev/null 2>&1 || echo dns-denied:$h; '
         "done; "
-        f"for n in {network_names}; do "
-        '  getent hosts "$n" >/dev/null 2>&1 || echo network-denied:$n; '
-        "done; "
         "curl -fsS --max-time 3 http://rootless-docker-transport:2375/_ping "
         ">/dev/null 2>&1 || echo adapter-tcp-denied; "
         "if ! env | grep -q '^SANDBOX_DOCKER_'; then echo sandbox-docker-env-denied; fi; "
-        "primary_gid=$(id -g); "
-        'extra_groups=$(awk \'/^Groups:/ {$1=""; sub(/^ +/, ""); print}\' '
-        "/proc/self/status | tr ' ' '\\n' | grep -Ev \"^$|^${primary_gid}$\" || true); "
-        'if test -z "$extra_groups"; then echo group-add-denied; fi'
+        "echo boundary-probe-complete"
     )
 
 
@@ -169,12 +260,40 @@ async def test_runner_rejects_missing_or_wrong_token(runner: httpx.AsyncClient) 
 # --- no Docker socket, non-root, read-only rootfs (plan 14.1, 48.7) ------------
 
 
-async def test_job_has_no_docker_socket(runner: httpx.AsyncClient) -> None:
-    job = await _run_job(
-        runner,
-        command=_bash(_job_boundary_probe()),
+@pytest.mark.parametrize("network_policy", ["none", "internet"])
+async def test_live_job_has_no_docker_authority(
+    runner: httpx.AsyncClient,
+    network_policy: str,
+) -> None:
+    body: dict[str, Any] = {
+        "job_id": _job_id(),
+        "network_policy": network_policy,
+        "command": _bash(f"{_job_boundary_probe()}; sleep 120"),
+        "timeout_seconds": 180,
+    }
+    await _submit(runner, body)
+    inspected: dict[str, Any] | None = None
+    job: dict[str, Any] | None = None
+    try:
+        inspected = await _wait_for_job_container(body["job_id"])
+        await _wait_for_boundary_probe(runner, body["job_id"])
+    finally:
+        cancelled = await runner.post(
+            f"/v1/jobs/{body['job_id']}/cancel",
+            headers={"Authorization": f"Bearer {RUNNER_TOKEN}"},
+        )
+        assert cancelled.status_code == 200, cancelled.text
+        job = await _wait(runner, body["job_id"])
+        await _wait_for_job_container_removal(body["job_id"])
+
+    assert inspected is not None
+    assert job is not None and job["status"] == "cancelled", job
+    assert_job_container_boundary(
+        inspected,
+        job_id=body["job_id"],
+        network_policy=network_policy,
+        sandbox_network=SANDBOX_NETWORK,
     )
-    assert job["status"] == "completed", job
     assert_job_boundary_denials(job["stdout"])
 
 
