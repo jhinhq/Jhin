@@ -282,6 +282,39 @@ async def test_invalid_json_with_escaped_secret_never_reaches_durable_state(
     await phase9_world.assert_no_execution_artifacts()
 
 
+async def test_nonlossless_retry_rethrows_original_failure_without_model_or_effect(
+    phase9_world: _World,
+) -> None:
+    phase9_world.client.responses.extend(
+        [
+            _response('["not-an-object"]'),
+            _response('{"value":"valid-later"}'),
+        ]
+    )
+
+    with pytest.raises(ApplicationError) as first:
+        await phase9_world.reasoning.reason_agent_step_activity(phase9_world.params)
+    with pytest.raises(ApplicationError) as retry:
+        await phase9_world.reasoning.reason_agent_step_activity(phase9_world.params)
+
+    assert first.value.type == "tool_step_manifest_not_lossless"
+    assert first.value.non_retryable is True
+    assert retry.value.type == first.value.type
+    assert retry.value.non_retryable is True
+    assert str(retry.value) == str(first.value)
+    assert len(phase9_world.client.requests) == 1
+    assert phase9_world.client.close_count == 1
+    assert len(phase9_world.client.responses) == 1
+    assert await phase9_world.event_payloads() == []
+    await phase9_world.assert_no_execution_artifacts()
+    async with phase9_world.sessions() as session:
+        run = await session.get(AgentRun, phase9_world.run_id)
+        assert run is not None
+        assert run.error_code == "tool_step_manifest_not_lossless"
+        assert run.error_message == first.value.message
+        assert await session.scalar(select(func.count(AuditEvent.id))) == 1
+
+
 @pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity", "1e999", "-1e999"])
 async def test_nonstandard_json_number_stops_before_manifest(
     phase9_world: _World,

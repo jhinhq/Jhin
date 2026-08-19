@@ -149,9 +149,7 @@ class ProjectionWorld:
             agent_id=str(self.agent_id),
             step_index=0,
             gateway_tool_call_ids=(
-                ids
-                if ids is not None
-                else [str(stable_tool_invocation_id(self.run_id, 0, 0))]
+                ids if ids is not None else [str(stable_tool_invocation_id(self.run_id, 0, 0))]
             ),
             cancelled_after_tool_call_id=cancelled_after_tool_call_id,
         )
@@ -234,8 +232,7 @@ class ProjectionWorld:
                             finish_reason="tool_calls",
                             provider_request_id="private-provider-request",
                             provider_call_ids=tuple(
-                                f"private-provider-call-{ordinal + 1}"
-                                for ordinal in range(count)
+                                f"private-provider-call-{ordinal + 1}" for ordinal in range(count)
                             ),
                             transitions=(
                                 {"node": "load_context", "detail": "context loaded"},
@@ -391,6 +388,47 @@ async def test_projection_is_idempotent_and_unknown_is_durable(
         serialized = str([event.payload_json for event in public_events])
         assert "private-provider-request" not in serialized
         assert "private-provider-call" not in serialized
+
+
+async def test_generic_finalization_preserves_execution_unknown_diagnosis(
+    world: ProjectionWorld,
+) -> None:
+    await world.seed_manifest_and_tool_call(status=ToolCallStatus.EXECUTION_UNKNOWN.value)
+    invocation_id = str(stable_tool_invocation_id(world.run_id, 0, 0))
+    expected_message = (
+        f"tool call {invocation_id} execution outcome is unknown; manual reconciliation is required"
+    )
+
+    with pytest.raises(ApplicationError) as projection_error:
+        await world.projections.commit_agent_step_activity(world.commit_params())
+    assert projection_error.value.type == "tool_execution_unknown"
+    assert projection_error.value.message == expected_message
+
+    await world.projections.finalize_run_projection_activity(
+        FinalizeInput(
+            workspace_id=str(world.workspace_id),
+            task_id=str(world.task_id),
+            run_id=str(world.run_id),
+            status=RunStatus.FAILED.value,
+            steps_used=0,
+            error_code="step_failed",
+            error_message="the workflow observed a generic step activity failure",
+        )
+    )
+
+    run = await world.load_run()
+    assert run.error_code == "tool_execution_unknown"
+    assert run.error_message == expected_message
+    async with world.sessions() as session:
+        event = await session.scalar(
+            select(RunEvent).where(
+                RunEvent.run_id == world.run_id,
+                RunEvent.event_type == "run.failed",
+            )
+        )
+        assert event is not None
+        assert event.payload_json["error_code"] == "tool_execution_unknown"
+        assert event.payload_json["error_message"] == expected_message
 
 
 async def test_projection_rejects_noncanonical_tool_id_prefix(world: ProjectionWorld) -> None:
@@ -568,9 +606,7 @@ async def test_projection_rejects_rows_after_an_earlier_durable_stop(
         approval_ordinals=approvals,
         outputs=outputs,
     )
-    ids = [
-        str(stable_tool_invocation_id(world.run_id, 0, ordinal)) for ordinal in range(2)
-    ]
+    ids = [str(stable_tool_invocation_id(world.run_id, 0, ordinal)) for ordinal in range(2)]
 
     with pytest.raises(ApplicationError) as error:
         await world.projections.commit_agent_step_activity(world.commit_params(ids=ids))
@@ -587,14 +623,10 @@ async def test_committed_projection_replay_requires_the_exact_bound_ids(
 ) -> None:
     await world.seed_step(statuses=[ToolCallStatus.COMPLETED.value])
     canonical = str(stable_tool_invocation_id(world.run_id, 0, 0))
-    first = await world.projections.commit_agent_step_activity(
-        world.commit_params(ids=[canonical])
-    )
+    first = await world.projections.commit_agent_step_activity(world.commit_params(ids=[canonical]))
 
     with pytest.raises(ApplicationError) as error:
-        await world.projections.commit_agent_step_activity(
-            world.commit_params(ids=retry_ids)
-        )
+        await world.projections.commit_agent_step_activity(world.commit_params(ids=retry_ids))
 
     assert first.execution_unknown_tool_call_id is None
     assert error.value.type == "tool_projection_binding_mismatch"
@@ -787,9 +819,7 @@ async def test_concurrent_finalize_projection_serializes_one_terminal_event() ->
         try:
             async with sessions() as blocker:
                 locked = await blocker.scalar(
-                    select(AgentRun)
-                    .where(AgentRun.id == run.id)
-                    .with_for_update()
+                    select(AgentRun).where(AgentRun.id == run.id).with_for_update()
                 )
                 assert locked is not None
                 calls = [
