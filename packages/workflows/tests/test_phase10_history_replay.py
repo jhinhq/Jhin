@@ -57,6 +57,11 @@ EXPECTED_OLD_ACTIVITIES = {
     "triggered-sync.json": {"prepare_triggered_task", "sync_external"},
     "engineering-sync.json": {"prepare_triggered_task", "sync_external"},
 }
+_PHASE10_PATCH_MARKERS = (
+    "phase10-tool-worker-boundary-v1",
+    "phase10-trigger-sync-tool-routing-v1",
+    "phase10-engineering-sync-tool-routing-v1",
+)
 
 
 def _copy_fixture_root(tmp_path: Path) -> Path:
@@ -189,7 +194,7 @@ def test_frozen_histories_have_only_phase9_commands() -> None:
         text = (FIXTURE_ROOT / filename).read_text(encoding="utf-8")
         recorded = set(re.findall(r'"activityType"\s*:\s*\{\s*"name"\s*:\s*"([^"]+)"', text))
         assert names.issubset(recorded)
-        assert "phase10-tool-worker-boundary-v1" not in text
+        assert all(marker not in text for marker in _PHASE10_PATCH_MARKERS)
 
 
 def test_committed_frozen_history_evidence_matches_exact_bytes_and_metadata() -> None:

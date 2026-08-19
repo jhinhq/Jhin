@@ -20,8 +20,11 @@ from jhin_tools.invocation import (
     INVOCATION_FORMAT_VERSION,
     MAX_TOOL_CALLS_PER_STEP,
     MAX_TOOL_STEP_INDEX,
+    SYNC_INVOCATION_FORMAT_VERSION,
+    SYNC_INVOCATION_NAMESPACE,
     TOOL_INVOCATION_FORMAT_VERSION,
     TOOL_INVOCATION_NAMESPACE,
+    stable_sync_invocation_id,
     stable_tool_invocation_id,
 )
 from jhin_tools.sanitize import (
@@ -54,6 +57,8 @@ __all__ = [
     "PHASE9_AFTER_MANIFEST",
     "PHASE9_CLEANUP_BEFORE_EFFECT",
     "PHASE9_SYNC_BEFORE_EFFECT",
+    "SYNC_INVOCATION_FORMAT_VERSION",
+    "SYNC_INVOCATION_NAMESPACE",
     "TOOL_AFTER_CLAIM",
     "TOOL_AFTER_EFFECT",
     "TOOL_BEFORE_CLAIM",
@@ -74,5 +79,6 @@ __all__ = [
     "builtin_tool_definitions",
     "release_barrier",
     "sanitize_payload",
+    "stable_sync_invocation_id",
     "stable_tool_invocation_id",
 ]

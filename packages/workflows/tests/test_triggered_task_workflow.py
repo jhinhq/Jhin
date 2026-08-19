@@ -17,7 +17,9 @@ from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
+from jhin_workflows import TOOL_TASK_QUEUE
 from jhin_workflows.agent_task.shared import AgentTaskInput, AgentTaskResult
+from jhin_workflows.tool_compat import SyncExternalToolInput
 from jhin_workflows.triggered_task import (
     ACTIVITY_PREPARE_TRIGGERED_TASK,
     ACTIVITY_SYNC_EXTERNAL,
@@ -27,6 +29,7 @@ from jhin_workflows.triggered_task import (
     TriggeredTaskInput,
     TriggeredTaskWorkflow,
 )
+from jhin_workflows.triggered_task.shared import ACTIVITY_SYNC_EXTERNAL_TOOL
 
 
 @workflow.defn(name="AgentTaskWorkflow")
@@ -66,7 +69,8 @@ class Stubs:
         self.sync_fails = sync_fails
         self.task_id = str(uuid.uuid4())
         self.prepare_calls: list[TriggeredTaskInput] = []
-        self.sync_calls: list[SyncExternalInput] = []
+        self.sync_calls: list[SyncExternalToolInput] = []
+        self.legacy_sync_calls: list[SyncExternalInput] = []
 
     @activity.defn(name=ACTIVITY_PREPARE_TRIGGERED_TASK)
     async def prepare(self, params: TriggeredTaskInput) -> PreparedTask:
@@ -74,7 +78,12 @@ class Stubs:
         return PreparedTask(task_id=self.task_id, created=self.created)
 
     @activity.defn(name=ACTIVITY_SYNC_EXTERNAL)
-    async def sync(self, params: SyncExternalInput) -> SyncExternalResult:
+    async def legacy_sync(self, params: SyncExternalInput) -> SyncExternalResult:
+        self.legacy_sync_calls.append(params)
+        raise AssertionError("new history scheduled the Phase 9 sync activity")
+
+    @activity.defn(name=ACTIVITY_SYNC_EXTERNAL_TOOL)
+    async def sync(self, params: SyncExternalToolInput) -> SyncExternalResult:
         self.sync_calls.append(params)
         if self.sync_fails:
             raise ApplicationError("provider unreachable", type="sync_external_failed")
@@ -85,11 +94,18 @@ async def run_workflow(stubs: Stubs, params: TriggeredTaskInput) -> Any:
     env = await WorkflowEnvironment.start_time_skipping()
     try:
         task_queue = f"test-{uuid.uuid4()}"
-        async with Worker(
-            env.client,
-            task_queue=task_queue,
-            workflows=[TriggeredTaskWorkflow, StubAgentTaskWorkflow],
-            activities=[stubs.prepare, stubs.sync],
+        async with (
+            Worker(
+                env.client,
+                task_queue=task_queue,
+                workflows=[TriggeredTaskWorkflow, StubAgentTaskWorkflow],
+                activities=[stubs.prepare, stubs.legacy_sync],
+            ),
+            Worker(
+                env.client,
+                task_queue=TOOL_TASK_QUEUE,
+                activities=[stubs.sync],
+            ),
         ):
             return await env.client.execute_workflow(
                 TriggeredTaskWorkflow.run,
@@ -110,6 +126,7 @@ async def test_creates_task_and_runs_child_to_completion() -> None:
     assert result.synced_external is False  # comment_back not enabled
     assert len(stubs.prepare_calls) == 1
     assert stubs.sync_calls == []
+    assert stubs.legacy_sync_calls == []
 
 
 async def test_duplicate_active_task_skips_the_run() -> None:
@@ -118,6 +135,7 @@ async def test_duplicate_active_task_skips_the_run() -> None:
     assert result.run_status == "skipped_duplicate_task"
     assert result.created_task is False
     assert stubs.sync_calls == []  # no run happened, nothing to report
+    assert stubs.legacy_sync_calls == []
 
 
 async def test_comment_back_syncs_after_the_run() -> None:
@@ -126,9 +144,11 @@ async def test_comment_back_syncs_after_the_run() -> None:
     assert result.synced_external is True
     assert len(stubs.sync_calls) == 1
     sync = stubs.sync_calls[0]
-    assert sync.external_id == "ENG-142"
-    assert sync.run_status == "completed"
+    assert set(vars(sync)) == {"workspace_id", "task_id", "run_id"}
+    assert sync.workspace_id == stubs.prepare_calls[0].workspace_id
+    assert sync.task_id == stubs.task_id
     assert sync.run_id == f"run-for-{stubs.task_id}"
+    assert stubs.legacy_sync_calls == []
 
 
 async def test_sync_failure_does_not_fail_the_workflow() -> None:

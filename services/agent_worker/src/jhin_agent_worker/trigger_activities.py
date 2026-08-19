@@ -23,8 +23,10 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio import activity
+from temporalio.client import Client as TemporalClient
 from temporalio.exceptions import ApplicationError
 
+from jhin_agent_worker.compatibility import compatibility_result
 from jhin_agent_worker.resources import Resources
 from jhin_connectors.linear.schemas import CommentCreateInput, CommentCreateOutput
 from jhin_connectors.linear.tools import LINEAR_TOOLS
@@ -40,6 +42,11 @@ from jhin_events import EventEnvelope, EventSource
 from jhin_observability import get_logger
 from jhin_secrets.redaction import redact_text
 from jhin_tools import PHASE9_SYNC_BEFORE_EFFECT, ToolExecutionContext
+from jhin_workflows.tool_compat import (
+    SyncExternalCompatibilityWorkflow,
+    SyncExternalToolInput,
+    compatibility_workflow_id,
+)
 from jhin_workflows.triggered_task import (
     ACTIVITY_PREPARE_TRIGGERED_TASK,
     ACTIVITY_SYNC_EXTERNAL,
@@ -58,6 +65,47 @@ _STATUS_LINES = {
     "failed": "could not complete the task",
     "cancelled": "was cancelled before finishing",
 }
+
+
+def _compatibility_uuid(value: str, *, field: str) -> str:
+    try:
+        return str(UUID(value))
+    except (AttributeError, TypeError, ValueError) as error:
+        raise ApplicationError(
+            f"legacy {field} is not a UUID",
+            type="compatibility_identity_invalid",
+            non_retryable=True,
+        ) from error
+
+
+class TriggerCompatibilityActivities:
+    """Phase 9 ``sync_external`` name as an IDs-only tool-queue coordinator."""
+
+    def __init__(self, temporal_client: TemporalClient) -> None:
+        self._client = temporal_client
+
+    @activity.defn(name=ACTIVITY_SYNC_EXTERNAL)
+    async def sync_external_activity(self, params: SyncExternalInput) -> SyncExternalResult:
+        workspace_id = _compatibility_uuid(params.workspace_id, field="workspace_id")
+        task_id = _compatibility_uuid(params.task_id, field="task_id")
+        run_id = _compatibility_uuid(params.run_id, field="run_id")
+        result = await compatibility_result(
+            self._client,
+            SyncExternalCompatibilityWorkflow.run,
+            SyncExternalToolInput(
+                workspace_id=workspace_id,
+                task_id=task_id,
+                run_id=run_id,
+            ),
+            workflow_id=compatibility_workflow_id("sync", run_id),
+        )
+        if not isinstance(result, SyncExternalResult):
+            raise ApplicationError(
+                "sync compatibility result is malformed",
+                type="compatibility_result_invalid",
+                non_retryable=True,
+            )
+        return result
 
 
 class TriggerActivities:

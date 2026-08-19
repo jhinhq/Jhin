@@ -33,6 +33,7 @@ from typing import Any
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
+from jhin_workflows import TOOL_TASK_QUEUE
 from jhin_workflows.agent_task.shared import AgentTaskInput, AgentTaskResult
 from jhin_workflows.delegated_task.shared import (
     DelegatedTaskInput,
@@ -43,6 +44,7 @@ from jhin_workflows.engineering_ticket.shared import (
     ACTIVITY_CREATE_ENGINEERING_CHILD_TASK,
     ACTIVITY_FINALIZE_ENGINEERING_TICKET,
     ACTIVITY_RESOLVE_ENGINEERING_PLAN,
+    PHASE10_ENGINEERING_SYNC_PATCH,
     CreatedEngineeringChildTask,
     CreateEngineeringChildTaskInput,
     EngineeringPlan,
@@ -51,9 +53,11 @@ from jhin_workflows.engineering_ticket.shared import (
     EngineeringTicketResult,
     FinalizeEngineeringTicketInput,
 )
+from jhin_workflows.tool_compat.shared import SyncExternalToolInput
 from jhin_workflows.triggered_task.shared import (
     ACTIVITY_PREPARE_TRIGGERED_TASK,
     ACTIVITY_SYNC_EXTERNAL,
+    ACTIVITY_SYNC_EXTERNAL_TOOL,
     PreparedTask,
     SyncExternalInput,
     SyncExternalResult,
@@ -245,23 +249,37 @@ class EngineeringTicketWorkflow:
         synced = False
         if base.comment_back and base.connection_id and impl_run_id:
             try:
-                outcome: SyncExternalResult = await workflow.execute_activity(
-                    ACTIVITY_SYNC_EXTERNAL,
-                    SyncExternalInput(
-                        workspace_id=base.workspace_id,
-                        connection_id=base.connection_id,
-                        external_source=base.external_source,
-                        external_id=base.external_id,
-                        task_id=prepared.task_id,
-                        run_id=impl_run_id,
-                        agent_id=plan.implementer_agent_id,
-                        run_status=final_status,
-                        trigger_name=base.trigger_name,
-                    ),
-                    result_type=SyncExternalResult,
-                    start_to_close_timeout=timedelta(seconds=60),
-                    retry_policy=_SYNC_RETRY,
-                )
+                if workflow.patched(PHASE10_ENGINEERING_SYNC_PATCH):
+                    outcome: SyncExternalResult = await workflow.execute_activity(
+                        ACTIVITY_SYNC_EXTERNAL_TOOL,
+                        SyncExternalToolInput(
+                            workspace_id=base.workspace_id,
+                            task_id=prepared.task_id,
+                            run_id=impl_run_id,
+                        ),
+                        result_type=SyncExternalResult,
+                        task_queue=TOOL_TASK_QUEUE,
+                        start_to_close_timeout=timedelta(seconds=60),
+                        retry_policy=_SYNC_RETRY,
+                    )
+                else:
+                    outcome = await workflow.execute_activity(
+                        ACTIVITY_SYNC_EXTERNAL,
+                        SyncExternalInput(
+                            workspace_id=base.workspace_id,
+                            connection_id=base.connection_id,
+                            external_source=base.external_source,
+                            external_id=base.external_id,
+                            task_id=prepared.task_id,
+                            run_id=impl_run_id,
+                            agent_id=plan.implementer_agent_id,
+                            run_status=final_status,
+                            trigger_name=base.trigger_name,
+                        ),
+                        result_type=SyncExternalResult,
+                        start_to_close_timeout=timedelta(seconds=60),
+                        retry_policy=_SYNC_RETRY,
+                    )
                 synced = outcome.synced
             except Exception:
                 synced = False

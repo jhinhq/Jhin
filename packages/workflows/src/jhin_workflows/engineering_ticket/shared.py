@@ -29,6 +29,7 @@ from jhin_workflows.triggered_task.shared import TriggeredTaskInput
 ACTIVITY_RESOLVE_ENGINEERING_PLAN = "resolve_engineering_plan"
 ACTIVITY_CREATE_ENGINEERING_CHILD_TASK = "create_engineering_child_task"
 ACTIVITY_FINALIZE_ENGINEERING_TICKET = "finalize_engineering_ticket"
+PHASE10_ENGINEERING_SYNC_PATCH = "phase10-engineering-sync-tool-routing-v1"
 
 DEFAULT_MAX_RETEST_CYCLES = 3
 
