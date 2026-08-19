@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 ComposeMode = Literal["rootful", "rootless"]
+UpgradeStage = Literal["parked-phase9", "base-only", "current-phase10"]
 
 EXPECTED_ROOTFUL_SERVICES = {
     "agent-worker",
@@ -111,10 +112,36 @@ _UPGRADE_FAILPOINTS = {
     "sync": "phase9.agent.sync.before_effect.v1",
     "cleanup": "phase9.agent.cleanup.before_effect.v1",
 }
+_BASE_COMPOSE_AUTO_IMAGE_SERVICES = (
+    "web",
+    "api",
+    "workflow-worker",
+    "agent-worker",
+    "tool-worker",
+    "event-worker",
+    "fake-provider",
+    "fake-github",
+    "fake-linear",
+    "fake-vercel",
+    "fake-supabase",
+)
+_UPGRADE_COMPOSE_AUTO_IMAGE_SERVICES = tuple(
+    f"phase10-{kind}-worker-{scenario}"
+    for kind in ("agent", "tool")
+    for scenario in _UPGRADE_SCENARIOS
+)
 
 
 class ComposePsError(ValueError):
     """The selected project is not the exact healthy service topology."""
+
+
+class _LifecycleSignal(BaseException):
+    """Catchable process signal latched until child reaping and final cleanup."""
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(f"Phase 10 lifecycle interrupted by signal {signum}")
+        self.signum = signum
 
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[Any]]
@@ -1076,6 +1103,13 @@ class ComposeAuthority:
     def docker_command(self, *args: str) -> tuple[str, ...]:
         return (self.docker_executable, "--host", self.docker_host, *args)
 
+    def compose_auto_image_tags(self, *, upgrade: bool = False) -> tuple[str, ...]:
+        """Return every unique-project tag Compose assigns to an untagged build."""
+        services: tuple[str, ...] = _BASE_COMPOSE_AUTO_IMAGE_SERVICES
+        if upgrade:
+            services = (*services, *_UPGRADE_COMPOSE_AUTO_IMAGE_SERVICES)
+        return tuple(f"{self.project}-{service}" for service in services)
+
     def phase9_image_tag(self, source_ref: str) -> str:
         if _HEX_REF.fullmatch(source_ref) is None:
             raise ValueError("Phase 9 image source ref is malformed")
@@ -1581,8 +1615,9 @@ class ComposeAuthority:
             )
         ):
             raise ValueError(f"service is outside the exact Phase 10 inventory: {service}")
+        profile = ("--profile", "phase10-upgrade") if upgrade else ()
         selected = self._run(
-            self.compose_command("ps", "-q", service, upgrade=upgrade),
+            self.compose_command(*profile, "ps", "-q", service, upgrade=upgrade),
             runner=runner,
             timeout=30.0,
         )
@@ -2691,7 +2726,13 @@ class ComposeAuthority:
             try:
                 down = self._run(
                     self.compose_command(
-                        *profile, "down", "-v", "--remove-orphans", upgrade=upgrade
+                        *profile,
+                        "down",
+                        "-v",
+                        "--remove-orphans",
+                        "--rmi",
+                        "local",
+                        upgrade=upgrade,
                     ),
                     runner=runner,
                     timeout=300.0,
@@ -2781,7 +2822,11 @@ class ComposeAuthority:
                 errors.append(error)
 
             phase9_tag = self.environment.get("PHASE10_UPGRADE_PHASE9_TAG")
-            image_tags = [self.runner_image, self.sandbox_image]
+            image_tags = [
+                self.runner_image,
+                self.sandbox_image,
+                *self.compose_auto_image_tags(upgrade=upgrade),
+            ]
             if phase9_tag is not None:
                 if (
                     re.fullmatch(
@@ -3132,6 +3177,35 @@ class UpgradeHarness:
         environment[f"PHASE10_UPGRADE_BARRIER_{upper}_MATCH"] = identity or ""
         return environment
 
+    def assert_stage_topology(
+        self,
+        stage: UpgradeStage,
+        *,
+        runner: CommandRunner = run_command,
+    ) -> dict[str, dict[str, Any]]:
+        """Require one of the three exact healthy upgrade handoff inventories."""
+        expected = self.authority.expected_services
+        if stage == "parked-phase9":
+            expected.update(f"phase9-agent-worker-{scenario}" for scenario in _UPGRADE_SCENARIOS)
+        elif stage == "current-phase10":
+            expected.update(_UPGRADE_COMPOSE_AUTO_IMAGE_SERVICES)
+        elif stage != "base-only":
+            raise ValueError("unknown Phase 10 upgrade stage")
+        result = self.authority._run(
+            self.authority.compose_command(
+                "--profile",
+                "phase10-upgrade",
+                "ps",
+                "--all",
+                "--format",
+                "json",
+                upgrade=True,
+            ),
+            runner=runner,
+            timeout=60.0,
+        )
+        return parse_compose_ps(_text(result.stdout), expected)
+
     def start_phase9_worker(
         self,
         scenario: str,
@@ -3205,6 +3279,67 @@ class UpgradeHarness:
                 runner=runner,
                 timeout=60.0,
             )
+        stopped = self.authority._run(
+            self.authority.docker_command("inspect", identifier),
+            runner=runner,
+            timeout=30.0,
+            check=False,
+        )
+        if stopped.returncode != 0:
+            raise RuntimeError("Phase 9 worker could not be inspected after stop")
+        try:
+            stopped_payload = json.loads(_text(stopped.stdout))
+        except json.JSONDecodeError as error:
+            raise RuntimeError(
+                "Phase 9 worker returned malformed post-stop inspect data"
+            ) from error
+        if (
+            not isinstance(stopped_payload, list)
+            or len(stopped_payload) != 1
+            or not isinstance(stopped_payload[0], dict)
+            or stopped_payload[0].get("Id") != identifier
+        ):
+            raise RuntimeError("Phase 9 worker identity changed after stop")
+        state = stopped_payload[0].get("State")
+        if not isinstance(state, dict) or state.get("Running") is not False:
+            action = "SIGKILL" if kill else "stop"
+            raise RuntimeError(f"Phase 9 worker is still running after {action}")
+        removed = self.authority._run(
+            self.authority.docker_command("rm", identifier),
+            runner=runner,
+            timeout=60.0,
+            check=False,
+        )
+        if removed.returncode != 0:
+            raise RuntimeError("failed to remove exact Phase 9 worker container")
+        remaining_identity = self.authority._run(
+            self.authority.docker_command("inspect", identifier),
+            runner=runner,
+            timeout=30.0,
+            check=False,
+        )
+        if remaining_identity.returncode == 0:
+            raise RuntimeError("Phase 9 worker survived exact removal: container identity")
+        if remaining_identity.returncode != 1:
+            raise RuntimeError("Phase 9 worker identity absence is indeterminate")
+        remaining_service = self.authority._run(
+            self.authority.compose_command(
+                "--profile",
+                "phase10-upgrade",
+                "ps",
+                "--all",
+                "-q",
+                service,
+                upgrade=True,
+            ),
+            runner=runner,
+            timeout=30.0,
+            check=False,
+        )
+        if remaining_service.returncode != 0:
+            raise RuntimeError("Phase 9 worker service absence is indeterminate")
+        if [line for line in _text(remaining_service.stdout).splitlines() if line.strip()]:
+            raise RuntimeError("Phase 9 worker survived exact removal: service identity")
 
     def start_phase10_workers(
         self,
@@ -3579,30 +3714,36 @@ def execute_one_shot(
 
     live_authority = authority
     cleaned = False
+    cleaning = False
     cleanup_errors: list[BaseException] = []
 
     def cleanup() -> None:
-        nonlocal cleaned
-        if cleaned:
+        nonlocal cleaned, cleaning
+        if cleaned or cleaning:
             return
-        cleaned = True
+        cleaning = True
         try:
-            live_authority.down_and_cleanup(runner=runner, upgrade=scenario.upgrade)
-        except BaseException as error:
-            cleanup_errors.append(error)
-        try:
-            lease.unlink(missing_ok=True)
-        except BaseException as error:
-            cleanup_errors.append(error)
+            try:
+                live_authority.down_and_cleanup(runner=runner, upgrade=scenario.upgrade)
+            except BaseException as error:
+                cleanup_errors.append(error)
+            try:
+                lease.unlink(missing_ok=True)
+            except BaseException as error:
+                cleanup_errors.append(error)
+        finally:
+            cleaned = True
+            cleaning = False
 
     previous_handlers: dict[int, Any] = {}
+    interrupted_signum: int | None = None
 
     def handle_signal(signum: int, frame: Any) -> None:
-        cleanup()
-        previous = previous_handlers.get(signum)
-        if callable(previous):
-            previous(signum, frame)
-        raise SystemExit(128 + signum)
+        nonlocal interrupted_signum
+        del frame
+        if interrupted_signum is None:
+            interrupted_signum = signum
+        raise _LifecycleSignal(interrupted_signum)
 
     atexit.register(cleanup)
     for signum in (signal.SIGINT, signal.SIGTERM):
@@ -3680,10 +3821,15 @@ def execute_one_shot(
     except BaseException as error:
         primary_error = error
     finally:
+        for signal_number in previous_handlers:
+            signal.signal(signal_number, signal.SIG_IGN)
         cleanup()
         atexit.unregister(cleanup)
         for signal_number, previous in previous_handlers.items():
             signal.signal(signal_number, previous)
+
+    if isinstance(primary_error, _LifecycleSignal):
+        primary_error = SystemExit(128 + primary_error.signum)
 
     if primary_error is not None and cleanup_errors:
         raise BaseExceptionGroup(

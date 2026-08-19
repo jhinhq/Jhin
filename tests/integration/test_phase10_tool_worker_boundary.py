@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import os
+import signal
 import stat
 import subprocess
 import sys
@@ -583,6 +584,226 @@ def test_upgrade_harness_uses_profiled_distinct_services_and_verified_image() ->
         upgraded.remove_runtime_paths()
 
 
+def _upgrade_harness_for_recorder() -> UpgradeHarness:
+    authority = _authority_for_recorder()
+    frozen = FrozenPhase9Image(
+        source_ref="6318781b57692bf39f37cd428d73de115d7458e2",
+        tag=f"jhin-phase9-agent-worker:6318781b5769-{authority.token}",
+        image_id="sha256:" + "a" * 64,
+    )
+    return UpgradeHarness.from_authority(authority.with_upgrade_runtime(frozen))
+
+
+def test_phase9_sigkill_reaps_exact_container_before_current_tool_first_swap() -> None:
+    harness = _upgrade_harness_for_recorder()
+    authority = harness.authority
+    service = "phase9-agent-worker-normal"
+    old_id = "phase9-normal-id"
+    service_ps = authority.compose_command(
+        "--profile", "phase10-upgrade", "ps", "-q", service, upgrade=True
+    )
+    service_all_ps = authority.compose_command(
+        "--profile", "phase10-upgrade", "ps", "--all", "-q", service, upgrade=True
+    )
+    service_queries = 0
+    old_inspections = 0
+    calls: list[tuple[str, ...]] = []
+
+    def recorder(command: tuple[str, ...], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal old_inspections, service_queries
+        assert kwargs["env"] == authority.environment
+        assert kwargs["cwd"] == authority.repo
+        calls.append(command)
+        if command == service_ps:
+            service_queries += 1
+            output = f"{old_id}\n" if service_queries == 1 else ""
+            return subprocess.CompletedProcess(command, 0, output, "")
+        if command == service_all_ps:
+            service_queries += 1
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command == authority.docker_command("inspect", old_id):
+            old_inspections += 1
+            if old_inspections == 1:
+                payload = [{"Id": old_id, "State": {"Running": True}}]
+                return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+            if old_inspections == 2:
+                payload = [{"Id": old_id, "State": {"Running": False}}]
+                return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+            return subprocess.CompletedProcess(command, 1, "", "not found")
+        if "compose" in command and "ps" in command and "-q" in command:
+            selected_service = command[-1]
+            container_id = f"{selected_service}-id"
+            return subprocess.CompletedProcess(command, 0, f"{container_id}\n", "")
+        if command[:4] == (*authority.docker_command(), "inspect"):
+            container_id = command[-1]
+            selected_service = container_id.removesuffix("-id")
+            kind = "tool" if "-tool-" in selected_service else "agent"
+            scenario = selected_service.rsplit("-", 1)[-1]
+            payload = [
+                {
+                    "Id": container_id,
+                    "Image": "sha256:" + ("b" if kind == "tool" else "c") * 64,
+                    "Config": {
+                        "Env": [
+                            "APP_ENV=test",
+                            f"TEMPORAL_NAMESPACE={harness.scenarios[scenario].namespace}",
+                        ]
+                    },
+                }
+            ]
+            return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    try:
+        harness.stop_phase9_worker("normal", kill=True, runner=recorder)
+        harness.start_phase10_workers(runner=recorder)
+        post_kill_inspect = calls.index(authority.docker_command("inspect", old_id), 2)
+        exact_remove = calls.index(authority.docker_command("rm", old_id))
+        final_id_inspect = calls.index(
+            authority.docker_command("inspect", old_id), exact_remove + 1
+        )
+        service_absence = calls.index(service_all_ps)
+        tool_up, agent_up = harness.phase10_worker_up_commands()
+        assert post_kill_inspect < exact_remove < final_id_inspect < service_absence
+        assert service_absence < calls.index(tool_up) < calls.index(agent_up)
+        assert old_inspections == 3 and service_queries == 2
+    finally:
+        authority.remove_runtime_paths()
+
+
+def test_phase9_sigkill_refuses_to_remove_a_still_running_old_container() -> None:
+    harness = _upgrade_harness_for_recorder()
+    authority = harness.authority
+    service = "phase9-agent-worker-normal"
+    old_id = "phase9-normal-id"
+    service_ps = authority.compose_command(
+        "--profile", "phase10-upgrade", "ps", "-q", service, upgrade=True
+    )
+    inspections = 0
+    calls: list[tuple[str, ...]] = []
+
+    def recorder(command: tuple[str, ...], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal inspections
+        del kwargs
+        calls.append(command)
+        if command == service_ps:
+            return subprocess.CompletedProcess(command, 0, f"{old_id}\n", "")
+        if command == authority.docker_command("inspect", old_id):
+            inspections += 1
+            payload = [{"Id": old_id, "State": {"Running": True}}]
+            return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    try:
+        with pytest.raises(RuntimeError, match="still running after SIGKILL"):
+            harness.stop_phase9_worker("normal", kill=True, runner=recorder)
+        assert inspections == 2
+        assert authority.docker_command("rm", old_id) not in calls
+    finally:
+        authority.remove_runtime_paths()
+
+
+@pytest.mark.parametrize("survivor", ["identity", "service"])
+def test_phase9_sigkill_fails_if_the_removed_old_container_survives(survivor: str) -> None:
+    harness = _upgrade_harness_for_recorder()
+    authority = harness.authority
+    service = "phase9-agent-worker-normal"
+    old_id = "phase9-normal-id"
+    service_ps = authority.compose_command(
+        "--profile", "phase10-upgrade", "ps", "-q", service, upgrade=True
+    )
+    service_all_ps = authority.compose_command(
+        "--profile", "phase10-upgrade", "ps", "--all", "-q", service, upgrade=True
+    )
+    service_queries = 0
+    inspections = 0
+
+    def recorder(command: tuple[str, ...], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal inspections, service_queries
+        del kwargs
+        if command == service_ps:
+            service_queries += 1
+            output = f"{old_id}\n" if service_queries == 1 else ""
+            return subprocess.CompletedProcess(command, 0, output, "")
+        if command == service_all_ps:
+            service_queries += 1
+            output = f"{old_id}\n" if survivor == "service" else ""
+            return subprocess.CompletedProcess(command, 0, output, "")
+        if command == authority.docker_command("inspect", old_id):
+            inspections += 1
+            if inspections < 3:
+                payload = [{"Id": old_id, "State": {"Running": inspections == 1}}]
+                return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+            return subprocess.CompletedProcess(
+                command,
+                0 if survivor == "identity" else 1,
+                json.dumps([{"Id": old_id}]) if survivor == "identity" else "",
+                "",
+            )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    try:
+        with pytest.raises(RuntimeError, match="survived exact removal"):
+            harness.stop_phase9_worker("normal", kill=True, runner=recorder)
+        assert inspections == 3
+        assert service_queries == (1 if survivor == "identity" else 2)
+    finally:
+        authority.remove_runtime_paths()
+
+
+@pytest.mark.parametrize(
+    ("stage", "extra_services"),
+    [
+        (
+            "parked-phase9",
+            {f"phase9-agent-worker-{name}" for name in ("normal", "approval", "sync", "cleanup")},
+        ),
+        ("base-only", set()),
+        (
+            "current-phase10",
+            {
+                f"phase10-{kind}-worker-{name}"
+                for kind in ("tool", "agent")
+                for name in ("normal", "approval", "sync", "cleanup")
+            },
+        ),
+    ],
+)
+def test_upgrade_stage_topology_is_profiled_healthy_and_exact(
+    stage: str,
+    extra_services: set[str],
+) -> None:
+    harness = _upgrade_harness_for_recorder()
+    authority = harness.authority
+    recorder = _ScriptedRecorder(authority)
+    expected = EXPECTED_ROOTFUL_SERVICES | extra_services
+    command = authority.compose_command(
+        "--profile",
+        "phase10-upgrade",
+        "ps",
+        "--all",
+        "--format",
+        "json",
+        upgrade=True,
+    )
+    recorder.responses[command] = (
+        0,
+        json.dumps(
+            [
+                {"Service": service, "State": "running", "Health": "healthy"}
+                for service in sorted(expected)
+            ]
+        ),
+        "",
+    )
+    try:
+        observed = harness.assert_stage_topology(cast(Any, stage), runner=recorder)
+        assert set(observed) == expected
+        assert recorder.calls == [command]
+    finally:
+        authority.remove_runtime_paths()
+
+
 def test_authority_uses_unique_exact_targets_and_all_ephemeral_ports() -> None:
     repo = Path(__file__).resolve().parents[2]
     authority = ComposeAuthority.create(
@@ -942,7 +1163,7 @@ def test_cleanup_uses_exact_project_vector_labels_network_and_images() -> None:
     assert any(
         " compose " in f" {command} "
         and f" -p {authority.project} " in f" {command} "
-        and command.endswith("down -v --remove-orphans")
+        and command.endswith("down -v --remove-orphans --rmi local")
         for command in joined
     )
     assert any(f"label=jhin.phase10.invocation={authority.token}" in command for command in joined)
@@ -952,9 +1173,108 @@ def test_cleanup_uses_exact_project_vector_labels_network_and_images() -> None:
     assert {command.rsplit(" ", 1)[-1] for command in joined if " image rm " in f" {command} "} == {
         authority.runner_image,
         authority.sandbox_image,
+        *authority.compose_auto_image_tags(),
     }
     assert not authority.runtime_dir.exists()
     assert not authority.barrier_root.exists()
+
+
+@pytest.mark.parametrize("upgrade", [False, True])
+def test_cleanup_exhausts_every_base_and_upgrade_compose_auto_image(upgrade: bool) -> None:
+    authority = _authority_for_recorder()
+    if upgrade:
+        frozen = FrozenPhase9Image(
+            source_ref="6318781b57692bf39f37cd428d73de115d7458e2",
+            tag=authority.phase9_image_tag("6318781b57692bf39f37cd428d73de115d7458e2"),
+            image_id="sha256:" + "a" * 64,
+        )
+        authority = authority.with_upgrade_runtime(frozen)
+    recorder = _ScriptedRecorder(authority)
+    recorder.responses[
+        authority.docker_command("network", "inspect", authority.sandbox_network)
+    ] = (1, "", "not found")
+    recorder.responses[authority.docker_command("network", "inspect", "jhin_sandbox")] = (
+        1,
+        "",
+        "not found",
+    )
+    base_services = {
+        "web",
+        "api",
+        "workflow-worker",
+        "agent-worker",
+        "tool-worker",
+        "event-worker",
+        "fake-provider",
+        "fake-github",
+        "fake-linear",
+        "fake-vercel",
+        "fake-supabase",
+    }
+    upgrade_services = {
+        f"phase10-{kind}-worker-{scenario}"
+        for kind in ("agent", "tool")
+        for scenario in ("normal", "approval", "sync", "cleanup")
+    }
+    expected = {
+        f"{authority.project}-{service}"
+        for service in base_services | (upgrade_services if upgrade else set())
+    }
+    try:
+        assert set(authority.compose_auto_image_tags(upgrade=upgrade)) == expected
+        authority.down_and_cleanup(runner=recorder, upgrade=upgrade)
+        down = authority.compose_command(
+            *(("--profile", "phase10-upgrade") if upgrade else ()),
+            "down",
+            "-v",
+            "--remove-orphans",
+            "--rmi",
+            "local",
+            upgrade=upgrade,
+        )
+        assert down in recorder.calls
+        for tag in expected:
+            assert authority.docker_command("image", "rm", tag) in recorder.calls
+            assert recorder.calls.count(authority.docker_command("image", "inspect", tag)) == 3
+    finally:
+        if authority.runtime_dir.exists() or authority.barrier_root.exists():
+            authority.remove_runtime_paths()
+
+
+@pytest.mark.parametrize("upgrade", [False, True])
+def test_cleanup_reports_a_surviving_base_or_upgrade_compose_auto_image(upgrade: bool) -> None:
+    authority = _authority_for_recorder()
+    if upgrade:
+        frozen = FrozenPhase9Image(
+            source_ref="6318781b57692bf39f37cd428d73de115d7458e2",
+            tag=authority.phase9_image_tag("6318781b57692bf39f37cd428d73de115d7458e2"),
+            image_id="sha256:" + "a" * 64,
+        )
+        authority = authority.with_upgrade_runtime(frozen)
+    recorder = _ScriptedRecorder(authority)
+    recorder.responses[
+        authority.docker_command("network", "inspect", authority.sandbox_network)
+    ] = (1, "", "not found")
+    recorder.responses[authority.docker_command("network", "inspect", "jhin_sandbox")] = (
+        1,
+        "",
+        "not found",
+    )
+    service = "phase10-agent-worker-normal" if upgrade else "api"
+    survivor = f"{authority.project}-{service}"
+    inspect = authority.docker_command("image", "inspect", survivor)
+    recorder.responses[inspect] = (0, "", "")
+    try:
+        with pytest.raises(BaseExceptionGroup, match="cleanup invariants") as captured:
+            authority.down_and_cleanup(runner=recorder, upgrade=upgrade)
+        assert "exact image tag remains" in " ".join(
+            str(error) for error in captured.value.exceptions
+        )
+        assert recorder.calls.count(inspect) == 3
+        assert recorder.calls.count(authority.docker_command("image", "rm", survivor)) == 2
+    finally:
+        if authority.runtime_dir.exists() or authority.barrier_root.exists():
+            authority.remove_runtime_paths()
 
 
 def test_cleanup_inventory_is_database_bound_and_uses_exact_resource_labels() -> None:
@@ -1193,7 +1513,10 @@ def test_cleanup_continues_to_down_and_exact_sweeps_after_diagnostic_exception()
     try:
         with pytest.raises(ExceptionGroup, match="cleanup invariants"):
             authority.down_and_cleanup(runner=diagnostic_failure)
-        assert any(command[-3:] == ("down", "-v", "--remove-orphans") for command in recorder.calls)
+        assert any(
+            command[-5:] == ("down", "-v", "--remove-orphans", "--rmi", "local")
+            for command in recorder.calls
+        )
         assert any(
             f"label=jhin.phase10.invocation={authority.token}" in command
             for call in recorder.calls
@@ -1229,7 +1552,10 @@ def test_cleanup_preserves_base_exception_evidence_and_still_runs_later_sweeps()
         with pytest.raises(BaseExceptionGroup) as captured:
             authority.down_and_cleanup(runner=interrupted_diagnostic)
         assert any(isinstance(error, KeyboardInterrupt) for error in captured.value.exceptions)
-        assert any(command[-3:] == ("down", "-v", "--remove-orphans") for command in recorder.calls)
+        assert any(
+            command[-5:] == ("down", "-v", "--remove-orphans", "--rmi", "local")
+            for command in recorder.calls
+        )
         assert any("network" in command and "ls" in command for command in recorder.calls)
     finally:
         if authority.runtime_dir.exists() or authority.barrier_root.exists():
@@ -1940,6 +2266,149 @@ def test_one_shot_lifecycle_publishes_lease_before_child_and_cleans_every_exit(
     finally:
         lease.unlink(missing_ok=True)
         authority.remove_runtime_paths()
+
+
+def _spawn_signal_lifecycle_probe(
+    tmp_path: Path,
+    *,
+    mode: str,
+) -> tuple[subprocess.Popen[str], Path, Path]:
+    repo = Path(__file__).resolve().parents[2]
+    token = uuid.uuid4().hex[:12]
+    lease = Path("/tmp") / f"jhin-p10-signal-{token}.json"
+    script = r"""
+import os
+import sys
+import time
+from pathlib import Path
+
+from tests.integration import phase10_upgrade_harness as lifecycle
+
+mode = sys.argv[1]
+root = Path(sys.argv[2])
+repo = Path(sys.argv[3])
+lease = Path(sys.argv[4])
+token = sys.argv[5]
+child_pid_path = root / "child.pid"
+cleanup_started = root / "cleanup-started"
+cleanup_state = root / "cleanup-state"
+survivor_check = root / "survivor-check"
+
+authority = lifecycle.ComposeAuthority.create(
+    repo=repo,
+    mode="rootful",
+    socket_path=Path("/var/run/docker.sock"),
+    socket_gid=123,
+    token=token,
+    source_environment={"PATH": os.environ.get("PATH", "/usr/bin")},
+)
+
+def no_preflight(self, *, runner):
+    del self, runner
+
+def observed_cleanup(self, *, runner, upgrade=False):
+    del self, runner, upgrade
+    child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+    try:
+        os.kill(child_pid, 0)
+    except ProcessLookupError:
+        state = "exited"
+    else:
+        state = "alive"
+    cleanup_state.write_text(state, encoding="utf-8")
+    cleanup_started.write_text("started", encoding="utf-8")
+    if mode == "second-signal":
+        time.sleep(1.0)
+    survivor_check.write_text("checked", encoding="utf-8")
+
+child_code = (
+    "import os,sys,time; from pathlib import Path; "
+    "Path(sys.argv[1]).write_text(str(os.getpid()), encoding='utf-8'); "
+    "time.sleep(300)"
+)
+lifecycle.ComposeAuthority.preflight = no_preflight
+lifecycle.ComposeAuthority.down_and_cleanup = observed_cleanup
+lifecycle.build_live_pytest_command = lambda scenario: (
+    sys.executable,
+    "-c",
+    child_code,
+    str(child_pid_path),
+)
+scenario = lifecycle.LiveScenario(
+    nodes=("signal-probe",),
+    expected_tests=1,
+    start_stack=False,
+)
+try:
+    lifecycle.execute_one_shot(authority, scenario=scenario, lease_path=lease)
+finally:
+    authority.remove_runtime_paths()
+"""
+    process = subprocess.Popen(
+        (sys.executable, "-c", script, mode, str(tmp_path), str(repo), str(lease), token),
+        cwd=repo,
+        env=os.environ.copy(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    child_pid_path = tmp_path / "child.pid"
+    deadline = time.monotonic() + 10.0
+    while not child_pid_path.is_file() and process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    if not child_pid_path.is_file():
+        stdout, stderr = process.communicate(timeout=5.0)
+        pytest.fail(f"signal lifecycle child did not start: {stdout=} {stderr=}")
+    return process, child_pid_path, lease
+
+
+def _finish_signal_lifecycle_probe(
+    process: subprocess.Popen[str],
+    child_pid_path: Path,
+    lease: Path,
+) -> tuple[str, str, bool]:
+    try:
+        stdout, stderr = process.communicate(timeout=10.0)
+        return stdout, stderr, lease.exists()
+    finally:
+        emergency_cleanup = process.poll() is None
+        if emergency_cleanup:
+            process.kill()
+            process.wait(timeout=5.0)
+        if emergency_cleanup and child_pid_path.is_file():
+            child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(child_pid, signal.SIGKILL)
+        lease.unlink(missing_ok=True)
+
+
+def test_signal_waits_for_real_pytest_child_exit_before_cleanup(tmp_path: Path) -> None:
+    process, child_pid_path, lease = _spawn_signal_lifecycle_probe(tmp_path, mode="first-signal")
+    os.kill(process.pid, signal.SIGTERM)
+    stdout, stderr, lease_survived = _finish_signal_lifecycle_probe(process, child_pid_path, lease)
+    assert process.returncode == 128 + signal.SIGTERM, (stdout, stderr)
+    assert lease_survived is False
+    assert (tmp_path / "cleanup-state").read_text(encoding="utf-8") == "exited"
+    assert (tmp_path / "survivor-check").read_text(encoding="utf-8") == "checked"
+
+
+def test_second_signal_cannot_interrupt_final_survivor_checks(tmp_path: Path) -> None:
+    process, child_pid_path, lease = _spawn_signal_lifecycle_probe(
+        tmp_path,
+        mode="second-signal",
+    )
+    os.kill(process.pid, signal.SIGTERM)
+    cleanup_started = tmp_path / "cleanup-started"
+    deadline = time.monotonic() + 10.0
+    while not cleanup_started.is_file() and process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert cleanup_started.is_file()
+    os.kill(process.pid, signal.SIGINT)
+    stdout, stderr, lease_survived = _finish_signal_lifecycle_probe(process, child_pid_path, lease)
+    assert process.returncode == 128 + signal.SIGTERM, (stdout, stderr)
+    assert lease_survived is False
+    assert (tmp_path / "cleanup-state").read_text(encoding="utf-8") == "exited"
+    assert (tmp_path / "survivor-check").read_text(encoding="utf-8") == "checked"
 
 
 def test_one_shot_upgrade_build_uses_the_injected_selected_daemon_runner(

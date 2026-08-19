@@ -387,8 +387,22 @@ async def test_inflight_phase9_histories_finish_after_phase10_swap() -> None:
         )
         assert len(cleanup_volumes) == 1
 
+        parked_topology = await asyncio.to_thread(
+            upgrade.assert_stage_topology,
+            "parked-phase9",
+        )
+        assert set(parked_topology) == authority.expected_services | {
+            f"phase9-agent-worker-{scenario}"
+            for scenario in ("normal", "approval", "sync", "cleanup")
+        }
+
         for parked in (normal, approval, cleanup, sync):
             await asyncio.to_thread(upgrade.stop_phase9_worker, parked.scenario, kill=True)
+        base_topology = await asyncio.to_thread(
+            upgrade.assert_stage_topology,
+            "base-only",
+        )
+        assert set(base_topology) == authority.expected_services
         for parked in (normal, cleanup, sync):
             upgrade.release(parked.scenario, parked.domain_run_id)
         current_workers = await asyncio.to_thread(upgrade.start_phase10_workers)
@@ -411,6 +425,11 @@ async def test_inflight_phase9_histories_finish_after_phase10_swap() -> None:
         }
         assert all(len(images) == 1 for images in current_images.values())
         assert upgrade.frozen.image_id not in current_images["agent"] | current_images["tool"]
+        current_topology = await asyncio.to_thread(
+            upgrade.assert_stage_topology,
+            "current-phase10",
+        )
+        assert set(current_topology) == authority.expected_services | set(current_workers)
 
         decision = await client.post(
             f"/api/v1/workspaces/{workspace_id}/approvals/{approval_id}/approve",
