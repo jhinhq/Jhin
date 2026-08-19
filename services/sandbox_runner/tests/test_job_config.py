@@ -113,6 +113,62 @@ class TestIsolationInvariants:
         )
         assert host["NetworkMode"] not in {"runner", "engine"}
 
+    @pytest.mark.parametrize("field", ["env", "secret_env"])
+    @pytest.mark.parametrize(
+        "forbidden_name",
+        [
+            "DOCKER_HOST",
+            "DOCKER_CONTEXT",
+            "DOCKER_CONFIG",
+            "DOCKER_TLS",
+            "DOCKER_TLS_VERIFY",
+            "DOCKER_CERT_PATH",
+            "DOCKER_API_VERSION",
+            "DOCKER_CUSTOM_AUTHORITY",
+            "SANDBOX_DOCKER_MODE",
+            "SANDBOX_DOCKER_SOCKET",
+            "SANDBOX_DOCKER_TRANSPORT_URL",
+            "SANDBOX_DOCKER_GID",
+            "SANDBOX_DOCKER_CUSTOM_AUTHORITY",
+        ],
+    )
+    def test_all_docker_authority_variable_names_are_removed(
+        self, field: str, forbidden_name: str
+    ) -> None:
+        config = config_for(
+            request(**{field: {forbidden_name: "not-authority", "KEEP_ME": "normal-secret"}})
+        )
+        environment = dict(entry.split("=", 1) for entry in config["Env"])
+        assert forbidden_name not in environment
+        assert environment["KEEP_ME"] == "normal-secret"
+
+    @pytest.mark.parametrize("field", ["env", "secret_env"])
+    @pytest.mark.parametrize(
+        "forbidden_value",
+        [
+            "rootless-docker-transport",
+            "rootless-docker-transport:2375",
+            "http://rootless-docker-transport:2375",
+            "tcp://rootless-docker-transport:2375",
+            "https://rootless-docker-transport:2375/v1.47",
+            "/var/run/docker.sock",
+            "unix:///var/run/docker.sock",
+            "/run/jhin/docker.sock",
+            "file:///run/jhin/docker.sock",
+            "/run/host/docker.sock",
+            "unix:///run/host/docker.sock",
+        ],
+    )
+    def test_all_docker_authority_value_forms_are_removed(
+        self, field: str, forbidden_value: str
+    ) -> None:
+        config = config_for(
+            request(**{field: {"AUTHORITY_ALIAS": forbidden_value, "KEEP_ME": "safe"}})
+        )
+        environment = dict(entry.split("=", 1) for entry in config["Env"])
+        assert "AUTHORITY_ALIAS" not in environment
+        assert environment["KEEP_ME"] == "safe"
+
     def test_resource_limits_applied(self) -> None:
         req = request(cpu_limit=1.5, memory_mb=512, pids_limit=64)
         cpu, memory, pids, _ = resolve_limits(req, SETTINGS)

@@ -30,6 +30,10 @@ class RootlessTransportConfigurationError(RuntimeError):
     """The adapter cannot safely provide its fixed Docker transport."""
 
 
+class _UpstreamConnectionError(Exception):
+    """An upstream operation failed; details must not cross the boundary."""
+
+
 def validate_production_boundary(
     *,
     argv: Sequence[str],
@@ -94,10 +98,46 @@ async def _probe_upstream(upstream: Path) -> None:
             await _close_writer(writer)
 
 
-async def _copy_stream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    while chunk := await reader.read(_CHUNK_SIZE):
-        writer.write(chunk)
-        await writer.drain()
+async def _copy_client_to_upstream(
+    client_reader: asyncio.StreamReader, upstream_writer: asyncio.StreamWriter
+) -> None:
+    while True:
+        try:
+            chunk = await client_reader.read(_CHUNK_SIZE)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return
+        if not chunk:
+            return
+        try:
+            upstream_writer.write(chunk)
+            await upstream_writer.drain()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise _UpstreamConnectionError from exc
+
+
+async def _copy_upstream_to_client(
+    upstream_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter
+) -> None:
+    while True:
+        try:
+            chunk = await upstream_reader.read(_CHUNK_SIZE)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise _UpstreamConnectionError from exc
+        if not chunk:
+            return
+        try:
+            client_writer.write(chunk)
+            await client_writer.drain()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return
 
 
 async def _relay_connection(
@@ -107,28 +147,32 @@ async def _relay_connection(
     upstream: Path,
 ) -> None:
     upstream_writer: asyncio.StreamWriter | None = None
-    copies: set[asyncio.Task[None]] = set()
+    copies: tuple[asyncio.Task[None], asyncio.Task[None]] | None = None
+    results: list[BaseException | None] = []
     try:
-        upstream_reader, upstream_writer = await asyncio.open_unix_connection(upstream)
-        copies = {
-            asyncio.create_task(_copy_stream(client_reader, upstream_writer)),
-            asyncio.create_task(_copy_stream(upstream_reader, client_writer)),
-        }
-        done, pending = await asyncio.wait(copies, return_when=asyncio.FIRST_COMPLETED)
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
-        for task in done:
-            task.result()
+        try:
+            upstream_reader, upstream_writer = await asyncio.open_unix_connection(upstream)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise _UpstreamConnectionError from exc
+        copies = (
+            asyncio.create_task(_copy_client_to_upstream(client_reader, upstream_writer)),
+            asyncio.create_task(_copy_upstream_to_client(upstream_reader, client_writer)),
+        )
+        await asyncio.wait(copies, return_when=asyncio.FIRST_COMPLETED)
     finally:
-        for task in copies:
-            if not task.done():
-                task.cancel()
-        if copies:
-            await asyncio.gather(*copies, return_exceptions=True)
+        if copies is not None:
+            for task in copies:
+                if not task.done():
+                    task.cancel()
+            results = list(await asyncio.gather(*copies, return_exceptions=True))
         await _close_writer(client_writer)
         if upstream_writer is not None:
             await _close_writer(upstream_writer)
+    for result in results:
+        if isinstance(result, _UpstreamConnectionError):
+            raise result
 
 
 async def serve_rootless_transport(
@@ -162,7 +206,7 @@ async def serve_rootless_transport(
             acquired = True
             try:
                 await _relay_connection(reader, writer, upstream=upstream)
-            except (OSError, ConnectionError):
+            except _UpstreamConnectionError:
                 if not fatal.done():
                     fatal.set_result(
                         RootlessTransportConfigurationError("upstream connection failed")

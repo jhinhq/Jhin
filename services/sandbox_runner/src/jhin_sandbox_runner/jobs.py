@@ -30,7 +30,6 @@ from aiodocker.exceptions import DockerError
 
 from jhin_observability import get_logger
 from jhin_sandbox_runner.docker_socket import (
-    ROOTLESS_TRANSPORT_URL,
     DockerSocketConfigurationError,
     validate_docker_authority,
 )
@@ -47,6 +46,13 @@ WORKSPACE_VOLUME_PREFIX = "jhin-sandbox-ws-"
 _TRUNCATION_MARKER = "\n…[truncated by sandbox runner]"
 _POLL_INTERVAL_SECONDS = 0.5
 DOCKER_CHECK_TIMEOUT_SECONDS = 5.0
+_FORBIDDEN_JOB_ENV_NAME_PREFIXES = ("DOCKER_", "SANDBOX_DOCKER_")
+_FORBIDDEN_JOB_ENV_SOCKET_PATHS = (
+    "/var/run/docker.sock",
+    "/run/jhin/docker.sock",
+    "/run/host/docker.sock",
+)
+_ROOTLESS_TRANSPORT_HOSTNAME = "rootless-docker-transport"
 
 
 class JobValidationError(Exception):
@@ -131,6 +137,14 @@ def workspace_volume_name(workspace_key: str) -> str:
     return f"{WORKSPACE_VOLUME_PREFIX}{workspace_key}"
 
 
+def _job_environment_value_is_safe(name: str, value: str) -> bool:
+    if name.startswith(_FORBIDDEN_JOB_ENV_NAME_PREFIXES):
+        return False
+    if _ROOTLESS_TRANSPORT_HOSTNAME in value.casefold():
+        return False
+    return not any(path in value for path in _FORBIDDEN_JOB_ENV_SOCKET_PATHS)
+
+
 def build_container_config(
     request: SandboxJobRequest,
     settings: Settings,
@@ -146,18 +160,10 @@ def build_container_config(
     (no privileged mode, no host network, cap drop, read-only root, ...).
     """
     requested_env = {**request.env, **request.secret_env}
-    forbidden_values = {
-        ROOTLESS_TRANSPORT_URL,
-        "/var/run/docker.sock",
-        "/run/jhin/docker.sock",
-        "/run/host/docker.sock",
-    }
     safe_env = {
         name: value
         for name, value in requested_env.items()
-        if name != "DOCKER_HOST"
-        and not name.startswith("SANDBOX_DOCKER_")
-        and not any(forbidden in value for forbidden in forbidden_values)
+        if _job_environment_value_is_safe(name, value)
     }
     env = {
         # Read-only root: HOME must live on the writable workspace so tools
