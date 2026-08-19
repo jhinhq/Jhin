@@ -4069,6 +4069,39 @@ class AuthorityLeaseOwnership:
     authority_token: str
 
 
+class _AuthorityLeaseRefreshError(OSError):
+    """Refresh failed after the new lease inode became authoritative."""
+
+    def __init__(
+        self,
+        error: BaseException,
+        *,
+        ownership: AuthorityLeaseOwnership,
+    ) -> None:
+        super().__init__(f"authority lease refresh failed after ownership transfer: {error}")
+        self.refresh_error = error
+        self.ownership = ownership
+
+
+class _LeaseOwnershipAssignment:
+    """Keep catchable signals blocked until the caller binds returned ownership."""
+
+    def __init__(self) -> None:
+        self._previous_mask: set[int | signal.Signals] | None = None
+
+    def __enter__(self) -> _LeaseOwnershipAssignment:
+        self._previous_mask = signal.pthread_sigmask(
+            signal.SIG_BLOCK,
+            _CATCHABLE_SIGNAL_SET,
+        )
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        del exc_info
+        assert self._previous_mask is not None
+        signal.pthread_sigmask(signal.SIG_SETMASK, self._previous_mask)
+
+
 def _validate_direct_tmp_path(path: Path, *, description: str) -> None:
     if path.parent != Path("/tmp") or not path.is_absolute():
         raise ValueError(f"{description} must live directly below /tmp")
@@ -4254,7 +4287,13 @@ def _replace_authority_lease(
             inode=temporary_stat.st_ino,
             authority_token=authority.token,
         )
-        _fsync_tmp_directory()
+        try:
+            _fsync_tmp_directory()
+        except BaseException as error:
+            raise _AuthorityLeaseRefreshError(
+                error,
+                ownership=refreshed,
+            ) from error
         return refreshed
     finally:
         os.close(current_descriptor)
@@ -4707,12 +4746,21 @@ def execute_one_shot(
             (name for name, candidate in LIVE_SCENARIOS.items() if candidate == scenario),
             "custom",
         )
-        lease_ownership = write_authority_lease(live_authority, lease)
+        with _LeaseOwnershipAssignment():
+            lease_ownership = write_authority_lease(live_authority, lease)
         external_started = True
         if scenario.start_stack:
             ports = live_authority.start_stack(runner=runner)
             live_authority = live_authority.with_published_ports(ports)
-            lease_ownership = _replace_authority_lease(live_authority, lease_ownership)
+            with _LeaseOwnershipAssignment():
+                try:
+                    lease_ownership = _replace_authority_lease(
+                        live_authority,
+                        lease_ownership,
+                    )
+                except _AuthorityLeaseRefreshError as error:
+                    lease_ownership = error.ownership
+                    raise
             if scenario.upgrade:
                 source_ref = read_phase9_source_ref(
                     live_authority.repo,
@@ -4730,7 +4778,15 @@ def execute_one_shot(
                     live_authority,
                     _environment_items=tuple(sorted(planned_environment.items())),
                 )
-                lease_ownership = _replace_authority_lease(live_authority, lease_ownership)
+                with _LeaseOwnershipAssignment():
+                    try:
+                        lease_ownership = _replace_authority_lease(
+                            live_authority,
+                            lease_ownership,
+                        )
+                    except _AuthorityLeaseRefreshError as error:
+                        lease_ownership = error.ownership
+                        raise
                 frozen = live_authority.build_phase9_agent_image(source_ref, runner=runner)
                 try:
                     previous_mask = signal.pthread_sigmask(
@@ -4739,10 +4795,15 @@ def execute_one_shot(
                     )
                     try:
                         live_authority = live_authority.with_upgrade_runtime(frozen)
-                        lease_ownership = _replace_authority_lease(
-                            live_authority,
-                            lease_ownership,
-                        )
+                        with _LeaseOwnershipAssignment():
+                            try:
+                                lease_ownership = _replace_authority_lease(
+                                    live_authority,
+                                    lease_ownership,
+                                )
+                            except _AuthorityLeaseRefreshError as error:
+                                lease_ownership = error.ownership
+                                raise
                     finally:
                         signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
                 except BaseException as setup_error:
@@ -4934,11 +4995,17 @@ def _persistent_up_locked(
     try:
         authority = select_live_authority(repo=repo, mode=mode)
         signal_lifecycle.activate()
-        lease_ownership = write_authority_lease(authority, lease)
+        with _LeaseOwnershipAssignment():
+            lease_ownership = write_authority_lease(authority, lease)
         external_started = True
         ports = authority.start_stack(runner=runner)
         authority = authority.with_published_ports(ports)
-        lease_ownership = _replace_authority_lease(authority, lease_ownership)
+        with _LeaseOwnershipAssignment():
+            try:
+                lease_ownership = _replace_authority_lease(authority, lease_ownership)
+            except _AuthorityLeaseRefreshError as error:
+                lease_ownership = error.ownership
+                raise
     except BaseException as error:
         primary_error = error
     finally:

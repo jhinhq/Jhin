@@ -2028,6 +2028,225 @@ def test_initial_authority_lease_rejects_zero_write_and_removes_only_its_partial
         authority.remove_runtime_paths()
 
 
+def _lease_handoff_lifecycle_case(
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    lifecycle_kind: str,
+) -> tuple[Path, list[ComposeAuthority], Any, Any]:
+    """Build a real active signal lifecycle around fake external boundaries."""
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    lease = (
+        Path("/tmp") / f"jhin-p10-handoff-{uuid.uuid4().hex}.json"
+        if lifecycle_kind == "one-shot"
+        else lease_path_for(tmp_path)
+    )
+    ports = {
+        variable: 53300 + index
+        for index, (variable, _service, _container_port) in enumerate(PUBLISHED_ENDPOINTS)
+    }
+    created: list[ComposeAuthority] = []
+
+    def new_authority() -> ComposeAuthority:
+        authority = ComposeAuthority.create(
+            repo=tmp_path,
+            mode="rootful",
+            socket_path=Path("/var/run/docker.sock"),
+            socket_gid=123,
+            token=uuid.uuid4().hex[:12],
+            source_environment={"PATH": os.environ.get("PATH", "/usr/bin")},
+        )
+        created.append(authority)
+        return authority
+
+    def fake_start(self: ComposeAuthority, *, runner: Any) -> dict[str, int]:
+        del self, runner
+        return ports
+
+    def conclusive_cleanup(
+        self: ComposeAuthority,
+        *,
+        runner: Any,
+        upgrade: bool = False,
+    ) -> None:
+        del runner, upgrade
+        self.remove_recovery_paths()
+
+    def successful_child(command: tuple[str, ...], **kwargs: Any) -> Any:
+        del kwargs
+        return subprocess.CompletedProcess(command, 0, "passed\n", "")
+
+    monkeypatch.setattr(ComposeAuthority, "start_stack", fake_start)
+    monkeypatch.setattr(ComposeAuthority, "down_and_cleanup", conclusive_cleanup)
+
+    def invoke() -> Any:
+        authority = new_authority()
+        if lifecycle_kind == "one-shot":
+            return execute_one_shot(
+                authority,
+                scenario=LiveScenario(
+                    nodes=("lease-handoff",),
+                    expected_tests=1,
+                    start_stack=True,
+                ),
+                lease_path=lease,
+                child_runner=successful_child,
+            )
+        monkeypatch.setattr(
+            lifecycle,
+            "select_live_authority",
+            lambda **kwargs: authority,
+        )
+        return lifecycle._persistent_up(repo=tmp_path, mode="rootful")
+
+    def rerun_and_recover() -> None:
+        result = invoke()
+        if lifecycle_kind == "one-shot":
+            assert isinstance(result, subprocess.CompletedProcess)
+            assert result.returncode == 0
+        else:
+            assert isinstance(result, ComposeAuthority)
+            loaded = read_authority_lease(lease, expected_repo=tmp_path)
+            assert loaded.token == result.token
+            lifecycle._persistent_down(repo=tmp_path)
+        assert not lease.exists()
+        assert not created[-1].runtime_dir.exists()
+        assert not created[-1].barrier_root.exists()
+
+    return lease, created, invoke, rerun_and_recover
+
+
+def _assert_failed_handoff_is_fully_removed(
+    *,
+    lease: Path,
+    authority: ComposeAuthority,
+) -> None:
+    """Reject the unreadable lease-without-runtime state from a lost handoff."""
+    assert not lease.exists()
+    assert not authority.runtime_dir.exists()
+    assert not authority.barrier_root.exists()
+
+
+@pytest.mark.parametrize("lifecycle_kind", ("one-shot", "persistent"))
+def test_active_lifecycle_binds_post_link_ownership_before_pending_signal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    lifecycle_kind: str,
+) -> None:
+    lease, created, invoke, rerun_and_recover = _lease_handoff_lifecycle_case(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        lifecycle_kind=lifecycle_kind,
+    )
+    real_link = os.link
+    signalled = False
+
+    def signal_after_link(source: Any, destination: Any, **kwargs: Any) -> None:
+        nonlocal signalled
+        real_link(source, destination, **kwargs)
+        if Path(destination) == lease and not signalled:
+            signalled = True
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    monkeypatch.setattr(os, "link", signal_after_link)
+    try:
+        with pytest.raises(SystemExit) as raised:
+            invoke()
+        assert raised.value.code == 128 + signal.SIGTERM
+        assert signalled is True
+        _assert_failed_handoff_is_fully_removed(lease=lease, authority=created[-1])
+        rerun_and_recover()
+    finally:
+        lease.unlink(missing_ok=True)
+        lifecycle.persistent_operation_lock_path(tmp_path).unlink(missing_ok=True)
+        for authority in created:
+            if authority.runtime_dir.exists() or authority.barrier_root.exists():
+                authority.remove_runtime_paths()
+
+
+@pytest.mark.parametrize("lifecycle_kind", ("one-shot", "persistent"))
+def test_active_lifecycle_binds_post_replace_ownership_before_pending_signal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    lifecycle_kind: str,
+) -> None:
+    lease, created, invoke, rerun_and_recover = _lease_handoff_lifecycle_case(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        lifecycle_kind=lifecycle_kind,
+    )
+    real_replace = os.replace
+    signalled = False
+
+    def signal_after_replace(source: Any, destination: Any, **kwargs: Any) -> None:
+        nonlocal signalled
+        real_replace(source, destination, **kwargs)
+        if Path(destination) == lease and not signalled:
+            signalled = True
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    monkeypatch.setattr(os, "replace", signal_after_replace)
+    try:
+        with pytest.raises(SystemExit) as raised:
+            invoke()
+        assert raised.value.code == 128 + signal.SIGTERM
+        assert signalled is True
+        _assert_failed_handoff_is_fully_removed(lease=lease, authority=created[-1])
+        rerun_and_recover()
+    finally:
+        lease.unlink(missing_ok=True)
+        lifecycle.persistent_operation_lock_path(tmp_path).unlink(missing_ok=True)
+        for authority in created:
+            if authority.runtime_dir.exists() or authority.barrier_root.exists():
+                authority.remove_runtime_paths()
+
+
+@pytest.mark.parametrize("lifecycle_kind", ("one-shot", "persistent"))
+def test_post_replace_fsync_failure_never_loses_new_lease_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    lifecycle_kind: str,
+) -> None:
+    lease, created, invoke, rerun_and_recover = _lease_handoff_lifecycle_case(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        lifecycle_kind=lifecycle_kind,
+    )
+    real_replace = os.replace
+    real_fsync_tmp = lifecycle._fsync_tmp_directory
+    replaced = False
+    failed = False
+
+    def observe_replace(source: Any, destination: Any, **kwargs: Any) -> None:
+        nonlocal replaced
+        real_replace(source, destination, **kwargs)
+        if Path(destination) == lease:
+            replaced = True
+
+    def fail_once_after_replace() -> None:
+        nonlocal failed
+        if replaced and not failed:
+            failed = True
+            raise OSError("injected post-replace directory fsync failure")
+        real_fsync_tmp()
+
+    monkeypatch.setattr(os, "replace", observe_replace)
+    monkeypatch.setattr(lifecycle, "_fsync_tmp_directory", fail_once_after_replace)
+    try:
+        with pytest.raises(OSError, match="post-replace"):
+            invoke()
+        assert replaced is True
+        assert failed is True
+        _assert_failed_handoff_is_fully_removed(lease=lease, authority=created[-1])
+        rerun_and_recover()
+    finally:
+        lease.unlink(missing_ok=True)
+        lifecycle.persistent_operation_lock_path(tmp_path).unlink(missing_ok=True)
+        for authority in created:
+            if authority.runtime_dir.exists() or authority.barrier_root.exists():
+                authority.remove_runtime_paths()
+
+
 def test_one_shot_does_not_unlink_a_preexisting_unowned_lease() -> None:
     authority = _authority_for_recorder()
     lease = Path("/tmp") / f"jhin-p10-unowned-one-shot-{uuid.uuid4().hex}.json"
