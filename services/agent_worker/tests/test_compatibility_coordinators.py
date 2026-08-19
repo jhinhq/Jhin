@@ -3,22 +3,34 @@
 from __future__ import annotations
 
 import ast
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from temporalio import activity
 from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
+from temporalio.testing import WorkflowEnvironment
+from temporalio.worker import Worker
 
 from jhin_agent_worker.compatibility import (
     AgentCompatibilityActivities,
     compatibility_result,
 )
 from jhin_agent_worker.trigger_activities import TriggerCompatibilityActivities
+from jhin_db.base import Base
+from jhin_db.models import Agent, AgentRun, Task, Workspace
+from jhin_domain import RunStatus, TaskState, new_uuid7
 from jhin_workflows import TOOL_TASK_QUEUE
 from jhin_workflows.agent_task.shared import (
+    ACTIVITY_CLEANUP_RUN_WORKSPACE,
     AdvertisedTool,
     BoundToolResult,
+    CleanupRunWorkspaceInput,
+    CleanupRunWorkspaceResult,
     CommitAgentStepInput,
     CommitApprovalProjectionInput,
     FinalizeInput,
@@ -41,6 +53,7 @@ TASK_ID = "018f4d52-8b93-7d41-8ac7-7f190f091002"
 RUN_ID = "018f4d52-8b93-7d41-8ac7-7f190f091003"
 AGENT_ID = "018f4d52-8b93-7d41-8ac7-7f190f091004"
 APPROVAL_ID = "018f4d52-8b93-7d41-8ac7-7f190f091005"
+WRONG_TASK_ID = "018f4d52-8b93-7d41-8ac7-7f190f091006"
 TOOL_CALL_ID = "bde966e2-384b-5429-adcd-b7a81fde775e"
 
 
@@ -66,13 +79,15 @@ class _Client:
         *,
         id: str,
         task_queue: str,
+        id_reuse_policy: Any = None,
     ) -> _Handle:
+        assert id_reuse_policy is not None
         self.starts.append((workflow_run, arg, id, task_queue))
         if id in self.already_started:
             raise WorkflowAlreadyStartedError(id, "compatibility-workflow")
         return _Handle(self.results[id])
 
-    def get_workflow_handle(self, workflow_id: str) -> _Handle:
+    def get_workflow_handle_for(self, _workflow_run: Any, workflow_id: str) -> _Handle:
         self.reattachments.append(workflow_id)
         return _Handle(self.results[workflow_id])
 
@@ -112,6 +127,58 @@ class _Projections:
         self.finalize_calls.append(params)
 
 
+@dataclass
+class _CoordinatorResources:
+    session_factory: async_sessionmaker[AsyncSession]
+
+
+@pytest.fixture
+async def coordinator_resources() -> AsyncIterator[_CoordinatorResources]:
+    engine = create_async_engine("sqlite+aiosqlite://")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessions() as session:
+        workspace = Workspace(
+            id=UUID(WORKSPACE_ID),
+            name="Compatibility",
+            slug="compatibility",
+        )
+        agent = Agent(
+            id=UUID(AGENT_ID),
+            workspace_id=workspace.id,
+            name="Compatibility agent",
+            slug="compatibility-agent",
+        )
+        task = Task(
+            id=UUID(TASK_ID),
+            workspace_id=workspace.id,
+            title="Compatibility task",
+            state=TaskState.COMPLETED.value,
+            assigned_agent_id=agent.id,
+            correlation_id=new_uuid7(),
+        )
+        wrong_task = Task(
+            id=UUID(WRONG_TASK_ID),
+            workspace_id=workspace.id,
+            title="Wrong compatibility task",
+            state=TaskState.COMPLETED.value,
+            assigned_agent_id=agent.id,
+            correlation_id=new_uuid7(),
+        )
+        run = AgentRun(
+            id=UUID(RUN_ID),
+            workspace_id=workspace.id,
+            task_id=task.id,
+            agent_id=agent.id,
+            status=RunStatus.COMPLETED.value,
+        )
+        session.add_all([workspace, agent, task, wrong_task, run])
+        await session.commit()
+    yield _CoordinatorResources(session_factory=sessions)
+    await engine.dispose()
+
+
 def _run_step() -> RunStepInput:
     return RunStepInput(
         workspace_id=WORKSPACE_ID,
@@ -139,7 +206,7 @@ def _compatibility_results() -> dict[str, Any]:
             tool_call_id=TOOL_CALL_ID,
             status="executed",
         ),
-        compatibility_workflow_id("cleanup", RUN_ID): object(),
+        compatibility_workflow_id("cleanup", RUN_ID): CleanupRunWorkspaceResult(deleted=True),
         compatibility_workflow_id("sync", RUN_ID): SyncExternalResult(
             synced=True, detail="https://linear.test/comment/1"
         ),
@@ -196,11 +263,13 @@ async def test_legacy_retry_reattaches_tool_step_without_any_local_effect() -> N
     assert projections.step_calls[0].gateway_tool_call_ids == [TOOL_CALL_ID]
 
 
-async def test_legacy_approval_and_finalize_reattach_by_stable_identity() -> None:
+async def test_legacy_approval_and_finalize_reattach_by_stable_identity(
+    coordinator_resources: _CoordinatorResources,
+) -> None:
     client = _Client(_compatibility_results())
     projections = _Projections()
     coordinator = AgentCompatibilityActivities(
-        resources=object(),  # type: ignore[arg-type]
+        resources=coordinator_resources,  # type: ignore[arg-type]
         temporal_client=client,  # type: ignore[arg-type]
         reasoning=_Reasoning(call_count=0),  # type: ignore[arg-type]
         projections=projections,  # type: ignore[arg-type]
@@ -240,6 +309,35 @@ async def test_legacy_approval_and_finalize_reattach_by_stable_identity() -> Non
         compatibility_workflow_id("approval", APPROVAL_ID),
         compatibility_workflow_id("cleanup", RUN_ID),
     ]
+
+
+async def test_legacy_finalize_rejects_wrong_task_before_cleanup_workflow(
+    coordinator_resources: _CoordinatorResources,
+) -> None:
+    client = _Client(_compatibility_results())
+    projections = _Projections()
+    coordinator = AgentCompatibilityActivities(
+        resources=coordinator_resources,  # type: ignore[arg-type]
+        temporal_client=client,  # type: ignore[arg-type]
+        reasoning=_Reasoning(call_count=0),  # type: ignore[arg-type]
+        projections=projections,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(ApplicationError) as error:
+        await coordinator.finalize_run_activity(
+            FinalizeInput(
+                workspace_id=WORKSPACE_ID,
+                task_id=WRONG_TASK_ID,
+                run_id=RUN_ID,
+                status="completed",
+                steps_used=4,
+            )
+        )
+
+    assert error.value.type == "compatibility_context_invalid"
+    assert error.value.non_retryable is True
+    assert client.starts == []
+    assert projections.finalize_calls == []
 
 
 async def test_legacy_trigger_sync_ignores_advisory_payload_and_uses_ids_only() -> None:
@@ -308,6 +406,46 @@ async def test_compatibility_result_reattaches_an_existing_workflow() -> None:
 
     assert result is expected
     assert client.reattachments == [workflow_id]
+
+
+async def test_closed_compatibility_history_reuses_one_activity_result() -> None:
+    calls = 0
+
+    @activity.defn(name=ACTIVITY_CLEANUP_RUN_WORKSPACE)
+    async def cleanup(
+        _params: CleanupRunWorkspaceInput,
+    ) -> CleanupRunWorkspaceResult:
+        nonlocal calls
+        calls += 1
+        return CleanupRunWorkspaceResult(deleted=True)
+
+    environment = await WorkflowEnvironment.start_time_skipping()
+    workflow_id = compatibility_workflow_id("cleanup", RUN_ID)
+    params = CleanupRunWorkspaceInput(workspace_id=WORKSPACE_ID, run_id=RUN_ID)
+    try:
+        async with Worker(
+            environment.client,
+            task_queue=TOOL_TASK_QUEUE,
+            workflows=[CleanupCompatibilityWorkflow],
+            activities=[cleanup],
+        ):
+            first = await compatibility_result(
+                environment.client,
+                CleanupCompatibilityWorkflow.run,
+                params,
+                workflow_id=workflow_id,
+            )
+            second = await compatibility_result(
+                environment.client,
+                CleanupCompatibilityWorkflow.run,
+                params,
+                workflow_id=workflow_id,
+            )
+    finally:
+        await environment.shutdown()
+
+    assert first == second == CleanupRunWorkspaceResult(deleted=True)
+    assert calls == 1
 
 
 def test_agent_compatibility_module_has_no_connector_or_runner_import() -> None:

@@ -6,10 +6,13 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from uuid import UUID
 
+from sqlalchemy import select
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from jhin_connectors.cli.runner_client import delete_workspace as delete_sandbox_workspace
+from jhin_db.models import AgentRun
+from jhin_tool_worker.resources import ToolWorkerResources
 from jhin_workflows.agent_task.shared import (
     ACTIVITY_CLEANUP_RUN_WORKSPACE,
     CleanupRunWorkspaceInput,
@@ -24,9 +27,11 @@ class CleanupActivities:
 
     def __init__(
         self,
+        resources: ToolWorkerResources,
         *,
         delete_workspace: DeleteWorkspace = delete_sandbox_workspace,
     ) -> None:
+        self._resources = resources
         self._delete_workspace = delete_workspace
         self._attempted: set[UUID] = set()
         self._lock = asyncio.Lock()
@@ -37,7 +42,7 @@ class CleanupActivities:
         params: CleanupRunWorkspaceInput,
     ) -> CleanupRunWorkspaceResult:
         try:
-            UUID(params.workspace_id)
+            workspace_id = UUID(params.workspace_id)
             run_id = UUID(params.run_id)
         except (AttributeError, TypeError, ValueError) as error:
             raise ApplicationError(
@@ -45,6 +50,20 @@ class CleanupActivities:
                 type="cleanup_identity_invalid",
                 non_retryable=True,
             ) from error
+
+        async with self._resources.session_factory() as session:
+            bound_run_id = await session.scalar(
+                select(AgentRun.id).where(
+                    AgentRun.id == run_id,
+                    AgentRun.workspace_id == workspace_id,
+                )
+            )
+        if bound_run_id is None:
+            raise ApplicationError(
+                "cleanup run is not bound to the requested workspace",
+                type="cleanup_context_invalid",
+                non_retryable=True,
+            )
 
         async with self._lock:
             if run_id in self._attempted:

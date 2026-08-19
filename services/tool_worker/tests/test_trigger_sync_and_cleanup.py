@@ -8,14 +8,17 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import asyncpg
 import pytest
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from temporalio.client import WorkflowFailureError
 from temporalio.exceptions import ApplicationError
+from temporalio.testing import WorkflowEnvironment
+from temporalio.worker import Worker
 
 from jhin_connectors.linear.schemas import CommentCreateInput, CommentCreateOutput
 from jhin_db import create_engine as create_database_engine
@@ -46,11 +49,15 @@ from jhin_policy import RiskLevel, ToolDefinition
 from jhin_tool_worker.cleanup_activities import CleanupActivities
 from jhin_tool_worker.trigger_activities import TriggerToolActivities
 from jhin_tools import ToolCatalog, ToolExecutionContext, stable_sync_invocation_id
+from jhin_workflows import TOOL_TASK_QUEUE
 from jhin_workflows.agent_task.shared import (
     CleanupRunWorkspaceInput,
     CleanupRunWorkspaceResult,
 )
-from jhin_workflows.tool_compat import SyncExternalToolInput
+from jhin_workflows.tool_compat import (
+    CleanupCompatibilityWorkflow,
+    SyncExternalToolInput,
+)
 from jhin_workflows.triggered_task.shared import SyncExternalResult
 
 WORKSPACE_ID = "018f4d52-8b93-7d41-8ac7-7f190f092001"
@@ -126,6 +133,30 @@ class SyncWorld:
             )
             return int(value or 0)
 
+    async def event_payload(self, event_type: str) -> dict[str, Any]:
+        async with self.sessions() as session:
+            event = await session.scalar(
+                select(RunEvent).where(
+                    RunEvent.run_id == self.run.id,
+                    RunEvent.event_type == event_type,
+                )
+            )
+            assert event is not None
+            return event.payload_json
+
+    async def latest_audit_metadata(self, action: str) -> dict[str, Any]:
+        async with self.sessions() as session:
+            audit = await session.scalar(
+                select(AuditEvent)
+                .where(
+                    AuditEvent.workspace_id == self.workspace.id,
+                    AuditEvent.action == action,
+                )
+                .order_by(AuditEvent.created_at.desc())
+            )
+            assert audit is not None
+            return audit.metadata_json
+
     async def seed_executing_claim(self) -> None:
         async with self.sessions() as session:
             session.add(
@@ -162,9 +193,106 @@ class SyncWorld:
                 connection = await session.get(Connection, self.connection.id)
                 assert connection is not None
                 connection.status = ConnectionStatus.DISABLED.value
+            elif case == "trigger_renamed":
+                trigger = await session.get(Trigger, self.trigger.id)
+                assert trigger is not None
+                trigger.name = "Renamed after sync"
+            elif case == "external_id_drift":
+                task = await session.get(Task, self.task.id)
+                assert task is not None
+                task.external_id = "ENG-999"
+            elif case == "revoked_and_drifted":
+                trigger = await session.get(Trigger, self.trigger.id)
+                task = await session.get(Task, self.task.id)
+                assert trigger is not None
+                assert task is not None
+                trigger.enabled = False
+                trigger.name = "Revoked after claim"
+                task.external_id = "ENG-999"
             else:
                 raise AssertionError(f"unknown authority case {case}")
             await session.commit()
+
+    async def configure_engineering_run(
+        self,
+        status: str,
+        *,
+        valid_parent: bool = True,
+        child_run: bool = True,
+    ) -> UUID:
+        async with self.sessions() as session:
+            parent = await session.get(Task, self.task.id)
+            run = await session.get(AgentRun, self.run.id)
+            assert parent is not None
+            assert run is not None
+            parent.state = (
+                TaskState.COMPLETED.value if status == "completed" else TaskState.FAILED.value
+            )
+            parent.metadata_json = {
+                **parent.metadata_json,
+                "engineering_result": {
+                    "status": status,
+                    "verdict": "pass" if status == "completed" else "fail",
+                    "cycles_used": 1,
+                },
+            }
+            if not child_run:
+                run.status = (
+                    RunStatus.FAILED.value
+                    if status == "implementation_failed"
+                    else RunStatus.COMPLETED.value
+                )
+                await session.commit()
+                return parent.id
+            child_parent_id = parent.id
+            if not valid_parent:
+                unrelated = Task(
+                    workspace_id=parent.workspace_id,
+                    title="Unrelated parent",
+                    state=TaskState.COMPLETED.value,
+                    assigned_agent_id=self.agent.id,
+                    correlation_id=new_uuid7(),
+                )
+                session.add(unrelated)
+                await session.flush()
+                child_parent_id = unrelated.id
+            child = Task(
+                workspace_id=parent.workspace_id,
+                title="Engineering implementation child",
+                state=(
+                    TaskState.FAILED.value
+                    if status == "implementation_failed"
+                    else TaskState.COMPLETED.value
+                ),
+                assigned_agent_id=self.agent.id,
+                parent_task_id=child_parent_id,
+                correlation_id=new_uuid7(),
+                metadata_json={"origin": "engineering_template"},
+            )
+            session.add(child)
+            await session.flush()
+            run.task_id = child.id
+            run.status = (
+                RunStatus.FAILED.value
+                if status == "implementation_failed"
+                else RunStatus.COMPLETED.value
+            )
+            await session.commit()
+            return child.id
+
+    async def unrelated_task_id(self) -> UUID:
+        async with self.sessions() as session:
+            task = Task(
+                workspace_id=self.workspace.id,
+                title="Unrelated sync task",
+                state=TaskState.COMPLETED.value,
+                assigned_agent_id=self.agent.id,
+                trigger_id=self.trigger.id,
+                correlation_id=new_uuid7(),
+            )
+            session.add(task)
+            await session.commit()
+            return task.id
 
 
 async def _build_sync_world(
@@ -343,6 +471,44 @@ async def test_sync_reloads_standing_authority_and_replays_one_claim(
     assert grant_count == 0
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    ["trigger_disabled", "trigger_renamed", "external_id_drift"],
+)
+async def test_terminal_sync_claim_replays_before_mutable_authority(
+    sync_world: SyncWorld,
+    mutation: str,
+) -> None:
+    first = await sync_world.activities.sync_external_tool_activity(sync_world.ids_only_params)
+    await sync_world.mutate_authority(mutation)
+
+    replay = await sync_world.activities.sync_external_tool_activity(sync_world.ids_only_params)
+
+    assert replay == first
+    assert sync_world.effect_bodies == [sync_world.expected_body]
+    assert await sync_world.count_events("external.synced") == 1
+
+
+async def test_terminal_sync_claim_rejects_a_different_task_binding(
+    sync_world: SyncWorld,
+) -> None:
+    await sync_world.activities.sync_external_tool_activity(sync_world.ids_only_params)
+    unrelated_task_id = await sync_world.unrelated_task_id()
+
+    with pytest.raises(ApplicationError) as error:
+        await sync_world.activities.sync_external_tool_activity(
+            SyncExternalToolInput(
+                workspace_id=str(sync_world.workspace.id),
+                task_id=str(unrelated_task_id),
+                run_id=str(sync_world.run.id),
+            )
+        )
+
+    assert error.value.type == "sync_invocation_mismatch"
+    assert error.value.non_retryable is True
+    assert sync_world.effect_bodies == [sync_world.expected_body]
+
+
 async def test_concurrent_sync_calls_share_one_durable_effect(sync_world: SyncWorld) -> None:
     results = await asyncio.gather(
         sync_world.activities.sync_external_tool_activity(sync_world.ids_only_params),
@@ -416,6 +582,72 @@ async def test_prior_executing_sync_claim_becomes_unknown_without_reposting(
     assert await sync_world.count_audits("tool.call.execution_unknown") == 1
 
 
+async def test_executing_sync_claim_becomes_unknown_after_authority_revocation(
+    sync_world: SyncWorld,
+) -> None:
+    await sync_world.seed_executing_claim()
+    await sync_world.mutate_authority("revoked_and_drifted")
+
+    with pytest.raises(ApplicationError) as error:
+        await sync_world.activities.sync_external_tool_activity(sync_world.ids_only_params)
+
+    assert error.value.type == "sync_execution_unknown"
+    assert error.value.non_retryable is True
+    row = await sync_world.tool_call()
+    assert row is not None
+    assert row.status == ToolCallStatus.EXECUTION_UNKNOWN.value
+    assert sync_world.effect_bodies == []
+    assert await sync_world.count_events("external.sync_unknown") == 1
+    assert (await sync_world.event_payload("external.sync_unknown"))["external_id"] == "ENG-77"
+
+
+@pytest.mark.parametrize(
+    "engineering_status",
+    ["completed", "review_failed", "implementation_failed"],
+)
+async def test_engineering_child_sync_uses_parent_authority_and_final_status(
+    sync_world: SyncWorld,
+    engineering_status: str,
+) -> None:
+    await sync_world.configure_engineering_run(engineering_status)
+
+    result = await sync_world.activities.sync_external_tool_activity(sync_world.ids_only_params)
+
+    assert result == SyncExternalResult(
+        synced=True,
+        detail="https://linear.test/comment/1",
+    )
+    assert len(sync_world.effect_bodies) == 1
+    assert sync_world.effect_bodies[0].endswith(f"({engineering_status}).")
+    audit = await sync_world.latest_audit_metadata("trigger.synced_external")
+    assert audit["run_status"] == engineering_status
+
+
+async def test_engineering_child_sync_rejects_wrong_parent_before_effect(
+    sync_world: SyncWorld,
+) -> None:
+    await sync_world.configure_engineering_run("completed", valid_parent=False)
+
+    with pytest.raises(ApplicationError) as error:
+        await sync_world.activities.sync_external_tool_activity(sync_world.ids_only_params)
+
+    assert error.value.type == "sync_authority_invalid"
+    assert error.value.non_retryable is True
+    assert sync_world.effect_bodies == []
+    assert await sync_world.tool_call() is None
+
+
+async def test_direct_engineering_sync_keeps_parent_run_authority(
+    sync_world: SyncWorld,
+) -> None:
+    await sync_world.configure_engineering_run("completed", child_run=False)
+
+    result = await sync_world.activities.sync_external_tool_activity(sync_world.ids_only_params)
+
+    assert result.synced is True
+    assert sync_world.effect_bodies == [sync_world.expected_body]
+
+
 async def test_lost_sync_response_is_unknown_and_never_retried(
     sync_world: SyncWorld,
 ) -> None:
@@ -434,25 +666,36 @@ async def test_lost_sync_response_is_unknown_and_never_retried(
 
 
 @pytest.mark.parametrize("delete_result", [True, False])
-async def test_cleanup_uses_run_workspace_name_once(delete_result: bool) -> None:
+async def test_cleanup_uses_run_workspace_name_once(
+    sync_world: SyncWorld,
+    delete_result: bool,
+) -> None:
     deleted_names: list[str] = []
 
     async def delete_workspace(workspace_name: str) -> bool:
         deleted_names.append(workspace_name)
         return delete_result
 
-    activities = CleanupActivities(delete_workspace=delete_workspace)
-    params = CleanupRunWorkspaceInput(workspace_id=WORKSPACE_ID, run_id=RUN_ID)
+    activities = CleanupActivities(
+        sync_world.resources,  # type: ignore[arg-type]
+        delete_workspace=delete_workspace,
+    )
+    params = CleanupRunWorkspaceInput(
+        workspace_id=str(sync_world.workspace.id),
+        run_id=str(sync_world.run.id),
+    )
 
     first = await activities.cleanup_run_workspace_activity(params)
     second = await activities.cleanup_run_workspace_activity(params)
 
     assert first == CleanupRunWorkspaceResult(deleted=delete_result)
     assert second == CleanupRunWorkspaceResult(deleted=False)
-    assert deleted_names == [f"run-{RUN_ID}"]
+    assert deleted_names == [f"run-{sync_world.run.id}"]
 
 
-async def test_cleanup_rejects_invalid_identity_before_runner_call() -> None:
+async def test_cleanup_rejects_invalid_identity_before_runner_call(
+    sync_world: SyncWorld,
+) -> None:
     calls: list[str] = []
 
     async def delete_workspace(workspace_name: str) -> bool:
@@ -460,14 +703,82 @@ async def test_cleanup_rejects_invalid_identity_before_runner_call() -> None:
         return True
 
     activities = CleanupActivities(
+        sync_world.resources,  # type: ignore[arg-type]
         delete_workspace=delete_workspace,
     )
 
     with pytest.raises(ApplicationError) as error:
         await activities.cleanup_run_workspace_activity(
-            CleanupRunWorkspaceInput(workspace_id="not-a-uuid", run_id=RUN_ID)
+            CleanupRunWorkspaceInput(
+                workspace_id="not-a-uuid",
+                run_id=str(sync_world.run.id),
+            )
         )
 
     assert error.value.type == "cleanup_identity_invalid"
     assert error.value.non_retryable is True
+    assert calls == []
+
+
+async def test_cleanup_rejects_cross_workspace_run_before_runner_call(
+    sync_world: SyncWorld,
+) -> None:
+    calls: list[str] = []
+
+    async def delete_workspace(workspace_name: str) -> bool:
+        calls.append(workspace_name)
+        return True
+
+    activities = CleanupActivities(
+        sync_world.resources,  # type: ignore[arg-type]
+        delete_workspace=delete_workspace,
+    )
+
+    with pytest.raises(ApplicationError) as error:
+        await activities.cleanup_run_workspace_activity(
+            CleanupRunWorkspaceInput(
+                workspace_id=str(new_uuid7()),
+                run_id=str(sync_world.run.id),
+            )
+        )
+
+    assert error.value.type == "cleanup_context_invalid"
+    assert error.value.non_retryable is True
+    assert calls == []
+
+
+async def test_direct_cleanup_workflow_cannot_bypass_database_binding(
+    sync_world: SyncWorld,
+) -> None:
+    calls: list[str] = []
+
+    async def delete_workspace(workspace_name: str) -> bool:
+        calls.append(workspace_name)
+        return True
+
+    activities = CleanupActivities(
+        sync_world.resources,  # type: ignore[arg-type]
+        delete_workspace=delete_workspace,
+    )
+    environment = await WorkflowEnvironment.start_time_skipping()
+    try:
+        async with Worker(
+            environment.client,
+            task_queue=TOOL_TASK_QUEUE,
+            workflows=[CleanupCompatibilityWorkflow],
+            activities=[activities.cleanup_run_workspace_activity],
+        ):
+            with pytest.raises(WorkflowFailureError):
+                await environment.client.execute_workflow(
+                    CleanupCompatibilityWorkflow.run,
+                    CleanupRunWorkspaceInput(
+                        workspace_id=str(new_uuid7()),
+                        run_id=str(sync_world.run.id),
+                    ),
+                    id=f"direct-cleanup-{new_uuid7()}",
+                    task_queue=TOOL_TASK_QUEUE,
+                )
+    finally:
+        await environment.shutdown()
+
     assert calls == []

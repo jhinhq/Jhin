@@ -34,6 +34,7 @@ from jhin_domain import (
     ActorType,
     ConnectionStatus,
     SecretType,
+    TaskState,
     ToolCallStatus,
 )
 from jhin_events import EventEnvelope, EventSource
@@ -66,7 +67,10 @@ _STATUS_LINES = {
     "completed": "completed the task",
     "failed": "could not complete the task",
     "cancelled": "was cancelled before finishing",
+    "review_failed": "could not complete the task because review failed",
+    "implementation_failed": "could not complete the task because implementation failed",
 }
+_ENGINEERING_STATUSES = frozenset({"completed", "review_failed", "implementation_failed"})
 _PROCESS_SYNC_LOCKS: dict[UUID, asyncio.Lock] = {}
 _PROCESS_SYNC_LOCKS_GUARD = asyncio.Lock()
 
@@ -75,6 +79,7 @@ _PROCESS_SYNC_LOCKS_GUARD = asyncio.Lock()
 class _SyncAuthority:
     workspace_id: UUID
     task_id: UUID
+    run_task_id: UUID
     run_id: UUID
     agent_id: UUID
     agent_name: str
@@ -83,6 +88,19 @@ class _SyncAuthority:
     external_source: str
     external_id: str
     run_status: str
+    input_payload: dict[str, object]
+
+
+@dataclass(frozen=True)
+class _SyncClaimBinding:
+    workspace_id: UUID
+    task_id: UUID
+    run_task_id: UUID
+    run_id: UUID
+    agent_id: UUID
+    connection_id: UUID
+    external_source: str
+    external_id: str
     input_payload: dict[str, object]
 
 
@@ -114,6 +132,14 @@ def _unknown_error(invocation_id: UUID) -> ApplicationError:
         f"trigger sync {invocation_id} may have produced an external effect; "
         "manual reconciliation is required",
         type="sync_execution_unknown",
+        non_retryable=True,
+    )
+
+
+def _mismatch_error(message: str) -> ApplicationError:
+    return ApplicationError(
+        message,
+        type="sync_invocation_mismatch",
         non_retryable=True,
     )
 
@@ -187,42 +213,78 @@ class TriggerToolActivities:
         task_id: UUID,
         run_id: UUID,
     ) -> _SyncAuthority:
-        row = (
-            await session.execute(
-                select(Task, AgentRun, Trigger, Connection, Agent, Secret)
-                .join(
-                    AgentRun,
-                    (AgentRun.task_id == Task.id) & (AgentRun.workspace_id == Task.workspace_id),
-                )
-                .join(
-                    Trigger,
-                    (Trigger.id == Task.trigger_id) & (Trigger.workspace_id == Task.workspace_id),
-                )
-                .join(
-                    Connection,
-                    (Connection.id == Trigger.connection_id)
-                    & (Connection.workspace_id == Task.workspace_id),
-                )
-                .join(
-                    Agent,
-                    (Agent.id == AgentRun.agent_id) & (Agent.workspace_id == Task.workspace_id),
-                )
-                .join(
-                    Secret,
-                    (Secret.id == Connection.encrypted_secret_id)
-                    & (Secret.workspace_id == Task.workspace_id),
-                )
-                .where(
-                    Task.id == task_id,
-                    Task.workspace_id == workspace_id,
-                    AgentRun.id == run_id,
-                )
-                .limit(2)
+        task = await session.scalar(
+            select(Task).where(Task.id == task_id, Task.workspace_id == workspace_id)
+        )
+        run = await session.scalar(
+            select(AgentRun).where(
+                AgentRun.id == run_id,
+                AgentRun.workspace_id == workspace_id,
             )
-        ).all()
-        if len(row) != 1:
+        )
+        if task is None or run is None or run.task_id is None:
             raise _authority_error("trigger sync authority was not found")
-        task, run, trigger, connection, agent, secret = row[0]
+        run_task = await session.scalar(
+            select(Task).where(
+                Task.id == run.task_id,
+                Task.workspace_id == workspace_id,
+            )
+        )
+        if run_task is None or not (run_task.id == task.id or run_task.parent_task_id == task.id):
+            raise _authority_error("trigger sync run is not bound to the authoritative task")
+
+        trigger = await session.scalar(
+            select(Trigger).where(
+                Trigger.id == task.trigger_id,
+                Trigger.workspace_id == workspace_id,
+            )
+        )
+        connection = (
+            await session.scalar(
+                select(Connection).where(
+                    Connection.id == trigger.connection_id,
+                    Connection.workspace_id == workspace_id,
+                )
+            )
+            if trigger is not None
+            else None
+        )
+        secret = (
+            await session.scalar(
+                select(Secret).where(
+                    Secret.id == connection.encrypted_secret_id,
+                    Secret.workspace_id == workspace_id,
+                )
+            )
+            if connection is not None and connection.encrypted_secret_id is not None
+            else None
+        )
+        agent = await session.scalar(
+            select(Agent).where(
+                Agent.id == run.agent_id,
+                Agent.workspace_id == workspace_id,
+            )
+        )
+        if trigger is None or connection is None or secret is None or agent is None:
+            raise _authority_error("trigger sync authority was not found")
+
+        engineering_result = task.metadata_json.get("engineering_result")
+        if engineering_result is None:
+            if run_task.id != task.id:
+                raise _authority_error("engineering sync result is not finalized")
+            run_status = run.status
+        elif (
+            not isinstance(engineering_result, dict)
+            or type(engineering_result.get("status")) is not str
+            or engineering_result["status"] not in _ENGINEERING_STATUSES
+        ):
+            raise _authority_error("engineering sync result is malformed")
+        else:
+            run_status = engineering_result["status"]
+
+        expected_engineering_state = (
+            TaskState.COMPLETED.value if run_status == "completed" else TaskState.FAILED.value
+        )
         if (
             trigger.enabled is not True
             or trigger.action_config_json.get("comment_back") is not True
@@ -233,14 +295,16 @@ class TriggerToolActivities:
             or not isinstance(task.external_id, str)
             or not task.external_id
             or run.status not in {status.value for status in RUN_TERMINAL_STATUSES}
+            or run_task.state not in {state.value for state in TASK_TERMINAL_STATES}
             or task.state not in {state.value for state in TASK_TERMINAL_STATES}
+            or (engineering_result is not None and task.state != expected_engineering_state)
         ):
             raise _authority_error("trigger sync standing authority is no longer valid")
 
-        status_line = _STATUS_LINES.get(run.status, run.status)
+        status_line = _STATUS_LINES.get(run_status, run_status)
         body = (
             f"**Jhin** — trigger “{trigger.name}”: the assigned agent {status_line}. "
-            f"Task `{task.id}` ({run.status})."
+            f"Task `{task.id}` ({run_status})."
         )
         raw_input: dict[str, object] = {
             "connection_id": str(connection.id),
@@ -262,6 +326,7 @@ class TriggerToolActivities:
         return _SyncAuthority(
             workspace_id=workspace_id,
             task_id=task_id,
+            run_task_id=run_task.id,
             run_id=run_id,
             agent_id=agent.id,
             agent_name=agent.name,
@@ -269,7 +334,7 @@ class TriggerToolActivities:
             connection_id=connection.id,
             external_source=task.external_source,
             external_id=task.external_id,
-            run_status=run.status,
+            run_status=run_status,
             input_payload=sanitized,
         )
 
@@ -289,10 +354,96 @@ class TriggerToolActivities:
             and row.sanitized_input_json == authority.input_payload
         )
 
+    @staticmethod
+    def _binding_from_authority(authority: _SyncAuthority) -> _SyncClaimBinding:
+        return _SyncClaimBinding(
+            workspace_id=authority.workspace_id,
+            task_id=authority.task_id,
+            run_task_id=authority.run_task_id,
+            run_id=authority.run_id,
+            agent_id=authority.agent_id,
+            connection_id=authority.connection_id,
+            external_source=authority.external_source,
+            external_id=authority.external_id,
+            input_payload=authority.input_payload,
+        )
+
+    async def _load_claim_binding(
+        self,
+        session: AsyncSession,
+        *,
+        workspace_id: UUID,
+        task_id: UUID,
+        run_id: UUID,
+        invocation_id: UUID,
+    ) -> tuple[ToolCall, _SyncClaimBinding] | None:
+        row = await session.scalar(
+            select(ToolCall).where(ToolCall.id == invocation_id).with_for_update()
+        )
+        if row is None:
+            return None
+        if (
+            row.workspace_id != workspace_id
+            or row.run_id != run_id
+            or row.tool_name != _SYNC_TOOL_NAME
+            or row.connection_id is None
+        ):
+            raise _mismatch_error("trigger sync invocation identity changed")
+
+        run = await session.scalar(
+            select(AgentRun).where(
+                AgentRun.id == run_id,
+                AgentRun.workspace_id == workspace_id,
+                AgentRun.agent_id == row.agent_id,
+            )
+        )
+        if run is None or run.task_id is None:
+            raise _mismatch_error("trigger sync invocation run binding changed")
+        run_task = await session.scalar(
+            select(Task).where(
+                Task.id == run.task_id,
+                Task.workspace_id == workspace_id,
+            )
+        )
+        if run_task is None or not (run_task.id == task_id or run_task.parent_task_id == task_id):
+            raise _mismatch_error("trigger sync invocation task binding changed")
+
+        payload = row.sanitized_input_json
+        if not isinstance(payload, dict) or set(payload) != {
+            "connection_id",
+            "issue",
+            "body",
+        }:
+            raise _mismatch_error("trigger sync invocation input binding changed")
+        connection_id_value = payload.get("connection_id")
+        issue = payload.get("issue")
+        body = payload.get("body")
+        if (
+            not isinstance(connection_id_value, str)
+            or connection_id_value != str(row.connection_id)
+            or not isinstance(issue, str)
+            or not issue
+            or not isinstance(body, str)
+            or not body
+        ):
+            raise _mismatch_error("trigger sync invocation input binding changed")
+
+        return row, _SyncClaimBinding(
+            workspace_id=workspace_id,
+            task_id=task_id,
+            run_task_id=run_task.id,
+            run_id=run_id,
+            agent_id=row.agent_id,
+            connection_id=row.connection_id,
+            external_source="linear",
+            external_id=issue,
+            input_payload=dict(payload),
+        )
+
     async def _append_event(
         self,
         session: AsyncSession,
-        authority: _SyncAuthority,
+        binding: _SyncClaimBinding,
         *,
         event_type: str,
         payload: dict[str, object],
@@ -300,23 +451,23 @@ class TriggerToolActivities:
         run = await session.scalar(
             select(AgentRun)
             .where(
-                AgentRun.id == authority.run_id,
-                AgentRun.workspace_id == authority.workspace_id,
-                AgentRun.task_id == authority.task_id,
-                AgentRun.agent_id == authority.agent_id,
+                AgentRun.id == binding.run_id,
+                AgentRun.workspace_id == binding.workspace_id,
+                AgentRun.task_id == binding.run_task_id,
+                AgentRun.agent_id == binding.agent_id,
             )
             .with_for_update()
         )
         if run is None:
             raise _authority_error("trigger sync run authority disappeared")
         current = await session.scalar(
-            select(func.max(RunEvent.seq)).where(RunEvent.run_id == authority.run_id)
+            select(func.max(RunEvent.seq)).where(RunEvent.run_id == binding.run_id)
         )
         session.add(
             RunEvent(
-                workspace_id=authority.workspace_id,
-                run_id=authority.run_id,
-                task_id=authority.task_id,
+                workspace_id=binding.workspace_id,
+                run_id=binding.run_id,
+                task_id=binding.task_id,
                 seq=(current if current is not None else -1) + 1,
                 event_type=event_type,
                 payload_json=payload,
@@ -326,19 +477,22 @@ class TriggerToolActivities:
     async def _mark_unknown(
         self,
         session: AsyncSession,
-        authority: _SyncAuthority,
+        binding: _SyncClaimBinding,
         invocation_id: UUID,
     ) -> SyncExternalResult | None:
         await session.rollback()
-        row = await session.scalar(
-            select(ToolCall).where(ToolCall.id == invocation_id).with_for_update()
+        loaded = await self._load_claim_binding(
+            session,
+            workspace_id=binding.workspace_id,
+            task_id=binding.task_id,
+            run_id=binding.run_id,
+            invocation_id=invocation_id,
         )
-        if row is None or not self._claim_matches(row, authority, invocation_id):
-            raise ApplicationError(
-                "trigger sync invocation binding changed",
-                type="sync_invocation_mismatch",
-                non_retryable=True,
-            )
+        if loaded is None:
+            raise _mismatch_error("trigger sync invocation disappeared")
+        row, persisted_binding = loaded
+        if persisted_binding != binding:
+            raise _mismatch_error("trigger sync invocation binding changed")
         if row.status == ToolCallStatus.COMPLETED.value:
             detail = row.sanitized_output_json.get("url", "")
             return SyncExternalResult(
@@ -358,26 +512,26 @@ class TriggerToolActivities:
         row.error_code = "execution_outcome_unknown"
         await self._append_event(
             session,
-            authority,
+            binding,
             event_type="external.sync_unknown",
             payload={
-                "external_source": authority.external_source,
-                "external_id": authority.external_id,
+                "external_source": binding.external_source,
+                "external_id": binding.external_id,
                 "tool_call_id": str(invocation_id),
                 "manual_reconciliation_required": True,
             },
         )
         session.add(
             AuditEvent(
-                workspace_id=authority.workspace_id,
+                workspace_id=binding.workspace_id,
                 actor_type=ActorType.SYSTEM.value,
                 actor_id=None,
                 action="tool.call.execution_unknown",
                 target_type="tool_call",
                 target_id=invocation_id,
                 metadata_json={
-                    "run_id": str(authority.run_id),
-                    "task_id": str(authority.task_id),
+                    "run_id": str(binding.run_id),
+                    "task_id": str(binding.task_id),
                     "tool_name": _SYNC_TOOL_NAME,
                     "code": "execution_outcome_unknown",
                 },
@@ -389,20 +543,22 @@ class TriggerToolActivities:
     async def _existing_result(
         self,
         session: AsyncSession,
-        authority: _SyncAuthority,
+        *,
+        workspace_id: UUID,
+        task_id: UUID,
+        run_id: UUID,
         invocation_id: UUID,
     ) -> SyncExternalResult | None:
-        row = await session.scalar(
-            select(ToolCall).where(ToolCall.id == invocation_id).with_for_update()
+        loaded = await self._load_claim_binding(
+            session,
+            workspace_id=workspace_id,
+            task_id=task_id,
+            run_id=run_id,
+            invocation_id=invocation_id,
         )
-        if row is None:
+        if loaded is None:
             return None
-        if not self._claim_matches(row, authority, invocation_id):
-            raise ApplicationError(
-                "trigger sync invocation binding changed",
-                type="sync_invocation_mismatch",
-                non_retryable=True,
-            )
+        row, binding = loaded
         if row.status == ToolCallStatus.COMPLETED.value:
             detail = row.sanitized_output_json.get("url", "")
             await session.rollback()
@@ -418,7 +574,7 @@ class TriggerToolActivities:
             ToolCallStatus.EXECUTING.value,
             ToolCallStatus.EXECUTION_UNKNOWN.value,
         }:
-            await self._mark_unknown(session, authority, invocation_id)
+            await self._mark_unknown(session, binding, invocation_id)
             raise _unknown_error(invocation_id)
         if row.status in _TERMINAL_TOOL_STATUSES:
             raise ApplicationError(
@@ -473,6 +629,7 @@ class TriggerToolActivities:
             )
         )
         await session.commit()
+        binding = self._binding_from_authority(authority)
 
         started = time.monotonic()
         try:
@@ -515,7 +672,7 @@ class TriggerToolActivities:
             detail = detail_value if isinstance(detail_value, str) else ""
             await self._append_event(
                 session,
-                authority,
+                binding,
                 event_type="external.synced",
                 payload={
                     "external_source": authority.external_source,
@@ -543,7 +700,7 @@ class TriggerToolActivities:
             )
             await session.commit()
         except BaseException as error:
-            recovered = await self._mark_unknown(session, authority, invocation_id)
+            recovered = await self._mark_unknown(session, binding, invocation_id)
             if recovered is not None:
                 return recovered
             if isinstance(error, Exception):
@@ -563,15 +720,21 @@ class TriggerToolActivities:
         run_id = _uuid(params.run_id, field="run_id")
         invocation_id = stable_sync_invocation_id(run_id)
         async with self._lifecycle_session(invocation_id) as session:
+            replayed = await self._existing_result(
+                session,
+                workspace_id=workspace_id,
+                task_id=task_id,
+                run_id=run_id,
+                invocation_id=invocation_id,
+            )
+            if replayed is not None:
+                return replayed
             authority = await self._load_authority(
                 session,
                 workspace_id=workspace_id,
                 task_id=task_id,
                 run_id=run_id,
             )
-            replayed = await self._existing_result(session, authority, invocation_id)
-            if replayed is not None:
-                return replayed
             return await self._execute_claim(session, authority, invocation_id)
 
 

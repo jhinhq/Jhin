@@ -11,13 +11,16 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import select
 from temporalio import activity
 from temporalio.client import Client
+from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
 
 from jhin_agent_worker.projections import AgentProjectionActivities
 from jhin_agent_worker.reasoning import AgentReasoningActivities
 from jhin_agent_worker.resources import Resources
+from jhin_db.models import AgentRun, Task
 from jhin_tools import MAX_TOOL_CALLS_PER_STEP, MAX_TOOL_STEP_INDEX, stable_tool_invocation_id
 from jhin_workflows import TOOL_TASK_QUEUE
 from jhin_workflows.agent_task.shared import (
@@ -76,9 +79,10 @@ async def compatibility_result(
             arg,
             id=workflow_id,
             task_queue=TOOL_TASK_QUEUE,
+            id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
         )
     except WorkflowAlreadyStartedError:
-        handle = client.get_workflow_handle(workflow_id)
+        handle = client.get_workflow_handle_for(workflow_run, workflow_id)
     return await handle.result()
 
 
@@ -93,6 +97,7 @@ class AgentCompatibilityActivities:
         reasoning: AgentReasoningActivities | None = None,
         projections: AgentProjectionActivities | None = None,
     ) -> None:
+        self._resources = resources
         self._client = temporal_client
         self._reasoning = reasoning or AgentReasoningActivities(resources)
         self._projections = projections or AgentProjectionActivities(
@@ -245,6 +250,24 @@ class AgentCompatibilityActivities:
         task_id = _uuid(params.task_id, field="task_id")
         run_id = _uuid(params.run_id, field="run_id") if params.run_id is not None else None
         if run_id is not None:
+            async with self._resources.session_factory() as session:
+                bound_run_id = await session.scalar(
+                    select(AgentRun.id)
+                    .join(Task, AgentRun.task_id == Task.id)
+                    .where(
+                        AgentRun.id == UUID(run_id),
+                        AgentRun.workspace_id == UUID(workspace_id),
+                        AgentRun.task_id == UUID(task_id),
+                        Task.id == UUID(task_id),
+                        Task.workspace_id == UUID(workspace_id),
+                    )
+                )
+            if bound_run_id is None:
+                raise ApplicationError(
+                    "legacy finalize context does not bind the workspace, task, and run",
+                    type="compatibility_context_invalid",
+                    non_retryable=True,
+                )
             await compatibility_result(
                 self._client,
                 CleanupCompatibilityWorkflow.run,
