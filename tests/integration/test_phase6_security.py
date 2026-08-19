@@ -23,8 +23,8 @@ import json
 import os
 import subprocess
 import time
-from collections.abc import AsyncIterator
-from typing import Any
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Any, Protocol, cast
 from uuid import uuid4
 
 import httpx
@@ -60,6 +60,11 @@ FORBIDDEN_JOB_DNS_NAMES = (
 )
 JOB_CONTAINER_USER = "1000:1000"
 SANDBOX_NETWORK = os.environ.get("SANDBOX_NETWORK", "jhin_sandbox")
+
+
+class CancelResponse(Protocol):
+    status_code: int
+    text: str
 
 
 def _job_id() -> str:
@@ -189,7 +194,47 @@ async def _wait_for_job_container_removal(job_id: str) -> None:
         if _docker("ps", "-aq", "--filter", f"label=jhin.sandbox.job={job_id}") == "":
             return
         await asyncio.sleep(0.2)
-    pytest.fail(f"job {job_id} container survived cancellation")
+    identifiers = _docker("ps", "-aq", "--filter", f"label=jhin.sandbox.job={job_id}").splitlines()
+    assert len(identifiers) <= 1, f"job label matched multiple containers: {identifiers}"
+    if identifiers:
+        _docker("rm", "-f", identifiers[0])
+    remaining = _docker("ps", "-aq", "--filter", f"label=jhin.sandbox.job={job_id}")
+    assert remaining == "", f"job {job_id} container survived forced cleanup: {remaining}"
+
+
+async def cleanup_live_job(
+    *,
+    cancel: Callable[[], Awaitable[object]],
+    wait_terminal: Callable[[], Awaitable[dict[str, Any]]],
+    remove_container: Callable[[], Awaitable[None]],
+) -> dict[str, Any]:
+    """Attempt every cleanup step before surfacing cancellation or cleanup failures."""
+    cancelled: object | None = None
+    terminal: dict[str, Any] | None = None
+    cleanup_errors: list[Exception] = []
+
+    try:
+        cancelled = await cancel()
+    except Exception as exc:
+        cleanup_errors.append(exc)
+    try:
+        terminal = await wait_terminal()
+    except Exception as exc:
+        cleanup_errors.append(exc)
+    try:
+        await remove_container()
+    except Exception as exc:
+        cleanup_errors.append(exc)
+
+    if cleanup_errors:
+        raise ExceptionGroup("live job cleanup failed", cleanup_errors)
+    assert cancelled is not None
+    cancellation_result = cast(CancelResponse, cancelled)
+    assert cancellation_result.status_code == 200, (
+        f"cancel: {cancellation_result.status_code} {cancellation_result.text}"
+    )
+    assert terminal is not None
+    return terminal
 
 
 async def _wait_for_boundary_probe(client: httpx.AsyncClient, job_id: str) -> None:
@@ -278,13 +323,14 @@ async def test_live_job_has_no_docker_authority(
         inspected = await _wait_for_job_container(body["job_id"])
         await _wait_for_boundary_probe(runner, body["job_id"])
     finally:
-        cancelled = await runner.post(
-            f"/v1/jobs/{body['job_id']}/cancel",
-            headers={"Authorization": f"Bearer {RUNNER_TOKEN}"},
+        job = await cleanup_live_job(
+            cancel=lambda: runner.post(
+                f"/v1/jobs/{body['job_id']}/cancel",
+                headers={"Authorization": f"Bearer {RUNNER_TOKEN}"},
+            ),
+            wait_terminal=lambda: _wait(runner, body["job_id"]),
+            remove_container=lambda: _wait_for_job_container_removal(body["job_id"]),
         )
-        assert cancelled.status_code == 200, cancelled.text
-        job = await _wait(runner, body["job_id"])
-        await _wait_for_job_container_removal(body["job_id"])
 
     assert inspected is not None
     assert job is not None and job["status"] == "cancelled", job

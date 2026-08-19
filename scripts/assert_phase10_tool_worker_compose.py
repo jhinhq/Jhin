@@ -6,16 +6,22 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import stat
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
+import yaml  # type: ignore[import-untyped]
+
 ROOT = Path(__file__).resolve().parents[1]
 ComposeMode = Literal["rootful", "rootless"]
 _ROOTLESS_TRANSPORT_URL = "http://rootless-docker-transport:2375"
 _RUNNER_IMAGE = "jhin-sandbox-runner:local"
+_DEFAULT_SANDBOX_NETWORK = "jhin_sandbox"
+_SANDBOX_NETWORK_INTERPOLATION = "${SANDBOX_NETWORK:-jhin_sandbox}"
+_RESERVED_SANDBOX_NETWORKS = {"bridge", "default", "host", "none"}
 _RUNNER_HEALTHCHECK = {
     "interval": "10s",
     "retries": 5,
@@ -83,6 +89,51 @@ class StatResult(Protocol):
     def st_gid(self) -> int: ...
 
 
+class _UniqueKeySafeLoader(yaml.SafeLoader):  # type: ignore[misc]
+    """SafeLoader that rejects direct and ambiguous merged duplicate keys."""
+
+    def construct_mapping(self, node: Any, deep: bool = False) -> dict[Any, Any]:
+        if not isinstance(node, yaml.MappingNode):
+            raise ValueError("YAML mapping node is required")
+
+        direct_key_nodes: set[int] = set()
+        direct_keys: set[Any] = set()
+        merge_keys = 0
+        for key_node, _value_node in node.value:
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                merge_keys += 1
+                if merge_keys > 1:
+                    raise ValueError("duplicate YAML merge key is forbidden")
+                continue
+            key = self.construct_object(key_node, deep=deep)
+            try:
+                duplicate = key in direct_keys
+                direct_keys.add(key)
+            except TypeError as exc:
+                raise ValueError("YAML mapping keys must be hashable") from exc
+            if duplicate:
+                raise ValueError(f"duplicate YAML mapping key: {key!r}")
+            direct_key_nodes.add(id(key_node))
+
+        self.flatten_mapping(node)
+        seen_origins: dict[Any, list[bool]] = {}
+        mapping: dict[Any, Any] = {}
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            is_direct = id(key_node) in direct_key_nodes
+            try:
+                origins = seen_origins.setdefault(key, [])
+            except TypeError as exc:
+                raise ValueError("YAML mapping keys must be hashable") from exc
+            if origins:
+                safe_direct_override = is_direct and origins == [False]
+                if not safe_direct_override:
+                    raise ValueError(f"duplicate YAML mapping key after merge: {key!r}")
+            origins.append(is_direct)
+            mapping[key] = self.construct_object(value_node, deep=deep)
+        return mapping
+
+
 def _path_lstat(path: Path) -> StatResult:
     return path.lstat()
 
@@ -90,6 +141,11 @@ def _path_lstat(path: Path) -> StatResult:
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise ValueError(message)
+
+
+def _require_mapping(value: object, message: str) -> dict[str, Any]:
+    _require(isinstance(value, dict), message)
+    return cast(dict[str, Any], value)
 
 
 def compose_files(mode: str, *, dev: bool = False) -> tuple[str, ...]:
@@ -166,6 +222,23 @@ def validate_rootful_socket(
     return str(path), gid
 
 
+def validate_sandbox_network(value: str) -> str:
+    """Reject Docker-reserved or whitespace-ambiguous job network authority."""
+    stripped = value.strip()
+    _require(bool(stripped), "SANDBOX_NETWORK must be nonempty")
+    _require(value == stripped, "SANDBOX_NETWORK must not contain surrounding whitespace")
+    normalized = stripped.casefold()
+    _require(
+        normalized not in _RESERVED_SANDBOX_NETWORKS,
+        "SANDBOX_NETWORK must not use a Docker reserved network mode",
+    )
+    _require(
+        re.fullmatch(r"container\s*:.*", normalized) is None,
+        "SANDBOX_NETWORK must not use Docker container network mode",
+    )
+    return value
+
+
 def _network_names(service: Mapping[str, Any]) -> set[str]:
     networks = service.get("networks", {})
     _require(isinstance(networks, dict), "rendered service networks must be a mapping")
@@ -182,36 +255,99 @@ def _secret_sources(service: Mapping[str, Any]) -> set[str]:
     }
 
 
-def assert_source_contract() -> None:
-    """Assert source-only bind safety that Compose normalizes out of renders."""
-    expected_fragments = {
-        "compose.rootful.yaml": (
-            "      - type: bind\n"
-            "        source: ${SANDBOX_DOCKER_SOCKET_HOST:?set verified absolute Docker socket}\n"
-            "        target: /run/jhin/docker.sock\n"
-            "        bind:\n"
-            "          create_host_path: false"
-        ),
-        "compose.rootless.yaml": (
-            "      - type: bind\n"
-            "        source: ${PHASE10_ROOTLESS_DOCKER_SOCKET:?set the verified rootless socket}\n"
-            "        target: /run/host/docker.sock\n"
-            "        bind:\n"
-            "          create_host_path: false"
-        ),
-    }
-    for filename, fragment in expected_fragments.items():
-        source = (ROOT / filename).read_text(encoding="utf-8")
-        _require(
-            source.count(fragment) == 1,
-            f"{filename} bind must set create_host_path: false exactly once",
+def _load_yaml_mapping(filename: str) -> dict[str, Any]:
+    try:
+        loaded: object = yaml.load(
+            (ROOT / filename).read_text(encoding="utf-8"),
+            Loader=_UniqueKeySafeLoader,
         )
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        raise ValueError(f"{filename} is not unambiguous safe YAML: {exc}") from exc
+    _require(isinstance(loaded, dict), f"{filename} root must be a mapping")
+    return cast(dict[str, Any], loaded)
+
+
+def _require_source_socket_bind(
+    overlay: Mapping[str, Any],
+    *,
+    filename: str,
+    service_name: str,
+    source: str,
+    target: str,
+) -> None:
+    services = _require_mapping(overlay.get("services"), f"{filename} services must be a mapping")
+    service = _require_mapping(
+        services.get(service_name),
+        f"{filename} {service_name} must be a mapping",
+    )
+    volumes = service.get("volumes")
+    _require(
+        isinstance(volumes, list) and len(volumes) == 1,
+        f"{filename} {service_name} must have exactly one socket bind volume",
+    )
+    volume_values = cast(list[object], volumes)
+    volume = _require_mapping(volume_values[0], f"{filename} socket volume must be a mapping")
+    _require(
+        set(volume) == {"bind", "source", "target", "type"},
+        f"{filename} socket bind fields drifted",
+    )
+    _require(volume.get("type") == "bind", f"{filename} socket volume must be a bind")
+    _require(volume.get("source") == source, f"{filename} socket bind source drifted")
+    _require(volume.get("target") == target, f"{filename} socket bind target drifted")
+    bind = volume.get("bind")
+    _require(
+        isinstance(bind, dict)
+        and set(bind) == {"create_host_path"}
+        and bind.get("create_host_path") is False,
+        f"{filename} socket bind create_host_path must be exactly false",
+    )
+
+
+def assert_source_contract() -> None:
+    """Assert semantic source-only safety that Compose normalizes out of renders."""
+    base = _load_yaml_mapping("compose.yaml")
+    rootful = _load_yaml_mapping("compose.rootful.yaml")
+    rootless = _load_yaml_mapping("compose.rootless.yaml")
+
+    services = _require_mapping(base.get("services"), "compose.yaml services must be a mapping")
+    runner = _require_mapping(
+        services.get("sandbox-runner"),
+        "compose.yaml sandbox-runner must be a mapping",
+    )
+    runner_environment = runner.get("environment")
+    _require(
+        isinstance(runner_environment, dict)
+        and runner_environment.get("SANDBOX_NETWORK") == _SANDBOX_NETWORK_INTERPOLATION,
+        "compose.yaml runner SANDBOX_NETWORK interpolation drifted",
+    )
+    networks = _require_mapping(base.get("networks"), "compose.yaml networks must be a mapping")
+    sandbox = networks.get("sandbox")
+    _require(
+        isinstance(sandbox, dict) and sandbox.get("name") == _SANDBOX_NETWORK_INTERPOLATION,
+        "compose.yaml sandbox network interpolation drifted",
+    )
+
+    _require_source_socket_bind(
+        rootful,
+        filename="compose.rootful.yaml",
+        service_name="sandbox-runner",
+        source="${SANDBOX_DOCKER_SOCKET_HOST:?set verified absolute Docker socket}",
+        target="/run/jhin/docker.sock",
+    )
+    _require_source_socket_bind(
+        rootless,
+        filename="compose.rootless.yaml",
+        service_name="rootless-docker-transport",
+        source="${PHASE10_ROOTLESS_DOCKER_SOCKET:?set the verified rootless socket}",
+        target="/run/host/docker.sock",
+    )
 
 
 def _assert_common_workers(
     services: Mapping[str, Any],
     *,
     expected_app_env: str,
+    expected_sandbox_network: str,
 ) -> None:
     agent = cast(dict[str, Any], services["agent-worker"])
     tool = cast(dict[str, Any], services["tool-worker"])
@@ -262,6 +398,26 @@ def _assert_common_workers(
         "tool worker received model/provider/prompt authority",
     )
 
+    runner_environment = cast(dict[str, Any], runner.get("environment", {}))
+    runner_token = runner_environment.get("SANDBOX_RUNNER_TOKEN")
+    _require(
+        isinstance(runner_token, str) and bool(runner_token),
+        "runner token must be nonempty",
+    )
+    _require(
+        runner_token == tool_environment.get("SANDBOX_RUNNER_TOKEN"),
+        "runner and tool-worker tokens differ",
+    )
+    _require(
+        runner_environment.get("SANDBOX_DEFAULT_IMAGE")
+        == tool_environment.get("SANDBOX_DEFAULT_IMAGE"),
+        "runner and tool-worker default images differ",
+    )
+    _require(
+        runner_environment.get("SANDBOX_NETWORK") == expected_sandbox_network,
+        "runner SANDBOX_NETWORK differs from the expected sandbox network",
+    )
+
     _require(runner.get("user") == "10001:10001", "runner user must be 10001:10001")
     _require(runner.get("privileged", False) is False, "runner must not be privileged")
     _require(runner.get("cap_drop") == ["ALL"], "runner must drop every capability")
@@ -283,6 +439,64 @@ def _assert_common_workers(
         _require(
             _secret_sources(cast(dict[str, Any], services[name])) == {"jhin_master_key"},
             f"{name} secret set drifted",
+        )
+
+
+def _assert_sandbox_network_contract(
+    config: Mapping[str, Any],
+    services: Mapping[str, Any],
+    *,
+    dev: bool,
+    expected_sandbox_network: str,
+) -> None:
+    networks = _require_mapping(config.get("networks"), "rendered networks must be a mapping")
+
+    sandbox_users = {
+        name for name, service in services.items() if "sandbox" in _network_names(service)
+    }
+    expected_users = {"fake-github"} if dev else set()
+    _require(
+        sandbox_users == expected_users,
+        "logical sandbox network users drifted",
+    )
+
+    physical_names: dict[str, str] = {}
+    for logical_name, network_value in networks.items():
+        network = _require_mapping(
+            network_value,
+            f"network {logical_name} must be a mapping",
+        )
+        physical_name = network.get("name")
+        _require(
+            isinstance(physical_name, str) and bool(physical_name),
+            f"network {logical_name} physical name is missing",
+        )
+        physical_name = cast(str, physical_name)
+        if logical_name == "sandbox":
+            continue
+        _require(
+            physical_name not in physical_names,
+            f"rendered physical network name collision: {physical_name}",
+        )
+        physical_names[physical_name] = str(logical_name)
+
+    _require(
+        expected_sandbox_network not in physical_names,
+        "expected sandbox network collides with rendered physical authority network",
+    )
+
+    has_rendered_sandbox = "sandbox" in networks
+    rendered_sandbox = networks.get("sandbox")
+    if dev:
+        _require(
+            isinstance(rendered_sandbox, dict),
+            "development sandbox network declaration is missing",
+        )
+    if has_rendered_sandbox:
+        _require(
+            isinstance(rendered_sandbox, dict)
+            and rendered_sandbox.get("name") == expected_sandbox_network,
+            "rendered sandbox network name differs from expected",
         )
 
 
@@ -515,12 +729,14 @@ def assert_rendered_contract(
     mode: str,
     dev: bool,
     expected_app_env: str,
+    expected_sandbox_network: str,
     expected_rootful_gid: int | None = None,
     expected_socket_source: str | None = None,
 ) -> None:
     """Assert the one exhaustive production/dev x rootful/rootless contract."""
     assert_source_contract()
     _require(mode in {"rootful", "rootless"}, "mode must be rootful or rootless")
+    expected_sandbox_network = validate_sandbox_network(expected_sandbox_network)
     _require(
         expected_app_env in ({"dev", "test"} if dev else {"production"}),
         "expected APP_ENV does not match the selected production/dev contract",
@@ -546,8 +762,18 @@ def assert_rendered_contract(
             "rootful authority overlay is missing",
         )
 
-    _assert_common_workers(services, expected_app_env=expected_app_env)
+    _assert_common_workers(
+        services,
+        expected_app_env=expected_app_env,
+        expected_sandbox_network=expected_sandbox_network,
+    )
     _assert_dev_contract(services, dev=dev)
+    _assert_sandbox_network_contract(
+        config,
+        services,
+        dev=dev,
+        expected_sandbox_network=expected_sandbox_network,
+    )
     _assert_ports(services, mode=selected, dev=dev)
     if selected == "rootless":
         _assert_rootless(
@@ -608,6 +834,10 @@ def main(argv: list[str] | None = None) -> int:
     mode = cast(ComposeMode, args.mode)
     explicit_env: dict[str, str] = {}
     expected_app_env = "production"
+    expected_sandbox_network = validate_sandbox_network(
+        os.environ.get("SANDBOX_NETWORK", _DEFAULT_SANDBOX_NETWORK)
+    )
+    explicit_env["SANDBOX_NETWORK"] = expected_sandbox_network
     expected_gid: int | None = None
     expected_socket: str | None = None
     if mode == "rootful":
@@ -636,6 +866,7 @@ def main(argv: list[str] | None = None) -> int:
         mode=mode,
         dev=bool(args.dev),
         expected_app_env=expected_app_env,
+        expected_sandbox_network=expected_sandbox_network,
         expected_rootful_gid=expected_gid,
         expected_socket_source=expected_socket,
     )

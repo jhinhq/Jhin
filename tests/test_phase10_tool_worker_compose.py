@@ -21,6 +21,8 @@ SCRIPT_PATH = ROOT / "scripts" / "assert_phase10_tool_worker_compose.py"
 ROOTLESS_SOCKET = "/run/user/10001/docker.sock"
 ROOTLESS_GID_CANARY = "phase10-rootless-gid-canary-73191"
 ROOTFUL_TEST_GID = 10001
+DEFAULT_SANDBOX_NETWORK = "jhin_sandbox"
+UNIQUE_SANDBOX_NETWORK = "jhin-phase10-contract-sandbox"
 
 
 class ComposeContractModule(Protocol):
@@ -45,12 +47,16 @@ class ComposeContractModule(Protocol):
         mode: str,
         dev: bool,
         expected_app_env: str,
+        expected_sandbox_network: str,
         expected_rootful_gid: int | None = None,
         expected_socket_source: str | None = None,
     ) -> None: ...
 
     @staticmethod
     def assert_source_contract() -> None: ...
+
+    @staticmethod
+    def validate_sandbox_network(value: str) -> str: ...
 
     @staticmethod
     def validate_rootful_socket(
@@ -117,6 +123,7 @@ def test_shared_contract_accepts_every_supported_render(
         env = {
             "PHASE10_ROOTLESS_DOCKER_SOCKET": ROOTLESS_SOCKET,
             "SANDBOX_DOCKER_GID": ROOTLESS_GID_CANARY,
+            "SANDBOX_NETWORK": UNIQUE_SANDBOX_NETWORK,
         }
         if app_env_override is not None:
             env["APP_ENV"] = app_env_override
@@ -126,6 +133,7 @@ def test_shared_contract_accepts_every_supported_render(
             mode=mode,
             dev=dev,
             expected_app_env=expected_app_env,
+            expected_sandbox_network=UNIQUE_SANDBOX_NETWORK,
             expected_socket_source=ROOTLESS_SOCKET,
         )
         assert ROOTLESS_GID_CANARY not in json.dumps(rendered, sort_keys=True)
@@ -139,6 +147,7 @@ def test_shared_contract_accepts_every_supported_render(
             env = {
                 "SANDBOX_DOCKER_GID": str(gid),
                 "SANDBOX_DOCKER_SOCKET_HOST": str(socket_path),
+                "SANDBOX_NETWORK": UNIQUE_SANDBOX_NETWORK,
             }
             if app_env_override is not None:
                 env["APP_ENV"] = app_env_override
@@ -148,6 +157,7 @@ def test_shared_contract_accepts_every_supported_render(
         mode=mode,
         dev=dev,
         expected_app_env=expected_app_env,
+        expected_sandbox_network=UNIQUE_SANDBOX_NETWORK,
         expected_rootful_gid=gid,
         expected_socket_source=str(socket_path),
     )
@@ -173,6 +183,217 @@ def test_dev_defaults_to_dev_but_explicit_test_app_env_wins() -> None:
         assert explicit["services"][worker]["environment"]["APP_ENV"] == "test"
 
 
+def test_default_sandbox_network_is_explicitly_asserted_in_production_and_dev() -> None:
+    contract = _load_contract()
+    for dev in (False, True):
+        rendered = contract.render_compose(
+            "rootless",
+            dev=dev,
+            env={"PHASE10_ROOTLESS_DOCKER_SOCKET": ROOTLESS_SOCKET},
+        )
+        contract.assert_rendered_contract(
+            rendered,
+            mode="rootless",
+            dev=dev,
+            expected_app_env="dev" if dev else "production",
+            expected_sandbox_network=DEFAULT_SANDBOX_NETWORK,
+            expected_socket_source=ROOTLESS_SOCKET,
+        )
+        assert (
+            rendered["services"]["sandbox-runner"]["environment"]["SANDBOX_NETWORK"]
+            == DEFAULT_SANDBOX_NETWORK
+        )
+        if dev:
+            assert rendered["networks"]["sandbox"]["name"] == DEFAULT_SANDBOX_NETWORK
+        else:
+            assert "sandbox" not in rendered["networks"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        " ",
+        "host",
+        " HOST ",
+        "bridge",
+        "Bridge",
+        "none",
+        "\tnone\n",
+        "default",
+        "container:abc123",
+        " Container:abc123 ",
+        "container : abc123",
+        " jhin_unique_sandbox ",
+    ],
+)
+def test_sandbox_network_validation_rejects_reserved_or_ambiguous_values(value: str) -> None:
+    contract = _load_contract()
+
+    with pytest.raises(ValueError, match=r"SANDBOX_NETWORK|sandbox network"):
+        contract.validate_sandbox_network(value)
+
+
+def test_sandbox_network_validation_preserves_a_unique_explicit_name() -> None:
+    contract = _load_contract()
+
+    assert contract.validate_sandbox_network(UNIQUE_SANDBOX_NETWORK) == UNIQUE_SANDBOX_NETWORK
+
+
+@pytest.mark.parametrize(
+    ("label", "changes", "expected_network"),
+    [
+        (
+            "runner expected mismatch",
+            (("services", "sandbox-runner", "environment", "SANDBOX_NETWORK", "wrong"),),
+            UNIQUE_SANDBOX_NETWORK,
+        ),
+        (
+            "rendered sandbox mismatch",
+            (("networks", "sandbox", "name", "wrong"),),
+            UNIQUE_SANDBOX_NETWORK,
+        ),
+        (
+            "rendered sandbox declaration missing",
+            (("networks", "sandbox", None),),
+            UNIQUE_SANDBOX_NETWORK,
+        ),
+        (
+            "runner physical name collision",
+            (
+                ("services", "sandbox-runner", "environment", "SANDBOX_NETWORK", "jhin_runner"),
+                ("networks", "sandbox", "name", "jhin_runner"),
+            ),
+            "jhin_runner",
+        ),
+        (
+            "engine physical name collision",
+            (
+                ("services", "sandbox-runner", "environment", "SANDBOX_NETWORK", "jhin_engine"),
+                ("networks", "sandbox", "name", "jhin_engine"),
+            ),
+            "jhin_engine",
+        ),
+        (
+            "api sandbox membership",
+            (("services", "api", "networks", "sandbox", None),),
+            UNIQUE_SANDBOX_NETWORK,
+        ),
+        (
+            "event worker sandbox membership",
+            (("services", "event-worker", "networks", "sandbox", None),),
+            UNIQUE_SANDBOX_NETWORK,
+        ),
+        (
+            "fake GitHub sandbox membership missing",
+            (("services", "fake-github", "networks", "sandbox", None),),
+            UNIQUE_SANDBOX_NETWORK,
+        ),
+        (
+            "physical name collision",
+            (("networks", "control", "name", "jhin_data"),),
+            UNIQUE_SANDBOX_NETWORK,
+        ),
+        (
+            "empty runner token",
+            (("services", "sandbox-runner", "environment", "SANDBOX_RUNNER_TOKEN", ""),),
+            UNIQUE_SANDBOX_NETWORK,
+        ),
+        (
+            "wrong runner token",
+            (("services", "sandbox-runner", "environment", "SANDBOX_RUNNER_TOKEN", "wrong"),),
+            UNIQUE_SANDBOX_NETWORK,
+        ),
+        (
+            "wrong tool token",
+            (("services", "tool-worker", "environment", "SANDBOX_RUNNER_TOKEN", "wrong"),),
+            UNIQUE_SANDBOX_NETWORK,
+        ),
+        (
+            "wrong runner image",
+            (("services", "sandbox-runner", "environment", "SANDBOX_DEFAULT_IMAGE", "wrong"),),
+            UNIQUE_SANDBOX_NETWORK,
+        ),
+        (
+            "wrong tool image",
+            (("services", "tool-worker", "environment", "SANDBOX_DEFAULT_IMAGE", "wrong"),),
+            UNIQUE_SANDBOX_NETWORK,
+        ),
+    ],
+)
+def test_shared_contract_rejects_network_token_and_image_mutations(
+    label: str,
+    changes: tuple[tuple[Any, ...], ...],
+    expected_network: str,
+) -> None:
+    contract = _load_contract()
+    rendered = contract.render_compose(
+        "rootless",
+        dev=True,
+        env={
+            "PHASE10_ROOTLESS_DOCKER_SOCKET": ROOTLESS_SOCKET,
+            "SANDBOX_NETWORK": UNIQUE_SANDBOX_NETWORK,
+        },
+    )
+    mutated = copy.deepcopy(rendered)
+    for change in changes:
+        if label == "fake GitHub sandbox membership missing":
+            del mutated["services"]["fake-github"]["networks"]["sandbox"]
+        else:
+            _set_nested(mutated, *change)
+
+    with pytest.raises(ValueError, match=r"network|token|image|environment"):
+        contract.assert_rendered_contract(
+            mutated,
+            mode="rootless",
+            dev=True,
+            expected_app_env="dev",
+            expected_sandbox_network=expected_network,
+            expected_socket_source=ROOTLESS_SOCKET,
+        )
+
+
+def test_shared_contract_rejects_expected_sandbox_network_mismatch() -> None:
+    contract = _load_contract()
+    rendered = contract.render_compose(
+        "rootless",
+        dev=True,
+        env={
+            "PHASE10_ROOTLESS_DOCKER_SOCKET": ROOTLESS_SOCKET,
+            "SANDBOX_NETWORK": UNIQUE_SANDBOX_NETWORK,
+        },
+    )
+
+    with pytest.raises(ValueError, match=r"network"):
+        contract.assert_rendered_contract(
+            rendered,
+            mode="rootless",
+            dev=True,
+            expected_app_env="dev",
+            expected_sandbox_network="other-unique-sandbox",
+            expected_socket_source=ROOTLESS_SOCKET,
+        )
+
+
+def test_production_contract_rejects_any_logical_sandbox_network_user() -> None:
+    contract = _load_contract()
+    rendered = contract.render_compose(
+        "rootless",
+        env={"PHASE10_ROOTLESS_DOCKER_SOCKET": ROOTLESS_SOCKET},
+    )
+    rendered["services"]["api"]["networks"]["sandbox"] = None
+
+    with pytest.raises(ValueError, match=r"sandbox.*network|network.*sandbox"):
+        contract.assert_rendered_contract(
+            rendered,
+            mode="rootless",
+            dev=False,
+            expected_app_env="production",
+            expected_sandbox_network=DEFAULT_SANDBOX_NETWORK,
+            expected_socket_source=ROOTLESS_SOCKET,
+        )
+
+
 def test_shared_contract_rejects_adapter_supplemental_group_authority() -> None:
     contract = _load_contract()
     rendered = contract.render_compose(
@@ -187,6 +408,7 @@ def test_shared_contract_rejects_adapter_supplemental_group_authority() -> None:
             mode="rootless",
             dev=False,
             expected_app_env="production",
+            expected_sandbox_network=DEFAULT_SANDBOX_NETWORK,
             expected_socket_source=ROOTLESS_SOCKET,
         )
 
@@ -287,19 +509,40 @@ def test_shared_contract_rejects_every_reviewed_security_mutation(
             mode="rootless",
             dev=False,
             expected_app_env="production",
+            expected_sandbox_network=DEFAULT_SANDBOX_NETWORK,
             expected_socket_source=ROOTLESS_SOCKET,
         )
 
 
+def _copy_source_contract(tmp_path: Path) -> None:
+    for source_name in ("compose.yaml", "compose.rootful.yaml", "compose.rootless.yaml"):
+        shutil.copy2(ROOT / source_name, tmp_path / source_name)
+
+
+def _safe_bind_fragment(filename: str) -> str:
+    if filename == "compose.rootful.yaml":
+        source = "${SANDBOX_DOCKER_SOCKET_HOST:?set verified absolute Docker socket}"
+        target = "/run/jhin/docker.sock"
+    else:
+        source = "${PHASE10_ROOTLESS_DOCKER_SOCKET:?set the verified rootless socket}"
+        target = "/run/host/docker.sock"
+    return (
+        "      - type: bind\n"
+        f"        source: {source}\n"
+        f"        target: {target}\n"
+        "        bind:\n"
+        "          create_host_path: false"
+    )
+
+
 @pytest.mark.parametrize("filename", ["compose.rootful.yaml", "compose.rootless.yaml"])
-def test_source_contract_rejects_bind_that_can_create_a_host_path(
+def test_semantic_source_contract_ignores_safe_text_decoys(
     filename: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     contract = _load_contract()
-    for source_name in ("compose.rootful.yaml", "compose.rootless.yaml"):
-        shutil.copy2(ROOT / source_name, tmp_path / source_name)
+    _copy_source_contract(tmp_path)
     monkeypatch.setattr(contract, "ROOT", tmp_path)
     contract.assert_source_contract()
 
@@ -307,9 +550,163 @@ def test_source_contract_rejects_bind_that_can_create_a_host_path(
     source = source_path.read_text(encoding="utf-8")
     unsafe = source.replace("bind:\n          create_host_path: false", "bind: {}", 1)
     assert unsafe != source
+    unsafe += f"\nx-phase10-safe-text-decoy: |\n{_safe_bind_fragment(filename)}\n"
+    unsafe += "# create_host_path: false cannot repair an unsafe node\n"
     source_path.write_text(unsafe, encoding="utf-8")
 
     with pytest.raises(ValueError, match=r"create_host_path"):
+        contract.assert_source_contract()
+
+
+@pytest.mark.parametrize("filename", ["compose.rootful.yaml", "compose.rootless.yaml"])
+@pytest.mark.parametrize("duplicate", ["top-level services", "bind key"])
+def test_semantic_source_contract_rejects_duplicate_mapping_keys(
+    filename: str,
+    duplicate: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _load_contract()
+    _copy_source_contract(tmp_path)
+    monkeypatch.setattr(contract, "ROOT", tmp_path)
+    source_path = tmp_path / filename
+    source = source_path.read_text(encoding="utf-8")
+    if duplicate == "top-level services":
+        source += "\nservices:\n  phase10-duplicate-service: {}\n"
+    else:
+        source = source.replace(
+            "bind:\n          create_host_path: false",
+            "bind:\n          create_host_path: false\n        bind: {}",
+            1,
+        )
+    source_path.write_text(source, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"duplicate"):
+        contract.assert_source_contract()
+
+
+@pytest.mark.parametrize("filename", ["compose.rootful.yaml", "compose.rootless.yaml"])
+def test_semantic_source_contract_rejects_duplicate_socket_volume_nodes(
+    filename: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _load_contract()
+    _copy_source_contract(tmp_path)
+    monkeypatch.setattr(contract, "ROOT", tmp_path)
+    source_path = tmp_path / filename
+    source = source_path.read_text(encoding="utf-8")
+    source = source.replace(
+        "      - type: bind\n",
+        "      - &phase10-socket-bind\n        type: bind\n",
+        1,
+    )
+    source = source.replace(
+        "          create_host_path: false",
+        "          create_host_path: false\n      - *phase10-socket-bind",
+        1,
+    )
+    source_path.write_text(source, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"socket bind|volume|exactly one"):
+        contract.assert_source_contract()
+
+
+@pytest.mark.parametrize("style", ["alias", "merge"])
+def test_semantic_source_contract_accepts_unambiguous_safe_anchors(
+    style: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _load_contract()
+    shutil.copy2(ROOT / "compose.yaml", tmp_path / "compose.yaml")
+    volume_reference = "*phase10-safe-bind" if style == "alias" else "<<: *phase10-safe-bind"
+    overlays = {
+        "compose.rootful.yaml": (
+            "x-phase10-safe-bind: &phase10-safe-bind\n"
+            "  type: bind\n"
+            "  source: ${SANDBOX_DOCKER_SOCKET_HOST:?set verified absolute Docker socket}\n"
+            "  target: /run/jhin/docker.sock\n"
+            "  bind:\n"
+            "    create_host_path: false\n"
+            "services:\n"
+            "  sandbox-runner:\n"
+            "    volumes:\n"
+            f"      - {volume_reference}\n"
+        ),
+        "compose.rootless.yaml": (
+            "x-phase10-safe-bind: &phase10-safe-bind\n"
+            "  type: bind\n"
+            "  source: ${PHASE10_ROOTLESS_DOCKER_SOCKET:?set the verified rootless socket}\n"
+            "  target: /run/host/docker.sock\n"
+            "  bind:\n"
+            "    create_host_path: false\n"
+            "services:\n"
+            "  rootless-docker-transport:\n"
+            "    volumes:\n"
+            f"      - {volume_reference}\n"
+        ),
+    }
+    for filename, source in overlays.items():
+        (tmp_path / filename).write_text(source, encoding="utf-8")
+    monkeypatch.setattr(contract, "ROOT", tmp_path)
+
+    contract.assert_source_contract()
+
+
+def test_semantic_source_contract_rejects_unsafe_anchor_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _load_contract()
+    _copy_source_contract(tmp_path)
+    source = (
+        "x-phase10-safe-bind: &phase10-safe-bind\n"
+        "  type: bind\n"
+        "  source: ${PHASE10_ROOTLESS_DOCKER_SOCKET:?set the verified rootless socket}\n"
+        "  target: /run/host/docker.sock\n"
+        "  bind:\n"
+        "    create_host_path: false\n"
+        "services:\n"
+        "  rootless-docker-transport:\n"
+        "    volumes:\n"
+        "      - <<: *phase10-safe-bind\n"
+        "        bind: {}\n"
+    )
+    (tmp_path / "compose.rootless.yaml").write_text(source, encoding="utf-8")
+    monkeypatch.setattr(contract, "ROOT", tmp_path)
+
+    with pytest.raises(ValueError, match=r"create_host_path"):
+        contract.assert_source_contract()
+
+
+def test_semantic_source_contract_rejects_network_interpolation_decoys(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _load_contract()
+    _copy_source_contract(tmp_path)
+    compose_path = tmp_path / "compose.yaml"
+    source = compose_path.read_text(encoding="utf-8")
+    source = source.replace(
+        "SANDBOX_NETWORK: ${SANDBOX_NETWORK:-jhin_sandbox}",
+        "SANDBOX_NETWORK: unsafe-network",
+        1,
+    )
+    source = source.replace(
+        "name: ${SANDBOX_NETWORK:-jhin_sandbox}",
+        "name: unsafe-network",
+        1,
+    )
+    source += (
+        "\nx-phase10-network-decoy: |\n"
+        "  SANDBOX_NETWORK: ${SANDBOX_NETWORK:-jhin_sandbox}\n"
+        "  name: ${SANDBOX_NETWORK:-jhin_sandbox}\n"
+    )
+    compose_path.write_text(source, encoding="utf-8")
+    monkeypatch.setattr(contract, "ROOT", tmp_path)
+
+    with pytest.raises(ValueError, match=r"SANDBOX_NETWORK|sandbox network"):
         contract.assert_source_contract()
 
 
@@ -376,6 +773,7 @@ def test_shared_contract_rejects_missing_or_merged_authority_vectors(
             mode=mode,
             dev=False,
             expected_app_env="production",
+            expected_sandbox_network=DEFAULT_SANDBOX_NETWORK,
             expected_rootful_gid=10001 if mode == "rootful" else None,
             expected_socket_source=(
                 "/var/run/docker.sock" if mode == "rootful" else ROOTLESS_SOCKET
@@ -517,6 +915,7 @@ def test_cli_passes_the_explicit_expected_app_env_for_every_vector(
     monkeypatch.setenv("PHASE10_ROOTLESS_DOCKER_SOCKET", ROOTLESS_SOCKET)
     monkeypatch.setenv("SANDBOX_DOCKER_SOCKET_HOST", "/host/docker.sock")
     monkeypatch.setenv("SANDBOX_DOCKER_GID", str(ROOTFUL_TEST_GID))
+    monkeypatch.setenv("SANDBOX_NETWORK", UNIQUE_SANDBOX_NETWORK)
     monkeypatch.setattr(
         contract,
         "validate_rootful_socket",
@@ -551,6 +950,7 @@ def test_cli_passes_the_explicit_expected_app_env_for_every_vector(
         if mode == "rootful"
         else {"PHASE10_ROOTLESS_DOCKER_SOCKET": ROOTLESS_SOCKET}
     )
+    expected_env["SANDBOX_NETWORK"] = UNIQUE_SANDBOX_NETWORK
     if dev and inherited_app_env is not None:
         expected_env["APP_ENV"] = inherited_app_env
     assert observed["render"] == (mode, dev, expected_env)
@@ -560,12 +960,49 @@ def test_cli_passes_the_explicit_expected_app_env_for_every_vector(
             "mode": mode,
             "dev": dev,
             "expected_app_env": expected_app_env,
+            "expected_sandbox_network": UNIQUE_SANDBOX_NETWORK,
             "expected_rootful_gid": ROOTFUL_TEST_GID if mode == "rootful" else None,
             "expected_socket_source": (
                 "/verified/docker.sock" if mode == "rootful" else ROOTLESS_SOCKET
             ),
         },
     )
+
+
+def test_cli_uses_an_explicit_default_sandbox_network_from_a_scrubbed_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _load_contract()
+    observed: dict[str, Any] = {}
+    rendered: dict[str, Any] = {"services": {}}
+    monkeypatch.delenv("SANDBOX_NETWORK", raising=False)
+    monkeypatch.setenv("PHASE10_ROOTLESS_DOCKER_SOCKET", ROOTLESS_SOCKET)
+
+    def fake_render(
+        selected_mode: str,
+        *,
+        dev: bool,
+        env: dict[str, str] | None,
+    ) -> dict[str, Any]:
+        observed["render"] = (selected_mode, dev, env)
+        return rendered
+
+    def fake_assert(config: dict[str, Any], **kwargs: Any) -> None:
+        observed["assert"] = (config, kwargs)
+
+    monkeypatch.setattr(contract, "render_compose", fake_render)
+    monkeypatch.setattr(contract, "assert_rendered_contract", fake_assert)
+
+    assert contract.main(["--mode", "rootless"]) == 0
+    assert observed["render"] == (
+        "rootless",
+        False,
+        {
+            "PHASE10_ROOTLESS_DOCKER_SOCKET": ROOTLESS_SOCKET,
+            "SANDBOX_NETWORK": DEFAULT_SANDBOX_NETWORK,
+        },
+    )
+    assert observed["assert"][1]["expected_sandbox_network"] == DEFAULT_SANDBOX_NETWORK
 
 
 def test_environment_example_has_no_active_app_env_or_mode_authority() -> None:
@@ -857,3 +1294,55 @@ def test_host_inspection_rejects_every_job_authority_mutation(
             network_policy="none",
             sandbox_network="jhin_sandbox",
         )
+
+
+async def test_live_job_cleanup_attempts_wait_and_removal_after_cancel_raises() -> None:
+    from tests.integration.test_phase6_security import cleanup_live_job
+
+    events: list[str] = []
+
+    async def cancel() -> SimpleNamespace:
+        events.append("cancel")
+        raise RuntimeError("cancel transport failed")
+
+    async def wait_terminal() -> dict[str, Any]:
+        events.append("wait")
+        return {"status": "cancelled"}
+
+    async def remove_container() -> None:
+        events.append("remove")
+
+    with pytest.raises(ExceptionGroup, match=r"cleanup"):
+        await cleanup_live_job(
+            cancel=cancel,
+            wait_terminal=wait_terminal,
+            remove_container=remove_container,
+        )
+
+    assert events == ["cancel", "wait", "remove"]
+
+
+async def test_live_job_cleanup_asserts_cancel_result_only_after_removal() -> None:
+    from tests.integration.test_phase6_security import cleanup_live_job
+
+    events: list[str] = []
+
+    async def cancel() -> SimpleNamespace:
+        events.append("cancel")
+        return SimpleNamespace(status_code=503, text="cancel denied")
+
+    async def wait_terminal() -> dict[str, Any]:
+        events.append("wait")
+        return {"status": "running"}
+
+    async def remove_container() -> None:
+        events.append("remove")
+
+    with pytest.raises(AssertionError, match=r"cancel: 503"):
+        await cleanup_live_job(
+            cancel=cancel,
+            wait_terminal=wait_terminal,
+            remove_container=remove_container,
+        )
+
+    assert events == ["cancel", "wait", "remove"]
