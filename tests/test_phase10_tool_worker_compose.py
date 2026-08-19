@@ -1153,32 +1153,46 @@ def test_environment_example_has_no_active_app_env_or_mode_authority() -> None:
         (
             "rootful",
             {
-                "api",
-                "web",
-                "workflow-worker",
                 "agent-worker",
-                "tool-worker",
-                "sandbox-runner",
+                "api",
                 "event-worker",
+                "fake-github",
+                "fake-linear",
+                "fake-provider",
+                "fake-supabase",
+                "fake-supabase-db",
+                "fake-vercel",
                 "postgres",
                 "nats",
+                "sandbox-runner",
                 "temporal",
+                "temporal-ui",
+                "tool-worker",
+                "web",
+                "workflow-worker",
             },
         ),
         (
             "rootless",
             {
-                "api",
-                "web",
-                "workflow-worker",
                 "agent-worker",
-                "tool-worker",
-                "sandbox-runner",
-                "rootless-docker-transport",
+                "api",
                 "event-worker",
+                "fake-github",
+                "fake-linear",
+                "fake-provider",
+                "fake-supabase",
+                "fake-supabase-db",
+                "fake-vercel",
                 "postgres",
                 "nats",
+                "rootless-docker-transport",
+                "sandbox-runner",
                 "temporal",
+                "temporal-ui",
+                "tool-worker",
+                "web",
+                "workflow-worker",
             },
         ),
     ],
@@ -1198,52 +1212,60 @@ def test_integration_compose_command_uses_base_dev_and_one_mode_overlay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from tests.integration import conftest as harness
+    from tests.integration.phase10_upgrade_harness import (
+        ComposeAuthority,
+        write_authority_lease,
+    )
 
     observed: dict[str, Any] = {}
 
-    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def fake_run(command: tuple[str, ...], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         observed["command"] = command
         observed["kwargs"] = kwargs
         return subprocess.CompletedProcess(command, 0, stdout="api\n", stderr="")
 
-    monkeypatch.setenv("PHASE10_SOCKET_MODE", mode)
-    monkeypatch.setenv("JHIN_TEST_COMPOSE_PROJECT", "jhin-phase10-contract")
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    authority = ComposeAuthority.create(
+        repo=ROOT,
+        mode=mode,
+        socket_path=Path(
+            "/var/run/docker.sock" if mode == "rootful" else "/run/user/10001/docker.sock"
+        ),
+        socket_gid=10001 if mode == "rootful" else None,
+        token="a10b20c30d40",
+        source_environment={"PATH": os.environ.get("PATH", "")},
+    )
+    lease = Path("/tmp") / f"jhin-p10-contract-{os.getpid()}-{mode}.json"
+    lease.unlink(missing_ok=True)
+    try:
+        write_authority_lease(authority, lease)
+        monkeypatch.setenv("PHASE10_SOCKET_MODE", mode)
+        monkeypatch.setenv("JHIN_PHASE10_AUTHORITY_LEASE", str(lease))
+        monkeypatch.setattr(harness, "run_command", fake_run)
 
-    harness.compose("ps", "--all", timeout=7.0)
+        harness.compose("ps", "--all", timeout=7.0)
 
-    assert observed == {
-        "command": [
-            "docker",
-            "compose",
-            "-p",
-            "jhin-phase10-contract",
-            "-f",
-            "compose.yaml",
-            "-f",
-            "compose.dev.yaml",
-            "-f",
-            f"compose.{mode}.yaml",
-            "ps",
-            "--all",
-        ],
-        "kwargs": {
-            "cwd": harness.REPO_ROOT,
-            "capture_output": True,
-            "text": True,
-            "timeout": 7.0,
-            "check": True,
-        },
-    }
+        assert observed == {
+            "command": authority.compose_command("ps", "--all"),
+            "kwargs": {
+                "env": authority.environment,
+                "cwd": harness.REPO_ROOT,
+                "timeout": 7.0,
+                "check": True,
+            },
+        }
+    finally:
+        lease.unlink(missing_ok=True)
+        authority.remove_runtime_paths()
 
 
-def test_integration_compose_requires_an_explicit_socket_mode(
+def test_integration_compose_requires_a_lease_and_explicit_socket_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from tests.integration import conftest as harness
 
+    monkeypatch.delenv("JHIN_PHASE10_AUTHORITY_LEASE", raising=False)
     monkeypatch.delenv("PHASE10_SOCKET_MODE", raising=False)
-    with pytest.raises(ValueError, match="PHASE10_SOCKET_MODE"):
+    with pytest.raises(RuntimeError, match="authority lease"):
         harness.compose("ps")
     with pytest.raises(ValueError, match="PHASE10_SOCKET_MODE"):
         harness.selected_compose_mode()
