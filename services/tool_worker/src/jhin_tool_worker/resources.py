@@ -31,30 +31,51 @@ class ToolWorkerResources:
     @classmethod
     async def create(cls, settings: ToolWorkerSettings) -> ToolWorkerResources:
         engine = create_engine(settings.database_url)
-        session_factory = create_session_factory(engine)
-        nats_connection = await nats.connect(settings.nats_url)
-        jetstream = nats_connection.jetstream()
-        await ensure_streams(jetstream)
-        resources = cls(
-            engine=engine,
-            session_factory=session_factory,
-            nats_connection=nats_connection,
-            publisher=EventPublisher(jetstream),
-            crypto=SecretCrypto(load_master_key()),
-            test_barrier=CrashBarrier(
-                CrashBarrierConfig(
-                    root=settings.test_crash_barrier_dir,
-                    selected=settings.test_crash_barrier_name,
-                    match_identity=settings.test_crash_barrier_match,
+        nats_connection: NatsClient | None = None
+        try:
+            session_factory = create_session_factory(engine)
+            nats_connection = await nats.connect(settings.nats_url)
+            jetstream = nats_connection.jetstream()
+            await ensure_streams(jetstream)
+            resources = cls(
+                engine=engine,
+                session_factory=session_factory,
+                nats_connection=nats_connection,
+                publisher=EventPublisher(jetstream),
+                crypto=SecretCrypto(load_master_key()),
+                test_barrier=CrashBarrier(
+                    CrashBarrierConfig(
+                        root=settings.test_crash_barrier_dir,
+                        selected=settings.test_crash_barrier_name,
+                        match_identity=settings.test_crash_barrier_match,
+                    )
+                ),
+            )
+        except BaseException:
+            if nats_connection is not None:
+                try:
+                    await nats_connection.drain()
+                except Exception as error:
+                    logger.warning(
+                        "Partial NATS cleanup failed (%s)",
+                        type(error).__name__[:100],
+                    )
+            try:
+                await engine.dispose()
+            except Exception as error:
+                logger.warning(
+                    "Partial database cleanup failed (%s)",
+                    type(error).__name__[:100],
                 )
-            ),
-        )
+            raise
         logger.info("tool worker resources ready")
         return resources
 
     async def close(self) -> None:
-        await self.nats_connection.drain()
-        await self.engine.dispose()
+        try:
+            await self.nats_connection.drain()
+        finally:
+            await self.engine.dispose()
 
 
 __all__ = ["ToolWorkerResources"]

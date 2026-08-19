@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
+import asyncpg
 import pytest
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from temporalio.exceptions import ApplicationError
 
+from jhin_db import create_engine as create_database_engine
+from jhin_db import create_session_factory
 from jhin_db.base import Base
 from jhin_db.models import (
     Agent,
@@ -130,10 +135,13 @@ class ApprovalWorld:
             await session.commit()
 
     async def approve_in_database(self, approval_id: str) -> None:
+        await self.decide_in_database(approval_id, ApprovalStatus.APPROVED.value)
+
+    async def decide_in_database(self, approval_id: str, decision: str) -> None:
         async with self.sessions() as session:
             approval = await session.get(Approval, UUID(approval_id))
             assert approval is not None
-            approval.status = ApprovalStatus.APPROVED.value
+            approval.status = decision
             approval.decided_at = datetime.now(UTC)
             await session.commit()
 
@@ -145,11 +153,22 @@ class ApprovalWorld:
             await session.commit()
 
     async def park_and_approve(self, *, with_connection: bool = False) -> BoundToolResult:
+        return await self.park_and_decide(
+            decision=ApprovalStatus.APPROVED.value,
+            with_connection=with_connection,
+        )
+
+    async def park_and_decide(
+        self,
+        *,
+        decision: str,
+        with_connection: bool = False,
+    ) -> BoundToolResult:
         await self.seed_manifest(with_connection=with_connection)
         parked = await self.activities.execute_bound_tool_activity(self.execute_params())
         assert parked.status == "needs_approval"
         assert parked.approval_id is not None
-        await self.approve_in_database(parked.approval_id)
+        await self.decide_in_database(parked.approval_id, decision)
         return parked
 
     async def seed_executing_claim(self, tool_call_id: str) -> None:
@@ -159,13 +178,24 @@ class ApprovalWorld:
             row.status = ToolCallStatus.EXECUTING.value
             await session.commit()
 
+    async def corrupt_run_owner(self) -> None:
+        async with self.sessions() as session:
+            replacement = Agent(
+                workspace_id=self.workspace.id,
+                name="Replacement owner",
+                slug=f"replacement-{new_uuid7().hex[:8]}",
+            )
+            session.add(replacement)
+            await session.flush()
+            run = await session.get(AgentRun, self.run.id)
+            assert run is not None
+            run.agent_id = replacement.id
+            await session.commit()
 
-@pytest.fixture
-async def world() -> AsyncIterator[ApprovalWorld]:
-    engine = create_async_engine("sqlite+aiosqlite://")
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-    sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+async def _build_world(
+    sessions: async_sessionmaker[AsyncSession],
+) -> ApprovalWorld:
     effect = _Effect()
 
     async def execute_effect(_ctx: ToolExecutionContext, _payload: BaseModel) -> BaseModel:
@@ -242,7 +272,7 @@ async def world() -> AsyncIterator[ApprovalWorld]:
         )
         await session.commit()
 
-    yield ApprovalWorld(
+    return ApprovalWorld(
         activities=ToolActivities(_Resources(sessions), catalog),  # type: ignore[arg-type]
         sessions=sessions,
         effect=effect,
@@ -252,7 +282,49 @@ async def world() -> AsyncIterator[ApprovalWorld]:
         run=run,
         connection=connection,
     )
+
+
+@pytest.fixture
+async def world() -> AsyncIterator[ApprovalWorld]:
+    engine = create_async_engine("sqlite+aiosqlite://")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    yield await _build_world(sessions)
     await engine.dispose()
+
+
+@pytest.fixture
+async def postgres_world() -> AsyncIterator[ApprovalWorld]:
+    host = os.environ.get("JHIN_POSTGRES_HOST", "127.0.0.1")
+    port = int(os.environ.get("POSTGRES_DEV_PORT", "55432"))
+    database_name = f"jhin_tool_approval_{uuid4().hex}"
+    admin_dsn = f"postgresql://jhin:jhin@{host}:{port}/postgres"
+    database_url = f"postgresql+asyncpg://jhin:jhin@{host}:{port}/{database_name}"
+    admin = await asyncpg.connect(admin_dsn)
+    try:
+        await admin.execute(f'CREATE DATABASE "{database_name}"')
+    finally:
+        await admin.close()
+
+    engine = create_database_engine(database_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        sessions = create_session_factory(engine)
+        yield await _build_world(sessions)
+    finally:
+        await engine.dispose()
+        admin = await asyncpg.connect(admin_dsn)
+        try:
+            await admin.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datname = $1 AND pid <> pg_backend_pid()",
+                database_name,
+            )
+            await admin.execute(f'DROP DATABASE IF EXISTS "{database_name}"')
+        finally:
+            await admin.close()
 
 
 async def test_approval_resolution_reloads_database_authority_and_identity(
@@ -287,4 +359,67 @@ async def test_ambiguous_approved_effect_returns_durable_unknown(world: Approval
         approval_id=parked.approval_id,
         stop_reason="execution_unknown",
     )
+    assert world.effect.count == 0
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("decision", "expected_status", "expected_persisted_status", "expected_effect_count"),
+    [
+        (
+            ApprovalStatus.APPROVED.value,
+            "executed",
+            ToolCallStatus.COMPLETED.value,
+            1,
+        ),
+        (
+            ApprovalStatus.REJECTED.value,
+            "rejected",
+            ToolCallStatus.REJECTED.value,
+            0,
+        ),
+    ],
+)
+async def test_postgres_resolution_survives_gateway_rollback_and_replays_without_effect(
+    postgres_world: ApprovalWorld,
+    decision: str,
+    expected_status: str,
+    expected_persisted_status: str,
+    expected_effect_count: int,
+) -> None:
+    world = postgres_world
+    parked = await world.park_and_decide(decision=decision)
+    assert parked.approval_id is not None
+
+    first = await world.activities.resolve_bound_tool_approval_activity(
+        world.approval_params(parked.approval_id)
+    )
+    replay = await world.activities.resolve_bound_tool_approval_activity(
+        world.approval_params(parked.approval_id)
+    )
+
+    assert first == replay == BoundToolResult(
+        tool_call_id=parked.tool_call_id,
+        status=expected_status,
+        approval_id=parked.approval_id,
+    )
+    assert world.effect.count == expected_effect_count
+    async with world.sessions() as session:
+        tool_call = await session.get(ToolCall, UUID(parked.tool_call_id))
+        assert tool_call is not None
+        assert tool_call.status == expected_persisted_status
+
+
+async def test_approval_rejects_run_owner_drift_before_effect(world: ApprovalWorld) -> None:
+    parked = await world.park_and_approve()
+    assert parked.approval_id is not None
+    await world.corrupt_run_owner()
+
+    with pytest.raises(ApplicationError) as error:
+        await world.activities.resolve_bound_tool_approval_activity(
+            world.approval_params(parked.approval_id)
+        )
+
+    assert error.value.type == "approval_context_not_found"
+    assert error.value.non_retryable is True
     assert world.effect.count == 0

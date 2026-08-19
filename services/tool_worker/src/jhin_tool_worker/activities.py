@@ -383,6 +383,7 @@ class ToolActivities:
                         ToolCall.run_id == run_id,
                         ToolCall.agent_id == agent_id,
                         AgentRun.task_id == task_id,
+                        AgentRun.agent_id == agent_id,
                     )
                     .limit(2)
                 )
@@ -393,6 +394,7 @@ class ToolActivities:
                     error_type="approval_context_not_found",
                 )
             approval, tool_call, run, agent = durable
+            expected_tool_call_id = tool_call.id
             await _validate_approval_manifest_binding(
                 session,
                 workspace_id=workspace_id,
@@ -433,7 +435,7 @@ class ToolActivities:
                     error_type="approval_state_invalid",
                 ) from error
             await session.commit()
-            if outcome.tool_call_id != tool_call.id:
+            if outcome.tool_call_id != expected_tool_call_id:
                 raise _non_retryable(
                     "approval tool identity changed during resolution",
                     error_type="tool_invocation_mismatch",

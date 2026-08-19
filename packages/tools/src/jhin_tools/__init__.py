@@ -7,8 +7,8 @@ from jhin_tools.builtin import (
     ToolDefinitionCatalog,
     ToolExecutionContext,
     allowed_tool_definitions,
-    builtin_tool_definitions,
     build_builtin_catalog,
+    builtin_tool_definitions,
 )
 from jhin_tools.errors import ToolExecutionError
 from jhin_tools.gateway import (
@@ -70,8 +70,8 @@ __all__ = [
     "ToolExecutionError",
     "ToolGateway",
     "allowed_tool_definitions",
-    "builtin_tool_definitions",
     "build_builtin_catalog",
+    "builtin_tool_definitions",
     "release_barrier",
     "sanitize_payload",
     "stable_tool_invocation_id",

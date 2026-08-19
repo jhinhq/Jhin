@@ -63,24 +63,24 @@ async def main() -> None:
     configure_current_logging(settings.log_level)
     client = await connect_with_retry(settings)
     resources = await resources_with_retry(settings)
-    catalog = build_default_catalog()
-    activities = ToolActivities(resources, catalog)
-
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for handled_signal in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(handled_signal, stop.set)
-
-    worker = Worker(
-        client,
-        task_queue=TOOL_TASK_QUEUE,
-        activities=[
-            activities.resolve_advertised_tools_activity,
-            activities.execute_bound_tool_activity,
-            activities.resolve_bound_tool_approval_activity,
-        ],
-    )
     try:
+        catalog = build_default_catalog()
+        activities = ToolActivities(resources, catalog)
+
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for handled_signal in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(handled_signal, stop.set)
+
+        worker = Worker(
+            client,
+            task_queue=TOOL_TASK_QUEUE,
+            activities=[
+                activities.resolve_advertised_tools_activity,
+                activities.execute_bound_tool_activity,
+                activities.resolve_bound_tool_approval_activity,
+            ],
+        )
         async with worker:
             logger.info("Tool worker started on task queue %s", TOOL_TASK_QUEUE)
             await stop.wait()

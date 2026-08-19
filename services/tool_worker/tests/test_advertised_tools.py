@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
@@ -9,11 +10,14 @@ import pytest
 from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+import jhin_tool_worker.main as main_module
+import jhin_tool_worker.resources as resources_module
 from jhin_db.base import Base
 from jhin_db.models import Agent, AgentCapabilityGrant, Workspace
 from jhin_domain import new_uuid7
 from jhin_policy import RiskLevel, ToolDefinition
 from jhin_tool_worker.activities import ToolActivities
+from jhin_tool_worker.resources import ToolWorkerResources
 from jhin_tool_worker.settings import ToolWorkerSettings
 from jhin_tools import TOOL_AFTER_CLAIM, ToolCatalog, ToolExecutionContext
 from jhin_workflows.agent_task.shared import ResolveAdvertisedToolsInput
@@ -49,6 +53,36 @@ class _Resources:
     session_factory: async_sessionmaker[AsyncSession]
     crypto: None = None
     test_barrier: None = None
+
+
+@dataclass
+class _DisposableEngine:
+    dispose_count: int = 0
+
+    async def dispose(self) -> None:
+        self.dispose_count += 1
+
+
+@dataclass
+class _DrainableNats:
+    drain_count: int = 0
+    fail_drain: bool = False
+
+    def jetstream(self) -> object:
+        return object()
+
+    async def drain(self) -> None:
+        self.drain_count += 1
+        if self.fail_drain:
+            raise RuntimeError("drain failed")
+
+
+@dataclass
+class _ClosableResources:
+    close_count: int = 0
+
+    async def close(self) -> None:
+        self.close_count += 1
 
 
 @pytest.fixture
@@ -127,3 +161,98 @@ def test_tool_worker_settings_ignore_unrelated_environment(
 
     assert settings.app_env == "development"
     assert marker not in repr(settings)
+
+
+@pytest.mark.parametrize("failure_stage", ["connect", "ensure_streams", "master_key"])
+async def test_partial_resource_creation_closes_every_acquired_resource(
+    failure_stage: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _DisposableEngine()
+    nats_connection = _DrainableNats()
+
+    monkeypatch.setattr(resources_module, "create_engine", lambda _url: engine)
+    monkeypatch.setattr(resources_module, "create_session_factory", lambda _engine: object())
+
+    async def connect(_url: str) -> _DrainableNats:
+        if failure_stage == "connect":
+            raise RuntimeError("connect failed")
+        return nats_connection
+
+    async def ensure_streams(_jetstream: object) -> None:
+        if failure_stage == "ensure_streams":
+            raise RuntimeError("ensure streams failed")
+
+    def load_master_key() -> bytes:
+        if failure_stage == "master_key":
+            raise RuntimeError("master key failed")
+        return b"0" * 32
+
+    monkeypatch.setattr(resources_module.nats, "connect", connect)
+    monkeypatch.setattr(resources_module, "ensure_streams", ensure_streams)
+    monkeypatch.setattr(resources_module, "load_master_key", load_master_key)
+
+    with pytest.raises(RuntimeError, match=failure_stage.replace("_", " ")):
+        await ToolWorkerResources.create(ToolWorkerSettings())
+
+    assert engine.dispose_count == 1
+    assert nats_connection.drain_count == (0 if failure_stage == "connect" else 1)
+
+
+async def test_resource_close_disposes_engine_when_nats_drain_fails() -> None:
+    engine = _DisposableEngine()
+    nats_connection = _DrainableNats(fail_drain=True)
+    resources = ToolWorkerResources(
+        engine=engine,  # type: ignore[arg-type]
+        session_factory=object(),  # type: ignore[arg-type]
+        nats_connection=nats_connection,  # type: ignore[arg-type]
+        publisher=object(),  # type: ignore[arg-type]
+        crypto=object(),  # type: ignore[arg-type]
+        test_barrier=object(),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(RuntimeError, match="drain failed"):
+        await resources.close()
+
+    assert nats_connection.drain_count == 1
+    assert engine.dispose_count == 1
+
+
+@pytest.mark.parametrize("failure_stage", ["catalog", "worker"])
+async def test_main_closes_resources_after_post_acquisition_construction_failure(
+    failure_stage: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resources = _ClosableResources()
+    settings = ToolWorkerSettings()
+
+    async def connect_with_retry(_settings: ToolWorkerSettings) -> object:
+        return object()
+
+    async def resources_with_retry(_settings: ToolWorkerSettings) -> _ClosableResources:
+        return resources
+
+    def build_catalog() -> ToolCatalog:
+        if failure_stage == "catalog":
+            raise RuntimeError("catalog failed")
+        return ToolCatalog()
+
+    def construct_worker(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("worker failed")
+
+    class _SignalLoop:
+        def add_signal_handler(self, *_args: object) -> None:
+            return None
+
+    monkeypatch.setattr(main_module, "ToolWorkerSettings", lambda: settings)
+    monkeypatch.setattr(main_module, "configure_current_logging", lambda _level: None)
+    monkeypatch.setattr(main_module, "connect_with_retry", connect_with_retry)
+    monkeypatch.setattr(main_module, "resources_with_retry", resources_with_retry)
+    monkeypatch.setattr(main_module, "build_default_catalog", build_catalog)
+    monkeypatch.setattr(main_module, "Worker", construct_worker)
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: _SignalLoop())
+
+    with pytest.raises(RuntimeError, match=f"{failure_stage} failed"):
+        await main_module.main()
+
+    assert resources.close_count == 1
