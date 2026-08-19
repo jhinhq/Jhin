@@ -606,18 +606,27 @@ def run_owned_command(
     input_bytes: bytes | None = None,
 ) -> subprocess.CompletedProcess[Any]:
     """Run one external command in an owned session and exhaust its descendants."""
-    process = subprocess.Popen(
-        command,
-        cwd=cwd,
-        env=env,
-        stdin=subprocess.PIPE if input_bytes is not None else None,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=input_bytes is None,
-        start_new_session=True,
-    )
-    process_group = process.pid
+    catchable_signals = {signal.SIGINT, signal.SIGTERM}
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, catchable_signals)
     try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.PIPE if input_bytes is not None else None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=input_bytes is None,
+            start_new_session=True,
+        )
+    except BaseException:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        raise
+    process_group = process.pid
+    mask_restored = False
+    try:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        mask_restored = True
         stdout, stderr = process.communicate(input=input_bytes, timeout=timeout)
     except subprocess.TimeoutExpired as error:
         try:
@@ -642,6 +651,9 @@ def run_owned_command(
                 [error, teardown_error],
             ) from error
         raise
+    finally:
+        if not mask_restored:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
     if _owned_process_group_exists(process_group):
         _terminate_owned_process_group(process, process_group=process_group)
@@ -4053,30 +4065,88 @@ def _persistent_up(
     *,
     repo: Path,
     mode: str,
-    runner: CommandRunner = run_command,
+    runner: CommandRunner = run_owned_command,
 ) -> ComposeAuthority:
     lease = lease_path_for(repo)
     if lease.exists() or lease.is_symlink():
         raise FileExistsError(f"persistent Phase 10 lease already exists: {lease}")
     authority = select_live_authority(repo=repo, mode=mode)
+    previous_handlers: dict[int, Any] = {}
+    interrupted_signum: int | None = None
+
+    def handle_signal(signum: int, frame: Any) -> None:
+        nonlocal interrupted_signum
+        del frame
+        if interrupted_signum is not None:
+            return
+        interrupted_signum = signum
+        for caught_signal in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(caught_signal, signal.SIG_IGN)
+        raise _LifecycleSignal(signum)
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        try:
+            previous_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, handle_signal)
+        except ValueError:
+            previous_handlers.clear()
+            break
+
+    primary_error: BaseException | None = None
+    cleanup_errors: list[BaseException] = []
     try:
         ports = authority.start_stack(runner=runner)
         authority = authority.with_published_ports(ports)
         write_authority_lease(authority, lease)
-        return authority
-    except BaseException as primary:
-        cleanup_error: BaseException | None = None
-        try:
-            authority.down_and_cleanup(runner=runner)
-        except BaseException as error:
-            cleanup_error = error
-        lease.unlink(missing_ok=True)
-        if cleanup_error is not None:
-            raise BaseExceptionGroup(
-                "persistent Phase 10 start and cleanup both failed",
-                [primary, cleanup_error],
-            ) from primary
-        raise
+    except BaseException as error:
+        primary_error = error
+    finally:
+        for signal_number in previous_handlers:
+            signal.signal(signal_number, signal.SIG_IGN)
+        if primary_error is not None and not _contains_owned_process_group_survivor(primary_error):
+            latched_group_error: BaseException | None = None
+
+            def fail_closed_cleanup_runner(*args: Any, **kwargs: Any) -> Any:
+                nonlocal latched_group_error
+                if latched_group_error is not None:
+                    raise latched_group_error
+                try:
+                    return runner(*args, **kwargs)
+                except BaseException as cleanup_runner_error:
+                    if _contains_owned_process_group_survivor(cleanup_runner_error):
+                        latched_group_error = cleanup_runner_error
+                    raise
+
+            down_error: BaseException | None = None
+            try:
+                authority.down_and_cleanup(runner=fail_closed_cleanup_runner)
+            except BaseException as error:
+                down_error = error
+                cleanup_errors.append(error)
+            if latched_group_error is not None and (
+                down_error is None or not _contains_owned_process_group_survivor(down_error)
+            ):
+                cleanup_errors.append(latched_group_error)
+            if latched_group_error is None:
+                try:
+                    lease.unlink(missing_ok=True)
+                except BaseException as error:
+                    cleanup_errors.append(error)
+        for signal_number, previous in previous_handlers.items():
+            signal.signal(signal_number, previous)
+
+    if isinstance(primary_error, _LifecycleSignal):
+        primary_error = SystemExit(128 + primary_error.signum)
+    if primary_error is not None and cleanup_errors:
+        raise BaseExceptionGroup(
+            "persistent Phase 10 start and cleanup both failed",
+            [primary_error, *cleanup_errors],
+        )
+    if primary_error is not None:
+        raise primary_error
+    if cleanup_errors:
+        raise BaseExceptionGroup("persistent Phase 10 startup cleanup failed", cleanup_errors)
+    return authority
 
 
 def _load_persistent(repo: Path) -> tuple[Path, ComposeAuthority]:
