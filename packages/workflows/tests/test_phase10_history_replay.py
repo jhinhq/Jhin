@@ -58,20 +58,18 @@ EXPECTED_OLD_ACTIVITIES = {
     "engineering-sync.json": {"prepare_triggered_task", "sync_external"},
 }
 
-WORKFLOW_TYPES = {
-    "agent-tool-step.json": AgentTaskWorkflow,
-    "agent-post-bind-pre-effect.json": AgentTaskWorkflow,
-    "agent-parked-approval.json": AgentTaskWorkflow,
-    "agent-finalization.json": AgentTaskWorkflow,
-    "triggered-sync.json": TriggeredTaskWorkflow,
-    "engineering-sync.json": EngineeringTicketWorkflow,
-}
-
 
 def _copy_fixture_root(tmp_path: Path) -> Path:
     destination = tmp_path / "phase9_temporal"
     shutil.copytree(FIXTURE_ROOT, destination)
     return destination
+
+
+def _fixture_history(fixture: Path, *, workflow_id: str) -> WorkflowHistory:
+    return WorkflowHistory.from_json(
+        workflow_id,
+        fixture.read_text(encoding="utf-8"),
+    )
 
 
 def _committed_evidence(root: Path) -> dict[str, Any]:
@@ -174,9 +172,12 @@ def test_tool_worker_contracts_are_dependency_light_and_preserve_caller_fields()
     assert CommitAgentStepInput("workspace", "task", "run", "agent", 2).gateway_tool_call_ids == []
     approval = ResolveBoundToolApprovalInput("workspace", "task", "run", "agent", "approval")
     assert approval.approval_id == "approval"
-    assert CommitApprovalProjectionInput(
-        "workspace", "task", "run", "agent", "approval", "tool-call"
-    ).tool_call_id == "tool-call"
+    assert (
+        CommitApprovalProjectionInput(
+            "workspace", "task", "run", "agent", "approval", "tool-call"
+        ).tool_call_id
+        == "tool-call"
+    )
     assert CleanupRunWorkspaceInput("workspace", "run").run_id == "run"
     assert CleanupRunWorkspaceResult(deleted=True).deleted is True
 
@@ -184,9 +185,7 @@ def test_tool_worker_contracts_are_dependency_light_and_preserve_caller_fields()
 def test_frozen_histories_have_only_phase9_commands() -> None:
     for filename, names in EXPECTED_OLD_ACTIVITIES.items():
         text = (FIXTURE_ROOT / filename).read_text(encoding="utf-8")
-        recorded = set(
-            re.findall(r'"activityType"\s*:\s*\{\s*"name"\s*:\s*"([^"]+)"', text)
-        )
+        recorded = set(re.findall(r'"activityType"\s*:\s*\{\s*"name"\s*:\s*"([^"]+)"', text))
         assert names.issubset(recorded)
         assert "phase10-tool-worker-boundary-v1" not in text
 
@@ -209,9 +208,7 @@ def test_committed_evidence_rejects_mutated_fixture(tmp_path: Path) -> None:
 
 def test_committed_evidence_rejects_replaced_fixture(tmp_path: Path) -> None:
     root = _copy_fixture_root(tmp_path)
-    (root / "agent-tool-step.json").write_bytes(
-        (root / "agent-finalization.json").read_bytes()
-    )
+    (root / "agent-tool-step.json").write_bytes((root / "agent-finalization.json").read_bytes())
 
     with pytest.raises(ValueError):
         assert_frozen_history_evidence(root)
@@ -241,13 +238,12 @@ def test_committed_evidence_rejects_mutated_sdk_metadata(tmp_path: Path) -> None
         assert_frozen_history_evidence(root)
 
 
-@pytest.mark.parametrize(("filename", "workflow_type"), WORKFLOW_TYPES.items())
-async def test_frozen_phase9_history_replays(filename: str, workflow_type: type) -> None:
-    workflow_id = f"phase9-replay-{filename.removesuffix('.json')}"
-    history = WorkflowHistory.from_json(
-        workflow_id,
-        (FIXTURE_ROOT / filename).read_text(encoding="utf-8"),
-    )
+@pytest.mark.parametrize("fixture", sorted(FIXTURE_ROOT.glob("*.json")), ids=lambda p: p.name)
+async def test_phase9_history_replays_with_phase10_workflows(fixture: Path) -> None:
+    workflow_id = f"phase9-replay-{fixture.stem}"
+    history = _fixture_history(fixture, workflow_id=workflow_id)
 
     assert history.workflow_id == workflow_id
-    await Replayer(workflows=[workflow_type]).replay_workflow(history)
+    await Replayer(
+        workflows=[AgentTaskWorkflow, TriggeredTaskWorkflow, EngineeringTicketWorkflow]
+    ).replay_workflow(history)
