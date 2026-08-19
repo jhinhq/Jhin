@@ -318,6 +318,56 @@ def test_phase9_source_ref_is_exact_committed_ancestor() -> None:
     assert source_ref == "6318781b57692bf39f37cd428d73de115d7458e2"
 
 
+def test_phase9_source_ref_validation_uses_injected_owned_runner() -> None:
+    repo = Path(__file__).resolve().parents[2]
+    environment = {"PATH": "/usr/bin", "BOUNDARY": "owned"}
+    calls: list[tuple[tuple[str, ...], dict[str, Any]]] = []
+
+    def runner(command: tuple[str, ...], **kwargs: Any) -> Any:
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    source_ref = read_phase9_source_ref(
+        repo,
+        runner=runner,
+        environment=environment,
+    )
+    assert source_ref == "6318781b57692bf39f37cd428d73de115d7458e2"
+    assert calls == [
+        (
+            (
+                "git",
+                "cat-file",
+                "-e",
+                "6318781b57692bf39f37cd428d73de115d7458e2^{commit}",
+            ),
+            {
+                "env": environment,
+                "cwd": repo,
+                "timeout": 30.0,
+                "check": False,
+                "input_bytes": None,
+            },
+        ),
+        (
+            (
+                "git",
+                "merge-base",
+                "--is-ancestor",
+                "6318781b57692bf39f37cd428d73de115d7458e2",
+                "HEAD",
+            ),
+            {
+                "env": environment,
+                "cwd": repo,
+                "timeout": 30.0,
+                "check": False,
+                "input_bytes": None,
+            },
+        ),
+    ]
+
+
 def test_frozen_phase9_build_streams_exact_archive_to_selected_daemon() -> None:
     authority = _authority_for_recorder()
     source_ref = "6318781b57692bf39f37cd428d73de115d7458e2"
@@ -349,12 +399,11 @@ def test_frozen_phase9_archive_and_selected_daemon_build_are_bounded(
     source_ref = "6318781b57692bf39f37cd428d73de115d7458e2"
     image_id = "sha256:" + "b" * 64
     archive_bytes = b"phase9-tar-stream"
-    archive_calls: list[dict[str, Any]] = []
     runner_calls: list[tuple[tuple[str, ...], float, bytes | None]] = []
 
-    def archive_run(command: list[str] | tuple[str, ...], **kwargs: Any) -> Any:
-        archive_calls.append(kwargs)
-        return subprocess.CompletedProcess(command, 0, archive_bytes, b"")
+    def forbidden_direct_subprocess(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise AssertionError("frozen archive escaped the injected runner")
 
     def bounded_runner(
         command: tuple[str, ...],
@@ -368,44 +417,33 @@ def test_frozen_phase9_archive_and_selected_daemon_build_are_bounded(
         del check
         assert env == authority.environment and cwd == authority.repo
         runner_calls.append((command, timeout, input_bytes))
-        stdout = image_id.encode() + b"\n" if "inspect" in command else b""
+        if command == authority.phase9_archive_command(source_ref):
+            stdout = archive_bytes
+        else:
+            stdout = image_id.encode() + b"\n" if "inspect" in command else b""
         return subprocess.CompletedProcess(command, 0, stdout, b"")
 
-    monkeypatch.setattr(subprocess, "run", archive_run)
+    monkeypatch.setattr(subprocess, "run", forbidden_direct_subprocess)
     try:
         frozen = authority.build_phase9_agent_image(source_ref, runner=bounded_runner)
         assert frozen.image_id == image_id
-        assert archive_calls == [
-            {
-                "cwd": authority.repo,
-                "env": authority.environment,
-                "check": False,
-                "capture_output": True,
-                "timeout": 120.0,
-            }
-        ]
+        assert runner_calls[0] == (
+            authority.phase9_archive_command(source_ref),
+            120.0,
+            b"",
+        )
         build_call = next(call for call in runner_calls if "build" in call[0])
         assert build_call[1:] == (1200.0, archive_bytes)
     finally:
         authority.remove_runtime_paths()
 
 
-def test_frozen_phase9_build_timeout_attempts_only_exact_tag_cleanup(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_frozen_phase9_build_timeout_attempts_only_exact_tag_cleanup() -> None:
     authority = _authority_for_recorder()
     source_ref = "6318781b57692bf39f37cd428d73de115d7458e2"
     tag = authority.phase9_image_tag(source_ref)
     calls: list[tuple[str, ...]] = []
     removed = False
-
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda command, **kwargs: subprocess.CompletedProcess(
-            command, 0, b"phase9-tar-stream", b""
-        ),
-    )
 
     def timing_out_runner(
         command: tuple[str, ...],
@@ -413,6 +451,8 @@ def test_frozen_phase9_build_timeout_attempts_only_exact_tag_cleanup(
     ) -> subprocess.CompletedProcess[bytes]:
         nonlocal removed
         calls.append(command)
+        if command == authority.phase9_archive_command(source_ref):
+            return subprocess.CompletedProcess(command, 0, b"phase9-tar-stream", b"")
         if "build" in command:
             raise subprocess.TimeoutExpired(command, kwargs["timeout"])
         if command[-3:] == ("image", "inspect", tag):
@@ -446,13 +486,6 @@ def test_frozen_phase9_build_socket_mismatch_makes_zero_daemon_calls_and_reports
         ),
     )
     monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda command, **kwargs: subprocess.CompletedProcess(
-            command, 0, b"phase9-tar-stream", b""
-        ),
-    )
-    monkeypatch.setattr(
         SocketMetadata,
         "capture",
         classmethod(
@@ -469,6 +502,8 @@ def test_frozen_phase9_build_socket_mismatch_makes_zero_daemon_calls_and_reports
 
     def forbidden_runner(command: tuple[str, ...], **kwargs: Any) -> Any:
         del kwargs
+        if command == authority.phase9_archive_command(source_ref):
+            return subprocess.CompletedProcess(command, 0, b"phase9-tar-stream", b"")
         daemon_calls.append(command)
         raise AssertionError("changed socket reached Docker")
 
@@ -493,13 +528,6 @@ def test_frozen_phase9_failed_build_does_not_cleanup_through_a_replaced_socket(
     )
     authority = replace(_authority_for_recorder(), socket_snapshot=original)
     replaced = False
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda command, **kwargs: subprocess.CompletedProcess(
-            command, 0, b"phase9-tar-stream", b""
-        ),
-    )
 
     def capture(cls: type[SocketMetadata], path: Path) -> SocketMetadata:
         del cls
@@ -510,6 +538,8 @@ def test_frozen_phase9_failed_build_does_not_cleanup_through_a_replaced_socket(
 
     def failing_build(command: tuple[str, ...], **kwargs: Any) -> Any:
         nonlocal replaced
+        if command == authority.phase9_archive_command(source_ref):
+            return subprocess.CompletedProcess(command, 0, b"phase9-tar-stream", b"")
         daemon_calls.append(command)
         if "build" in command:
             replaced = True
@@ -2305,10 +2335,136 @@ def test_one_shot_withholds_cleanup_if_owned_child_group_survives(
         authority.remove_runtime_paths()
 
 
+def test_one_shot_cleanup_stops_commands_and_withholds_lease_on_group_survivor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _authority_for_recorder()
+    lease = Path("/tmp") / f"jhin-p10-one-shot-{uuid.uuid4().hex}.json"
+    runner_calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        ComposeAuthority,
+        "preflight",
+        lambda self, *, runner: None,
+    )
+
+    def surviving_runner(command: tuple[str, ...], **kwargs: Any) -> Any:
+        del kwargs
+        runner_calls.append(command)
+        raise lifecycle._OwnedProcessGroupSurvived(4343)
+
+    def fake_cleanup(
+        self: ComposeAuthority,
+        *,
+        runner: Any,
+        upgrade: bool = False,
+    ) -> None:
+        del self, upgrade
+        errors: list[BaseException] = []
+        for command in (("cleanup-first",), ("cleanup-second",)):
+            try:
+                runner(
+                    command,
+                    env=authority.environment,
+                    cwd=authority.repo,
+                    timeout=5.0,
+                    check=False,
+                    input_bytes=None,
+                )
+            except BaseException as error:
+                errors.append(error)
+        raise BaseExceptionGroup("cleanup commands failed", errors)
+
+    def child_runner(command: tuple[str, ...], **kwargs: Any) -> Any:
+        del kwargs
+        return subprocess.CompletedProcess(command, 0, "passed\n", "")
+
+    monkeypatch.setattr(ComposeAuthority, "down_and_cleanup", fake_cleanup)
+    scenario = LiveScenario(nodes=("cleanup-survivor",), expected_tests=1, start_stack=False)
+    try:
+        with pytest.raises(BaseExceptionGroup, match="cleanup"):
+            execute_one_shot(
+                authority,
+                scenario=scenario,
+                lease_path=lease,
+                runner=surviving_runner,
+                child_runner=child_runner,
+            )
+        assert runner_calls == [("cleanup-first",)]
+        assert lease.is_file()
+    finally:
+        lease.unlink(missing_ok=True)
+        authority.remove_runtime_paths()
+
+
+def test_one_shot_default_runner_owns_setup_and_cleanup_process_groups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _authority_for_recorder()
+    lease = Path("/tmp") / f"jhin-p10-one-shot-{uuid.uuid4().hex}.json"
+    ports = {
+        variable: 51500 + index
+        for index, (variable, _service, _container_port) in enumerate(PUBLISHED_ENDPOINTS)
+    }
+    process_groups: dict[str, dict[str, int]] = {}
+
+    def record_process_group(label: str, runner: Any) -> None:
+        command = (
+            sys.executable,
+            "-c",
+            "import json,os; print(json.dumps({'pid': os.getpid(), 'pgid': os.getpgrp()}))",
+        )
+        result = runner(
+            command,
+            env=authority.environment,
+            cwd=authority.repo,
+            timeout=5.0,
+            check=True,
+            input_bytes=None,
+        )
+        process_groups[label] = json.loads(cast(str, result.stdout))
+
+    def fake_start(self: ComposeAuthority, *, runner: Any) -> dict[str, int]:
+        del self
+        record_process_group("setup", runner)
+        return ports
+
+    def fake_cleanup(
+        self: ComposeAuthority,
+        *,
+        runner: Any,
+        upgrade: bool = False,
+    ) -> None:
+        del self, upgrade
+        record_process_group("cleanup", runner)
+
+    def child_runner(command: tuple[str, ...], **kwargs: Any) -> Any:
+        del kwargs
+        return subprocess.CompletedProcess(command, 0, "passed\n", "")
+
+    monkeypatch.setattr(ComposeAuthority, "start_stack", fake_start)
+    monkeypatch.setattr(ComposeAuthority, "down_and_cleanup", fake_cleanup)
+    scenario = LiveScenario(nodes=("owned-outer-runner",), expected_tests=1)
+    try:
+        execute_one_shot(
+            authority,
+            scenario=scenario,
+            lease_path=lease,
+            child_runner=child_runner,
+        )
+        assert set(process_groups) == {"setup", "cleanup"}
+        assert process_groups["setup"]["pid"] == process_groups["setup"]["pgid"]
+        assert process_groups["cleanup"]["pid"] == process_groups["cleanup"]["pgid"]
+        assert process_groups["setup"]["pgid"] != process_groups["cleanup"]["pgid"]
+    finally:
+        lease.unlink(missing_ok=True)
+        authority.remove_runtime_paths()
+
+
 def _spawn_signal_lifecycle_probe(
     tmp_path: Path,
     *,
     mode: str,
+    stage: str = "pytest",
 ) -> tuple[subprocess.Popen[str], Path, Path]:
     repo = Path(__file__).resolve().parents[2]
     token = uuid.uuid4().hex[:12]
@@ -2323,10 +2479,11 @@ from pathlib import Path
 from tests.integration import phase10_upgrade_harness as lifecycle
 
 mode = sys.argv[1]
-root = Path(sys.argv[2])
-repo = Path(sys.argv[3])
-lease = Path(sys.argv[4])
-token = sys.argv[5]
+stage = sys.argv[2]
+root = Path(sys.argv[3])
+repo = Path(sys.argv[4])
+lease = Path(sys.argv[5])
+token = sys.argv[6]
 child_pid_path = root / "child.json"
 grandchild_pid_path = root / "grandchild.json"
 mutation_path = root / "grandchild-mutations"
@@ -2342,9 +2499,6 @@ authority = lifecycle.ComposeAuthority.create(
     token=token,
     source_environment={"PATH": os.environ.get("PATH", "/usr/bin")},
 )
-
-def no_preflight(self, *, runner):
-    del self, runner
 
 def observed_cleanup(self, *, runner, upgrade=False):
     del self, runner, upgrade
@@ -2419,16 +2573,42 @@ child_code = (
     "    check=True,\n"
     ")\n"
 )
-lifecycle.ComposeAuthority.preflight = no_preflight
+
+def selected_preflight(self, *, runner):
+    if stage in {"preflight", "preflight-timeout"}:
+        runner(
+            (
+                sys.executable,
+                "-c",
+                child_code,
+                str(child_pid_path),
+                str(grandchild_pid_path),
+                str(mutation_path),
+            ),
+            env=self.environment,
+            cwd=repo,
+            timeout=0.5 if stage == "preflight-timeout" else 300.0,
+            check=True,
+            input_bytes=None,
+        )
+
+lifecycle.ComposeAuthority.preflight = selected_preflight
 lifecycle.ComposeAuthority.down_and_cleanup = observed_cleanup
-lifecycle.build_live_pytest_command = lambda scenario: (
-    sys.executable,
-    "-c",
-    child_code,
-    str(child_pid_path),
-    str(grandchild_pid_path),
-    str(mutation_path),
-)
+if stage == "pytest":
+    lifecycle.build_live_pytest_command = lambda scenario: (
+        sys.executable,
+        "-c",
+        child_code,
+        str(child_pid_path),
+        str(grandchild_pid_path),
+        str(mutation_path),
+    )
+else:
+    lifecycle.build_live_pytest_command = lambda scenario: (
+        sys.executable,
+        "-c",
+        "raise AssertionError('final pytest child unexpectedly started')",
+    )
 scenario = lifecycle.LiveScenario(
     nodes=("signal-probe",),
     expected_tests=1,
@@ -2440,7 +2620,17 @@ finally:
     authority.remove_runtime_paths()
 """
     process = subprocess.Popen(
-        (sys.executable, "-c", script, mode, str(tmp_path), str(repo), str(lease), token),
+        (
+            sys.executable,
+            "-c",
+            script,
+            mode,
+            stage,
+            str(tmp_path),
+            str(repo),
+            str(lease),
+            token,
+        ),
         cwd=repo,
         env=os.environ.copy(),
         stdout=subprocess.PIPE,
@@ -2571,7 +2761,7 @@ def test_owned_live_child_timeout_reaps_nested_process_group(tmp_path: Path) -> 
     child_group: int | None = None
     try:
         with pytest.raises(subprocess.TimeoutExpired) as raised:
-            lifecycle.run_live_child_command(
+            lifecycle.run_owned_command(
                 command,
                 env=os.environ.copy(),
                 cwd=Path(__file__).resolve().parents[2],
@@ -2606,7 +2796,7 @@ def test_owned_live_child_preserves_output_and_check_semantics(tmp_path: Path) -
         "import sys; print('stdout-value'); print('stderr-value', file=sys.stderr); "
         "raise SystemExit(7)",
     )
-    result = lifecycle.run_live_child_command(
+    result = lifecycle.run_owned_command(
         command,
         env=os.environ.copy(),
         cwd=tmp_path,
@@ -2618,7 +2808,7 @@ def test_owned_live_child_preserves_output_and_check_semantics(tmp_path: Path) -
     assert result.stderr == "stderr-value\n"
 
     with pytest.raises(subprocess.CalledProcessError) as raised:
-        lifecycle.run_live_child_command(
+        lifecycle.run_owned_command(
             command,
             env=os.environ.copy(),
             cwd=tmp_path,
@@ -2635,6 +2825,57 @@ def test_signal_waits_for_real_pytest_child_exit_before_cleanup(tmp_path: Path) 
     os.kill(process.pid, signal.SIGTERM)
     stdout, stderr, lease_survived = _finish_signal_lifecycle_probe(process, child_pid_path, lease)
     assert process.returncode == 128 + signal.SIGTERM, (stdout, stderr)
+    assert lease_survived is False
+    cleanup_state = json.loads((tmp_path / "cleanup-state").read_text(encoding="utf-8"))
+    assert cleanup_state["child_pgid"] == cleanup_state["child_pid"]
+    assert cleanup_state["grandchild_pgid"] == cleanup_state["child_pgid"]
+    assert cleanup_state["child_pgid"] != cleanup_state["harness_pgid"]
+    assert cleanup_state["child_alive"] is False
+    assert cleanup_state["grandchild_alive"] is False
+    assert cleanup_state["group_alive"] is False
+    assert cleanup_state["mutation_stable"] is True
+    assert (tmp_path / "survivor-check").read_text(encoding="utf-8") == "checked"
+
+
+def test_signal_waits_for_real_preflight_descendants_before_cleanup(tmp_path: Path) -> None:
+    process, child_pid_path, lease = _spawn_signal_lifecycle_probe(
+        tmp_path,
+        mode="first-signal",
+        stage="preflight",
+    )
+    os.kill(process.pid, signal.SIGTERM)
+    stdout, stderr, lease_survived = _finish_signal_lifecycle_probe(
+        process,
+        child_pid_path,
+        lease,
+    )
+    assert process.returncode == 128 + signal.SIGTERM, (stdout, stderr)
+    assert lease_survived is False
+    cleanup_state = json.loads((tmp_path / "cleanup-state").read_text(encoding="utf-8"))
+    assert cleanup_state["child_pgid"] == cleanup_state["child_pid"]
+    assert cleanup_state["grandchild_pgid"] == cleanup_state["child_pgid"]
+    assert cleanup_state["child_pgid"] != cleanup_state["harness_pgid"]
+    assert cleanup_state["child_alive"] is False
+    assert cleanup_state["grandchild_alive"] is False
+    assert cleanup_state["group_alive"] is False
+    assert cleanup_state["mutation_stable"] is True
+    assert (tmp_path / "survivor-check").read_text(encoding="utf-8") == "checked"
+
+
+def test_preflight_timeout_reaps_real_descendants_before_cleanup(tmp_path: Path) -> None:
+    process, child_pid_path, lease = _spawn_signal_lifecycle_probe(
+        tmp_path,
+        mode="first-signal",
+        stage="preflight-timeout",
+    )
+    stdout, stderr, lease_survived = _finish_signal_lifecycle_probe(
+        process,
+        child_pid_path,
+        lease,
+    )
+    assert process.returncode == 1, (stdout, stderr)
+    assert "TimeoutExpired" in stderr
+    assert "final pytest child unexpectedly started" not in stderr
     assert lease_survived is False
     cleanup_state = json.loads((tmp_path / "cleanup-state").read_text(encoding="utf-8"))
     assert cleanup_state["child_pgid"] == cleanup_state["child_pid"]

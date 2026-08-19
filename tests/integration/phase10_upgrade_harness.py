@@ -596,7 +596,7 @@ def _terminate_owned_process_group(
         _restore_signal_handlers(previous_handlers)
 
 
-def run_live_child_command(
+def run_owned_command(
     command: tuple[str, ...],
     *,
     env: dict[str, str],
@@ -605,7 +605,7 @@ def run_live_child_command(
     check: bool,
     input_bytes: bytes | None = None,
 ) -> subprocess.CompletedProcess[Any]:
-    """Run pytest in one owned session and exhaust all of its descendants."""
+    """Run one external command in an owned session and exhaust its descendants."""
     process = subprocess.Popen(
         command,
         cwd=cwd,
@@ -1022,27 +1022,33 @@ def activity_start_count(history_or_events: Any, activity_name: str) -> int:
     return count
 
 
-def read_phase9_source_ref(repo: Path) -> str:
+def read_phase9_source_ref(
+    repo: Path,
+    *,
+    runner: CommandRunner = run_command,
+    environment: Mapping[str, str] | None = None,
+) -> str:
     """Load the frozen Phase 9 commit and prove it is an ancestor of HEAD."""
     path = repo / "packages/workflows/tests/fixtures/phase9_temporal/phase9-ref.txt"
     source_ref = path.read_text(encoding="utf-8").strip()
     if _HEX_REF.fullmatch(source_ref) is None:
         raise ValueError("Phase 9 source ref must be exactly forty lowercase hex characters")
-    resolved = subprocess.run(
-        ["git", "cat-file", "-e", f"{source_ref}^{{commit}}"],
+    selected_environment = dict(os.environ if environment is None else environment)
+    resolved = runner(
+        ("git", "cat-file", "-e", f"{source_ref}^{{commit}}"),
+        env=selected_environment,
         cwd=repo,
-        check=False,
-        capture_output=True,
-        text=True,
         timeout=30.0,
+        check=False,
+        input_bytes=None,
     )
-    ancestor = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", source_ref, "HEAD"],
+    ancestor = runner(
+        ("git", "merge-base", "--is-ancestor", source_ref, "HEAD"),
+        env=selected_environment,
         cwd=repo,
-        check=False,
-        capture_output=True,
-        text=True,
         timeout=30.0,
+        check=False,
+        input_bytes=None,
     )
     if resolved.returncode != 0 or ancestor.returncode != 0:
         raise ValueError("Phase 9 source ref is not an available ancestor commit")
@@ -1295,13 +1301,13 @@ class ComposeAuthority:
         runner: CommandRunner = run_command,
     ) -> FrozenPhase9Image:
         """Feed one bounded committed archive into one bounded selected-daemon build."""
-        archive = subprocess.run(
+        archive = runner(
             self.phase9_archive_command(source_ref),
-            cwd=self.repo,
             env=self.environment,
-            check=False,
-            capture_output=True,
+            cwd=self.repo,
             timeout=120.0,
+            check=False,
+            input_bytes=b"",
         )
         if archive.returncode != 0:
             raise RuntimeError("failed to archive the frozen Phase 9 source")
@@ -3864,8 +3870,8 @@ def execute_one_shot(
     *,
     scenario: LiveScenario,
     lease_path: Path | None = None,
-    runner: CommandRunner = run_command,
-    child_runner: CommandRunner = run_live_child_command,
+    runner: CommandRunner = run_owned_command,
+    child_runner: CommandRunner = run_owned_command,
 ) -> subprocess.CompletedProcess[Any]:
     """Own stack→child-pytest→exhaustive-cleanup as one signal-safe lifecycle."""
     lease = (
@@ -3886,15 +3892,38 @@ def execute_one_shot(
         if cleaned or cleaning:
             return
         cleaning = True
+        latched_group_error: BaseException | None = None
+
+        def fail_closed_cleanup_runner(*args: Any, **kwargs: Any) -> Any:
+            nonlocal latched_group_error
+            if latched_group_error is not None:
+                raise latched_group_error
+            try:
+                return runner(*args, **kwargs)
+            except BaseException as error:
+                if _contains_owned_process_group_survivor(error):
+                    latched_group_error = error
+                raise
+
         try:
+            down_error: BaseException | None = None
             try:
-                live_authority.down_and_cleanup(runner=runner, upgrade=scenario.upgrade)
+                live_authority.down_and_cleanup(
+                    runner=fail_closed_cleanup_runner,
+                    upgrade=scenario.upgrade,
+                )
             except BaseException as error:
+                down_error = error
                 cleanup_errors.append(error)
-            try:
-                lease.unlink(missing_ok=True)
-            except BaseException as error:
-                cleanup_errors.append(error)
+            if latched_group_error is not None and (
+                down_error is None or not _contains_owned_process_group_survivor(down_error)
+            ):
+                cleanup_errors.append(latched_group_error)
+            if latched_group_error is None:
+                try:
+                    lease.unlink(missing_ok=True)
+                except BaseException as error:
+                    cleanup_errors.append(error)
         finally:
             cleaned = True
             cleaning = False
@@ -3934,7 +3963,11 @@ def execute_one_shot(
             ports = live_authority.start_stack(runner=runner)
             live_authority = live_authority.with_published_ports(ports)
             if scenario.upgrade:
-                source_ref = read_phase9_source_ref(live_authority.repo)
+                source_ref = read_phase9_source_ref(
+                    live_authority.repo,
+                    runner=runner,
+                    environment=live_authority.environment,
+                )
                 frozen = live_authority.build_phase9_agent_image(source_ref, runner=runner)
                 try:
                     live_authority = live_authority.with_upgrade_runtime(frozen)
