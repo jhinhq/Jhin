@@ -1362,6 +1362,7 @@ class ComposeAuthority:
     _environment_items: tuple[tuple[str, str], ...]
     _published_port_items: tuple[tuple[str, int], ...] = ()
     socket_snapshot: SocketMetadata | None = None
+    _allow_missing_recovery_paths: bool = False
 
     @classmethod
     def create(
@@ -1762,7 +1763,12 @@ class ComposeAuthority:
         journal = Path(raw)
         if journal != self.child_barrier_journal_path:
             raise RuntimeError("child barrier journal does not belong to this authority")
-        _validate_child_barrier_journal(journal)
+        try:
+            _validate_child_barrier_journal(journal)
+        except FileNotFoundError:
+            if self._allow_missing_recovery_paths:
+                return None
+            raise
         return journal
 
     def cleanup_child_barriers(self) -> None:
@@ -1781,13 +1787,32 @@ class ComposeAuthority:
                 raise RuntimeError("child barrier journal identity changed")
             fcntl.flock(descriptor, fcntl.LOCK_EX)
             try:
-                raw = os.read(descriptor, 1024 * 1024 + 1)
+                locked_journal = os.fstat(descriptor)
+                maximum_size = 1024 * 1024
+                expected_size = locked_journal.st_size
+                if expected_size < 0 or expected_size > maximum_size:
+                    raise RuntimeError("child barrier journal is too large")
+                chunks: list[bytes] = []
+                consumed = 0
+                while consumed < expected_size:
+                    chunk = os.read(
+                        descriptor,
+                        min(64 * 1024, expected_size - consumed),
+                    )
+                    if not chunk:
+                        raise RuntimeError("child barrier journal read made no progress")
+                    chunks.append(chunk)
+                    consumed += len(chunk)
+                    if consumed > maximum_size:
+                        raise RuntimeError("child barrier journal is too large")
+                extra = os.read(descriptor, 1)
+                if extra:
+                    raise RuntimeError("child barrier journal changed during bounded read")
+                raw = b"".join(chunks)
             finally:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
         finally:
             os.close(descriptor)
-        if len(raw) > 1024 * 1024:
-            raise RuntimeError("child barrier journal is too large")
         if raw and not raw.endswith(b"\n"):
             raise RuntimeError("child barrier journal has a partial record")
 
@@ -4069,6 +4094,35 @@ class AuthorityLeaseOwnership:
     authority_token: str
 
 
+@dataclass
+class _AuthorityLeaseTransition:
+    """Caller-bound old/new ownership admitted before a filesystem handoff."""
+
+    current: AuthorityLeaseOwnership | None = None
+    staged: AuthorityLeaseOwnership | None = None
+
+    def stage(
+        self,
+        ownership: AuthorityLeaseOwnership,
+        *,
+        replacing: AuthorityLeaseOwnership | None,
+    ) -> None:
+        if self.staged is not None or self.current != replacing:
+            raise RuntimeError("authority lease ownership transition is inconsistent")
+        self.staged = ownership
+
+    def commit(self, ownership: AuthorityLeaseOwnership) -> None:
+        if self.staged != ownership:
+            raise RuntimeError("authority lease ownership commit is inconsistent")
+        self.current = ownership
+        self.staged = None
+
+    def candidates(self) -> tuple[AuthorityLeaseOwnership, ...]:
+        return tuple(
+            candidate for candidate in (self.staged, self.current) if candidate is not None
+        )
+
+
 class _AuthorityLeaseRefreshError(OSError):
     """Refresh failed after the new lease inode became authoritative."""
 
@@ -4179,9 +4233,34 @@ def _unlink_owned_authority_lease(ownership: AuthorityLeaseOwnership) -> None:
         os.close(descriptor)
 
 
+def _unlink_authority_lease_transition(transition: _AuthorityLeaseTransition) -> None:
+    """Remove the exact staged or committed inode currently owning the name."""
+    candidates = transition.candidates()
+    if not candidates:
+        return
+    path = candidates[0].path
+    if any(candidate.path != path for candidate in candidates):
+        raise RuntimeError("authority lease transition paths diverged")
+    try:
+        current = path.lstat()
+    except FileNotFoundError:
+        return
+    for candidate in candidates:
+        if current.st_dev == candidate.device and current.st_ino == candidate.inode:
+            _unlink_owned_authority_lease(candidate)
+            return
+    if transition.current is None:
+        # Initial publication lost an O_EXCL race.  The staged inode still
+        # belongs only to the private temp name; preserve the foreign lease.
+        return
+    raise RuntimeError("authority lease ownership identity changed")
+
+
 def write_authority_lease(
     authority: ComposeAuthority,
     path: Path,
+    *,
+    transition: _AuthorityLeaseTransition | None = None,
 ) -> AuthorityLeaseOwnership:
     """Durably publish a private, no-follow lease without overwriting one."""
     _validate_direct_tmp_path(path, description="authority lease")
@@ -4201,6 +4280,14 @@ def write_authority_lease(
     )
     temporary = Path(raw_temporary)
     temporary_stat = os.fstat(descriptor)
+    candidate = AuthorityLeaseOwnership(
+        path=path,
+        device=temporary_stat.st_dev,
+        inode=temporary_stat.st_ino,
+        authority_token=authority.token,
+    )
+    if transition is not None:
+        transition.stage(candidate, replacing=None)
     published: AuthorityLeaseOwnership | None = None
     try:
         _write_all(descriptor, payload, description="authority lease")
@@ -4216,12 +4303,9 @@ def write_authority_lease(
             if stat.S_ISLNK(raced.st_mode):
                 raise ValueError("authority lease path is a symlink") from error
             raise FileExistsError(f"authority lease already exists: {path}") from error
-        published = AuthorityLeaseOwnership(
-            path=path,
-            device=temporary_stat.st_dev,
-            inode=temporary_stat.st_ino,
-            authority_token=authority.token,
-        )
+        published = candidate
+        if transition is not None:
+            transition.commit(candidate)
         _fsync_tmp_directory()
         _unlink_exact_file(
             temporary,
@@ -4255,6 +4339,8 @@ def write_authority_lease(
 def _replace_authority_lease(
     authority: ComposeAuthority,
     ownership: AuthorityLeaseOwnership,
+    *,
+    transition: _AuthorityLeaseTransition | None = None,
 ) -> AuthorityLeaseOwnership:
     """Atomically refresh a validated lease without a missing/partial window."""
     path = ownership.path
@@ -4278,8 +4364,6 @@ def _replace_authority_lease(
         temporary_descriptor = -1
         verified_descriptor = _owned_lease_descriptor(ownership)
         os.close(verified_descriptor)
-        os.replace(temporary_path, path)
-        temporary_path = None
         assert temporary_stat is not None
         refreshed = AuthorityLeaseOwnership(
             path=path,
@@ -4287,6 +4371,12 @@ def _replace_authority_lease(
             inode=temporary_stat.st_ino,
             authority_token=authority.token,
         )
+        if transition is not None:
+            transition.stage(refreshed, replacing=ownership)
+        os.replace(temporary_path, path)
+        temporary_path = None
+        if transition is not None:
+            transition.commit(refreshed)
         try:
             _fsync_tmp_directory()
         except BaseException as error:
@@ -4316,7 +4406,12 @@ def _lease_path(value: Any, *, field: str) -> Path:
     return path
 
 
-def read_authority_lease(path: Path, *, expected_repo: Path) -> ComposeAuthority:
+def read_authority_lease(
+    path: Path,
+    *,
+    expected_repo: Path,
+    allow_missing_recovery_paths: bool = False,
+) -> ComposeAuthority:
     """Load an exact owner-only lease and revalidate every derived identity."""
     if path.parent != Path("/tmp") or not path.is_absolute():
         raise ValueError("authority lease must live directly below /tmp")
@@ -4367,7 +4462,12 @@ def read_authority_lease(path: Path, *, expected_repo: Path) -> ComposeAuthority
     barrier_root = _lease_path(payload["barrier_root"], field="barrier_root")
     master_key = _lease_path(payload["master_key_path"], field="master_key_path")
     for runtime_path in (runtime_dir, barrier_root):
-        runtime_metadata = runtime_path.lstat()
+        try:
+            runtime_metadata = runtime_path.lstat()
+        except FileNotFoundError:
+            if allow_missing_recovery_paths:
+                continue
+            raise
         if (
             runtime_path.parent != Path("/tmp")
             or stat.S_ISLNK(runtime_metadata.st_mode)
@@ -4414,6 +4514,9 @@ def read_authority_lease(path: Path, *, expected_repo: Path) -> ComposeAuthority
             raise ValueError("authority lease child-barrier journal identity is invalid")
         try:
             _validate_child_barrier_journal(expected_child_journal)
+        except FileNotFoundError as error:
+            if not allow_missing_recovery_paths:
+                raise ValueError("authority lease child-barrier journal is invalid") from error
         except RuntimeError as error:
             raise ValueError("authority lease child-barrier journal is invalid") from error
     for variable, _service, _container_port in PUBLISHED_ENDPOINTS:
@@ -4486,6 +4589,7 @@ def read_authority_lease(path: Path, *, expected_repo: Path) -> ComposeAuthority
         _environment_items=tuple(sorted(cast(dict[str, str], environment).items())),
         _published_port_items=tuple(sorted(published_ports.items())),
         socket_snapshot=snapshot,
+        _allow_missing_recovery_paths=allow_missing_recovery_paths,
     )
 
 
@@ -4682,6 +4786,7 @@ def execute_one_shot(
     cleaning = False
     external_started = False
     lease_ownership: AuthorityLeaseOwnership | None = None
+    lease_transition = _AuthorityLeaseTransition()
     cleanup_errors: list[BaseException] = []
 
     def cleanup() -> None:
@@ -4702,9 +4807,9 @@ def execute_one_shot(
                 except BaseException as error:
                     local_error = error
                     cleanup_errors.append(error)
-                if local_error is None and lease_ownership is not None:
+                if local_error is None:
                     try:
-                        _unlink_owned_authority_lease(lease_ownership)
+                        _unlink_authority_lease_transition(lease_transition)
                     except BaseException as error:
                         cleanup_errors.append(error)
                         local_error = error
@@ -4725,9 +4830,9 @@ def execute_one_shot(
                 down_error is None or not _contains_owned_process_group_survivor(down_error)
             ):
                 cleanup_errors.append(cleanup_runner.survivor)
-            if down_error is None and lease_ownership is not None:
+            if down_error is None:
                 try:
-                    _unlink_owned_authority_lease(lease_ownership)
+                    _unlink_authority_lease_transition(lease_transition)
                 except BaseException as error:
                     cleanup_errors.append(error)
                     down_error = error
@@ -4747,7 +4852,11 @@ def execute_one_shot(
             "custom",
         )
         with _LeaseOwnershipAssignment():
-            lease_ownership = write_authority_lease(live_authority, lease)
+            lease_ownership = write_authority_lease(
+                live_authority,
+                lease,
+                transition=lease_transition,
+            )
         external_started = True
         if scenario.start_stack:
             ports = live_authority.start_stack(runner=runner)
@@ -4757,6 +4866,7 @@ def execute_one_shot(
                     lease_ownership = _replace_authority_lease(
                         live_authority,
                         lease_ownership,
+                        transition=lease_transition,
                     )
                 except _AuthorityLeaseRefreshError as error:
                     lease_ownership = error.ownership
@@ -4783,6 +4893,7 @@ def execute_one_shot(
                         lease_ownership = _replace_authority_lease(
                             live_authority,
                             lease_ownership,
+                            transition=lease_transition,
                         )
                     except _AuthorityLeaseRefreshError as error:
                         lease_ownership = error.ownership
@@ -4800,6 +4911,7 @@ def execute_one_shot(
                                 lease_ownership = _replace_authority_lease(
                                     live_authority,
                                     lease_ownership,
+                                    transition=lease_transition,
                                 )
                             except _AuthorityLeaseRefreshError as error:
                                 lease_ownership = error.ownership
@@ -4938,6 +5050,7 @@ def _persistent_up_locked(
     authority: ComposeAuthority | None = None
     external_started = False
     lease_ownership: AuthorityLeaseOwnership | None = None
+    lease_transition = _AuthorityLeaseTransition()
     cleaning = False
     cleaned = False
     cleanup_errors: list[BaseException] = []
@@ -4960,9 +5073,9 @@ def _persistent_up_locked(
                 except BaseException as error:
                     local_error = error
                     cleanup_errors.append(error)
-                if local_error is None and lease_ownership is not None:
+                if local_error is None:
                     try:
-                        _unlink_owned_authority_lease(lease_ownership)
+                        _unlink_authority_lease_transition(lease_transition)
                     except BaseException as error:
                         cleanup_errors.append(error)
                         local_error = error
@@ -4980,9 +5093,9 @@ def _persistent_up_locked(
                 down_error is None or not _contains_owned_process_group_survivor(down_error)
             ):
                 cleanup_errors.append(cleanup_runner.survivor)
-            if down_error is None and lease_ownership is not None:
+            if down_error is None:
                 try:
-                    _unlink_owned_authority_lease(lease_ownership)
+                    _unlink_authority_lease_transition(lease_transition)
                 except BaseException as error:
                     cleanup_errors.append(error)
                     down_error = error
@@ -4996,13 +5109,21 @@ def _persistent_up_locked(
         authority = select_live_authority(repo=repo, mode=mode)
         signal_lifecycle.activate()
         with _LeaseOwnershipAssignment():
-            lease_ownership = write_authority_lease(authority, lease)
+            lease_ownership = write_authority_lease(
+                authority,
+                lease,
+                transition=lease_transition,
+            )
         external_started = True
         ports = authority.start_stack(runner=runner)
         authority = authority.with_published_ports(ports)
         with _LeaseOwnershipAssignment():
             try:
-                lease_ownership = _replace_authority_lease(authority, lease_ownership)
+                lease_ownership = _replace_authority_lease(
+                    authority,
+                    lease_ownership,
+                    transition=lease_transition,
+                )
             except _AuthorityLeaseRefreshError as error:
                 lease_ownership = error.ownership
                 raise
@@ -5044,9 +5165,15 @@ def _persistent_up_locked(
 
 def _load_persistent(
     repo: Path,
+    *,
+    allow_missing_recovery_paths: bool = False,
 ) -> tuple[Path, ComposeAuthority, AuthorityLeaseOwnership]:
     lease = lease_path_for(repo)
-    authority = read_authority_lease(lease, expected_repo=repo)
+    authority = read_authority_lease(
+        lease,
+        expected_repo=repo,
+        allow_missing_recovery_paths=allow_missing_recovery_paths,
+    )
     metadata = lease.lstat()
     ownership = AuthorityLeaseOwnership(
         path=lease,
@@ -5081,7 +5208,10 @@ def _persistent_down_locked(
     conclusive_signal: int | None = None
     transition_errors: list[BaseException] = []
     try:
-        lease, authority, lease_ownership = _load_persistent(repo)
+        lease, authority, lease_ownership = _load_persistent(
+            repo,
+            allow_missing_recovery_paths=True,
+        )
         signal_lifecycle.activate()
         authority.assert_socket_unchanged()
         authority.down_and_cleanup(runner=runner)

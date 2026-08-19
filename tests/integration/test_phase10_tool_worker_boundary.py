@@ -11,6 +11,7 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -311,6 +312,43 @@ def test_child_barrier_intent_is_fsynced_before_the_first_mkdir(
     finally:
         if barrier is not None and barrier.root.exists():
             barrier.cleanup()
+        if authority.runtime_dir.exists() or authority.barrier_root.exists():
+            authority.remove_runtime_paths()
+
+
+def test_child_barrier_cleanup_reads_every_record_after_a_legal_short_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _authority_for_recorder().with_child_barrier_journal()
+    journal = authority.child_barrier_journal_path
+    monkeypatch.setenv("JHIN_PHASE10_CHILD_BARRIER_JOURNAL", str(journal))
+    barriers = [
+        create_barrier_root("phase10.tool.before_claim.v1"),
+        create_barrier_root("phase10.tool.after_effect.before_commit.v1"),
+    ]
+    journal_identity = journal.lstat().st_dev, journal.lstat().st_ino
+    first_record_size = len(journal.read_bytes().splitlines(keepends=True)[0])
+    real_read = os.read
+    journal_reads = 0
+
+    def short_first_record(descriptor: int, size: int) -> bytes:
+        nonlocal journal_reads
+        metadata = os.fstat(descriptor)
+        if (metadata.st_dev, metadata.st_ino) == journal_identity:
+            journal_reads += 1
+            if journal_reads == 1:
+                return real_read(descriptor, min(size, first_record_size))
+        return real_read(descriptor, size)
+
+    monkeypatch.setattr(os, "read", short_first_record)
+    try:
+        authority.cleanup_child_barriers()
+        assert journal_reads >= 3
+        assert all(not barrier.root.exists() for barrier in barriers)
+    finally:
+        for barrier in barriers:
+            if barrier.root.exists():
+                barrier.cleanup()
         if authority.runtime_dir.exists() or authority.barrier_root.exists():
             authority.remove_runtime_paths()
 
@@ -2240,6 +2278,93 @@ def test_post_replace_fsync_failure_never_loses_new_lease_ownership(
         _assert_failed_handoff_is_fully_removed(lease=lease, authority=created[-1])
         rerun_and_recover()
     finally:
+        lease.unlink(missing_ok=True)
+        lifecycle.persistent_operation_lock_path(tmp_path).unlink(missing_ok=True)
+        for authority in created:
+            if authority.runtime_dir.exists() or authority.barrier_root.exists():
+                authority.remove_runtime_paths()
+
+
+@pytest.mark.parametrize("handoff", ("link", "replace"))
+def test_unblocked_helper_thread_cannot_split_lease_ownership_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    handoff: str,
+) -> None:
+    lease, created, invoke, rerun_and_recover = _lease_handoff_lifecycle_case(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        lifecycle_kind="one-shot",
+    )
+    ready = threading.Event()
+    stop = threading.Event()
+
+    def unblocked_signal_target() -> None:
+        previous = signal.pthread_sigmask(
+            signal.SIG_UNBLOCK,
+            {signal.SIGINT, signal.SIGTERM},
+        )
+        ready.set()
+        try:
+            stop.wait(timeout=10.0)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+    helper = threading.Thread(target=unblocked_signal_target, daemon=True)
+    helper.start()
+    assert ready.wait(timeout=5.0)
+    signalled = False
+
+    def signal_after_real_handoff(
+        real_operation: Any,
+        source: Any,
+        destination: Any,
+        **kwargs: Any,
+    ) -> None:
+        nonlocal signalled
+        real_operation(source, destination, **kwargs)
+        if Path(destination) == lease and not signalled:
+            signalled = True
+            os.kill(os.getpid(), signal.SIGTERM)
+            # Force a main-thread bytecode checkpoint while the lifecycle
+            # caller still has not received the callee's ownership result.
+            for _index in range(1000):
+                pass
+
+    if handoff == "link":
+        real_link = os.link
+        monkeypatch.setattr(
+            os,
+            "link",
+            lambda source, destination, **kwargs: signal_after_real_handoff(
+                real_link,
+                source,
+                destination,
+                **kwargs,
+            ),
+        )
+    else:
+        real_replace = os.replace
+        monkeypatch.setattr(
+            os,
+            "replace",
+            lambda source, destination, **kwargs: signal_after_real_handoff(
+                real_replace,
+                source,
+                destination,
+                **kwargs,
+            ),
+        )
+    try:
+        with pytest.raises(SystemExit) as raised:
+            invoke()
+        assert raised.value.code == 128 + signal.SIGTERM
+        assert signalled is True
+        _assert_failed_handoff_is_fully_removed(lease=lease, authority=created[-1])
+        rerun_and_recover()
+    finally:
+        stop.set()
+        helper.join(timeout=5.0)
         lease.unlink(missing_ok=True)
         lifecycle.persistent_operation_lock_path(tmp_path).unlink(missing_ok=True)
         for authority in created:
@@ -4617,6 +4742,65 @@ def test_persistent_down_indeterminate_cleanup_retains_readable_recovery_authori
     finally:
         lease.unlink(missing_ok=True)
         authority.remove_runtime_paths()
+
+
+@pytest.mark.parametrize("failed_path_name", ("barrier_root", "runtime_dir"))
+def test_persistent_down_rereads_and_retries_partial_local_path_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failed_path_name: str,
+) -> None:
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    authority = ComposeAuthority.create(
+        repo=tmp_path,
+        mode="rootful",
+        socket_path=Path("/var/run/docker.sock"),
+        socket_gid=123,
+        token=uuid.uuid4().hex[:12],
+        source_environment={"PATH": os.environ.get("PATH", "/usr/bin")},
+    )
+    lease = lease_path_for(tmp_path)
+    write_authority_lease(authority, lease)
+    failed_path = cast(Path, getattr(authority, failed_path_name))
+    real_rmtree = shutil.rmtree
+    injected = False
+
+    def fail_one_local_path(path: Any, *args: Any, **kwargs: Any) -> None:
+        nonlocal injected
+        if Path(path) == failed_path and not injected:
+            injected = True
+            raise OSError(f"injected {failed_path_name} removal failure")
+        real_rmtree(path, *args, **kwargs)
+
+    def local_cleanup_only(
+        self: ComposeAuthority,
+        *,
+        runner: Any,
+        upgrade: bool = False,
+    ) -> None:
+        del runner, upgrade
+        self.remove_recovery_paths()
+
+    monkeypatch.setattr(shutil, "rmtree", fail_one_local_path)
+    monkeypatch.setattr(ComposeAuthority, "down_and_cleanup", local_cleanup_only)
+    try:
+        with pytest.raises(BaseExceptionGroup, match="runtime paths"):
+            lifecycle._persistent_down(repo=tmp_path)
+        assert injected is True
+        assert lease.is_file()
+        assert failed_path.exists()
+        with pytest.raises(FileNotFoundError):
+            read_authority_lease(lease, expected_repo=tmp_path)
+
+        lifecycle._persistent_down(repo=tmp_path)
+        assert not lease.exists()
+        assert not authority.barrier_root.exists()
+        assert not authority.runtime_dir.exists()
+    finally:
+        lease.unlink(missing_ok=True)
+        lifecycle.persistent_operation_lock_path(tmp_path).unlink(missing_ok=True)
+        if authority.runtime_dir.exists() or authority.barrier_root.exists():
+            authority.remove_runtime_paths()
 
 
 def test_persistent_down_never_unlinks_a_replaced_unowned_lease(
