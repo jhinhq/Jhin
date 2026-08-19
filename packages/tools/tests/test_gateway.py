@@ -5,9 +5,9 @@ import asyncio
 import json
 import secrets as stdlib_secrets
 from collections.abc import Iterator, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import cast
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
@@ -40,6 +40,12 @@ from jhin_tools.builtin import (
 from jhin_tools.errors import ToolExecutionError
 from jhin_tools.gateway import GatewayOutcome, GatewayStateError, ToolGateway
 from jhin_tools.sanitize import MAX_STRING_CHARS
+from jhin_tools.test_barriers import (
+    TOOL_AFTER_CLAIM,
+    TOOL_AFTER_EFFECT,
+    TOOL_BEFORE_CLAIM,
+    CrashBarrierName,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -77,8 +83,110 @@ class _ApprovalOutput(BaseModel):
     executed: bool
 
 
+class _BarrierInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    value: str
+
+
+class _BarrierOutput(BaseModel):
+    value: str
+
+
+class _RecordingBarrier:
+    def __init__(self) -> None:
+        self._order: list[str] | None = None
+
+    def record_into(self, order: list[str]) -> None:
+        self._order = order
+
+    async def arrive_and_wait(self, name: CrashBarrierName, identity: UUID) -> None:
+        assert identity
+        if self._order is not None:
+            self._order.append(name)
+
+
+@dataclass
+class GatewayWorld:
+    gateway: ToolGateway
+    barrier: _RecordingBarrier
+    order: list[str]
+    invocation_id: UUID
+
+
+@pytest.fixture
+async def gateway_world(
+    session: AsyncSession,
+    context: ToolExecutionContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> GatewayWorld:
+    order: list[str] = []
+    barrier = _RecordingBarrier()
+    invocation_id = UUID("018f4d52-8b93-7d41-8ac7-7f190f091111")
+    await _persist_execution_context(session, context)
+    await _grant(session, context, "test.mutate")
+
+    async def executor(_ctx: ToolExecutionContext, payload: BaseModel) -> _BarrierOutput:
+        order.append("executor")
+        validated = cast(_BarrierInput, payload)
+        return _BarrierOutput(value=validated.value)
+
+    catalog = ToolCatalog()
+    catalog.register(
+        ToolDefinition(
+            name="test.mutate",
+            description="A deterministic mutation for crash-barrier ordering.",
+            risk=RiskLevel.WRITE,
+            input_model=_BarrierInput,
+            output_model=_BarrierOutput,
+            required_capability="test.mutate",
+        ),
+        executor,
+    )
+    bind = session.bind
+    assert bind is not None
+    barrier_context = replace(
+        context,
+        session_factory=async_sessionmaker(bind, expire_on_commit=False),
+        test_barrier=cast(Any, barrier),
+    )
+    original_commit = session.commit
+    commit_count = 0
+
+    async def recording_commit() -> None:
+        nonlocal commit_count
+        await original_commit()
+        commit_count += 1
+        order.append("claim_committed" if commit_count == 1 else "terminal_committed")
+
+    monkeypatch.setattr(session, "commit", recording_commit)
+    return GatewayWorld(
+        gateway=ToolGateway(barrier_context, catalog),
+        barrier=barrier,
+        order=order,
+        invocation_id=invocation_id,
+    )
+
+
 async def _approval_executor(ctx: ToolExecutionContext, payload: BaseModel) -> _ApprovalOutput:
     return _ApprovalOutput(executed=True)
+
+
+async def test_gateway_barriers_bracket_only_the_external_effect(
+    gateway_world: GatewayWorld,
+) -> None:
+    gateway_world.barrier.record_into(gateway_world.order)
+    await gateway_world.gateway.request(
+        "test.mutate", '{"value":"once"}', invocation_id=gateway_world.invocation_id
+    )
+    assert gateway_world.order == [
+        TOOL_BEFORE_CLAIM,
+        "claim_committed",
+        TOOL_AFTER_CLAIM,
+        "executor",
+        TOOL_AFTER_EFFECT,
+        "terminal_committed",
+    ]
 
 
 def _custom_approval_catalog(

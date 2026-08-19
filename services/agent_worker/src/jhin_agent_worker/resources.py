@@ -18,6 +18,7 @@ from jhin_events import EventPublisher
 from jhin_events.streams import ensure_streams
 from jhin_observability import get_logger
 from jhin_secrets import SecretCrypto, load_master_key
+from jhin_tools import CrashBarrier, CrashBarrierConfig
 
 logger = get_logger(__name__)
 
@@ -29,6 +30,7 @@ class Resources:
     nats_connection: NatsClient
     publisher: EventPublisher
     crypto: SecretCrypto
+    test_barrier: CrashBarrier
 
     @classmethod
     async def create(cls, settings: Settings) -> Resources:
@@ -38,6 +40,13 @@ class Resources:
         js = nats_connection.jetstream()
         await ensure_streams(js)
         crypto = SecretCrypto(load_master_key())
+        test_barrier = CrashBarrier(
+            CrashBarrierConfig(
+                root=settings.test_crash_barrier_dir,
+                selected=settings.test_crash_barrier_name,
+                match_identity=settings.test_crash_barrier_match,
+            )
+        )
         logger.info("resources.ready", nats_url=settings.nats_url)
         return cls(
             engine=engine,
@@ -45,6 +54,7 @@ class Resources:
             nats_connection=nats_connection,
             publisher=EventPublisher(js),
             crypto=crypto,
+            test_barrier=test_barrier,
         )
 
     async def close(self) -> None:

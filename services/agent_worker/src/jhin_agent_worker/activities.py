@@ -63,7 +63,10 @@ from jhin_policy import Grant, GrantEffect
 from jhin_secrets import SecretStore
 from jhin_secrets.redaction import redact_text
 from jhin_tools import (
+    AGENT_BEFORE_BIND,
     MAX_TOOL_CALLS_PER_STEP,
+    PHASE9_AFTER_MANIFEST,
+    PHASE9_CLEANUP_BEFORE_EFFECT,
     GatewayOutcome,
     ToolExecutionContext,
     ToolGateway,
@@ -876,6 +879,9 @@ class AgentActivities:
                 stable_tool_invocation_id(run_id, params.step_index, ordinal)
                 for ordinal in range(len(outcome.tool_calls))
             )
+            test_barrier = getattr(self._resources, "test_barrier", None)
+            if test_barrier is not None:
+                await test_barrier.arrive_and_wait(AGENT_BEFORE_BIND, run_id)
             committed_after_model = await self._bind_step_tool_manifest(
                 session,
                 workspace_id=workspace_id,
@@ -885,6 +891,8 @@ class AgentActivities:
                 step_index=params.step_index,
                 tool_calls=outcome.tool_calls,
             )
+            if test_barrier is not None:
+                await test_barrier.arrive_and_wait(PHASE9_AFTER_MANIFEST, run_id)
             if committed_after_model is not None:
                 return committed_after_model
 
@@ -916,6 +924,7 @@ class AgentActivities:
                                 agent_name=snapshot.name,
                                 crypto=self._resources.crypto,
                                 session_factory=self._resources.session_factory,
+                                test_barrier=getattr(self._resources, "test_barrier", None),
                             ),
                             build_default_catalog(),
                         )
@@ -1357,6 +1366,7 @@ class AgentActivities:
                         agent_name=agent.name if agent is not None else "agent",
                         crypto=self._resources.crypto,
                         session_factory=self._resources.session_factory,
+                        test_barrier=getattr(self._resources, "test_barrier", None),
                     ),
                     build_default_catalog(),
                 )
@@ -1867,6 +1877,11 @@ class AgentActivities:
         # The run's sandbox workspace volume dies with the run (plan 14.5).
         # Best-effort: the runner also reaps aged volumes on startup.
         if params.run_id is not None:
+            test_barrier = getattr(self._resources, "test_barrier", None)
+            if test_barrier is not None:
+                await test_barrier.arrive_and_wait(
+                    PHASE9_CLEANUP_BEFORE_EFFECT, UUID(params.run_id)
+                )
             deleted = await delete_sandbox_workspace(f"run-{params.run_id}")
             logger.info("sandbox.workspace_cleanup", run_id=params.run_id, deleted=deleted)
 

@@ -65,6 +65,7 @@ from jhin_tools.sanitize import (
     sanitize_payload,
     strict_json_loads,
 )
+from jhin_tools.test_barriers import TOOL_AFTER_CLAIM, TOOL_AFTER_EFFECT, TOOL_BEFORE_CLAIM
 
 GatewayStatus = Literal[
     "executed",
@@ -855,6 +856,8 @@ class ToolGateway:
                 },
             )
             await claim_session.commit()
+            if self._ctx.test_barrier is not None:
+                await self._ctx.test_barrier.arrive_and_wait(TOOL_AFTER_CLAIM, invocation_id)
         except IntegrityError:
             await self._ctx.session.rollback()
             self._ctx.session.expire_all()
@@ -1127,6 +1130,8 @@ class ToolGateway:
             # side effect) separately from the activity's transcript bundle.
             # A crash between those commits can then repair the bundle by
             # replaying this exact outcome without invoking the executor.
+            if self._ctx.test_barrier is not None:
+                await self._ctx.test_barrier.arrive_and_wait(TOOL_AFTER_EFFECT, tool_call_id)
             await session.commit()
             await session.refresh(row)
         return GatewayOutcome(
@@ -1161,6 +1166,8 @@ class ToolGateway:
                 invocation_id=None,
             )
         async with self._invocation_lifecycle_lock(invocation_id) as gateway:
+            if gateway._ctx.test_barrier is not None:
+                await gateway._ctx.test_barrier.arrive_and_wait(TOOL_BEFORE_CLAIM, invocation_id)
             return await gateway._request_once(
                 tool_name,
                 arguments_json,

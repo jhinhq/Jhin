@@ -39,7 +39,7 @@ from jhin_domain import (
 from jhin_events import EventEnvelope, EventSource
 from jhin_observability import get_logger
 from jhin_secrets.redaction import redact_text
-from jhin_tools import ToolExecutionContext
+from jhin_tools import PHASE9_SYNC_BEFORE_EFFECT, ToolExecutionContext
 from jhin_workflows.triggered_task import (
     ACTIVITY_PREPARE_TRIGGERED_TASK,
     ACTIVITY_SYNC_EXTERNAL,
@@ -241,8 +241,13 @@ class TriggerActivities:
                 agent_id=UUID(params.agent_id),
                 agent_name="system",
                 crypto=self._resources.crypto,
+                test_barrier=getattr(self._resources, "test_barrier", None),
             )
             try:
+                if ctx.test_barrier is not None:
+                    await ctx.test_barrier.arrive_and_wait(
+                        PHASE9_SYNC_BEFORE_EFFECT, UUID(params.run_id)
+                    )
                 output = await executor(
                     ctx,
                     CommentCreateInput(

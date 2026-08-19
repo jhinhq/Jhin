@@ -32,6 +32,7 @@ from jhin_policy import (
     capability_matches,
 )
 from jhin_secrets import SecretCrypto
+from jhin_tools.test_barriers import CrashBarrier
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,7 @@ class ToolExecutionContext:
     crypto: SecretCrypto | None = None
     session_factory: async_sessionmaker[AsyncSession] | None = None
     tool_call_id: UUID | None = None
+    test_barrier: CrashBarrier | None = None
 
 
 ToolExecutor = Callable[[ToolExecutionContext, BaseModel], Awaitable[BaseModel]]
