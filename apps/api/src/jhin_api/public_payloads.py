@@ -14,6 +14,7 @@ _DATABASE_TOOLS = frozenset(
     }
 )
 _LOSSLESS_MANIFEST_EVENT = "agent.step.tool_manifest"
+_AGENT_ONLY_REASONING_EVENT = "agent.step.reasoning"
 
 
 def public_tool_payload(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -62,6 +63,9 @@ def public_run_event_payload(event_type: str, payload: dict[str, Any]) -> dict[s
     UI timelines need only the call order and binding status, never those
     lossless arguments.
     """
+
+    if event_type == _AGENT_ONLY_REASONING_EVENT:
+        return {}
 
     if event_type != _LOSSLESS_MANIFEST_EVENT:
         return deepcopy(payload)

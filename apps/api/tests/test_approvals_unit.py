@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from jhin_api.approvals import service
 from jhin_api.approvals.schemas import ApprovalOut
 from jhin_api.deps import WorkspaceContext
+from jhin_api.public_payloads import public_run_event_payload
 from jhin_api.tasks.schemas import RunEventOut, ToolCallOut
 from jhin_db.models import Agent, Approval, AuditEvent, Task
 from jhin_domain import ApprovalStatus, new_uuid7
@@ -196,6 +197,56 @@ def test_public_tool_manifest_timeline_omits_lossless_arguments(
             "calls": [{"ordinal": 0, "lossless": True, "tool_name": tool_name}],
         },
     }
+
+
+def test_public_manifest_projection_never_exposes_bound_arguments() -> None:
+    private = {
+        "step": 2,
+        "manifest": {
+            "count": 1,
+            "calls": [
+                {
+                    "ordinal": 0,
+                    "lossless": True,
+                    "tool_name": "linear.issue.get",
+                    "arguments_json": '{"connection_id":"secret-ref","issue":"ENG-7"}',
+                }
+            ],
+        },
+    }
+    public = public_run_event_payload("agent.step.tool_manifest", private)
+    assert public == {
+        "step": 2,
+        "manifest": {
+            "count": 1,
+            "calls": [{"ordinal": 0, "lossless": True, "tool_name": "linear.issue.get"}],
+        },
+    }
+    assert "arguments_json" not in json.dumps(public)
+
+
+def test_public_reasoning_projection_is_always_empty() -> None:
+    private = {
+        "format_version": 1,
+        "step": 2,
+        "completion": "agent-only completion",
+        "provider_call_ids": ["provider-secret-id"],
+        "transitions": [{"node": "execute_tool"}],
+        "usage": {"input_tokens": 7, "output_tokens": 3},
+        "unexpected_future_private_field": {"secret": "must fail closed"},
+    }
+    event = RunEventOut.model_validate(
+        {
+            "id": new_uuid7(),
+            "run_id": new_uuid7(),
+            "seq": 3,
+            "event_type": "agent.step.reasoning",
+            "payload_json": private,
+            "created_at": datetime.now(UTC),
+        }
+    ).model_dump(mode="json")
+    assert event["payload_json"] == {}
+    assert "must fail closed" not in json.dumps(event)
 
 
 def test_public_timeline_preserves_unrelated_event_payloads() -> None:

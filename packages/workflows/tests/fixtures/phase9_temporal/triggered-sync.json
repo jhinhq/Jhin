@@ -1,0 +1,364 @@
+{
+  "events": [
+    {
+      "eventId": "1",
+      "eventTime": "2036-08-16T03:11:34.663Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_STARTED",
+      "workflowExecutionStartedEventAttributes": {
+        "workflowType": {
+          "name": "TriggeredTaskWorkflow"
+        },
+        "taskQueue": {
+          "name": "jhin-agent-queue"
+        },
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJhZ2VudF9pZCI6IjAxYTAxODAwLWIxYzMtN2ViMC04YzNmLTZhYzJhMDU1NDg0YSIsImNvbW1lbnRfYmFjayI6dHJ1ZSwiY29ubmVjdGlvbl9pZCI6IjAxYTAxODAwLWIxZjItNzI0My04ZDczLTA5MTc1YmM0NzU5YiIsImRlc2NyaXB0aW9uIjoiQ29tcGxldGUgY2hpbGQgd29yayBmb3IgdHJpZ2dlcmVkLXN5bmMiLCJldmVudF9pZCI6IjAxYTAxODAwLWIxZWUtNzFlMS1hZDFhLTk0ZDRkOGU2MDU4OCIsImV2ZW50X3R5cGUiOiJjb25uZWN0b3IubGluZWFyLmlzc3VlLnVwZGF0ZWQiLCJleHRlcm5hbF9pZCI6IlBIQVNFOS10cmlnZ2VyZWQtc3luYy0wMWEwMTgwMGIxOTIiLCJleHRlcm5hbF9zb3VyY2UiOiJsaW5lYXIiLCJleHRlcm5hbF91cmwiOiJodHRwczovL2xpbmVhci5leGFtcGxlL3RyaWdnZXJlZC1zeW5jIiwiaW52b2NhdGlvbl9pZCI6IjAxYTAxODAwLWIxZWUtNzFlMS1hZDFhLTk0ZWZhMGEwNmYyMSIsInRpdGxlIjoiUGhhc2UgOSBjYXB0dXJlIHRyaWdnZXJlZC1zeW5jIiwidHJpZ2dlcl9pZCI6IjAxYTAxODAwLWIxZTktNzg0Mi1hOWFiLTM2OGZmNjVkZjdmMSIsInRyaWdnZXJfbmFtZSI6IlBoYXNlIDkgdHJpZ2dlcmVkLXN5bmMiLCJ3b3Jrc3BhY2VfaWQiOiIwMWEwMTgwMC1iMWI1LTcyZTAtODFjNi1mMDU3YzJjNzNhZDYifQ=="
+            }
+          ]
+        },
+        "workflowExecutionTimeout": "315360000s",
+        "workflowRunTimeout": "315360000s",
+        "workflowTaskTimeout": "10s",
+        "originalExecutionRunId": "06824d4f-a918-42e8-942a-a4251437e689",
+        "identity": "17533@Mac-Studio.local",
+        "firstExecutionRunId": "06824d4f-a918-42e8-942a-a4251437e689",
+        "attempt": 1,
+        "firstWorkflowTaskBackoff": "0s",
+        "priority": {}
+      }
+    },
+    {
+      "eventId": "2",
+      "eventTime": "2036-08-16T03:11:34.663Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "jhin-agent-queue"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "3",
+      "eventTime": "2036-08-16T03:11:34.663Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "2",
+        "identity": "17533@Mac-Studio.local",
+        "historySizeBytes": "927"
+      }
+    },
+    {
+      "eventId": "4",
+      "eventTime": "2036-08-16T03:11:34.674Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "2",
+        "identity": "17533@Mac-Studio.local",
+        "binaryChecksum": "a775a591075a138a68e22877b9e40677",
+        "sdkMetadata": {
+          "coreUsedFlags": [
+            3,
+            1,
+            2
+          ],
+          "sdkName": "temporal-python",
+          "sdkVersion": "1.31.0"
+        },
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "5",
+      "eventTime": "2036-08-16T03:11:34.674Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "1",
+        "activityType": {
+          "name": "prepare_triggered_task"
+        },
+        "taskQueue": {
+          "name": "jhin-agent-queue",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJhZ2VudF9pZCI6IjAxYTAxODAwLWIxYzMtN2ViMC04YzNmLTZhYzJhMDU1NDg0YSIsImNvbW1lbnRfYmFjayI6dHJ1ZSwiY29ubmVjdGlvbl9pZCI6IjAxYTAxODAwLWIxZjItNzI0My04ZDczLTA5MTc1YmM0NzU5YiIsImRlc2NyaXB0aW9uIjoiQ29tcGxldGUgY2hpbGQgd29yayBmb3IgdHJpZ2dlcmVkLXN5bmMiLCJldmVudF9pZCI6IjAxYTAxODAwLWIxZWUtNzFlMS1hZDFhLTk0ZDRkOGU2MDU4OCIsImV2ZW50X3R5cGUiOiJjb25uZWN0b3IubGluZWFyLmlzc3VlLnVwZGF0ZWQiLCJleHRlcm5hbF9pZCI6IlBIQVNFOS10cmlnZ2VyZWQtc3luYy0wMWEwMTgwMGIxOTIiLCJleHRlcm5hbF9zb3VyY2UiOiJsaW5lYXIiLCJleHRlcm5hbF91cmwiOiJodHRwczovL2xpbmVhci5leGFtcGxlL3RyaWdnZXJlZC1zeW5jIiwiaW52b2NhdGlvbl9pZCI6IjAxYTAxODAwLWIxZWUtNzFlMS1hZDFhLTk0ZWZhMGEwNmYyMSIsInRpdGxlIjoiUGhhc2UgOSBjYXB0dXJlIHRyaWdnZXJlZC1zeW5jIiwidHJpZ2dlcl9pZCI6IjAxYTAxODAwLWIxZTktNzg0Mi1hOWFiLTM2OGZmNjVkZjdmMSIsInRyaWdnZXJfbmFtZSI6IlBoYXNlIDkgdHJpZ2dlcmVkLXN5bmMiLCJ3b3Jrc3BhY2VfaWQiOiIwMWEwMTgwMC1iMWI1LTcyZTAtODFjNi1mMDU3YzJjNzNhZDYifQ=="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "315360000s",
+        "scheduleToStartTimeout": "315360000s",
+        "startToCloseTimeout": "30s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "3",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2.0,
+          "maximumInterval": "15s",
+          "maximumAttempts": 5
+        },
+        "priority": {}
+      }
+    },
+    {
+      "eventId": "6",
+      "eventTime": "2036-08-16T03:11:34.675Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "5",
+        "identity": "17533@Mac-Studio.local",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "7",
+      "eventTime": "2036-08-16T03:11:34.696Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJjcmVhdGVkIjp0cnVlLCJ0YXNrX2lkIjoiMDFhMDE4MDAtYjU1Ny03NjIwLWE4YzMtOWViMDkxMTFmZjg3In0="
+            }
+          ]
+        },
+        "scheduledEventId": "5",
+        "startedEventId": "6",
+        "identity": "17533@Mac-Studio.local"
+      }
+    },
+    {
+      "eventId": "8",
+      "eventTime": "2036-08-16T03:11:34.696Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "jhin-agent-queue"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "9",
+      "eventTime": "2036-08-16T03:11:34.696Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "8",
+        "identity": "17533@Mac-Studio.local",
+        "historySizeBytes": "2135"
+      }
+    },
+    {
+      "eventId": "10",
+      "eventTime": "2036-08-16T03:11:34.700Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "8",
+        "identity": "17533@Mac-Studio.local",
+        "binaryChecksum": "a775a591075a138a68e22877b9e40677",
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "11",
+      "eventTime": "2036-08-16T03:11:34.700Z",
+      "eventType": "EVENT_TYPE_START_CHILD_WORKFLOW_EXECUTION_INITIATED",
+      "startChildWorkflowExecutionInitiatedEventAttributes": {
+        "namespace": "default",
+        "workflowId": "task-01a01800-b557-7620-a8c3-9eb09111ff87",
+        "workflowType": {
+          "name": "AgentTaskWorkflow"
+        },
+        "taskQueue": {
+          "name": "jhin-agent-queue",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJhZ2VudF9pZCI6IjAxYTAxODAwLWIxYzMtN2ViMC04YzNmLTZhYzJhMDU1NDg0YSIsImluc3RydWN0aW9uIjoiQ29tcGxldGUgY2hpbGQgd29yayBmb3IgdHJpZ2dlcmVkLXN5bmMiLCJ0YXNrX2lkIjoiMDFhMDE4MDAtYjU1Ny03NjIwLWE4YzMtOWViMDkxMTFmZjg3Iiwid29ya3NwYWNlX2lkIjoiMDFhMDE4MDAtYjFiNS03MmUwLTgxYzYtZjA1N2MyYzczYWQ2In0="
+            }
+          ]
+        },
+        "workflowExecutionTimeout": "0s",
+        "workflowRunTimeout": "0s",
+        "workflowTaskTimeout": "10s",
+        "parentClosePolicy": "PARENT_CLOSE_POLICY_TERMINATE",
+        "workflowTaskCompletedEventId": "9",
+        "workflowIdReusePolicy": "WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE",
+        "header": {},
+        "memo": {},
+        "priority": {}
+      }
+    },
+    {
+      "eventId": "12",
+      "eventTime": "2036-08-16T03:11:34.701Z",
+      "eventType": "EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_STARTED",
+      "childWorkflowExecutionStartedEventAttributes": {
+        "namespace": "default",
+        "initiatedEventId": "11",
+        "workflowExecution": {
+          "workflowId": "task-01a01800-b557-7620-a8c3-9eb09111ff87",
+          "runId": "2f8cdc1f-75d6-43ec-979e-23bde3ea0e77"
+        },
+        "workflowType": {
+          "name": "AgentTaskWorkflow"
+        }
+      }
+    },
+    {
+      "eventId": "13",
+      "eventTime": "2036-08-16T03:11:34.701Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "jhin-agent-queue"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "14",
+      "eventTime": "2036-08-16T03:11:34.701Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "13",
+        "identity": "17533@Mac-Studio.local",
+        "historySizeBytes": "2831"
+      }
+    },
+    {
+      "eventId": "15",
+      "eventTime": "2036-08-16T03:11:34.712Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "13",
+        "identity": "17533@Mac-Studio.local",
+        "binaryChecksum": "a775a591075a138a68e22877b9e40677",
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "16",
+      "eventTime": "2036-08-16T03:11:34.782Z",
+      "eventType": "EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_COMPLETED",
+      "childWorkflowExecutionCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJjb3N0X21pY3JvcyI6MCwiaW5wdXRfdG9rZW5zIjo3LCJvdXRwdXRfdG9rZW5zIjozLCJydW5faWQiOiIwMWEwMTgwMC1iNTg2LTdhNzAtOGIyMi1iNWQ0ZjJkZDNhODUiLCJzdGF0dXMiOiJjb21wbGV0ZWQiLCJzdGVwc191c2VkIjoxfQ=="
+            }
+          ]
+        },
+        "namespace": "default",
+        "workflowExecution": {
+          "workflowId": "task-01a01800-b557-7620-a8c3-9eb09111ff87",
+          "runId": "2f8cdc1f-75d6-43ec-979e-23bde3ea0e77"
+        },
+        "workflowType": {
+          "name": "AgentTaskWorkflow"
+        },
+        "initiatedEventId": "11",
+        "startedEventId": "12"
+      }
+    },
+    {
+      "eventId": "17",
+      "eventTime": "2036-08-16T03:11:34.782Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "jhin-agent-queue"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "18",
+      "eventTime": "2036-08-16T03:11:34.782Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "17",
+        "identity": "17533@Mac-Studio.local",
+        "historySizeBytes": "3318"
+      }
+    },
+    {
+      "eventId": "19",
+      "eventTime": "2036-08-16T03:11:34.784Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "17",
+        "identity": "17533@Mac-Studio.local",
+        "binaryChecksum": "a775a591075a138a68e22877b9e40677",
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "20",
+      "eventTime": "2036-08-16T03:11:34.784Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "2",
+        "activityType": {
+          "name": "sync_external"
+        },
+        "taskQueue": {
+          "name": "jhin-agent-queue",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJhZ2VudF9pZCI6IjAxYTAxODAwLWIxYzMtN2ViMC04YzNmLTZhYzJhMDU1NDg0YSIsImNvbm5lY3Rpb25faWQiOiIwMWEwMTgwMC1iMWYyLTcyNDMtOGQ3My0wOTE3NWJjNDc1OWIiLCJleHRlcm5hbF9pZCI6IlBIQVNFOS10cmlnZ2VyZWQtc3luYy0wMWEwMTgwMGIxOTIiLCJleHRlcm5hbF9zb3VyY2UiOiJsaW5lYXIiLCJydW5faWQiOiIwMWEwMTgwMC1iNTg2LTdhNzAtOGIyMi1iNWQ0ZjJkZDNhODUiLCJydW5fc3RhdHVzIjoiY29tcGxldGVkIiwidGFza19pZCI6IjAxYTAxODAwLWI1NTctNzYyMC1hOGMzLTllYjA5MTExZmY4NyIsInRyaWdnZXJfbmFtZSI6IlBoYXNlIDkgdHJpZ2dlcmVkLXN5bmMiLCJ3b3Jrc3BhY2VfaWQiOiIwMWEwMTgwMC1iMWI1LTcyZTAtODFjNi1mMDU3YzJjNzNhZDYifQ=="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "315360000s",
+        "scheduleToStartTimeout": "315360000s",
+        "startToCloseTimeout": "60s",
+        "heartbeatTimeout": "0s",
+        "workflowTaskCompletedEventId": "18",
+        "retryPolicy": {
+          "initialInterval": "2s",
+          "backoffCoefficient": 2.0,
+          "maximumInterval": "30s",
+          "maximumAttempts": 3
+        },
+        "priority": {}
+      }
+    }
+  ]
+}
