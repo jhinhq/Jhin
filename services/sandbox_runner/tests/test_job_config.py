@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from jhin_sandbox_runner.jobs import (
@@ -18,6 +20,8 @@ SETTINGS = Settings(
     sandbox_runner_token="test-token",
     sandbox_default_image="jhin-sandbox:test",
     sandbox_network="jhin_sandbox_test",
+    sandbox_docker_mode="rootless",
+    sandbox_docker_transport_url="http://rootless-docker-transport:2375",
 )
 
 
@@ -66,8 +70,48 @@ class TestIsolationInvariants:
         # A dedicated sandbox bridge — never "host", never a control network.
         assert internet["HostConfig"]["NetworkMode"] == "jhin_sandbox_test"
 
+    @pytest.mark.parametrize("network", ["runner", "engine"])
+    def test_control_plane_network_is_rejected(self, network: str) -> None:
+        unsafe_settings = SETTINGS.model_copy(update={"sandbox_network": network})
+        req = request(network_policy="internet")
+        cpu, memory, pids, _timeout = resolve_limits(req, unsafe_settings)
+        with pytest.raises(JobValidationError, match="control-plane network"):
+            build_container_config(
+                req,
+                unsafe_settings,
+                image="jhin-sandbox:test",
+                cpu_limit=cpu,
+                memory_mb=memory,
+                pids_limit=pids,
+            )
+
     def test_runs_as_non_root_uid_1000(self) -> None:
-        assert config_for(request())["User"] == "1000:1000"
+        config = config_for(request())
+        assert config["User"] == "1000:1000"
+        assert "GroupAdd" not in config["HostConfig"]
+
+    def test_job_never_inherits_runner_docker_authority(self) -> None:
+        config = config_for(
+            request(
+                env={
+                    "SANDBOX_DOCKER_MODE": "rootful",
+                    "DOCKER_HOST": "unix:///run/host/docker.sock",
+                }
+            )
+        )
+        host = config["HostConfig"]
+        assert all(
+            forbidden not in repr(config)
+            for forbidden in (
+                "/var/run/docker.sock",
+                "/run/jhin/docker.sock",
+                "/run/host/docker.sock",
+                "rootless-docker-transport",
+                "SANDBOX_DOCKER_",
+                "DOCKER_HOST",
+            )
+        )
+        assert host["NetworkMode"] not in {"runner", "engine"}
 
     def test_resource_limits_applied(self) -> None:
         req = request(cpu_limit=1.5, memory_mb=512, pids_limit=64)
@@ -132,3 +176,11 @@ class TestRequestValidation:
 
     def test_volume_name_shape(self) -> None:
         assert workspace_volume_name("run-1") == "jhin-sandbox-ws-run-1"
+
+
+def test_python_runtime_image_creates_exact_numeric_runner_identity() -> None:
+    dockerfile = (Path(__file__).parents[3] / "docker" / "python.Dockerfile").read_text(
+        encoding="utf-8"
+    )
+    assert "groupadd --gid 10001 jhin" in dockerfile
+    assert "useradd --create-home --uid 10001 --gid 10001 jhin" in dockerfile

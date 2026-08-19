@@ -8,7 +8,15 @@ the job.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from jhin_sandbox_runner.docker_socket import (
+    ROOTLESS_TRANSPORT_URL,
+    DockerSocketMode,
+)
 
 
 class Settings(BaseSettings):
@@ -18,6 +26,13 @@ class Settings(BaseSettings):
     # top of Docker network isolation). Empty token = every request denied.
     sandbox_runner_token: str = ""
     sandbox_runner_port: int = 8085
+
+    # Required Docker authority. There is deliberately no mode default: an
+    # omitted deployment decision must fail configuration validation.
+    sandbox_docker_mode: DockerSocketMode
+    sandbox_docker_socket: Path | None = None
+    sandbox_docker_transport_url: str | None = None
+    sandbox_docker_gid: int | None = Field(default=None, gt=0)
 
     # Image used when a job request does not name one.
     sandbox_default_image: str = "jhin-sandbox:latest"
@@ -37,3 +52,22 @@ class Settings(BaseSettings):
     sandbox_workspace_max_age_hours: int = 24
 
     log_level: str = "INFO"
+
+    @model_validator(mode="after")
+    def validate_docker_mode(self) -> Settings:
+        if self.sandbox_docker_mode == "rootless":
+            if self.sandbox_docker_socket is not None or self.sandbox_docker_gid is not None:
+                raise ValueError("rootless mode accepts no socket path or socket GID")
+            if self.sandbox_docker_transport_url != ROOTLESS_TRANSPORT_URL:
+                raise ValueError("rootless mode requires the exact private transport URL")
+            return self
+
+        if self.sandbox_docker_socket is None:
+            raise ValueError("rootful mode requires a Docker socket path")
+        if not self.sandbox_docker_socket.is_absolute():
+            raise ValueError("rootful Docker socket path must be absolute")
+        if self.sandbox_docker_gid is None:
+            raise ValueError("rootful mode requires a positive socket GID")
+        if self.sandbox_docker_transport_url is not None:
+            raise ValueError("rootful mode accepts no transport URL")
+        return self

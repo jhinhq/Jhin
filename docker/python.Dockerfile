@@ -52,7 +52,8 @@ RUN if [ "$INSTALL_GIT" = "1" ]; then \
         && apt-get install -y --no-install-recommends git \
         && rm -rf /var/lib/apt/lists/*; \
     fi
-RUN useradd --create-home --uid 10001 jhin
+RUN groupadd --gid 10001 jhin \
+    && useradd --create-home --uid 10001 --gid 10001 jhin
 COPY --from=builder --chown=jhin:jhin /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1

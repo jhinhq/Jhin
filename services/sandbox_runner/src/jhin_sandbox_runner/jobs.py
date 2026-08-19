@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -28,6 +29,11 @@ import aiodocker
 from aiodocker.exceptions import DockerError
 
 from jhin_observability import get_logger
+from jhin_sandbox_runner.docker_socket import (
+    ROOTLESS_TRANSPORT_URL,
+    DockerSocketConfigurationError,
+    validate_docker_authority,
+)
 from jhin_sandbox_runner.schemas import SandboxJobRequest, SandboxJobStatusResponse
 from jhin_sandbox_runner.settings import Settings
 from jhin_secrets.redaction import SecretRedactor
@@ -40,10 +46,15 @@ WORKSPACE_VOLUME_PREFIX = "jhin-sandbox-ws-"
 
 _TRUNCATION_MARKER = "\n…[truncated by sandbox runner]"
 _POLL_INTERVAL_SECONDS = 0.5
+DOCKER_CHECK_TIMEOUT_SECONDS = 5.0
 
 
 class JobValidationError(Exception):
     """The request asks for more than the configured caps allow."""
+
+
+class DockerDaemonConfigurationError(RuntimeError):
+    """The selected Docker daemon does not match the configured trust mode."""
 
 
 @dataclass
@@ -134,15 +145,31 @@ def build_container_config(
     Pure function so the security-relevant knobs are directly unit-testable
     (no privileged mode, no host network, cap drop, read-only root, ...).
     """
+    requested_env = {**request.env, **request.secret_env}
+    forbidden_values = {
+        ROOTLESS_TRANSPORT_URL,
+        "/var/run/docker.sock",
+        "/run/jhin/docker.sock",
+        "/run/host/docker.sock",
+    }
+    safe_env = {
+        name: value
+        for name, value in requested_env.items()
+        if name != "DOCKER_HOST"
+        and not name.startswith("SANDBOX_DOCKER_")
+        and not any(forbidden in value for forbidden in forbidden_values)
+    }
     env = {
         # Read-only root: HOME must live on the writable workspace so tools
         # like git can write their config.
         "HOME": request.working_dir,
-        **request.env,
-        **request.secret_env,
+        **safe_env,
     }
+    network_mode = "none" if request.network_policy == "none" else settings.sandbox_network
+    if network_mode in {"runner", "engine"}:
+        raise JobValidationError("jobs cannot join a control-plane network")
     host_config: dict[str, Any] = {
-        "NetworkMode": "none" if request.network_policy == "none" else settings.sandbox_network,
+        "NetworkMode": network_mode,
         "Memory": memory_mb * 1024 * 1024,
         "MemorySwap": memory_mb * 1024 * 1024,  # no swap beyond the cap
         "NanoCpus": int(cpu_limit * 1_000_000_000),
@@ -189,9 +216,39 @@ class JobManager:
         return self._docker
 
     async def start(self) -> None:
-        self._docker = aiodocker.Docker()
-        await self._ensure_sandbox_network()
-        await self.reap_orphans()
+        effective_uid = os.geteuid()
+        effective_gid = os.getegid()
+        if self._settings.sandbox_docker_mode == "rootless" and effective_gid != 10001:
+            raise DockerSocketConfigurationError("rootless runner requires UID/GID 10001:10001")
+        validated_url = validate_docker_authority(
+            mode=self._settings.sandbox_docker_mode,
+            socket_path=self._settings.sandbox_docker_socket,
+            transport_url=self._settings.sandbox_docker_transport_url,
+            configured_gid=self._settings.sandbox_docker_gid,
+            effective_uid=effective_uid,
+            supplemental_groups=set(os.getgroups()),
+        )
+        client = aiodocker.Docker(url=validated_url)
+        self._docker = client
+        try:
+            await asyncio.wait_for(client.version(), timeout=DOCKER_CHECK_TIMEOUT_SECONDS)
+            info = await asyncio.wait_for(
+                client.system.info(), timeout=DOCKER_CHECK_TIMEOUT_SECONDS
+            )
+            security_options = info.get("SecurityOptions", [])
+            if self._settings.sandbox_docker_mode == "rootless" and (
+                not isinstance(security_options, list) or "name=rootless" not in security_options
+            ):
+                raise DockerDaemonConfigurationError(
+                    "configured rootless Docker daemon is not rootless"
+                )
+            await self._ensure_sandbox_network()
+            await self.reap_orphans()
+        except BaseException:
+            self._docker = None
+            with contextlib.suppress(Exception):
+                await client.close()
+            raise
 
     async def _ensure_sandbox_network(self) -> None:
         """Create the dedicated job bridge network if compose has not.
@@ -201,27 +258,30 @@ class JobManager:
         owns its creation.
         """
         name = self._settings.sandbox_network
-        try:
-            networks = await self.docker.networks.list(filters={"name": name})
-            if not any(entry.get("Name") == name for entry in networks):
-                await self.docker.networks.create(
-                    {"Name": name, "Driver": "bridge", "Labels": {"jhin.sandbox.network": "1"}}
-                )
-                logger.info("sandbox.network_created", network=name)
-        except DockerError as exc:
-            logger.warning("sandbox.network_ensure_failed", network=name, error=exc.message)
+        networks = await self.docker.networks.list(filters={"name": name})
+        if not any(entry.get("Name") == name for entry in networks):
+            await self.docker.networks.create(
+                {"Name": name, "Driver": "bridge", "Labels": {"jhin.sandbox.network": "1"}}
+            )
+            logger.info("sandbox.network_created", network=name)
 
     async def close(self) -> None:
         for record in self._jobs.values():
             if record.task is not None and not record.task.done():
                 record.task.cancel()
         if self._docker is not None:
-            await self._docker.close()
+            client = self._docker
+            self._docker = None
+            await client.close()
 
     async def ping(self) -> bool:
         try:
-            await self.docker.version()
-            return True
+
+            async def ping_daemon() -> bool:
+                async with self.docker._query("_ping", versioned_api=False) as response:
+                    return response.status == 200 and await response.text() == "OK"
+
+            return await asyncio.wait_for(ping_daemon(), timeout=DOCKER_CHECK_TIMEOUT_SECONDS)
         except Exception:
             return False
 
@@ -402,34 +462,19 @@ class JobManager:
     async def reap_orphans(self) -> None:
         """Remove leftover job containers (and stale workspace volumes) from
         a previous runner process that died mid-job."""
-        try:
-            containers = await self.docker.containers.list(
-                all=1, filters=json.dumps({"label": [JOB_LABEL]})
-            )
-            for container in containers:
-                try:
-                    await container.delete(force=True, v=True)
-                    logger.info("sandbox.reaped_container", container_id=container.id[:12])
-                except DockerError:
-                    pass
-        except DockerError as exc:
-            logger.warning("sandbox.reap_containers_failed", error=exc.message)
+        containers = await self.docker.containers.list(
+            all=1, filters=json.dumps({"label": [JOB_LABEL]})
+        )
+        for container in containers:
+            await container.delete(force=True, v=True)
+            logger.info("sandbox.reaped_container", container_id=container.id[:12])
 
         max_age = self._settings.sandbox_workspace_max_age_hours * 3600
-        try:
-            listing = await self.docker.volumes.list(filters={"label": [WORKSPACE_LABEL]})
-            for entry in listing.get("Volumes") or []:
-                created = entry.get("CreatedAt", "")
-                try:
-                    age = (datetime.now(UTC) - datetime.fromisoformat(created)).total_seconds()
-                except ValueError:
-                    continue
-                if age > max_age:
-                    try:
-                        volume = await self.docker.volumes.get(entry["Name"])
-                        await volume.delete()
-                        logger.info("sandbox.reaped_workspace", volume=entry["Name"])
-                    except DockerError:
-                        pass
-        except DockerError as exc:
-            logger.warning("sandbox.reap_volumes_failed", error=exc.message)
+        listing = await self.docker.volumes.list(filters={"label": [WORKSPACE_LABEL]})
+        for entry in listing.get("Volumes") or []:
+            created = entry.get("CreatedAt", "")
+            age = (datetime.now(UTC) - datetime.fromisoformat(created)).total_seconds()
+            if age > max_age:
+                volume = await self.docker.volumes.get(entry["Name"])
+                await volume.delete()
+                logger.info("sandbox.reaped_workspace", volume=entry["Name"])

@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 
 from jhin_observability import configure_logging, get_logger
 from jhin_sandbox_runner.jobs import JobManager, JobValidationError
@@ -60,8 +61,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
 
     @app.get("/health")
-    async def health() -> dict[str, object]:
-        return {"status": "ok", "docker": await manager.ping()}
+    async def health() -> JSONResponse:
+        docker_ok = await manager.ping()
+        payload = {
+            "status": "ok" if docker_ok else "unavailable",
+            "docker": docker_ok,
+        }
+        return JSONResponse(
+            status_code=(status.HTTP_200_OK if docker_ok else status.HTTP_503_SERVICE_UNAVAILABLE),
+            content=payload,
+        )
 
     @app.post(
         "/v1/jobs",
