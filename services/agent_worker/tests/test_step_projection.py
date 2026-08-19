@@ -16,7 +16,10 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm.attributes import flag_modified
+from temporalio import activity
 from temporalio.exceptions import ApplicationError
+from temporalio.testing import WorkflowEnvironment
+from temporalio.worker import Worker
 
 from jhin_agent_worker.projections import AgentProjectionActivities
 from jhin_agent_worker.reasoning import AgentStepReasoningRecord, AgentStepUsage
@@ -33,7 +36,26 @@ from jhin_db.models import (
 )
 from jhin_domain import ApprovalStatus, RunStatus, TaskState, ToolCallStatus, new_uuid7
 from jhin_tools import stable_tool_invocation_id
-from jhin_workflows.agent_task.shared import CommitAgentStepInput, FinalizeInput
+from jhin_workflows import AGENT_TASK_QUEUE, TOOL_TASK_QUEUE
+from jhin_workflows.agent_task import AgentTaskInput, AgentTaskWorkflow
+from jhin_workflows.agent_task.shared import (
+    ACTIVITY_CLEANUP_RUN_WORKSPACE,
+    ACTIVITY_EXECUTE_BOUND_TOOL,
+    ACTIVITY_REASON_AGENT_STEP,
+    ACTIVITY_RESOLVE_ADVERTISED_TOOLS,
+    ACTIVITY_RESOLVE_SNAPSHOT,
+    AdvertisedTool,
+    BoundToolResult,
+    CleanupRunWorkspaceInput,
+    CleanupRunWorkspaceResult,
+    CommitAgentStepInput,
+    ExecuteBoundToolInput,
+    FinalizeInput,
+    ReasonAgentStepInput,
+    ReasonAgentStepResult,
+    ResolveAdvertisedToolsInput,
+    SnapshotResult,
+)
 
 
 class _Publisher:
@@ -51,6 +73,59 @@ class _Resources:
         self.crypto = None
 
 
+class _CancellationWorkflowActivities:
+    def __init__(self, world: ProjectionWorld) -> None:
+        self._world = world
+        self.execute_started = asyncio.Event()
+        self.release_execute = asyncio.Event()
+
+    @activity.defn(name=ACTIVITY_RESOLVE_SNAPSHOT)
+    async def resolve_snapshot(self, _params: AgentTaskInput) -> SnapshotResult:
+        return SnapshotResult(
+            run_id=str(self._world.run_id),
+            snapshot_json="{}",
+            snapshot_hash="projection-cancellation",
+            max_steps=2,
+        )
+
+    @activity.defn(name=ACTIVITY_RESOLVE_ADVERTISED_TOOLS)
+    async def resolve_advertised_tools(
+        self,
+        _params: ResolveAdvertisedToolsInput,
+    ) -> list[AdvertisedTool]:
+        return [
+            AdvertisedTool(
+                name="system.echo",
+                description="Echo one value",
+                parameters={"type": "object"},
+            )
+        ]
+
+    @activity.defn(name=ACTIVITY_REASON_AGENT_STEP)
+    async def reason_agent_step(
+        self,
+        _params: ReasonAgentStepInput,
+    ) -> ReasonAgentStepResult:
+        return ReasonAgentStepResult(call_count=3)
+
+    @activity.defn(name=ACTIVITY_EXECUTE_BOUND_TOOL)
+    async def execute_bound_tool(self, params: ExecuteBoundToolInput) -> BoundToolResult:
+        assert params.ordinal == 0
+        self.execute_started.set()
+        await self.release_execute.wait()
+        return BoundToolResult(
+            tool_call_id=str(stable_tool_invocation_id(self._world.run_id, 0, 0)),
+            status="executed",
+        )
+
+    @activity.defn(name=ACTIVITY_CLEANUP_RUN_WORKSPACE)
+    async def cleanup_run_workspace(
+        self,
+        _params: CleanupRunWorkspaceInput,
+    ) -> CleanupRunWorkspaceResult:
+        return CleanupRunWorkspaceResult(deleted=True)
+
+
 @dataclass
 class ProjectionWorld:
     projections: AgentProjectionActivities
@@ -61,7 +136,12 @@ class ProjectionWorld:
     task_id: Any
     run_id: Any
 
-    def commit_params(self, *, ids: list[str] | None = None) -> CommitAgentStepInput:
+    def commit_params(
+        self,
+        *,
+        ids: list[str] | None = None,
+        cancelled_after_tool_call_id: str | None = None,
+    ) -> CommitAgentStepInput:
         return CommitAgentStepInput(
             workspace_id=str(self.workspace_id),
             task_id=str(self.task_id),
@@ -73,7 +153,30 @@ class ProjectionWorld:
                 if ids is not None
                 else [str(stable_tool_invocation_id(self.run_id, 0, 0))]
             ),
+            cancelled_after_tool_call_id=cancelled_after_tool_call_id,
         )
+
+    async def load_commit_payload(self) -> dict[str, Any]:
+        async with self.sessions() as session:
+            event = await session.scalar(
+                select(RunEvent).where(
+                    RunEvent.run_id == self.run_id,
+                    RunEvent.event_type == "agent.step.committed",
+                )
+            )
+            assert event is not None
+            return event.payload_json
+
+    async def load_tool_call_ids(self) -> list[str]:
+        async with self.sessions() as session:
+            rows = list(
+                await session.scalars(
+                    select(ToolCall)
+                    .where(ToolCall.run_id == self.run_id)
+                    .order_by(ToolCall.created_at)
+                )
+            )
+            return [str(row.id) for row in rows]
 
     async def seed_step(
         self,
@@ -296,6 +399,140 @@ async def test_projection_rejects_noncanonical_tool_id_prefix(world: ProjectionW
     with pytest.raises(ApplicationError) as error:
         await world.projections.commit_agent_step_activity(
             world.commit_params(ids=[str(new_uuid7())])
+        )
+
+    assert error.value.type == "tool_projection_binding_mismatch"
+    assert await world.count_events("agent.step.committed") == 0
+    assert await world.count_projection_messages() == 0
+
+
+async def test_cancellation_truncation_commits_exact_completed_prefix_atomically(
+    world: ProjectionWorld,
+) -> None:
+    await world.seed_step(
+        statuses=[ToolCallStatus.COMPLETED.value],
+        manifest_count=3,
+    )
+    completed_id = str(stable_tool_invocation_id(world.run_id, 0, 0))
+    params = world.commit_params(
+        ids=[completed_id],
+        cancelled_after_tool_call_id=completed_id,
+    )
+
+    result = await world.projections.commit_agent_step_activity(params)
+
+    assert result.done is False
+    assert await world.load_tool_call_ids() == [completed_id]
+    assert await world.count_projection_messages() == 2
+    assert await world.count_events("agent.step.committed") == 1
+    payload = await world.load_commit_payload()
+    assert payload["gateway_tool_call_ids"] == [completed_id]
+    assert payload["cancelled_after_tool_call_id"] == completed_id
+
+
+async def test_workflow_cancellation_commits_real_projection_without_a_later_effect(
+    world: ProjectionWorld,
+) -> None:
+    await world.seed_step(
+        statuses=[ToolCallStatus.COMPLETED.value],
+        manifest_count=3,
+    )
+    completed_id = str(stable_tool_invocation_id(world.run_id, 0, 0))
+    activities = _CancellationWorkflowActivities(world)
+    environment = await WorkflowEnvironment.start_time_skipping()
+    try:
+        async with (
+            Worker(
+                environment.client,
+                task_queue=AGENT_TASK_QUEUE,
+                workflows=[AgentTaskWorkflow],
+                activities=[
+                    activities.resolve_snapshot,
+                    activities.reason_agent_step,
+                    world.projections.commit_agent_step_activity,
+                    world.projections.finalize_run_projection_activity,
+                ],
+            ),
+            Worker(
+                environment.client,
+                task_queue=TOOL_TASK_QUEUE,
+                activities=[
+                    activities.resolve_advertised_tools,
+                    activities.execute_bound_tool,
+                    activities.cleanup_run_workspace,
+                ],
+            ),
+        ):
+            params = AgentTaskInput(
+                workspace_id=str(world.workspace_id),
+                task_id=str(world.task_id),
+                agent_id=str(world.agent_id),
+            )
+            handle = await environment.client.start_workflow(
+                AgentTaskWorkflow.run,
+                params,
+                id=f"projection-cancellation-{world.run_id}",
+                task_queue=AGENT_TASK_QUEUE,
+            )
+            result_task = asyncio.create_task(handle.result())
+            await asyncio.wait_for(activities.execute_started.wait(), timeout=5)
+            await handle.signal("cancel")
+            activities.release_execute.set()
+            result = await asyncio.wait_for(result_task, timeout=5)
+    finally:
+        activities.release_execute.set()
+        await environment.shutdown()
+
+    assert result.status == "cancelled"
+    assert result.steps_used == 1
+    assert await world.load_tool_call_ids() == [completed_id]
+    assert await world.count_projection_messages() == 2
+    assert await world.count_events("agent.step.committed") == 1
+    payload = await world.load_commit_payload()
+    assert payload["gateway_tool_call_ids"] == [completed_id]
+    assert payload["cancelled_after_tool_call_id"] == completed_id
+    assert (await world.load_run()).status == RunStatus.CANCELLED.value
+
+
+async def test_cancellation_truncation_cannot_hide_a_later_effect(
+    world: ProjectionWorld,
+) -> None:
+    await world.seed_step(
+        statuses=[
+            ToolCallStatus.COMPLETED.value,
+            ToolCallStatus.COMPLETED.value,
+        ],
+        manifest_count=3,
+    )
+    completed_id = str(stable_tool_invocation_id(world.run_id, 0, 0))
+    params = world.commit_params(
+        ids=[completed_id],
+        cancelled_after_tool_call_id=completed_id,
+    )
+
+    with pytest.raises(ApplicationError) as error:
+        await world.projections.commit_agent_step_activity(params)
+
+    assert error.value.type == "tool_projection_binding_mismatch"
+    assert await world.count_events("agent.step.committed") == 0
+    assert await world.count_projection_messages() == 0
+
+
+async def test_cancellation_truncation_rejects_a_nonexecuted_prefix(
+    world: ProjectionWorld,
+) -> None:
+    await world.seed_step(
+        statuses=[ToolCallStatus.FAILED.value],
+        manifest_count=2,
+    )
+    failed_id = str(stable_tool_invocation_id(world.run_id, 0, 0))
+
+    with pytest.raises(ApplicationError) as error:
+        await world.projections.commit_agent_step_activity(
+            world.commit_params(
+                ids=[failed_id],
+                cancelled_after_tool_call_id=failed_id,
+            )
         )
 
     assert error.value.type == "tool_projection_binding_mismatch"

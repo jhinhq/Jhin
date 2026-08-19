@@ -250,6 +250,7 @@ class AgentProjectionActivities:
         run_id: UUID,
         step_index: int,
         gateway_tool_call_ids: list[str] | None = None,
+        cancelled_after_tool_call_id: str | None = None,
     ) -> StepResult | None:
         event = await load_step_event(
             session,
@@ -278,6 +279,27 @@ class AgentProjectionActivities:
             if bound_ids != canonical_ids or gateway_tool_call_ids != bound_ids:
                 raise ApplicationError(
                     "step projection retry changed its canonical tool ID binding",
+                    type="tool_projection_binding_mismatch",
+                    non_retryable=True,
+                )
+            bound_cancellation = event.payload_json.get("cancelled_after_tool_call_id")
+            if bound_cancellation is not None and not isinstance(bound_cancellation, str):
+                raise ApplicationError(
+                    "committed step cancellation binding is malformed",
+                    type="step_result_malformed",
+                    non_retryable=True,
+                )
+            if bound_cancellation is not None and (
+                not bound_ids or bound_cancellation != bound_ids[-1]
+            ):
+                raise ApplicationError(
+                    "committed step cancellation binding changed its tool prefix",
+                    type="step_result_malformed",
+                    non_retryable=True,
+                )
+            if cancelled_after_tool_call_id != bound_cancellation:
+                raise ApplicationError(
+                    "step projection retry changed its cancellation binding",
                     type="tool_projection_binding_mismatch",
                     non_retryable=True,
                 )
@@ -607,6 +629,7 @@ class AgentProjectionActivities:
                     run_id=run_id,
                     step_index=params.step_index,
                     gateway_tool_call_ids=params.gateway_tool_call_ids,
+                    cancelled_after_tool_call_id=params.cancelled_after_tool_call_id,
                 )
             if committed is not None:
                 await session.rollback()
@@ -637,6 +660,16 @@ class AgentProjectionActivities:
             if len(params.gateway_tool_call_ids) > len(calls):
                 raise ApplicationError(
                     "step projection has more tool IDs than its canonical manifest",
+                    type="tool_projection_binding_mismatch",
+                    non_retryable=True,
+                )
+            if params.cancelled_after_tool_call_id is not None and (
+                not params.gateway_tool_call_ids
+                or len(params.gateway_tool_call_ids) >= len(calls)
+                or params.cancelled_after_tool_call_id != params.gateway_tool_call_ids[-1]
+            ):
+                raise ApplicationError(
+                    "cancellation truncation does not bind the exact canonical prefix",
                     type="tool_projection_binding_mismatch",
                     non_retryable=True,
                 )
@@ -673,6 +706,25 @@ class AgentProjectionActivities:
                         non_retryable=True,
                     )
 
+            if params.cancelled_after_tool_call_id is not None:
+                final = projected[-1]
+                delegation = self._delegation_request(final)
+                if any(result.status != "executed" for result in projected) or (
+                    delegation is not None and delegation.blocking
+                ):
+                    raise ApplicationError(
+                        "cancellation truncation requires an ordinary executed prefix",
+                        type="tool_projection_binding_mismatch",
+                        non_retryable=True,
+                    )
+                for omitted_id in expected_ids[len(projected) :]:
+                    if await session.get(ToolCall, UUID(omitted_id)) is not None:
+                        raise ApplicationError(
+                            "cancellation truncation would hide a later tool effect",
+                            type="tool_projection_binding_mismatch",
+                            non_retryable=True,
+                        )
+
             if len(projected) < len(calls):
                 if not projected:
                     raise ApplicationError(
@@ -682,8 +734,10 @@ class AgentProjectionActivities:
                     )
                 final = projected[-1]
                 delegation = self._delegation_request(final)
-                permitted_stop = final.status in {"needs_approval", "execution_unknown"} or (
-                    delegation is not None and delegation.blocking
+                permitted_stop = (
+                    final.status in {"needs_approval", "execution_unknown"}
+                    or (delegation is not None and delegation.blocking)
+                    or params.cancelled_after_tool_call_id is not None
                 )
                 if not permitted_stop:
                     raise ApplicationError(
@@ -854,6 +908,7 @@ class AgentProjectionActivities:
                     "step": params.step_index,
                     "result": asdict(step_result),
                     "gateway_tool_call_ids": [str(result.row.id) for result in projected],
+                    "cancelled_after_tool_call_id": params.cancelled_after_tool_call_id,
                 },
             )
             await session.commit()

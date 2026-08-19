@@ -131,6 +131,11 @@ class CommitAgentStepInput:
     agent_id: str
     step_index: int
     gateway_tool_call_ids: list[str] = field(default_factory=list)
+    # A cancellation signal arrived after this canonical call completed but
+    # before the remaining manifest calls were scheduled. The projection
+    # validates the marker against the exact prefix and rejects any omitted
+    # call that already has a durable ToolCall row.
+    cancelled_after_tool_call_id: str | None = None
 
 
 @dataclass

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -63,6 +64,7 @@ class TwoQueueWorld:
         self.agent_queue = AGENT_TASK_QUEUE
         self.activity_calls: list[tuple[str, str]] = []
         self.executed_ordinals: list[int] = []
+        self.commit_calls: list[CommitAgentStepInput] = []
         self.finalize_calls: list[FinalizeInput] = []
         self.approval_projection_calls: list[CommitApprovalProjectionInput] = []
         self.run_id = str(uuid.uuid4())
@@ -76,6 +78,8 @@ class TwoQueueWorld:
         self._approval_parked = asyncio.Event()
         self._first_execute_started = asyncio.Event()
         self._release_first_execute = asyncio.Event()
+        self._commit_started = asyncio.Event()
+        self._release_commit = asyncio.Event()
 
     @property
     def effect_calls(self) -> list[tuple[str, str]]:
@@ -128,6 +132,7 @@ class TwoQueueWorld:
         if self._reason_calls > 1 or self._scenario in {
             "zero_calls",
             "cleanup_failure",
+            "cleanup_no_poller",
         }:
             return ReasonAgentStepResult(call_count=0)
         if self._scenario == "one_step":
@@ -165,6 +170,11 @@ class TwoQueueWorld:
     @activity.defn(name=ACTIVITY_COMMIT_AGENT_STEP)
     async def commit_agent_step(self, params: CommitAgentStepInput) -> StepResult:
         self._record(ACTIVITY_COMMIT_AGENT_STEP)
+        self.commit_calls.append(params)
+        if self._scenario == "cleanup_no_poller":
+            self._commit_started.set()
+            await self._release_commit.wait()
+            return StepResult(done=True)
         if self._scenario == "execution_unknown":
             raise ApplicationError(
                 "tool execution outcome is unknown",
@@ -300,6 +310,77 @@ class TwoQueueWorld:
             self._release_first_execute.set()
             await environment.shutdown()
 
+    async def run_without_cleanup_poller(self) -> Any:
+        self._scenario = "cleanup_no_poller"
+        environment = await WorkflowEnvironment.start_time_skipping()
+        stop_tool_worker = asyncio.Event()
+        tool_worker_ready = asyncio.Event()
+
+        async def serve_tool_queue() -> None:
+            async with Worker(
+                environment.client,
+                task_queue=TOOL_TASK_QUEUE,
+                activities=[
+                    self.resolve_advertised_tools,
+                    self.execute_bound_tool,
+                    self.resolve_bound_tool_approval,
+                    self.cleanup_run_workspace,
+                ],
+            ):
+                tool_worker_ready.set()
+                await stop_tool_worker.wait()
+
+        tool_worker_task: asyncio.Task[None] | None = None
+        try:
+            async with Worker(
+                environment.client,
+                task_queue=self.agent_queue,
+                workflows=[AgentTaskWorkflow],
+                activities=[
+                    self.resolve_snapshot,
+                    self.reason_agent_step,
+                    self.commit_agent_step,
+                    self.commit_approval_projection,
+                    self.finalize_run_projection,
+                    self.run_agent_step,
+                    self.resolve_approval,
+                    self.finalize_run,
+                ],
+            ):
+                tool_worker_task = asyncio.create_task(serve_tool_queue())
+                await asyncio.wait_for(tool_worker_ready.wait(), timeout=5)
+                handle = await environment.client.start_workflow(
+                    AgentTaskWorkflow.run,
+                    self.params,
+                    id=f"task-{self.params.task_id}",
+                    task_queue=self.agent_queue,
+                )
+                result_task = asyncio.create_task(handle.result())
+                await asyncio.wait_for(self._commit_started.wait(), timeout=5)
+                stop_tool_worker.set()
+                await asyncio.wait_for(tool_worker_task, timeout=5)
+                self._release_commit.set()
+                for _attempt in range(300):
+                    history = await handle.fetch_history()
+                    if any(
+                        event.activity_task_scheduled_event_attributes.activity_type.name
+                        == ACTIVITY_CLEANUP_RUN_WORKSPACE
+                        for event in history.events
+                    ):
+                        break
+                    await asyncio.sleep(0.01)
+                else:
+                    raise AssertionError("cleanup activity was not scheduled")
+                await environment.sleep(timedelta(seconds=31))
+                return await asyncio.wait_for(result_task, timeout=5)
+        finally:
+            stop_tool_worker.set()
+            self._release_commit.set()
+            if tool_worker_task is not None and not tool_worker_task.done():
+                tool_worker_task.cancel()
+                await asyncio.gather(tool_worker_task, return_exceptions=True)
+            await environment.shutdown()
+
 
 @pytest.fixture
 def two_queue_world() -> TwoQueueWorld:
@@ -358,10 +439,34 @@ async def test_stop_scenarios_never_schedule_a_later_ordinal(
     ]
     if scenario == "cancellation":
         assert result.status == "cancelled"
+        assert len(two_queue_world.commit_calls) == 1
+        assert two_queue_world.commit_calls[0].cancelled_after_tool_call_id == _TOOL_CALL_ID
     elif scenario == "execution_unknown":
         assert result.status == "failed"
     else:
         assert result.status == "completed"
+
+
+async def test_final_projection_is_bounded_when_cleanup_queue_has_no_poller(
+    two_queue_world: TwoQueueWorld,
+) -> None:
+    result = await two_queue_world.run_without_cleanup_poller()
+
+    assert result.status == "completed"
+    assert two_queue_world.finalize_calls == [
+        FinalizeInput(
+            workspace_id=two_queue_world.params.workspace_id,
+            task_id=two_queue_world.params.task_id,
+            run_id=two_queue_world.run_id,
+            status="completed",
+            steps_used=1,
+        )
+    ]
+    assert (ACTIVITY_CLEANUP_RUN_WORKSPACE, TOOL_TASK_QUEUE) not in two_queue_world.activity_calls
+    assert two_queue_world.activity_calls[-1] == (
+        ACTIVITY_FINALIZE_RUN_PROJECTION,
+        two_queue_world.agent_queue,
+    )
 
 
 async def test_approval_resolution_crosses_tool_then_agent_boundaries(

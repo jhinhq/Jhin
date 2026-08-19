@@ -169,7 +169,9 @@ def test_tool_worker_contracts_are_dependency_light_and_preserve_caller_fields()
     assert ReasonAgentStepResult(call_count=1).call_count == 1
     assert ExecuteBoundToolInput("workspace", "run", 2, 0).ordinal == 0
     assert BoundToolResult("tool-call", "completed").approval_id is None
-    assert CommitAgentStepInput("workspace", "task", "run", "agent", 2).gateway_tool_call_ids == []
+    commit = CommitAgentStepInput("workspace", "task", "run", "agent", 2)
+    assert commit.gateway_tool_call_ids == []
+    assert commit.cancelled_after_tool_call_id is None
     approval = ResolveBoundToolApprovalInput("workspace", "task", "run", "agent", "approval")
     assert approval.approval_id == "approval"
     assert (

@@ -83,6 +83,7 @@ _FINALIZE_RETRY = RetryPolicy(
     maximum_interval=timedelta(seconds=15),
     maximum_attempts=5,
 )
+_CLEANUP_SCHEDULE_TO_CLOSE_TIMEOUT = timedelta(seconds=30)
 _RESOLVE_APPROVAL_RETRY = RetryPolicy(
     initial_interval=timedelta(seconds=1),
     backoff_coefficient=2.0,
@@ -252,6 +253,7 @@ class AgentTaskWorkflow:
                         retry_policy=_STEP_RETRY,
                     )
                     tool_ids: list[str] = []
+                    stopped_for_durable_outcome = False
                     for ordinal in range(reasoned.call_count):
                         if self._cancel_requested():
                             break
@@ -269,8 +271,20 @@ class AgentTaskWorkflow:
                             retry_policy=_STEP_RETRY,
                         )
                         tool_ids.append(bound.tool_call_id)
-                        if bound.stop_reason is not None or self._cancel_requested():
+                        if bound.stop_reason is not None:
+                            stopped_for_durable_outcome = True
                             break
+                        if self._cancel_requested():
+                            break
+                    cancellation_truncation_id: str | None = None
+                    if (
+                        self._cancel_requested()
+                        and len(tool_ids) < reasoned.call_count
+                        and not stopped_for_durable_outcome
+                    ):
+                        if not tool_ids:
+                            break
+                        cancellation_truncation_id = tool_ids[-1]
                     step = await workflow.execute_activity(
                         ACTIVITY_COMMIT_AGENT_STEP,
                         CommitAgentStepInput(
@@ -280,6 +294,7 @@ class AgentTaskWorkflow:
                             agent_id=params.agent_id,
                             step_index=self._steps_used,
                             gateway_tool_call_ids=tool_ids,
+                            cancelled_after_tool_call_id=cancellation_truncation_id,
                         ),
                         result_type=StepResult,
                         task_queue=AGENT_TASK_QUEUE,
@@ -516,6 +531,7 @@ class AgentTaskWorkflow:
                         ),
                         task_queue=TOOL_TASK_QUEUE,
                         start_to_close_timeout=timedelta(seconds=30),
+                        schedule_to_close_timeout=_CLEANUP_SCHEDULE_TO_CLOSE_TIMEOUT,
                         retry_policy=_FINALIZE_RETRY,
                     )
             await workflow.execute_activity(
