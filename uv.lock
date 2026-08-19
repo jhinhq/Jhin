@@ -756,7 +756,6 @@ version = "0.1.0"
 source = { editable = "services/agent_worker" }
 dependencies = [
     { name = "jhin-agents" },
-    { name = "jhin-connectors" },
     { name = "jhin-db" },
     { name = "jhin-domain" },
     { name = "jhin-events" },
@@ -775,7 +774,6 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "jhin-agents", editable = "packages/agents" },
-    { name = "jhin-connectors", editable = "packages/connectors" },
     { name = "jhin-db", editable = "packages/db" },
     { name = "jhin-domain", editable = "packages/domain" },
     { name = "jhin-events", editable = "packages/events" },

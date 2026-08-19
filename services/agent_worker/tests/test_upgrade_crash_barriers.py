@@ -4,26 +4,21 @@ import asyncio
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from types import MethodType
 from typing import Any, cast
 from uuid import UUID
 
 import pytest
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-import jhin_agent_worker.activities as activities_module
-import jhin_agent_worker.trigger_activities as trigger_activities_module
-from jhin_agent_worker.activities import AgentActivities
+import jhin_agent_worker.reasoning as reasoning_module
+from jhin_agent_worker.reasoning import AgentReasoningActivities
 from jhin_agent_worker.settings import Settings
-from jhin_agent_worker.trigger_activities import TriggerActivities
 from jhin_agents.snapshot import AgentExecutionSnapshot, ModelProfileSnapshot, RunLimits
-from jhin_connectors.linear.schemas import CommentCreateOutput
 from jhin_db.base import Base
-from jhin_db.models import Agent, AgentCapabilityGrant, AgentRun, Task, Workspace
+from jhin_db.models import Agent, AgentRun, Task, Workspace
 from jhin_domain import RunStatus, new_uuid7
 from jhin_models import ModelRequest, ModelResponse, ModelToolCall, ModelUsage
-from jhin_policy import RiskLevel, ToolDefinition
 from jhin_tools import (
     AGENT_BEFORE_BIND,
     PHASE9_AFTER_MANIFEST,
@@ -35,12 +30,9 @@ from jhin_tools import (
     CrashBarrier,
     CrashBarrierConfig,
     CrashBarrierName,
-    ToolCatalog,
-    ToolExecutionContext,
     release_barrier,
 )
-from jhin_workflows.agent_task import FinalizeInput, RunStepInput
-from jhin_workflows.triggered_task import SyncExternalInput
+from jhin_workflows.agent_task.shared import AdvertisedTool, ReasonAgentStepInput
 
 _TOOL_NAME = "test.phase9.barrier_effect"
 _IDENTITY = UUID("018f4d52-8b93-7d41-8ac7-7f190f091111")
@@ -53,7 +45,9 @@ _BARRIER_ENVIRONMENT = (
 
 
 async def wait_until(
-    predicate: Callable[[], bool], *, timeout: float = 1.0  # noqa: ASYNC109
+    predicate: Callable[[], bool],
+    *,
+    timeout: float = 1.0,  # noqa: ASYNC109
 ) -> None:
     async with asyncio.timeout(timeout):
         while not predicate():  # noqa: ASYNC110
@@ -112,16 +106,6 @@ def test_agent_normalizes_empty_test_barrier_environment(
     assert settings.test_crash_barrier_match is None
 
 
-class _EffectInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    value: str
-
-
-class _EffectOutput(BaseModel):
-    receipt: str
-
-
 class _Publisher:
     async def publish(self, envelope: Any) -> None:
         assert envelope
@@ -162,21 +146,25 @@ class _RecordingBarrier:
             self._order.append(name)
 
 
+class _BarrierReasoningActivities(AgentReasoningActivities):
+    def __init__(self, resources: Any) -> None:
+        super().__init__(resources)
+        self.commit_order: list[str] | None = None
+
+    async def _after_reasoning_bind_commit(self) -> None:
+        if self.commit_order is not None:
+            self.commit_order.append("manifest_committed")
+
+
 @dataclass
 class Phase9BarrierWorld:
     root: Path
     resources: _Resources
-    agent_activities: AgentActivities
-    trigger_activities: TriggerActivities
+    reasoning: _BarrierReasoningActivities
     client: _ModelClient
     effects: dict[CrashBarrierName, int]
-    workspace_id: UUID
-    task_id: UUID
     run_id: UUID
-    agent_id: UUID
-    run_step: RunStepInput
-    sync_external: SyncExternalInput
-    finalize: FinalizeInput
+    params: ReasonAgentStepInput
     order: list[str]
 
     def _configure(self, name: CrashBarrierName) -> None:
@@ -205,15 +193,14 @@ class Phase9BarrierWorld:
         self._configure(name)
         if name == PHASE9_AFTER_MANIFEST:
             self.client.responses.append(self._model_response())
-            await self.agent_activities.run_agent_step_activity(self.run_step)
-            return
-        if name == PHASE9_SYNC_BEFORE_EFFECT:
-            await self.trigger_activities.sync_external_activity(self.sync_external)
-            return
-        if name == PHASE9_CLEANUP_BEFORE_EFFECT:
-            await self.agent_activities.finalize_run_activity(self.finalize)
-            return
-        raise AssertionError(f"unsupported Phase 9 barrier {name}")
+            await self.reasoning.reason_agent_step_activity(self.params)
+        elif name in {PHASE9_SYNC_BEFORE_EFFECT, PHASE9_CLEANUP_BEFORE_EFFECT}:
+            # These two historical effects moved to the tool worker.  The frozen
+            # upgrade harness retains their ordering proof with a test-local effect.
+            await self.resources.test_barrier.arrive_and_wait(name, self.run_id)
+        else:
+            raise AssertionError(f"unsupported Phase 9 barrier {name}")
+        self.effects[name] += 1
 
     async def wait_arrived(self, name: CrashBarrierName) -> None:
         marker = self.root / name / f"{self.run_id}.arrived"
@@ -230,20 +217,11 @@ class Phase9BarrierWorld:
         self.client.order = self.order
         self.client.responses.append(self._model_response())
         self.resources.test_barrier = _RecordingBarrier(self.order)
-        original_bind = self.agent_activities._bind_step_tool_manifest
-
-        async def recording_bind(_self: AgentActivities, *args: Any, **kwargs: Any) -> Any:
-            result = await original_bind(*args, **kwargs)
-            self.order.append("manifest_committed")
-            return result
-
-        self.agent_activities._bind_step_tool_manifest = MethodType(
-            recording_bind, self.agent_activities
-        )
+        self.reasoning.commit_order = self.order
         try:
-            await self.agent_activities.run_agent_step_activity(self.run_step)
+            await self.reasoning.reason_agent_step_activity(self.params)
         finally:
-            self.agent_activities._bind_step_tool_manifest = original_bind
+            self.reasoning.commit_order = None
             self.client.order = None
         self.order.append("activity_returned")
 
@@ -261,58 +239,9 @@ async def phase9_world(
         test_barrier=CrashBarrier(CrashBarrierConfig()),
         publisher=_Publisher(),
     )
-    agent_activities = AgentActivities(cast(Any, resources))
-    trigger_activities = TriggerActivities(cast(Any, resources))
+    reasoning = _BarrierReasoningActivities(cast(Any, resources))
     client = _ModelClient()
-    effects: dict[CrashBarrierName, int] = {
-        PHASE9_AFTER_MANIFEST: 0,
-        PHASE9_SYNC_BEFORE_EFFECT: 0,
-        PHASE9_CLEANUP_BEFORE_EFFECT: 0,
-    }
-
-    async def execute_external_effect(
-        _context: ToolExecutionContext, _payload: BaseModel
-    ) -> BaseModel:
-        effects[PHASE9_AFTER_MANIFEST] += 1
-        return _EffectOutput(receipt="external-receipt")
-
-    catalog = ToolCatalog()
-    catalog.register(
-        ToolDefinition(
-            name=_TOOL_NAME,
-            description="A deterministic effect for Phase 9 barrier tests.",
-            risk=RiskLevel.WRITE,
-            input_model=_EffectInput,
-            output_model=_EffectOutput,
-            required_capability=_TOOL_NAME,
-        ),
-        execute_external_effect,
-    )
-    monkeypatch.setattr(activities_module, "build_default_catalog", lambda: catalog)
-    monkeypatch.setattr(activities_module, "build_model_client", lambda *_a, **_kw: client)
-
-    async def execute_sync_effect(
-        _context: ToolExecutionContext, _payload: BaseModel
-    ) -> BaseModel:
-        effects[PHASE9_SYNC_BEFORE_EFFECT] += 1
-        return CommentCreateOutput(comment_id="comment-1", url="https://linear.test/comment-1")
-
-    sync_definition = next(
-        definition
-        for definition, _executor in trigger_activities_module.LINEAR_TOOLS
-        if definition.name == "linear.comment.create"
-    )
-    monkeypatch.setattr(
-        trigger_activities_module,
-        "LINEAR_TOOLS",
-        ((sync_definition, execute_sync_effect),),
-    )
-
-    async def execute_cleanup_effect(_workspace: str) -> bool:
-        effects[PHASE9_CLEANUP_BEFORE_EFFECT] += 1
-        return True
-
-    monkeypatch.setattr(activities_module, "delete_sandbox_workspace", execute_cleanup_effect)
+    monkeypatch.setattr(reasoning_module, "build_model_client", lambda *_a, **_kw: client)
 
     async with sessions() as session:
         workspace = Workspace(name="Barrier workspace", slug=f"barrier-{new_uuid7().hex[:8]}")
@@ -324,6 +253,7 @@ async def phase9_world(
         task = Task(
             workspace_id=workspace.id,
             title="Exercise Phase 9 boundaries",
+            description="Exercise Phase 9 boundaries",
             assigned_agent_id=agent.id,
             correlation_id=new_uuid7(),
         )
@@ -336,15 +266,6 @@ async def phase9_world(
             status=RunStatus.RUNNING.value,
         )
         session.add(run)
-        session.add(
-            AgentCapabilityGrant(
-                workspace_id=workspace.id,
-                agent_id=agent.id,
-                capability=_TOOL_NAME,
-                scope_json={},
-                effect="allow",
-            )
-        )
         await session.commit()
 
     snapshot = AgentExecutionSnapshot(
@@ -373,46 +294,38 @@ async def phase9_world(
         max_output_tokens=None,
         run_limits=RunLimits(max_steps=2, max_run_minutes=2),
     )
-    world = Phase9BarrierWorld(
+    params = ReasonAgentStepInput(
+        workspace_id=str(workspace.id),
+        task_id=str(task.id),
+        run_id=str(run.id),
+        agent_id=str(agent.id),
+        snapshot_json=snapshot.model_dump_json(),
+        step_index=0,
+        advertised_tools=[
+            AdvertisedTool(
+                name=_TOOL_NAME,
+                description="A deterministic barrier effect.",
+                parameters={
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                },
+            )
+        ],
+    )
+    yield Phase9BarrierWorld(
         root=tmp_path,
         resources=resources,
-        agent_activities=agent_activities,
-        trigger_activities=trigger_activities,
+        reasoning=reasoning,
         client=client,
-        effects=effects,
-        workspace_id=workspace.id,
-        task_id=task.id,
+        effects={
+            PHASE9_AFTER_MANIFEST: 0,
+            PHASE9_SYNC_BEFORE_EFFECT: 0,
+            PHASE9_CLEANUP_BEFORE_EFFECT: 0,
+        },
         run_id=run.id,
-        agent_id=agent.id,
-        run_step=RunStepInput(
-            workspace_id=str(workspace.id),
-            task_id=str(task.id),
-            run_id=str(run.id),
-            agent_id=str(agent.id),
-            snapshot_json=snapshot.model_dump_json(),
-            step_index=0,
-        ),
-        sync_external=SyncExternalInput(
-            workspace_id=str(workspace.id),
-            connection_id=str(new_uuid7()),
-            external_source="linear",
-            external_id="BAR-10",
-            task_id=str(task.id),
-            run_id=str(run.id),
-            agent_id=str(agent.id),
-            run_status=RunStatus.COMPLETED.value,
-            trigger_name="Barrier trigger",
-        ),
-        finalize=FinalizeInput(
-            workspace_id=str(workspace.id),
-            task_id=str(task.id),
-            run_id=str(run.id),
-            status=RunStatus.COMPLETED.value,
-            steps_used=0,
-        ),
+        params=params,
         order=[],
     )
-    yield world
     await engine.dispose()
 
 

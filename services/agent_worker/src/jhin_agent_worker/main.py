@@ -7,15 +7,21 @@ from __future__ import annotations
 
 import asyncio
 import signal
+from collections.abc import Callable
+from typing import Any
 
 from temporalio.client import Client
 from temporalio.worker import Worker
 
 from jhin_agent_worker.activities import AgentActivities
+from jhin_agent_worker.compatibility import AgentCompatibilityActivities
 from jhin_agent_worker.engineering_activities import EngineeringActivities
 from jhin_agent_worker.resources import Resources
 from jhin_agent_worker.settings import Settings
-from jhin_agent_worker.trigger_activities import TriggerActivities
+from jhin_agent_worker.trigger_activities import (
+    TriggerActivities,
+    TriggerCompatibilityActivities,
+)
 from jhin_observability import configure_logging, get_logger
 from jhin_observability.healthfile import clear_heartbeat, run_heartbeat
 from jhin_secrets.redaction import redact_event_dict
@@ -68,52 +74,62 @@ async def main() -> None:
 
     client = await connect_with_retry(settings)
     resources = await resources_with_retry(settings)
-    activities = AgentActivities(resources, temporal_client=client)
-    trigger_activities = TriggerActivities(resources)
-    engineering_activities = EngineeringActivities(resources)
-    logger.info(
-        "temporal.connected",
-        address=settings.temporal_address,
-        namespace=settings.temporal_namespace,
-        task_queue=AGENT_TASK_QUEUE,
-    )
+    heartbeat_task: asyncio.Task[None] | None = None
+    try:
+        activities = AgentActivities(resources, temporal_client=client)
+        compatibility = AgentCompatibilityActivities(resources, client)
+        trigger_activities = TriggerActivities(resources)
+        trigger_compatibility = TriggerCompatibilityActivities(client)
+        engineering_activities = EngineeringActivities(resources)
+        logger.info(
+            "temporal.connected",
+            address=settings.temporal_address,
+            namespace=settings.temporal_namespace,
+            task_queue=AGENT_TASK_QUEUE,
+        )
 
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop.set)
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stop.set)
 
-    heartbeat_task = asyncio.create_task(run_heartbeat())
-    worker = Worker(
-        client,
-        task_queue=AGENT_TASK_QUEUE,
-        workflows=[
+        agent_workflows = [
             AgentTaskWorkflow,
             TriggeredTaskWorkflow,
             DelegatedTaskWorkflow,
             EngineeringTicketWorkflow,
-        ],
-        activities=[
+        ]
+        agent_activities: list[Callable[..., Any]] = [
             activities.resolve_snapshot_activity,
-            activities.run_agent_step_activity,
-            activities.resolve_approval_activity,
-            activities.finalize_run_activity,
+            activities.reason_agent_step_activity,
+            activities.commit_agent_step_activity,
+            activities.commit_approval_projection_activity,
+            activities.finalize_run_projection_activity,
             activities.summarize_delegation_activity,
             activities.deliver_delegation_result_activity,
+            compatibility.run_agent_step_activity,
+            compatibility.resolve_approval_activity,
+            compatibility.finalize_run_activity,
             trigger_activities.prepare_triggered_task_activity,
-            trigger_activities.sync_external_activity,
+            trigger_compatibility.sync_external_activity,
             engineering_activities.resolve_engineering_plan_activity,
             engineering_activities.create_engineering_child_task_activity,
             engineering_activities.finalize_engineering_ticket_activity,
-        ],
-    )
-    try:
+        ]
+        heartbeat_task = asyncio.create_task(run_heartbeat())
+        worker = Worker(
+            client,
+            task_queue=AGENT_TASK_QUEUE,
+            workflows=agent_workflows,
+            activities=agent_activities,
+        )
         async with worker:
             logger.info("worker.started", task_queue=AGENT_TASK_QUEUE)
             await stop.wait()
             logger.info("worker.stopping")
     finally:
-        heartbeat_task.cancel()
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
         clear_heartbeat()
         await resources.close()
 

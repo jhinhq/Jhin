@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from dataclasses import asdict
 from typing import Any
 from uuid import UUID
 
@@ -13,9 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
-from jhin_agent_worker.activities import AgentActivities
+from jhin_agent_worker.projections import AgentProjectionActivities
 from jhin_agent_worker.reasoning import AgentStepReasoningRecord, AgentStepUsage
-from jhin_agents.snapshot import AgentExecutionSnapshot, ModelProfileSnapshot, RunLimits
 from jhin_db.base import Base
 from jhin_db.models import Agent, AgentRun, Approval, Message, RunEvent, Task, ToolCall, Workspace
 from jhin_domain import (
@@ -28,110 +26,13 @@ from jhin_domain import (
     new_uuid7,
 )
 from jhin_tools import stable_tool_invocation_id
-from jhin_workflows.agent_task import RunStepInput, StepResult
 from jhin_workflows.agent_task.shared import CommitApprovalProjectionInput
 
 ActivityWorld = tuple[
-    AgentActivities,
+    AgentProjectionActivities,
     "_Resources",
     async_sessionmaker[AsyncSession],
 ]
-
-
-async def test_committed_step_retry_returns_durable_result_without_calling_model(
-    activity_world: ActivityWorld,
-) -> None:
-    activities, resources, sessions = activity_world
-    async with sessions() as session:
-        workspace = Workspace(name="Step replay", slug=f"step-{new_uuid7().hex[:8]}")
-        session.add(workspace)
-        await session.flush()
-        agent = Agent(workspace_id=workspace.id, name="Replay", slug="replay")
-        session.add(agent)
-        await session.flush()
-        task = Task(
-            workspace_id=workspace.id,
-            title="Replay a committed step",
-            assigned_agent_id=agent.id,
-            correlation_id=new_uuid7(),
-        )
-        session.add(task)
-        await session.flush()
-        run = AgentRun(
-            workspace_id=workspace.id,
-            agent_id=agent.id,
-            task_id=task.id,
-            status=RunStatus.RUNNING.value,
-            input_tokens=11,
-            output_tokens=7,
-            steps_used=3,
-        )
-        session.add(run)
-        await session.flush()
-        expected = StepResult(
-            done=False,
-            input_tokens=5,
-            output_tokens=2,
-            cached_tokens=1,
-            cost_micros=9,
-        )
-        session.add(
-            RunEvent(
-                workspace_id=workspace.id,
-                run_id=run.id,
-                task_id=task.id,
-                seq=4,
-                event_type="agent.step.committed",
-                payload_json={"step": 2, "result": asdict(expected)},
-            )
-        )
-        snapshot = AgentExecutionSnapshot(
-            agent_id=agent.id,
-            workspace_id=workspace.id,
-            name=agent.name,
-            role_title="",
-            system_prompt="",
-            autonomy_level="supervised",
-            team_id=None,
-            team_name=None,
-            manager_agent_id=None,
-            manager_name=None,
-            model_profile=ModelProfileSnapshot(
-                profile_id=new_uuid7(),
-                provider_id=new_uuid7(),
-                provider_type="must-not-be-built",
-                base_url=None,
-                secret_id=None,
-                model_name="never-called",
-                display_name="Never called",
-                input_cost_micros_per_million=None,
-                output_cost_micros_per_million=None,
-            ),
-            temperature=None,
-            max_output_tokens=None,
-            run_limits=RunLimits(max_steps=5, max_run_minutes=5),
-        )
-        params = RunStepInput(
-            workspace_id=str(workspace.id),
-            task_id=str(task.id),
-            run_id=str(run.id),
-            agent_id=str(agent.id),
-            snapshot_json=snapshot.model_dump_json(),
-            step_index=2,
-        )
-        await session.commit()
-
-    result = await ActivityEnvironment().run(activities.run_agent_step_activity, params)
-
-    assert result == expected
-    async with sessions() as session:
-        persisted_run = await session.get(AgentRun, run.id)
-        assert persisted_run is not None
-        assert persisted_run.input_tokens == 11
-        assert persisted_run.output_tokens == 7
-        assert persisted_run.steps_used == 3
-        assert await session.scalar(select(func.count(RunEvent.id))) == 1
-    assert resources.publisher.events == []
 
 
 class _Publisher:
@@ -156,7 +57,7 @@ async def activity_world() -> AsyncIterator[ActivityWorld]:
         await connection.run_sync(Base.metadata.create_all)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     resources = _Resources(sessions)
-    yield AgentActivities(resources), resources, sessions  # type: ignore[arg-type]
+    yield AgentProjectionActivities(resources), resources, sessions  # type: ignore[arg-type]
     await engine.dispose()
 
 
