@@ -2848,9 +2848,25 @@ def test_make_and_ci_delegate_all_live_modes_to_the_shared_harness() -> None:
         for step in rootless_steps
         if step.get("name") == "Start and validate UID-10001 rootless Docker"
     )
+    start_script = start_step["run"]
+    rootlesskit_preflight = start_script.index("rootlesskit true")
+    installer = start_script.index("dockerd-rootless-setuptool.sh install --force")
+    assert start_script.index("HOME=/home/phase10rootless") < rootlesskit_preflight
+    assert (
+        start_script.index("XDG_CONFIG_HOME=/home/phase10rootless/.config") < rootlesskit_preflight
+    )
+    assert rootlesskit_preflight < installer
+    installer_env = start_script.rfind(
+        "sudo -u phase10rootless -H env", rootlesskit_preflight, installer
+    )
+    assert installer_env > rootlesskit_preflight
+    assert start_script.index("HOME=/home/phase10rootless", installer_env, installer)
+    assert start_script.index(
+        "XDG_CONFIG_HOME=/home/phase10rootless/.config", installer_env, installer
+    )
     assert (
         "echo \"ROOTLESS_SOCKET_SNAPSHOT=$(stat -c '%d:%i:%f:%u:%g' "
-        '/run/user/10001/docker.sock)" >> "$GITHUB_ENV"' in start_step["run"]
+        '/run/user/10001/docker.sock)" >> "$GITHUB_ENV"' in start_script
     )
     cleanup_step = next(
         step
