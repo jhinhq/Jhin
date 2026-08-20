@@ -169,6 +169,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -278,11 +279,19 @@ jobs:
 
       - name: Sync workspace for the rootless test UID
         run: |
-          uv sync --frozen --all-packages
-          sudo chown -R 10001:10001 "$GITHUB_WORKSPACE"
+          rootless_workspace=/tmp/jhin-phase10-rootless-workspace
+          sudo install -d -o 10001 -g 10001 -m 0711 "$rootless_workspace"
+          sudo cp -a "$GITHUB_WORKSPACE"/. "$rootless_workspace"/
+          sudo chown -R 10001:10001 "$rootless_workspace"
+          sudo chmod 0711 "$rootless_workspace"
           sudo install -d -o 10001 -g 10001 -m 0700 /tmp/jhin-phase10-uv-cache
+          sudo -u phase10rootless -H env \
+            PATH="$PATH" \
+            UV_CACHE_DIR=/tmp/jhin-phase10-uv-cache \
+            uv --directory "$rootless_workspace" sync --frozen --all-packages
 
       - name: Validate rootless Compose contract
+        working-directory: /tmp/jhin-phase10-rootless-workspace
         run: |
           sudo -u phase10rootless -H env \
             PATH="$PATH" \
@@ -293,6 +302,7 @@ jobs:
             uv run python scripts/assert_phase10_tool_worker_compose.py --mode rootless
 
       - name: Rootless sandbox socket
+        working-directory: /tmp/jhin-phase10-rootless-workspace
         run: |
           sudo -u phase10rootless -H env \
             PATH="$PATH" \
@@ -303,6 +313,7 @@ jobs:
             make test-sandbox-socket-rootless
 
       - name: Rootless tool-worker boundary
+        working-directory: /tmp/jhin-phase10-rootless-workspace
         run: |
           sudo -u phase10rootless -H env \
             PATH="$PATH" \
@@ -314,6 +325,7 @@ jobs:
             make test-tool-worker-boundary-integration
 
       - name: Rootless Phase 9 to Phase 10 in-flight upgrade
+        working-directory: /tmp/jhin-phase10-rootless-workspace
         run: |
           sudo -u phase10rootless -H env \
             PATH="$PATH" \

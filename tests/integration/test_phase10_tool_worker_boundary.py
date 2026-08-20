@@ -2870,6 +2870,9 @@ def test_make_and_ci_delegate_all_live_modes_to_the_shared_harness() -> None:
     assert "assert_phase10_tool_worker_compose.py --mode rootless" in rootless_job
 
     rootless_steps = workflow_payload["jobs"]["phase10-rootless-live"]["steps"]
+    rootless_checkout = rootless_steps[0]
+    assert rootless_checkout["uses"] == "actions/checkout@v4"
+    assert rootless_checkout["with"]["persist-credentials"] is False
     provision_step = next(
         step
         for step in rootless_steps
@@ -2884,6 +2887,35 @@ def test_make_and_ci_delegate_all_live_modes_to_the_shared_harness() -> None:
     assert provision_script.index("Signed-By: /etc/apt/keyrings/docker.asc") < apt_update
     assert "dpkg-query -W -f='${Version}' docker-ce" in provision_script
     assert 'docker-ce-rootless-extras="$docker_ce_version"' in provision_script
+
+    sync_step = next(
+        step
+        for step in rootless_steps
+        if step.get("name") == "Sync workspace for the rootless test UID"
+    )
+    sync_script = sync_step["run"]
+    rootless_workspace = "/tmp/jhin-phase10-rootless-workspace"
+    assert 'sudo chown -R 10001:10001 "$GITHUB_WORKSPACE"' not in sync_script
+    assert f"rootless_workspace={rootless_workspace}" in sync_script
+    assert 'sudo install -d -o 10001 -g 10001 -m 0711 "$rootless_workspace"' in sync_script
+    assert 'sudo cp -a "$GITHUB_WORKSPACE"/. "$rootless_workspace"/' in sync_script
+    assert 'sudo chown -R 10001:10001 "$rootless_workspace"' in sync_script
+    assert 'sudo chmod 0711 "$rootless_workspace"' in sync_script
+    assert 'uv --directory "$rootless_workspace" sync --frozen --all-packages' in sync_script
+    assert (
+        sync_script.index('sudo cp -a "$GITHUB_WORKSPACE"/. "$rootless_workspace"/')
+        < sync_script.index('sudo chown -R 10001:10001 "$rootless_workspace"')
+        < sync_script.index('sudo chmod 0711 "$rootless_workspace"')
+        < sync_script.index('uv --directory "$rootless_workspace" sync --frozen --all-packages')
+    )
+    for step_name in (
+        "Validate rootless Compose contract",
+        "Rootless sandbox socket",
+        "Rootless tool-worker boundary",
+        "Rootless Phase 9 to Phase 10 in-flight upgrade",
+    ):
+        selected_step = next(step for step in rootless_steps if step.get("name") == step_name)
+        assert selected_step["working-directory"] == rootless_workspace
 
     start_step = next(
         step
