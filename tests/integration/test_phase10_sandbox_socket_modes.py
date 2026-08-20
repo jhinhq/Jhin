@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 from typing import Any
 
 import pytest
@@ -87,6 +88,20 @@ def test_selected_socket_mode_live_boundary() -> None:
     assert job["status"] == "completed", job
     assert job["exit_code"] == 0, job
     assert job["stdout"] == "phase10-noop\n", job
+
+    workspace_key = f"phase10-socket-{secrets.token_hex(8)}"
+    try:
+        first_workspace_job = authority.run_noop_sandbox_job(workspace_key=workspace_key)
+        assert first_workspace_job["status"] == "completed", first_workspace_job
+        assert first_workspace_job["exit_code"] == 0, first_workspace_job
+        reused_workspace_job = authority.run_noop_sandbox_job(
+            workspace_key=workspace_key,
+            require_existing_workspace=True,
+        )
+        assert reused_workspace_job["status"] == "completed", reused_workspace_job
+        assert reused_workspace_job["exit_code"] == 0, reused_workspace_job
+    finally:
+        authority.delete_sandbox_workspace(workspace_key)
     authority.assert_socket_unchanged()
 
 

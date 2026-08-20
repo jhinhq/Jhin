@@ -105,8 +105,10 @@ _PASSTHROUGH_ENVIRONMENT = {
     "DOCKER_CONFIG",
 }
 _HEX_REF = re.compile(r"[0-9a-f]{40}\Z")
+_DOCKER_CONTAINER_ID = re.compile(r"[0-9a-f]{64}\Z")
 _TOKEN = re.compile(r"[0-9a-f]{8,16}\Z")
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
+_WORKSPACE_KEY = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,80}\Z")
 _UPGRADE_SCENARIOS = ("normal", "approval", "sync", "cleanup")
 _UPGRADE_FAILPOINTS = {
     "normal": "phase9.agent.after_manifest.before_effect.v1",
@@ -3089,8 +3091,18 @@ class ComposeAuthority:
         return _text(result.stdout).strip().encode()
 
     @classmethod
-    def noop_sandbox_job_request(cls, job_id: str) -> dict[str, Any]:
+    def noop_sandbox_job_request(
+        cls,
+        job_id: str,
+        *,
+        workspace_key: str = "",
+        require_existing_workspace: bool = False,
+    ) -> dict[str, Any]:
         cls.sandbox_job_label(job_id)
+        if workspace_key:
+            cls.sandbox_workspace_key(workspace_key)
+        elif require_existing_workspace:
+            raise ValueError("workspace reuse requires an exact workspace key")
         verification = (
             "import os\n"
             "from pathlib import Path\n"
@@ -3100,26 +3112,49 @@ class ComposeAuthority:
             "metadata = os.stat(installed)\n"
             "assert (metadata.st_uid, metadata.st_gid, metadata.st_mode & 0o777) == "
             "(0, 0, 0o644)\n"
-            "print('phase10-noop')\n"
         )
-        return {
+        if workspace_key:
+            verification += "marker = Path('/workspace/.phase10-volume-reuse')\n"
+            if require_existing_workspace:
+                verification += "assert marker.read_bytes() == b'phase10-volume-reuse\\n'\n"
+            else:
+                verification += "marker.write_bytes(b'phase10-volume-reuse\\n')\n"
+        verification += "print('phase10-noop')\n"
+        request = {
             "job_id": job_id,
             "command": ["python3", "-c", verification],
             "network_policy": "none",
         }
+        if workspace_key:
+            request["workspace_key"] = workspace_key
+        return request
 
-    def run_noop_sandbox_job(self, *, timeout: float = 30.0) -> dict[str, Any]:
+    def run_noop_sandbox_job(
+        self,
+        *,
+        timeout: float = 30.0,
+        workspace_key: str = "",
+        require_existing_workspace: bool = False,
+    ) -> dict[str, Any]:
         port = self.published_ports.get("SANDBOX_RUNNER_DEV_PORT")
         if port is None:
             raise RuntimeError("sandbox runner host endpoint was not resolved")
         job_id = secrets.token_hex(12)
         self.record_direct_sandbox_job(job_id)
+        if workspace_key:
+            self.record_direct_sandbox_workspace(workspace_key)
         endpoint = f"http://127.0.0.1:{port}"
         headers = {
             "Authorization": f"Bearer {self.environment['SANDBOX_RUNNER_TOKEN']}",
             "Content-Type": "application/json",
         }
-        body = json.dumps(self.noop_sandbox_job_request(job_id)).encode()
+        body = json.dumps(
+            self.noop_sandbox_job_request(
+                job_id,
+                workspace_key=workspace_key,
+                require_existing_workspace=require_existing_workspace,
+            )
+        ).encode()
         request = urllib.request.Request(
             f"{endpoint}/v1/jobs",
             data=body,
@@ -3144,15 +3179,50 @@ class ComposeAuthority:
             time.sleep(0.1)
         raise TimeoutError("sandbox runner no-op job did not finish")
 
+    def delete_sandbox_workspace(
+        self,
+        workspace_key: str,
+        *,
+        runner: CommandRunner = run_command,
+    ) -> None:
+        self.sandbox_workspace_key(workspace_key)
+        port = self.published_ports.get("SANDBOX_RUNNER_DEV_PORT")
+        if port is None:
+            raise RuntimeError("sandbox runner host endpoint was not resolved")
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/workspaces/{workspace_key}",
+            headers={"Authorization": f"Bearer {self.environment['SANDBOX_RUNNER_TOKEN']}"},
+            method="DELETE",
+        )
+        with urllib.request.urlopen(request, timeout=5.0) as response:
+            if response.status != 204:
+                raise RuntimeError("sandbox runner rejected workspace deletion")
+        if self._exact_label_ids(
+            runner=runner,
+            resource="volume",
+            label=f"jhin.sandbox.workspace={workspace_key}",
+        ):
+            raise RuntimeError("sandbox workspace volume survived deletion")
+
     @staticmethod
     def sandbox_job_label(job_id: str) -> str:
         if re.fullmatch(r"[a-z0-9][a-z0-9-]{7,63}", job_id) is None:
             raise ValueError("sandbox job identity is malformed")
         return f"jhin.sandbox.job={job_id}"
 
+    @staticmethod
+    def sandbox_workspace_key(workspace_key: str) -> str:
+        if _WORKSPACE_KEY.fullmatch(workspace_key) is None:
+            raise ValueError("sandbox workspace identity is malformed")
+        return workspace_key
+
     @property
     def direct_sandbox_job_ledger(self) -> Path:
         return self.runtime_dir / "direct-sandbox-jobs.json"
+
+    @property
+    def direct_sandbox_workspace_ledger(self) -> Path:
+        return self.runtime_dir / "direct-sandbox-workspaces.json"
 
     def direct_sandbox_jobs(self) -> tuple[str, ...]:
         """Read the private crash-safe inventory of direct runner requests."""
@@ -3201,7 +3271,71 @@ class ComposeAuthority:
         )
         try:
             encoded = json.dumps([*jobs, job_id], separators=(",", ":")).encode()
-            os.write(descriptor, encoded)
+            _write_all(descriptor, encoded, description="direct sandbox job ledger")
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        try:
+            os.replace(temporary, path)
+            directory = os.open(
+                self.runtime_dir,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            )
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def direct_sandbox_workspaces(self) -> tuple[str, ...]:
+        """Read the private crash-safe inventory of direct workspace keys."""
+        path = self.direct_sandbox_workspace_ledger
+        if not path.exists() and not path.is_symlink():
+            return ()
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        try:
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_uid != os.geteuid()
+            ):
+                raise RuntimeError("direct sandbox workspace ledger metadata is unsafe")
+            with os.fdopen(descriptor, encoding="utf-8") as stream:
+                descriptor = -1
+                payload = json.load(stream)
+        except json.JSONDecodeError as error:
+            raise RuntimeError("direct sandbox workspace ledger is malformed") from error
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        if (
+            not isinstance(payload, list)
+            or any(not isinstance(value, str) for value in payload)
+            or len(payload) != len(set(payload))
+        ):
+            raise RuntimeError("direct sandbox workspace ledger is malformed")
+        for workspace_key in payload:
+            self.sandbox_workspace_key(workspace_key)
+        return tuple(cast(list[str], payload))
+
+    def record_direct_sandbox_workspace(self, workspace_key: str) -> None:
+        """Fsync an exact workspace key before the runner can create its volume."""
+        self.sandbox_workspace_key(workspace_key)
+        workspaces = self.direct_sandbox_workspaces()
+        if workspace_key in workspaces:
+            return
+        path = self.direct_sandbox_workspace_ledger
+        temporary = self.runtime_dir / f".direct-sandbox-workspaces-{secrets.token_hex(6)}"
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+        )
+        try:
+            encoded = json.dumps([*workspaces, workspace_key], separators=(",", ":")).encode()
+            _write_all(descriptor, encoded, description="direct sandbox workspace ledger")
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
@@ -3221,9 +3355,13 @@ class ComposeAuthority:
     def direct_sandbox_artifact_filters(
         self,
     ) -> tuple[tuple[Literal["container", "volume"], str], ...]:
-        return tuple(
-            ("container", self.sandbox_job_label(job_id)) for job_id in self.direct_sandbox_jobs()
-        )
+        filters: list[tuple[Literal["container", "volume"], str]] = []
+        for job_id in self.direct_sandbox_jobs():
+            filters.append(("container", self.sandbox_job_label(job_id)))
+        for workspace_key in self.direct_sandbox_workspaces():
+            filters.append(("container", f"jhin.sandbox.workspace.init={workspace_key}"))
+            filters.append(("volume", f"jhin.sandbox.workspace={workspace_key}"))
+        return tuple(filters)
 
     @classmethod
     def blocking_sandbox_job_request(cls, job_id: str) -> dict[str, Any]:
@@ -3733,6 +3871,7 @@ class ComposeAuthority:
                 "network", "ls", "-q", "--filter", "label=com.docker.compose.project=jhin"
             ),
             self.docker_command("ps", "-aq", "--filter", "label=jhin.sandbox.job"),
+            self.docker_command("ps", "-aq", "--filter", "label=jhin.sandbox.workspace.init"),
             self.docker_command("volume", "ls", "-q", "--filter", "label=jhin.sandbox.workspace"),
         )
         occupied: list[str] = []
@@ -3766,7 +3905,7 @@ class ComposeAuthority:
         label: str,
     ) -> list[str]:
         if resource == "container":
-            command = self.docker_command("ps", "-aq", "--filter", f"label={label}")
+            command = self.docker_command("ps", "-aq", "--no-trunc", "--filter", f"label={label}")
         elif resource == "volume":
             command = self.docker_command("volume", "ls", "-q", "--filter", f"label={label}")
         else:
@@ -3774,7 +3913,13 @@ class ComposeAuthority:
         result = self._run(command, runner=runner, timeout=30.0, check=False)
         if result.returncode != 0:
             raise RuntimeError(f"failed to list exact-label {resource} resources")
-        return [line.strip() for line in _text(result.stdout).splitlines() if line.strip()]
+        identifiers = [line.strip() for line in _text(result.stdout).splitlines() if line.strip()]
+        if resource == "container" and (
+            any(_DOCKER_CONTAINER_ID.fullmatch(identifier) is None for identifier in identifiers)
+            or len(set(identifiers)) != len(identifiers)
+        ):
+            raise RuntimeError("exact-label query returned noncanonical container IDs")
+        return identifiers
 
     def snapshot_sandbox_artifacts(
         self,

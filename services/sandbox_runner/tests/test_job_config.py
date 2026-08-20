@@ -56,13 +56,22 @@ class TestIsolationInvariants:
 
     def test_no_docker_socket_or_host_mounts(self) -> None:
         """Plan 48.7: jobs never receive the Docker socket or host paths.
-        The only bind, ever, is the named workspace volume."""
+        The only mount, ever, is the named workspace volume."""
         host = config_for(request(workspace_key="run-abc"))["HostConfig"]
-        binds = host.get("Binds", [])
-        assert binds == ["jhin-sandbox-ws-run-abc:/workspace"]
-        assert not any("docker.sock" in b or b.startswith("/") for b in binds)
+        assert "Binds" not in host
+        mounts = host.get("Mounts", [])
+        assert mounts == [
+            {
+                "Type": "volume",
+                "Source": "jhin-sandbox-ws-run-abc",
+                "Target": "/workspace",
+                "ReadOnly": False,
+                "VolumeOptions": {"NoCopy": True},
+            }
+        ]
+        assert "docker.sock" not in repr(mounts)
         host_no_ws = config_for(request())["HostConfig"]
-        assert "Binds" not in host_no_ws
+        assert "Binds" not in host_no_ws and "Mounts" not in host_no_ws
 
     def test_network_policy_mapping(self) -> None:
         assert config_for(request())["HostConfig"]["NetworkMode"] == "none"

@@ -42,6 +42,7 @@ logger = get_logger(__name__)
 
 JOB_LABEL = "jhin.sandbox.job"
 WORKSPACE_LABEL = "jhin.sandbox.workspace"
+WORKSPACE_INIT_LABEL = "jhin.sandbox.workspace.init"
 WORKSPACE_VOLUME_PREFIX = "jhin-sandbox-ws-"
 
 _TRUNCATION_MARKER = "\n…[truncated by sandbox runner]"
@@ -54,6 +55,22 @@ _FORBIDDEN_JOB_ENV_SOCKET_PATHS = (
     "/run/host/docker.sock",
 )
 _ROOTLESS_TRANSPORT_HOSTNAME = "rootless-docker-transport"
+_WORKSPACE_INIT_TARGET = "/jhin-workspace-init"
+_WORKSPACE_INIT_SCRIPT = """\
+import os
+import stat
+
+path = "/jhin-workspace-init"
+before = os.lstat(path)
+if not stat.S_ISDIR(before.st_mode):
+    raise SystemExit(2)
+os.chmod(path, 0o700)
+os.chown(path, 1000, 1000)
+after = os.stat(path)
+expected = (1000, 1000, 0o700)
+actual = (after.st_uid, after.st_gid, stat.S_IMODE(after.st_mode))
+raise SystemExit(0 if actual == expected else 3)
+"""
 
 
 class JobValidationError(Exception):
@@ -138,6 +155,16 @@ def workspace_volume_name(workspace_key: str) -> str:
     return f"{WORKSPACE_VOLUME_PREFIX}{workspace_key}"
 
 
+def _workspace_volume_mount(workspace_key: str, target: str) -> dict[str, Any]:
+    return {
+        "Type": "volume",
+        "Source": workspace_volume_name(workspace_key),
+        "Target": target,
+        "ReadOnly": False,
+        "VolumeOptions": {"NoCopy": True},
+    }
+
+
 def _job_environment_value_is_safe(name: str, value: str) -> bool:
     if name.startswith(_FORBIDDEN_JOB_ENV_NAME_PREFIXES):
         return False
@@ -189,8 +216,8 @@ def build_container_config(
         "AutoRemove": False,
     }
     if request.workspace_key:
-        host_config["Binds"] = [
-            f"{workspace_volume_name(request.workspace_key)}:{request.working_dir}"
+        host_config["Mounts"] = [
+            _workspace_volume_mount(request.workspace_key, request.working_dir)
         ]
     else:
         # No persistent workspace requested: still give the job a writable
@@ -346,7 +373,10 @@ class JobManager:
         terminal_status = "failed"
         try:
             if request.workspace_key:
-                await self._ensure_workspace_volume(request.workspace_key)
+                await self._ensure_workspace_volume(
+                    request.workspace_key,
+                    job_id=request.job_id,
+                )
             config = build_container_config(
                 request,
                 self._settings,
@@ -456,13 +486,51 @@ class JobManager:
 
     # --- workspaces ---
 
-    async def _ensure_workspace_volume(self, workspace_key: str) -> None:
+    async def _ensure_workspace_volume(self, workspace_key: str, *, job_id: str) -> None:
         await self.docker.volumes.create(
             {
                 "Name": workspace_volume_name(workspace_key),
                 "Labels": {WORKSPACE_LABEL: workspace_key},
             }
         )
+        initializer = await self.docker.containers.create(
+            {
+                "Image": self._settings.sandbox_default_image,
+                "Entrypoint": ["python3", "-c"],
+                "Cmd": [_WORKSPACE_INIT_SCRIPT],
+                "User": "0:0",
+                "Labels": {WORKSPACE_INIT_LABEL: workspace_key},
+                "HostConfig": {
+                    "NetworkMode": "none",
+                    "Memory": 64 * 1024 * 1024,
+                    "MemorySwap": 64 * 1024 * 1024,
+                    "NanoCpus": 1_000_000_000,
+                    "PidsLimit": 16,
+                    "CapDrop": ["ALL"],
+                    "CapAdd": ["CHOWN", "FOWNER"],
+                    "SecurityOpt": ["no-new-privileges:true"],
+                    "ReadonlyRootfs": True,
+                    "Privileged": False,
+                    "AutoRemove": False,
+                    "Mounts": [_workspace_volume_mount(workspace_key, _WORKSPACE_INIT_TARGET)],
+                },
+            },
+            name=f"jhin-sbx-init-{job_id[:32]}",
+        )
+        delete_failed = False
+        try:
+            await initializer.start()
+            result = await initializer.wait(timeout=DOCKER_CHECK_TIMEOUT_SECONDS)
+            status_code = result.get("StatusCode") if isinstance(result, dict) else None
+            if type(status_code) is not int or status_code != 0:
+                raise RuntimeError("sandbox workspace initialization failed")
+        finally:
+            try:
+                await initializer.delete(force=True, v=True)
+            except Exception:
+                delete_failed = True
+        if delete_failed:
+            raise RuntimeError("sandbox workspace initializer cleanup failed")
 
     async def delete_workspace(self, workspace_key: str) -> bool:
         name = workspace_volume_name(workspace_key)
@@ -478,12 +546,18 @@ class JobManager:
     async def reap_orphans(self) -> None:
         """Remove leftover job containers (and stale workspace volumes) from
         a previous runner process that died mid-job."""
-        containers = await self.docker.containers.list(
-            all=1, filters=json.dumps({"label": [JOB_LABEL]})
-        )
-        for container in containers:
-            await container.delete(force=True, v=True)
-            logger.info("sandbox.reaped_container", container_id=container.id[:12])
+        seen_containers: set[str] = set()
+        for label in (JOB_LABEL, WORKSPACE_INIT_LABEL):
+            containers = await self.docker.containers.list(
+                all=1, filters=json.dumps({"label": [label]})
+            )
+            for container in containers:
+                identifier = str(container.id)
+                if identifier in seen_containers:
+                    continue
+                seen_containers.add(identifier)
+                await container.delete(force=True, v=True)
+                logger.info("sandbox.reaped_container", container_id=identifier[:12])
 
         max_age = self._settings.sandbox_workspace_max_age_hours * 3600
         listing = await self.docker.volumes.list(filters={"label": [WORKSPACE_LABEL]})

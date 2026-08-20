@@ -56,6 +56,107 @@ class _FakeDocker:
         self.containers = _FakeContainers(container)
 
 
+class _WorkspaceInitializerContainer:
+    id = "workspace-initializer-id"
+
+    def __init__(self, *, status_code: int = 0) -> None:
+        self.status_code = status_code
+        self.started = False
+        self.wait_timeout: float | None = None
+        self.deleted: tuple[bool, bool] | None = None
+
+    async def start(self) -> None:
+        self.started = True
+
+    async def wait(self, **kwargs: float) -> dict[str, int]:
+        self.wait_timeout = kwargs["timeout"]
+        return {"StatusCode": self.status_code}
+
+    async def delete(self, *, force: bool, v: bool) -> None:
+        self.deleted = (force, v)
+
+
+class _WorkspaceVolumes:
+    def __init__(self) -> None:
+        self.created: list[dict[str, object]] = []
+
+    async def create(self, config: dict[str, object]) -> None:
+        self.created.append(config)
+
+
+class _WorkspaceContainers:
+    def __init__(self, container: _WorkspaceInitializerContainer) -> None:
+        self.container = container
+        self.created: list[tuple[dict[str, Any], str]] = []
+
+    async def create(self, config: dict[str, Any], *, name: str) -> _WorkspaceInitializerContainer:
+        self.created.append((config, name))
+        return self.container
+
+
+class _WorkspaceDocker:
+    def __init__(self, container: _WorkspaceInitializerContainer) -> None:
+        self.volumes = _WorkspaceVolumes()
+        self.containers = _WorkspaceContainers(container)
+
+
+@pytest.mark.asyncio
+async def test_workspace_volume_is_nocopy_and_initialized_by_trusted_root() -> None:
+    container = _WorkspaceInitializerContainer()
+    docker = _WorkspaceDocker(container)
+    manager = JobManager(runner_settings(sandbox_default_image="jhin-sandbox:test"))
+    manager._docker = cast(Any, docker)
+
+    await manager._ensure_workspace_volume("run-abc", job_id="0123456789abcdef")
+
+    assert docker.volumes.created == [
+        {
+            "Name": "jhin-sandbox-ws-run-abc",
+            "Labels": {"jhin.sandbox.workspace": "run-abc"},
+        }
+    ]
+    assert len(docker.containers.created) == 1
+    config, name = docker.containers.created[0]
+    assert name == "jhin-sbx-init-0123456789abcdef"
+    assert config["Image"] == "jhin-sandbox:test"
+    assert config["Entrypoint"] == ["python3", "-c"]
+    assert isinstance(config["Cmd"], list) and len(config["Cmd"]) == 1
+    assert "os.chmod" in config["Cmd"][0] and "os.chown" in config["Cmd"][0]
+    assert config["User"] == "0:0"
+    assert config["Labels"] == {"jhin.sandbox.workspace.init": "run-abc"}
+    host = config["HostConfig"]
+    assert host["NetworkMode"] == "none"
+    assert host["ReadonlyRootfs"] is True
+    assert host["Privileged"] is False
+    assert host["CapDrop"] == ["ALL"]
+    assert host["CapAdd"] == ["CHOWN", "FOWNER"]
+    assert host["SecurityOpt"] == ["no-new-privileges:true"]
+    assert host["Mounts"] == [
+        {
+            "Type": "volume",
+            "Source": "jhin-sandbox-ws-run-abc",
+            "Target": "/jhin-workspace-init",
+            "ReadOnly": False,
+            "VolumeOptions": {"NoCopy": True},
+        }
+    ]
+    assert container.started is True
+    assert container.wait_timeout == jobs_module.DOCKER_CHECK_TIMEOUT_SECONDS
+    assert container.deleted == (True, True)
+
+
+@pytest.mark.asyncio
+async def test_workspace_initializer_failure_is_terminal_and_deleted() -> None:
+    container = _WorkspaceInitializerContainer(status_code=1)
+    docker = _WorkspaceDocker(container)
+    manager = JobManager(runner_settings(sandbox_default_image="jhin-sandbox:test"))
+    manager._docker = cast(Any, docker)
+
+    with pytest.raises(RuntimeError, match="workspace initialization failed"):
+        await manager._ensure_workspace_volume("run-abc", job_id="0123456789abcdef")
+    assert container.deleted == (True, True)
+
+
 def runner_settings(**overrides: object) -> Settings:
     values: dict[str, object] = {
         "sandbox_runner_token": "test-token",
@@ -126,8 +227,9 @@ class _StartupContainers:
     def __init__(self, owner: _StartupDocker) -> None:
         self.owner = owner
 
-    async def list(self, **_kwargs: object) -> list[object]:
+    async def list(self, **kwargs: object) -> list[object]:
         self.owner.calls.append("containers.list")
+        self.owner.container_list_kwargs.append(kwargs)
         self.owner.fail_if("containers.list")
         return [self.owner.orphan] if self.owner.orphan is not None else []
 
@@ -162,6 +264,7 @@ class _StartupDocker:
     def __init__(self, *, url: str) -> None:
         self.url = url
         self.calls: list[str] = []
+        self.container_list_kwargs: list[dict[str, object]] = []
         self.closed = False
         self.system = _StartupSystem(self)
         self.networks = _StartupNetworks(self)
@@ -211,7 +314,12 @@ async def test_start_validates_daemon_identity_before_any_mutation(
         "system.info",
         "networks.list",
         "containers.list",
+        "containers.list",
         "volumes.list",
+    ]
+    assert docker.container_list_kwargs == [
+        {"all": 1, "filters": '{"label": ["jhin.sandbox.job"]}'},
+        {"all": 1, "filters": '{"label": ["jhin.sandbox.workspace.init"]}'},
     ]
 
 
@@ -255,6 +363,7 @@ async def test_rootless_start_rejects_daemon_without_exact_identity(
                 "version",
                 "system.info",
                 "networks.list",
+                "containers.list",
                 "containers.list",
                 "volumes.list",
                 "close",

@@ -1562,6 +1562,7 @@ def test_clean_daemon_preflight_checks_only_exact_reserved_authorities() -> None
         joined = [" ".join(command) for command in recorder.calls]
         assert any("com.docker.compose.project=jhin" in command for command in joined)
         assert any("label=jhin.sandbox.job" in command for command in joined)
+        assert any("label=jhin.sandbox.workspace.init" in command for command in joined)
         assert any("label=jhin.sandbox.workspace" in command for command in joined)
         assert any(command.endswith("network inspect jhin_sandbox") for command in joined)
         assert not any("jhin*" in command for command in joined)
@@ -1571,7 +1572,15 @@ def test_clean_daemon_preflight_checks_only_exact_reserved_authorities() -> None
 
 @pytest.mark.parametrize(
     "resource",
-    ["project", "project-volume", "project-network", "job", "volume", "network"],
+    [
+        "project",
+        "project-volume",
+        "project-network",
+        "job",
+        "initializer",
+        "volume",
+        "network",
+    ],
 )
 def test_clean_daemon_preflight_fails_closed_on_any_reserved_resource(resource: str) -> None:
     authority = _authority_for_recorder()
@@ -1586,6 +1595,9 @@ def test_clean_daemon_preflight_fails_closed_on_any_reserved_resource(resource: 
         "network", "ls", "-q", "--filter", "label=com.docker.compose.project=jhin"
     )
     job = authority.docker_command("ps", "-aq", "--filter", "label=jhin.sandbox.job")
+    initializer = authority.docker_command(
+        "ps", "-aq", "--filter", "label=jhin.sandbox.workspace.init"
+    )
     volume = authority.docker_command(
         "volume", "ls", "-q", "--filter", "label=jhin.sandbox.workspace"
     )
@@ -1599,6 +1611,8 @@ def test_clean_daemon_preflight_fails_closed_on_any_reserved_resource(resource: 
         recorder.responses[project_network] = (0, "foreign-project-network\n", "")
     elif resource == "job":
         recorder.responses[job] = (0, "foreign-job\n", "")
+    elif resource == "initializer":
+        recorder.responses[initializer] = (0, "foreign-initializer\n", "")
     elif resource == "volume":
         recorder.responses[volume] = (0, "foreign-volume\n", "")
     else:
@@ -1897,13 +1911,45 @@ def test_direct_runner_jobs_are_durably_inventoried_for_parent_cleanup() -> None
     try:
         authority.record_direct_sandbox_job(first)
         authority.record_direct_sandbox_job(second)
+        authority.record_direct_sandbox_workspace("phase10-reuse")
+        authority.record_direct_sandbox_workspace("phase10-reuse")
         ledger = authority.runtime_dir / "direct-sandbox-jobs.json"
+        workspace_ledger = authority.runtime_dir / "direct-sandbox-workspaces.json"
         assert stat.S_IMODE(ledger.lstat().st_mode) == 0o600
+        assert stat.S_IMODE(workspace_ledger.lstat().st_mode) == 0o600
         assert authority.direct_sandbox_jobs() == (first, second)
+        assert authority.direct_sandbox_workspaces() == ("phase10-reuse",)
         assert authority.direct_sandbox_artifact_filters() == (
             ("container", f"jhin.sandbox.job={first}"),
             ("container", f"jhin.sandbox.job={second}"),
+            ("container", "jhin.sandbox.workspace.init=phase10-reuse"),
+            ("volume", "jhin.sandbox.workspace=phase10-reuse"),
         )
+    finally:
+        authority.remove_runtime_paths()
+
+
+@pytest.mark.parametrize(
+    ("payload", "mode", "message"),
+    [
+        ("{", 0o600, "ledger is malformed"),
+        ('["phase10-reuse","phase10-reuse"]', 0o600, "ledger is malformed"),
+        ('["../escape"]', 0o600, "workspace identity is malformed"),
+        ('["phase10-reuse"]', 0o644, "ledger metadata is unsafe"),
+    ],
+)
+def test_direct_workspace_ledger_corruption_fails_closed(
+    payload: str,
+    mode: int,
+    message: str,
+) -> None:
+    authority = _authority_for_recorder()
+    ledger = authority.runtime_dir / "direct-sandbox-workspaces.json"
+    try:
+        ledger.write_text(payload, encoding="utf-8")
+        ledger.chmod(mode)
+        with pytest.raises((RuntimeError, ValueError), match=message):
+            authority.direct_sandbox_artifact_filters()
     finally:
         authority.remove_runtime_paths()
 
@@ -1911,14 +1957,16 @@ def test_direct_runner_jobs_are_durably_inventoried_for_parent_cleanup() -> None
 def test_cleanup_attempts_every_exact_auxiliary_before_reraising_invariant() -> None:
     authority = _authority_for_recorder()
     recorder = _ScriptedRecorder(authority)
+    auxiliary_ids = ("c" * 64, "d" * 64)
     aux_list = authority.docker_command(
         "ps",
         "-aq",
+        "--no-trunc",
         "--filter",
         f"label=jhin.phase10.invocation={authority.token}",
     )
-    recorder.responses[aux_list] = (0, "aux-one\naux-two\n", "")
-    for container in ("aux-one", "aux-two"):
+    recorder.responses[aux_list] = (0, "\n".join(auxiliary_ids) + "\n", "")
+    for container in auxiliary_ids:
         inspect = authority.docker_command(
             "inspect", "--format", "{{json .Config.Labels}}", container
         )
@@ -1935,7 +1983,7 @@ def test_cleanup_attempts_every_exact_auxiliary_before_reraising_invariant() -> 
         with pytest.raises(ExceptionGroup, match="cleanup invariants"):
             authority.down_and_cleanup(runner=recorder)
         removals = [command for command in recorder.calls if command[-3:-1] == ("rm", "-f")]
-        assert {command[-1] for command in removals} == {"aux-one", "aux-two"}
+        assert {command[-1] for command in removals} == set(auxiliary_ids)
     finally:
         if authority.runtime_dir.exists() or authority.barrier_root.exists():
             authority.remove_runtime_paths()
@@ -2255,14 +2303,65 @@ def test_cleanup_recovery_removes_survivors_found_after_initial_probe_timeouts()
             authority.remove_runtime_paths()
 
 
+def test_exact_label_container_query_uses_full_ids() -> None:
+    authority = _authority_for_recorder()
+    recorder = _ScriptedRecorder(authority)
+    label = f"com.docker.compose.project={authority.project}"
+    full_identifier = "a" * 64
+    list_command = authority.docker_command("ps", "-aq", "--no-trunc", "--filter", f"label={label}")
+    recorder.responses[list_command] = (0, f"{full_identifier}\n", "")
+    try:
+        assert authority._exact_label_ids(
+            runner=recorder,
+            resource="container",
+            label=label,
+        ) == [full_identifier]
+        assert recorder.calls == [list_command]
+    finally:
+        authority.remove_runtime_paths()
+
+
+@pytest.mark.parametrize(
+    "listed_ids",
+    [
+        ["a" * 12],
+        ["A" * 64],
+        ["g" * 64],
+        ["a" * 63],
+        ["a" * 65],
+        ["a" * 64, "a" * 64],
+    ],
+)
+def test_exact_label_container_query_rejects_noncanonical_ids(
+    listed_ids: list[str],
+) -> None:
+    authority = _authority_for_recorder()
+    recorder = _ScriptedRecorder(authority)
+    label = f"com.docker.compose.project={authority.project}"
+    list_command = authority.docker_command("ps", "-aq", "--no-trunc", "--filter", f"label={label}")
+    recorder.responses[list_command] = (0, "\n".join(listed_ids) + "\n", "")
+    try:
+        with pytest.raises(RuntimeError, match="noncanonical container IDs"):
+            authority._exact_label_ids(
+                runner=recorder,
+                resource="container",
+                label=label,
+            )
+        assert recorder.calls == [list_command]
+    finally:
+        authority.remove_runtime_paths()
+
+
 @pytest.mark.parametrize("resource", ["container", "volume", "network"])
 def test_exact_label_recovery_exhausts_every_project_resource_class(resource: str) -> None:
     authority = _authority_for_recorder()
     recorder = _ScriptedRecorder(authority)
     project_label = f"com.docker.compose.project={authority.project}"
-    identifier = f"recovered-{resource}"
+    identifier = "b" * 64 if resource == "container" else f"recovered-{resource}"
     if resource == "container":
-        list_command = authority.docker_command("ps", "-aq", "--filter", f"label={project_label}")
+        list_command = authority.docker_command(
+            "ps", "-aq", "--no-trunc", "--filter", f"label={project_label}"
+        )
         inspect_command = authority.docker_command(
             "inspect", "--format", "{{json .Config.Labels}}", identifier
         )
@@ -3223,6 +3322,76 @@ def test_noop_sandbox_job_verifies_canonical_readline_content_and_metadata() -> 
         assert "st_gid" in script
         assert "0o644" in script
         assert "phase10-noop" in script
+    finally:
+        authority.remove_runtime_paths()
+
+
+def test_noop_sandbox_workspace_request_proves_second_job_reuses_volume() -> None:
+    authority = _authority_for_recorder()
+    job_id = "deadc0dedeadc0dedeadc0de"
+    try:
+        first = authority.noop_sandbox_job_request(
+            job_id,
+            workspace_key="phase10-reuse",
+        )
+        second = authority.noop_sandbox_job_request(
+            job_id,
+            workspace_key="phase10-reuse",
+            require_existing_workspace=True,
+        )
+        assert first["workspace_key"] == second["workspace_key"] == "phase10-reuse"
+        first_script = first["command"][2]
+        second_script = second["command"][2]
+        assert "marker.write_bytes" in first_script and "marker.read_bytes" not in first_script
+        assert "marker.read_bytes" in second_script and "marker.write_bytes" not in second_script
+        assert ".phase10-volume-reuse" in first_script
+        assert ".phase10-volume-reuse" in second_script
+        with pytest.raises(ValueError, match="requires an exact workspace key"):
+            authority.noop_sandbox_job_request(
+                job_id,
+                require_existing_workspace=True,
+            )
+        with pytest.raises(ValueError, match="workspace identity is malformed"):
+            authority.noop_sandbox_job_request(
+                job_id,
+                workspace_key="../escape",
+            )
+    finally:
+        authority.remove_runtime_paths()
+
+
+def test_noop_workspace_is_durably_recorded_before_runner_post(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = replace(
+        _authority_for_recorder(),
+        _published_port_items=(("SANDBOX_RUNNER_DEV_PORT", 49152),),
+    )
+    events: list[str] = []
+
+    class PostObserved(Exception):
+        pass
+
+    def record_job(_self: ComposeAuthority, _job_id: str) -> None:
+        events.append("job-ledger")
+
+    def record_workspace(_self: ComposeAuthority, workspace_key: str) -> None:
+        assert workspace_key == "phase10-reuse"
+        events.append("workspace-ledger")
+
+    def urlopen(request: Any, *, timeout: float) -> Any:
+        assert request.get_method() == "POST"
+        assert timeout == 5.0
+        events.append("runner-post")
+        raise PostObserved
+
+    monkeypatch.setattr(ComposeAuthority, "record_direct_sandbox_job", record_job)
+    monkeypatch.setattr(ComposeAuthority, "record_direct_sandbox_workspace", record_workspace)
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    try:
+        with pytest.raises(PostObserved):
+            authority.run_noop_sandbox_job(workspace_key="phase10-reuse")
+        assert events == ["job-ledger", "workspace-ledger", "runner-post"]
     finally:
         authority.remove_runtime_paths()
 
@@ -7450,6 +7619,54 @@ class _SandboxHTTPResponse:
 
     def read(self) -> bytes:
         return self._body
+
+
+@pytest.mark.parametrize("survivor", [False, True])
+def test_delete_sandbox_workspace_proves_exact_volume_absence(
+    monkeypatch: pytest.MonkeyPatch,
+    survivor: bool,
+) -> None:
+    authority = replace(
+        _authority_for_recorder(),
+        _published_port_items=(("SANDBOX_RUNNER_DEV_PORT", 49152),),
+    )
+    recorder = _ScriptedRecorder(authority)
+    workspace_key = "phase10-reuse"
+    list_command = authority.docker_command(
+        "volume",
+        "ls",
+        "-q",
+        "--filter",
+        f"label=jhin.sandbox.workspace={workspace_key}",
+    )
+    recorder.responses[list_command] = (
+        0,
+        "jhin-sandbox-ws-phase10-reuse\n" if survivor else "",
+        "",
+    )
+    requests: list[Any] = []
+
+    def urlopen(request: Any, *, timeout: float) -> _SandboxHTTPResponse:
+        requests.append(request)
+        assert timeout == 5.0
+        return _SandboxHTTPResponse(204, {})
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    try:
+        if survivor:
+            with pytest.raises(RuntimeError, match="survived deletion"):
+                authority.delete_sandbox_workspace(workspace_key, runner=recorder)
+        else:
+            authority.delete_sandbox_workspace(workspace_key, runner=recorder)
+        assert len(requests) == 1
+        assert requests[0].get_method() == "DELETE"
+        assert requests[0].full_url.endswith(f"/v1/workspaces/{workspace_key}")
+        assert requests[0].get_header("Authorization") == (
+            f"Bearer {authority.environment['SANDBOX_RUNNER_TOKEN']}"
+        )
+        assert recorder.calls == [list_command]
+    finally:
+        authority.remove_runtime_paths()
 
 
 def _install_inspectable_job_scenario(
