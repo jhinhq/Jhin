@@ -32,9 +32,9 @@
 - The monitoring plane uses only an internal `monitoring` network. Collector/Prometheus/Tempo/Grafana receive no PostgreSQL, NATS, Temporal, Docker-socket, master-key, model-provider, connector, or sandbox-runner credentials. Grafana has no production host binding; the dev overlay may bind only `127.0.0.1`.
 - Prometheus/Tempo/Grafana volumes are replaceable diagnostics and are excluded from required product backup. Grafana data sources and dashboards are provisioned from version-controlled repository files.
 - Product UI work is out of scope. This plan provides only `ObservabilityRuntime.status()` for the later protected-health sub-project and does not add public or protected operations endpoints.
-- Task 0 intentionally stages the already-tracked amendment to `docs/superpowers/plans/2026-08-18-phase-10-protected-health.md` with this plan so the downstream plan cannot overwrite the interceptor-aware API Temporal provider or telemetry-owned integration harness. No later telemetry task edits or stages that plan.
-- The user-owned untracked `orgforge-production-implementation-plan.md` must not be read, edited, staged, renamed, deleted, or committed. Do not stage either Phase 10 design spec unless its owner separately requests that action.
-- Every implementation task follows RED → focused GREEN → affected suite → review of the exact diff → scoped commit. Never use `git add .`; stage only the paths named by that task after checking `git status --short` and `git diff --cached --name-only`.
+- Task 0 modifies and stages the two already-tracked plan files together so the downstream plan cannot overwrite the interceptor-aware API Temporal provider or telemetry-owned integration harness. No later telemetry task edits or stages either plan.
+- The protected external user-owned plan path is outside this plan. No task or command may open, read, hash, stat, search, edit, stage, rename, delete, commit, or otherwise target it. Status, diff, and staging checks must be explicitly scoped to plan-owned paths. Do not stage either Phase 10 design spec unless its owner separately requests that action.
+- Every implementation task follows RED -> focused GREEN -> affected suite -> exact-diff review -> scoped commit. Never use `git add .`. Worktree status/diff queries are always scoped to the task's owned paths. The sole permitted unscoped repository-state query is `git diff --cached --name-only` (or `git diff --cached --quiet`): it reads only tracked index state and is required to fail closed on an unrelated staged path. No task may use an unscoped worktree-status query.
 
 ## Shared Interfaces
 
@@ -122,264 +122,655 @@ exception text.
 
 ## File Map
 
-```text
-docs/superpowers/plans/2026-08-18-phase-10-protected-health.md
-docs/superpowers/plans/2026-08-18-phase-10-telemetry-core.md
+This is the exact implementation ownership map. Each task's `Files` block and
+`taskN_paths` array below mirror the corresponding list byte-for-byte.
 
-packages/observability/pyproject.toml
-packages/observability/src/jhin_observability/__init__.py
-packages/observability/src/jhin_observability/bootstrap.py
-packages/observability/src/jhin_observability/config.py
-packages/observability/src/jhin_observability/context.py
-packages/observability/src/jhin_observability/errors.py
-packages/observability/src/jhin_observability/events.py
-packages/observability/src/jhin_observability/exporters.py
-packages/observability/src/jhin_observability/logging.py
-packages/observability/src/jhin_observability/metrics.py
-packages/observability/src/jhin_observability/redaction.py
-packages/observability/src/jhin_observability/registry.py
-packages/observability/src/jhin_observability/sqlalchemy.py
-packages/observability/src/jhin_observability/temporal.py
-packages/observability/tests/conftest.py
-packages/observability/tests/test_bootstrap.py
-packages/observability/tests/test_context.py
-packages/observability/tests/test_errors.py
-packages/observability/tests/test_exporters.py
-packages/observability/tests/test_log_audit.py
-packages/observability/tests/test_logging.py
-packages/observability/tests/test_metrics.py
-packages/observability/tests/test_noop_metrics.py
-packages/observability/tests/test_sqlalchemy.py
-packages/observability/tests/test_temporal.py
+### Task 1 owned paths (51)
 
-apps/api/src/jhin_api/deps.py
-apps/api/src/jhin_api/health/router.py
-apps/api/src/jhin_api/health/service.py
-apps/api/src/jhin_api/main.py
-apps/api/src/jhin_api/models/router.py
-apps/api/src/jhin_api/models/service.py
-apps/api/src/jhin_api/seed.py
-apps/api/src/jhin_api/settings.py
-apps/api/src/jhin_api/temporal.py
-apps/api/src/jhin_api/webhooks/service.py
-apps/api/tests/test_observability.py
-apps/api/tests/test_model_telemetry.py
-apps/api/tests/test_temporal_provider.py
-apps/web/Dockerfile
-apps/web/instrumentation.ts
-apps/web/lib/server-logger.ts
-apps/web/next.config.ts
-apps/web/server-wrapper.cjs
-apps/web/tests/server-logger.test.ts
-apps/web/tests/server-wrapper.test.ts
+- `apps/api/src/jhin_api/main.py`
+- `apps/api/src/jhin_api/webhooks/service.py`
+- `compose.rootless.yaml`
+- `compose.yaml`
+- `packages/events/pyproject.toml`
+- `packages/events/src/jhin_events/consumer.py`
+- `packages/observability/src/jhin_observability/__init__.py`
+- `packages/observability/src/jhin_observability/errors.py`
+- `packages/observability/src/jhin_observability/events.py`
+- `packages/observability/src/jhin_observability/logging.py`
+- `packages/observability/src/jhin_observability/redaction.py`
+- `packages/observability/tests/test_errors.py`
+- `packages/observability/tests/test_log_audit.py`
+- `packages/observability/tests/test_logging.py`
+- `packages/secrets/pyproject.toml`
+- `packages/secrets/src/jhin_secrets/crypto.py`
+- `packages/secrets/tests/test_crypto.py`
+- `packages/workflows/src/jhin_workflows/heartbeat/activities.py`
+- `scripts/assert_phase10_tool_worker_compose.py`
+- `scripts/audit_phase10_logging.py`
+- `services/agent_worker/src/jhin_agent_worker/activities.py`
+- `services/agent_worker/src/jhin_agent_worker/engineering_activities.py`
+- `services/agent_worker/src/jhin_agent_worker/main.py`
+- `services/agent_worker/src/jhin_agent_worker/projections.py`
+- `services/agent_worker/src/jhin_agent_worker/reasoning.py`
+- `services/agent_worker/src/jhin_agent_worker/resources.py`
+- `services/agent_worker/src/jhin_agent_worker/settings.py`
+- `services/agent_worker/src/jhin_agent_worker/trigger_activities.py`
+- `services/event_worker/src/jhin_event_worker/main.py`
+- `services/event_worker/src/jhin_event_worker/matcher.py`
+- `services/event_worker/src/jhin_event_worker/normalizer.py`
+- `services/event_worker/src/jhin_event_worker/processor.py`
+- `services/event_worker/src/jhin_event_worker/settings.py`
+- `services/sandbox_runner/src/jhin_sandbox_runner/jobs.py`
+- `services/sandbox_runner/src/jhin_sandbox_runner/main.py`
+- `services/sandbox_runner/src/jhin_sandbox_runner/rootless_transport.py`
+- `services/sandbox_runner/src/jhin_sandbox_runner/settings.py`
+- `services/sandbox_runner/tests/test_rootless_transport.py`
+- `services/tool_worker/pyproject.toml`
+- `services/tool_worker/src/jhin_tool_worker/activities.py`
+- `services/tool_worker/src/jhin_tool_worker/main.py`
+- `services/tool_worker/src/jhin_tool_worker/resources.py`
+- `services/tool_worker/src/jhin_tool_worker/settings.py`
+- `services/tool_worker/src/jhin_tool_worker/trigger_activities.py`
+- `services/tool_worker/tests/test_advertised_tools.py`
+- `services/tool_worker/tests/test_worker_registration.py`
+- `services/workflow_worker/src/jhin_workflow_worker/main.py`
+- `services/workflow_worker/src/jhin_workflow_worker/settings.py`
+- `tests/test_phase10_tool_worker_compose.py`
+- `tests/test_worker_dependency_boundaries.py`
+- `uv.lock`
 
-packages/db/pyproject.toml
-packages/db/src/jhin_db/engine.py
-packages/db/tests/test_observability.py
-packages/events/pyproject.toml
-packages/events/src/jhin_events/consumer.py
-packages/events/src/jhin_events/publisher.py
-packages/events/src/jhin_events/telemetry.py
-packages/events/tests/test_telemetry.py
-packages/models/pyproject.toml
-packages/models/src/jhin_models/factory.py
-packages/models/src/jhin_models/telemetry.py
-packages/models/src/jhin_models/testing/fake_openai.py
-packages/models/tests/test_fake_openai.py
-packages/models/tests/test_telemetry.py
-packages/secrets/src/jhin_secrets/crypto.py
-packages/tools/pyproject.toml
-packages/tools/src/jhin_tools/telemetry.py
-packages/tools/tests/test_telemetry.py
+### Task 2 owned paths (15)
 
-packages/connectors/pyproject.toml
-packages/connectors/src/jhin_connectors/cli/runner_client.py
-packages/connectors/src/jhin_connectors/github/auth.py
-packages/connectors/src/jhin_connectors/github/client.py
-packages/connectors/src/jhin_connectors/http_client.py
-packages/connectors/src/jhin_connectors/linear/client.py
-packages/connectors/src/jhin_connectors/registry.py
-packages/connectors/src/jhin_connectors/supabase/management_client.py
-packages/connectors/src/jhin_connectors/supabase/database_client.py
-packages/connectors/src/jhin_connectors/supabase/database_tools.py
-packages/connectors/src/jhin_connectors/telemetry.py
-packages/connectors/src/jhin_connectors/testing/fake_linear.py
-packages/connectors/src/jhin_connectors/vercel/client.py
-packages/connectors/tests/test_telemetry.py
-packages/connectors/tests/test_http_client.py
-packages/connectors/tests/linear/test_fake_linear_admin.py
-packages/connectors/tests/supabase/test_database_telemetry.py
+- `packages/observability/pyproject.toml`
+- `packages/observability/src/jhin_observability/__init__.py`
+- `packages/observability/src/jhin_observability/bootstrap.py`
+- `packages/observability/src/jhin_observability/config.py`
+- `packages/observability/src/jhin_observability/context.py`
+- `packages/observability/src/jhin_observability/exporters.py`
+- `packages/observability/src/jhin_observability/metrics.py`
+- `packages/observability/src/jhin_observability/registry.py`
+- `packages/observability/tests/conftest.py`
+- `packages/observability/tests/test_bootstrap.py`
+- `packages/observability/tests/test_context.py`
+- `packages/observability/tests/test_exporters.py`
+- `packages/observability/tests/test_noop_metrics.py`
+- `pyproject.toml`
+- `uv.lock`
 
-services/agent_worker/src/jhin_agent_worker/activities.py
-services/agent_worker/src/jhin_agent_worker/engineering_activities.py
-services/agent_worker/src/jhin_agent_worker/main.py
-services/agent_worker/src/jhin_agent_worker/projections.py
-services/agent_worker/src/jhin_agent_worker/reasoning.py
-services/agent_worker/src/jhin_agent_worker/resources.py
-services/agent_worker/src/jhin_agent_worker/settings.py
-services/agent_worker/src/jhin_agent_worker/trigger_activities.py
-services/agent_worker/tests/test_telemetry.py
-services/tool_worker/pyproject.toml
-services/tool_worker/src/jhin_tool_worker/activities.py
-services/tool_worker/src/jhin_tool_worker/main.py
-services/tool_worker/src/jhin_tool_worker/resources.py
-services/tool_worker/src/jhin_tool_worker/settings.py
-services/tool_worker/tests/test_telemetry.py
-services/tool_worker/tests/test_worker_registration.py
-services/event_worker/pyproject.toml
-services/event_worker/src/jhin_event_worker/main.py
-services/event_worker/src/jhin_event_worker/matcher.py
-services/event_worker/src/jhin_event_worker/normalizer.py
-services/event_worker/src/jhin_event_worker/processor.py
-services/event_worker/src/jhin_event_worker/settings.py
-services/event_worker/tests/test_telemetry.py
-services/workflow_worker/pyproject.toml
-services/workflow_worker/src/jhin_workflow_worker/main.py
-services/workflow_worker/src/jhin_workflow_worker/settings.py
-services/workflow_worker/tests/test_telemetry.py
-services/sandbox_runner/src/jhin_sandbox_runner/jobs.py
-services/sandbox_runner/src/jhin_sandbox_runner/main.py
-services/sandbox_runner/src/jhin_sandbox_runner/settings.py
-services/sandbox_runner/tests/test_telemetry.py
-packages/workflows/src/jhin_workflows/heartbeat/activities.py
-packages/workflows/src/jhin_workflows/poller_health.py
-packages/workflows/tests/test_poller_health.py
-packages/workflows/pyproject.toml
+### Task 3 owned paths (5)
 
-docker/monitoring.Dockerfile
-ops/observability/collector.yaml
-ops/observability/prometheus.yaml
-ops/observability/tempo.yaml
-ops/observability/grafana/provisioning/datasources/jhin.yaml
-ops/observability/grafana/provisioning/dashboards/jhin.yaml
-ops/observability/grafana/dashboards/jhin-overview.json
-scripts/assert_phase10_observability_compose.py
-scripts/assert_phase10_tool_worker_compose.py
-scripts/audit_phase10_logging.py
-scripts/build_phase10_dashboard.py
-scripts/phase10_artifact.py
-scripts/record_phase10_telemetry_evidence.py
-tests/test_phase10_artifact.py
-tests/test_phase10_observability_compose.py
-tests/test_phase10_tool_worker_compose.py
-tests/test_phase10_telemetry_evidence.py
-tests/test_worker_dependency_boundaries.py
-tests/integration/conftest.py
-tests/integration/emit_phase10_metrics.py
-tests/integration/test_phase10_telemetry.py
-tests/integration/test_seed.py
-tests/test_phase10_telemetry_harness.py
-tests/test_web_json_stdout.py
+- `packages/observability/src/jhin_observability/__init__.py`
+- `packages/observability/src/jhin_observability/bootstrap.py`
+- `packages/observability/src/jhin_observability/metrics.py`
+- `packages/observability/tests/test_bootstrap.py`
+- `packages/observability/tests/test_metrics.py`
 
-.env.example
-.github/workflows/ci.yml
-Makefile
-compose.dev.yaml
-compose.yaml
-docs/evidence/phase10-telemetry.md
-docs/operations/telemetry.md
-pyproject.toml
-uv.lock
-```
+### Task 4 owned paths (15)
 
-This list is exhaustive. Each task's `Files` block assigns the create/modify action and commit boundary for its subset; implementation must not add a telemetry file outside this map without first amending and reviewing the plan.
+- `apps/api/pyproject.toml`
+- `apps/api/src/jhin_api/main.py`
+- `apps/api/src/jhin_api/seed.py`
+- `apps/api/src/jhin_api/settings.py`
+- `apps/api/tests/test_health.py`
+- `apps/api/tests/test_observability.py`
+- `packages/db/pyproject.toml`
+- `packages/db/src/jhin_db/engine.py`
+- `packages/db/tests/test_observability.py`
+- `packages/observability/pyproject.toml`
+- `packages/observability/src/jhin_observability/__init__.py`
+- `packages/observability/src/jhin_observability/sqlalchemy.py`
+- `packages/observability/tests/test_sqlalchemy.py`
+- `tests/integration/test_phase2_api.py`
+- `uv.lock`
 
----
+### Task 5 owned paths (15)
+
+- `apps/api/src/jhin_api/webhooks/router.py`
+- `apps/api/src/jhin_api/webhooks/service.py`
+- `apps/api/tests/test_webhooks_unit.py`
+- `packages/events/pyproject.toml`
+- `packages/events/src/jhin_events/consumer.py`
+- `packages/events/src/jhin_events/publisher.py`
+- `packages/events/src/jhin_events/telemetry.py`
+- `packages/events/tests/test_telemetry.py`
+- `services/event_worker/pyproject.toml`
+- `services/event_worker/src/jhin_event_worker/main.py`
+- `services/event_worker/src/jhin_event_worker/normalizer.py`
+- `services/event_worker/src/jhin_event_worker/processor.py`
+- `services/event_worker/src/jhin_event_worker/settings.py`
+- `services/event_worker/tests/test_telemetry.py`
+- `uv.lock`
+
+### Task 6 owned paths (39)
+
+- `apps/api/src/jhin_api/deps.py`
+- `apps/api/src/jhin_api/health/router.py`
+- `apps/api/src/jhin_api/health/service.py`
+- `apps/api/src/jhin_api/main.py`
+- `apps/api/src/jhin_api/temporal.py`
+- `apps/api/tests/test_health.py`
+- `apps/api/tests/test_temporal_provider.py`
+- `packages/observability/pyproject.toml`
+- `packages/observability/src/jhin_observability/__init__.py`
+- `packages/observability/src/jhin_observability/logging.py`
+- `packages/observability/src/jhin_observability/temporal.py`
+- `packages/observability/tests/test_log_audit.py`
+- `packages/observability/tests/test_logging.py`
+- `packages/observability/tests/test_temporal.py`
+- `packages/workflows/pyproject.toml`
+- `packages/workflows/src/jhin_workflows/poller_health.py`
+- `packages/workflows/tests/test_phase10_history_replay.py`
+- `packages/workflows/tests/test_poller_health.py`
+- `pyproject.toml`
+- `services/agent_worker/src/jhin_agent_worker/main.py`
+- `services/agent_worker/src/jhin_agent_worker/resources.py`
+- `services/agent_worker/src/jhin_agent_worker/settings.py`
+- `services/event_worker/src/jhin_event_worker/main.py`
+- `services/event_worker/tests/test_telemetry.py`
+- `services/sandbox_runner/src/jhin_sandbox_runner/main.py`
+- `services/sandbox_runner/src/jhin_sandbox_runner/settings.py`
+- `services/sandbox_runner/tests/test_api_auth.py`
+- `services/sandbox_runner/tests/test_telemetry.py`
+- `services/tool_worker/src/jhin_tool_worker/main.py`
+- `services/tool_worker/src/jhin_tool_worker/resources.py`
+- `services/tool_worker/src/jhin_tool_worker/settings.py`
+- `services/tool_worker/tests/test_advertised_tools.py`
+- `services/tool_worker/tests/test_worker_registration.py`
+- `services/workflow_worker/pyproject.toml`
+- `services/workflow_worker/src/jhin_workflow_worker/main.py`
+- `services/workflow_worker/src/jhin_workflow_worker/settings.py`
+- `services/workflow_worker/tests/test_telemetry.py`
+- `tests/test_worker_dependency_boundaries.py`
+- `uv.lock`
+
+### Task 7 owned paths (32)
+
+- `apps/api/src/jhin_api/deps.py`
+- `apps/api/src/jhin_api/models/router.py`
+- `apps/api/src/jhin_api/models/service.py`
+- `apps/api/tests/test_model_telemetry.py`
+- `apps/api/tests/test_webhooks_unit.py`
+- `packages/models/pyproject.toml`
+- `packages/models/src/jhin_models/factory.py`
+- `packages/models/src/jhin_models/telemetry.py`
+- `packages/models/tests/test_factory.py`
+- `packages/models/tests/test_telemetry.py`
+- `packages/tools/pyproject.toml`
+- `packages/tools/src/jhin_tools/telemetry.py`
+- `packages/tools/tests/test_telemetry.py`
+- `services/agent_worker/src/jhin_agent_worker/activities.py`
+- `services/agent_worker/src/jhin_agent_worker/projections.py`
+- `services/agent_worker/src/jhin_agent_worker/reasoning.py`
+- `services/agent_worker/tests/test_delegation_activities.py`
+- `services/agent_worker/tests/test_phase9_invocation_activity.py`
+- `services/agent_worker/tests/test_reasoning_manifest.py`
+- `services/agent_worker/tests/test_step_projection.py`
+- `services/agent_worker/tests/test_telemetry.py`
+- `services/agent_worker/tests/test_upgrade_crash_barriers.py`
+- `services/event_worker/src/jhin_event_worker/main.py`
+- `services/event_worker/src/jhin_event_worker/matcher.py`
+- `services/event_worker/tests/test_matcher.py`
+- `services/event_worker/tests/test_telemetry.py`
+- `services/tool_worker/src/jhin_tool_worker/activities.py`
+- `services/tool_worker/tests/test_advertised_tools.py`
+- `services/tool_worker/tests/test_bound_approval.py`
+- `services/tool_worker/tests/test_bound_tool_execution.py`
+- `services/tool_worker/tests/test_telemetry.py`
+- `uv.lock`
+
+### Task 8 owned paths (44)
+
+- `apps/api/src/jhin_api/connections/router.py`
+- `apps/api/src/jhin_api/connections/service.py`
+- `apps/api/tests/test_connections_unit.py`
+- `apps/api/tests/test_connector_telemetry.py`
+- `packages/connectors/pyproject.toml`
+- `packages/connectors/src/jhin_connectors/base.py`
+- `packages/connectors/src/jhin_connectors/cli/runner_client.py`
+- `packages/connectors/src/jhin_connectors/cli/tools.py`
+- `packages/connectors/src/jhin_connectors/github/auth.py`
+- `packages/connectors/src/jhin_connectors/github/client.py`
+- `packages/connectors/src/jhin_connectors/github/connector.py`
+- `packages/connectors/src/jhin_connectors/github/tools.py`
+- `packages/connectors/src/jhin_connectors/http_client.py`
+- `packages/connectors/src/jhin_connectors/linear/client.py`
+- `packages/connectors/src/jhin_connectors/linear/connector.py`
+- `packages/connectors/src/jhin_connectors/linear/tools.py`
+- `packages/connectors/src/jhin_connectors/supabase/connector.py`
+- `packages/connectors/src/jhin_connectors/supabase/database_client.py`
+- `packages/connectors/src/jhin_connectors/supabase/database_tools.py`
+- `packages/connectors/src/jhin_connectors/supabase/management_client.py`
+- `packages/connectors/src/jhin_connectors/supabase/management_tools.py`
+- `packages/connectors/src/jhin_connectors/telemetry.py`
+- `packages/connectors/src/jhin_connectors/vercel/client.py`
+- `packages/connectors/src/jhin_connectors/vercel/connector.py`
+- `packages/connectors/src/jhin_connectors/vercel/tools.py`
+- `packages/connectors/tests/supabase/test_database_telemetry.py`
+- `packages/connectors/tests/test_http_client.py`
+- `packages/connectors/tests/test_telemetry.py`
+- `packages/tools/pyproject.toml`
+- `packages/tools/src/jhin_tools/builtin.py`
+- `packages/tools/tests/test_telemetry.py`
+- `services/sandbox_runner/pyproject.toml`
+- `services/sandbox_runner/src/jhin_sandbox_runner/jobs.py`
+- `services/sandbox_runner/src/jhin_sandbox_runner/main.py`
+- `services/sandbox_runner/src/jhin_sandbox_runner/schemas.py`
+- `services/sandbox_runner/src/jhin_sandbox_runner/settings.py`
+- `services/sandbox_runner/tests/test_job_config.py`
+- `services/sandbox_runner/tests/test_telemetry.py`
+- `services/tool_worker/src/jhin_tool_worker/activities.py`
+- `services/tool_worker/src/jhin_tool_worker/cleanup_activities.py`
+- `services/tool_worker/src/jhin_tool_worker/main.py`
+- `services/tool_worker/src/jhin_tool_worker/trigger_activities.py`
+- `services/tool_worker/tests/test_telemetry.py`
+- `uv.lock`
+
+### Task 9 owned paths (12)
+
+- `apps/web/Dockerfile`
+- `apps/web/instrumentation.ts`
+- `apps/web/lib/server-log-contract.json`
+- `apps/web/lib/server-logger.ts`
+- `apps/web/next.config.ts`
+- `apps/web/server-wrapper.cjs`
+- `apps/web/tests/instrumentation.test.ts`
+- `apps/web/tests/server-logger.test.ts`
+- `apps/web/tests/server-only-stub.ts`
+- `apps/web/tests/server-wrapper.test.ts`
+- `apps/web/vitest.config.ts`
+- `tests/test_web_json_stdout.py`
+
+### Task 10 owned paths (18)
+
+- `.env.example`
+- `Makefile`
+- `compose.dev.yaml`
+- `compose.rootless.yaml`
+- `compose.yaml`
+- `docker/monitoring.Dockerfile`
+- `ops/observability/collector.yaml`
+- `ops/observability/grafana/dashboards/jhin-overview.json`
+- `ops/observability/grafana/provisioning/dashboards/jhin.yaml`
+- `ops/observability/grafana/provisioning/datasources/jhin.yaml`
+- `ops/observability/prometheus.yaml`
+- `ops/observability/tempo.yaml`
+- `scripts/assert_phase10_observability_compose.py`
+- `scripts/assert_phase10_tool_worker_compose.py`
+- `scripts/build_phase10_dashboard.py`
+- `tests/integration/phase10_upgrade_harness.py`
+- `tests/test_phase10_observability_compose.py`
+- `tests/test_phase10_tool_worker_compose.py`
+
+### Task 11 owned paths (14)
+
+- `.github/workflows/ci.yml`
+- `Makefile`
+- `docs/operations/telemetry.md`
+- `packages/connectors/src/jhin_connectors/testing/fake_linear.py`
+- `packages/connectors/tests/linear/test_fake_linear_admin.py`
+- `packages/models/src/jhin_models/testing/fake_openai.py`
+- `packages/models/tests/test_fake_openai.py`
+- `scripts/phase10_artifact.py`
+- `tests/integration/conftest.py`
+- `tests/integration/emit_phase10_metrics.py`
+- `tests/integration/phase10_upgrade_harness.py`
+- `tests/integration/test_phase10_telemetry.py`
+- `tests/test_phase10_artifact.py`
+- `tests/test_phase10_telemetry_harness.py`
+
+### Task 12 owned paths (3)
+
+- `docs/evidence/phase10-telemetry.md`
+- `scripts/record_phase10_telemetry_evidence.py`
+- `tests/test_phase10_telemetry_evidence.py`
 
 ### Task 0: Check In the Reviewed Telemetry Execution Baseline
 
 **Files:**
-- Create: `docs/superpowers/plans/2026-08-18-phase-10-telemetry-core.md`
+- Modify: `docs/superpowers/plans/2026-08-18-phase-10-telemetry-core.md`
 - Modify: `docs/superpowers/plans/2026-08-18-phase-10-protected-health.md`
 
 **Interfaces:**
-- Consumes: the corrected Phase 10 design, the committed `50d3261` protected-health baseline and its reviewed telemetry-handoff amendment, and a completed, accepted tool-worker-boundary predecessor.
+- Consumes: tracked two-plan checkpoint `6ef08f41d678c478746071d1c996f8ca4ffa254a`, tool-worker-boundary base `8838905e405dba85807a0a87ffb3e73524c41860`, its exact 30-commit accepted tip `0439fb2c92075ee5cdd5adf9bc54d2805de6670e` with an exact 36-path union, and exact-head rootful/rootless PR acceptance evidence.
 - Produces: one two-plan checkpoint commit against which every telemetry and protected-health handoff is reviewed.
 
-- [ ] **Step 1: Validate the predecessor's committed acceptance artifact before any telemetry edit**
+- [ ] **Step 1: Validate the tracked checkpoint and exact predecessor range before any telemetry edit**
 
-The predecessor's committed acceptance artifact is its exact Task 10 commit—not an untracked log or
-a prose PASS claim. Run from a checkout containing the completed predecessor:
+Run from the clean accepted predecessor checkout. The complete reviewed range, every per-commit
+path set, and the 36-path union are part of the gate; a subject-only match is insufficient:
 
 ```bash
 set -euo pipefail
+tracked_checkpoint=6ef08f41d678c478746071d1c996f8ca4ffa254a
+predecessor_base=8838905e405dba85807a0a87ffb3e73524c41860
+accepted_tip=0439fb2c92075ee5cdd5adf9bc54d2805de6670e
+test "$(git rev-parse HEAD)" = "$accepted_tip"
+git merge-base --is-ancestor "$tracked_checkpoint" "$predecessor_base"
+test "$(git rev-list --count "$predecessor_base".."$accepted_tip")" = 30 || exit 1
+
 for path in \
-  services/tool_worker/src/jhin_tool_worker/__init__.py \
-  services/tool_worker/src/jhin_tool_worker/settings.py \
-  services/tool_worker/src/jhin_tool_worker/resources.py \
-  services/tool_worker/src/jhin_tool_worker/activities.py \
-  services/tool_worker/src/jhin_tool_worker/main.py \
-  services/tool_worker/tests/test_worker_registration.py \
-  tests/test_worker_dependency_boundaries.py \
-  tests/test_phase10_tool_worker_compose.py \
-  scripts/assert_phase10_tool_worker_compose.py \
-  compose.rootful.yaml compose.rootless.yaml; do
-  test -f "$path"
+  docs/superpowers/plans/2026-08-18-phase-10-protected-health.md \
+  docs/superpowers/plans/2026-08-18-phase-10-telemetry-core.md; do
+  git ls-files --error-unmatch "$path"
+  test "$(git log -1 --format=%H "$accepted_tip" -- "$path")" = "$tracked_checkpoint"
 done
 
-mapfile -t acceptance_commits < <(git log --format=%H \
-  --fixed-strings --grep='test: verify Phase 10 tool-worker boundary')
-test "${#acceptance_commits[@]}" -eq 1
-acceptance_commit="${acceptance_commits[0]}"
-git merge-base --is-ancestor "$acceptance_commit" HEAD
-test "$(git show -s --format=%s "$acceptance_commit")" = \
-  "test: verify Phase 10 tool-worker boundary"
-test "$(git diff-tree --no-commit-id --name-only -r "$acceptance_commit" | LC_ALL=C sort)" = \
-  "$(printf '%s\n' \
-    .github/workflows/ci.yml \
-    Makefile \
-    tests/integration/compose.phase10-upgrade.yaml \
-    tests/integration/phase10_upgrade_harness.py \
-    tests/integration/test_phase10_live_upgrade.py \
-    tests/integration/test_phase10_sandbox_socket_modes.py \
-    tests/integration/test_phase10_tool_worker_boundary.py \
-    tests/integration/test_phase3_exit.py \
-    tests/integration/test_phase6_exit.py \
-    tests/integration/test_phase7_exit.py \
-    tests/integration/test_phase9_exit.py | LC_ALL=C sort)"
-git grep -q '^test-tool-worker-boundary-integration:' "$acceptance_commit" -- Makefile
-git grep -q '^test-tool-worker-live-upgrade:' "$acceptance_commit" -- Makefile
-git grep -q '^test-sandbox-socket-rootful:' "$acceptance_commit" -- Makefile
-git grep -q '^test-sandbox-socket-rootless:' "$acceptance_commit" -- Makefile
-git grep -q '^test-sandbox-socket-wrong-gid:' "$acceptance_commit" -- Makefile
-git grep -q 'phase10-live-upgrade:' "$acceptance_commit" -- .github/workflows/ci.yml
+
+assert_commit_paths() {
+  local commit="$1"
+  shift
+  local actual expected
+  actual="$(git diff-tree --no-commit-id --name-only -r "$commit" | LC_ALL=C sort)" || return 1
+  expected="$(printf '%s
+' "$@" | LC_ALL=C sort)" || return 1
+  test "$actual" = "$expected" || return 1
+}
+
+assert_commit_paths bf6ea4b60a8a62a50083620164a2379254bd7e9f \
+  .github/workflows/ci.yml Makefile tests/integration/compose.phase10-upgrade.yaml \
+  tests/integration/conftest.py tests/integration/phase10_upgrade_harness.py \
+  tests/integration/test_phase10_live_upgrade.py \
+  tests/integration/test_phase10_sandbox_socket_modes.py \
+  tests/integration/test_phase10_tool_worker_boundary.py \
+  tests/integration/test_phase6_exit.py tests/test_phase10_tool_worker_compose.py \
+  tests/test_phase9_production_compose.py
+assert_commit_paths 4b09d720c993883e896a83dba2a4c1ceec52bfd9 \
+  packages/tools/tests/test_crash_barriers.py pyproject.toml \
+  scripts/capture_phase9_temporal_histories.py \
+  services/agent_worker/src/jhin_agent_worker/projections.py \
+  services/agent_worker/src/jhin_agent_worker/reasoning.py \
+  services/agent_worker/tests/test_legacy_manifest_sidecar.py \
+  services/agent_worker/tests/test_reasoning_manifest.py \
+  services/tool_worker/src/jhin_tool_worker/activities.py \
+  services/tool_worker/tests/test_bound_approval.py \
+  services/tool_worker/tests/test_bound_tool_execution.py \
+  tests/test_capture_phase9_temporal_histories.py
+assert_commit_paths 660518ae26bcb1afa4e4ef553fd3cf42007bc6bf \
+  tests/integration/phase10_upgrade_harness.py \
+  tests/integration/test_phase10_live_upgrade.py \
+  tests/integration/test_phase10_tool_worker_boundary.py
+for commit in \
+  41d7210c19a34fa8e92640cb1c48f923c254538d \
+  786a3e26430ccaeac72eecf8f40293460e46d9a9 \
+  696fd3e27f62395732148f46ed47f0b31d5e2751 \
+  2b636cdd4ae08b7452a2e04fe03d21f32d9bd067 \
+  ac46404c710f6da2b9fae9a4901df128780d3441 \
+  ed866b8c6962a6b523ec716666ef857e39fea514 \
+  80babf31f8d0b870b994ff1a81031ab738102830 \
+  4c156215138f9301a7a65933c71b6102d3029ae9; do
+  assert_commit_paths "$commit" tests/integration/phase10_upgrade_harness.py \
+    tests/integration/test_phase10_tool_worker_boundary.py
+done
+assert_commit_paths 5f3644ab1f0bf7e9b24ee51d796696febaff378d \
+  .github/workflows/ci.yml apps/web/Dockerfile \
+  packages/connectors/tests/vercel/test_webhook.py \
+  tests/integration/test_phase10_tool_worker_boundary.py
+assert_commit_paths 579c72e8c78ada0ab830ad205d590de286d73275 \
+  .github/workflows/ci.yml tests/integration/test_phase10_tool_worker_boundary.py
+assert_commit_paths 0dc2827bd8527e649cecfa3bf6a13229cd7d5f16 \
+  .github/workflows/ci.yml tests/integration/phase10_upgrade_harness.py \
+  tests/integration/test_phase10_tool_worker_boundary.py
+assert_commit_paths 9d7fb7a5c2f5b5c96ab8f1289ef7b65790b3bbd7 \
+  .github/workflows/ci.yml packages/tools/src/jhin_tools/test_barriers.py \
+  packages/tools/tests/test_crash_barriers.py tests/integration/phase10_upgrade_harness.py \
+  tests/integration/test_phase10_tool_worker_boundary.py
+for commit in \
+  5f2b8c97c787710871d458313a1948db12f2c5b1 \
+  05f00ca5eee3af43673384386e21519f514a2644 \
+  d5781aefe14d1feaa50bf9a1368178aa233db36b; do
+  assert_commit_paths "$commit" .github/workflows/ci.yml \
+    tests/integration/test_phase10_tool_worker_boundary.py
+done
+assert_commit_paths 74ae79a9c1b8cec2c28c9789f5966633043ff832 \
+  tests/integration/phase10_upgrade_harness.py \
+  tests/integration/test_phase10_tool_worker_boundary.py
+assert_commit_paths bcf2252c3f210fa10967f26de9e08960cff3c7f9 \
+  docker/sandbox.Dockerfile tests/integration/phase10_upgrade_harness.py \
+  tests/integration/test_phase10_tool_worker_boundary.py
+assert_commit_paths f2a22853f630dfde4912b7f0af26945c08c32e41 \
+  compose.dev.yaml compose.yaml tests/test_compose_supabase_db_fixture.py
+assert_commit_paths 3fb42b63290d761f21aa5dbfb7b8c2e4eefa9090 \
+  services/sandbox_runner/src/jhin_sandbox_runner/rootless_transport.py \
+  services/sandbox_runner/tests/test_rootless_transport.py \
+  tests/integration/test_phase10_sandbox_socket_modes.py
+
+
+git grep -q '^test-tool-worker-boundary-integration:' "$accepted_tip" -- Makefile
+git grep -q '^test-tool-worker-live-upgrade:' "$accepted_tip" -- Makefile
+git grep -q '^test-sandbox-socket-rootful:' "$accepted_tip" -- Makefile
+git grep -q '^test-sandbox-socket-rootless:' "$accepted_tip" -- Makefile
+git grep -q '^test-sandbox-socket-wrong-gid:' "$accepted_tip" -- Makefile
+git grep -q 'phase10-rootful-live:' "$accepted_tip" -- .github/workflows/ci.yml
+git grep -q 'phase10-rootless-live:' "$accepted_tip" -- .github/workflows/ci.yml
 ```
 
-Expected: PASS and exactly one ancestor commit with the predecessor Task 10 subject and eleven-file
-acceptance diff. Any missing path, target, CI job, extra commit path, or non-ancestor commit exits
-nonzero before either plan is staged. Do not substitute an uncommitted worktree test or handwritten
-evidence file for this artifact.
+##### Step 1 continued: Verify the exact ordered candidate ledger
 
-- [ ] **Step 2: Execute every predecessor live acceptance target on the supported Linux host**
+```bash
+actual_commits="$(git rev-list --reverse "$predecessor_base".."$accepted_tip")" || exit 1
+expected_commits="$(printf '%s\n' \
+  bf6ea4b60a8a62a50083620164a2379254bd7e9f \
+  4b09d720c993883e896a83dba2a4c1ceec52bfd9 \
+  660518ae26bcb1afa4e4ef553fd3cf42007bc6bf \
+  41d7210c19a34fa8e92640cb1c48f923c254538d \
+  786a3e26430ccaeac72eecf8f40293460e46d9a9 \
+  696fd3e27f62395732148f46ed47f0b31d5e2751 \
+  2b636cdd4ae08b7452a2e04fe03d21f32d9bd067 \
+  ac46404c710f6da2b9fae9a4901df128780d3441 \
+  ed866b8c6962a6b523ec716666ef857e39fea514 \
+  80babf31f8d0b870b994ff1a81031ab738102830 \
+  4c156215138f9301a7a65933c71b6102d3029ae9 \
+  5f3644ab1f0bf7e9b24ee51d796696febaff378d \
+  579c72e8c78ada0ab830ad205d590de286d73275 \
+  0dc2827bd8527e649cecfa3bf6a13229cd7d5f16 \
+  9d7fb7a5c2f5b5c96ab8f1289ef7b65790b3bbd7 \
+  5f2b8c97c787710871d458313a1948db12f2c5b1 \
+  05f00ca5eee3af43673384386e21519f514a2644 \
+  d5781aefe14d1feaa50bf9a1368178aa233db36b \
+  74ae79a9c1b8cec2c28c9789f5966633043ff832 \
+  bcf2252c3f210fa10967f26de9e08960cff3c7f9 \
+  f2a22853f630dfde4912b7f0af26945c08c32e41 \
+  3fb42b63290d761f21aa5dbfb7b8c2e4eefa9090 \
+  3deb7da456ebbcdd904d1e873270097edc0a7ed4 \
+  41bc0f44033785f77c20d0fa5ddcaed1792dfab9 \
+  ee66c588014acf8e448352a7e5e458aca63d37fe \
+  639cf43d1d1189971b26c6d9809f0ed89c52eabd \
+  7d8f6b14466047404b3face0c98211310995dc47 \
+  bee85b90e69dbbd79ce0576d25f0e95efac2b09f \
+  a430ccd8d6054f32f7e959abde85aa1f78c4a6a8 \
+  0439fb2c92075ee5cdd5adf9bc54d2805de6670e)" || exit 1
+test "$actual_commits" = "$expected_commits" || exit 1
 
-This is a hard gate, not an optional rerun. The host must provide both the rootful Docker socket and
-the predecessor's UID-10001 rootless socket:
+actual_paths="$(git diff --name-only "$predecessor_base".."$accepted_tip" | LC_ALL=C sort)" || exit 1
+expected_paths="$(printf '%s\n' \
+  .github/workflows/ci.yml \
+  Makefile \
+  apps/web/Dockerfile \
+  compose.dev.yaml \
+  compose.yaml \
+  docker/sandbox.Dockerfile \
+  packages/connectors/tests/vercel/test_webhook.py \
+  packages/tools/src/jhin_tools/test_barriers.py \
+  packages/tools/tests/test_crash_barriers.py \
+  pyproject.toml \
+  scripts/capture_phase9_temporal_histories.py \
+  services/agent_worker/src/jhin_agent_worker/projections.py \
+  services/agent_worker/src/jhin_agent_worker/reasoning.py \
+  services/agent_worker/tests/test_legacy_manifest_sidecar.py \
+  services/agent_worker/tests/test_reasoning_manifest.py \
+  services/sandbox_runner/src/jhin_sandbox_runner/jobs.py \
+  services/sandbox_runner/src/jhin_sandbox_runner/rootless_transport.py \
+  services/sandbox_runner/tests/test_job_config.py \
+  services/sandbox_runner/tests/test_job_lifecycle.py \
+  services/sandbox_runner/tests/test_rootless_transport.py \
+  services/tool_worker/src/jhin_tool_worker/activities.py \
+  services/tool_worker/tests/test_bound_approval.py \
+  services/tool_worker/tests/test_bound_tool_execution.py \
+  tests/integration/compose.phase10-upgrade.yaml \
+  tests/integration/conftest.py \
+  tests/integration/phase10_upgrade_harness.py \
+  tests/integration/test_phase10_live_upgrade.py \
+  tests/integration/test_phase10_sandbox_socket_modes.py \
+  tests/integration/test_phase10_tool_worker_boundary.py \
+  tests/integration/test_phase3_exit.py \
+  tests/integration/test_phase6_exit.py \
+  tests/integration/test_phase7_exit.py \
+  tests/test_capture_phase9_temporal_histories.py \
+  tests/test_compose_supabase_db_fixture.py \
+  tests/test_phase10_tool_worker_compose.py \
+  tests/test_phase9_production_compose.py)" || exit 1
+actual_path_count="$(printf '%s\n' "$actual_paths" | \
+  awk 'NF { count++ } END { print count + 0 }')" || exit 1
+test "$actual_path_count" = 36 || exit 1
+test "$actual_paths" = "$expected_paths" || exit 1
+
+assert_commit_paths 3deb7da456ebbcdd904d1e873270097edc0a7ed4 \
+  services/agent_worker/tests/test_reasoning_manifest.py \
+  tests/integration/phase10_upgrade_harness.py \
+  tests/integration/test_phase10_tool_worker_boundary.py
+assert_commit_paths 41bc0f44033785f77c20d0fa5ddcaed1792dfab9 \
+  tests/integration/phase10_upgrade_harness.py \
+  tests/integration/test_phase10_tool_worker_boundary.py
+assert_commit_paths ee66c588014acf8e448352a7e5e458aca63d37fe \
+  services/sandbox_runner/src/jhin_sandbox_runner/jobs.py \
+  services/sandbox_runner/tests/test_job_config.py \
+  services/sandbox_runner/tests/test_job_lifecycle.py \
+  tests/integration/phase10_upgrade_harness.py \
+  tests/integration/test_phase10_sandbox_socket_modes.py \
+  tests/integration/test_phase10_tool_worker_boundary.py
+assert_commit_paths 639cf43d1d1189971b26c6d9809f0ed89c52eabd \
+  tests/integration/phase10_upgrade_harness.py \
+  tests/integration/test_phase10_tool_worker_boundary.py
+assert_commit_paths 7d8f6b14466047404b3face0c98211310995dc47 \
+  tests/integration/phase10_upgrade_harness.py \
+  tests/integration/test_phase10_tool_worker_boundary.py
+
+assert_commit_paths bee85b90e69dbbd79ce0576d25f0e95efac2b09f \
+  tests/integration/phase10_upgrade_harness.py \
+  tests/integration/test_phase10_tool_worker_boundary.py \
+  tests/integration/test_phase3_exit.py \
+  tests/integration/test_phase7_exit.py
+assert_commit_paths a430ccd8d6054f32f7e959abde85aa1f78c4a6a8 \
+  tests/integration/phase10_upgrade_harness.py \
+  tests/integration/test_phase10_live_upgrade.py \
+  tests/integration/test_phase10_tool_worker_boundary.py
+test "$(git show -s --format=%s a430ccd8d6054f32f7e959abde85aa1f78c4a6a8)" = \
+  "fix: close Phase 10 live acceptance probes" || exit 1
+assert_commit_paths 0439fb2c92075ee5cdd5adf9bc54d2805de6670e \
+  tests/integration/phase10_upgrade_harness.py \
+  tests/integration/test_phase10_live_upgrade.py \
+  tests/integration/test_phase10_tool_worker_boundary.py
+test "$(git show -s --format=%s 0439fb2c92075ee5cdd5adf9bc54d2805de6670e)" = \
+  "fix: stabilize Phase 10 upgrade acceptance" || exit 1
+```
+
+Expected: PASS at the exact accepted tip, with the plans still tracked at `6ef08f41…`, exactly 30
+ordered commits after `8838905…`, every per-commit path set exact, and exactly the literal 36-path
+union above. Any mismatch stops before either plan is edited or staged.
+
+- [ ] **Step 2: Bind the accepted PR run to the exact head and synthetic merge tree**
+
+The accepted exact-head run, job, synthetic-merge, and shared-tree values are final:
 
 ```bash
 set -euo pipefail
-test -S /var/run/docker.sock
-socket_gid="$(stat -c %g /var/run/docker.sock)"
-test "$socket_gid" -gt 0
-test -n "${PHASE10_ROOTLESS_DOCKER_SOCKET:-}"
-test -S "$PHASE10_ROOTLESS_DOCKER_SOCKET"
+accepted_run_id=32404319465
+rootful_job_id=96539679313
+rootless_job_id=96539679660
+pr_number=1
+pr_base=9fae5f63888f7b43f1eb6a0b008dd079ae7cd85a
+pr_head=0439fb2c92075ee5cdd5adf9bc54d2805de6670e
+synthetic_merge=5e7373aa9413f4500fde1f0f87c520eb14ba62b3
+shared_tree=7b50d34bfd0db0d30e4ab68589c55ef853acd40d
 
-SANDBOX_DOCKER_GID="$socket_gid" PHASE10_SOCKET_MODE=rootful \
-  make test-tool-worker-boundary-integration
-SANDBOX_DOCKER_GID="$socket_gid" PHASE10_SOCKET_MODE=rootful \
-  make test-tool-worker-live-upgrade
-SANDBOX_DOCKER_GID="$socket_gid" PHASE10_SOCKET_MODE=rootful \
-  make test-sandbox-socket-rootful
-env -u SANDBOX_DOCKER_GID \
-  PHASE10_ROOTLESS_DOCKER_SOCKET="$PHASE10_ROOTLESS_DOCKER_SOCKET" \
-  PHASE10_SOCKET_MODE=rootless make test-sandbox-socket-rootless
-SANDBOX_DOCKER_GID="$socket_gid" PHASE10_SOCKET_MODE=wrong-gid \
-  make test-sandbox-socket-wrong-gid
+pr_json="$(gh api "repos/jhinhq/Jhin/pulls/$pr_number")"
+test "$(jq -r .base.sha <<<"$pr_json")" = "$pr_base"
+test "$(jq -r .head.sha <<<"$pr_json")" = "$pr_head"
+
+run_json="$(gh api "repos/jhinhq/Jhin/actions/runs/$accepted_run_id")"
+test "$(jq -r .event <<<"$run_json")" = "pull_request"
+test "$(jq -r .conclusion <<<"$run_json")" = "success"
+# The run API names the PR head; checkout logs prove the merge SHA.
+test "$(jq -r .head_sha <<<"$run_json")" = "$pr_head"
+test "$(jq -r '.pull_requests[0].number' <<<"$run_json")" = "$pr_number"
+
+git fetch --no-tags origin "refs/pull/$pr_number/merge"
+test "$(git rev-parse FETCH_HEAD)" = "$synthetic_merge"
+merge_parents="$(git show -s --format=%P "$synthetic_merge")"
+head_tree="$(git show -s --format=%T "$pr_head")"
+merge_tree="$(git show -s --format=%T "$synthetic_merge")"
+test "$pr_head" = "0439fb2c92075ee5cdd5adf9bc54d2805de6670e"
+test "$merge_parents" = "$pr_base $pr_head"
+test "$head_tree" = "$shared_tree"
+test "$merge_tree" = "$shared_tree"
+test "$head_tree" = "$merge_tree"
+
+jobs_json="$(gh api "repos/jhinhq/Jhin/actions/runs/$accepted_run_id/jobs?per_page=100")"
+rootful_conclusion="$(jq -r --arg id "$rootful_job_id" \
+  '.jobs[] | select((.id | tostring) == $id and .name == "Phase 10 rootful live boundary") | .conclusion' \
+  <<<"$jobs_json")"
+rootless_conclusion="$(jq -r --arg id "$rootless_job_id" \
+  '.jobs[] | select((.id | tostring) == $id and .name == "Phase 10 rootless live boundary") | .conclusion' \
+  <<<"$jobs_json")"
+test "$rootful_conclusion" = success
+test "$rootless_conclusion" = success
+test "$(jq -r --arg id "$rootful_job_id" \
+  '[.jobs[] | select((.id | tostring) == $id) | .steps[] | select(.name == "Rootful wrong-GID failure" and .conclusion == "success")] | length' \
+  <<<"$jobs_json")" = "1"
+test "$(jq -r --arg id "$rootless_job_id" \
+  '[.jobs[] | select((.id | tostring) == $id) | .steps[] | select(.name == "Rootful wrong-GID failure")] | length' \
+  <<<"$jobs_json")" = "0"
 ```
 
-Expected: all five targets PASS with fresh results: live boundary/crash recovery, true Phase 9→10
-upgrade, rootful socket access, rootless socket access, and wrong-GID fail-closed behavior. Because
-the shell is `set -euo pipefail`, the first failure stops Task 0; do not stage either plan, skip a
-socket mode, reuse render-only GID `10001`, or continue to Task 1.
+##### Step 2 continued: Prove both jobs checked out the synthetic merge
+
+```bash
+checkout_log_dir="$(mktemp -d "${TMPDIR:-/tmp}/jhin-phase10-checkout.XXXXXX")"
+cleanup_checkout_logs() {
+  rm -f -- "$checkout_log_dir/rootful.log" "$checkout_log_dir/rootless.log"
+  rmdir -- "$checkout_log_dir"
+}
+trap cleanup_checkout_logs EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+checkout_log_has_sha() {
+  log_path="$1"
+  expected_sha="$2"
+  awk -v sha="$expected_sha" '
+    index($0, "/usr/bin/git log -1 --format") && index($0, "%H") {
+      remaining = 4
+      next
+    }
+    remaining > 0 {
+      if (index($0, sha)) {
+        found = 1
+        exit
+      }
+      remaining--
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$log_path"
+}
+
+gh run view "$accepted_run_id" --repo jhinhq/Jhin \
+  --job "$rootful_job_id" --log >"$checkout_log_dir/rootful.log"
+gh run view "$accepted_run_id" --repo jhinhq/Jhin \
+  --job "$rootless_job_id" --log >"$checkout_log_dir/rootless.log"
+checkout_log_has_sha "$checkout_log_dir/rootful.log" "$synthetic_merge"
+checkout_log_has_sha "$checkout_log_dir/rootless.log" "$synthetic_merge"
+rg -F -q -- '/pull/1/merge' "$checkout_log_dir/rootful.log" || exit 1
+rg -F -q -- '/pull/1/merge' "$checkout_log_dir/rootless.log" || exit 1
+
+trap - EXIT HUP INT TERM
+cleanup_checkout_logs
+
+```
+
+Expected: the accepted PR run, PR head, PR base, synthetic merge, and shared tree are literal and
+mutually consistent. Both distinct Linux live jobs succeeded at that tree. The wrong-GID proof is
+one successful step inside the rootful job and is absent from the rootless job.
 
 - [ ] **Step 3: Verify the two-plan handoff and stage exactly those two paths**
 
@@ -387,16 +778,17 @@ Run:
 
 ```bash
 set -euo pipefail
-git merge-base --is-ancestor 50d3261 HEAD
-git ls-files --error-unmatch \
+plan_paths=(
   docs/superpowers/plans/2026-08-18-phase-10-protected-health.md
-test -f docs/superpowers/plans/2026-08-18-phase-10-telemetry-core.md
-test "$(git status --short -- \
-  docs/superpowers/plans/2026-08-18-phase-10-protected-health.md)" = \
-  " M docs/superpowers/plans/2026-08-18-phase-10-protected-health.md"
-test "$(git status --short -- \
-  docs/superpowers/plans/2026-08-18-phase-10-telemetry-core.md)" = \
-  "?? docs/superpowers/plans/2026-08-18-phase-10-telemetry-core.md"
+  docs/superpowers/plans/2026-08-18-phase-10-telemetry-core.md
+)
+for path in "${plan_paths[@]}"; do
+  git ls-files --error-unmatch "$path"
+  test "$(git log -1 --format=%H "$accepted_tip" -- "$path")" = \
+    "6ef08f41d678c478746071d1c996f8ca4ffa254a"
+  test "$(git status --short --untracked-files=no -- "$path")" = " M $path"
+  git diff --cached --quiet -- "$path"
+done
 rg -q 'TemporalClientProvider' \
   docs/superpowers/plans/2026-08-18-phase-10-protected-health.md
 rg -q 'temporal_client_interceptors\(self\._observability\)' \
@@ -405,71 +797,99 @@ rg -q 'TelemetryExporterStatus' \
   docs/superpowers/plans/2026-08-18-phase-10-protected-health.md
 rg -q 'tests/test_phase10_telemetry_harness\.py' \
   docs/superpowers/plans/2026-08-18-phase-10-protected-health.md
-test "$(git status --short -- orgforge-production-implementation-plan.md)" = "?? orgforge-production-implementation-plan.md"
-test "$(shasum -a 256 orgforge-production-implementation-plan.md | cut -d' ' -f1)" = \
-  "ddb4d42cda623bad3fc2fb36d9092aaba6e8293533b29c80994cd738d6167513"
-test "$(stat -c %s orgforge-production-implementation-plan.md)" = "82118"
-test -z "$(git diff --cached --name-only)"
-git add docs/superpowers/plans/2026-08-18-phase-10-protected-health.md \
-  docs/superpowers/plans/2026-08-18-phase-10-telemetry-core.md
-test "$(git diff --cached --name-only)" = "$(printf '%s\n' \
-  docs/superpowers/plans/2026-08-18-phase-10-protected-health.md \
-  docs/superpowers/plans/2026-08-18-phase-10-telemetry-core.md)"
-git diff --cached --check
-test "$(git status --short -- orgforge-production-implementation-plan.md)" = "?? orgforge-production-implementation-plan.md"
+cached_paths="$(git diff --cached --name-only)" || exit 1
+test -z "$cached_paths" || exit 1
+git add -- "${plan_paths[@]}"
+expected_index="$(printf '%s\n' "${plan_paths[@]}" | LC_ALL=C sort)" || exit 1
+actual_index="$(git diff --cached --name-only | LC_ALL=C sort)" || exit 1
+test "$actual_index" = "$expected_index" || exit 1
+git diff --cached --check -- "${plan_paths[@]}" || exit 1
 ```
 
-Expected: the protected-health plan is the tracked amendment based on `50d3261`, its provider,
-interceptor/status, and shared-harness handoffs are present, and the cached-name output is exactly
-the two plan paths in the command. The OrgForge file retains its exact hash and 82,118-byte size and
-remains untracked and unstaged.
+Expected: both plans are tracked descendants of checkpoint `6ef08f41…`, the provider,
+interceptor/status, and shared-harness handoffs are present, and only the two explicitly scoped plan
+paths are staged by this task. No command targets the user-owned production-plan path.
 
 - [ ] **Step 4: Commit the two-plan checkpoint**
 
 ```bash
-git commit -m "docs: align Phase 10 telemetry and health plans"
+plan_paths=(
+  docs/superpowers/plans/2026-08-18-phase-10-protected-health.md
+  docs/superpowers/plans/2026-08-18-phase-10-telemetry-core.md
+)
+git commit --only "${plan_paths[@]}" \
+  -m "docs(observability): checkpoint Phase 10 telemetry execution"
+test "$(git show -s --format=%s HEAD)" = \
+  "docs(observability): checkpoint Phase 10 telemetry execution"
+expected_commit_paths="$(printf '%s\n' "${plan_paths[@]}" | LC_ALL=C sort)" || exit 1
+actual_commit_paths="$(git diff-tree --no-commit-id --name-only -r HEAD | LC_ALL=C sort)" || exit 1
+test "$actual_commit_paths" = "$expected_commit_paths" || exit 1
+cached_paths="$(git diff --cached --name-only)" || exit 1
+test -z "$cached_paths" || exit 1
 ```
 
-Expected: one documentation-only commit containing exactly the two plan paths; neither Phase 10
-spec nor `orgforge-production-implementation-plan.md` is included. This remains one Task 0 commit,
-so the complete telemetry plan still contains 13 commits total.
+Expected: one documentation-only commit with the exact subject and the two plan paths only. This
+remains one Task 0 commit, so the complete telemetry plan still contains 13 commits total.
+
+
 
 ### Task 1: Enforce the JSON-v1 Log and Safe-Error Boundary
 
 **Files:**
-- Create: `packages/observability/src/jhin_observability/events.py`
-- Create: `packages/observability/src/jhin_observability/redaction.py`
-- Create: `packages/observability/src/jhin_observability/errors.py`
-- Modify: `packages/observability/src/jhin_observability/logging.py`
-- Modify: `packages/observability/src/jhin_observability/__init__.py`
-- Modify: `packages/observability/tests/test_logging.py`
-- Create: `packages/observability/tests/test_errors.py`
-- Create: `packages/observability/tests/test_log_audit.py`
-- Create: `scripts/audit_phase10_logging.py`
 - Modify: `apps/api/src/jhin_api/main.py`
 - Modify: `apps/api/src/jhin_api/webhooks/service.py`
+- Modify: `compose.rootless.yaml`
+- Modify: `compose.yaml`
+- Modify: `packages/events/pyproject.toml`
 - Modify: `packages/events/src/jhin_events/consumer.py`
+- Modify: `packages/observability/src/jhin_observability/__init__.py`
+- Modify: `packages/observability/src/jhin_observability/errors.py`
+- Modify: `packages/observability/src/jhin_observability/events.py`
+- Modify: `packages/observability/src/jhin_observability/logging.py`
+- Modify: `packages/observability/src/jhin_observability/redaction.py`
+- Modify: `packages/observability/tests/test_errors.py`
+- Modify: `packages/observability/tests/test_log_audit.py`
+- Modify: `packages/observability/tests/test_logging.py`
+- Modify: `packages/secrets/pyproject.toml`
 - Modify: `packages/secrets/src/jhin_secrets/crypto.py`
+- Modify: `packages/secrets/tests/test_crypto.py`
 - Modify: `packages/workflows/src/jhin_workflows/heartbeat/activities.py`
+- Modify: `scripts/assert_phase10_tool_worker_compose.py`
+- Modify: `scripts/audit_phase10_logging.py`
 - Modify: `services/agent_worker/src/jhin_agent_worker/activities.py`
 - Modify: `services/agent_worker/src/jhin_agent_worker/engineering_activities.py`
 - Modify: `services/agent_worker/src/jhin_agent_worker/main.py`
+- Modify: `services/agent_worker/src/jhin_agent_worker/projections.py`
+- Modify: `services/agent_worker/src/jhin_agent_worker/reasoning.py`
 - Modify: `services/agent_worker/src/jhin_agent_worker/resources.py`
+- Modify: `services/agent_worker/src/jhin_agent_worker/settings.py`
 - Modify: `services/agent_worker/src/jhin_agent_worker/trigger_activities.py`
-- Modify: `services/tool_worker/src/jhin_tool_worker/activities.py`
-- Modify: `services/tool_worker/src/jhin_tool_worker/main.py`
-- Modify: `services/tool_worker/src/jhin_tool_worker/resources.py`
 - Modify: `services/event_worker/src/jhin_event_worker/main.py`
 - Modify: `services/event_worker/src/jhin_event_worker/matcher.py`
 - Modify: `services/event_worker/src/jhin_event_worker/normalizer.py`
 - Modify: `services/event_worker/src/jhin_event_worker/processor.py`
+- Modify: `services/event_worker/src/jhin_event_worker/settings.py`
 - Modify: `services/sandbox_runner/src/jhin_sandbox_runner/jobs.py`
 - Modify: `services/sandbox_runner/src/jhin_sandbox_runner/main.py`
+- Modify: `services/sandbox_runner/src/jhin_sandbox_runner/rootless_transport.py`
+- Modify: `services/sandbox_runner/src/jhin_sandbox_runner/settings.py`
+- Modify: `services/sandbox_runner/tests/test_rootless_transport.py`
+- Modify: `services/tool_worker/pyproject.toml`
+- Modify: `services/tool_worker/src/jhin_tool_worker/activities.py`
+- Modify: `services/tool_worker/src/jhin_tool_worker/main.py`
+- Modify: `services/tool_worker/src/jhin_tool_worker/resources.py`
+- Modify: `services/tool_worker/src/jhin_tool_worker/settings.py`
+- Modify: `services/tool_worker/src/jhin_tool_worker/trigger_activities.py`
+- Modify: `services/tool_worker/tests/test_advertised_tools.py`
+- Modify: `services/tool_worker/tests/test_worker_registration.py`
 - Modify: `services/workflow_worker/src/jhin_workflow_worker/main.py`
+- Modify: `services/workflow_worker/src/jhin_workflow_worker/settings.py`
+- Modify: `tests/test_phase10_tool_worker_compose.py`
+- Modify: `tests/test_worker_dependency_boundaries.py`
+- Modify: `uv.lock`
 
 **Interfaces:**
-- Consumes: optional service-supplied value redactors with structlog `Processor` signature.
-- Produces: `LOG_SCHEMA_VERSION = 1`, exact `EVENT_FIELD_RULES`, `filter_log_event(...)`, `structural_redaction(...)`, `safe_error(...)`, `configure_json_logging(...)`, and `get_logger(...)`; later bootstrap calls the logger before OTel setup.
+- Consumes the accepted Task 0 handoff and produces the exact Task 1 contract, subject, manifest, and gates below.
 
 - [ ] **Step 1: Write failing schema, structural-redaction, and stdlib-capture tests**
 
@@ -1540,64 +1960,383 @@ Expected: PASS; captured stdout is valid JSONL and no canary survives either red
 
 - [ ] **Step 7: Review and commit**
 
-```bash
-git diff --check
-git diff -- packages/observability scripts/audit_phase10_logging.py apps/api/src \
-  packages/events/src packages/secrets/src packages/workflows/src services
-git add packages/observability/src/jhin_observability/__init__.py \
-  packages/observability/src/jhin_observability/events.py \
-  packages/observability/src/jhin_observability/errors.py \
-  packages/observability/src/jhin_observability/logging.py \
-  packages/observability/src/jhin_observability/redaction.py \
-  packages/observability/tests/test_errors.py \
-  packages/observability/tests/test_log_audit.py \
-  packages/observability/tests/test_logging.py scripts/audit_phase10_logging.py \
-  apps/api/src/jhin_api/main.py apps/api/src/jhin_api/webhooks/service.py \
-  packages/events/src/jhin_events/consumer.py packages/secrets/src/jhin_secrets/crypto.py \
-  packages/workflows/src/jhin_workflows/heartbeat/activities.py \
-  services/agent_worker/src/jhin_agent_worker/activities.py \
-  services/agent_worker/src/jhin_agent_worker/engineering_activities.py \
-  services/agent_worker/src/jhin_agent_worker/main.py \
-  services/agent_worker/src/jhin_agent_worker/resources.py \
-  services/agent_worker/src/jhin_agent_worker/trigger_activities.py \
-  services/tool_worker/src/jhin_tool_worker/activities.py \
-  services/tool_worker/src/jhin_tool_worker/main.py \
-  services/tool_worker/src/jhin_tool_worker/resources.py \
-  services/event_worker/src/jhin_event_worker/main.py \
-  services/event_worker/src/jhin_event_worker/matcher.py \
-  services/event_worker/src/jhin_event_worker/normalizer.py \
-  services/event_worker/src/jhin_event_worker/processor.py \
-  services/sandbox_runner/src/jhin_sandbox_runner/jobs.py \
-  services/sandbox_runner/src/jhin_sandbox_runner/main.py \
-  services/workflow_worker/src/jhin_workflow_worker/main.py
-git diff --cached --name-only
-git commit -m "feat(observability): enforce safe JSON log schema"
-```
+The task's sole staging and commit gate is the exact manifest-owned gate in the final executable contract below.
 
 Expected: only Task 1 files are committed.
+
+#### Binding protected-health registry reservation
+
+The Task 1 contract reserves exactly `health.heartbeat_write_failed` in the closed JSON-v1
+event registry and its existing audit tests. It has no event-specific fields. Protected-health
+code may emit only:
+
+```python
+logger.warning("health.heartbeat_write_failed")
+```
+
+It must not pass a service field, exception/reason text, identity, URL, state, canary, or arbitrary
+extra. The fixed JSON base field already names the emitting service. This reservation changes no
+Task 1 manifest because the registry and audit paths are already Task 1-owned.
+
+#### Final executable contract for Task 1
+
+
+The following changes are mandatory before dispatching Task 1. They resolve the dependency
+contradictions, incomplete File Map, false-positive AST audit, missing environment identity, and
+insufficient GREEN suite found by preflight.
+
+### 6.1 Exhaustive File Map additions
+
+Add these currently absent paths to the global File Map:
+
+```text
+packages/secrets/pyproject.toml
+packages/secrets/tests/test_crypto.py
+services/tool_worker/src/jhin_tool_worker/trigger_activities.py
+services/tool_worker/tests/test_advertised_tools.py
+services/sandbox_runner/src/jhin_sandbox_runner/rootless_transport.py
+services/sandbox_runner/tests/test_rootless_transport.py
+compose.rootless.yaml
+```
+
+The following paths already appear in the File Map but must be assigned to Task 1 as modifications:
+
+```text
+packages/events/pyproject.toml
+services/tool_worker/pyproject.toml
+uv.lock
+tests/test_worker_dependency_boundaries.py
+services/tool_worker/tests/test_worker_registration.py
+services/agent_worker/src/jhin_agent_worker/projections.py
+services/agent_worker/src/jhin_agent_worker/reasoning.py
+services/agent_worker/src/jhin_agent_worker/settings.py
+services/event_worker/src/jhin_event_worker/settings.py
+services/workflow_worker/src/jhin_workflow_worker/settings.py
+services/sandbox_runner/src/jhin_sandbox_runner/settings.py
+services/tool_worker/src/jhin_tool_worker/settings.py
+compose.yaml
+scripts/assert_phase10_tool_worker_compose.py
+tests/test_phase10_tool_worker_compose.py
+```
+
+Add every path in both lists to Task 1's `Files` block and exact staging manifest. Do not leave an
+implementation path implied only by the repository-wide audit.
+
+### 6.2 Bind the dependency decision in Task 1
+
+Task 1, not Task 6, owns the first usable JSON-v1 imports:
+
+- add `jhin-observability` plus its workspace source to `services/tool_worker/pyproject.toml`;
+- add `jhin-observability` plus its workspace source to `packages/secrets/pyproject.toml`;
+- add `jhin-observability` plus its workspace source to `packages/events/pyproject.toml` so the
+  consumer imports the canonical `SafeErrorCode` rather than duplicating a string literal; and
+- regenerate `uv.lock` in Task 1, then require `uv lock --check` in GREEN.
+
+Update `tests/test_worker_dependency_boundaries.py` in Task 1: require the tool-worker dependency
+and source, require its `jhin_observability` import, and preserve unchanged the prohibitions on
+agent/model dependencies and imports. The older observability-negative assertions are deleted;
+the authority-boundary assertions are not.
+
+Remove `configure_current_logging` in Task 1. Update both
+`services/tool_worker/tests/test_worker_registration.py` and
+`services/tool_worker/tests/test_advertised_tools.py` to patch/assert the JSON-v1 bootstrap with
+`service="tool-worker"`, normalized environment, and configured level. Do not retain a helper that
+hides the environment parameter. The temporary public `configure_logging = configure_json_logging`
+alias may remain in `jhin_observability` until Task 6, but no production entrypoint may call it after
+Task 1.
+
+### 6.3 Define the closed normalizers instead of referencing nonexistent APIs
+
+Add and export one authoritative implementation in `jhin_observability.events`:
+
+```python
+ENVIRONMENTS = frozenset({"dev", "test", "staging", "production"})
+CONNECTOR_TYPES = frozenset({"github", "linear", "vercel", "supabase", "cli"})
+EVENT_FAMILIES = frozenset({"connector", "task", "run", "tool", "approval"})
+SANDBOX_OUTCOMES = frozenset({
+    "ok", "accepted", "started", "completed", "failed",
+    "cancelled", "timeout", "duplicate",
+})
+
+
+def normalize_environment(raw: object) -> str:
+    value = getattr(raw, "value", raw)
+    text = value.strip().lower() if isinstance(value, str) else ""
+    aliases = {"development": "dev", "prod": "production"}
+    normalized = aliases.get(text, text)
+    return normalized if normalized in ENVIRONMENTS else "production"
+
+
+def normalize_connector_type(raw: object) -> str:
+    value = getattr(raw, "value", raw)
+    text = value.strip().lower() if isinstance(value, str) else ""
+    return text if text in CONNECTOR_TYPES else "other"
+
+
+def normalize_event_family(raw: object) -> str:
+    value = getattr(raw, "value", raw)
+    text = value.strip().lower() if isinstance(value, str) else ""
+    family = text.split(".", 1)[0]
+    return family if family in EVENT_FAMILIES else "other"
+
+
+def normalize_sandbox_outcome(raw: object) -> str:
+    value = getattr(raw, "value", raw)
+    text = value.strip().lower() if isinstance(value, str) else ""
+    aliases = {"running": "started"}
+    normalized = aliases.get(text, text)
+    return normalized if normalized in SANDBOX_OUTCOMES else "other"
+```
+
+Test every admitted value, both aliases, enum-like `.value` inputs, whitespace/case handling, and
+unknown/non-string fallback. Replace the plan's bare `event_family` placeholder with
+`normalize_event_family(event_type)` at each source call.
+
+Also import `CONTEXT_FIELD_RULES` explicitly from `jhin_observability.events` in the Step 1 test that
+asserts `job_id` is not a context field. Do not rely on an accidental package-level re-export.
+
+### 6.4 Register and bootstrap the standalone rootless adapter
+
+Add exact event contracts:
+
+```python
+"rootless_transport.ready": {},
+"rootless_transport.failed": {"error_code": FieldKind.ENUM},
+```
+
+and exact event-specific failure values:
+
+```python
+("rootless_transport.failed", "error_code"): frozenset({
+    "configuration_error", "upstream_unavailable",
+}),
+```
+
+Migrate `packages/secrets/.../crypto.py`, tool-worker `main.py`, `resources.py`,
+`trigger_activities.py`, and sandbox `rootless_transport.py` from bound stdlib loggers to
+`jhin_observability.get_logger`. The adapter calls `configure_json_logging` before validation or any
+log write, with service `rootless-docker-transport`, normalized `APP_ENV`, and `LOG_LEVEL`; it emits
+only the two registered events and their closed code. It never emits socket paths, payload bytes,
+exception text, or arbitrary `extra` fields.
+
+Give the adapter's private configuration exception a closed code field: identity/argument/socket-
+shape validation uses `configuration_error`, while probe/relay loss uses `upstream_unavailable`.
+`main()` logs that field directly; it never derives a code by inspecting exception text.
+
+Update `services/sandbox_runner/tests/test_rootless_transport.py` to capture stdout and assert valid
+JSON-v1 for ready/failure records plus absence of socket/error/payload canaries.
+
+Replace `packages/secrets/tests/test_crypto.py`'s stale `caplog` assertion for the
+free-text `MASTER_KEY environment variable` warning. The test must configure JSON-v1
+logging explicitly, capture and parse the emitted stdout line, assert
+`event == "security.master_key_env_source"` with the required schema/service/environment
+base fields and no event-specific fields, and assert that neither the environment variable name,
+key material, nor any free-text warning survives anywhere in the serialized record. Restore any
+logging globals the test changes so it is order-independent.
+
+### 6.5 Make environment identity real for every process
+
+Add `app_env` to event-worker, workflow-worker, and sandbox-runner settings. Change the agent/tool
+defaults from `development` to the shared closed value `dev`; tests assert the stored defaults are
+closed. Task 1's temporary direct bootstrap may normalize the two documented legacy aliases, while
+Task 6's `ObservabilitySettings` inheritance rejects every non-closed stored value. Use the
+authoritative normalizer at all six
+ordinary Python entrypoints; API/agent/tool already have a source setting but must also normalize
+it. Pass `APP_ENV: ${APP_ENV:-production}` to workflow-worker, event-worker, and sandbox-runner in
+`compose.yaml`; pass both `APP_ENV` and `LOG_LEVEL` to
+`rootless-docker-transport` in `compose.rootless.yaml`.
+
+Extend `scripts/assert_phase10_tool_worker_compose.py` and its tests so production/dev/rootful/
+rootless renders assert the exact `APP_ENV` on API, agent-worker, tool-worker, event-worker,
+workflow-worker, sandbox-runner, and (when present) rootless-docker-transport. Add an AST bootstrap
+regression to `packages/observability/tests/test_log_audit.py` for the seven entrypoints: each must
+call `configure_json_logging` with its exact service and a normalized environment before its first
+application log/resource action.
+
+### 6.6 Correct the AST audit and its semantic exemptions
+
+Change `_logger_bindings` from an undifferentiated set to a binding-kind map. Bindings and direct
+factories from `logging.getLogger` are always `foreign_logging`; only structlog/Jhin factories are
+contract loggers. Therefore `logging.getLogger(...).warning("api.started")` must fail even though
+the literal event is registered. Retain the external-stdlib runtime-renderer test; it proves foreign
+library records are safely captured, not that application code may use stdlib logging.
+
+Add only these two non-log protocol exemptions:
+
+1. In `packages/workflows/.../poller_health.py`, permit only the current closed-token `print` shapes
+   inside `main` and `run`: the conditional `_READY_OUTPUT`/`_UNAVAILABLE_OUTPUT` expression and the
+   single `_UNAVAILABLE_OUTPUT` argument. Any extra/dynamic argument, f-string, different constant,
+   or print in another function remains `direct_print`.
+2. In `JobManager.start`, permit only the awaited `client.system.info()` where `client` is the local
+   name assigned from `aiodocker.Docker(url=validated_url)`. Any other `.info()` receiver, owner
+   function, assignment source, or unawaited shape remains `unresolved_logger_receiver`.
+
+Add mutation regressions for each rejected near miss, plus a regression proving a bound stdlib
+logger is `foreign_logging`. Run the existing closed-output
+`packages/workflows/tests/test_poller_health.py` suite unchanged.
+
+Migrate the four accepted-predecessor sources that the old Task 1 omitted:
+
+- projections: normalize event family, remove workflow IDs, use `error_type`;
+- reasoning: remove redacted/free text and use only `error_type`;
+- tool trigger activities: registered literal plus only `error_type`; and
+- rootless transport: the two exact adapter events above.
+
+### 6.7 Correct Task 1 RED/GREEN and audit coverage
+
+Step 1/RED must include the dependency-boundary, crypto warning, tool registration/advertised-tools,
+rootless JSON, environment-render, stdlib-binding, print-exemption, and Docker-info-exemption
+regressions. The expected RED paragraph must name those failures; a `NameError` from a missing
+`CONTEXT_FIELD_RULES` import is not an acceptable RED.
+
+After `uv lock`, replace Task 1 GREEN with:
+
+```bash
+uv lock --check
+uv run python scripts/audit_phase10_logging.py
+uv run pytest \
+  packages/observability/tests \
+  packages/secrets/tests \
+  packages/events/tests \
+  packages/workflows/tests \
+  apps/api/tests/test_webhooks_unit.py \
+  services/agent_worker/tests \
+  services/tool_worker/tests \
+  services/event_worker/tests \
+  services/sandbox_runner/tests \
+  tests/test_worker_dependency_boundaries.py \
+  tests/test_phase10_tool_worker_compose.py -q
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy
+```
+
+This intentionally uses full Ruff/mypy because the root configuration includes the audit script
+and every modified source tree. Do not restore the previous observability-only static gates.
+
+### 6.8 Exact Task 1 staging manifest
+
+Replace Task 1's free-form `git add` block with this exact indexed-array manifest and fail-closed
+pattern:
+
+```bash
+task1_paths=(
+  apps/api/src/jhin_api/main.py
+  apps/api/src/jhin_api/webhooks/service.py
+  compose.rootless.yaml
+  compose.yaml
+  packages/events/pyproject.toml
+  packages/events/src/jhin_events/consumer.py
+  packages/observability/src/jhin_observability/__init__.py
+  packages/observability/src/jhin_observability/errors.py
+  packages/observability/src/jhin_observability/events.py
+  packages/observability/src/jhin_observability/logging.py
+  packages/observability/src/jhin_observability/redaction.py
+  packages/observability/tests/test_errors.py
+  packages/observability/tests/test_log_audit.py
+  packages/observability/tests/test_logging.py
+  packages/secrets/pyproject.toml
+  packages/secrets/src/jhin_secrets/crypto.py
+  packages/secrets/tests/test_crypto.py
+  packages/workflows/src/jhin_workflows/heartbeat/activities.py
+  scripts/assert_phase10_tool_worker_compose.py
+  scripts/audit_phase10_logging.py
+  services/agent_worker/src/jhin_agent_worker/activities.py
+  services/agent_worker/src/jhin_agent_worker/engineering_activities.py
+  services/agent_worker/src/jhin_agent_worker/main.py
+  services/agent_worker/src/jhin_agent_worker/projections.py
+  services/agent_worker/src/jhin_agent_worker/reasoning.py
+  services/agent_worker/src/jhin_agent_worker/resources.py
+  services/agent_worker/src/jhin_agent_worker/settings.py
+  services/agent_worker/src/jhin_agent_worker/trigger_activities.py
+  services/event_worker/src/jhin_event_worker/main.py
+  services/event_worker/src/jhin_event_worker/matcher.py
+  services/event_worker/src/jhin_event_worker/normalizer.py
+  services/event_worker/src/jhin_event_worker/processor.py
+  services/event_worker/src/jhin_event_worker/settings.py
+  services/sandbox_runner/src/jhin_sandbox_runner/jobs.py
+  services/sandbox_runner/src/jhin_sandbox_runner/main.py
+  services/sandbox_runner/src/jhin_sandbox_runner/rootless_transport.py
+  services/sandbox_runner/src/jhin_sandbox_runner/settings.py
+  services/sandbox_runner/tests/test_rootless_transport.py
+  services/tool_worker/pyproject.toml
+  services/tool_worker/src/jhin_tool_worker/activities.py
+  services/tool_worker/src/jhin_tool_worker/main.py
+  services/tool_worker/src/jhin_tool_worker/resources.py
+  services/tool_worker/src/jhin_tool_worker/settings.py
+  services/tool_worker/src/jhin_tool_worker/trigger_activities.py
+  services/tool_worker/tests/test_advertised_tools.py
+  services/tool_worker/tests/test_worker_registration.py
+  services/workflow_worker/src/jhin_workflow_worker/main.py
+  services/workflow_worker/src/jhin_workflow_worker/settings.py
+  tests/test_phase10_tool_worker_compose.py
+  tests/test_worker_dependency_boundaries.py
+  uv.lock
+)
+test -z "$(git diff --cached --name-only)"
+git add -- "${task1_paths[@]}"
+expected_index="$(printf '%s\n' "${task1_paths[@]}" | LC_ALL=C sort)"
+actual_index="$(git diff --cached --name-only | LC_ALL=C sort)"
+test "$actual_index" = "$expected_index"
+git diff --cached --check -- "${task1_paths[@]}"
+git commit --only "${task1_paths[@]}" \
+  -m "feat(observability): enforce safe JSON log schema"
+test "$(git diff-tree --no-commit-id --name-only -r HEAD | LC_ALL=C sort)" = \
+  "$expected_index"
+test -z "$(git diff --cached --name-only)"
+```
+
+The revised `Files` block and this array must remain exact mirrors. A real implementation choice
+that adds a compatibility test/file must first amend both the exhaustive File Map and Task 1
+`Files`; it cannot be staged opportunistically.
+
+### 6.9 Rebalance Task 6 after Task 1 owns JSON bootstrap
+
+Task 6 still replaces Task 1's direct JSON bootstrap with the full optional OTel runtime, adds
+Temporal interceptors, and updates tool-worker registration tests. Make these exact plan changes:
+
+- remove `services/tool_worker/pyproject.toml` from Task 6 `Files` and staging; its observability
+  dependency was committed in Task 1 and Task 6 has no further manifest edit;
+- keep `tests/test_worker_dependency_boundaries.py` in Task 6, but change its inline instruction to
+  retain Task 1's positive tool-observability and negative agent/model assertions, then add only the
+  new workflows-observability assertion;
+- keep `services/tool_worker/tests/test_worker_registration.py` in Task 6 because it gains runtime
+  ordering and Temporal-interceptor assertions;
+- keep event/workflow manifests in Task 6 because that task adds their secret-redaction/runtime
+  dependencies, and keep `uv.lock` for those changes;
+- keep event/workflow/sandbox settings in Task 6, but describe their change as extending the
+  already-present Task 1 environment field through `ObservabilitySettings`, not introducing
+  `app_env`; and
+- state explicitly that the rootless adapter retains Task 1's direct JSON-v1 bootstrap and is not
+  given an OTLP runtime or credentials in Task 6.
+
+In Task 6 Step 5 replace “remove all service calls to the compatibility alias” with “replace every
+Task 1 `configure_json_logging` call in the six ordinary services with
+`initialize_observability`, then remove the compatibility alias; retain the rootless adapter's
+direct JSON bootstrap.” Run `tests/test_worker_dependency_boundaries.py` in Task 6 GREEN even though
+only its workflows assertion is new there.
 
 ### Task 2: Build the Optional No-Op/OTLP Bootstrap and Bounded Exporters
 
 **Files:**
-- Create: `packages/observability/src/jhin_observability/config.py`
-- Create: `packages/observability/src/jhin_observability/exporters.py`
-- Create: `packages/observability/src/jhin_observability/bootstrap.py`
-- Create: `packages/observability/src/jhin_observability/context.py`
-- Create: `packages/observability/src/jhin_observability/metrics.py`
-- Create: `packages/observability/src/jhin_observability/registry.py`
-- Modify: `packages/observability/src/jhin_observability/__init__.py`
 - Modify: `packages/observability/pyproject.toml`
+- Modify: `packages/observability/src/jhin_observability/__init__.py`
+- Modify: `packages/observability/src/jhin_observability/bootstrap.py`
+- Modify: `packages/observability/src/jhin_observability/config.py`
+- Modify: `packages/observability/src/jhin_observability/context.py`
+- Modify: `packages/observability/src/jhin_observability/exporters.py`
+- Modify: `packages/observability/src/jhin_observability/metrics.py`
+- Modify: `packages/observability/src/jhin_observability/registry.py`
+- Modify: `packages/observability/tests/conftest.py`
+- Modify: `packages/observability/tests/test_bootstrap.py`
+- Modify: `packages/observability/tests/test_context.py`
+- Modify: `packages/observability/tests/test_exporters.py`
+- Modify: `packages/observability/tests/test_noop_metrics.py`
 - Modify: `pyproject.toml`
 - Modify: `uv.lock`
-- Create: `packages/observability/tests/conftest.py`
-- Create: `packages/observability/tests/test_bootstrap.py`
-- Create: `packages/observability/tests/test_context.py`
-- Create: `packages/observability/tests/test_exporters.py`
-- Create: `packages/observability/tests/test_noop_metrics.py`
 
 **Interfaces:**
-- Consumes: Task 1 `configure_json_logging`, structlog processors, and OTel API/SDK exporters.
-- Produces: every interface in Shared Interfaces, including a dependency-free no-op `JhinMetrics` facade available before OTel/bootstrap configuration; Task 3 replaces only its configured registry internals.
+- Consumes the accepted Task 1 handoff and produces the exact Task 2 contract, subject, manifest, and gates below.
 
 - [ ] **Step 1: Add dependencies and write failing config/no-op/context tests**
 
@@ -2361,36 +3100,343 @@ Expected: PASS, including a measured nonblocking saturated queue and fail-open e
 
 - [ ] **Step 7: Review and commit**
 
-```bash
-git diff --check
-git add pyproject.toml packages/observability/pyproject.toml uv.lock \
-  packages/observability/src/jhin_observability/__init__.py \
-  packages/observability/src/jhin_observability/bootstrap.py \
-  packages/observability/src/jhin_observability/config.py \
-  packages/observability/src/jhin_observability/context.py \
-  packages/observability/src/jhin_observability/exporters.py \
-  packages/observability/src/jhin_observability/metrics.py \
-  packages/observability/src/jhin_observability/registry.py \
-  packages/observability/tests/conftest.py \
-  packages/observability/tests/test_bootstrap.py \
-  packages/observability/tests/test_context.py \
-  packages/observability/tests/test_exporters.py \
-  packages/observability/tests/test_noop_metrics.py
-git diff --cached --name-only
-git commit -m "feat(observability): add bounded optional OTLP bootstrap"
+The task's sole staging and commit gate is the exact manifest-owned gate in the final executable contract below.
+
+#### Final executable contract for Task 2
+
+
+The Task 2 preflight supersedes the earlier ledger PASS. No new Task 2 path is required, but the
+existing Task 2 interfaces, tests, implementation rules, GREEN command, and staging block must be
+corrected as follows before its brief is generated.
+
+### 7.1 Make exporter diagnostics source-aware without changing protected health
+
+Keep `TelemetryExporterStatus` public and exactly four fields in this exact order:
+
+```python
+configured: bool
+last_success_at: datetime | None
+dropped_items: int
+last_error_code: Literal["export_timeout", "export_failed"] | None
 ```
+
+Change only the internal diagnostics API:
+
+```python
+ExportSignal = Literal["traces", "metrics"]
+
+ExportDiagnostics(active_signals: frozenset[ExportSignal])
+ExportDiagnostics.record_success(source: ExportSignal, at: datetime) -> bool
+ExportDiagnostics.record_failure(
+    source: ExportSignal,
+    code: Literal["export_timeout", "export_failed"],
+) -> None
+```
+
+The implementation keeps one last-success timestamp and one current error per active signal.
+Aggregate behavior is fixed:
+
+- `last_error_code` is `export_timeout` if any active signal currently has that code, otherwise
+  `export_failed` if any active signal is failed, otherwise `None`;
+- aggregate `last_success_at` is `None` until every active signal has succeeded at least once, then
+  the minimum of the active signals' most recent success timestamps, so one stale signal cannot be
+  hidden by a fresh one;
+- a success clears only its source's failure;
+- `record_success(...)` returns `True` only for the one transition from “at least one active signal
+  failed” to “no active signal failed”; and
+- `telemetry.export_recovered` is emitted only on that final aggregate transition. Failure/recovery
+  events retain their existing closed fields and never add endpoint, exception, or signal text.
+
+Configured bootstrap constructs diagnostics with both `traces` and `metrics` active. No-export
+bootstrap uses an empty active set and retains the exact unconfigured public status.
+
+Add interleaving tests for trace-fail/metric-success, metric-fail/trace-success, both-fail/one-
+recovers, and final recovery. Each intermediate snapshot must remain failed, and exactly one final
+recovery event may be emitted.
+
+### 7.2 Correct dependencies, imports, and exporter signatures
+
+Add this direct dependency because production source imports `grpc`:
+
+```toml
+"grpcio>=1.63.2,<2",
+```
+
+Keep the existing bounded OTel 1.x dependencies. Import the no-op tracer provider through the
+public API:
+
+```python
+from opentelemetry.trace import NoOpTracerProvider
+```
+
+Do not use `opentelemetry.trace.noop`. Import `UTC` from `datetime` wherever success timestamps call
+`astimezone(UTC)`.
+
+Export the Shared Interfaces from `jhin_observability.__init__` with their exact documented
+signatures: config/settings/runtime/status, initialize/get-runtime, context helpers, no-op
+tracer/metrics, safe span/error helpers, and registries. Repository consumers import those public
+names; no consumer may depend on a private bootstrap singleton or diagnostic signal map.
+
+`DiagnosticSpanExporter.export` and every test span exporter must implement the resolved public
+signature `export(spans)` only. Do not pass `timeout_millis` to `SpanExporter.export`; configure the
+underlying `OTLPSpanExporter(timeout=config.export_timeout_millis / 1_000)` once, then bound the
+processor's wait/flush/shutdown deadline around its daemon worker. The metric wrapper must match the
+resolved `MetricExporter.export` signature exactly, including only parameters present on that base
+class. Both OTLP exporters receive their timeout at construction.
+
+After `uv lock`, add an import/signature smoke test in `test_bootstrap.py` that imports the exact
+resolved `NoOpTracerProvider`, `grpc`, span exporter, metric exporter, providers, and reader; uses
+`inspect.signature` to prove the diagnostic wrappers are substitutable; and proves
+`grpc.ssl_channel_credentials(...)` returns the credential type accepted by the OTLP constructors.
+This test is a lock/API compatibility gate, not a version-string assertion copied from prose.
+
+### 7.3 Make bootstrap and shutdown ownership transactional and race-safe
+
+Construct `TracerProvider` and `MeterProvider` with `shutdown_on_exit=False`. No Task 2 provider,
+reader, processor, or wrapper may register an atexit shutdown that can re-enter a stuck exporter
+after the runtime deadline.
+
+Use one bootstrap lock and an explicit runtime state. The required transitions are:
+
+1. `initialize_observability` serializes construction, returns only a fully initialized RUNNING
+   runtime for an equal config, and raises the closed configuration error for a different config.
+2. Provider/reader/processor objects remain local and unpublished until all construction succeeds.
+   On any intermediate exception, run the already-created bounded cleanup callbacks in reverse
+   order and leave no global runtime, provider owner, reader worker, or processor worker.
+3. The first `shutdown` caller changes the runtime from RUNNING to SHUTTING_DOWN and detaches the
+   global owner under the same bootstrap lock **before** invoking callbacks. Thus a concurrent equal-
+   config initialize can never receive a shutting-down runtime.
+4. `_shutdown_complete` becomes true only after callbacks finish or their shared deadline expires.
+   A second shutdown caller observes the state through a condition/event, never performs callbacks
+   twice, and cannot race ahead of owner detachment. It may wait only through its own supplied
+   deadline.
+5. Finalization sets COMPLETE and notifies waiters even when one cleanup callback raises; cleanup
+   exceptions are contained and never restore the detached runtime.
+
+Add deterministic barrier-based tests for concurrent equal initialize, shutdown plus reinitialize,
+two concurrent shutdown callers, callback failure, and injected failure after each partial bootstrap
+stage. After releasing any test blocker, join the daemon worker and assert zero owned survivors.
+
+### 7.4 Close the endpoint/TLS/numeric validation matrix
+
+Define and test these reviewed ceilings:
+
+```python
+MAX_SPAN_QUEUE_SIZE = 65_536
+MAX_SPAN_EXPORT_BATCH_SIZE = 8_192
+MAX_EXPORT_TIMEOUT_MILLIS = 30_000
+MAX_METRIC_EXPORT_INTERVAL_MILLIS = 300_000
+```
+
+The validation contract is exact:
+
+- a missing endpoint rejects `otlp_insecure=True` and every CA/client credential path;
+- HTTP is accepted only with `otlp_insecure=True`, a root path (`""` or `"/"`), and authority
+  exactly one of `otel-collector:4317`, `localhost:4317`, `127.0.0.1:4317`, or `[::1]:4317`;
+- HTTP rejects every CA/client credential path;
+- HTTPS requires `otlp_insecure=False`, a root path, no credentials/query/fragment, and a valid
+  host; TLS CA is optional and client certificate/key remain an all-or-none pair;
+- HTTPS plus `otlp_insecure=True` is invalid rather than silently creating cleartext gRPC;
+- non-root paths, including `/v1/traces` and `/v1/metrics`, are invalid for the shared gRPC endpoint;
+- client certificate/key mismatch is invalid in every mode;
+- sample ratio rejects `bool`, non-numeric values, NaN/infinity, and values outside `[0, 1]`;
+- queue, batch, timeout, and interval reject `bool`, non-integers, nonpositive values, and values
+  above their exact ceilings; batch must also be no larger than queue; and
+- `ObservabilitySettings` uses before-validators that accept only canonical decimal environment
+  strings (environment variables are necessarily strings), convert them once, and reject booleans,
+  names such as `true`/`false`, exponent tricks where not explicitly allowed, and malformed values.
+  Direct `ObservabilityConfig` construction still rejects `bool` and every non-numeric type.
+
+TLS files are read only during transactional bootstrap. Missing, non-regular, or unreadable files
+raise `ObservabilityConfigurationError` without including the path or underlying exception text,
+and trigger partial-bootstrap cleanup.
+
+Add every valid/invalid edge above to `test_bootstrap.py`, including blank endpoint after settings
+normalization and both direct-dataclass and environment/settings construction.
+
+### 7.5 Replace regex-permissive span attributes with per-key contracts
+
+Retain the stable ID keys as the deliberate bounded exception: they accept only the existing
+128-character identifier regex. Retain finite nonnegative numeric handling for the numeric keys.
+Every other string key is normalized through a per-key closed registry; a generic 200-character
+regex is not an authorization boundary.
+
+Create one immutable `MappingProxyType` of `frozenset` values in `registry.py` with at least these
+exact families (the set notation below is abbreviated plan notation, not permission to leave the
+runtime registry mutable):
+
+```python
+SPAN_ATTRIBUTE_VALUES = {
+    "http.request.method": {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "other"},
+    "http.route": {"/api/:path*", "other"},
+    "http.response.status_class": {"1xx", "2xx", "3xx", "4xx", "5xx", "other"},
+    "db.system": {"postgresql", "other"},
+    "db.operation": {"SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "CREATE", "ALTER", "DROP", "other"},
+    "messaging.system": {"nats", "other"},
+    "jhin.stream": {"INGRESS", "EVENTS", "DLQ", "other"},
+    "jhin.consumer": {"event-worker", "event-worker-ingress", "other"},
+    "jhin.subject_family": {"connector", "task", "run", "tool", "approval", "dlq", "other"},
+    "jhin.provider_type": {"openai", "anthropic", "openrouter", "ollama", "openai_compatible", "other"},
+    "jhin.connector_type": {"github", "linear", "vercel", "supabase", "cli", "other"},
+    "jhin.operation": {"generate", "verify", "issue_comment_create", "execute_read", "execute_write", "submit", "cancel", "status", "cleanup", "other"},
+    "jhin.outcome": {"ok", "accepted", "started", "completed", "failed", "cancelled", "timeout", "denied", "rejected", "duplicate", "execution_unknown", "healthy", "unhealthy", "other"},
+    "jhin.tool_family": {"system", "organization", "github", "linear", "vercel", "supabase", "cli", "other"},
+    "jhin.risk": {"read", "write", "elevated", "destructive", "other"},
+    "jhin.network_policy": {"none", "internet", "other"},
+    "temporal.task_queue": {"jhin-workflow-queue", "jhin-agent-queue", "jhin-tool-queue", "other"},
+}
+```
+
+Add `db.table` as a closed set of the reviewed SQLAlchemy table names plus `other`; add
+`temporal.activity_type` from `TEMPORAL_ACTIVITY_NAMES` plus `other`; and add
+`temporal.workflow_type` as the exact registered workflow names plus `other`. The central database
+set must include the later protected-health `service_instance_heartbeat` handoff so the later plan
+does not invent a second normalizer. `error.type` and `error.code` are not accepted from arbitrary
+`safe_span(..., attributes=...)` mappings; `record_span_error(SafeError)` is their sole writer.
+
+The exact additional registries are:
+
+```python
+DB_TABLE_VALUES = frozenset({
+    "agent", "agent_capability_grant", "agent_relationship", "agent_run",
+    "agent_team_membership", "approval", "audit_event", "connection", "message",
+    "model_profile", "model_provider", "run_event", "sandbox_job", "secret",
+    "service_instance_heartbeat", "task", "team", "tool_call", "trigger",
+    "trigger_invocation", "user", "user_session", "webhook_delivery", "workspace",
+    "workspace_membership", "other",
+})
+TEMPORAL_WORKFLOW_TYPE_VALUES = frozenset({
+    "AdvertisedToolsCompatibilityWorkflow", "AgentTaskWorkflow",
+    "ApprovalCompatibilityWorkflow", "CleanupCompatibilityWorkflow",
+    "DelegatedTaskWorkflow", "EngineeringTicketWorkflow", "HeartbeatWorkflow",
+    "SyncExternalCompatibilityWorkflow", "ToolStepCompatibilityWorkflow",
+    "TriggeredTaskWorkflow", "other",
+})
+TEMPORAL_ACTIVITY_TYPE_VALUES = frozenset((*TEMPORAL_ACTIVITY_NAMES, "other"))
+```
+
+Before registry lookup, apply Task 1 structural redaction to the candidate key/value and reject or
+normalize to `other` if it changes, truncates, redacts, contains a URL/host form, or is payload-
+shaped. Unknown enum-like values become `other`; they are never preserved because they happen to
+match a regex. Task 4 must normalize all registered API route templates to `/api/:path*` before
+calling `safe_span`, preserving the already-frozen metric route contract.
+
+Add parameterized tests proving that arbitrary alphanumeric/customer/secret strings, URL and host
+forms, credential/payload-shaped values, unknown enums, oversized values, booleans in numeric
+fields, and unregistered keys do not reach an exported span. Test the stable ID exception
+separately and scan the complete serialized span attributes for every canary.
+
+### 7.6 Use an exact resource and the configured metric timings
+
+Construct the resource directly, not through default detectors:
+
+```python
+resource = Resource({
+    "service.name": config.service_name,
+    "service.version": config.service_version,
+    "deployment.environment.name": config.environment,
+})
+```
+
+Do not use `Resource.create(...)`. Both providers use that exact object, and arbitrary
+`OTEL_RESOURCE_ATTRIBUTES` is ignored. A test sets process/env detector canaries and asserts the
+exported resource key set is exactly those three keys and contains no canary.
+
+Construct `PeriodicExportingMetricReader` with
+`export_timeout_millis=config.export_timeout_millis` and
+`export_interval_millis=config.metric_export_interval_millis`; remove the hard-coded
+`5_000`/`60_000`. Assert those exact configured values through a constructor seam. The protected-
+health freshness calculation must continue to use the same configured interval rather than a
+separate default.
+
+### 7.7 Make package tests own and restore logging/thread globals
+
+Extend the package autouse fixture to snapshot and restore root handlers, root level/disabled
+state, and the complete `structlog.get_config()` configuration in addition to resetting the
+observability runtime. Restoration runs in `finally` even after a failing test.
+
+Every exporter test that asserts JSON stdout calls `configure_json_logging(...)` itself; test order
+must not provide logging configuration. Blocking-exporter tests release their blocker, wait for the
+processor's stopped event, and join its daemon worker before fixture teardown. Assert no Task 2
+worker remains alive after every normal, failure, timeout, or partial-bootstrap case.
+
+Replace Task 2 GREEN with:
+
+```bash
+uv lock --check
+uv run pytest packages/observability/tests -q
+uv run ruff check packages/observability
+uv run ruff format --check packages/observability
+uv run mypy packages/observability/src packages/observability/tests
+```
+
+The whole directory is mandatory because Task 2 changes package `__init__` and installs an autouse
+fixture over Task 1 logging/error/audit tests.
+
+### 7.8 Carry the closed environment across later tasks
+
+Task 1 now owns the source/Compose correction: agent/tool defaults are `dev`; event/workflow/sandbox
+gain the closed field; every production Compose Python service receives
+`APP_ENV=${APP_ENV:-production}`; and the rootless adapter receives/normalizes the same value. Task 2
+must make `ObservabilitySettings.app_env` the exact `dev|test|staging|production` literal and must
+not reintroduce `development`.
+
+Task 6 extends those existing settings through `ObservabilitySettings`; it does not introduce a new
+default. Task 10's rendered observability profile assertions must cover APP_ENV for every Python
+product service and the rootless adapter, and Task 12's evidence render must preserve the same
+environment. Add this as a cross-task ledger ruling so later tasks cannot regress production labels
+to `dev` or create a service-local environment normalizer.
+
+### 7.9 Make Task 2 staging exact
+
+Replace Task 2's staging block with:
+
+```bash
+set -euo pipefail
+task2_paths=(
+  packages/observability/pyproject.toml
+  packages/observability/src/jhin_observability/__init__.py
+  packages/observability/src/jhin_observability/bootstrap.py
+  packages/observability/src/jhin_observability/config.py
+  packages/observability/src/jhin_observability/context.py
+  packages/observability/src/jhin_observability/exporters.py
+  packages/observability/src/jhin_observability/metrics.py
+  packages/observability/src/jhin_observability/registry.py
+  packages/observability/tests/conftest.py
+  packages/observability/tests/test_bootstrap.py
+  packages/observability/tests/test_context.py
+  packages/observability/tests/test_exporters.py
+  packages/observability/tests/test_noop_metrics.py
+  pyproject.toml
+  uv.lock
+)
+test -z "$(git diff --cached --name-only)"
+git add -- "${task2_paths[@]}"
+expected_index="$(printf '%s\n' "${task2_paths[@]}" | LC_ALL=C sort)"
+actual_index="$(git diff --cached --name-only | LC_ALL=C sort)"
+test "$actual_index" = "$expected_index"
+git diff --cached --check -- "${task2_paths[@]}"
+git commit --only "${task2_paths[@]}" \
+  -m "feat(observability): add bounded optional OTLP bootstrap"
+test "$(git diff-tree --no-commit-id --name-only -r HEAD | LC_ALL=C sort)" = \
+  "$expected_index"
+test -z "$(git diff --cached --name-only)"
+```
+
+No additional Task 2 path is authorized by these corrections. If implementation needs another
+source or test file, amend the exhaustive File Map and Task 2 `Files` before touching it.
 
 ### Task 3: Define Every Required Metric and Enforce Cardinality
 
 **Files:**
-- Modify: `packages/observability/src/jhin_observability/metrics.py`
-- Modify: `packages/observability/src/jhin_observability/bootstrap.py`
 - Modify: `packages/observability/src/jhin_observability/__init__.py`
-- Create: `packages/observability/tests/test_metrics.py`
+- Modify: `packages/observability/src/jhin_observability/bootstrap.py`
+- Modify: `packages/observability/src/jhin_observability/metrics.py`
+- Modify: `packages/observability/tests/test_bootstrap.py`
+- Modify: `packages/observability/tests/test_metrics.py`
 
 **Interfaces:**
-- Consumes: Task 2 `MeterProvider` and immutable service/environment resource identity.
-- Produces: one `JhinMetrics` registry, typed counter/histogram handles, cached observable gauges, label validation, and helpers consumed by Tasks 5–8.
+- Consumes the accepted Task 2 handoff and produces the exact Task 3 contract, subject, manifest, and gates below.
 
 - [ ] **Step 1: Write the failing registry and forbidden-cardinality tests**
 
@@ -2809,35 +3855,219 @@ Expected: PASS and exactly the 16 required/explanatory instruments are registere
 
 - [ ] **Step 5: Review and commit**
 
-```bash
-git diff --check
-git add packages/observability/src/jhin_observability/__init__.py \
-  packages/observability/src/jhin_observability/bootstrap.py \
-  packages/observability/src/jhin_observability/metrics.py \
-  packages/observability/tests/test_metrics.py
-git diff --cached --name-only
-git commit -m "feat(observability): enforce telemetry metric cardinality"
+The task's sole staging and commit gate is the exact manifest-owned gate in the final executable contract below.
+
+#### Final executable contract for Task 3
+
+
+The Task 3 preflight supersedes the ledger's earlier PASS. Apply all of this section before
+dispatching Task 3. Task 2 is still pending, so the single-authority `MetricName` correction
+belongs in Task 2; Task 3 must consume it and must not create a second registry.
+
+### 8.1 Wire the validated metrics facade into bootstrap
+
+Add `packages/observability/tests/test_bootstrap.py` to Task 3's `Files` block,
+RED/GREEN commands, and exact staging manifest.
+
+In Task 3 Step 3, bind both bootstrap branches:
+
+- The configured branch obtains the package meter from Task 2's resource-bound
+  `MeterProvider`, calls `build_jhin_metrics(meter)` exactly once, and installs
+  that exact returned object as `ObservabilityRuntime.metrics` before publishing the
+  runtime. It may not leave Task 2's initial no-op facade installed.
+- The endpoint-absent branch installs Task 3's validated `noop_metrics()` singleton,
+  reports `is_noop is True`, and does not construct an SDK metric exporter, reader, or
+  provider merely to obtain label validation.
+- Task 2's transactional initialization/shutdown ownership still applies: no runtime containing
+  the configured facade becomes visible until all providers, processors, and metric instruments
+  are initialized, and reset/shutdown releases the provider that owns that meter.
+
+Add bootstrap regressions using Task 2's in-memory/provider-construction seam:
+
+1. A configured runtime exposes a non-noop facade, records a representative counter through that
+   facade, and the point is visible through `InMemoryMetricReader`.
+2. The configured metric resource has exactly
+   `service.name`, `service.version`, and
+   `deployment.environment.name` with the configured values; no default detector or
+   process environment attribute is present.
+3. A spy proves one builder call and object identity with `runtime.metrics`; shutdown and
+   fixture reset release the owning provider and leave no Task 2 worker alive.
+4. With no endpoint, `runtime.metrics is noop_metrics()`,
+   `runtime.metrics.is_noop is True`, no provider seam is called, and an invalid label
+   still raises `MetricLabelError`.
+
+The focused RED includes both `test_metrics.py` and `test_bootstrap.py`. Missing
+registry/validator/bootstrap wiring is the expected failure; a missing helper, bad import, or
+fixture leak is not an acceptable RED.
+
+### 8.2 Make the metric tests and implementation snippets executable
+
+In `test_metrics.py`, define a lifecycle-owned fixture/helper named
+`in_memory_metrics`, never `test_metrics`. It must:
+
+- create an `InMemoryMetricReader` and SDK `MeterProvider`;
+- call `build_jhin_metrics(provider.get_meter(...))`;
+- yield the facade and reader;
+- define `series_for(reader, name)` by traversing
+  `reader.get_metrics_data()` rather than relying on an undefined test utility; and
+- call `provider.shutdown()` in `finally` on success or failure.
+
+Replace every planned `test_metrics()` call with that fixture/helper. Do not add a product
+API whose name begins with `test_`. In the Step 3 implementation imports, add
+`Protocol`, remove unused `cast`, and retain Task 2's
+`Callable` import because `JhinMetrics` still uses it. The literal snippets,
+Ruff, and mypy must all agree without collection-time or undefined-name failures.
+
+### 8.3 Keep one `MetricName` authority
+
+Amend Task 2's no-op-facade instruction and implementation snippet:
+
+- `registry.py` is the only file that defines the complete
+  `MetricName = Literal[...]` list.
+- `metrics.py` imports `MetricName` from
+  `jhin_observability.registry` and re-exports that exact object for compatibility; it
+  does not import `Literal` solely to repeat the names.
+- Package `__init__.py` re-exports the same canonical alias.
+- Task 3 imports `MetricName` from `jhin_observability.registry` alongside
+  `TEMPORAL_ACTIVITY_NAMES`.
+
+Add this invariant regression:
+
+```python
+from typing import get_args
+
+from jhin_observability import MetricName as PublicMetricName
+from jhin_observability.metrics import MetricName as MetricsMetricName
+from jhin_observability.registry import MetricName as RegistryMetricName
+
+
+def test_metric_name_has_one_authority() -> None:
+    assert PublicMetricName is RegistryMetricName
+    assert MetricsMetricName is RegistryMetricName
+    assert set(get_args(RegistryMetricName)) == set(instrument_contracts())
 ```
+
+Because Task 2 already owns and stages `registry.py`, its 15-path manifest does not
+change. Task 3 does not modify or stage `registry.py` unless Task 2 was actually committed
+without this correction; that unexpected state requires amending Task 3 `Files` and
+staging before implementation, not opportunistic staging.
+
+### 8.4 Prove cardinality and validation for all sixteen instruments
+
+Keep `EXPECTED` as an independent sixteen-entry literal. Replace the single-instrument
+cardinality example with table-driven tests over every entry:
+
+1. For every counter, histogram, and gauge, construct one valid complete baseline label set. For
+   each label declared by that instrument, vary that one dimension over many distinct unregistered
+   strings and prove the emitted/collected canonical attribute set contains at most the single
+   `other` series for that varying dimension.
+2. Exercise the public handle for its declared kind:
+   `counter(...).add(...)`, `histogram(...).record(...)`, or
+   `set_observable(...)` followed by collection. Do not infer runtime behavior merely
+   from `instrument_contracts()`. Counters and histograms may record the dynamic values
+   sequentially; gauges must replace and collect one dynamic observation at a time so this
+   normalization proof does not conflict with the duplicate-in-one-replacement rejection below.
+3. Across every instrument, parameterize every forbidden identifier key, every globally allowed
+   key that is extra for that instrument, each missing required key, non-string labels, and the
+   wrong requested instrument kind. Across counter, histogram, and observable paths, reject bool,
+   negative, NaN, infinite, and non-numeric measurements. Recorder spies must prove every failure
+   occurs before an SDK `add`, `record`, or callback-visible state change.
+4. Run the same validation matrix against configured and validated-noop facades. No-op means no
+   export, not weaker validation.
+5. Directly prove the 128-observation boundary: 128 succeeds, 129 fails; a successful replacement
+   removes every stale prior tuple; and any failed replacement preserves the complete prior tuple.
+
+The independent contract equality still proves exact names/kinds/units/label subsets, while these
+tests prove every actual public recording path goes through the validator.
+
+### 8.5 Reject duplicate normalized observable identities atomically
+
+Change `_ObservableState.replace` to normalize and validate the complete candidate
+sequence before taking the lock. For each point, derive a canonical identity in stable spec-label
+order, concretely:
+
+```python
+identity = tuple((key, normalized_attributes[key]) for key in sorted(spec.labels))
+```
+
+Track those identities for the candidate replacement. A repeated identity raises
+`MetricLabelError("duplicate normalized observable identity")`; the error must not include
+either raw caller value. Do not use generic last-write-wins. Aggregation is allowed only if a
+future metric-specific contract explicitly defines it; no current Task 3 gauge does.
+
+Only after the cap, every measurement, every label set, and uniqueness all pass may one lock
+acquisition swap the immutable tuple. A failure at any point preserves the prior complete tuple.
+
+Add configured and validated-noop regressions using `connector_health`: first install a
+valid prior observation, then submit two distinct unknown connector values that both normalize to
+`connector_type="other"`. Both facades must reject the duplicate. Collection through the
+in-memory reader must show the configured prior tuple unchanged; exercise the validated-noop
+facade's shared `_ObservableState` through a module-local state unit test to prove the
+same atomic preservation without adding a public read API.
+
+### 8.6 Replace Task 3 GREEN and make staging exact
+
+Replace Step 4 with:
+
+```bash
+uv lock --check
+uv run pytest packages/observability/tests -q
+uv run ruff check packages/observability
+uv run ruff format --check packages/observability
+uv run mypy packages/observability/src packages/observability/tests
+```
+
+The whole package suite is mandatory because Task 3 changes bootstrap and public exports and must
+rerun Task 1 logging and Task 2 exporter/lifecycle tests.
+
+Replace Task 3 Step 5 with:
+
+```bash
+set -euo pipefail
+task3_paths=(
+  packages/observability/src/jhin_observability/__init__.py
+  packages/observability/src/jhin_observability/bootstrap.py
+  packages/observability/src/jhin_observability/metrics.py
+  packages/observability/tests/test_bootstrap.py
+  packages/observability/tests/test_metrics.py
+)
+test -z "$(git diff --cached --name-only)"
+git add -- "${task3_paths[@]}"
+expected_index="$(printf '%s\n' "${task3_paths[@]}" | LC_ALL=C sort)"
+actual_index="$(git diff --cached --name-only | LC_ALL=C sort)"
+test "$actual_index" = "$expected_index"
+git diff --cached --check -- "${task3_paths[@]}"
+git commit --only "${task3_paths[@]}" \
+  -m "feat(observability): enforce telemetry metric cardinality"
+test "$(git diff-tree --no-commit-id --name-only -r HEAD | LC_ALL=C sort)" = \
+  "$expected_index"
+test -z "$(git diff --cached --name-only)"
+```
+
+The revised Task 3 `Files` block and this exact five-path array must be mirrors. Any
+additional implementation path requires a reviewed plan amendment before that path is touched.
 
 ### Task 4: Trace API Requests and Useful Database Operations Safely
 
 **Files:**
-- Create: `packages/observability/src/jhin_observability/sqlalchemy.py`
-- Modify: `packages/observability/src/jhin_observability/__init__.py`
-- Create: `packages/observability/tests/test_sqlalchemy.py`
-- Modify: `packages/db/pyproject.toml`
-- Modify: `packages/db/src/jhin_db/engine.py`
-- Create: `packages/db/tests/test_observability.py`
-- Modify: `apps/api/src/jhin_api/settings.py`
+- Modify: `apps/api/pyproject.toml`
 - Modify: `apps/api/src/jhin_api/main.py`
 - Modify: `apps/api/src/jhin_api/seed.py`
-- Create: `apps/api/tests/test_observability.py`
-- Modify: `tests/integration/test_seed.py`
+- Modify: `apps/api/src/jhin_api/settings.py`
+- Modify: `apps/api/tests/test_health.py`
+- Modify: `apps/api/tests/test_observability.py`
+- Modify: `packages/db/pyproject.toml`
+- Modify: `packages/db/src/jhin_db/engine.py`
+- Modify: `packages/db/tests/test_observability.py`
+- Modify: `packages/observability/pyproject.toml`
+- Modify: `packages/observability/src/jhin_observability/__init__.py`
+- Modify: `packages/observability/src/jhin_observability/sqlalchemy.py`
+- Modify: `packages/observability/tests/test_sqlalchemy.py`
+- Modify: `tests/integration/test_phase2_api.py`
 - Modify: `uv.lock`
 
 **Interfaces:**
-- Consumes: Tasks 1–3 bootstrap, trace-only context, safe spans, and `ObservabilitySettings`.
-- Produces: API server spans and request-scoped log context; `create_engine(..., trace_sql=True)` installs statement-free normalized SQL spans for every database-using service.
+- Consumes the accepted Task 3 handoff and produces the exact Task 4 contract, subject, manifest, and gates below.
 
 - [ ] **Step 1: Write failing API trace/request-ID/baggage tests**
 
@@ -3162,38 +4392,391 @@ Expected: PASS; no test span contains SQL or any DSN component.
 
 - [ ] **Step 7: Review and commit**
 
-```bash
-git diff --check
-git add apps/api/src/jhin_api/main.py apps/api/src/jhin_api/settings.py \
-  apps/api/tests/test_observability.py packages/db/pyproject.toml \
-  packages/db/src/jhin_db/engine.py packages/db/tests/test_observability.py \
-  apps/api/src/jhin_api/seed.py tests/integration/test_seed.py \
-  packages/observability/src/jhin_observability/__init__.py \
-  packages/observability/src/jhin_observability/sqlalchemy.py \
-  packages/observability/tests/test_sqlalchemy.py uv.lock
-git diff --cached --name-only
-git commit -m "feat(observability): trace API and database boundaries"
+The task's sole staging and commit gate is the exact manifest-owned gate in the final executable contract below.
+
+#### Final executable contract for Task 4
+
+
+The Task 4 preflight is binding and supersedes the existing NO-GO ledger sentence. Preserve every
+Task 2 route/resource/redaction contract and every Task 3 metric contract while applying all of
+this section before Task 4 is dispatched.
+
+### 9.1 Correct the exhaustive File Map, dependencies, and ownership
+
+Add these paths to the global File Map and Task 4 `Files`:
+
+```text
+apps/api/pyproject.toml
+apps/api/tests/test_health.py
+tests/integration/test_phase2_api.py
 ```
+
+Remove `tests/integration/test_seed.py` from Task 4 and from its otherwise-unused global
+File Map entry. The seed test continues importing the Phase 2 fixture and remains byte-for-byte
+unchanged; Task 4 repairs the fixture at its actual owner,
+`tests/integration/test_phase2_api.py`.
+
+Make Task 4's `Files` block the exact 15 paths in section 9.8. Bind these direct
+dependencies and regenerate `uv.lock`:
+
+- `packages/observability/pyproject.toml` adds
+  `sqlalchemy>=2.0.36,<3` because production
+  `jhin_observability.sqlalchemy` imports SQLAlchemy.
+- `packages/db/pyproject.toml` adds `jhin-observability` with its workspace
+  source and `opentelemetry-api>=1.38,<2` because
+  `jhin_db.engine` imports both the shared hook and `Tracer`.
+- `apps/api/pyproject.toml` adds
+  `opentelemetry-api>=1.38,<2`. The pure-ASGI implementation below imports
+  `starlette.types` and `starlette.responses` directly, so also declare
+  `starlette>=1.6,<2` rather than relying on FastAPI's transitive dependency.
+
+Do not add SQLAlchemy auto-instrumentation. Its statement-capture defaults violate this task's
+privacy boundary.
+
+### 9.2 Replace decorator middleware with one pure-ASGI owner
+
+Delete the `@app.middleware("http")` implementation and install one
+`HttpObservabilityMiddleware` pure-ASGI class as the outer request middleware. Its
+`__call__(scope, receive, send)` contract is exact:
+
+1. If `scope["type"] != "http"`, call the downstream app unchanged and do no telemetry
+   or request-ID work.
+2. Create one UUIDv7 request ID, store that UUID in
+   `scope.setdefault("state", {})["request_id"]`, extract only W3C trace context from
+   the request headers, and obtain the tracer from
+   `scope["app"].state.observability.tracer`. Open exactly one
+   `safe_span("http.server.request", tracer=that_exact_tracer,
+   kind=SpanKind.SERVER, context=parent)` inside
+   `bind_context(request_id=request_id)`. Never call
+   `get_runtime()` from middleware.
+3. Wrap `send`. On the first `http.response.start`, capture its status, remove
+   every downstream header whose lowercased name is `x-request-id`, append exactly one
+   ASCII `X-Request-ID` containing the generated UUID, and forward the copied message.
+   Forward body/trailer messages without inspecting or retaining their payloads.
+4. Keep both context managers open while awaiting the complete downstream ASGI application. They
+   close only after every response-body send and downstream background action has returned, or
+   after an exception/cancellation has unwound.
+5. If an ordinary exception occurs before response start, call
+   `record_span_error(span, safe_error(exc,
+   code=SafeErrorCode.INTERNAL_ERROR))`, emit the registered safe failure log, and run a
+   generic `JSONResponse(status_code=500,
+   content={"detail": "Internal server error"})` through the wrapped sender. Do not serialize
+   or log the exception message.
+6. If an ordinary exception occurs after response start, record/log the same closed safe error and
+   re-raise the original exception; do not attempt a second response. Cancellation and any send
+   failure likewise propagate after `finally` cleanup.
+7. In one finalization path, resolve `scope.get("route")` only after downstream routing
+   has run, normalize method/route/status/status-class, set the four server-span attributes once,
+   and emit exactly one `api.request_finished` record using the same bounded values.
+   The safe span must continue to disable automatic OTel exception events/descriptions; only
+   `record_span_error(SafeError)` writes error metadata.
+
+This middleware owns no response body, header, query, URL, client address, user agent, cookie,
+exception, or traceback value. All success, ordinary failure, streaming failure, and cancellation
+paths detach both OTel and structlog request context.
+
+Add direct-ASGI and HTTPX regressions for:
+
+- ordinary 2xx and 404 responses;
+- a downstream duplicate `X-Request-ID` being replaced by exactly one canonical header;
+- an exception before response start producing one generic JSON 500;
+- an exception after response start producing no second
+  `http.response.start` and re-raising;
+- a streaming response whose iterator observes the active server span and request ID on every
+  chunk, while the exporter remains empty until the final chunk completes;
+- a streaming iterator failure with only safe error type/code, no OTel exception event or status
+  description, exactly one span end, and no context leak; and
+- cancellation at each of the pre-start and body-send boundaries.
+
+### 9.3 Collapse every API template to the Task 2 route registry
+
+Replace the old concrete-template normalizer with:
+
+```python
+def normalize_http_route(scope: Scope) -> str:
+    route = scope.get("route")
+    if not isinstance(route, APIRoute):
+        return "other"
+    template = route.path
+    if not isinstance(template, str) or not 1 <= len(template) <= 200:
+        return "other"
+    return "/api/:path*" if template.startswith("/api/") else "other"
+```
+
+No registered concrete template is exported. Both `http.route` on the span and
+`http_route` in `api.request_finished` use that exact result. Change the
+health-span expectation from `/api/v1/health` to `/api/:path*`.
+
+Add one table-driven test over every registered `APIRoute`, plus unmatched, oversized,
+invalid, and non-API routes. Add path-parameter, query-string, header, baggage, and exception-message
+canaries. For every case, scan the complete JSON log objects and complete serialized span
+name/resource/attributes/events/status, not a selected attribute subset. The only route values
+permitted anywhere are `/api/:path*` and `other`.
+
+Inside a request, a probe route must assert extracted baggage is empty. After every request, assert
+`structlog.contextvars.get_contextvars() == {}` and that there is no current recording
+span. Different successive request IDs alone are not a leak test.
+
+### 9.4 Define real, function-scoped API fixtures
+
+Define `test_settings`, `app`, `client`, and
+`spans` locally in `apps/api/tests/test_observability.py`. Do not add an
+API-wide autouse runtime fixture.
+
+Binding fixture behavior:
+
+- `test_settings()` returns deterministic
+  `Settings(app_env="test", otel_exporter_otlp_endpoint=None,
+  otel_exporter_otlp_insecure=False, ...)` values, including a local SQLite URL and fixed log
+  level, and never inherits a live OTLP endpoint.
+- A function-scoped `TracerProvider` with
+  `SimpleSpanProcessor` and `InMemorySpanExporter` owns the test tracer. Its
+  resource has exactly the three Task 2 keys with test values. The fixture shuts down the provider
+  and exporter in `finally` even after assertion failure.
+- Before monkeypatching, retain the real package `safe_span`. Patch only
+  `jhin_api.main.safe_span` with a narrow wrapper that records the caller-supplied
+  `tracer`, asserts it is not omitted, and delegates to the real helper with the
+  function-scoped test tracer. After each request assert the recorded argument is exactly
+  `app.state.observability.tracer`. Do not mutate Task 2's private bootstrap singleton.
+- Patch only external resource seams needed to keep the test deterministic; do not bypass lifespan
+  or middleware.
+- Enter `AsyncClient(ASGITransport(app=app), ...)` inside
+  `async with app.router.lifespan_context(app)`. On exit, prove the exact app runtime was
+  shut down, `get_runtime()` raises
+  `ObservabilityNotInitializedError`, the function-scoped provider/exporter is stopped,
+  and no context remains.
+
+Use `raise_app_exceptions=False` only for the pre-start generic-500 HTTP test. Use a
+direct ASGI sender recorder for post-start streaming failure so the test can prove the exact
+message sequence and propagated exception.
+
+The exception test uses a unique message canary and asserts it is absent from response bytes, JSON
+logs, span/resource serialization, events, status description, and stderr. Its server span contains
+only the four bounded HTTP attributes plus safe `error.type` and
+`error.code`.
+
+### 9.5 Replace the SQL RED with local executable proofs
+
+Remove `create_test_engine_with_visible_dsn` and every network/DNS-dependent SQL test.
+Define lifecycle-owned tracer/exporter fixtures in the SQL test modules and use the real
+`jhin_db.create_engine` with `sqlite+aiosqlite:///:memory:`:
+
+1. Create a minimal `secret` table, clear all setup spans, and execute a parameterized
+   `SELECT` containing distinct SQL-token and bind-value canaries. Assert exactly one
+   child `db.operation` span with exactly
+   `db.system="postgresql"`, `db.operation="SELECT"`, and
+   `db.table="secret"`. Scan the complete serialized span, logs, stdout, and stderr for
+   both canaries.
+2. In a separate unit test, patch `create_async_engine` and the listener-install seam.
+   Assert the exact database URL is passed only as the first SQLAlchemy constructor argument and is
+   never passed to span metadata, listener state, or a logger. This test makes no connection.
+3. Execute/query an unregistered table name and assert `db.table="other"`; never call that
+   case a known-table proof.
+4. In the seed AST test define
+   `REPO_ROOT = Path(__file__).resolve().parents[3]`, prove exactly one
+   `create_engine` call exists in `seed.py`, and prove its explicit tracer is
+   exactly `noop_tracer()`.
+
+`normalized_sql_metadata` accepts a statement only when
+`isinstance(statement, str)`. It inspects at most a fixed 4,096-character prefix, parses
+only the closed leading operation/table grammar, uppercases the operation, lowercases the table,
+and intersects the table with the supplied immutable known-table set and Task 2's
+`DB_TABLE_VALUES`. Unknown/malformed values become `other`. It never invokes
+`str()`, `repr()`, formatting, or regex over an arbitrary object. Add an object
+whose `__str__` raises/contains a canary and prove it is never called.
+
+### 9.6 Make the SQL listener atomic, fail-open, and echo-free
+
+Use exactly
+`_SQL_STATE_ATTR = "_jhin_observability_sql_span_state"` as the namespaced
+execution-context attribute. Its value contains only:
+
+```python
+@dataclass
+class _SQLSpanState:
+    manager: AbstractContextManager[Span]
+    span: Span
+    closed: bool = False
+```
+
+The state may not retain statement, parameters, URL, engine, exception, or traceback. The
+`before_cursor_execute` listener computes closed metadata, enters
+`safe_span("db.operation", tracer=tracer, kind=SpanKind.CLIENT,
+attributes=metadata)`, and publishes the state only after enter succeeds. Any instrumentation
+failure is contained and the database call proceeds without state.
+
+Both success and error paths call one helper that removes the namespaced attribute before doing
+anything else and flips `closed` before record/end work. Missing
+`execution_context` or state is a no-op. Success exits the stored manager exactly once
+with `(None, None, None)`. Error first calls
+`record_span_error(stored_span,
+safe_error(original_exception, code=SafeErrorCode.INTERNAL_ERROR))` and then also exits with
+`(None, None, None)`; the raw SQLAlchemy exception is never forwarded to OTel. A listener,
+tracer, attribute, error-recording, or end failure is swallowed and may neither fail a successful
+query nor replace/mask the original database exception. `handle_error` always returns
+`None`.
+
+Add tests for success, database error, a tracer/manager that fails at start/record/end, a successful
+query after an error, nested and concurrent async executions, correct outer-span parentage, one and
+only one end, missing execution context, no current-span leak, no raw exception event/status
+description/text, and zero retained raw SQL/bind/URL values.
+
+Remove the public `echo` parameter from `jhin_db.create_engine`. The wrapper
+always calls `create_async_engine(database_url, echo=False,
+pool_pre_ping=True)`. Assert `echo` is absent from the public signature, an attempted
+`echo=True` call raises before SQLAlchemy construction, and successful/error SQL canaries
+never appear on stdout or stderr. SQL echo cannot be enabled through the Jhin API.
+
+Correct Task 4's Produces sentence: it installs a safe statement-free package hook, wires the API,
+and keeps seed explicitly no-op. It does not yet claim that every long-lived service passes a
+configured tracer.
+
+### 9.7 Repair API lifespan and bind Task 5/6/11 handoffs
+
+Task 4 API bootstrap is fixed:
+
+- Use `service_version("jhin-api")` in
+  `settings.observability_config(...)`. Do not duplicate
+  `jhin_api.__version__` as the telemetry resource authority.
+- `initialize_observability(...)` is the first resource-owning action inside lifespan and
+  precedes secret crypto, engine/session construction, NATS/Temporal clients, and locks. The engine
+  receives that exact `runtime.tracer`.
+- Keep runtime, secret crypto, engine, and connection clients out of module import and
+  `create_app()`. Store the runtime only on app state during lifespan.
+- Nested `finally` blocks attempt NATS close, engine dispose, the registered stopped log,
+  and the exact runtime shutdown in order even when an earlier cleanup raises. Failure injected
+  immediately after runtime creation still shuts it down and detaches the package-global owner.
+  Add order/failure tests for NATS-close and engine-dispose exceptions.
+
+Modify `apps/api/tests/test_health.py` to pass deterministic Task 4 settings and exercise
+the real lifespan; do not let host environment or another test own its runtime.
+
+In `tests/integration/test_phase2_api.py`, delete the manual engine/session wiring. The
+`api` fixture must:
+
+```python
+app = create_app(settings)
+async with app.router.lifespan_context(app):
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://test"
+    ) as client:
+        yield ApiHarness(
+            client=client,
+            transport=transport,
+            engine=app.state.engine,
+            session_factory=app.state.session_factory,
+        )
+```
+
+Every `ApiHarness.new_client()` is created/entered only while that outer lifespan is
+active. Lifespan alone owns engine disposal and runtime shutdown. After fixture exit, assert the
+runtime owner is detached. Keep `tests/integration/test_seed.py` unchanged.
+
+Bind the downstream plan text:
+
+- **Task 5:** add `services/event_worker/src/jhin_event_worker/settings.py` to Task 5
+  `Files` and staging. Its NATS/metric implementation upgrades event-worker to the Task
+  2/3 runtime before NATS, Temporal, or engine construction, uses
+  `service_version("jhin-event-worker")`, calls
+  `create_engine(settings.database_url, tracer=runtime.tracer)`, supplies
+  `runtime.metrics` to the lag sampler, and shuts the runtime down after its engine and
+  clients. Add a call-order/identity regression. Task 6 later preserves this runtime while adding
+  Temporal interceptors; it does not initialize a second event-worker runtime.
+- **Task 6:** add
+  `services/agent_worker/src/jhin_agent_worker/resources.py` and
+  `services/tool_worker/src/jhin_tool_worker/resources.py` to Task 6
+  `Files` and exact staging. Pass the process runtime into each resource constructor and
+  require each long-lived `create_engine` call to use
+  `tracer=runtime.tracer`. Preserve Task 4's pure-ASGI middleware, route collapse,
+  `service_version("jhin-api")`, Phase 2 lifespan harness, and cleanup order when Task 6
+  adds the API Temporal provider. The recursive AST gate scans all production API/service Python
+  files, exempts only `seed.py`, and fails any long-lived engine call without that exact
+  tracer keyword.
+- **Task 11:** retain `db.operation` in `REQUIRED_SPANS`. The connected
+  real-asyncpg acceptance must prove at least one database span is a child in the known API trace,
+  has only the closed DB attributes, and contains no SQL, bind, DSN, URL, or exception canary in
+  its complete serialized form. The Task 4 SQLite suite is not a substitute for this live proof.
+
+### 9.8 Replace Task 4 GREEN and make its 15 paths exact
+
+Keep the focused API and SQL RED/GREEN commands, then replace Task 4 Step 6 with:
+
+```bash
+uv lock
+uv lock --check
+uv run pytest packages/observability/tests packages/db/tests apps/api/tests -q
+uv run pytest -q
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy
+```
+
+The root pytest gate must collect the corrected Phase 2/seed integration modules while the marked
+live cases remain deselected. Task 11 remains the connected asyncpg/OTLP gate.
+
+Replace Task 4 Step 7 with:
+
+```bash
+set -euo pipefail
+task4_paths=(
+  apps/api/pyproject.toml
+  apps/api/src/jhin_api/main.py
+  apps/api/src/jhin_api/seed.py
+  apps/api/src/jhin_api/settings.py
+  apps/api/tests/test_health.py
+  apps/api/tests/test_observability.py
+  packages/db/pyproject.toml
+  packages/db/src/jhin_db/engine.py
+  packages/db/tests/test_observability.py
+  packages/observability/pyproject.toml
+  packages/observability/src/jhin_observability/__init__.py
+  packages/observability/src/jhin_observability/sqlalchemy.py
+  packages/observability/tests/test_sqlalchemy.py
+  tests/integration/test_phase2_api.py
+  uv.lock
+)
+test -z "$(git diff --cached --name-only)"
+git status --short -- "${task4_paths[@]}"
+git diff --check -- "${task4_paths[@]}"
+git add -- "${task4_paths[@]}"
+expected_index="$(printf '%s\n' "${task4_paths[@]}" | LC_ALL=C sort)"
+actual_index="$(git diff --cached --name-only | LC_ALL=C sort)"
+test "$actual_index" = "$expected_index"
+git diff --cached --check -- "${task4_paths[@]}"
+git commit --only "${task4_paths[@]}" \
+  -m "feat(observability): trace API and database boundaries"
+test "$(git show -s --format=%s HEAD)" = \
+  "feat(observability): trace API and database boundaries"
+test "$(git diff-tree --no-commit-id --name-only -r HEAD | LC_ALL=C sort)" = \
+  "$expected_index"
+test -z "$(git diff --cached --name-only)"
+```
+
+The revised Task 4 `Files` block and this array are exact mirrors. No other Task 4 path is
+authorized.
 
 ### Task 5: Propagate Context Through NATS and Export Consumer Lag
 
 **Files:**
-- Modify: `packages/events/pyproject.toml`
-- Modify: `packages/events/src/jhin_events/publisher.py`
-- Modify: `packages/events/src/jhin_events/consumer.py`
-- Create: `packages/events/src/jhin_events/telemetry.py`
-- Create: `packages/events/tests/test_telemetry.py`
-- Modify: `apps/api/src/jhin_api/deps.py`
+- Modify: `apps/api/src/jhin_api/webhooks/router.py`
 - Modify: `apps/api/src/jhin_api/webhooks/service.py`
-- Modify: `services/event_worker/src/jhin_event_worker/processor.py`
-- Modify: `services/event_worker/src/jhin_event_worker/normalizer.py`
+- Modify: `apps/api/tests/test_webhooks_unit.py`
+- Modify: `packages/events/pyproject.toml`
+- Modify: `packages/events/src/jhin_events/consumer.py`
+- Modify: `packages/events/src/jhin_events/publisher.py`
+- Modify: `packages/events/src/jhin_events/telemetry.py`
+- Modify: `packages/events/tests/test_telemetry.py`
+- Modify: `services/event_worker/pyproject.toml`
 - Modify: `services/event_worker/src/jhin_event_worker/main.py`
-- Create: `services/event_worker/tests/test_telemetry.py`
+- Modify: `services/event_worker/src/jhin_event_worker/normalizer.py`
+- Modify: `services/event_worker/src/jhin_event_worker/processor.py`
+- Modify: `services/event_worker/src/jhin_event_worker/settings.py`
+- Modify: `services/event_worker/tests/test_telemetry.py`
 - Modify: `uv.lock`
 
 **Interfaces:**
-- Consumes: Task 2 trace-only carrier and Task 3 `nats_consumer_lag` gauge.
-- Produces: `EventPublisher.publish(envelope, *, headers=None)`, trace-aware generic `publish_jetstream(...)`, trace-aware `run_pull_consumer(...)`, and `poll_nats_consumer_lag(...)`.
+- Consumes the accepted Task 4 handoff and produces the exact Task 5 contract, subject, manifest, and gates below.
 
 - [ ] **Step 1: Write failing publisher/consumer propagation tests**
 
@@ -3745,59 +5328,513 @@ Expected: PASS; existing message ID and webhook idempotency behavior is unchange
 
 - [ ] **Step 7: Review and commit**
 
-```bash
-git diff --check
-git add apps/api/src/jhin_api/deps.py apps/api/src/jhin_api/webhooks/service.py \
-  packages/events/pyproject.toml packages/events/src/jhin_events/consumer.py \
-  packages/events/src/jhin_events/publisher.py packages/events/src/jhin_events/telemetry.py \
-  packages/events/tests/test_telemetry.py \
-  services/event_worker/src/jhin_event_worker/main.py \
-  services/event_worker/src/jhin_event_worker/normalizer.py \
-  services/event_worker/src/jhin_event_worker/processor.py \
-  services/event_worker/tests/test_telemetry.py uv.lock
-git diff --cached --name-only
-git commit -m "feat(observability): propagate traces through NATS"
+The task's sole staging and commit gate is the exact manifest-owned gate in the final executable contract below.
+
+#### Final executable contract for Task 5
+
+
+The Task 5 preflight is binding and supersedes the coarser Task 5 handoff in section 9.7. Apply
+these Task 2, Task 5, Task 6, and Task 11 corrections before dispatching Task 5. Task 5 must be a
+self-contained green commit: its event worker exports NATS spans and lag immediately, while
+deliberate package/standalone and pre-Task-6 agent/tool compatibility remains explicit no-op.
+
+### 10.1 Move the event-worker runtime and database tracer into Task 5
+
+Add `services/event_worker/src/jhin_event_worker/settings.py` and
+`services/event_worker/pyproject.toml` to Task 5 as shown in the exact manifest below.
+
+`Settings` extends Task 2's `ObservabilitySettings`. Close its durable names:
+
+```python
+consumer_durable_name: Literal["event-worker"] = "event-worker"
+ingress_durable_name: Literal["event-worker-ingress"] = "event-worker-ingress"
 ```
+
+Do not pair hard-coded sampler consumers with independently configurable durable names.
+
+In event-worker `main()`, settings construction is followed immediately by:
+
+```python
+runtime = initialize_observability(
+    settings.observability_config(
+        service_name="event-worker",
+        service_version=service_version("jhin-event-worker"),
+        extra_log_processors=(redact_event_dict,),
+    )
+)
+```
+
+This occurs before NATS, Temporal, engine, heartbeat, lag, matcher, handler, or consumer
+construction. Establish a `try/finally` immediately after the runtime exists; initialize
+all later resource/task locals to `None` so partial startup is cleanable. Production
+wiring is exact:
+
+- `create_engine(settings.database_url, trace_sql=True,
+  tracer=runtime.tracer)`;
+- both `run_pull_consumer` calls receive `tracer=runtime.tracer`;
+- `EventProcessor(..., tracer=runtime.tracer)` and
+  `IngressNormalizer(..., tracer=runtime.tracer)`;
+- every event-worker `EventPublisher` receives that same tracer; and
+- the one lag poller receives the exact `runtime.metrics`.
+
+The heartbeat, lag poller, and both product consumers are named, owned tasks. Run the two product
+consumers in one `asyncio.TaskGroup`: normal stop lets both return, while failure of one
+cancels and awaits the peer. The lag poller is not in that failure-coupled scope. Teardown cancels
+and **awaits** every remaining task, consuming
+each terminal result; clears the heartbeat; closes NATS; disposes the engine; and then shuts down
+that exact runtime. Use nested cleanup so a cancellation, consumer failure, startup failure after
+runtime/NATS/engine creation, task failure, NATS-close failure, or engine-dispose failure cannot
+skip a later cleanup or package-global runtime detachment. No task or exception may remain
+pending/unretrieved.
+
+Add behavioral and AST regressions proving initialization is the first resource-owning action,
+every injected object is identical to the runtime field, the engine receives the exact tracer, and
+failure injected after runtime, NATS, Temporal, engine, heartbeat, and lag construction leaves zero
+owned resource/task survivors.
+
+### 10.2 Make every NATS tracer seam explicit and compatibility-safe
+
+Put the generic APIs in `jhin_events.telemetry` and use these ownership rules:
+
+- `publish_jetstream(..., *, tracer: Tracer, ...)`,
+  `dispatch_or_nak(..., *, tracer: Tracer, ...)`, and
+  `run_pull_consumer(..., *, tracer: Tracer, ...)` require an explicit tracer.
+- `EventPublisher.__init__(js, *, tracer: Tracer | None = None)` stores
+  `tracer if tracer is not None else noop_tracer()`. Its public
+  `publish(envelope, *, headers=None)` signature remains fixed and uses the stored
+  tracer.
+- `EventProcessor` and `IngressNormalizer` accept optional constructor
+  tracers only for package/test compatibility; their default is the public
+  `noop_tracer()`. Event-worker production always supplies
+  `runtime.tracer`.
+- API `process_delivery(..., *, tracer: Tracer | None = None)` defaults deliberately to
+  `noop_tracer()` for direct unit callers. The actual webhook router passes
+  `request.app.state.observability.tracer` from Task 4.
+- Task 6 supplies its agent/tool process tracer when their resource containers construct
+  `EventPublisher`. Standalone package/live durability tests either pass an owned test
+  tracer or deliberately exercise the explicit no-op default.
+
+Add a binding-aware recursive AST test over production API/service sources. It rejects:
+
+- an actual webhook route call missing `tracer=request.app.state.observability.tracer`;
+- an event-worker generic publish/consumer/handler missing the exact runtime tracer;
+- an agent/tool resource `EventPublisher` without its resource-owned runtime tracer after
+  Task 6; and
+- any direct production call to strict global `safe_span()` in place of these injected
+  seams.
+
+The test must recognize constructor fields passed onward (for example
+`EventPublisher(js, tracer=self._tracer)`) rather than requiring a literal
+`runtime.tracer` at every nested call. Default no-op is not permission for a product
+entrypoint to omit injection.
+
+### 10.3 Make Task 2's carrier provably trace-only
+
+Keep one Task 2 `TRACE_CARRIER_KEYS` set and make
+`inject_trace_headers` obey this exact order:
+
+1. Copy the caller mapping; never mutate it.
+2. Remove every supplied key whose case-insensitive spelling is
+   `traceparent`, `tracestate`, or `baggage`.
+3. Ask `TraceContextTextMapPropagator` to inject into a new empty mapping.
+4. Merge back only its canonical lower-case `traceparent` and
+   `tracestate`. With no valid current span, inject neither and never revive a stale
+   caller carrier.
+5. Preserve every validated non-propagation header exactly once.
+
+Task 2 context tests and Task 5 transport tests cover lower-, mixed-, and upper-case baggage/stale
+trace keys; a valid current tracestate; no current span; invalid current context; caller mapping
+immutability; and absence of duplicate case variants.
+
+Before Task 5 calls that helper, validate ordinary NATS headers through one bounded implementation:
+
+```python
+MAX_NATS_HEADERS = 32
+MAX_NATS_HEADER_NAME_BYTES = 64
+MAX_NATS_HEADER_VALUE_BYTES = 1_024
+MAX_NATS_HEADER_TOTAL_BYTES = 8_192
+```
+
+Task 1 must export its existing sensitive-key-family predicate as
+`is_sensitive_key_name(value: object) -> bool`; Task 5 reuses it rather than duplicating
+the secret/authorization/cookie/token/password/API-key/DSN families.
+
+Header validation is binding:
+
+- keys and values are real strings; names are ASCII and match
+  `[A-Za-z0-9][A-Za-z0-9-]*` within the byte cap;
+- names/values containing CR, LF, NUL, invalid Unicode, or a sensitive key family are rejected;
+- case-insensitive duplicate ordinary names are rejected;
+- all caller spellings of `Nats-Msg-Id` and trace-carrier keys are stripped before
+  canonical values are added;
+- callers set dedupe identity only through the explicit `message_id` argument, which
+  emits exactly one `Nats-Msg-Id`;
+- the final header count and aggregate encoded bytes, including injected carrier/dedupe fields,
+  remain within the exact caps; and
+- every validation error is a closed `UnsafeNatsHeaderError("invalid NATS header")` that
+  echoes no key or value.
+
+The planned ordinary `safe-header` behavior and exact message ID remain unchanged. Tests
+must use the resolved NATS encoding behavior and prove the input mapping is unchanged.
+
+### 10.4 Use one subject authority and correct Task 2's family registry
+
+The Task 2 `jhin.subject_family` closed registry is replaced with exactly:
+
+```python
+frozenset({
+    "ingress", "task", "agent", "tool", "approval", "connector",
+    "trigger", "workflow", "system", "dlq", "other",
+})
+```
+
+Remove `run`; add every actual NATS family above. This correction supersedes the older
+abbreviated registry in section 7.5.
+
+Task 5 may not declare `SUBJECT_FAMILIES`. It imports the canonical
+`jhin_events.subjects.EVENT_DOMAINS`. Define only
+`StreamName`, `DlqOriginStream`, `ConsumerName`, narrow structural
+publish/consumer-info Protocols, and classifier helpers in
+`jhin_events.telemetry`; `publisher.py` imports from there so there is no
+`publisher <-> telemetry` cycle.
+
+The classifier accepts only:
+
+- EVENTS: `jhin.v1.<nonempty-workspace>.<EVENT_DOMAINS member>.<one-or-more nonempty event
+  tokens>`;
+- INGRESS: `jhin.v1.<nonempty-workspace>.ingress.<nonempty-connector>.<one-or-more nonempty
+  event tokens>`; and
+- DLQ: exactly `jhin.dlq.ingress` or `jhin.dlq.events`.
+
+Every token must satisfy the existing canonical subject-token grammar, and the classified stream
+must equal the caller's expected stream. Errors never contain the workspace or raw subject. No
+span/log attribute receives either. Add an invariant:
+
+```python
+assert set(SPAN_ATTRIBUTE_VALUES["jhin.subject_family"]) == (
+    set(EVENT_DOMAINS) | {"ingress", "dlq", "other"}
+)
+```
+
+Test empty/extra/missing/reserved tokens, every canonical domain, both ingress/DLQ forms,
+stream/subject mismatches, and workspace/subject canaries.
+
+### 10.5 Keep handler, failure log, and settlement inside one consumer span
+
+Remove the split span ownership between `dispatch_message` and
+`dispatch_or_nak`. One fail-open `dispatch_or_nak` owns the full operation:
+
+1. Validate only closed stream/consumer/family metadata, extract the trace-only parent, and enter
+   `safe_span("nats.consume", tracer=tracer, kind=SpanKind.CONSUMER,
+   context=parent, attributes=...)`.
+2. Await the handler exactly once. Its ACK/TERM is therefore inside the span. After it returns,
+   set `jhin.outcome="ok"`.
+3. On an ordinary handler exception, set `jhin.outcome="failed"`, record only
+   `SafeErrorCode.INTERNAL_ERROR`, emit the registered
+   `jetstream.consumer_handler_failed` JSON record while the consumer trace/span context
+   is current, and await exactly one delayed NAK before leaving the span.
+4. Cancellation propagates immediately and is never converted to an ordinary failure or NAK.
+5. In every case, detach extracted OTel and structlog context after settlement/unwind.
+
+Error recording/logging failure is contained so it cannot replace the handler failure or skip the
+NAK. If NAK also fails, preserve the original handler exception as authoritative after consuming/
+recording the settlement failure safely. On a successful NAK the fetch loop continues without a
+second handler or settlement path.
+
+Instrumentation is fail-open. If extraction/injection, span construction, attribute setting,
+error recording, or span end fails, the code still invokes the handler and its one settlement path
+exactly once. Add success, handler-failure, instrumentation-failure, NAK-failure, and cancellation
+tests proving call counts, parent trace/span, closed status/error attributes, active trace/span IDs
+in the failure log, duration through settlement, and empty contexts.
+
+Apply the same rule to `publish_jetstream`:
+
+- validated caller input errors stop before transport;
+- trace injection/span setup failures fall back to sanitized non-carrier headers and still perform
+  exactly one JetStream publish;
+- publish success sets `jhin.outcome="ok"`;
+- a real JetStream failure records closed safe error/outcome while possible and re-raises the exact
+  transport exception; and
+- no instrumentation failure may duplicate the publish or replace the transport exception.
+
+### 10.6 Bind only context-safe workspace IDs without changing business behavior
+
+Task 2 must expose and package-export one validator using its existing central grammar:
+
+```python
+def is_safe_context_id(value: object) -> TypeGuard[str]:
+    return isinstance(value, str) and bool(_ID_RE.fullmatch(value))
+```
+
+`bind_context` continues to reject invalid explicit values. Task 5 handlers use the
+public validator; they never copy `_ID_RE`.
+
+After an envelope is schema-valid, both service handlers always bind its UUID correlation ID.
+They add `workspace_id` only when `is_safe_context_id(envelope.workspace_id)` is
+true. Otherwise they omit that diagnostic field and still invoke the existing business handler
+exactly once with the original envelope; existing ACK/TERM/NAK, dedupe, normalization, and matcher
+behavior remains authoritative.
+
+Add URL-, payload-, oversized-, whitespace-, and control-character workspace canaries. Each
+business stub is invoked once, no canary reaches a log/span/header/error, correlation remains bound
+inside handling, and both context fields are empty afterward. A valid workspace regression must
+prove both fields are bound and that `jhin.correlation_id` appears on the active consumer
+span as required by Task 2; do not assert the older four-attribute dict that omitted it.
+
+### 10.7 Make tests lifecycle-owned, end-to-end, and privacy-complete
+
+Split tests by owner:
+
+- shared publisher/carrier/header/classifier/consumer tests live in
+  `packages/events/tests/test_telemetry.py`; and
+- event-worker handler/runtime/lag tests live in
+  `services/event_worker/tests/test_telemetry.py`.
+
+Each file that records spans owns a function-scoped SDK `TracerProvider`,
+`SimpleSpanProcessor`, and `InMemorySpanExporter`, passes that exact tracer
+through the public seam, and shuts the provider/exporter down in `finally`. There is no
+package-global OTel provider mutation, strict `get_runtime()` call outside owned bootstrap,
+test-order dependency, or fixture imported from another package tree. Stubs implement the narrow
+Task 5 Protocols rather than pretending to be concrete `JetStreamContext` objects.
+
+Add one deterministic in-process two-hop test:
+
+```text
+Task 4 API server span
+  -> webhook nats.publish
+  -> INGRESS nats.consume
+  -> normalized nats.publish
+  -> EVENTS nats.consume
+```
+
+All five spans share one trace ID with exact parent/child edges. The outgoing
+`traceparent` span ID equals the actual producer span ID, not merely a valid regex.
+Valid `tracestate` propagates; baggage does not; malformed/missing carriers create a safe
+root; all contexts detach.
+
+Preserve and test the canonical `Nats-Msg-Id`, webhook publish-before-commit, rollback,
+dedupe, ACK/TERM, and in-memory redelivery-dedupe behavior. The actual webhook router test proves
+it passes its app runtime tracer.
+
+Invalid-envelope DLQ is exactly:
+
+```python
+{
+    "schema_version": 1,
+    "reason": "invalid_envelope",
+    "origin_stream": origin_stream,
+    "error_count": error_count,
+}
+```
+
+`error_count` must have `type(error_count) is int` and
+`0 <= error_count <= 1_000`. Bool, negative, oversized, float, string, and arbitrary
+objects fail before publish. Complete JSON logs and complete serialized
+span/resource/attribute/event/status data must exclude raw payload, raw subject, non-carrier input
+header names/complete values, unsafe workspace, authorization/cookie/secret, exception, and
+error-body canaries. Trace/span IDs derived from one valid trace carrier and the deliberately
+bounded valid workspace/correlation context fields remain the only intentional derivatives.
+
+Valid `EventProcessor` handling must bind workspace/correlation through the real matcher
+seam, preserve its dedupe and ACK behavior, and clear both bindings after return/error.
+
+### 10.8 Close lag values, timeouts, replacement, and task supervision
+
+For `ConsumerInfo.num_pending`, accept only
+`type(value) is int and value >= 0`. Never call `int(value)`. `None`,
+bool, negative, float, string, and a hostile `__int__` retain the last good value.
+
+`sample_nats_consumer_lag_once` samples each canonical consumer independently under an
+injectable, finite, positive `probe_timeout_seconds`. A timeout/failure for one never
+skips the other. First-sample failure emits no fabricated zero; after prior success it preserves
+only the last good value.
+
+After a successful two-consumer sample, one atomic
+`metrics.set_observable("nats_consumer_lag", observations)` replacement contains exactly:
+
+```text
+(INGRESS, event-worker-ingress)
+(EVENTS, event-worker)
+```
+
+There is no third/stale/duplicate normalized identity. A metric-set failure is logged safely and
+does not terminate either product consumer or leave an unretrieved task exception.
+
+Before entering `poll_nats_consumer_lag`, require
+`interval_seconds` and `probe_timeout_seconds` to be non-bool finite positive
+numbers. Each interval waits on `stop.wait()` with a timeout, so `stop.set()`
+wakes immediately. Cancellation propagates. Event-worker never includes this background task in a
+gather whose ordinary failure would cancel product consumers; it owns, names, cancels, and awaits
+it during teardown.
+
+Add tests for first/prior/partial failure, timeout cancellation, every invalid value above,
+hostile conversion, exact full replacement, Task 3 duplicate-identity compatibility, immediate
+stop, metric-set failure isolation, explicit cancellation, and zero pending tasks.
+
+### 10.9 Bind dependencies, File Map, and Task 6/11 ownership
+
+Amend the global File Map with:
+
+```text
+apps/api/src/jhin_api/webhooks/router.py
+apps/api/tests/test_webhooks_unit.py
+```
+
+Remove `apps/api/src/jhin_api/deps.py` from Task 5; no Task 5 change is specified there.
+Task 5 owns exactly the 15 paths in section 10.10. Generic helpers remain module-qualified under
+`jhin_events.telemetry`, so `jhin_events/__init__.py` is not modified or staged.
+
+Dependency ownership is exact:
+
+- `packages/events/pyproject.toml` adds
+  `opentelemetry-api>=1.38,<2` and preserves Task 1's existing
+  `jhin-observability` dependency/workspace source.
+- `services/event_worker/pyproject.toml` adds
+  `jhin-secrets` and its workspace source for
+  `redact_event_dict`. Its existing events/observability dependencies remain.
+- Regenerate `uv.lock` once in Task 5 and then require `uv lock --check`.
+
+Rebalance Task 6:
+
+- event-worker `main.py` remains because Task 6 adds Temporal interceptors to its existing
+  runtime;
+- remove event-worker settings/manifest from Task 6 `Files` and staging: their current
+  planned runtime-settings/redaction changes are now committed by Task 5, so no Task 6 delta
+  remains in either path;
+- retain the section 9.7 additions of agent/tool
+  `resources.py`, pass each process runtime to both
+  `create_engine(..., tracer=runtime.tracer)` and
+  `EventPublisher(..., tracer=runtime.tracer)`; and
+- extend Task 6's recursive wiring audit to check both long-lived database tracer and NATS publisher
+  tracer identity. It must preserve tool-worker's agent/model authority prohibitions.
+
+Task 11 retains the real connected trace across webhook producer, both consumers, normalized
+producer, Temporal, agent, tool, connector, and sandbox spans. It must also prove exported
+`nats_consumer_lag` has exactly the two canonical series and no workspace/subject/header
+label. These live NATS/OTLP assertions supplement, not replace, Task 5's deterministic tests.
+
+### 10.10 Use executable RED/GREEN and exact 15-path staging
+
+After the Task 2 carrier/registry corrections and Tasks 1-4, Task 5 RED is:
+
+```bash
+uv run pytest packages/events/tests/test_telemetry.py -q
+uv run pytest \
+  services/event_worker/tests/test_telemetry.py \
+  apps/api/tests/test_webhooks_unit.py -q
+```
+
+Expected RED names absent trace-aware helpers, explicit tracer/runtime wiring, lag sampler, or the
+new behavioral assertions. Missing fixtures/imports, an import cycle, `NameError`,
+collection/type errors, or an accidental `ObservabilityNotInitializedError` is invalid
+RED evidence.
+
+After implementation run:
+
+```bash
+uv lock
+uv lock --check
+uv run pytest \
+  packages/events/tests \
+  services/event_worker/tests \
+  apps/api/tests/test_webhooks_unit.py -q
+uv run pytest -q
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy
+```
+
+Root collection must preserve the standalone/live NATS test and existing API/agent/tool publisher
+regressions. Webhook dedupe/rollback and consumer settlement semantics remain authoritative.
+
+Replace Task 5 staging with:
+
+```bash
+set -euo pipefail
+task5_paths=(
+  apps/api/src/jhin_api/webhooks/router.py
+  apps/api/src/jhin_api/webhooks/service.py
+  apps/api/tests/test_webhooks_unit.py
+  packages/events/pyproject.toml
+  packages/events/src/jhin_events/consumer.py
+  packages/events/src/jhin_events/publisher.py
+  packages/events/src/jhin_events/telemetry.py
+  packages/events/tests/test_telemetry.py
+  services/event_worker/pyproject.toml
+  services/event_worker/src/jhin_event_worker/main.py
+  services/event_worker/src/jhin_event_worker/normalizer.py
+  services/event_worker/src/jhin_event_worker/processor.py
+  services/event_worker/src/jhin_event_worker/settings.py
+  services/event_worker/tests/test_telemetry.py
+  uv.lock
+)
+test -z "$(git diff --cached --name-only)"
+git status --short -- "${task5_paths[@]}"
+git diff --check -- "${task5_paths[@]}"
+git add -- "${task5_paths[@]}"
+expected_index="$(printf '%s\n' "${task5_paths[@]}" | LC_ALL=C sort)"
+actual_index="$(git diff --cached --name-only | LC_ALL=C sort)"
+test "$actual_index" = "$expected_index"
+git diff --cached --check -- "${task5_paths[@]}"
+git commit --only "${task5_paths[@]}" \
+  -m "feat(observability): propagate traces through NATS"
+test "$(git show -s --format=%s HEAD)" = \
+  "feat(observability): propagate traces through NATS"
+actual_commit_paths="$(git diff-tree --no-commit-id --name-only -r HEAD | LC_ALL=C sort)"
+test "$actual_commit_paths" = "$expected_index"
+test -z "$(git diff --cached --name-only)"
+```
+
+The revised Task 5 `Files` block and this array are exact mirrors. No additional Task 5
+path is authorized. If package-root exports are later desired,
+`jhin_events/__init__.py` must first be added to File Map/Files/staging in a reviewed plan
+amendment.
 
 ### Task 6: Propagate Context Through Temporal and Bootstrap Every Python Service
 
 **Files:**
-- Modify: `packages/observability/pyproject.toml`
-- Create: `packages/observability/src/jhin_observability/temporal.py`
-- Modify: `packages/observability/src/jhin_observability/__init__.py`
-- Modify: `packages/observability/src/jhin_observability/logging.py`
-- Create: `packages/observability/tests/test_temporal.py`
 - Modify: `apps/api/src/jhin_api/deps.py`
 - Modify: `apps/api/src/jhin_api/health/router.py`
 - Modify: `apps/api/src/jhin_api/health/service.py`
 - Modify: `apps/api/src/jhin_api/main.py`
-- Create: `apps/api/src/jhin_api/temporal.py`
-- Create: `apps/api/tests/test_temporal_provider.py`
-- Modify: `services/event_worker/pyproject.toml`
-- Modify: `services/agent_worker/src/jhin_agent_worker/settings.py`
-- Modify: `services/agent_worker/src/jhin_agent_worker/main.py`
-- Modify: `services/tool_worker/src/jhin_tool_worker/settings.py`
-- Modify: `services/tool_worker/src/jhin_tool_worker/main.py`
-- Modify: `services/tool_worker/pyproject.toml`
-- Modify: `services/tool_worker/tests/test_worker_registration.py`
-- Modify: `services/event_worker/src/jhin_event_worker/settings.py`
-- Modify: `services/event_worker/src/jhin_event_worker/main.py`
-- Modify: `services/workflow_worker/src/jhin_workflow_worker/settings.py`
-- Modify: `services/workflow_worker/src/jhin_workflow_worker/main.py`
-- Modify: `services/workflow_worker/pyproject.toml`
-- Create: `services/workflow_worker/tests/test_telemetry.py`
+- Modify: `apps/api/src/jhin_api/temporal.py`
+- Modify: `apps/api/tests/test_health.py`
+- Modify: `apps/api/tests/test_temporal_provider.py`
+- Modify: `packages/observability/pyproject.toml`
+- Modify: `packages/observability/src/jhin_observability/__init__.py`
+- Modify: `packages/observability/src/jhin_observability/logging.py`
+- Modify: `packages/observability/src/jhin_observability/temporal.py`
+- Modify: `packages/observability/tests/test_log_audit.py`
+- Modify: `packages/observability/tests/test_logging.py`
+- Modify: `packages/observability/tests/test_temporal.py`
 - Modify: `packages/workflows/pyproject.toml`
 - Modify: `packages/workflows/src/jhin_workflows/poller_health.py`
+- Modify: `packages/workflows/tests/test_phase10_history_replay.py`
 - Modify: `packages/workflows/tests/test_poller_health.py`
-- Modify: `services/sandbox_runner/src/jhin_sandbox_runner/settings.py`
-- Modify: `services/sandbox_runner/src/jhin_sandbox_runner/main.py`
 - Modify: `pyproject.toml`
-- Modify: `uv.lock`
+- Modify: `services/agent_worker/src/jhin_agent_worker/main.py`
+- Modify: `services/agent_worker/src/jhin_agent_worker/resources.py`
+- Modify: `services/agent_worker/src/jhin_agent_worker/settings.py`
+- Modify: `services/event_worker/src/jhin_event_worker/main.py`
+- Modify: `services/event_worker/tests/test_telemetry.py`
+- Modify: `services/sandbox_runner/src/jhin_sandbox_runner/main.py`
+- Modify: `services/sandbox_runner/src/jhin_sandbox_runner/settings.py`
+- Modify: `services/sandbox_runner/tests/test_api_auth.py`
+- Modify: `services/sandbox_runner/tests/test_telemetry.py`
+- Modify: `services/tool_worker/src/jhin_tool_worker/main.py`
+- Modify: `services/tool_worker/src/jhin_tool_worker/resources.py`
+- Modify: `services/tool_worker/src/jhin_tool_worker/settings.py`
+- Modify: `services/tool_worker/tests/test_advertised_tools.py`
+- Modify: `services/tool_worker/tests/test_worker_registration.py`
+- Modify: `services/workflow_worker/pyproject.toml`
+- Modify: `services/workflow_worker/src/jhin_workflow_worker/main.py`
+- Modify: `services/workflow_worker/src/jhin_workflow_worker/settings.py`
+- Modify: `services/workflow_worker/tests/test_telemetry.py`
 - Modify: `tests/test_worker_dependency_boundaries.py`
+- Modify: `uv.lock`
 
 **Interfaces:**
-- Consumes: `TOOL_TASK_QUEUE`, fixed activity names, Task 2 runtime, and Task 3 `temporal_activity_failures`.
-- Produces: `SafeTemporalTracingInterceptor`, `TemporalActivityMetricsInterceptor`, trace-aware Temporal clients/workers, and exactly one runtime per service.
+- Consumes the accepted Task 5 handoff and produces the exact Task 6 contract, subject, manifest, and gates below.
 
 - [ ] **Step 1: Write failing Temporal propagation/replay/failure-metric tests**
 
@@ -4974,36 +7011,535 @@ Expected: PASS; tool queue activity context is connected and workflow replay cre
 
 - [ ] **Step 8: Review and commit**
 
-```bash
-git diff --check
-git add pyproject.toml apps/api/src/jhin_api/deps.py \
-  apps/api/src/jhin_api/health/router.py apps/api/src/jhin_api/health/service.py \
-  apps/api/src/jhin_api/main.py apps/api/src/jhin_api/temporal.py \
-  apps/api/tests/test_temporal_provider.py packages/observability/pyproject.toml \
-  packages/observability/src/jhin_observability/__init__.py \
-  packages/observability/src/jhin_observability/logging.py \
-  packages/observability/src/jhin_observability/temporal.py \
+The task's sole staging and commit gate is the exact manifest-owned gate in the final executable contract below.
+
+#### Final executable contract for Task 6
+
+
+After applying the draft and the binding Task 1-5 corrections above, replace Task 6 from its
+`Files` block through its staging/commit block with the rulings in this section. The Task 6
+snippets are illustrative only where this section does not give an exact public signature,
+ownership rule, test assertion, path list, or command. Those exact requirements are binding.
+
+### 11.1 Write the complete test seams first and audit the architecture actually prescribed
+
+Before the first RED run, create every Task 6 test helper, fixture, and auditor used by that run,
+including the Temporal time-skipping environment, cross-queue probe, history capture/replay,
+two-attempt failure helper, in-memory span/metric accessors, and repository wiring audit. Test-only
+helpers are part of the test-first step, not deferred production implementation. A missing fixture,
+`NameError`, collection/type error, import cycle, strict-global runtime leak, or auditor that
+cannot recognize the prescribed helper calls is invalid RED evidence.
+
+Replace the direct-constructor text search with one import-aware semantic audit. It resolves
+qualified names through imports/aliases and enforces all of these exact sets:
+
+- `jhin_observability.connect_temporal_client` is called by exactly
+  `agent-worker`, `tool-worker`, `event-worker`, and `workflow-worker`.
+- `jhin_observability.build_temporal_worker` is called by exactly
+  `agent-worker`, `tool-worker`, and `workflow-worker`.
+- Direct `Client.connect` is allowed only in
+  `jhin_observability/temporal.py`, `jhin_api/temporal.py`, and
+  `jhin_workflows/poller_health.py`. Each allowed call forwards the exact list returned by
+  `temporal_client_interceptors(runtime)`. Health service and every other API/product module
+  contain no direct connect.
+- Direct `Worker` construction is allowed only inside
+  `jhin_observability.build_temporal_worker`. Each service call forwards, by identity, its local
+  initialized `runtime`, its canonical task-queue constant, and its exact workflow and activity
+  lists.
+- Production code constructs neither `SafeTemporalTracingInterceptor` nor
+  `TemporalActivityMetricsInterceptor` outside
+  `temporal_client_interceptors` and `temporal_worker_interceptors`.
+
+The audit must report the resolved helper owner, not a generic `package` label, and it must reject
+extra/missing services, a local alias that bypasses identity checks, ad-hoc interceptor lists,
+direct health connections, and an uninstrumented allowed direct connect.
+
+Rewrite agent/tool registration regressions to patch and capture the shared helper and existing
+retry seams. Assert exact runtime, task queue, workflow/activity-list, interceptor-list, and returned
+client/worker identity. Compare ordering with the real `connect_with_retry`,
+`resources_with_retry`, and `temporal_with_retry` control flow; do not search for nonexistent
+direct `Resources.create`, `ToolWorkerResources.create`, or `Worker(...)` calls in
+`main.py`.
+
+Update the predecessor bootstrap audit in
+`packages/observability/tests/test_log_audit.py` in the same test-first step:
+
+- exactly API, agent worker, tool worker, event worker, workflow worker, and sandbox runner use
+  `initialize_observability` before their first side effect/resource;
+- exactly the standalone rootless adapter calls `configure_json_logging`, and it has no
+  runtime/OTLP initialization; and
+- no ordinary service calls `configure_json_logging` or the removed compatibility alias.
+
+`packages/observability/tests/test_logging.py` exercises `configure_json_logging` directly and
+asserts `configure_logging` is no longer exported by `jhin_observability`. Preserve the Task 1
+rootless event/log-format behavior while removing that one-task alias.
+
+### 11.2 Audit only the deterministic workflow import closure
+
+Do not recursively classify every file below `packages/workflows/src` as replay-sensitive.
+Build the deterministic audit from the workflow types actually registered by the worker and walk
+only their workflow-side import closure: registered workflow modules, their shared workflow code,
+task-queue constants, and relevant package initializers. Explicitly exclude
+`poller_health.py` and activity-only implementations; those execute outside replay.
+
+Independently fail if any workflow definition or its replay-sensitive closure imports
+`jhin_observability`, OpenTelemetry, `random`, `time`, or a telemetry clock, or calls
+`datetime.now`. This exclusion does not relax the production wiring audit for the poller CLI.
+Run `packages/workflows/tests/test_phase10_history_replay.py` with the real production worker
+interceptor and the frozen Phase 9 history. Normal execution and replay emit no workflow
+application span and replay emits no duplicate span.
+
+### 11.3 Reserve, bound, and sanitize Temporal's `_tracer-data` carrier
+
+Keep `TraceContextTextMapPropagator`, but do not rely on the SDK 1.31 default header-copy
+behavior. Define one shared
+`MAX_TEMPORAL_TRACER_DATA_BYTES = 1_024` limit, measured as
+`len(payload.SerializeToString())` for the reserved Temporal protobuf `Payload`. Injection and
+extraction use the SDK data-converter seam; no code hand-builds undocumented protobuf bytes.
+
+Every client, workflow-outbound, activity-inbound, and Nexus carrier follows the same rules:
+
+1. Shallow-copy the caller mapping. Never mutate the caller mapping or any unrelated payload.
+2. Remove the copied mapping's existing `_tracer-data` before attempting injection.
+3. If the current span context is absent or invalid, return the copy without the reserved header;
+   never forward stale trace data.
+4. Serialize only a canonical `traceparent` plus optional `tracestate`. Reject/drop every other
+   carrier key, including `baggage`.
+5. Before decoding, require the reserved value to be the expected Temporal `Payload`, require its
+   serialized size to be at most 1,024 bytes, and contain decoder/type errors locally. After
+   decoding, require a string-to-string mapping with exactly `traceparent` and optional
+   `tracestate`, then accept only context that the trace-context propagator validates.
+6. Missing, wrong-type, oversized, malformed, decoder-hostile, unknown-key, or invalid trace data
+   yields an empty/root parent and never prevents authoritative Temporal work.
+
+Unrelated Temporal application headers remain byte-for-byte authoritative and retain their key,
+value object, and serialized payload. Privacy tests inspect the decoded reserved telemetry payload
+separately; they must not demand removal of legitimate business headers.
+
+Add regressions for valid `traceparent` plus `tracestate`, baggage removal, invalid/no-current
+span, stale reserved data, missing and wrong-type values, the 1,024-byte boundary and one byte over,
+malformed/decoder-hostile values, invalid trace syntax, unknown carrier keys, caller immutability,
+unrelated-header byte equality, and the complete serialized reserved contents on all four carrier
+paths.
+
+### 11.4 Make tracing, context cleanup, and failure metrics strictly fail-open
+
+The tracing wrapper is a diagnostic shell around exactly one downstream invocation:
+
+- an ordinary tracer/context-manager/start/inject failure calls downstream exactly once without
+  instrumentation;
+- a successful downstream result is returned unchanged even if attribute, status, span-end, or
+  detach telemetry fails;
+- an original downstream exception is re-raised as the exact same exception with its original
+  traceback even if error classification, attribute/status recording, span end, metric lookup, or
+  detach fails;
+- `asyncio.CancelledError` and other cancellation remain cancellation, are not translated, and do
+  not increment `temporal_activity_failures`; and
+- attach/detach is tracked per invocation and detach is guarded/best-effort. Never detach an absent,
+  foreign, already-detached, or mismatched-async-context token.
+
+`normalize_temporal_attributes` accepts `Attributes | None` and treats `None` as empty before
+any `.get`. The activity-metrics interceptor contains counter lookup, failure classification, and
+`add()`; a hostile metric backend cannot replace the activity result or exact original failure.
+An attempt that reaches an authoritative ordinary activity exception contributes one failure
+attempt when metrics are healthy. A telemetry setup failure does not duplicate the activity call.
+
+Use hostile tracer, context manager, propagator, span, detach, counter lookup, classifier, and
+counter-add doubles. Prove exact invocation count/result/exception identity and no context leak for
+ordinary success, ordinary failure, cancellation, telemetry setup failure, and telemetry teardown
+failure.
+
+### 11.5 Pin and test the exact Temporal 1.31 private compatibility surface
+
+Task 6 deliberately keeps the SDK-private tracing hooks, so
+`packages/observability/pyproject.toml` depends on exactly
+`temporalio==1.31.0`, not `>=1.31,<1.32`. Regenerate `uv.lock` once, assert both the lock and
+runtime import version are exactly 1.31.0, and run `uv lock --check`.
+
+Keep these public contracts exact:
+
+~~~python
+TemporalInterceptorRole = Literal["client", "worker"]
+
+class SafeTemporalTracingInterceptor(TracingInterceptor):
+    def __init__(self, tracer: Tracer, *, role: TemporalInterceptorRole) -> None: ...
+
+class TemporalActivityMetricsInterceptor(temporalio.worker.Interceptor):
+    def __init__(self, metrics: JhinMetrics, *, task_queue: str) -> None: ...
+
+def temporal_client_interceptors(
+    runtime: ObservabilityRuntime,
+) -> list[temporalio.client.Interceptor]: ...
+
+def temporal_worker_interceptors(
+    runtime: ObservabilityRuntime,
+    *,
+    task_queue: str,
+) -> list[temporalio.worker.Interceptor]: ...
+
+async def connect_temporal_client(
+    settings: ObservabilityTemporalSettings,
+    runtime: ObservabilityRuntime,
+) -> Client: ...
+
+def build_temporal_worker(
+    client: Client,
+    *,
+    runtime: ObservabilityRuntime,
+    task_queue: str,
+    workflows: Sequence[type[Any]],
+    activities: Sequence[Callable[..., Any]],
+) -> Worker: ...
+~~~
+
+Validate `role` at runtime and reject anything except `client` or `worker` with a fixed,
+non-input-bearing `ValueError`. Use the SDK-compatible callable type accepted by the resolved
+`Worker` constructor if its 1.31 annotation is narrower than the shorthand above; do not use bare
+`Sequence[type]` or weaken strict typing with unbounded ignores.
+
+Export the two interceptors, two list builders, `connect_temporal_client`,
+`build_temporal_worker`, and their public protocol/type names from
+`jhin_observability.__init__`. Keep the Task 2 runtime/config public names intact.
+
+Compatibility tests inspect the actual 1.31 objects, not AST import spelling. Assert the resolved
+signatures/fields of `TracingInterceptor.__init__`, its overridden
+`_start_as_current_span`, `_CompletedWorkflowSpanParams`, the workflow/activity/Nexus
+interceptor inputs used here, worker interceptor inheritance and prepend/order behavior, and
+`Replayer(..., interceptors=...)`. Exercise start-workflow, signal, activity, and synthetic
+Nexus paths with the exact production classes.
+
+### 11.6 Preserve signal/update context without creating workflow spans
+
+Choose the propagation contract, not the narrower terminal-signal alternative. Under SDK 1.31,
+workflow start context comes from `params.context`, while signal/update incoming context is
+carried by `params.link_context`. Validate that incoming reserved trace-only carrier with section
+11.3's safe extractor and run only the signal/update handler's outbound scheduling work under that
+context. Emit no workflow span and make no OTel/time/random call from workflow code.
+
+An activity scheduled by a signal/update is parented to that valid incoming signal/update trace,
+not the original workflow-start trace. A missing/malformed/oversized signal carrier schedules the
+activity from a safe root and still performs work. Add an actual signal-to-activity trace-ID
+regression, a distinct-start-versus-signal trace regression, malformed-signal safe-root coverage,
+and replay proof with zero workflow spans.
+
+### 11.7 Make all six ordinary service lifecycles transactional
+
+Each ordinary service owns exactly one runtime named with the exact closed service identity:
+`api`, `agent-worker`, `tool-worker`, `event-worker`, `workflow-worker`, and
+`sandbox-runner`. Establish the enclosing cleanup region immediately after the exact runtime is
+created, before provider/resource/client/manager/worker construction. Nested `finally` blocks
+attempt every later cleanup and the bounded exact runtime shutdown even when an earlier
+construction, run, cancellation, or cleanup step fails.
+
+Every service `Settings` continues to inherit Task 2's `ObservabilitySettings`; no Task 6
+service-local environment field or normalizer is allowed. Construct settings first, then initialize
+the runtime before the first external side effect with
+`settings.observability_config(..., extra_log_processors=(redact_event_dict,))` and the exact
+package version: `jhin-api`, `jhin-agent-worker`, `jhin-tool-worker`,
+`jhin-event-worker`, `jhin-workflow-worker`, or `jhin-sandbox-runner` as applicable.
+Preserve Task 1/2's closed `dev|test|staging|production` environment and Task 1's production
+Compose normalization. Every owned runtime shutdown uses the bounded
+`timeout_millis=5_000` call. Rootless remains the sole JSON-only process and creates no runtime.
+
+For API, retain every Task 4 invariant: pure-ASGI middleware; the collapsed `"/api/:path*"`
+registry; `service_version("jhin-api")`; the Phase 2 lifespan harness; runtime initialization as
+the first lifespan side effect; runtime stored in app state; and cleanup order NATS, engine,
+`api.stopped`, runtime. Move creation/storage of
+`TemporalClientProvider(settings, runtime)` inside the cleanup `try` immediately after runtime
+creation; assignment of `app.state.observability` is inside that same `try`. Provider
+construction or any app-state assignment failure must still reach runtime shutdown. It is not
+authority to move secret/engine construction or replace their exact runtime tracer identity.
+
+For agent, tool, and workflow workers:
+
+- initialize the exact runtime before all resources;
+- put client/resource/heartbeat/worker construction inside the cleanup region;
+- on exit or startup failure, stop/cancel and await every started worker/heartbeat task, close
+  client-owned resources, then shut down the exact runtime;
+- keep attempting later cleanup when worker/heartbeat/resource cleanup raises; and
+- prove ordinary run, construction failure at every acquisition boundary, cancellation, and
+  cleanup failure leave no task/resource/runtime survivor.
+
+`Resources.create(..., runtime=runtime)` and
+`ToolWorkerResources.create(..., runtime=runtime)` receive the exact process runtime. Agent
+`Resources.create` becomes transactional: if any step after engine acquisition fails, dispose
+the engine; if NATS or a publisher was acquired, close it before the engine, even on retry.
+Tool resources retain their existing partial-cleanup guarantees while adding exact runtime
+identity. Both engines receive `tracer=runtime.tracer`; both product
+`EventPublisher` instances receive that same tracer. Recursively prove the engine, publisher,
+forwarding constructor, and returned resource graph all retain the exact tracer identity.
+
+Workflow worker establishes cleanup before starting the heartbeat or constructing the worker.
+Worker/interceptor construction failure cancels and awaits an already-started heartbeat, then
+shuts the runtime. Normal and exceptional teardown cancel **and await** heartbeat/worker tasks;
+there is no fire-and-forget cancellation or unretrieved exception.
+
+Task 5 remains sole owner of event-worker runtime initialization, settings inheritance, redactor,
+engine/NATS tracers, lag metrics/task, and cleanup. Task 6 passes that one exact existing runtime
+through `temporal_with_retry` into `connect_temporal_client`; it creates no second runtime and
+does not re-own the event manifest or settings. Tests assert one initialization, runtime identity,
+retry identity, and Task 5's consumer/lag teardown order.
+
+### 11.8 Make sandbox app ownership explicit and leak-free
+
+Keep the public factory signature:
+
+~~~python
+def create_app(
+    settings: Settings | None = None,
+    *,
+    runtime: ObservabilityRuntime | None = None,
+) -> FastAPI: ...
+~~~
+
+The factory records whether it owns the runtime. If it initializes one, every
+`JobManager`/app/route-install construction failure shuts that runtime immediately, and an
+entered lifespan discharges ownership exactly once after manager cleanup. If a caller injects a
+runtime, the app never shuts it down on success or failure. There is no module/package-global
+runtime owner.
+
+The CLI owns one runtime around the entire `create_app(settings, runtime=runtime)` plus
+`uvicorn.run(..., log_config=None)` call and shuts it in `finally`, including factory or server
+failure. Existing no-lifespan auth tests create a fresh function-scoped caller-owned runtime,
+inject it, and shut it in fixture `finally`; they do not accidentally test an app-owned runtime
+without entering lifespan.
+
+In `services/sandbox_runner/tests/test_api_auth.py` and `test_telemetry.py`, cover factory
+construction/route-install failure, manager-start failure, manager-close failure, normal
+app-owned lifespan, injected ownership, CLI factory/Uvicorn failure, unused/no-lifespan injected
+construction, exact-once shutdown, and absence of a reusable global owner after every path.
+
+### 11.9 Keep one API provider and close Temporal health details
+
+Preserve the protected-health handoff exactly:
+
+~~~python
+class TemporalClientProvider:
+    def __init__(
+        self,
+        settings: Settings,
+        observability: ObservabilityRuntime,
+    ) -> None: ...
+
+    async def get(self) -> TemporalClient: ...
+~~~
+
+`jhin_api.temporal` owns this provider and the business dependency seam. Its lock produces one
+cached interceptor-aware client under concurrency. `health.service` owns
+`TemporalHealthUnavailable` and `check_temporal(provider)`; `health.router` reads the one
+`app.state.temporal_provider`. Do not introduce a temporal/health circular import.
+
+Add an app-level test that invokes the real `jhin_api.deps.TemporalDep`, readiness route, and the
+later protected-health dependency seam and proves all three resolve the exact app-state provider
+and one cached client. Calling `provider.get()` twice directly is not sufficient.
+
+`check_temporal` re-raises cancellation but translates connect/RPC/check failures into the fixed
+`TemporalHealthUnavailable` before generic `_timed` can serialize `str(exc)`, or otherwise
+returns the same closed fixed detail. A unique address/RPC/message canary is absent from the
+readiness body, structured JSON logs, span names, attributes, events, and status descriptions.
+Keep the deterministic Task 4 lifespan fixtures and later protected-health provider access.
+
+### 11.10 Correct dependencies, File Map, and cross-task handoffs
+
+After Tasks 1-5, Task 6 dependency ownership is exactly:
+
+- `packages/observability/pyproject.toml`: `temporalio==1.31.0`;
+- `packages/workflows/pyproject.toml`: direct `jhin-observability` dependency and workspace
+  source for the process-local poller CLI;
+- `services/workflow_worker/pyproject.toml`: direct `jhin-secrets` dependency and workspace
+  source for its redaction processor;
+- `uv.lock`: exact Temporal 1.31.0 after one regeneration and `uv lock --check`;
+- no Task 6 tool-worker manifest delta because Task 1 already owns observability there; and
+- no Task 6 event-worker manifest/settings delta because Task 5 already owns secrets, settings,
+  redaction, runtime, tracer/metrics, and lag lifecycle there.
+
+`tests/test_worker_dependency_boundaries.py` preserves Task 1's positive
+tool-observability dependency and negative tool agent/model dependency/import assertions. Task 6
+adds only the workflows-observability dependency assertion.
+
+Keep the poller CLI's public contract exact:
+
+~~~python
+async def queue_has_workflow_poller(
+    address: str,
+    namespace: str,
+    queue: str,
+    *,
+    runtime: ObservabilityRuntime | None = None,
+) -> bool: ...
+~~~
+
+An injected runtime is forwarded by identity and never shut down by the helper. Without one, the
+helper initializes an owned `temporal-poller-check` runtime with
+`service_version("jhin-workflows")` and
+`normalize_environment(os.environ.get("APP_ENV", "production"))`, establishes cleanup before
+connecting, forwards the exact `temporal_client_interceptors(active_runtime)` list to its one
+allowed direct `Client.connect`, and always shuts the owned runtime. Preserve its existing public
+arguments, request semantics, live-poller test, injected-list identity regression, and owned
+runtime regression that leaves strict `get_runtime()` uninitialized afterward.
+
+In root `pyproject.toml`, retain prior test roots and include
+`packages/observability/tests`, `services/tool_worker/tests`, and
+`services/workflow_worker/tests` exactly once so root collection exercises the shared boundaries.
+
+Amend the global File Map for these previously absent affected paths:
+
+~~~text
+apps/api/tests/test_health.py
+services/tool_worker/tests/test_advertised_tools.py
+packages/workflows/tests/test_phase10_history_replay.py
+services/sandbox_runner/tests/test_api_auth.py
+~~~
+
+The first two remain owned by the corrected Task 4 and Task 1 descriptions respectively and are
+also affected Task 6 regressions. Task 6 preserves the Task 4 API lifecycle/SQL/middleware
+handoff, Task 5's event runtime/NATS lifecycle, and the later protected-health provider contract.
+Task 11 must exercise a real connected trace through Temporal into agent/tool work and must retain
+the privacy, normalized-name, and no-workflow-span assertions here.
+
+### 11.11 Own lifecycle-scoped tests and run broad gates
+
+`packages/observability/tests/test_temporal.py` defines function-scoped
+`TracerProvider`/`SimpleSpanProcessor`/`InMemorySpanExporter` and
+`MeterProvider`/reader/`JhinMetrics` fixtures. Every fixture shuts down what it owns in
+`finally`, passes the exact tracer/metrics through public seams, and never relies on a global OTel
+provider, Task 2's private reset, test ordering, or an unconfigured no-op runtime.
+
+The test-first suite covers all of the following before production rewiring:
+
+- API/client -> workflow -> agent activity -> tool activity trace continuity;
+- zero workflow application spans in normal execution and replay;
+- exact registered span/activity names plus complete attribute/event/status/carrier privacy scans;
+- exactly two attempt-level failure increments for a real two-attempt activity retry;
+- exact client/worker interceptor list order, role, tracer/metrics identity, and closed task queue;
+- invalid, missing, stale, malformed, oversized, baggage-bearing, and detach-hostile carriers;
+- signal/update-to-activity trace propagation and malformed safe-root behavior;
+- hostile tracing/propagation/metric implementations preserving exact business behavior;
+- frozen Phase 9 replay with the production worker interceptor;
+- deterministic import-closure enforcement;
+- semantic helper wiring, recursive engine/publisher tracer identity, provider identity/privacy;
+- all six service startup/cleanup/cancellation paths and the one Task 5 event runtime; and
+- the predecessor log-audit/rootless and tool registration/advertisement regressions.
+
+After the corrected Tasks 1-5 commits exist and all helpers/fixtures/auditors above have been
+written, Task 6 RED is:
+
+~~~bash
+uv run pytest \
   packages/observability/tests/test_temporal.py \
-  services/agent_worker/src/jhin_agent_worker/main.py \
-  services/agent_worker/src/jhin_agent_worker/settings.py \
-  services/tool_worker/src/jhin_tool_worker/main.py \
-  services/tool_worker/src/jhin_tool_worker/settings.py \
-  services/tool_worker/pyproject.toml services/tool_worker/tests/test_worker_registration.py \
-  services/event_worker/pyproject.toml \
-  services/event_worker/src/jhin_event_worker/main.py \
-  services/event_worker/src/jhin_event_worker/settings.py \
-  services/workflow_worker/src/jhin_workflow_worker/main.py \
-  services/workflow_worker/src/jhin_workflow_worker/settings.py \
-  services/workflow_worker/tests/test_telemetry.py services/workflow_worker/pyproject.toml \
-  packages/workflows/pyproject.toml \
-  packages/workflows/src/jhin_workflows/poller_health.py \
+  packages/observability/tests/test_log_audit.py \
+  packages/observability/tests/test_logging.py \
+  apps/api/tests/test_temporal_provider.py \
+  apps/api/tests/test_health.py \
   packages/workflows/tests/test_poller_health.py \
-  services/sandbox_runner/src/jhin_sandbox_runner/main.py \
-  services/sandbox_runner/src/jhin_sandbox_runner/settings.py \
-  tests/test_worker_dependency_boundaries.py uv.lock
-git diff --cached --name-only
-git commit -m "feat(observability): trace Temporal service boundaries"
-```
+  packages/workflows/tests/test_phase10_history_replay.py \
+  services/workflow_worker/tests/test_telemetry.py \
+  services/tool_worker/tests/test_worker_registration.py \
+  services/tool_worker/tests/test_advertised_tools.py \
+  services/event_worker/tests/test_telemetry.py \
+  services/sandbox_runner/tests/test_telemetry.py \
+  services/sandbox_runner/tests/test_api_auth.py \
+  tests/test_worker_dependency_boundaries.py -q
+~~~
+
+Expected RED names absent Temporal interfaces/runtime wiring or failing behavioral assertions.
+Undefined helpers/fixtures, unrelated collection/type failures, strict-global leakage, or a
+helper/auditor contradiction is invalid RED.
+
+After implementation run:
+
+~~~bash
+uv lock
+uv lock --check
+uv run pytest \
+  packages/observability/tests \
+  apps/api/tests \
+  packages/workflows/tests \
+  services/agent_worker/tests \
+  services/tool_worker/tests \
+  services/event_worker/tests \
+  services/workflow_worker/tests \
+  services/sandbox_runner/tests \
+  tests/test_worker_dependency_boundaries.py -q
+uv run pytest -q
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy
+~~~
+
+All commands pass. The affected suite is intentionally broad because bootstrap, provider,
+interceptor, and service-lifecycle helpers are shared process boundaries.
+
+### 11.12 Make Task 6's 39 paths and committed tree exact
+
+Replace Task 6 `Files` and staging with this exact mirrored array. Remove
+`services/tool_worker/pyproject.toml`, `services/event_worker/pyproject.toml`, and
+`services/event_worker/src/jhin_event_worker/settings.py`; they have no post-Task-1/5 delta.
+
+~~~bash
+set -euo pipefail
+task6_paths=(
+  apps/api/src/jhin_api/deps.py
+  apps/api/src/jhin_api/health/router.py
+  apps/api/src/jhin_api/health/service.py
+  apps/api/src/jhin_api/main.py
+  apps/api/src/jhin_api/temporal.py
+  apps/api/tests/test_health.py
+  apps/api/tests/test_temporal_provider.py
+  packages/observability/pyproject.toml
+  packages/observability/src/jhin_observability/__init__.py
+  packages/observability/src/jhin_observability/logging.py
+  packages/observability/src/jhin_observability/temporal.py
+  packages/observability/tests/test_log_audit.py
+  packages/observability/tests/test_logging.py
+  packages/observability/tests/test_temporal.py
+  packages/workflows/pyproject.toml
+  packages/workflows/src/jhin_workflows/poller_health.py
+  packages/workflows/tests/test_phase10_history_replay.py
+  packages/workflows/tests/test_poller_health.py
+  pyproject.toml
+  services/agent_worker/src/jhin_agent_worker/main.py
+  services/agent_worker/src/jhin_agent_worker/resources.py
+  services/agent_worker/src/jhin_agent_worker/settings.py
+  services/event_worker/src/jhin_event_worker/main.py
+  services/event_worker/tests/test_telemetry.py
+  services/sandbox_runner/src/jhin_sandbox_runner/main.py
+  services/sandbox_runner/src/jhin_sandbox_runner/settings.py
+  services/sandbox_runner/tests/test_api_auth.py
+  services/sandbox_runner/tests/test_telemetry.py
+  services/tool_worker/src/jhin_tool_worker/main.py
+  services/tool_worker/src/jhin_tool_worker/resources.py
+  services/tool_worker/src/jhin_tool_worker/settings.py
+  services/tool_worker/tests/test_advertised_tools.py
+  services/tool_worker/tests/test_worker_registration.py
+  services/workflow_worker/pyproject.toml
+  services/workflow_worker/src/jhin_workflow_worker/main.py
+  services/workflow_worker/src/jhin_workflow_worker/settings.py
+  services/workflow_worker/tests/test_telemetry.py
+  tests/test_worker_dependency_boundaries.py
+  uv.lock
+)
+test -z "$(git diff --cached --name-only)"
+git status --short -- "${task6_paths[@]}"
+git diff --check -- "${task6_paths[@]}"
+git add -- "${task6_paths[@]}"
+expected_index="$(printf '%s\n' "${task6_paths[@]}" | LC_ALL=C sort)"
+actual_index="$(git diff --cached --name-only | LC_ALL=C sort)"
+test "$actual_index" = "$expected_index"
+git diff --cached --check -- "${task6_paths[@]}"
+git commit --only "${task6_paths[@]}" \
+  -m "feat(observability): trace Temporal service boundaries"
+test "$(git show -s --format=%s HEAD)" = \
+  "feat(observability): trace Temporal service boundaries"
+actual_commit_paths="$(git diff-tree --no-commit-id --name-only -r HEAD | LC_ALL=C sort)"
+test "$actual_commit_paths" = "$expected_index"
+test -z "$(git diff --cached --name-only)"
+~~~
+
+The Task 6 `Files` block and array are exact mirrors. No additional Task 6 path is authorized.
+The global index-only exception still applies: pre-existing unstaged work outside these 39 paths
+may remain, but any pre-staged path, unexpected staged path, missing expected path, path outside
+`Files`, commit-tree mismatch, or non-empty post-commit index fails closed.
 
 ### Task 7: Instrument Agent, Model, Tool, and Trigger Commit Boundaries
 
@@ -5011,28 +7547,38 @@ git commit -m "feat(observability): trace Temporal service boundaries"
 - Modify: `apps/api/src/jhin_api/deps.py`
 - Modify: `apps/api/src/jhin_api/models/router.py`
 - Modify: `apps/api/src/jhin_api/models/service.py`
-- Create: `apps/api/tests/test_model_telemetry.py`
+- Modify: `apps/api/tests/test_model_telemetry.py`
+- Modify: `apps/api/tests/test_webhooks_unit.py`
 - Modify: `packages/models/pyproject.toml`
-- Create: `packages/models/src/jhin_models/telemetry.py`
 - Modify: `packages/models/src/jhin_models/factory.py`
-- Create: `packages/models/tests/test_telemetry.py`
+- Modify: `packages/models/src/jhin_models/telemetry.py`
+- Modify: `packages/models/tests/test_factory.py`
+- Modify: `packages/models/tests/test_telemetry.py`
 - Modify: `packages/tools/pyproject.toml`
-- Create: `packages/tools/src/jhin_tools/telemetry.py`
-- Create: `packages/tools/tests/test_telemetry.py`
-- Modify: `services/agent_worker/src/jhin_agent_worker/reasoning.py`
-- Modify: `services/agent_worker/src/jhin_agent_worker/projections.py`
+- Modify: `packages/tools/src/jhin_tools/telemetry.py`
+- Modify: `packages/tools/tests/test_telemetry.py`
 - Modify: `services/agent_worker/src/jhin_agent_worker/activities.py`
-- Create: `services/agent_worker/tests/test_telemetry.py`
-- Modify: `services/tool_worker/src/jhin_tool_worker/activities.py`
-- Create: `services/tool_worker/tests/test_telemetry.py`
-- Modify: `services/event_worker/src/jhin_event_worker/matcher.py`
+- Modify: `services/agent_worker/src/jhin_agent_worker/projections.py`
+- Modify: `services/agent_worker/src/jhin_agent_worker/reasoning.py`
+- Modify: `services/agent_worker/tests/test_delegation_activities.py`
+- Modify: `services/agent_worker/tests/test_phase9_invocation_activity.py`
+- Modify: `services/agent_worker/tests/test_reasoning_manifest.py`
+- Modify: `services/agent_worker/tests/test_step_projection.py`
+- Modify: `services/agent_worker/tests/test_telemetry.py`
+- Modify: `services/agent_worker/tests/test_upgrade_crash_barriers.py`
 - Modify: `services/event_worker/src/jhin_event_worker/main.py`
+- Modify: `services/event_worker/src/jhin_event_worker/matcher.py`
+- Modify: `services/event_worker/tests/test_matcher.py`
 - Modify: `services/event_worker/tests/test_telemetry.py`
+- Modify: `services/tool_worker/src/jhin_tool_worker/activities.py`
+- Modify: `services/tool_worker/tests/test_advertised_tools.py`
+- Modify: `services/tool_worker/tests/test_bound_approval.py`
+- Modify: `services/tool_worker/tests/test_bound_tool_execution.py`
+- Modify: `services/tool_worker/tests/test_telemetry.py`
 - Modify: `uv.lock`
 
 **Interfaces:**
-- Consumes: Task 3 metric handles, Task 6 fixed activity names, Phase 10 sub-project-1 bound-manifest/tool outcome contracts, persisted `AgentRun` timestamps/totals, `GatewayOutcome.replayed`, and durable `TriggerInvocation` rows.
-- Produces: exact run/model/tool/trigger spans and metrics at the authoritative transition points.
+- Consumes the accepted Task 6 handoff and produces the exact Task 7 contract, subject, manifest, and gates below.
 
 - [ ] **Step 1: Write failing provider-attempt/body-exclusion tests**
 
@@ -5605,55 +8151,546 @@ Expected: PASS; repeated activity execution reuses durable results without dupli
 
 - [ ] **Step 11: Review and commit**
 
-```bash
-git diff --check
-git add apps/api/src/jhin_api/deps.py apps/api/src/jhin_api/models/router.py \
-  apps/api/src/jhin_api/models/service.py apps/api/tests/test_model_telemetry.py \
-  packages/models/pyproject.toml packages/models/src/jhin_models/factory.py \
-  packages/models/src/jhin_models/telemetry.py packages/models/tests/test_telemetry.py \
-  packages/tools/pyproject.toml packages/tools/src/jhin_tools/telemetry.py \
-  packages/tools/tests/test_telemetry.py \
-  services/agent_worker/src/jhin_agent_worker/reasoning.py \
-  services/agent_worker/src/jhin_agent_worker/projections.py \
-  services/agent_worker/src/jhin_agent_worker/activities.py \
-  services/agent_worker/tests/test_telemetry.py \
-  services/tool_worker/src/jhin_tool_worker/activities.py \
-  services/tool_worker/tests/test_telemetry.py \
-  services/event_worker/src/jhin_event_worker/matcher.py \
-  services/event_worker/src/jhin_event_worker/main.py \
-  services/event_worker/tests/test_telemetry.py uv.lock
-git diff --cached --name-only
-git commit -m "feat(observability): record committed agent and tool metrics"
-```
+The task's sole staging and commit gate is the exact manifest-owned gate in the final executable contract below.
+
+#### Final executable contract for Task 7
+
+
+After applying the draft and corrected Tasks 1-6, replace Task 7 from its `Files` block through
+its staging/commit block with this section. Task 7 consumes the exact predecessor-owned runtimes
+and durable transactions. It may add diagnostics around those authorities, but it may not
+rediscover a runtime, weaken an existing product contract, or turn a diagnostic failure into a
+product failure.
+
+### 12.1 Define every lifecycle-owned test seam before RED
+
+Before any Task 7 RED command, define every helper and fixture named by that command in its owning
+test file:
+
+- `packages/models/tests/test_telemetry.py` owns concrete `metrics`, `spans`, `tracer`,
+  `metric_sum`, complete-export serialization, fake model clients/iterators, and model-request
+  builders.
+- `apps/api/tests/test_model_telemetry.py` owns its real app, authentication/database/crypto
+  overrides, and admin HTTP client; it does not rely on Task 4's file-local fixtures.
+- `services/agent_worker/tests/test_telemetry.py` owns reasoning/projection objects, session
+  factory, complete bound-manifest rows, span/metric/histogram readers, committed-step inputs, and
+  finalization parameters.
+- package/tool-worker telemetry tests own activity/resource/catalog/bound-call, replay,
+  execution-unknown, metric, span, and complete-export fixtures.
+- event-worker telemetry/matcher tests own the database, matching trigger rows, app-runtime
+  metrics/tracer, one identity-preserving fake Temporal client, post-commit barrier, exporter, and
+  safe serialization helpers.
+
+Each span-recording file owns one function-scoped
+`TracerProvider` + `SimpleSpanProcessor` + `InMemorySpanExporter`. Each metric-recording file
+owns one function-scoped `MeterProvider` + `InMemoryMetricReader` + Task 3
+`JhinMetrics`. Teardown is in `finally`, closes providers/readers/runtimes/iterators it owns,
+and proves there is no surviving current context, provider, task, or runtime. Tests may not import
+a sibling tree's package-local conftest, replace a process-global OTel provider, depend on test
+order, or call strict `get_runtime()` without owning initialization.
+
+The API regression constructs the real Task 4 app with deterministic exporter-endpoint-absent
+settings, enters `app.router.lifespan_context(app)`, then enters its HTTP client inside that
+lifespan. Override only the route's authentication, database, and crypto seams. Invoke the real
+provider-verification route and prove its dependency passes the exact
+`app.state.observability.metrics` and `.tracer`; direct route-function invocation is
+insufficient. Lifespan exit must detach and shut down that exact app runtime.
+
+Expected RED is an absent production wrapper/runtime binding/committed-transition helper,
+reconciliation gap, or failing behavioral/privacy assertion. `NameError`, missing fixture,
+abstract-class construction, import/collection/type error, global runtime/provider leakage, or an
+undefined auditor is invalid RED.
+
+### 12.2 Implement the complete `ModelClient` protocol behind exactly one wrapper
+
+`InstrumentedModelClient` must be concrete against the real abstract base:
+
+~~~python
+class InstrumentedModelClient(ModelClient):
+    async def generate(self, request: ModelRequest) -> ModelResponse: ...
+    def stream(self, request: ModelRequest) -> AsyncIterator[str]: ...
+    async def verify(self) -> str: ...
+    async def close(self) -> None: ...
+~~~
+
+Use these exact behavioral contracts:
+
+1. `generate` and `verify` invoke the wrapped method exactly once. After the attempt begins,
+   normal return records one `ok` provider attempt and returns the exact object/value. Ordinary
+   failure records one `failed` attempt and re-raises the exact exception with its traceback.
+   Cancellation records only the closed `cancelled` outcome and remains the same cancellation.
+2. `stream` remains a synchronous `def` returning one internal async generator. Creating but
+   never iterating it creates neither wrapped iterator, span, nor metric. Span/attempt ownership
+   begins on first iteration, stays current across every yielded chunk, and never buffers,
+   inspects, joins, or re-traverses chunks. Normal exhaustion records one `ok`; ordinary iterator
+   failure records one `failed`; early `aclose`/`GeneratorExit` and cancellation record one
+   `cancelled`. Every started path closes the wrapped iterator exactly once in `finally`.
+3. `close` delegates exactly once without telemetry and preserves the wrapped close result,
+   cancellation, and exception exactly.
+4. `KeyboardInterrupt` and `SystemExit` are never converted to model failures. A tracer,
+   span, normalizer, or metric diagnostic failure cannot mask a result or the original
+   exception/cancellation. If wrapped-iterator cleanup is the only product failure, propagate it
+   exactly; if work is already unwinding an exception/cancellation, cleanup may not replace that
+   original authority.
+
+Tests cover generate success/failure/cancellation; verify success/failure/cancellation; stream
+full exhaustion, ordinary failure, early close, cancellation, never-consumed behavior, current
+context during yields, and exact wrapped-iterator cleanup; plus close success/failure/cancellation.
+Complete span, resource, event, status, and metric serialization must exclude prompt, completion,
+every chunk, model name, tool schema/call/arguments, request ID, endpoint/base URL, provider body,
+response metadata, and exception canaries.
+
+`build_model_client(..., metrics: JhinMetrics | None = None, tracer: Tracer | None = None)`
+selects the same raw adapter as before and always returns exactly one
+`InstrumentedModelClient`, including the explicit package-only no-op default. `None` resolves
+only to `noop_metrics()`/`noop_tracer()`; it never reads global runtime state or constructs a
+provider/exporter. Every production caller supplies both exact handles.
+
+Update `packages/models/tests/test_factory.py`: assert the correct one of all five raw adapters
+is behind exactly one wrapper, package defaults are explicit no-op, no nested wrapper exists, and
+`close` delegates. Remove exact-type assertions that require the raw adapter itself to be the
+factory return.
+
+`packages/models/pyproject.toml` declares both the `jhin-observability` workspace dependency
+and direct `opentelemetry-api>=1.38,<2` dependency used by production `Tracer`/`SpanKind`
+imports. A transitive OTel import is not acceptable.
+
+### 12.3 Bind every production handle to the predecessor-owned runtime
+
+API model verification obtains only `request.app.state.observability` through the one
+`ObservabilityRuntimeDep`; it never calls `get_runtime()`. Preserve
+`get_observability_runtime(request) -> ObservabilityRuntime` as the app-state validation seam.
+Thread `runtime.metrics` and `runtime.tracer` through the real route and service helper into
+`build_model_client` while leaving provider lookup/decryption, audit, commit, and returned
+verification detail unchanged.
+
+In the existing `service.verify_provider` signature, insert
+`metrics: JhinMetrics, tracer: Tracer` immediately after `provider_id`. Keep request/audit
+keywords and every existing statement otherwise intact. The one
+`_build_verification_client(provider, api_key, metrics, tracer) -> ModelClient` helper forwards
+both exact objects to the package factory.
+
+Task 6's `Resources.runtime` is the sole agent source. Composite `AgentActivities`,
+`AgentReasoningActivities`, and `AgentProjectionActivities` receive/bind the exact
+`runtime.metrics` and `runtime.tracer`; their model factory call uses those objects by identity.
+Task 6's `ToolWorkerResources.runtime` is the sole tool source, and
+`ToolActivities` binds its exact handles. Narrow existing resource doubles in the affected tests
+gain explicit validated no-op test telemetry; production code gets no
+`getattr(resource, ..., noop_*)` fallback.
+
+Task 5's one event-worker runtime remains sole owner. Change the public matcher constructor to
+require both handles:
+
+~~~python
+class TriggerMatcher:
+    def __init__(
+        self,
+        session_factory: SessionFactory,
+        temporal: TemporalClient,
+        *,
+        metrics: JhinMetrics,
+        tracer: Tracer,
+        cache_ttl_seconds: float = 5.0,
+    ) -> None: ...
+~~~
+
+Event-worker main passes `runtime.metrics` and `runtime.tracer` by identity. Matcher code does
+not call strict global `safe_span()`, initialize a runtime, or shut one down. Preserve Task 5's
+NATS consumer/lag lifetime and Task 6's Temporal interceptor/client identity.
+
+Replace the suffix AST search with an import-aware semantic audit that resolves only
+`jhin_models.build_model_client` and
+`jhin_models.factory.build_model_client`. Exact production owners are
+`jhin_api.models.service` and `jhin_agent_worker.reasoning`; each passes the exact local
+runtime-owned metrics/tracer. Reject an alias used to omit/default/swap a handle, an extra product
+caller, and any missing handle. Do not classify the agent's local
+`self._build_model_client(...)` test seam as the package factory. Add mutation tests for imported
+aliasing, omitted metrics/tracer, swapped handles, an extra caller, and the valid local seam.
+
+### 12.4 Make predecessor and Task 7 telemetry failures diagnostic-only
+
+Before Task 7 implementation, strengthen Task 2 `safe_span` and Task 3 bound metrics inside their
+already-owned source/test paths; they are not extra Task 7 paths:
+
+- Task 2 validates fixed span name/key/value schemas before product invocation. A developer-invalid
+  telemetry schema remains a deterministic validation failure in tests. Once valid, contain tracer
+  and span enter, late normalized set, error recording, end, and context detach backend failures.
+  Invoke downstream exactly once and preserve its exact result, exception/traceback, or
+  cancellation.
+- Task 3 validates instrument name/kind, measurement, and complete labels before recording. Invalid
+  caller data remains strict. Contain only the SDK/backend `add`/`record` failure after
+  validation so exporter/recorder outages are diagnostic.
+
+Task 7 helpers add their own containment around injected facade/tracer protocol doubles. Hostile
+tracer/span/metric/normalizer failures at model, agent, tool, and trigger boundaries cannot skip or
+repeat model, database, gateway, or Temporal work and cannot change durable rows, returned product
+values, public errors, retry/approval/authorization behavior, or cancellation.
+
+Outside the model wrapper's explicitly closed `cancelled` attempt outcome, cancellation is never
+counted as an ordinary Task 7 failure. Every boundary re-raises it unchanged.
+
+For every boundary, test hostile construction/enter/set/error/end/detach and metric
+lookup/add/record behavior on success, ordinary failure, and cancellation. Assert exact downstream
+call count, exact result/exception identity and traceback, the same durable business state as the
+no-telemetry control, and an empty context afterward.
+
+In trigger dispatch failure handling, never use an `assert` that can replace the Temporal error.
+Update the row only when the exact expected authoritative started row is present. Contain
+diagnostic or secondary update failures and re-raise the exact original Temporal exception with
+its traceback.
+
+### 12.5 Record model usage and terminal run metrics only for the commit owner
+
+`agent.reason_step` starts only after workspace/task/run/correlation state is loaded, validated,
+and bound. `model.request` is its child. The reason span ends only after the complete ordered,
+lossless reasoning/manifest pair commit, or after a safe failure occurring once identity is bound.
+Keep the Phase 9/10 sidecar repair, ordering, losslessness, and post-commit crash hooks unchanged.
+
+Committed token/cost metrics follow this exhaustive branch table:
+
+- an already-complete reasoning/manifest pair returns without a provider attempt or token/cost;
+- a concurrent winner found after this invocation called the provider suppresses this invocation's
+  token/cost because it did not commit the pair;
+- a successful legacy-sidecar repair records once;
+- a fresh complete-pair commit records once;
+- commit failure or non-lossless manifest failure records none; and
+- replay after either successful commit records none.
+
+The exact invocation that commits a fresh pair or successful repair records immediately after that
+commit and before returning, without moving/removing the existing post-commit crash barriers.
+Document the deliberate at-most-once diagnostic boundary: a hard crash after commit may lose the
+metric; retry never duplicates it. Task 7 adds no telemetry outbox and changes no transaction.
+
+Finalization retains the persisted once-guard. Under the row lock:
+
+1. `completed_at is not None` means another invocation owns finalization; roll back/return and
+   emit no terminal metric.
+2. `completed_at is None` means this invocation owns finalization even when current status is
+   already `failed` with `error_code="tool_execution_unknown"`.
+3. Set final status and exactly one persisted `completed_at`, commit, then only that owner records
+   `agent_runs_total`, optional duration, and optional closed failure metric.
+
+Duration uses only persisted `started_at` and committed `completed_at`. Record the histogram
+only when both are timezone-aware valid datetimes and the difference is finite and nonnegative.
+A missing/naive/malformed/future legacy start fabricates no zero, does not fail finalization, and
+does not suppress the run counter.
+
+The closed failure mapping is exact:
+
+~~~text
+tool_execution_unknown -> execution_unknown
+max_steps_exceeded      -> budget
+all other failed runs   -> internal
+cancelled/completed     -> no failure counter
+~~~
+
+Never label with raw `error_code`. Add the already-failed/uncompleted regression, count it once,
+then replay finalization and prove every terminal metric remains unchanged.
+
+### 12.6 Require catalog authority and a matching durable terminal tool call
+
+A prefix is not authority. Compute a known `tool_family` only after exact tool-name membership in
+the activity's current `ToolCatalog`; every attacker-supplied, unregistered, or removed name is
+`other`, even when its prefix is `github`, `linear`, or another registered family. Never
+export the tool name.
+
+Map durable gateway states exactly:
+
+~~~text
+GatewayOutcome executed          -> metric/span outcome completed
+GatewayOutcome needs_approval    -> no counter; span outcome accepted
+GatewayOutcome failed            -> metric/span outcome failed
+GatewayOutcome denied            -> metric/span outcome denied
+GatewayOutcome rejected          -> metric/span outcome rejected
+GatewayOutcome execution_unknown -> metric/span outcome execution_unknown
+GatewayOutcome executing         -> no counter
+~~~
+
+Failure classes are closed and independent of error text/code:
+
+~~~text
+failed            -> internal
+denied/rejected   -> policy
+execution_unknown -> execution_unknown
+~~~
+
+`GatewayOutcome.replayed` suppresses an ordinary terminal reload, but is not sufficient evidence
+for every path. Before recording, require that the outcome matches the exact durable
+`ToolCall` identity and terminal transition/reload owned by this activity. The
+`_invocation_mismatch_outcome` path commits its existing audit but remains
+`replayed=False`; it is not a new terminal tool call and emits no terminal counter.
+
+Record only after the authoritative terminal commit/reload and exact tool-call identity check, but
+before `_raise_ordinary_failure`, so genuine committed failures count while the existing
+`GatewayOutcome`, public `BoundToolResult`, `ApplicationError`, gateway transactions,
+approval flow, and replay flag remain unchanged. Telemetry failure changes none of them.
+
+Test first and replay behavior for executed, failed, denied, rejected, execution-unknown,
+needs-approval, executing, unknown-tool, removed-tool, and invocation-mismatch paths. Prove exact
+catalog-derived family/risk/outcome/failure labels, no identifier/name leakage, no mismatch/replay
+duplicate, and exact existing public return/error behavior under hostile telemetry.
+
+### 12.7 Reconcile the trigger commit-to-dispatch crash gap before claiming durability
+
+`TriggerMatcher` keeps transition-based at-most-once diagnostics, but product dispatch must
+survive a crash after the authoritative `started` commit and before Temporal:
+
+1. Commit the new authoritative `started` invocation.
+2. A duplicate delivery still commits its one `duplicate` history row. If it finds the
+   authoritative `started` row with no linked `task_id`, return that original authority to the
+   dispatch path and reissue the same deterministic Temporal workflow ID derived from the original
+   invocation ID.
+3. An authoritative started row with a linked `task_id` permits immediate suppression.
+4. Treat `WorkflowAlreadyStarted` for that deterministic ID as dispatch success. Concurrent
+   reconcilers are safe because Temporal owns duplicate-start idempotency.
+5. On a real dispatch failure, fail only the exact authoritative started row with the fixed
+   persisted `upstream_unavailable` code, contain secondary update/diagnostic failures, and
+   re-raise the exact original Temporal error. A later delivery may then create a fresh started
+   authority.
+
+Missing-target failure persists only `invalid_request`. Trigger failure metric classes are
+exactly `target` and `dispatch`. Each invocation/duplicate/failure metric is attempted only
+after its exact row commit; a crash may lose diagnostics but may not lose/suppress product work or
+create a metric-driven redelivery.
+
+`trigger_invocations_total` uses central
+`normalize_connector_type(envelope.source.type)` and only `started`, `duplicate`, or
+`failed`; `trigger_failures_total` uses the same connector plus only `target` or
+`dispatch`. A normal start counts once after its started commit, a duplicate counts once after
+its history-row commit, and missing-target/real-dispatch failures count once after their failed-row
+commit. Two genuine failed deliveries may create and count two fresh authorities; reconciliation
+of one unfinished authority may not fabricate a second started count.
+
+Add an injectable post-started-commit/pre-dispatch barrier. Crash there, redeliver, and use a fake
+Temporal client that enforces duplicate workflow IDs. Prove at most one workflow, one authoritative
+started row, one duplicate history row, and no lost work. Preserve canonical-event redelivery and
+existing `WorkflowAlreadyStarted` regressions. Also cover linked-task suppression, concurrent
+reconcilers, real dispatch failure followed by a fresh authority, and hostile metrics/tracer/update
+failures.
+
+`trigger.dispatch` uses the explicitly injected Task 5 tracer and stays a child of the active
+Task 5 NATS consumer span through Temporal settlement. Never attach trigger/target/workflow/event/
+workspace/idempotency/external IDs, URL, exception text, or event data to spans or labels.
+
+### 12.8 Normalize every late attribute through the closed registry
+
+No Task 7 path calls `span.set_attribute` with a late raw value. Use one best-effort setter that
+runs Task 2's per-key normalizer, or compute the complete normalized final attribute mapping before
+span end. Clamp model latency to the exact inclusive `0..300_000` millisecond range. Never call
+`str()` or `repr()` on an arbitrary provider, gateway, trigger, or exception value.
+
+Provider type comes from the validated `ModelProviderType`; tool family requires current catalog
+membership; connector type uses Task 1's central `normalize_connector_type`; all
+operation/outcome/failure/risk/direction values use the closed registry. Tests include arbitrary
+regex-safe strings and prove they normalize to `other` rather than surviving merely because they
+match a character regex.
+
+Agent/tool/trigger late outcomes obey the same rule. Tool spans start only after bound
+manifest/runtime/tool-call identity is validated. No prompt, completion, model/chunk/tool name,
+provider request ID, schema, tool input/output, approval payload, manifest, error detail, or
+connector/event payload is attached.
+
+### 12.9 Preserve predecessor contracts, dependencies, and cross-task handoffs
+
+The Task 7 changes preserve all of these contracts:
+
+- API verification's lookup/decryption/audit/commit/detail behavior, Task 4 middleware/lifespan,
+  and Task 6 app-runtime/provider ownership;
+- agent reasoning's ordered lossless two-record manifest, sidecar repair, Phase 9/10 crash
+  barriers, and absence of connector/tool-worker authority;
+- tool `GatewayOutcome`, `BoundToolResult`, transactions, approvals, and replay semantics;
+- event-worker's Task 5 singleton runtime, NATS context/span lifetime, lag task, TaskGroup, engine
+  tracer/cleanup, and Task 6 Temporal interceptor identity; and
+- Task 11's connected `model.request`, `agent.reason_step`,
+  `tool.gateway.execute`, and `trigger.dispatch` spans, complete canary scan, replay checks, and
+  real corrected trigger reconciliation barrier.
+
+Dependency ownership is exact:
+
+- `packages/models/pyproject.toml` adds `jhin-observability` with its workspace source and
+  direct `opentelemetry-api>=1.38,<2`;
+- `packages/tools/pyproject.toml` adds `jhin-observability` with its workspace source;
+- no service relies on a new transitive import; and
+- regenerate `uv.lock` once, then require `uv lock --check`.
+
+Amend the exhaustive global File Map for these currently absent affected paths:
+
+~~~text
+apps/api/tests/test_webhooks_unit.py
+packages/models/tests/test_factory.py
+services/agent_worker/tests/test_delegation_activities.py
+services/agent_worker/tests/test_phase9_invocation_activity.py
+services/agent_worker/tests/test_reasoning_manifest.py
+services/agent_worker/tests/test_step_projection.py
+services/agent_worker/tests/test_upgrade_crash_barriers.py
+services/event_worker/tests/test_matcher.py
+services/tool_worker/tests/test_advertised_tools.py
+services/tool_worker/tests/test_bound_approval.py
+services/tool_worker/tests/test_bound_tool_execution.py
+~~~
+
+The webhook and advertised-tools tests were introduced by earlier binding corrections and are
+modified again here to pass explicit Task 7 test telemetry. Every other listed test gains only the
+fixture/contract assertions required by the Task 7 production changes. No silent production no-op
+fallback is authorized.
+
+### 12.10 Run four independent executable RED groups
+
+After corrected Tasks 1-6 exist and every Task 7 helper/fixture/auditor above is complete, run:
+
+~~~bash
+uv run pytest packages/models/tests/test_telemetry.py \
+  packages/models/tests/test_factory.py \
+  apps/api/tests/test_model_telemetry.py -q
+uv run pytest services/agent_worker/tests/test_telemetry.py -q
+uv run pytest packages/tools/tests/test_telemetry.py \
+  services/tool_worker/tests/test_telemetry.py -q
+uv run pytest services/event_worker/tests/test_telemetry.py \
+  services/event_worker/tests/test_matcher.py \
+  apps/api/tests/test_webhooks_unit.py -q
+~~~
+
+Expected RED names absent wrapper/runtime wiring, committed-transition recording, exact
+normalization, trigger reconciliation, or hostile-telemetry containment. Implement in that same
+order and make each focused group GREEN before proceeding. Undefined seams, abstract wrapper
+construction, unrelated collection/type failures, or leaked provider/runtime state are invalid
+RED.
+
+### 12.11 Run focused, affected, root, and static GREEN gates
+
+After the four groups are GREEN, run exactly:
+
+~~~bash
+uv lock
+uv lock --check
+uv run pytest \
+  packages/models/tests packages/tools/tests apps/api/tests \
+  services/agent_worker/tests services/tool_worker/tests \
+  services/event_worker/tests -q
+uv run pytest -q
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy
+~~~
+
+All commands pass. Root collection includes integration modules while live-marked cases remain
+deselected. These broad gates are mandatory because Task 7 changes two shared distributions, API
+dependencies, three workers, and durable trigger/tool transactions.
+
+### 12.12 Make Task 7's 32 paths and committed tree exact
+
+Replace Task 7 `Files` and staging with this exact mirrored array:
+
+~~~bash
+set -euo pipefail
+task7_paths=(
+  apps/api/src/jhin_api/deps.py
+  apps/api/src/jhin_api/models/router.py
+  apps/api/src/jhin_api/models/service.py
+  apps/api/tests/test_model_telemetry.py
+  apps/api/tests/test_webhooks_unit.py
+  packages/models/pyproject.toml
+  packages/models/src/jhin_models/factory.py
+  packages/models/src/jhin_models/telemetry.py
+  packages/models/tests/test_factory.py
+  packages/models/tests/test_telemetry.py
+  packages/tools/pyproject.toml
+  packages/tools/src/jhin_tools/telemetry.py
+  packages/tools/tests/test_telemetry.py
+  services/agent_worker/src/jhin_agent_worker/activities.py
+  services/agent_worker/src/jhin_agent_worker/projections.py
+  services/agent_worker/src/jhin_agent_worker/reasoning.py
+  services/agent_worker/tests/test_delegation_activities.py
+  services/agent_worker/tests/test_phase9_invocation_activity.py
+  services/agent_worker/tests/test_reasoning_manifest.py
+  services/agent_worker/tests/test_step_projection.py
+  services/agent_worker/tests/test_telemetry.py
+  services/agent_worker/tests/test_upgrade_crash_barriers.py
+  services/event_worker/src/jhin_event_worker/main.py
+  services/event_worker/src/jhin_event_worker/matcher.py
+  services/event_worker/tests/test_matcher.py
+  services/event_worker/tests/test_telemetry.py
+  services/tool_worker/src/jhin_tool_worker/activities.py
+  services/tool_worker/tests/test_advertised_tools.py
+  services/tool_worker/tests/test_bound_approval.py
+  services/tool_worker/tests/test_bound_tool_execution.py
+  services/tool_worker/tests/test_telemetry.py
+  uv.lock
+)
+test -z "$(git diff --cached --name-only)"
+git status --short -- "${task7_paths[@]}"
+git diff --check -- "${task7_paths[@]}"
+git add -- "${task7_paths[@]}"
+expected_index="$(printf '%s\n' "${task7_paths[@]}" | LC_ALL=C sort)"
+actual_index="$(git diff --cached --name-only | LC_ALL=C sort)"
+test "$actual_index" = "$expected_index"
+git diff --cached --check -- "${task7_paths[@]}"
+git commit --only "${task7_paths[@]}" \
+  -m "feat(observability): record committed agent and tool metrics"
+test "$(git show -s --format=%s HEAD)" = \
+  "feat(observability): record committed agent and tool metrics"
+actual_commit_paths="$(git diff-tree --no-commit-id --name-only -r HEAD | LC_ALL=C sort)"
+test "$actual_commit_paths" = "$expected_index"
+test -z "$(git diff --cached --name-only)"
+~~~
+
+`activities.py` remains because composite `AgentActivities` binds Task 6 runtime handles. The
+Task 7 `Files` block and array are exact mirrors. No other Task 7 path is authorized. The global
+index-only exception remains the sole exception: pre-existing unstaged work outside these paths
+may remain, but a pre-staged/unexpected/missing path, path outside `Files`, commit-tree mismatch,
+or non-empty post-commit index fails closed. Any newly discovered affected path requires a
+reviewed File Map/Files/manifest amendment before it is touched.
 
 ### Task 8: Instrument Connector HTTP, Connection Health, and Sandbox Lifecycles
 
 **Files:**
+- Modify: `apps/api/src/jhin_api/connections/router.py`
+- Modify: `apps/api/src/jhin_api/connections/service.py`
+- Modify: `apps/api/tests/test_connections_unit.py`
+- Modify: `apps/api/tests/test_connector_telemetry.py`
 - Modify: `packages/connectors/pyproject.toml`
-- Modify: `packages/connectors/src/jhin_connectors/http_client.py`
-- Create: `packages/connectors/src/jhin_connectors/telemetry.py`
-- Modify: `packages/connectors/src/jhin_connectors/github/client.py`
+- Modify: `packages/connectors/src/jhin_connectors/base.py`
+- Modify: `packages/connectors/src/jhin_connectors/cli/runner_client.py`
+- Modify: `packages/connectors/src/jhin_connectors/cli/tools.py`
 - Modify: `packages/connectors/src/jhin_connectors/github/auth.py`
+- Modify: `packages/connectors/src/jhin_connectors/github/client.py`
+- Modify: `packages/connectors/src/jhin_connectors/github/connector.py`
+- Modify: `packages/connectors/src/jhin_connectors/github/tools.py`
+- Modify: `packages/connectors/src/jhin_connectors/http_client.py`
 - Modify: `packages/connectors/src/jhin_connectors/linear/client.py`
-- Modify: `packages/connectors/src/jhin_connectors/registry.py`
-- Modify: `packages/connectors/src/jhin_connectors/vercel/client.py`
-- Modify: `packages/connectors/src/jhin_connectors/supabase/management_client.py`
+- Modify: `packages/connectors/src/jhin_connectors/linear/connector.py`
+- Modify: `packages/connectors/src/jhin_connectors/linear/tools.py`
+- Modify: `packages/connectors/src/jhin_connectors/supabase/connector.py`
 - Modify: `packages/connectors/src/jhin_connectors/supabase/database_client.py`
 - Modify: `packages/connectors/src/jhin_connectors/supabase/database_tools.py`
-- Modify: `packages/connectors/src/jhin_connectors/cli/runner_client.py`
-- Create: `packages/connectors/tests/test_telemetry.py`
+- Modify: `packages/connectors/src/jhin_connectors/supabase/management_client.py`
+- Modify: `packages/connectors/src/jhin_connectors/supabase/management_tools.py`
+- Modify: `packages/connectors/src/jhin_connectors/telemetry.py`
+- Modify: `packages/connectors/src/jhin_connectors/vercel/client.py`
+- Modify: `packages/connectors/src/jhin_connectors/vercel/connector.py`
+- Modify: `packages/connectors/src/jhin_connectors/vercel/tools.py`
+- Modify: `packages/connectors/tests/supabase/test_database_telemetry.py`
 - Modify: `packages/connectors/tests/test_http_client.py`
-- Create: `packages/connectors/tests/supabase/test_database_telemetry.py`
-- Modify: `services/tool_worker/src/jhin_tool_worker/main.py`
-- Modify: `services/tool_worker/src/jhin_tool_worker/resources.py`
-- Modify: `services/sandbox_runner/src/jhin_sandbox_runner/main.py`
+- Modify: `packages/connectors/tests/test_telemetry.py`
+- Modify: `packages/tools/pyproject.toml`
+- Modify: `packages/tools/src/jhin_tools/builtin.py`
+- Modify: `packages/tools/tests/test_telemetry.py`
+- Modify: `services/sandbox_runner/pyproject.toml`
 - Modify: `services/sandbox_runner/src/jhin_sandbox_runner/jobs.py`
-- Create: `services/sandbox_runner/tests/test_telemetry.py`
+- Modify: `services/sandbox_runner/src/jhin_sandbox_runner/main.py`
+- Modify: `services/sandbox_runner/src/jhin_sandbox_runner/schemas.py`
+- Modify: `services/sandbox_runner/src/jhin_sandbox_runner/settings.py`
+- Modify: `services/sandbox_runner/tests/test_job_config.py`
+- Modify: `services/sandbox_runner/tests/test_telemetry.py`
+- Modify: `services/tool_worker/src/jhin_tool_worker/activities.py`
+- Modify: `services/tool_worker/src/jhin_tool_worker/cleanup_activities.py`
+- Modify: `services/tool_worker/src/jhin_tool_worker/main.py`
+- Modify: `services/tool_worker/src/jhin_tool_worker/trigger_activities.py`
+- Modify: `services/tool_worker/tests/test_telemetry.py`
 - Modify: `uv.lock`
 
 **Interfaces:**
-- Consumes: trace/context headers, metrics, tool-worker database access, existing bounded connector HTTP helper, and sandbox job DTOs.
-- Produces: normalized connector/sandbox spans, connector health/count gauges, and terminal sandbox metrics.
+- Consumes the accepted Task 7 handoff and produces the exact Task 8 contract, subject, manifest, and gates below.
 
 - [ ] **Step 1: Write failing connector URL/body/error exclusion tests**
 
@@ -6903,46 +9940,519 @@ Expected: PASS; connector/sandbox payload canaries do not appear in spans or met
 
 - [ ] **Step 8: Review and commit**
 
-```bash
-git diff --check
-git add packages/connectors/pyproject.toml \
-  packages/connectors/src/jhin_connectors/http_client.py \
-  packages/connectors/src/jhin_connectors/telemetry.py \
-  packages/connectors/src/jhin_connectors/github/client.py \
-  packages/connectors/src/jhin_connectors/github/auth.py \
-  packages/connectors/src/jhin_connectors/linear/client.py \
-  packages/connectors/src/jhin_connectors/registry.py \
-  packages/connectors/src/jhin_connectors/vercel/client.py \
-  packages/connectors/src/jhin_connectors/supabase/management_client.py \
-  packages/connectors/src/jhin_connectors/supabase/database_client.py \
-  packages/connectors/src/jhin_connectors/supabase/database_tools.py \
-  packages/connectors/src/jhin_connectors/cli/runner_client.py \
-  packages/connectors/tests/test_telemetry.py packages/connectors/tests/test_http_client.py \
+The task's sole staging and commit gate is the exact manifest-owned gate in the final executable contract below.
+
+#### Binding protected-health runner URL seam
+
+The Task 8 contract exposes the pure public helper
+`validated_sandbox_runner_base_url() -> str` from its already-owned runner client. The helper
+reads the existing environment/default authority; rejects userinfo, query, fragment, non-root
+path, unsupported scheme, malformed host/port, and control characters; and returns one normalized
+internal base URL. It returns no token and logs no URL. Telemetry runner calls and the protected
+tool-heartbeat probe consume this same helper. This reservation changes no Task 8 manifest.
+
+#### Final executable contract for Task 8
+
+
+After applying the draft and corrected Tasks 1-7, replace Task 8 from its `Files` block through
+its staging/commit block with this section. Task 8 consumes predecessor-owned runtimes,
+registries, fail-open helpers, and durable once-guards by identity. It does not create a second
+registry/provider, move a Task 7 commit point, or turn transport telemetry into product authority.
+
+### 13.1 Keep connector registration stateless and pass request-owned tracers explicitly
+
+There is no tracer-owning `GitHubClient`, `LinearClient`, or `RunnerClient`; the real
+connector/runner surface is module-level functions behind stateless global executor tuples. Keep
+`ConnectorRegistry`, `default_registry()`, `build_default_catalog()`, and every static tool
+tuple stateless. Do not modify or stage
+`packages/connectors/src/jhin_connectors/registry.py`, and introduce no mutable global tracer.
+
+Add only these package/direct-call defaults:
+
+~~~python
+@dataclass(frozen=True)
+class VerifyContext:
+    auth_type: str
+    credentials: dict[str, str]
+    config: dict[str, Any] = field(default_factory=dict)
+    tracer: Tracer | None = None
+
+@dataclass(...)
+class ToolExecutionContext:
+    # Preserve every existing field and default.
+    tracer: Tracer | None = None
+~~~
+
+The optional values are deliberate package/direct-test no-op boundaries, never production
+fallbacks. Connector verification and metadata methods forward `VerifyContext.tracer` through
+every concrete outbound client boundary. Every connector/CLI executor forwards
+`ToolExecutionContext.tracer` through the concrete HTTP, database, or runner operation.
+
+API verification and metadata routes receive Task 7's exact `ObservabilityRuntimeDep`. Their
+service functions require a `tracer: Tracer` argument and populate
+`VerifyContext(..., tracer=tracer)`; production service code has no optional/no-op fallback.
+Update direct service tests to pass an explicit recording or no-op tracer while preserving lookup,
+decryption, audit, commit, response, and error behavior.
+
+The three production tool contexts—two in
+`services/tool_worker/src/jhin_tool_worker/activities.py` and one in
+`trigger_activities.py`—receive the exact
+`self._resources.runtime.tracer`. `CleanupActivities` retains its injectable one-argument
+cleanup callable, while tool-worker main injects a tracer-bound callable such as
+`functools.partial(delete_sandbox_workspace, tracer=resources.runtime.tracer)`.
+
+Add an import/binding-aware semantic audit over the real context constructors and outbound
+module-level functions. It resolves aliases, distinguishes package functions from local test
+seams, requires the exact API/tool runtime owner at every API verification/metadata, three
+tool-context, and tracer-bound cleanup point, and rejects an omitted/swapped/no-op handle or extra
+product caller. A textual suffix match is not evidence. Mutation tests cover imported aliases, all
+omissions/swaps, an extra caller, and valid local/package-only seams.
+
+### 13.2 Close Task 2's one operation registry over the real surface
+
+Before Task 2 implementation, extend its sole central `jhin.operation` registry with these exact
+constants. Task 8 consumes this registry and declares no second list/set:
+
+~~~text
+github:
+  verify, installation_token_create, repository_read, branch_list, file_read,
+  branch_create, issue_read, issue_comment_create, pull_request_create,
+  pull_request_read, pull_request_comment, pull_request_merge, check_read,
+  workflow_dispatch, workflow_run_read
+
+linear:
+  verify, metadata_read, issue_read, issue_search, issue_create, issue_update,
+  comment_create
+
+vercel:
+  verify, project_list, project_read, deployment_list, deployment_read,
+  deployment_logs_read, environment_metadata_read, deployment_preview_create,
+  deployment_redeploy, deployment_promote, deployment_alias_assign
+
+supabase:
+  verify, project_read, logs_read, function_list, function_deploy,
+  function_delete, execute_read, execute_write
+
+sandbox/model shared:
+  generate, submit, status, cancel, cleanup, other
+~~~
+
+`ConnectorTelemetry` applies a connector-specific subset after central normalization. A globally
+valid Vercel operation paired with GitHub, or any other cross-connector mismatch, becomes
+`other`. Every operation comes from a fixed registered function/tool mapping. Unknown, removed,
+aliased, malformed, and arbitrary regex-safe strings become `other`; Supabase destructive
+database work is always `execute_write`; runner operations are only
+`submit|status|cancel|cleanup`.
+
+`retry_count` accepts only a real non-boolean integer and clamps to the exact inclusive
+`0..10` range. Current clients have no retry layer and pass exactly `0`. Late
+outcome/latency/status values use Task 2's same per-key normalizer and Task 7's fail-open setter;
+regex shape alone never authorizes an enum value.
+
+This is a predecessor Task 2 registry amendment inside Task 2's already-authorized registry/tests,
+not an extra Task 8 implementation path.
+
+### 13.3 Apply the superseding fail-open shell at every Task 8 boundary
+
+For connector HTTP/database, health sampling, runner client/server, and sandbox job lifecycle:
+
+1. Validate the fixed developer telemetry schema before the authoritative call.
+2. If tracer/span setup or enter fails, invoke authoritative work exactly once without a span.
+3. Return the exact successful result even if late normalization/attributes/events/status,
+   detach/end, metric recording, or owned diagnostic cleanup fails.
+4. Preserve the existing public exception type, value, and traceback and exact cancellation
+   identity when authoritative work fails. `CancelledError`, `KeyboardInterrupt`, and
+   `SystemExit` are not ordinary provider failures.
+5. Preserve intentional product mappings such as fixed
+   `ProviderHTTPError`/`SandboxRunnerError`; instrumentation may not add, remove, or change one.
+6. Attempt sandbox terminal counter and histogram independently and contain either backend
+   failure.
+
+Tests inject hostile tracer, context manager, span, propagator, normalizer, metric facade,
+counter/histogram, response close, and diagnostic cleanup implementations. Prove one authoritative
+call, exact result/error/cancellation, unchanged durable state, and no surviving context,
+provider, session, response, sampler/job task, or runtime after success, failure, cancellation, or
+early app shutdown.
+
+Task 7's post-commit metrics/spans remain once-only and fail-open. Task 8 does not wrap them in a
+larger failure domain, retry them, or record a second terminal tool/trigger metric.
+
+### 13.4 Preserve the one bounded connector HTTP authority
+
+`send_bounded_json` remains the sole authoritative provider boundary. Preserve its existing
+client/request/return contract and add keyword-only required `connector_type` and `operation`,
+`retry_count: int = 0`, and package-only `tracer: Tracer | None = None`.
+
+Before span creation or transport, retain response-cap validation, nonempty 2xx expected-status
+validation, and URL-userinfo rejection. The request remains one
+`client.send(..., stream=True, follow_redirects=False)`; enforce declared and streamed byte
+caps, strict UTF-8 JSON/shape/status rules, fixed safe public errors, and response closure on every
+success/failure/cancellation path. Preserve the existing transport call count and all eight bounded
+response behaviors.
+
+The `connector.http` client span contains only normalized connector type, the connector-owned
+operation, clamped retry count, closed outcome, bounded latency, and response status. It never
+receives or stringifies URL/host/path/query/userinfo, request/response/trace headers, request or
+response body, credentials, provider error/exception arguments/causes/context, connection/
+workspace/external IDs, SQL/DSN, or tool input/output. Do not call `str()` or `repr()` on
+untrusted request/response/exception/provider values for telemetry.
+
+Every production call in GitHub auth/client, Linear client, Vercel client, and Supabase management
+client forwards the request-owned tracer plus fixed connector/operation constants. Their connector
+and tool module-level functions carry those exact handles; no static registry state is changed.
+Update the eight existing direct bounded-response tests only with explicit
+connector/operation/no-op tracer arguments and preserve their assertions.
+
+An import-aware audit finds exactly those eight direct test calls plus all real production calls,
+resolves aliases, and rejects a bypass or missing/mismatched constant. Tests compare complete span
+name/kind/parent/resource/attributes/events/status description/end state, scan raw and encoded
+canaries across spans/metrics, and use hostile tracer/span/close doubles to prove one transport
+call with unchanged product behavior.
+
+### 13.5 Wrap exactly the two real asyncpg authorities
+
+Keep this public Task 11 contract exact:
+
+~~~python
+async def trace_connector_database(
+    operation: Literal["verify", "execute_read", "execute_write"],
+    action: Callable[[], Awaitable[T]],
+    *,
+    tracer: Tracer | None = None,
+) -> T: ...
+~~~
+
+Endpoint, schema, SQL, bind-count, read/write, least-privilege, and destructive validation remains
+outside the span and before asyncpg. The one `connector.database` span surrounds exactly one
+action that owns connect, verification or transaction, commit/rollback, and close/cleanup.
+Preserve timeouts, transaction/rollback authority, cancellation/error mapping, connection closure,
+SQL result, and destructive behavior. Destructive execution maps to `execute_write`.
+
+No SQL verb/text/hash, statement argument, DSN/user/password/host, schema/resource ID, row/result,
+exception text, or arbitrary object serialization enters telemetry. An import-aware audit proves
+the wrapper exists at exactly the verification and execution asyncpg boundaries, remains outside
+prevalidation, and cannot be bypassed by aliasing.
+
+Tests cover success, connect failure, transaction/commit/rollback/close failure, cancellation,
+hostile diagnostics, one action call, exact business result/error, and complete privacy
+serialization.
+
+### 13.6 Give connection-health sampling a finite, leak-free lifecycle
+
+The query selects only connector type, status, last-verified timestamp, and
+`last_error IS NOT NULL`, excludes disabled rows in SQL, and never loads/decrypts a credential,
+ID, config, or error text or calls a connector.
+
+Normalize connector type before grouping. Emit no series for a type with zero enabled rows. A type
+is healthy only if every enabled row is active, fresh, and has no error.
+`connector_health` emits one `0|1` observation for each present normalized connector type.
+`connector_connections` emits only positive healthy/unhealthy counts. All unknown types coalesce
+into one `other` family. Invalid, naive, future, missing, or malformed timestamps are
+conservatively unhealthy without arbitrary stringification.
+
+Compute and validate both complete tuples before calling either setter. Query/normalization
+failure calls neither setter and retains both prior tuples. Task 3 replaces each gauge separately,
+so do not claim cross-gauge atomicity: if either backend setter fails, contain it and still attempt
+the other according to the fixed order
+`connector_health` then `connector_connections`.
+
+Use exact defaults and bounds:
+
+~~~python
+CONNECTOR_HEALTH_INTERVAL_SECONDS = 30.0
+CONNECTOR_HEALTH_PROBE_TIMEOUT_SECONDS = 5.0
+MAX_CONNECTOR_HEALTH_PROBE_TIMEOUT_SECONDS = 30.0
+CONNECTOR_HEALTH_FRESHNESS_SECONDS = 300
+~~~
+
+`interval_seconds` is a finite positive non-boolean number.
+`probe_timeout_seconds` is finite, positive, non-boolean, and no greater than 30 seconds.
+`freshness_seconds` is a positive non-boolean integer. Each query is time-bounded. Interval wait
+uses `stop.wait()` so `stop.set()` wakes immediately.
+
+Tool-worker starts exactly one named sampler only after resources/runtime exist. It is independent
+of the Temporal worker and product TaskGroup; query, normalization, timeout, logging, or telemetry
+failure cannot cancel product work. On worker construction/start/run/stop/cancellation or resource
+cleanup failure, set stop, cancel if necessary, await and prove the sampler done, then close
+resources and finally shut down Task 6's exact runtime. No sampler task/session/context survives.
+
+Use fake session/query/clock/metrics only—no Docker/network/live database. Cover empty rows, all
+healthy, stale/error/disabled, multiple rows per type, unknown coalescing, exact freshness
+boundary, malformed/future timestamps, query/normalization failure retaining prior tuples,
+independent setter failures, query timeout, every invalid timing input, startup/worker/cleanup
+failure, immediate stop, cancellation, and zero pending tasks.
+
+### 13.7 Parent runner propagation inside a bounded streaming transport
+
+Keep `_headers(token)` authorization-only. Each submit, every status poll, cancel, and workspace
+cleanup enters one `sandbox.client` span first, then copies the base headers and injects trace
+context into that per-request copy before its single transport call. The outgoing
+`traceparent` parent span ID must equal the actual client span ID. Do not mutate caller
+header/payload/env/secret-env mappings, and never put trace headers into job environment data.
+
+Replace buffering `AsyncClient.request().json()` behavior with one redirect-free streaming
+transport that:
+
+- validates the internal base URL before constructing a client and rejects userinfo, query,
+  fragment, or non-root path;
+- validates job/workspace identifiers with `fullmatch` before path construction;
+- validates every timeout as a finite positive non-boolean value;
+- enforces one exact positive response byte cap;
+- reads/decode strict JSON only within that cap, accepts only a mapping, and closes the response
+  on success, ordinary failure, and cancellation;
+- maps transport/status/parse/close failures to fixed safe `SandboxRunnerError` values without
+  URL/response/identifier/exception text; and
+- never lets owned transport closure replace an already authoritative business exception.
+
+Validate `sandbox_max_output_bytes` in settings/schema/config as a real integer in the exact
+inclusive `1..65_536` range. The fixed runner JSON response cap is exactly
+`MAX_SANDBOX_RUNNER_RESPONSE_BYTES = 851_968`
+(`2 * 6 * 65_536 + 65_536`). Test exactly 851,968 bytes and one byte over. The client cap is not
+derived from an unreviewed deployment override.
+
+Validate job ID before computing deadline/path and validate caller job timeout before creating a
+client. Use `asyncio.get_running_loop().time()`; retain fixed poll interval, grace, cancellation,
+and deadline behavior, and do not let diagnostic setup/recording extend the product deadline.
+Standalone/direct calls use the explicit no-op tracer default. Production CLI executors and the
+tracer-bound cleanup callable pass Task 6's exact tracer. Cleanup stays best-effort and idempotent.
+
+### 13.8 Keep sandbox server and terminal-job ownership exact
+
+After Task 6 installs all existing routes, wrap them once with a route-bound pure-ASGI owner. Match
+the registered method/template—never exported raw path text—to this exact operation table:
+
+~~~text
+POST   /v1/jobs                          -> submit
+GET    /v1/jobs/{job_id}                 -> status
+GET    /v1/jobs/{job_id}/logs            -> status
+POST   /v1/jobs/{job_id}/cancel          -> cancel
+DELETE /v1/workspaces/{workspace_key}    -> cleanup
+all other registered routes              -> other
+~~~
+
+The wrapper safely extracts only trace context, creates one `sandbox.server` span with the
+explicit app runtime tracer, and covers the complete ASGI response lifetime. Fixed
+route/operation/status-class/outcome/latency attributes use the central normalizer. It never reads,
+attaches, or logs request body/output, Authorization, trace header, raw path, Docker error,
+env/secret-env, or workspace key. Invalid inbound context becomes a safe root. Downstream,
+send/receive, span, and detach failures preserve the ASGI result/error/cancellation and close the
+context exactly once.
+
+`JobManager` accepts optional package/direct-test `metrics` and `tracer`; Task 6's real
+`create_app` passes the exact `active_runtime.metrics` and `.tracer`. Manager construction
+and middleware/route installation stay within Task 6's cleanup-protected factory block. No global
+runtime is introduced. No-lifespan tests inject and close their own runtime; app-owned and injected
+shutdown identities remain exact under factory/start/close failure.
+
+Validate job IDs using `fullmatch` with exact length `8..64`; reject the newline-suffix edge.
+`JobManager._run` starts `sandbox.job.lifecycle` only after a validated `JobRecord` exists.
+Keep `asyncio.create_task` inside the submit server span so its copied context makes lifecycle the
+exact child of that submit span. The only identifier attribute is the validated job ID; no metric
+contains it. Network policy/outcome use closed registries. Never inspect command, image, output,
+error, env/secret, or workspace data for telemetry.
+
+Do not add `_jobs_lock`. The current duplicate-submit and terminal once-decisions have no
+suspension before mutation and are atomic in one event loop; prove concurrent identical/different
+duplicate submit and concurrent terminal finalize. Preserve duplicate HTTP 422.
+
+`wait_terminal` is side-effect-free, shielded, and time-bounded. `_finish_terminal` preserves
+the first terminal status/timestamp, sets `telemetry_recorded=True` before diagnostics, and only
+that owner attempts terminal metrics. Counter and histogram are attempted independently,
+fail-open, and never retried. Duration is `max(0, finished_at - started_at)` only for valid aware
+timestamps; malformed/missing timestamps omit the histogram without suppressing the counter.
+Status/log reads, replay finalize, duplicate submit, and repeated cancel emit no terminal metric
+and do not mutate terminal state.
+
+Test completed, failed, timeout, cancelled, concurrent finalize, identical/different duplicate
+submit, repeated cancel/status/log, malformed/missing timestamps, hostile metrics/tracer,
+job-task cancellation, runner/app factory/start/close failure, and zero pending job/context.
+Container deletion remains before terminal publication on every path.
+
+### 13.9 Make every Task 8 RED fixture and dependency explicit
+
+Every new/affected telemetry test file owns function-scoped tracer/provider/exporter and
+metric-provider/reader fixtures, observation and full-serialization helpers, fake
+session/query/clock/transport objects, and `finally` teardown. Delay imports of a not-yet-created
+production module until test execution so RED reports a named missing behavior/assertion rather
+than collection `ImportError`, `NameError`, abstract fixture, leaked global provider, or a
+Docker/network dependency.
+
+Direct dependency ownership is exact:
+
+- `packages/connectors/pyproject.toml` adds workspace `jhin-observability` and direct
+  `opentelemetry-api>=1.38,<2`;
+- `packages/tools/pyproject.toml` preserves Task 7's workspace `jhin-observability` and adds
+  direct `opentelemetry-api>=1.38,<2` for `ToolExecutionContext.tracer`;
+- `services/sandbox_runner/pyproject.toml` preserves Task 6's workspace
+  `jhin-observability` and adds direct `opentelemetry-api>=1.38,<2`; and
+- no production distribution imports the OTel SDK.
+
+Regenerate `uv.lock` once after all three manifest edits, then require `uv lock --check`.
+
+### 13.10 Run exact socket-free RED and broad GREEN gates
+
+After corrected Tasks 1-7 exist, create every Task 8 helper/test and affected contract update
+first. Run these three independent RED groups:
+
+~~~bash
+uv run pytest \
+  packages/connectors/tests/test_http_client.py \
+  packages/connectors/tests/test_telemetry.py \
   packages/connectors/tests/supabase/test_database_telemetry.py \
-  services/tool_worker/src/jhin_tool_worker/main.py \
-  services/tool_worker/src/jhin_tool_worker/resources.py \
-  services/sandbox_runner/src/jhin_sandbox_runner/main.py \
-  services/sandbox_runner/src/jhin_sandbox_runner/jobs.py \
-  services/sandbox_runner/tests/test_telemetry.py uv.lock
-git diff --cached --name-only
-git commit -m "feat(observability): trace connector and sandbox boundaries"
-```
+  apps/api/tests/test_connector_telemetry.py \
+  apps/api/tests/test_connections_unit.py -q
+
+uv run pytest \
+  packages/tools/tests/test_telemetry.py \
+  services/tool_worker/tests/test_telemetry.py -q
+
+uv run pytest \
+  services/sandbox_runner/tests/test_telemetry.py \
+  services/sandbox_runner/tests/test_job_config.py \
+  services/sandbox_runner/tests/test_job_lifecycle.py \
+  services/sandbox_runner/tests/test_api_auth.py -q
+~~~
+
+Expected RED names missing explicit runtime wiring, connector-specific operation normalization,
+bounded/fail-open transport/span behavior, client/server/job parentage, health lifecycle, terminal
+once-recording, or hard caps. Implement in that order and make each group GREEN. Collection
+imports, undefined fixtures, global leakage, or Docker/network/live-database failures are invalid
+RED.
+
+Then run:
+
+~~~bash
+uv lock
+uv lock --check
+uv run pytest \
+  packages/observability/tests \
+  packages/tools/tests \
+  packages/connectors/tests \
+  apps/api/tests \
+  services/tool_worker/tests \
+  services/sandbox_runner/tests -q
+uv run pytest -q
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy
+~~~
+
+All commands pass. Root collection includes live-marked integration modules while their live cases
+remain deselected. Task 8 unit gates use no Docker daemon, network service, or live database.
+
+### 13.11 Preserve Task 6/7 ownership and bind Task 11/12 evidence
+
+- **Task 6:** preserve exact runtime identity/ownership, sandbox
+  `create_app(settings, runtime=None)` factory/lifespan cleanup, worker resource shutdown,
+  Temporal interceptor, and absence of a global provider. Task 8 consumes only its tracer/metrics.
+- **Task 7:** preserve `completed_at is None` as agent finalization once-guard, catalog-member
+  tool family, no invocation-mismatch metric, trigger started-row reconciliation, and every
+  post-commit fail-open call. Task 8's tracer field is transport-only and cannot affect durable
+  outcome accounting.
+- **Task 11:** retain the exact `trace_connector_database` signature and exact health-gauge
+  series. The connected trace asserts parent **edges**, not only a shared trace ID: connector span
+  is a child of its active API/tool span; each `sandbox.server` is the exact child of its matching
+  `sandbox.client`; `sandbox.job.lifecycle` is the exact child of the submit server span.
+  Exercise Task 7's trigger barrier, sandbox terminal replay/once behavior, and complete raw plus
+  encoded canary scans over spans, events/status, metrics, and logs.
+- **Task 12:** rerun lock, full pytest collection, Ruff check/format, and mypy. Live monitoring and
+  connected infrastructure remain Task 11/12 work, never a Task 8 unit dependency.
+
+### 13.12 Make Task 8's 44 paths and committed tree exact
+
+Replace Task 8 `Files`, the corresponding global File Map entries, and staging with this exact
+mirrored array. `registry.py` and tool-worker `resources.py` are deliberately absent because
+the catalog stays stateless and Task 6 owns the runtime graph.
+
+~~~bash
+set -euo pipefail
+task8_paths=(
+  apps/api/src/jhin_api/connections/router.py
+  apps/api/src/jhin_api/connections/service.py
+  apps/api/tests/test_connections_unit.py
+  apps/api/tests/test_connector_telemetry.py
+  packages/connectors/pyproject.toml
+  packages/connectors/src/jhin_connectors/base.py
+  packages/connectors/src/jhin_connectors/cli/runner_client.py
+  packages/connectors/src/jhin_connectors/cli/tools.py
+  packages/connectors/src/jhin_connectors/github/auth.py
+  packages/connectors/src/jhin_connectors/github/client.py
+  packages/connectors/src/jhin_connectors/github/connector.py
+  packages/connectors/src/jhin_connectors/github/tools.py
+  packages/connectors/src/jhin_connectors/http_client.py
+  packages/connectors/src/jhin_connectors/linear/client.py
+  packages/connectors/src/jhin_connectors/linear/connector.py
+  packages/connectors/src/jhin_connectors/linear/tools.py
+  packages/connectors/src/jhin_connectors/supabase/connector.py
+  packages/connectors/src/jhin_connectors/supabase/database_client.py
+  packages/connectors/src/jhin_connectors/supabase/database_tools.py
+  packages/connectors/src/jhin_connectors/supabase/management_client.py
+  packages/connectors/src/jhin_connectors/supabase/management_tools.py
+  packages/connectors/src/jhin_connectors/telemetry.py
+  packages/connectors/src/jhin_connectors/vercel/client.py
+  packages/connectors/src/jhin_connectors/vercel/connector.py
+  packages/connectors/src/jhin_connectors/vercel/tools.py
+  packages/connectors/tests/supabase/test_database_telemetry.py
+  packages/connectors/tests/test_http_client.py
+  packages/connectors/tests/test_telemetry.py
+  packages/tools/pyproject.toml
+  packages/tools/src/jhin_tools/builtin.py
+  packages/tools/tests/test_telemetry.py
+  services/sandbox_runner/pyproject.toml
+  services/sandbox_runner/src/jhin_sandbox_runner/jobs.py
+  services/sandbox_runner/src/jhin_sandbox_runner/main.py
+  services/sandbox_runner/src/jhin_sandbox_runner/schemas.py
+  services/sandbox_runner/src/jhin_sandbox_runner/settings.py
+  services/sandbox_runner/tests/test_job_config.py
+  services/sandbox_runner/tests/test_telemetry.py
+  services/tool_worker/src/jhin_tool_worker/activities.py
+  services/tool_worker/src/jhin_tool_worker/cleanup_activities.py
+  services/tool_worker/src/jhin_tool_worker/main.py
+  services/tool_worker/src/jhin_tool_worker/trigger_activities.py
+  services/tool_worker/tests/test_telemetry.py
+  uv.lock
+)
+test -z "$(git diff --cached --name-only)"
+git status --short -- "${task8_paths[@]}"
+git diff --check -- "${task8_paths[@]}"
+git add -- "${task8_paths[@]}"
+expected_index="$(printf '%s\n' "${task8_paths[@]}" | LC_ALL=C sort)"
+actual_index="$(git diff --cached --name-only | LC_ALL=C sort)"
+test "$actual_index" = "$expected_index"
+git diff --cached --check -- "${task8_paths[@]}"
+git commit --only "${task8_paths[@]}" \
+  -m "feat(observability): trace connector and sandbox boundaries"
+test "$(git show -s --format=%s HEAD)" = \
+  "feat(observability): trace connector and sandbox boundaries"
+actual_commit_paths="$(git diff-tree --no-commit-id --name-only -r HEAD | LC_ALL=C sort)"
+test "$actual_commit_paths" = "$expected_index"
+test -z "$(git diff --cached --name-only)"
+~~~
+
+The Task 8 `Files`, File Map, and array are exact mirrors. No other Task 8 path is authorized.
+Any discovered affected path requires a reviewed amendment before it is touched. The Task 2
+operation-registry retrofix remains in its predecessor-owned paths and is not a Task 8 path. The
+global index-only exception remains sole: any pre-staged/unexpected/missing path, path outside
+`Files`, commit-tree mismatch, or non-empty post-commit index fails closed.
 
 ### Task 9: Give the Next.js Server the Same JSON-v1 Contract
 
 **Files:**
-- Create: `apps/web/lib/server-logger.ts`
-- Create: `apps/web/instrumentation.ts`
-- Create: `apps/web/server-wrapper.cjs`
 - Modify: `apps/web/Dockerfile`
+- Modify: `apps/web/instrumentation.ts`
+- Modify: `apps/web/lib/server-log-contract.json`
+- Modify: `apps/web/lib/server-logger.ts`
 - Modify: `apps/web/next.config.ts`
-- Create: `apps/web/tests/server-logger.test.ts`
-- Create: `apps/web/tests/server-wrapper.test.ts`
-- Create: `tests/test_web_json_stdout.py`
+- Modify: `apps/web/server-wrapper.cjs`
+- Modify: `apps/web/tests/instrumentation.test.ts`
+- Modify: `apps/web/tests/server-logger.test.ts`
+- Modify: `apps/web/tests/server-only-stub.ts`
+- Modify: `apps/web/tests/server-wrapper.test.ts`
+- Modify: `apps/web/vitest.config.ts`
+- Modify: `tests/test_web_json_stdout.py`
 
 **Interfaces:**
-- Consumes: Task 1 field names, sensitive-key list, size/depth limits, known-value semantics, and stable dotted-event rule.
-- Produces: `registerServerLogSecret(...)`, `serverLog(...)`, `serverError(...)`, a process wrapper that converts/suppresses every framework stdout/stderr line, graceful child shutdown, and no browser request access logger.
+- Consumes the accepted Task 8 handoff and produces the exact Task 9 contract, subject, manifest, and gates below.
 
 - [ ] **Step 1: Write failing TypeScript contract and redaction tests**
 
@@ -7688,39 +11198,474 @@ Expected: PASS; server logger is absent from client bundles and output records p
 
 - [ ] **Step 9: Review and commit**
 
-```bash
-git diff --check
-git add apps/web/Dockerfile apps/web/instrumentation.ts apps/web/lib/server-logger.ts \
-  apps/web/next.config.ts apps/web/server-wrapper.cjs \
-  apps/web/tests/server-logger.test.ts apps/web/tests/server-wrapper.test.ts \
+The task's sole staging and commit gate is the exact manifest-owned gate in the final executable contract below.
+
+#### Final executable contract for Task 9
+
+
+After applying the draft and corrected Tasks 1-8, replace Task 9 from its `Files` block through
+its staging/commit block with this section. Task 9 is JSON-v1 stdout only. It consumes Task 1's
+data contract by projection and introduces no Node/Python OTel runtime, metric, provider,
+monitoring-network attachment, or second looser registry.
+
+### 14.1 Use one immutable JSON contract for logger, wrapper, and Python parity
+
+Create the only web data authority at
+`apps/web/lib/server-log-contract.json`. It contains closed non-secret data only, and both
+`server-logger.ts` and `server-wrapper.cjs` load this exact file and recursively deep-freeze
+their in-process view.
+
+Its exact base contract is:
+
+- `schema_version: 1`, `service: "web"`, application logger `"jhin.web"`, and wrapper
+  logger `"jhin.web.wrapper"`;
+- environments `dev|test|staging|production`, aliases
+  `development -> dev` and `prod -> production`, with trim/case normalization and unknown/
+  empty/non-string fallback to `production`;
+- levels `debug|info|warning|error`;
+- context fields `request_id`, `correlation_id`, `workspace_id`, `task_id`, `run_id`,
+  `trace_id`, and `span_id`, each using Task 1's exact full-match grammar and 128-character
+  maximum;
+- `MAX_LOG_DEPTH=8`, `MAX_LOG_ITEMS=64`, `MAX_LOG_STRING=2000`, maximum key length 128,
+  minimum known-secret length 6, and exact sentinels
+  `"[REDACTED]"`, `"[TRUNCATED]"`, and `"[UNSUPPORTED]"`;
+- the exact Task 1 sensitive keys
+  `authorization|cookie|password|secret|token|api_key|private_key|dsn|prompt|completion|sql|`
+  `tool_input|tool_output|request_body|response_body|webhook_payload|secret_env` and exact
+  suffixes
+  `_authorization|_cookie|_password|_secret|_token|_api_key|_private_key|_dsn`; and
+- wrapper limits: 64 KiB frame, 16 KiB input slice, suppression count 1,000,000, and suppression
+  flush 1,000 ms.
+
+The event/field projection is exact:
+
+~~~text
+web.started                     -> []
+web.stopping                    -> [signal]
+web.rewrite_configured          -> [http_route]
+web.request_failed              -> [http_method, http_route, error_code]
+web.framework_output_suppressed -> [stream, count]
+log.event_rejected              -> []
+~~~
+
+Per-field enums and invalid behavior are exact:
+
+~~~text
+signal      = SIGINT|SIGTERM|other                       invalid -> other
+http_method = GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|other invalid -> other
+http_route  = /api/:path*|other                          invalid -> other
+error_code  = internal_error                             invalid -> omit
+stream      = stdout|stderr                              invalid -> omit
+~~~
+
+`count` is the separate finite integer contract in section 14.2. The Docker runtime copies the
+JSON beside the wrapper explicitly; do not rely on Next output-file tracing for this raw PID 1
+dependency.
+
+The unmarked test in `tests/test_web_json_stdout.py` loads this JSON and compares schema, caps,
+sensitive keys/suffixes, context fields, ID grammar, event-field projection, enums, aliases, and
+fallback policy against Task 1's actual Python constants. Web event-specific enum sets are
+nonempty subsets of the corresponding Python registry, and `other` is allowed only when the
+Python field permits it. It must not merely compare the JSON file with itself.
+
+Implement one exact-ID helper used by both modules. It proves the regex consumes the full input
+and rejects empty/non-string input; length 129; URL/whitespace/control values; and CR, LF, NUL,
+U+2028, or U+2029 anywhere, including a suffix. Test valid lengths 1 and 128 plus every rejection.
+Test environment normalization for every closed value, both aliases, case/whitespace, empty,
+unknown, and non-string values.
+
+### 14.2 Redact before validation without inspecting hostile values
+
+The logger pipeline order is binding:
+
+1. Normalize a literal registered event or use `log.event_rejected`, without stringifying input.
+2. Build the finite candidate-name set from only that event's permitted fields plus the seven
+   contexts. Read only own **data** property descriptors for those names. Never invoke an accessor,
+   iterator, proxy stringification, `toJSON`, `toString`, or equivalent. A hostile
+   descriptor/proxy operation produces a safe rejected/base-only record, not an exception.
+3. Apply one bounded structural pass, longest-known-secret-first replacement, then the second
+   bounded structural pass. Both structural passes normalize sensitive key spelling and strip URL
+   userinfo, query, and fragment before anything can be emitted.
+4. Validate only the redacted value against its exact field kind. Omit invalid IDs and exact enums;
+   map to `other` only for fields whose reviewed contract permits it.
+5. Add fixed base fields after caller processing and serialize once so caller fields cannot
+   override schema, timestamp, level, service, environment, event, or logger.
+
+`count` accepts only a real safe integer in the inclusive `0..1_000_000` range. Boolean,
+float, negative, overflow, coercible, accessor, and proxy values are omitted.
+
+`serverError` spreads or inspects neither argument. It invokes the same private pipeline with
+trusted forced `error_code="internal_error"`; the Error object is never dereferenced, including
+message, stack, cause, or custom getters. Public `serverLog` and `serverError` contain all
+diagnostic preparation and synchronous stdout-write failures and return `void`. Recovery never
+echoes an exception or caller value.
+
+The process-lifetime known-secret registry ignores values shorter than six and replaces longest
+first, including overlaps and multiple occurrences. Unit tests reset module state between cases;
+do not add a production clear API.
+
+Cover a short ignored secret, overlaps, repeated values, secrets under every allowed context,
+registered values that become invalid after replacement, camel/snake/punctuated/suffix sensitive
+keys, URL userinfo/query/fragment, cyclic/deep/large structures, throwing descriptors/accessors/
+proxies/stdout, and an Error with hostile message/stack/cause getters. Scan the complete line for
+raw plus URL/base64-encoded canaries.
+
+### 14.3 Canonicalize accepted child records and never relay input bytes
+
+Replace the boolean wrapper validator with a parser/canonicalizer returning a newly constructed
+safe record/canonical JSON string or `null`. Never emit the original child line.
+
+For an accepted application record:
+
+- require an ordinary non-array JSON object and exact base key/value types;
+- require canonical UTC timestamp shape and exact
+  `new Date(timestamp).toISOString() === timestamp`, not merely `Date.parse`;
+- require schema 1, service `web`, logger `jhin.web`, and closed level/environment/event;
+- reject every unknown key;
+- validate each optional context/event field with the shared exact-ID/enum/count contract; and
+- reconstruct fixed keys in deterministic order, then call `JSON.stringify` once on that new
+  object.
+
+The line framer may remove the one `\r` belonging to valid CRLF; otherwise leading/trailing
+whitespace is noncanonical and rejected. Duplicate-key shadow values, Unicode-escaped shadow
+values, noncanonical escapes/whitespace, invalid/noncanonical timestamps, arrays/primitives,
+extra keys, wrong logger/service, newline-suffixed IDs, enum edges, and malformed JSON are rejected
+or canonicalized without relaying their bytes. Accepted CRLF input is re-encoded once. Every
+rejected nonempty/oversized line contributes only to the bounded suppression summary.
+
+Wrapper-owned records use the same contract and encoder with fixed logger
+`jhin.web.wrapper`. Call sites supply only closed signal/stream/error/count values. Its private
+emitter uses the shared environment aliases and contains write/cleanup failure without printing a
+raw Node error.
+
+### 14.4 Finalize the child only after both pipes drain and release every owner
+
+Use one idempotent wrapper finalizer:
+
+- spawn with exactly ignored stdin and piped stdout/stderr and attach all data/end/error/close
+  handlers before returning control;
+- each line guard flushes idempotently at its stream `end`; child `close`, never `exit`, is
+  terminal authority and performs only a final idempotent flush after both pipes close;
+- synchronous spawn throw and asynchronous child `error` emit only the closed
+  `web.request_failed` wrapper record, set nonzero exit, clear owned timers, and remove every
+  installed signal listener without serializing the error;
+- a stdout/stderr stream `error` is bounded diagnostic failure: suppress the raw error, stop that
+  stream safely, do not kill/duplicate the child, and preserve the eventual child result;
+- first SIGINT/SIGTERM emits one `web.stopping`, forwards that exact signal once, and creates one
+  unref'd 10-second kill deadline; repeat signals/stops/close are idempotent;
+- requested graceful signal or code 0 after stop exits zero; SIGKILL/deadline, spawn failure, or
+  other abnormal child termination exits nonzero; and
+- every startup/error/close path clears kill/suppression timers, removes only listeners installed
+  by this wrapper, clears decoder buffers, and leaves no live handle.
+
+Diagnostic emit/finalization/cleanup failure cannot replace child authority or print free text.
+The finite line guards retain split UTF-8 correctness, huge-line dropping, saturated capped count,
+and aggregation behavior.
+
+Socket-free unit tests use `FakeChild`, explicitly end both streams, emit `close`, compare
+process listener counts before/after, and use fake timers. Cover normal code/signal stop,
+unexpected termination, async child error, synchronous spawn throw, stream error, ignored graceful
+deadline, double signal/close, final partial line before close, late data rejection, huge/saturated
+input, split UTF-8, and zero owned timer/listener/buffer state.
+
+### 14.5 Wire and test the installed Next 16.3.1 surface exactly
+
+Start `apps/web/instrumentation.ts` with:
+
+~~~typescript
+import type { Instrumentation } from "next";
+
+import { serverError, serverLog } from "@/lib/server-logger";
+~~~
+
+`register()` is Node-only and emits exactly `web.started` plus
+`web.rewrite_configured` with collapsed route `/api/:path*`.
+`normalizeNextRoute` consumes only typed `context.routePath` and returns exactly
+`/api/:path*|other`. `onRequestError` reads only `request.method` and
+`context.routePath`; it never reads concrete path, URL/query, headers, cookies, body, React
+props, Error, cause, message, or stack.
+
+Preserve standalone output and the same-origin rewrite, and make Next logging exact:
+
+~~~typescript
+logging: {
+  fetches: { fullUrl: false },
+  incomingRequests: false,
+},
+~~~
+
+This disables framework access lines at their source. Do not add a second access logger; the
+wrapper remains the fail-closed guard for unexpected framework output.
+
+`apps/web/tests/instrumentation.test.ts` covers node/non-node registration, exact route
+projection, every method/route fallback, exact `onRequestError` call, and proxy request/error
+objects whose forbidden getters throw. It imports the real Next config and asserts standalone
+output, disabled incoming requests, bounded fetch logging, and unchanged rewrite source/
+destination without logging the internal URL.
+
+### 14.6 Make all Vitest RED tests Node-only, resolvable, and isolated
+
+Create `apps/web/tests/server-only-stub.ts` with only an empty export. In
+`apps/web/vitest.config.ts`, alias the exact module ID `server-only` to that test-only file.
+Do not add a package dependency. Put `// @vitest-environment node` at the first line of
+`server-logger.test.ts`, `instrumentation.test.ts`, and `server-wrapper.test.ts`; the Next
+build continues using its pinned compiler alias and real server-only boundary.
+
+Until each production file exists, dynamically import it inside a named test/helper. Define every
+capture, environment snapshot/restore, stdout spy, module reset, fake child/timer, and complete
+record helper before RED. In `afterEach`/`finally`, restore `APP_ENV`, `NODE_ENV`,
+`NEXT_RUNTIME`, `process.exitCode`, stdout spies, timers, listeners, and module state, including
+the known-secret singleton.
+
+Do not use TypeScript `require(...)`. Load the deliberate CommonJS wrapper through a locally
+named function returned by `createRequire(import.meta.url)` with a narrow local interface.
+`server-wrapper.cjs` gets one documented file-level ESLint exemption for its deliberate
+CommonJS built-in/JSON loads. Do not relax repository-wide lint or add an ESLint config.
+
+### 14.7 Make the Docker proof unique, localhost-only, and self-cleaning
+
+`tests/test_web_json_stdout.py` contains:
+
+1. the unmarked Task 1 cross-language contract test from section 14.1, which runs in the ordinary
+   root suite; and
+2. exactly one individually `@pytest.mark.integration` built-image test.
+
+The Docker test creates a UUID-suffixed image tag and registers best-effort image removal before
+build. Once a validated container ID exists, immediately register container removal so fixture
+teardown removes container before image after success, failure, timeout, or assertion error.
+Publish the container only on `127.0.0.1` with a dynamically selected host port; never use
+unrestricted `-P`. Pass `APP_ENV=test` explicitly.
+
+After readiness, send one request containing unique URL-query, Authorization, and cookie canaries.
+Stop via Docker's bounded SIGTERM path, require exact zero exit, and capture stdout/stderr. Require:
+
+- stderr is empty and every nonempty stdout line is exactly one JSON object;
+- every record satisfies the shared allowed-key projection, canonical UTC timestamp, fixed
+  service, closed environment/level/event/logger, exact IDs/enums/count, and canonical
+  re-encoding with no duplicate semantic key;
+- `web.started`, `web.rewrite_configured`, and exactly one graceful `web.stopping` exist;
+- no framework/application free-text line exists; and
+- no raw canary or URL/base64 form appears in stdout, stderr, the inspect output selected for the
+  assertion, or parsed records.
+
+The pre-Dockerfile integration RED is valid only after all TypeScript/unit/parity groups are GREEN.
+It must fail because the old image starts `apps/web/server.js` directly. Then copy both
+`server-wrapper.cjs` and `lib/server-log-contract.json` with `--chown=jhin:jhin` into the
+runtime stage and make `node server-wrapper.cjs` the sole runtime command. Rerun the same isolated
+test GREEN.
+
+### 14.8 Keep dependency, bundle, and cardinality ownership exact
+
+Task 9 changes no package or lock:
+
+- `next@16.3.1` is already direct and supplies the instrumentation type plus production
+  `server-only` compiler boundary;
+- Vitest, TypeScript, and `@types/node` are already direct development dependencies;
+- the wrapper imports only Node built-ins and the repository-owned JSON contract; and
+- the stub resolves `server-only` only under Vitest.
+
+`apps/web/package.json` and `pnpm-lock.yaml` are absent from Task 9. A real dependency
+discovery requires a reviewed File Map/Files/manifest amendment before either changes. Compose,
+CI, and Task 11's harness are also later-owner paths.
+
+Task 9 creates no metric, trace label, OTel provider/exporter, or monitoring-network connection.
+Log cardinality is bounded by six events, their closed fields/enums, seven 128-character contexts,
+finite count, finite strings/items/depth, and capped suppression aggregation. No URL/host,
+provider/model/tool/connector name, external ID, request path, or arbitrary error becomes an event
+name or field key.
+
+Keep `import "server-only"` as the client-bundle guard. The production Next build is mandatory;
+any Client Component import of the logger must fail the build rather than shipping contract/
+redactor/known-secret state to the browser.
+
+### 14.9 Run exact RED, Docker transition, and final GREEN gates
+
+After corrected Tasks 1-8 exist, first create the complete test-only Vitest alias/stub, all three
+server test files, and Python helpers. Do not create the production logger, instrumentation,
+wrapper, or JSON contract yet. Run:
+
+~~~bash
+pnpm --filter jhin-web exec vitest run tests/server-logger.test.ts
+pnpm --filter jhin-web exec vitest run tests/instrumentation.test.ts
+pnpm --filter jhin-web exec vitest run tests/server-wrapper.test.ts
+uv run pytest -m 'not integration' tests/test_web_json_stdout.py -q
+~~~
+
+Expected RED names the absent production file from inside a named test. Undefined helpers,
+top-level collection import, unresolved test-only `server-only`, jsdom accident, singleton/env
+leak, or lint/type error is invalid RED.
+
+Implement shared contract/logger first, instrumentation/config second, wrapper third. Run each
+focused group and Python parity GREEN. Before the Dockerfile change run:
+
+~~~bash
+uv run pytest -m integration tests/test_web_json_stdout.py -q
+~~~
+
+Expected RED: the old image starts `apps/web/server.js` directly and fails the complete
+stdout/privacy/lifecycle/command assertions. Apply only the runtime-stage copy/CMD change and
+rerun the same integration test GREEN.
+
+Final Task 9 gates are:
+
+~~~bash
+pnpm --filter jhin-web test
+pnpm --filter jhin-web lint
+pnpm --filter jhin-web typecheck
+pnpm --filter jhin-web build
+uv run pytest -m integration tests/test_web_json_stdout.py -q
+uv run pytest -q
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy
+~~~
+
+All commands pass. The root pytest run executes the unmarked parity test and
+collects/deselects only the Docker case. No focused unit/parity gate uses Docker, network, browser,
+or a live service. The explicit integration test owns and removes only its unique image/container.
+
+### 14.10 Preserve Task 10-12 handoffs exactly
+
+- **Tasks 1-8:** keep every Python registry/runtime/metric/span/lifecycle authority unchanged.
+  Task 9 consumes only the JSON-v1 projection and adds no cross-service registry or product
+  behavior.
+- **Task 10:** because it owns `compose.yaml`, `compose.dev.yaml`, observability Compose guards,
+  and `.env.example`, it adds exact web `APP_ENV`: production default `production`, dev
+  default `dev`, and rendered explicit `test` override in both socket modes. Preserve Task 9's
+  wrapper CMD/copies, keep web off `monitoring`/OTLP, and add only bounded Docker JSON-file
+  logging.
+- **Task 11:** keep `docker compose logs --no-log-prefix` completely unfiltered. Validate web
+  lines with the Task 9 contract, closed allowed keys, canonical timestamp, and exact logger.
+  Route at least one URL/header/cookie-canary request through web, scan raw and encoded forms, and
+  reject every framework/application free-text line. The isolated Task 9 container test does not
+  replace rootful/rootless observed-stack evidence, and Task 11 may not bypass/reimplement wrapper.
+- **Task 12:** retain ordinary Python parity, all web test/lint/typecheck/build gates, both
+  clean-stack live gates, and complete canary/evidence scan. Add no Task 9 dependency version to
+  evidence. Final commit/path sequence includes this exact 12-path commit; Task 12 stages only its
+  own three evidence paths.
+
+### 14.11 Make Task 9's 12 paths and committed tree exact
+
+Replace Task 9 `Files`, matching global File Map entries, and staging with:
+
+~~~bash
+set -euo pipefail
+task9_paths=(
+  apps/web/Dockerfile
+  apps/web/instrumentation.ts
+  apps/web/lib/server-log-contract.json
+  apps/web/lib/server-logger.ts
+  apps/web/next.config.ts
+  apps/web/server-wrapper.cjs
+  apps/web/tests/instrumentation.test.ts
+  apps/web/tests/server-logger.test.ts
+  apps/web/tests/server-only-stub.ts
+  apps/web/tests/server-wrapper.test.ts
+  apps/web/vitest.config.ts
   tests/test_web_json_stdout.py
-git diff --cached --name-only
-git commit -m "feat(web): emit safe versioned server logs"
-```
+)
+test -z "$(git diff --cached --name-only)"
+git status --short -- "${task9_paths[@]}"
+git diff --check -- "${task9_paths[@]}"
+git add -- "${task9_paths[@]}"
+expected_index="$(printf '%s\n' "${task9_paths[@]}" | LC_ALL=C sort)"
+actual_index="$(git diff --cached --name-only | LC_ALL=C sort)"
+test "$actual_index" = "$expected_index"
+git diff --cached --check -- "${task9_paths[@]}"
+git commit --only "${task9_paths[@]}" \
+  -m "feat(web): emit safe versioned server logs"
+test "$(git show -s --format=%s HEAD)" = \
+  "feat(web): emit safe versioned server logs"
+actual_commit_paths="$(git diff-tree --no-commit-id --name-only -r HEAD | LC_ALL=C sort)"
+test "$actual_commit_paths" = "$expected_index"
+test -z "$(git diff --cached --name-only)"
+~~~
+
+The Task 9 `Files`, File Map, and array are exact mirrors. No package/lock, Compose, CI, or Task
+11 harness path is authorized. Any discovered affected path requires a reviewed amendment before
+it is touched. The global index-only exception remains sole: a pre-staged/unexpected/missing path,
+path outside `Files`, commit-tree mismatch, or non-empty post-commit index fails closed.
+
+#### Consolidated validation context
+
+
+Section 20 is the sole combined validation after Tasks 10-12 corrections. Replace the draft's
+earlier validation block with section 20 rather than retaining both. Its helpers use explicit
+`return 1` / `exit 1`, exact subject equality, all twelve manifests, the accepted predecessor
+tip handoff, and the protected final-head CI marker. The five exact acceptance values are filled from the mutually verified successful run;
+section 20 now requires those literal values and fails closed on any drift.
+
+#### Resolved implementation decisions
+
+
+Only these decisions remain legitimate at execution time:
+
+1. **Checkout log availability:** accept the completed run only if both logs contain the exact
+   full-SHA proof described above; otherwise amend CI and rerun.
+2. **Additional affected test discovered by implementation:** amend File Map/Files/staging first,
+   review the plan delta, then implement it. Do not silently expand the corresponding task commit.
+3. **Platform socket ownership command:** retain the two-branch GNU/BSD `stat_numeric` helper; do
+   not choose one platform and make the other harness non-executable.
+4. **Late span-attribute mechanism:** Task 7 may use either one best-effort setter backed by Task
+   2's closed per-key registry or construct the complete normalized final mapping before span end.
+   The same normalization, fail-open behavior, latency clamp, and privacy assertions apply to
+   either implementation.
+5. **Wrapper canonicalizer return form:** Task 9 may return either the newly constructed safe
+   record or its one canonical JSON encoding from the private parser. In either form the wrapper
+   must reconstruct fixed keys and stringify the new object exactly once; it may never relay the
+   child input bytes.
+
+The dependency, normalizer, compatibility-helper, environment, AST-exemption, rootless-event,
+`MetricName` authority, bootstrap metrics installation, normalized observable identity,
+pure-ASGI lifecycle, route collapse, test seam, SQL parser/listener, echo removal, Phase 2 fixture,
+trace-only NATS headers, subject authority, settlement lifetime, safe context binding, lag
+supervision, downstream tracer handoffs, and Task 3/4/5 test/staging choices are fixed by this
+addendum and are not left to the implementer. Task 6 likewise leaves no architecture decision
+open: the serialized reserved-carrier ceiling is 1,024 bytes; signal/update propagation uses
+validated SDK 1.31 `link_context`; private-hook use requires exact Temporal 1.31.0; the semantic
+wiring/import audits, six service ownership models, public signatures, provider/privacy contract,
+dependencies, 39-path manifest, and gates are fixed. Internal helper decomposition is an
+implementation choice only insofar as it preserves every observable contract and test above.
+Task 7 likewise fixes the complete model protocol, explicit runtime identity, semantic factory
+audit, diagnostic containment, committed-usage/finalization guards, catalog/durable-tool authority,
+trigger reconciliation and closed errors, dependencies, four-stage RED, broad GREEN, and exact
+32-path manifest/commit. The internal late-attribute mechanism in item 4 and ordinary private
+helper decomposition are the only Task 7 implementation choices; neither may change an observable
+contract. Task 8 fixes stateless request-bound tracer injection, the central connector-specific
+operation registry, fail-open HTTP/database/sampler/runner/job boundaries, exact HTTP and runner
+caps, health series/lifecycle, client-server-job parent edges, terminal once-recording,
+dependencies, Task 11/12 handoffs, RED/GREEN gates, and the exact 44-path manifest/commit. It adds
+no new open architecture choice; item 4's already-bounded late-attribute mechanism and internal
+helper decomposition remain the only implementation freedom. Task 9 fixes the immutable JSON
+authority, Task 1 parity, ordered fail-open redaction, exact enum/ID/environment policy, canonical
+child re-encoding, drained child lifecycle, Next/Vitest isolation, unique localhost-only Docker
+proof, dependency/bundle/cardinality decisions, Task 10-12 handoffs, gates, and exact 12-path
+manifest/commit. Item 5 is its sole explicit representation choice and cannot change output.
 
 ### Task 10: Add the Optional Collector/Prometheus/Tempo/Grafana Profile
 
 **Files:**
-- Create: `docker/monitoring.Dockerfile`
-- Create: `ops/observability/collector.yaml`
-- Create: `ops/observability/prometheus.yaml`
-- Create: `ops/observability/tempo.yaml`
-- Create: `ops/observability/grafana/provisioning/datasources/jhin.yaml`
-- Create: `ops/observability/grafana/provisioning/dashboards/jhin.yaml`
-- Create: `scripts/build_phase10_dashboard.py`
-- Create: `ops/observability/grafana/dashboards/jhin-overview.json`
-- Modify: `compose.yaml`
-- Modify: `compose.dev.yaml`
 - Modify: `.env.example`
 - Modify: `Makefile`
-- Create: `scripts/assert_phase10_observability_compose.py`
-- Create: `tests/test_phase10_observability_compose.py`
+- Modify: `compose.dev.yaml`
+- Modify: `compose.rootless.yaml`
+- Modify: `compose.yaml`
+- Modify: `docker/monitoring.Dockerfile`
+- Modify: `ops/observability/collector.yaml`
+- Modify: `ops/observability/grafana/dashboards/jhin-overview.json`
+- Modify: `ops/observability/grafana/provisioning/dashboards/jhin.yaml`
+- Modify: `ops/observability/grafana/provisioning/datasources/jhin.yaml`
+- Modify: `ops/observability/prometheus.yaml`
+- Modify: `ops/observability/tempo.yaml`
+- Modify: `scripts/assert_phase10_observability_compose.py`
 - Modify: `scripts/assert_phase10_tool_worker_compose.py`
+- Modify: `scripts/build_phase10_dashboard.py`
+- Modify: `tests/integration/phase10_upgrade_harness.py`
+- Modify: `tests/test_phase10_observability_compose.py`
 - Modify: `tests/test_phase10_tool_worker_compose.py`
 
 **Interfaces:**
-- Consumes: OTLP/gRPC from product services and exact Task 3 metric names.
-- Produces: optional `observability` Compose services, 15-day metrics, 72-hour traces, provisioned data sources/dashboard, internal-only topology, application Docker log rotation, and pure topology guards.
+- Consumes the accepted Task 9 handoff and produces the exact Task 10 contract, subject, manifest, and gates below.
 
 - [ ] **Step 1: Write failing rendered-Compose topology and retention tests**
 
@@ -8248,21 +12193,33 @@ Document the endpoint/TLS/sampler and dev ports in `.env.example`; do not add cr
 - [ ] **Step 7: Implement and run the rendered-profile assertion**
 
 `assert_phase10_observability_compose.py --mode {rootful,rootless}` loads `docker compose -f
-compose.yaml -f compose.<mode>.yaml config --format json`, passing render-only GID `10001` only for
-rootful, then performs the same topology/retention/logging assertions as the unit test and scans the
-rendered monitoring services for forbidden credential keys. It must not start containers.
+compose.yaml -f compose.<mode>.yaml config --format json`, passing the verified rootful socket's
+actual nonzero GID for rootful and the verified socket path for rootless, then performs the same
+topology/retention/logging assertions as the unit test and scans the rendered monitoring services
+for forbidden credential keys. It must not start containers.
 
 Run:
 
 ```bash
+rootful_socket="${PHASE10_ROOTFUL_DOCKER_SOCKET:-/var/run/docker.sock}"
+rootless_socket="${PHASE10_ROOTLESS_DOCKER_SOCKET:?set the verified rootless socket}"
+test -S "$rootful_socket"
+socket_gid="$(stat -c %g "$rootful_socket")"
+test "$socket_gid" -gt 0
 uv run python scripts/build_phase10_dashboard.py --check
 uv run pytest tests/test_phase10_observability_compose.py -q
-env -u SANDBOX_DOCKER_GID uv run python scripts/assert_phase10_observability_compose.py --mode rootless
-SANDBOX_DOCKER_GID=10001 uv run python scripts/assert_phase10_observability_compose.py --mode rootful
-env -u SANDBOX_DOCKER_GID uv run python scripts/assert_phase10_tool_worker_compose.py --mode rootless
-SANDBOX_DOCKER_GID=10001 uv run python scripts/assert_phase10_tool_worker_compose.py --mode rootful
-env -u SANDBOX_DOCKER_GID docker compose -f compose.yaml -f compose.rootless.yaml config --quiet
-SANDBOX_DOCKER_GID=10001 docker compose -f compose.yaml -f compose.dev.yaml \
+env -u SANDBOX_DOCKER_GID PHASE10_ROOTLESS_DOCKER_SOCKET="$rootless_socket" \
+  uv run python scripts/assert_phase10_observability_compose.py --mode rootless
+SANDBOX_DOCKER_SOCKET_HOST="$rootful_socket" SANDBOX_DOCKER_GID="$socket_gid" \
+  uv run python scripts/assert_phase10_observability_compose.py --mode rootful
+env -u SANDBOX_DOCKER_GID PHASE10_ROOTLESS_DOCKER_SOCKET="$rootless_socket" \
+  uv run python scripts/assert_phase10_tool_worker_compose.py --mode rootless
+SANDBOX_DOCKER_SOCKET_HOST="$rootful_socket" SANDBOX_DOCKER_GID="$socket_gid" \
+  uv run python scripts/assert_phase10_tool_worker_compose.py --mode rootful
+env -u SANDBOX_DOCKER_GID PHASE10_ROOTLESS_DOCKER_SOCKET="$rootless_socket" \
+  docker compose -f compose.yaml -f compose.rootless.yaml config --quiet
+SANDBOX_DOCKER_SOCKET_HOST="$rootful_socket" SANDBOX_DOCKER_GID="$socket_gid" \
+  docker compose -f compose.yaml -f compose.dev.yaml \
   -f compose.rootful.yaml --profile observability config --quiet
 ```
 
@@ -8270,43 +12227,344 @@ Expected: PASS; the optional profile is valid and internal, with exact retention
 
 - [ ] **Step 8: Review and commit**
 
-```bash
-git diff --check
-git add .env.example Makefile compose.yaml compose.dev.yaml docker/monitoring.Dockerfile \
-  ops/observability/collector.yaml ops/observability/prometheus.yaml \
-  ops/observability/tempo.yaml \
-  ops/observability/grafana/provisioning/datasources/jhin.yaml \
-  ops/observability/grafana/provisioning/dashboards/jhin.yaml \
-  ops/observability/grafana/dashboards/jhin-overview.json \
-  scripts/build_phase10_dashboard.py scripts/assert_phase10_observability_compose.py \
+The task's sole staging and commit gate is the exact manifest-owned gate in the final executable contract below.
+
+#### Final executable contract for Task 10
+
+
+After applying the draft and corrected Tasks 1-9, replace Task 10 from its `Files` block through
+its staging/commit block with this section. Task 10 adds an optional local diagnostics plane. It
+does not create a second Docker lifecycle, give products a new product-to-product path, initialize
+a second telemetry runtime, or claim live readiness from rendered YAML.
+
+### 17.1 Preserve product isolation with one backend bridge and six ingress bridges
+
+An internal Docker bridge is still full-mesh among its members. Therefore no product joins one
+shared `monitoring` bridge. Define exactly these seven project-scoped networks, each with the exact
+mapping `driver: bridge`, `external: false`, and `internal: true`:
+
+~~~text
+monitoring             otel-collector, prometheus, tempo, grafana
+telemetry-api          api, otel-collector
+telemetry-workflow     workflow-worker, otel-collector
+telemetry-agent        agent-worker, otel-collector
+telemetry-tool         tool-worker, otel-collector
+telemetry-event        event-worker, otel-collector
+telemetry-sandbox      sandbox-runner, otel-collector
+~~~
+
+The complete product network sets after Task 10 are exact:
+
+~~~text
+web                 edge
+api                 edge, control, data, telemetry-api
+workflow-worker     control, telemetry-workflow
+agent-worker        control, data, telemetry-agent
+tool-worker         control, data, runner, telemetry-tool
+event-worker        control, data, telemetry-event
+sandbox-runner      runner, telemetry-sandbox                 (rootful)
+sandbox-runner      runner, engine, telemetry-sandbox         (rootless)
+rootless adapter    engine                                    (rootless only)
+otel-collector      monitoring plus all six telemetry-* ingress bridges
+prometheus          monitoring
+tempo               monitoring
+grafana             monitoring
+~~~
+
+No product service joins backend `monitoring`; no two products share a telemetry ingress; web and
+the rootless adapter join none; and the rootless sandbox runner retains `engine`. Static and live
+tests mutation-reject every extra/missing attachment, any product on `monitoring`, any backend on
+a product network, web/adapter telemetry membership, a shared product ingress, Collector missing
+or adding an ingress, and rootless loss of `engine`.
+
+Revise every contradictory global/interface sentence in the telemetry plan to this model. The
+monitoring bridge is backend-only; the six producer bridges are ingress-only.
+
+### 17.2 Extend the sole leased Compose authority
+
+Delete the proposed `PHASE10_SOCKET_MODE`, `COMPOSE_BASE`, and `COMPOSE_DEV` Make/raw-Compose
+authority. Preserve `PHASE10_MODE` and extend
+`tests/integration/phase10_upgrade_harness.py`:
+
+- `ComposeAuthority.create(..., observability: bool = False)` and
+  `select_live_authority(..., observability: bool = False)` install one immutable selection in
+  the already-sanitized authority environment.
+- Base selection installs an empty endpoint and false insecure flag. Observed selection installs
+  exactly `http://otel-collector:4317` and `true`, retaining Task 2's reviewed sampler/queue/
+  batch/timeout/interval defaults.
+- `observability_enabled` is derived only from that closed environment. The private lease schema
+  remains backward-compatible: an old lease without OTel keys means base.
+- Only observed selection adds `--profile observability`, the exact four monitoring services,
+  exactly three dynamically allocated loopback ports named `PROMETHEUS_DEV_PORT`,
+  `TEMPO_DEV_PORT`, and `GRAFANA_DEV_PORT`, and four unique-project monitoring image tags.
+  Collector has no host binding.
+- `expected_services`, published-port validation/resolution, readiness, child environment,
+  diagnostics, `down -v --remove-orphans --rmi local`, second-pass container/network/volume/
+  sandbox proof, process-group proof, and image-absence proof all consume that same immutable
+  selection.
+- Ambient `OTEL_*`, `COMPOSE_PROFILES`, `.env`, project/port/socket/mode/crash selectors, Docker
+  context, and host state remain scrubbed. Rootful GID, verified rootless socket, master key,
+  recovery lease, barriers, signals, full canonical container IDs, workspace initializer labels,
+  direct-workspace ledger, and exact cleanup from predecessor tip
+  `ee66c588014acf8e448352a7e5e458aca63d37fe` remain authoritative.
+
+Make owns only these delegating targets and adds both to `.PHONY`:
+
+~~~make
+observability-up: ## Start one leased stack with the optional monitoring profile
+	$(PHASE10_HARNESS) up --mode $(PHASE10_MODE) --observability
+
+observability-down: ## Exhaustively clean the leased observed stack
+	$(PHASE10_HARNESS) down
+~~~
+
+Every existing live target remains harness-owned. Unit tests use an injected recorder and prove
+exact commands, immutable selection, service/port/image inventories, lease round-trip and old-
+lease compatibility, successful cleanup, and fail-closed survivor behavior without Docker.
+
+### 17.3 Use one poison-resistant render authority and the complete matrix
+
+Extend the accepted tool-worker Compose renderer; do not create a looser parallel renderer. Its
+contract is exact:
+
+- file order is base, optional dev, then exactly one socket-mode overlay;
+- profile selection is explicit and ambient `COMPOSE_PROFILES` is ignored;
+- `COMPOSE_DISABLE_ENV_FILE=1`; all competing Compose, Docker, mode, crash, and OTel state is
+  removed;
+- rootful render input includes an absolute socket source and positive
+  `SANDBOX_DOCKER_GID`; rootless includes an absolute verified socket source and omits the GID;
+- execution uses an argv with `shell=False`, 30-second timeout, captured text, checked exit, and
+  JSON-object validation; and
+- a placeholder socket exists only in a named unit-test render seam. The executable authority
+  gate always requires the caller's real selected socket and never describes a placeholder as
+  verification.
+
+Render and assert the Cartesian product:
+
+~~~text
+rootful/rootless x production/dev x profile absent/present
+default APP_ENV and explicit APP_ENV=test
+empty endpoint and exact bundled endpoint
+~~~
+
+Profile-absent renders contain no monitoring service, empty endpoint, false insecure, and
+unchanged product behavior. Profile-present renders contain exactly the four services. Merely
+enabling the profile with an empty endpoint still leaves every application no-op. Only the leased
+`observability-up` selection binds the profile to the internal endpoint. Retain every predecessor
+queue, dependency, token, secret-recipient, socket, UID/GID, crash, sandbox-network, rootless
+transport, and port assertion; change only the network sets in section 17.1.
+
+Every six ordinary Python services receive exactly this non-secret settings projection:
+
+~~~text
+OTEL_EXPORTER_OTLP_ENDPOINT                default empty
+OTEL_EXPORTER_OTLP_INSECURE                default false
+OTEL_TRACES_SAMPLER                        default parentbased_traceidratio
+OTEL_TRACES_SAMPLER_ARG                    default 0.10
+OTEL_BSP_MAX_QUEUE_SIZE                    default 2048
+OTEL_BSP_MAX_EXPORT_BATCH_SIZE             default 512
+OTEL_EXPORTER_OTLP_TIMEOUT_MILLIS           default 5000
+OTEL_METRIC_EXPORT_INTERVAL_MILLIS          default 60000
+~~~
+
+Do not inject blank CA/client-certificate/client-key paths. External TLS uses deployment-override,
+container-visible, read-only paths; key/certificate bytes never enter Compose environment or image
+layers. Add web `APP_ENV: ${APP_ENV:-production}` in base and `${APP_ENV:-dev}` in dev. Explicit
+`APP_ENV=test` reaches web, all six Python services, and the rootless adapter in both modes. Web
+gets no OTel key/network. The adapter retains only Task 1 `APP_ENV`/`LOG_LEVEL`, remains
+`engine`-only, and gets no OTel runtime, key, or backend network.
+
+### 17.4 Make monitoring images, configuration, security, and bounds closed
+
+Every monitoring image uses the narrow build contract:
+
+~~~yaml
+build:
+  context: docker
+  dockerfile: monitoring.Dockerfile
+  args:
+    BASE_IMAGE: <one exact reviewed version tag>
+~~~
+
+The Dockerfile accepts exactly the four pinned `BASE_IMAGE` values, pins the exact BusyBox
+version, and copies its probe executable with mode `0555`. Reject `latest`, floating tags, extra
+build args, repository-root context, or repository-context `COPY`/`ADD`.
+
+Retain the four exact monitoring image tag strings and BusyBox tag already specified by the
+tracked Task 10 draft; this addendum does not authorize choosing newer/floating replacements at
+implementation time. If any of those five exact tags is absent from the applied draft, stop for a
+reviewed plan amendment before writing Docker or Compose files.
+
+Collector configuration is exact and bounded: only OTLP/gRPC on `0.0.0.0:4317`; loopback-only
+health at `127.0.0.1:13133`; `memory_limiter` before `batch` in both pipelines with exact 256/64
+MiB limits; exact batch `512/1024/5s`; finite Tempo exporter queue and retry elapsed time;
+Prometheus translation `UnderscoreEscapingWithoutSuffixes`; no resource-to-label conversion; no
+log pipeline; structured Collector diagnostics; and no product-payload receiver/exporter.
+
+Prometheus has one Collector target, exact `15d` retention, no remote write/admin/lifecycle
+mutation endpoint. Tempo is local, single-tenant, exact `72h` replaceable retention and exposes
+only the gRPC receiver Collector needs. Grafana disables anonymous access and sign-up, has no base
+host binding, uses only repository provisioning, and exposes only Prometheus/Tempo datasources.
+Disable supported call-home/update checks. No backend receives a product secret/env key, Docker
+socket, product network, or host path except reviewed read-only config/dashboard binds.
+
+Every healthcheck is a complete exec-form map with exact local executable/URL, interval, timeout,
+retries, and start period. Reject `CMD-SHELL`, remote targets, omitted bounds, or probes against
+another service. Every optional backend has `restart: unless-stopped`, `cap_drop: [ALL]`,
+`no-new-privileges:true`, and explicit finite process/memory bounds. Any selected read-only-rootfs
+or tmpfs setting must be proven against the pinned image in Task 11; YAML does not establish
+compatibility.
+
+Apply Docker `json-file` logging with exact string options `max-size: "20m"` and
+`max-file: "5"` to every long-running base/dev/profile service, including the rootless adapter,
+dev-only fakes, and four backends. `sandbox-image` is the sole build-only exclusion. Tests enumerate
+each rendered active set and reject missing/changed/numeric/unbounded mappings. Infrastructure
+stdout is not thereby granted application JSON-v1 status.
+
+### 17.5 Generate and independently validate the sixteen-panel dashboard
+
+`scripts/build_phase10_dashboard.py` defines every import/helper before RED, writes atomically,
+and makes output byte-identical, sorted, and newline-terminated. Tests independently require:
+
+- exactly sixteen panels, one per canonical Task 3 instrument;
+- exact UID, schema version, range, refresh, deterministic IDs/grid, datasource UID, PromQL, and
+  unit;
+- metric names from the one Task 3 registry, with only histogram-derived suffixes and no second
+  counter `_total` suffix;
+- no forbidden identifier label, query, or variable;
+- fixed, edit-disabled, repository-only provisioning and only internal
+  `http://prometheus:9090` / `http://tempo:3200` URLs; and
+- exact mapping keys in datasource/dashboard YAML and dashboard JSON.
+
+Legends use only each panel's owned labels. Workspace/task/run/request/correlation/trace/
+connection/tool-call/URL/host/repository/project/model identifiers are forbidden in dashboard
+queries, labels, and variables. `trace_id` is allowed only in the one reviewed Prometheus
+datasource exemplar link, never in a dashboard query/variable/label.
+
+### 17.6 Use executable RED/GREEN and defer live claims to Task 11
+
+Before RED, install all delayed-import helpers so missing production paths fail inside named tests.
+Run independent socket-free RED groups:
+
+~~~bash
+uv run pytest tests/test_phase10_observability_compose.py -q
+uv run pytest tests/test_phase10_tool_worker_compose.py -q
+~~~
+
+Expected RED names the absent monitoring/profile/dashboard/authority selection or deliberately
+changed network/log/environment assertions. Collection/import/helper failure, ambient `.env`, a
+live socket, or daemon access is invalid RED.
+
+After implementation run:
+
+~~~bash
+uv run python scripts/build_phase10_dashboard.py --check
+uv run pytest \
+  tests/test_phase10_observability_compose.py \
+  tests/test_phase10_tool_worker_compose.py \
+  tests/test_phase9_production_compose.py \
+  tests/integration/test_phase10_tool_worker_boundary.py -q
+uv run ruff check \
+  scripts/assert_phase10_observability_compose.py \
   scripts/assert_phase10_tool_worker_compose.py \
-  tests/test_phase10_observability_compose.py tests/test_phase10_tool_worker_compose.py
-git diff --cached --name-only
-git commit -m "feat(observability): add optional monitoring profile"
-```
+  scripts/build_phase10_dashboard.py \
+  tests/test_phase10_observability_compose.py \
+  tests/test_phase10_tool_worker_compose.py \
+  tests/integration/phase10_upgrade_harness.py
+uv run ruff format --check \
+  scripts/assert_phase10_observability_compose.py \
+  scripts/assert_phase10_tool_worker_compose.py \
+  scripts/build_phase10_dashboard.py \
+  tests/test_phase10_observability_compose.py \
+  tests/test_phase10_tool_worker_compose.py \
+  tests/integration/phase10_upgrade_harness.py
+uv run mypy
+~~~
+
+Run rootful/rootless `docker compose ... config --quiet` only through the verified socket
+authorities with every exact required input. Task 10 starts, pulls, or builds no live container.
+Task 11 owns the first two-mode pinned-image/config/security/readiness acceptance; incompatibility
+is returned to Task 10 and is not weakened in Task 11.
+
+### 17.7 Make Task 10's 18 paths and committed tree exact
+
+Replace Task 10 `Files`, global File Map ownership, and staging with this exact mirrored array:
+
+~~~bash
+set -euo pipefail
+task10_paths=(
+  .env.example
+  Makefile
+  compose.dev.yaml
+  compose.rootless.yaml
+  compose.yaml
+  docker/monitoring.Dockerfile
+  ops/observability/collector.yaml
+  ops/observability/grafana/dashboards/jhin-overview.json
+  ops/observability/grafana/provisioning/dashboards/jhin.yaml
+  ops/observability/grafana/provisioning/datasources/jhin.yaml
+  ops/observability/prometheus.yaml
+  ops/observability/tempo.yaml
+  scripts/assert_phase10_observability_compose.py
+  scripts/assert_phase10_tool_worker_compose.py
+  scripts/build_phase10_dashboard.py
+  tests/integration/phase10_upgrade_harness.py
+  tests/test_phase10_observability_compose.py
+  tests/test_phase10_tool_worker_compose.py
+)
+test -z "$(git diff --cached --name-only)"
+git status --short -- "${task10_paths[@]}"
+git diff --check -- "${task10_paths[@]}"
+git add -- "${task10_paths[@]}"
+expected_index="$(printf '%s\n' "${task10_paths[@]}" | LC_ALL=C sort)"
+actual_index="$(git diff --cached --name-only | LC_ALL=C sort)"
+test "$actual_index" = "$expected_index"
+git diff --cached --check -- "${task10_paths[@]}"
+git commit --only "${task10_paths[@]}" \
+  -m "feat(observability): add optional monitoring profile"
+test "$(git show -s --format=%s HEAD)" = \
+  "feat(observability): add optional monitoring profile"
+actual_commit_paths="$(git diff-tree --no-commit-id --name-only -r HEAD | LC_ALL=C sort)"
+test "$actual_commit_paths" = "$expected_index"
+test -z "$(git diff --cached --name-only)"
+~~~
+
+Task 10 owns no CI, Task 11 integration test/artifact, dependency/lock, web source, or Task 12
+evidence path. A new path requires a reviewed File Map/Files/manifest amendment before editing.
+
+### 17.8 Bind Task 11 and Task 12 handoffs
+
+- **Task 11** consumes the observed selection on the same `ComposeAuthority`, dynamic monitoring
+  ports, exact service/image/network inventory, process groups, recovery lease, and exhaustive
+  cleanup. It proves live image IDs/build args, supported security settings, config parsing,
+  readiness, retention, dashboard/datasource load, isolated runtime networks, and Collector
+  stop/start recovery in both accepted modes. Application logs remain unfiltered; backend logs
+  remain diagnostics only.
+- **Task 12** discovers monitoring image versions through the same poison-resistant rootless
+  observed renderer and verified socket, reruns dashboard and both Compose authorities, consumes
+  Task 11's live success/cleanup proof, and stages no Task 10 path. No evidence row may call static
+  YAML a live readiness result.
 
 ### Task 11: Prove End-to-End Telemetry, Fail-Open Operation, and Secret Exclusion
 
 **Files:**
-- Create: `tests/integration/test_phase10_telemetry.py`
-- Create: `tests/integration/emit_phase10_metrics.py`
-- Modify: `tests/integration/conftest.py`
-- Create: `tests/test_phase10_telemetry_harness.py`
-- Create: `scripts/phase10_artifact.py`
-- Create: `tests/test_phase10_artifact.py`
 - Modify: `.github/workflows/ci.yml`
 - Modify: `Makefile`
-- Create: `docs/operations/telemetry.md`
-- Modify: `packages/models/src/jhin_models/testing/fake_openai.py`
-- Modify: `packages/models/tests/test_fake_openai.py`
+- Modify: `docs/operations/telemetry.md`
 - Modify: `packages/connectors/src/jhin_connectors/testing/fake_linear.py`
 - Modify: `packages/connectors/tests/linear/test_fake_linear_admin.py`
+- Modify: `packages/models/src/jhin_models/testing/fake_openai.py`
+- Modify: `packages/models/tests/test_fake_openai.py`
+- Modify: `scripts/phase10_artifact.py`
+- Modify: `tests/integration/conftest.py`
+- Modify: `tests/integration/emit_phase10_metrics.py`
+- Modify: `tests/integration/phase10_upgrade_harness.py`
+- Modify: `tests/integration/test_phase10_telemetry.py`
+- Modify: `tests/test_phase10_artifact.py`
+- Modify: `tests/test_phase10_telemetry_harness.py`
 
 **Interfaces:**
-- Consumes: the complete instrumented stack, dev fake providers, Collector Prometheus exporter, Tempo query API, and versioned dashboard.
-- Produces: two isolated black-box Compose invocations, a complete project-bound stack fixture,
-  exact Collector exposition assertions, a schema/canary-gated CI artifact, and an operator
-  runbook; no product UI/API.
+- Consumes the accepted Task 10 handoff and produces the exact Task 11 contract, subject, manifest, and gates below.
 
 - [ ] **Step 1: Write the harness/mode/legacy contract tests and run RED before rewriting it**
 
@@ -9602,12 +13860,15 @@ scanner passes. Normal CI uses only fake providers.
           --destination "$RUNNER_TEMP/phase10-canaries.json"
       - name: Prove rootless render with GID absent
         run: |
-          env -u SANDBOX_DOCKER_GID PHASE10_SOCKET_MODE=rootless uv run pytest \
+          env -u SANDBOX_DOCKER_GID PHASE10_SOCKET_MODE=rootless \
+            PHASE10_ROOTLESS_DOCKER_SOCKET=/run/user/10001/docker.sock uv run pytest \
             tests/test_phase10_tool_worker_compose.py \
             tests/test_phase10_observability_compose.py -q
-          env -u SANDBOX_DOCKER_GID PHASE10_SOCKET_MODE=rootless uv run python \
+          env -u SANDBOX_DOCKER_GID PHASE10_SOCKET_MODE=rootless \
+            PHASE10_ROOTLESS_DOCKER_SOCKET=/run/user/10001/docker.sock uv run python \
             scripts/assert_phase10_tool_worker_compose.py --mode rootless
-          env -u SANDBOX_DOCKER_GID PHASE10_SOCKET_MODE=rootless uv run python \
+          env -u SANDBOX_DOCKER_GID PHASE10_SOCKET_MODE=rootless \
+            PHASE10_ROOTLESS_DOCKER_SOCKET=/run/user/10001/docker.sock uv run python \
             scripts/assert_phase10_observability_compose.py --mode rootless
       - name: Build sandbox image for base project
         run: >-
@@ -10054,31 +14315,517 @@ an empty `ps -q` for both explicit projects because teardown ran.
 
 - [ ] **Step 11: Review and commit**
 
-```bash
-git diff --check
-git add .github/workflows/ci.yml Makefile docs/operations/telemetry.md \
+The task's sole staging and commit gate is the exact manifest-owned gate in the final executable contract below.
+
+#### Final executable contract for Task 11
+
+
+After corrected Tasks 1-10 exist, replace Task 11 from its `Files` block through its staging/
+commit block with this section. Delete the draft's fixed project, raw Compose lifecycle, parallel
+socket selector, rootful-only CI job, shared-name trace test, gauge-overwriting fixture, predictable
+artifact temporary path, and post-cleanup status capture.
+
+Task 11 consumes the accepted Phase 10 lifecycle rooted at exact predecessor tip
+`ee66c588014acf8e448352a7e5e458aca63d37fe`; it may not silently fall back to an earlier range.
+
+### 18.1 Add exactly two scenarios to the sole leased authority
+
+Do not add `StackContract`, `resolve_stack_contract`, a `jhin` fallback, caller-supplied project/
+files/profile/port/socket, or a second `PHASE10_SOCKET_MODE`. Keep integration conftest strict and
+wrap only its exact leased `ComposeAuthority` in a small typed `Stack` facade.
+
+After Task 10 adds `LiveScenario.observability: bool = False`, Task 11 adds exactly:
+
+~~~python
+"telemetry-base": LiveScenario(
+    nodes=(
+        "tests/integration/test_phase10_telemetry.py::"
+        "test_product_completes_work_with_profile_absent",
+    ),
+    expected_tests=1,
+    observability=False,
+),
+"telemetry-observed": LiveScenario(
+    nodes=(
+        "tests/integration/test_phase10_telemetry.py::test_observed_runtime_contract",
+        "tests/integration/test_phase10_telemetry.py::"
+        "test_connected_trace_metrics_canaries_and_replay_contract",
+        "tests/integration/test_phase10_telemetry.py::"
+        "test_application_stdout_is_schema_v1_jsonl",
+        "tests/integration/test_phase10_telemetry.py::"
+        "test_product_completes_while_collector_is_stopped_and_recovers",
+        "tests/integration/test_phase10_telemetry.py::"
+        "test_trigger_started_commit_is_reconciled_once",
+        "tests/integration/test_phase10_telemetry.py::"
+        "test_sandbox_terminal_reads_and_cancel_do_not_recount",
+    ),
+    # 1 runtime + 1 connected + 7 JSONL + 1 outage + 1 trigger + 1 sandbox.
+    expected_tests=12,
+    observability=True,
+),
+~~~
+
+The harness test compares exact node IDs and exact positive collection counts. Never use a `-k`
+filter: skips, xfails, deselection, or count drift fail. Base and observed run as two sequential,
+unique one-shot invocations. Each invocation owns build/up/test, pre-cleanup failure capture,
+down, exact second-pass resources, process groups, lease/barriers, full-ID sandbox/workspace-init
+cleanup, and selected image absence. Scenario success is returned only after all cleanup proves
+absence.
+
+### 18.2 Expose only typed telemetry operations from the leased authority
+
+`Stack` stores only `authority: ComposeAuthority`. Base/observed fixtures assert the immutable
+lease selection and use only `authority.published_ports` and its sanitized child environment.
+They guess no conventional port or project.
+
+Add narrow authority operations for:
+
+- unfiltered `logs --no-color --no-log-prefix <application-service>` with both streams;
+- raw Collector exposition via exact in-container
+  `exec -T otel-collector /bin/busybox wget -q -O - http://127.0.0.1:9464/metrics`;
+- Tempo, Prometheus, and Grafana requests through lease-resolved dynamic loopback ports;
+- exact rendered/runtime service, image, config, security, health, mount, log, and network
+  inspection;
+- bounded stop/start/readiness of exactly `otel-collector`;
+- a fixed metric fixture inside `api` through typed `exec -T`, never `compose cp`;
+- exact existing sandbox submit/status/log/cancel/terminal-safe operations; and
+- raw `ps --all --format json` used only by in-owner failure projection.
+
+Every method derives project, files, profile, socket, environment, allowlist, and timeout from the
+lease. Generic fixture Compose remains narrow and rejects lifecycle, raw `exec`/logs,
+`-p/-f/--profile`, and socket/context/host overrides. Direct sandbox work reuses the accepted
+ledgered operations so job/workspace intent is durable before the runner request and initializer/
+volume cleanup remains exact. Unit tests inject a recorder, prove every argv/environment, and
+reject ambient `COMPOSE_*`, `DOCKER_*`, `OTEL_*`, project, port, socket, or GID substitution
+without Docker.
+
+### 18.3 Make the first live monitoring acceptance exhaustive
+
+`test_observed_runtime_contract` must prove in rootful and rootless:
+
+- exact mode/profile service inventory, including the adapter only in rootless and exactly four
+  backends only when observed;
+- all four rendered pinned `BASE_IMAGE` args, unique-project image tags, resolved image IDs, and
+  running containers using those exact IDs;
+- reviewed non-root identities, effective cap drop/no-new-privileges, finite process/memory
+  bounds, supported read-only/tmpfs choices, exact `20m x 5` JSON-file logs, reviewed read-only
+  binds, and absence of product secrets/sockets;
+- Collector parse and exact gRPC/memory/batch/queue/retry/no-log/no-suffix configuration;
+- Prometheus one-target/15d, Tempo local single-tenant/72h, Grafana disabled anonymous/sign-up,
+  exact provisioned datasources, and byte-identical generated dashboard;
+- every exact local ready endpoint after Compose readiness; and
+- stop Collector, complete product work, start the same Collector, reassert readiness, emit and
+  observe a fresh metric within finite monotonic deadlines.
+
+Inspect real containers/endpoints/config behavior. Rendered YAML, a failure artifact, or a static
+file is not live proof. Runtime network membership must equal section 17.1 exactly and reject any
+extra/missing edge.
+
+### 18.4 Assert the connected parent graph, not a shared bag of names
+
+Query the complete Tempo trace and index trace ID, span ID, parent span ID, name, kind, and closed
+attributes. Require this actual edge graph, disambiguating repeated names with the closed route,
+stream, consumer, activity, and operation attributes:
+
+~~~text
+API webhook http.server.request
+  -> db.operation (at least one real asyncpg operation)
+  -> nats.publish (INGRESS)
+     -> nats.consume (INGRESS, event-worker-ingress)
+        -> nats.publish (EVENTS)
+           -> nats.consume (EVENTS, event-worker)
+              -> trigger.dispatch
+                 -> temporal.start_workflow
+                    -> temporal.activity.prepare_triggered_task
+                    -> temporal.activity.resolve_advertised_tools
+                    -> temporal.activity.reason_agent_step
+                       -> agent.reason_step
+                          -> model.request
+                    -> temporal.activity.execute_bound_tool
+                       -> tool.gateway.execute
+                          -> connector.http
+                       -> tool.gateway.execute
+                          -> sandbox.client (submit)
+                             -> matching sandbox.server (submit)
+                                -> sandbox.job.lifecycle
+                    -> temporal.activity.commit_agent_step
+                    -> temporal.activity.cleanup_run_workspace
+                    -> temporal.activity.finalize_run_projection
+~~~
+
+The connector span is a child of its active API/tool span; each sandbox server is the exact child
+of the matching client; lifecycle is the submit-server child. Every span uses only registered
+attributes/events/status. No `temporal.workflow.*` application span exists. The DB canary uses the
+real API connection create/verify flow, a rejected fake-Supabase database endpoint, and the known
+traceparent; it yields closed `connector.database`/`db.operation` beneath an API server span and
+never copies a DSN file or exports SQL, bind data, DSN, URL, host, exception, or canary.
+
+### 18.5 Use one exact canary manifest and scan every complete sink
+
+The private manifest contains exactly these fifteen kinds:
+
+~~~text
+prompt, completion, connector_response, connector_error, authorization,
+cookie, url, api_key, private_key, dsn_user, dsn_password, webhook_secret,
+webhook_body, tool_output, sandbox_secret_env
+~~~
+
+Use the same validated manifest for injection and validation. GitHub connection creation uses
+`auth_type="pat"`. Task 11 owns its builders while preserving the Phase 7 Linear/agent/grant/
+trigger semantics. Apply the same known traceparent to successful work, rejected login/webhook,
+failed connector verification, failing DB verification, and a dynamic-web request whose query,
+Authorization header, and Cookie carry their canaries.
+
+Before selective parsing, scan:
+
+1. complete unfiltered stdout and stderr of all seven application services;
+2. the complete Tempo response, including resources, spans, events, links, status, and values;
+3. the complete raw Collector Prometheus response, including labels and exemplars.
+
+For every canary reject raw, percent-encoded, standard-base64, and URL-safe-base64 forms, padded
+and unpadded, in raw bytes/text and deterministic decoded serialization. Backend logs are
+diagnostic and are not application JSON-v1 evidence.
+
+### 18.6 Prove all sixteen metric contracts without replacing real gauges
+
+The fixed in-container fixture emits only counters/histograms needed to expose missing
+instruments. It never registers or replaces a gauge. It receives only closed stdin if needed,
+owns runtime flush/shutdown, creates no host payload/temp file, and exits nonzero on failure.
+
+Parse Compose object/array/NDJSON separately from OpenMetrics. For all sixteen instruments:
+
+- counters use the exact registered name, never a translated `_total` or double suffix;
+- histogram buckets add only `le`, while count/sum use exactly the contract labels;
+- each series has exactly its Task 3 labels, values from closed registries, and no identifier
+  label; and
+- every expected kind is actually present.
+
+The real event worker exports exactly the two lag series
+`(INGRESS,event-worker-ingress)` and `(EVENTS,event-worker)` with no third/stale or workspace/
+subject/header dimension. Seed real connections and wait for real `connector_health` and positive
+`connector_connections`; never fabricate those gauges. Poll with finite monotonic deadlines that
+account for the configured metric interval.
+
+### 18.7 Prove trigger, reasoning/tool, and sandbox once contracts live
+
+Consume Task 7's test-only post-started-commit/pre-dispatch callback against leased Postgres and
+Temporal: park after the authoritative `started` commit, cancel that invocation, redeliver through
+a fresh matcher, and prove one authoritative started row, one duplicate history row, one
+deterministic workflow ID, at most one Temporal workflow, a linked/completed task, and no lost
+work. The production callback defaults to no-op; Task 11 adds no control route and edits no Task 7
+source.
+
+For reasoning/tool retry, use accepted Phase 10 crash barriers and snapshot series before the
+barrier, after first committed transition, and after retry/reload. Provider attempts count only
+real calls; committed reasoning replay does not duplicate token/cost; durable terminal tool reload
+does not duplicate terminal/failure counters. Assert exact deltas.
+
+For sandbox once, submit one completed `network_policy=none` job, wait for one counter and one
+histogram-count delta, snapshot full terminal state, then repeat status, logs, cancel, and safe
+terminal-finalize paths. State/timestamps remain unchanged and both subsequent metric deltas are
+zero. This is separate from the connected sandbox trace.
+
+### 18.8 Capture closed failure status inside the owner before cleanup
+
+Remove Docker execution from `scripts/phase10_artifact.py` and CI. On child failure,
+`_execute_selected_one_shot` asks its exact live authority for `ps --all --format json`, projects
+and validates the safe document, atomically writes it, then always performs exhaustive cleanup.
+Preserve the primary test error and group capture/cleanup failures without masking it.
+
+The exact schema is:
+
+~~~json
+{
+  "schema_version": 1,
+  "kind": "compose_status",
+  "scenario": "telemetry-base",
+  "socket_mode": "rootful | rootless",
+  "observability": false,
+  "project": "jhin-p10-<8..16 lowercase hex>",
+  "services": [
+    {"service": "<selected closed service>", "state": "<closed state>",
+     "health": "<closed health>"}
+  ]
+}
+~~~
+
+The scenario/selection discriminant permits exactly these two pairs and no cross-product:
+
+~~~text
+telemetry-base     -> observability: false
+telemetry-observed -> observability: true
+~~~
+
+The observed document has the same schema but uses the second exact pair. Unit tests accept both
+valid pairs and reject `telemetry-base` with `true` and `telemetry-observed` with `false` before
+writing or upload. Services are unique, sorted, and a subset of the exact selected inventory.
+States are only
+`created|restarting|running|removing|paused|exited|dead`; health is only
+`none|starting|healthy|unhealthy`, with absent/empty normalized to `none`. Accept Compose object,
+array, or NDJSON; reject blank/malformed/oversize, duplicate/unknown service, foreign project,
+unknown state/health, key drift, mode/profile mismatch, or canary content. Never include logs,
+traces, metrics, images, commands, ports, mounts, IDs, environment, or raw rows.
+
+The artifact service registries exactly mirror authority inventories:
+
+~~~text
+rootful base = agent-worker, api, event-worker, fake-github, fake-linear,
+               fake-provider, fake-supabase, fake-supabase-db, fake-vercel,
+               nats, postgres, sandbox-runner, temporal, temporal-ui,
+               tool-worker, web, workflow-worker
+rootless base = rootful base + rootless-docker-transport
+observed      = selected base + grafana, otel-collector, prometheus, tempo
+~~~
+
+`sandbox-image` is build-only and forbidden from status. A pure equality test binds every
+mode/profile registry to `ComposeAuthority.expected_services`.
+
+The outer interface is exact:
+
+~~~text
+JHIN_PHASE10_SAFE_ARTIFACT_DIR     owner-only outer-harness directory
+JHIN_TELEMETRY_CANARY_FILE         owner-only child/validator manifest, never Compose
+telemetry-compose-status-<socket_mode>-<scenario>.json
+~~~
+
+The first variable never enters lease/child/container environment. The second is added only to the
+sanitized pytest child and validator. CLI operations are only `canaries --destination` and
+`validate --input --canary-file`; projection is an in-process pure owner function.
+
+The manifest has exact closed schema
+`{"schema_version":1,"kind":"telemetry_canaries","values":{...}}`. Create its verified
+owner-only `0700` directory and new regular `0600` file with
+`O_CREAT|O_EXCL|O_NOFOLLOW`; reject wrong owner/mode/type, links, duplicate/unknown/missing kinds,
+empty/oversize values, and oversize documents. Never upload it.
+
+Safe status writing uses a unique new `0600` regular temporary file in the same verified
+directory, complete write, file fsync, validation of actual bytes, absent destination, atomic
+install, and parent fsync. On failure remove only the exact owned inode. Cover hostile parent/
+manifest/destination links, preexisting files, short writes, fsync/replace failure, parser forms,
+duplicates, canary encodings, and cleanup after every exception.
+
+### 18.9 Run both scenarios in both existing CI authorities
+
+The exact Make interface is:
+
+~~~make
+test-telemetry-base: ## Run profile-absent telemetry acceptance through one lease
+	$(PHASE10_HARNESS) run --mode $(PHASE10_MODE) --scenario telemetry-base
+
+test-telemetry-observed: ## Run observed telemetry acceptance through one lease
+	$(PHASE10_HARNESS) run --mode $(PHASE10_MODE) --scenario telemetry-observed
+
+test-telemetry-integration: ## Run base then observed as separate one-shots
+	$(MAKE) test-telemetry-base PHASE10_MODE="$(PHASE10_MODE)"
+	$(MAKE) test-telemetry-observed PHASE10_MODE="$(PHASE10_MODE)"
+~~~
+
+Add all three to `.PHONY`. They do not depend on `master-key`; the authority owns its private
+nonprinting key. Add `make test-telemetry-integration` to the existing
+`phase10-rootful-live` and `phase10-rootless-live` jobs. Do not create a third telemetry job. The
+rootless invocation remains in `/tmp/jhin-phase10-rootless-workspace`, runs as UID 10001 against
+the already verified rootless socket, carries the private uv/runtime environment, and omits
+`SANDBOX_DOCKER_GID`.
+
+In each existing live job, name the one step that invokes this target exactly
+`Telemetry base and observed acceptance`. The step runs `make test-telemetry-integration` through
+that job's already-verified authority and must conclude `success`; this exact shared name is the
+protected Task 0 final-head CI handoff.
+
+Each job creates its private canary/artifact directory under its owning UID. On failure, validate
+status under the same owner, copy only already-validated safe status to a runner-readable upload
+directory, and gate upload on the named successful validator step. Never copy/upload the manifest.
+Use exact step IDs `validate_telemetry_status_rootful` and
+`validate_telemetry_status_rootless`, and upload names
+`phase10-telemetry-status-rootful` and `phase10-telemetry-status-rootless`. Each upload directory
+contains at most the two exact scenario status names. The harness has already cleaned its exact
+project before the job returns.
+
+### 18.10 Validate every application stdout line under its owning schema
+
+After every application service has been exercised, collect unfiltered logs. Every nonempty line
+must be one JSON object; no prefix stripping, filtering, tailing, or ignored plaintext is allowed.
+Six Python services use Task 1's complete JSON-v1 allowed-key/event/closed-field contract. Web uses
+Task 9's stronger exact allowed keys, canonical UTC timestamp, `service="web"`, and logger only
+`jhin.web` or `jhin.web.wrapper`. Fake/infrastructure/backend services receive no application
+schema status. Every line passes the complete canary scan; a banner, traceback, multiline error,
+or free text fails.
+
+Fake-only seams stay deterministic, authenticated, bounded, and thread-safe. Fake OpenAI accepts
+one bounded strict-base64 final completion only after every requested tool result; malformed,
+duplicate, or oversize markers retain deterministic safe behavior and never log data. Fake Linear
+installs one bounded error under its existing lock, authenticates before consuming it exactly once
+under the same lock, and exposes no error/secret via reset/state. Preserve every predecessor fake
+byte contract and test concurrent one-shot consumption.
+
+`docs/operations/telemetry.md` distinguishes leased dev teardown from production disablement:
+bundled diagnostics use dynamic loopback ports and disabled Grafana anonymous access;
+`observability-down` deletes only the leased dev stack including replaceable monitoring volumes;
+production disablement clears the endpoint and rolls product services without deleting product
+volumes; external TLS paths are container-visible read-only files, never inline bytes; monitoring
+data is replaceable/excluded from product backup while product data is not.
+
+### 18.11 Use executable RED/GREEN and exact two-mode live gates
+
+Install complete delayed-import helpers before RED. The socket-free RED group is:
+
+~~~bash
+uv run pytest \
+  tests/test_phase10_telemetry_harness.py \
+  tests/test_phase10_artifact.py \
+  packages/models/tests/test_fake_openai.py \
+  packages/connectors/tests/linear/test_fake_linear_admin.py -q
+~~~
+
+Expected RED names missing leased scenarios/selection, typed operations, object/array/NDJSON safe
+projection, atomic filesystem defenses, workflow gating, final fake completion, or one-shot fake
+error. A collection error or Docker/network call is invalid RED.
+
+Focused/static GREEN is exact:
+
+~~~bash
+uv lock --check
+uv run pytest \
+  tests/test_phase10_telemetry_harness.py \
+  tests/test_phase10_artifact.py \
+  packages/models/tests/test_fake_openai.py \
+  packages/connectors/tests/linear/test_fake_linear_admin.py -q
+uv run pytest -m "not integration" -q
+uv run ruff check \
+  scripts/phase10_artifact.py \
+  tests/integration/conftest.py \
+  tests/integration/emit_phase10_metrics.py \
+  tests/integration/phase10_upgrade_harness.py \
+  tests/integration/test_phase10_telemetry.py \
+  tests/test_phase10_artifact.py \
+  tests/test_phase10_telemetry_harness.py \
   packages/models/src/jhin_models/testing/fake_openai.py \
   packages/models/tests/test_fake_openai.py \
   packages/connectors/src/jhin_connectors/testing/fake_linear.py \
-  packages/connectors/tests/linear/test_fake_linear_admin.py \
-  scripts/phase10_artifact.py tests/test_phase10_artifact.py \
+  packages/connectors/tests/linear/test_fake_linear_admin.py
+uv run ruff format --check \
+  scripts/phase10_artifact.py \
+  tests/integration/conftest.py \
+  tests/integration/emit_phase10_metrics.py \
+  tests/integration/phase10_upgrade_harness.py \
+  tests/integration/test_phase10_telemetry.py \
+  tests/test_phase10_artifact.py \
   tests/test_phase10_telemetry_harness.py \
-  tests/integration/conftest.py tests/integration/emit_phase10_metrics.py \
+  packages/models/src/jhin_models/testing/fake_openai.py \
+  packages/models/tests/test_fake_openai.py \
+  packages/connectors/src/jhin_connectors/testing/fake_linear.py \
+  packages/connectors/tests/linear/test_fake_linear_admin.py
+uv run mypy
+pnpm --filter jhin-web test
+pnpm --filter jhin-web lint
+pnpm --filter jhin-web typecheck
+pnpm --filter jhin-web build
+git diff --check -- \
+  .github/workflows/ci.yml \
+  Makefile \
+  docs/operations/telemetry.md \
+  packages/connectors/src/jhin_connectors/testing/fake_linear.py \
+  packages/connectors/tests/linear/test_fake_linear_admin.py \
+  packages/models/src/jhin_models/testing/fake_openai.py \
+  packages/models/tests/test_fake_openai.py \
+  scripts/phase10_artifact.py \
+  tests/integration/conftest.py \
+  tests/integration/emit_phase10_metrics.py \
+  tests/integration/phase10_upgrade_harness.py \
+  tests/integration/test_phase10_telemetry.py \
+  tests/test_phase10_artifact.py \
+  tests/test_phase10_telemetry_harness.py
+~~~
+
+Root collection loads the live module without daemon access. On a verified rootful socket:
+
+~~~bash
+test -S /var/run/docker.sock
+socket_gid="$(stat -c %g /var/run/docker.sock)"
+test "$socket_gid" -gt 0
+SANDBOX_DOCKER_GID="$socket_gid" \
+PHASE10_MODE=rootful \
+PHASE10_ROOTFUL_DOCKER_SOCKET=/var/run/docker.sock \
+make test-telemetry-integration
+~~~
+
+On the verified UID-10001 rootless owner:
+
+~~~bash
+sudo -u phase10rootless -H env -u SANDBOX_DOCKER_GID \
+  PATH="$PATH" \
+  XDG_RUNTIME_DIR=/run/user/10001 \
+  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/10001/bus \
+  UV_CACHE_DIR=/tmp/jhin-phase10-uv-cache \
+  PHASE10_MODE=rootless \
+  PHASE10_ROOTLESS_DOCKER_SOCKET=/run/user/10001/docker.sock \
+  make -C /tmp/jhin-phase10-rootless-workspace test-telemetry-integration
+~~~
+
+Both pass only with exact positive counts, zero skip/xfail/deselect, and each invocation's full
+second-pass resource/image absence. Failure status is captured before that cleanup, independently
+validated, canary-free, and the only possible upload.
+
+### 18.12 Make Task 11's 14 paths and committed tree exact
+
+Replace Task 11 `Files`, global File Map ownership, and staging with:
+
+~~~bash
+set -euo pipefail
+task11_paths=(
+  .github/workflows/ci.yml
+  Makefile
+  docs/operations/telemetry.md
+  packages/connectors/src/jhin_connectors/testing/fake_linear.py
+  packages/connectors/tests/linear/test_fake_linear_admin.py
+  packages/models/src/jhin_models/testing/fake_openai.py
+  packages/models/tests/test_fake_openai.py
+  scripts/phase10_artifact.py
+  tests/integration/conftest.py
+  tests/integration/emit_phase10_metrics.py
+  tests/integration/phase10_upgrade_harness.py
   tests/integration/test_phase10_telemetry.py
-git diff --cached --name-only
-git commit -m "test(observability): prove end-to-end telemetry safety"
-```
+  tests/test_phase10_artifact.py
+  tests/test_phase10_telemetry_harness.py
+)
+test -z "$(git diff --cached --name-only)"
+git status --short -- "${task11_paths[@]}"
+git diff --check -- "${task11_paths[@]}"
+git add -- "${task11_paths[@]}"
+expected_index="$(printf '%s\n' "${task11_paths[@]}" | LC_ALL=C sort)"
+actual_index="$(git diff --cached --name-only | LC_ALL=C sort)"
+test "$actual_index" = "$expected_index"
+git diff --cached --check -- "${task11_paths[@]}"
+git commit --only "${task11_paths[@]}" \
+  -m "test(observability): prove end-to-end telemetry safety"
+test "$(git show -s --format=%s HEAD)" = \
+  "test(observability): prove end-to-end telemetry safety"
+actual_commit_paths="$(git diff-tree --no-commit-id --name-only -r HEAD | LC_ALL=C sort)"
+test "$actual_commit_paths" = "$expected_index"
+test -z "$(git diff --cached --name-only)"
+~~~
+
+Task 11 adds no dependency/lock, Compose/profile, monitoring config/dashboard, or Task 1-10
+production telemetry path. A discovered need first amends File Map/Files/manifest.
+
+### 18.13 Bind Task 12's exact evidence handoff
+
+Task 12 consumes only scenario names `telemetry-base` and `telemetry-observed`; Make targets
+`test-telemetry-base`, `test-telemetry-observed`, and `test-telemetry-integration`; existing jobs
+`phase10-rootful-live` and `phase10-rootless-live`; the exact fifteen-kind private manifest; the
+closed failure-only `compose_status`; and the harness's post-run resource/image absence proof. It
+must cite both mode/scenario successes. Static YAML, raw Compose, a failure artifact, a skipped
+step, rootful-only execution, or prose is not readiness/cleanup evidence.
 
 ### Task 12: Run Release Gates, Record Actual Evidence, and Stage Only Telemetry
 
 **Files:**
-- Create: `tests/test_phase10_telemetry_evidence.py`
-- Create: `scripts/record_phase10_telemetry_evidence.py`
-- Create: `docs/evidence/phase10-telemetry.md`
+- Modify: `docs/evidence/phase10-telemetry.md`
+- Modify: `scripts/record_phase10_telemetry_evidence.py`
+- Modify: `tests/test_phase10_telemetry_evidence.py`
 
 **Interfaces:**
-- Consumes: every prior focused/affected/Compose gate and live acceptance output.
-- Produces: dated repository evidence containing commands, exact image/package versions, git commit, results, required metric/trace/log checks, and fail-open checks.
+- Consumes the accepted Task 11 handoff and produces the exact Task 12 contract, subject, manifest, and gates below.
 
 - [ ] **Step 1: Write failing evidence refusal and rendering tests**
 
@@ -10511,6 +15258,7 @@ Expected: PASS; a refused run leaves no evidence file, and a valid run is determ
 
 ```bash
 test -z "$(git diff --cached --name-only)"
+rootless_socket="${PHASE10_ROOTLESS_DOCKER_SOCKET:?set the verified rootless socket}"
 uv lock --check
 uv run pytest -m 'not integration'
 uv run ruff check .
@@ -10521,13 +15269,15 @@ pnpm --filter jhin-web lint
 pnpm --filter jhin-web typecheck
 pnpm --filter jhin-web build
 uv run python scripts/build_phase10_dashboard.py --check
-env -u SANDBOX_DOCKER_GID uv run python \
+env -u SANDBOX_DOCKER_GID PHASE10_ROOTLESS_DOCKER_SOCKET="$rootless_socket" uv run python \
   scripts/assert_phase10_observability_compose.py --mode rootless
-env -u SANDBOX_DOCKER_GID uv run python \
+env -u SANDBOX_DOCKER_GID PHASE10_ROOTLESS_DOCKER_SOCKET="$rootless_socket" uv run python \
   scripts/assert_phase10_tool_worker_compose.py --mode rootless
-env -u SANDBOX_DOCKER_GID docker compose -f compose.yaml \
+env -u SANDBOX_DOCKER_GID PHASE10_ROOTLESS_DOCKER_SOCKET="$rootless_socket" \
+  docker compose -f compose.yaml \
   -f compose.rootless.yaml config --quiet
-env -u SANDBOX_DOCKER_GID docker compose -f compose.yaml -f compose.dev.yaml \
+env -u SANDBOX_DOCKER_GID PHASE10_ROOTLESS_DOCKER_SOCKET="$rootless_socket" \
+  docker compose -f compose.yaml -f compose.dev.yaml \
   -f compose.rootless.yaml --profile observability config --quiet
 ```
 
@@ -10538,31 +15288,41 @@ Expected: every command exits zero. Fix any failure with a new RED/GREEN cycle i
 First with no profile/export endpoint, then with the full profile:
 
 ```bash
-env -u SANDBOX_DOCKER_GID docker compose -p jhin-phase10-base \
+rootless_socket="${PHASE10_ROOTLESS_DOCKER_SOCKET:?set the verified rootless socket}"
+test -S "$rootless_socket"
+env -u SANDBOX_DOCKER_GID PHASE10_ROOTLESS_DOCKER_SOCKET="$rootless_socket" \
+  docker compose -p jhin-phase10-base \
   -f compose.yaml -f compose.dev.yaml -f compose.rootless.yaml \
   --profile build build sandbox-image
-env -u SANDBOX_DOCKER_GID OTEL_EXPORTER_OTLP_ENDPOINT= \
+env -u SANDBOX_DOCKER_GID PHASE10_ROOTLESS_DOCKER_SOCKET="$rootless_socket" \
+  OTEL_EXPORTER_OTLP_ENDPOINT= \
   docker compose -p jhin-phase10-base -f compose.yaml -f compose.dev.yaml \
   -f compose.rootless.yaml up -d --build --wait --wait-timeout 240
-env -u SANDBOX_DOCKER_GID JHIN_TEST_COMPOSE_PROJECT=jhin-phase10-base \
+env -u SANDBOX_DOCKER_GID PHASE10_ROOTLESS_DOCKER_SOCKET="$rootless_socket" \
+  JHIN_TEST_COMPOSE_PROJECT=jhin-phase10-base \
   JHIN_TELEMETRY_MODE=base PHASE10_SOCKET_MODE=rootless \
   uv run pytest -m integration \
   tests/integration/test_phase10_telemetry.py::test_product_completes_work_with_profile_absent -v
-env -u SANDBOX_DOCKER_GID docker compose -p jhin-phase10-base \
+env -u SANDBOX_DOCKER_GID PHASE10_ROOTLESS_DOCKER_SOCKET="$rootless_socket" \
+  docker compose -p jhin-phase10-base \
   -f compose.yaml -f compose.dev.yaml -f compose.rootless.yaml down -v --remove-orphans
 
-env -u SANDBOX_DOCKER_GID docker compose -p jhin-phase10-observed \
+env -u SANDBOX_DOCKER_GID PHASE10_ROOTLESS_DOCKER_SOCKET="$rootless_socket" \
+  docker compose -p jhin-phase10-observed \
   -f compose.yaml -f compose.dev.yaml -f compose.rootless.yaml \
   --profile build build sandbox-image
-env -u SANDBOX_DOCKER_GID OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317 \
-OTEL_EXPORTER_OTLP_INSECURE=true docker compose -p jhin-phase10-observed \
+env -u SANDBOX_DOCKER_GID PHASE10_ROOTLESS_DOCKER_SOCKET="$rootless_socket" \
+  OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317 \
+  OTEL_EXPORTER_OTLP_INSECURE=true docker compose -p jhin-phase10-observed \
   -f compose.yaml -f compose.dev.yaml -f compose.rootless.yaml \
   --profile observability up -d --build --wait --wait-timeout 240
-env -u SANDBOX_DOCKER_GID JHIN_TEST_COMPOSE_PROJECT=jhin-phase10-observed \
+env -u SANDBOX_DOCKER_GID PHASE10_ROOTLESS_DOCKER_SOCKET="$rootless_socket" \
+  JHIN_TEST_COMPOSE_PROJECT=jhin-phase10-observed \
   JHIN_TELEMETRY_MODE=observed PHASE10_SOCKET_MODE=rootless \
   uv run pytest -m integration tests/integration/test_phase10_telemetry.py \
   -k 'not profile_absent' -v
-env -u SANDBOX_DOCKER_GID docker compose -p jhin-phase10-observed \
+env -u SANDBOX_DOCKER_GID PHASE10_ROOTLESS_DOCKER_SOCKET="$rootless_socket" \
+  docker compose -p jhin-phase10-observed \
   -f compose.yaml -f compose.dev.yaml -f compose.rootless.yaml \
   --profile observability down -v --remove-orphans
 ```
@@ -10574,10 +15334,13 @@ Expected: both clean-stack runs pass and both explicit projects are torn down. T
 ```bash
 uv run python scripts/record_phase10_telemetry_evidence.py
 test -s docs/evidence/phase10-telemetry.md
-rg -n 'FAIL|INCOMPLETE|PENDING RESULT|not run' docs/evidence/phase10-telemetry.md && exit 1 || true
-test -z "$(env -u SANDBOX_DOCKER_GID docker compose -p jhin-phase10-base \
+# Superseded by the fail-closed evidence parser below.
+rootless_socket="${PHASE10_ROOTLESS_DOCKER_SOCKET:?set the verified rootless socket}"
+test -z "$(env -u SANDBOX_DOCKER_GID \
+  PHASE10_ROOTLESS_DOCKER_SOCKET="$rootless_socket" docker compose -p jhin-phase10-base \
   -f compose.yaml -f compose.dev.yaml -f compose.rootless.yaml ps -q)"
-test -z "$(env -u SANDBOX_DOCKER_GID docker compose -p jhin-phase10-observed \
+test -z "$(env -u SANDBOX_DOCKER_GID \
+  PHASE10_ROOTLESS_DOCKER_SOCKET="$rootless_socket" docker compose -p jhin-phase10-observed \
   -f compose.yaml -f compose.dev.yaml -f compose.rootless.yaml \
   --profile observability ps -q)"
 ```
@@ -10606,32 +15369,766 @@ Expected: focused leak/cardinality tests pass and dashboards contain no identifi
 
 - [ ] **Step 8: Stage only evidence-generator/evidence files and commit**
 
-```bash
-git status --short
-test "$(git status --short -- orgforge-production-implementation-plan.md)" = "?? orgforge-production-implementation-plan.md"
-git add tests/test_phase10_telemetry_evidence.py \
-  scripts/record_phase10_telemetry_evidence.py docs/evidence/phase10-telemetry.md
-git diff --cached --name-only
-git diff --cached --check
-git commit -m "docs(observability): record Phase 10 telemetry evidence"
-```
+The task's sole staging and commit gate is the exact manifest-owned gate in the final executable contract below.
 
-Expected: exactly the three Task 12 files are in the final commit; the user-owned production plan and design specs remain unstaged.
+Expected: exactly the three Task 12 files are in the final commit; design specs remain unstaged.
 
 - [ ] **Step 9: Verify final repository state and commit sequence**
 
 ```bash
-git status --short
-git log --oneline --decorate -13
-test "$(git rev-list --count HEAD~13..HEAD)" = "13"
-test "$(git rev-list --count HEAD~12..HEAD)" = "12"
-git diff HEAD~13..HEAD --stat
+# The final history and manifest gate runs below.
 ```
 
-Expected: `HEAD~13..HEAD` is exactly the 13 scoped commits (Task 0 plus Tasks 1–12), while
-`HEAD~12..HEAD` is exactly the 12 implementation/evidence commits after the Task 0 baseline. The
-13-commit diff contains no unrelated user file. Any remaining untracked Phase 10 specs or
-`orgforge-production-implementation-plan.md` are reported but untouched.
+
+Expected: the named checkpoint through `HEAD` is exactly the 13 scoped commits (Task 0 plus Tasks
+1–12), while the exact subject sequence after the checkpoint is the 12 implementation/evidence
+commits. The path-scoped diff contains no unrelated file.
+
+#### Binding rootless evidence socket
+
+
+The draft propagates the socket into several release commands but not into the evidence generator.
+Revise Task 12 Steps 1 and 3 to define and test:
+
+```python
+def require_rootless_socket(environ: Mapping[str, str]) -> str:
+    raw = environ.get("PHASE10_ROOTLESS_DOCKER_SOCKET", "")
+    path = Path(raw)
+    if not raw or not path.is_absolute() or not path.is_socket():
+        raise EvidenceRefused(
+            "PHASE10_ROOTLESS_DOCKER_SOCKET must name the verified Unix socket"
+        )
+    return raw
+```
+
+Binding behavior:
+
+- `main()` calls `require_rootless_socket(os.environ)` before creating a canary or running a gate.
+- `gate_env` contains that exact path and removes `SANDBOX_DOCKER_GID`.
+- `discover_versions` accepts/inherits the same environment, validates the same socket, and passes
+  the exact path to its rootless Compose render.
+- Every `GATES` command, including both Compose-model scripts and both live Make targets, receives
+  that exact `gate_env` through `run_gate`.
+- `record_evidence` receives explicit versions discovered under that environment; it does not
+  silently rerender Compose under a different process environment.
+
+Add tests that create a temporary Unix socket and prove the injected runner sees the same absolute
+path for every gate; missing, relative, regular-file, and nonexistent paths must raise
+`EvidenceRefused` before the destination or temporary canary file is created.
+
+Add `test -S "$rootless_socket"` immediately after every Task 12 assignment of
+`rootless_socket`. Replace Step 6's generator invocation with:
+
+```bash
+rootless_socket="${PHASE10_ROOTLESS_DOCKER_SOCKET:?set the verified rootless socket}"
+test -S "$rootless_socket"
+env -u SANDBOX_DOCKER_GID \
+  PHASE10_ROOTLESS_DOCKER_SOCKET="$rootless_socket" \
+  uv run python scripts/record_phase10_telemetry_evidence.py
+```
+
+The evidence row is invalid if the generator saw only a conventional path string rather than a
+socket that passed `-S`/`Path.is_socket()` at execution time.
+
+#### Final executable contract for Task 12
+
+
+Task 12 begins only after corrected Tasks 1-11 exist and the pushed Task 11 head has one accepted
+exact-head Actions run whose two existing live jobs both passed base then observed. Replace the
+Task 12 brief with this section. Task 12 owns only evidence generation/validation; it does not
+invent a lifecycle, restage a predecessor, or turn a failure artifact/static render into success.
+
+Its accepted lifecycle baseline is the same exact predecessor tip
+`ee66c588014acf8e448352a7e5e458aca63d37fe` named by Tasks 0, 10, and 11.
+
+### 19.1 Route all live work through the sole authority
+
+Delete manual raw-Compose live/config commands and fixed-project cleanup checks. Task 12 invokes
+live work only through:
+
+~~~text
+Profile-absent acceptance -> make test-telemetry-base
+Observed telemetry acceptance -> make test-telemetry-observed
+~~~
+
+The sanitized generator environment contains exactly one selected live mode:
+
+~~~text
+PHASE10_MODE=rootless
+PHASE10_ROOTLESS_DOCKER_SOCKET=$rootless_socket
+DOCKER_HOST=unix://$rootless_socket
+COMPOSE_DISABLE_ENV_FILE=1
+APP_ENV=test
+JHIN_TELEMETRY_CANARY_FILE=$telemetry_canary_file
+~~~
+
+The generator creates the manifest once with Task 11's validated factory in its private run
+directory. It removes `SANDBOX_DOCKER_GID` and all competing Docker/Compose/profile/mode/crash/
+OTel selectors. It never sets a caller-owned `PHASE10_SOCKET_MODE`. A zero live gate means the
+strict scenario count passed and leased second-pass resource/image cleanup completed; no fixed-
+project `ps` inference is allowed.
+
+### 19.2 Use one immutable, exhaustive gate registry
+
+Replace mutable command lists with an immutable `GateSpec(name, argv, timeout_seconds,
+backs_acceptance)` registry in this exact order:
+
+~~~text
+Locked dependencies              |  300 | uv lock --check
+Python ordinary collection       | 3600 | uv run pytest
+Ruff lint                        |  900 | uv run ruff check .
+Ruff format                      |  900 | uv run ruff format --check .
+mypy                             | 1800 | uv run mypy
+Web test                         | 1200 | pnpm --filter jhin-web test
+Web lint                         |  900 | pnpm --filter jhin-web lint
+Web typecheck                    | 1200 | pnpm --filter jhin-web typecheck
+Web build                        | 1800 | pnpm --filter jhin-web build
+Dashboard/provisioning contract  |  600 | uv run python scripts/build_phase10_dashboard.py --check
+Logging audit                    |  600 | uv run python scripts/audit_phase10_logging.py
+Observability Compose model      |  600 | uv run python scripts/assert_phase10_observability_compose.py --mode rootless
+Tool-worker Compose model        |  600 | uv run python scripts/assert_phase10_tool_worker_compose.py --mode rootless
+Profile-absent acceptance        | 6600 | make test-telemetry-base
+Observed telemetry acceptance    | 6600 | make test-telemetry-observed
+~~~
+
+`record_evidence` accepts only results originating from this registry, in exact order, canonical
+argv, finite elapsed time, and zero return code. Reject missing/extra/reordered/duplicate names,
+altered commands, nonzero return, blank cells, negative/non-finite durations, and bool-as-number.
+The test fixture supplies all gates; a three-row fake is invalid.
+
+The six acceptance rows map exactly:
+
+~~~text
+Connected webhook-agent-tool trace -> Observed telemetry acceptance
+Exact metric/cardinality contract   -> Observed telemetry acceptance
+JSON-v1 all application services    -> Observed telemetry acceptance
+Profile-absent product work         -> Profile-absent acceptance
+Collector-outage product work       -> Observed telemetry acceptance
+Cross-sink canary absence           -> Observed telemetry acceptance
+~~~
+
+Canary absence requires the exact nonempty fifteen-kind manifest read through Task 11's validated
+reader. An empty/short/duplicate/ad-hoc value collection cannot create a PASS.
+
+### 19.3 Cite exact-head rootful and rootless CI provenance
+
+With an injected GitHub command runner, verify and record only closed provenance:
+
+- exact Task 11 PR head commit;
+- fetched synthetic-merge parents/tree and exact synthetic-merge checkout SHA in both retained
+  job logs using Task 0's checkout proof;
+- distinct successful `phase10-rootful-live` and `phase10-rootless-live` job IDs;
+- the named telemetry integration step in each job succeeded rather than skipped;
+- each job's workflow ran `telemetry-base` followed by `telemetry-observed`; and
+- rootful socket/GID authority and rootless UID-10001 authority steps succeeded.
+
+Evidence may contain run ID, job IDs, commit, mode, scenario, and `PASS`. It contains no raw job
+log, log URL, environment, mount, port, project, socket path, canary, or product identifier. Local
+verified-rootless execution supplements but never replaces two-mode CI. Failure-only status is
+never success or cleanup evidence.
+
+The final Task 12 commit cannot embed its own run without self-reference. After pushing Task 12,
+obtain a fresh successful exact-head required CI run before protected-health work. Do not amend the
+evidence solely to include that later run.
+
+### 19.4 Bind one socket, sanitized environment, renderer, and version registry
+
+Reuse `SocketMetadata.capture` and `validate_socket_metadata(..., mode="rootless")`: absolute,
+non-symlink Unix socket, host UID 10001, no rootful GID. Capture immutable metadata before gates,
+revalidate after each socket-consuming gate and at the end. The live harness independently proves
+rootless daemon identity/security options, cgroup v2, and systemd cgroup driver.
+
+`discover_versions` receives that sanitized gate environment and socket snapshot and uses Task
+10's poison-resistant rootless observed renderer. It never starts raw Compose with
+`os.environ.copy()`. Require exactly the four monitoring services and exact `BASE_IMAGE` args.
+The exact version registry is:
+
+~~~text
+package:jhin-observability
+lock:asyncpg
+lock:fastapi
+lock:grpcio
+lock:httpx
+lock:opentelemetry-api
+lock:opentelemetry-exporter-otlp-proto-grpc
+lock:opentelemetry-sdk
+lock:pydantic-settings
+lock:sqlalchemy
+lock:structlog
+lock:temporalio
+image:otel-collector
+image:prometheus
+image:tempo
+image:grafana
+~~~
+
+There is no `lock:next`. Parse `uv.lock` structurally and require exactly one versioned entry for
+each named package; reconcile the workspace package version with its lock entry. Inject files/
+renderer in unit tests and reject missing/duplicate/malformed/blank entries, extra/missing
+service, absent profile, wrong socket, or altered image without Docker.
+
+### 19.5 Make the run revision-stable and non-self-referential
+
+Before the first gate, snapshot and validate:
+
+1. unique Task 11 commit and exact subject/path manifest;
+2. empty entire index;
+3. no worktree override in the exact Task 1-11 owned-path union;
+4. SHA-256 of the Task 12 generator and test source that will be committed; and
+5. validated rootless socket metadata.
+
+After every gate and before writing, require unchanged `HEAD`, index, predecessor path state,
+generator/test hashes, and socket metadata. A concurrent commit/edit/socket replacement refuses
+evidence. The Markdown calls this revision the **audited Task 11 product commit** and records the
+two source digests, not a nonexistent final Task 12 commit.
+
+After commit require `HEAD^` equals that audited commit; committed generator/test digests equal
+the evidence; Task 12 subject/three paths are exact; and the parser accepts committed Markdown.
+
+### 19.6 Prove the exact ordered task history without revision arithmetic
+
+Use section 4's Bash-3.2 `unique_commit_with_subject` helper. Locate the unique checkpoint and
+final evidence subjects, require the final subject commit equals `HEAD`, and require these twelve
+subjects in exactly this order after the checkpoint with no intervening commit:
+
+~~~text
+feat(observability): enforce safe JSON log schema
+feat(observability): add bounded optional OTLP bootstrap
+feat(observability): enforce telemetry metric cardinality
+feat(observability): trace API and database boundaries
+feat(observability): propagate traces through NATS
+feat(observability): trace Temporal service boundaries
+feat(observability): record committed agent and tool metrics
+feat(observability): trace connector and sandbox boundaries
+feat(web): emit safe versioned server logs
+feat(observability): add optional monitoring profile
+test(observability): prove end-to-end telemetry safety
+docs(observability): record Phase 10 telemetry evidence
+~~~
+
+For each resolved commit, compare `git diff-tree` with that corrected task's exact path manifest:
+51, 15, 5, 15, 15, 39, 32, 44, 12, 18, 14, and 3 paths respectively. A count/stat, path union,
+subset, subject-only proof, or revision arithmetic is not a substitute. Use no `mapfile`,
+`readarray`, associative array, or case-conversion expansion.
+
+The executable history proof is Bash-3.2 compatible:
+
+~~~bash
+set -euo pipefail
+telemetry_plan=docs/superpowers/plans/2026-08-18-phase-10-telemetry-core.md
+
+unique_commit_with_subject() {
+  local subject="$1"
+  local matches count resolved_subject
+  matches="$(git log --format=%H --fixed-strings --grep="$subject")" || return 1
+  count="$(printf '%s\n' "$matches" | \
+    awk 'NF { count++ } END { print count + 0 }')" || return 1
+  test "$count" = 1 || return 1
+  resolved_subject="$(git show -s --format=%s "$matches")" || return 1
+  test "$resolved_subject" = "$subject" || return 1
+  printf '%s\n' "$matches"
+}
+
+task_manifest() {
+  local task_number="$1"
+  local marker marker_count
+  marker="task${task_number}_paths=("
+  marker_count="$(rg -F -c -x -- "$marker" "$telemetry_plan")" || return 1
+  test "$marker_count" -eq 1 || return 1
+  awk -v marker="$marker" '
+    $0 == marker { found = 1; inside = 1; next }
+    inside && /^\)$/ { complete = 1; exit }
+    inside && /^  [^ ]/ { print substr($0, 3) }
+    END { if (!found || !complete) exit 1 }
+  ' "$telemetry_plan" | LC_ALL=C sort || return 1
+}
+
+ordered_subjects=(
+  "feat(observability): enforce safe JSON log schema"
+  "feat(observability): add bounded optional OTLP bootstrap"
+  "feat(observability): enforce telemetry metric cardinality"
+  "feat(observability): trace API and database boundaries"
+  "feat(observability): propagate traces through NATS"
+  "feat(observability): trace Temporal service boundaries"
+  "feat(observability): record committed agent and tool metrics"
+  "feat(observability): trace connector and sandbox boundaries"
+  "feat(web): emit safe versioned server logs"
+  "feat(observability): add optional monitoring profile"
+  "test(observability): prove end-to-end telemetry safety"
+  "docs(observability): record Phase 10 telemetry evidence"
+)
+
+checkpoint_commit="$(unique_commit_with_subject \
+  'docs(observability): checkpoint Phase 10 telemetry execution')" || exit 1
+final_commit="$(unique_commit_with_subject \
+  'docs(observability): record Phase 10 telemetry evidence')" || exit 1
+head_commit="$(git rev-parse HEAD)" || exit 1
+test "$final_commit" = "$head_commit" || exit 1
+
+expected_commits="$(
+  task_number=1
+  while test "$task_number" -le 12; do
+    index_number=$((task_number - 1))
+    task_commit="$(unique_commit_with_subject \
+      "${ordered_subjects[$index_number]}")" || exit 1
+    expected_paths="$(task_manifest "$task_number")" || exit 1
+    actual_paths="$(git diff-tree --no-commit-id --name-only -r \
+      "$task_commit" | LC_ALL=C sort)" || exit 1
+    test "$actual_paths" = "$expected_paths" || exit 1
+    printf '%s\n' "$task_commit" || exit 1
+    task_number=$((task_number + 1))
+  done
+)" || exit 1
+actual_commits="$(git rev-list --reverse "$checkpoint_commit"..HEAD)" || exit 1
+test "$actual_commits" = "$expected_commits" || exit 1
+cached_paths="$(git diff --cached --name-only)" || exit 1
+test -z "$cached_paths" || exit 1
+~~~
+
+Add `test_bash32_history_audit_fails_closed` to
+`tests/test_phase10_telemetry_evidence.py`. It creates a temporary Git repository and temporary
+telemetry-plan fixture, invokes the exact audit above with `/bin/bash`, and first proves the valid
+twelve-commit fixture succeeds. It then runs three independent mutations and requires a nonzero
+exit each time:
+
+1. a second commit whose body or subject contains one requested subject, creating two grep hits;
+2. a duplicate exact `task6_paths=(` marker in the plan fixture; and
+3. one committed Task 8 path replaced by a wrong path while the ordered commit hashes remain
+   otherwise valid.
+
+Also mutate one commit body so it contains a requested subject while its actual subject differs;
+the explicit `git show --format=%s` equality must reject it. Capture stdout/stderr only for safe
+test diagnostics. No test may accept `set -e` as the failure mechanism; the nonzero result must
+come from the explicit `return 1` / `exit 1` branches above. Run this named test with the system
+Bash 3.2 compatibility gate before Task 12 records evidence.
+
+### 19.7 Bound execution, canary scanning, and atomic evidence writing
+
+Every gate has its registry timeout. The outer live timeout is longer than the inner scenario and
+cannot leave a child process group. Capture output in a private `0700` directory with new `0600`
+regular files, bounded per-gate and aggregate bytes, incremental cross-chunk canary scanning, and
+owned-inode-only cleanup. Do not retain both streams twice in memory. Timeout, signal, spawn,
+decoder, output-cap, or cleanup uncertainty fails and refuses evidence. Run fail-fast in registry
+order; a static failure starts no live mutation, while a live failure still lets its harness finish
+failure capture and cleanup.
+
+Render evidence in memory, validate the full closed schema, and install only through a unique new
+`0600` regular file in a verified destination directory: complete write, file fsync, absent
+destination, atomic install, directory fsync. Reject links, foreign/wrong mode, preexisting
+destination, predictable temporary name, short writes, replace/fsync failure, invalid UTC,
+non-40-hex commit, Markdown control/backtick injection, and non-finite duration.
+
+`--check` parses the committed Markdown and proves exact sections, registry/acceptance/version
+rows, local rootless plus two-mode CI provenance, no blank/FAIL/pending cell, and no encoded canary.
+Search helpers distinguish no-match from search failure. Task 10's structural dashboard test owns
+the one datasource exemplar exception; no broad scan may reject it or miss provisioning.
+
+### 19.8 Use executable RED/GREEN and run the expensive matrix once
+
+Create all fake runner, clock, socket, renderer, GitHub, lock, filesystem, and scanner helpers
+before RED; delay missing production import inside named tests. RED is:
+
+~~~bash
+uv run pytest tests/test_phase10_telemetry_evidence.py -q
+~~~
+
+Named groups cover registry/refusal/rendering, socket/environment/revision stability, structural
+versions, two-mode CI, bounded runner/canary scanning, and atomic writer/parser/CLI. Collection
+import, undefined fixture, Docker/network/GitHub, or unrelated failure is invalid RED.
+
+Focused GREEN is:
+
+~~~bash
+uv lock --check
+uv run pytest \
+  tests/test_phase10_telemetry_evidence.py \
+  tests/test_phase10_artifact.py \
+  tests/test_phase10_observability_compose.py \
+  tests/test_phase10_tool_worker_compose.py \
+  tests/test_web_json_stdout.py -q
+uv run ruff check \
+  scripts/record_phase10_telemetry_evidence.py \
+  tests/test_phase10_telemetry_evidence.py
+uv run ruff format --check \
+  scripts/record_phase10_telemetry_evidence.py \
+  tests/test_phase10_telemetry_evidence.py
+uv run mypy
+~~~
+
+Resolve the accepted Task 11 exact-head run and numeric rootful/rootless job IDs with Task 0's
+PR-head, synthetic-merge parent/tree, and two-checkout-log proof. The generator independently
+requeries them. Then run the exhaustive registry exactly once:
+
+~~~bash
+test -n "${accepted_run_id:?}"
+test -n "${rootful_job_id:?}"
+test -n "${rootless_job_id:?}"
+rootless_socket="${PHASE10_ROOTLESS_DOCKER_SOCKET:?set the verified rootless socket}"
+test -S "$rootless_socket"
+env -u SANDBOX_DOCKER_GID \
+  PHASE10_MODE=rootless \
+  PHASE10_ROOTLESS_DOCKER_SOCKET="$rootless_socket" \
+  uv run python scripts/record_phase10_telemetry_evidence.py \
+    --accepted-run-id "$accepted_run_id" \
+    --rootful-job-id "$rootful_job_id" \
+    --rootless-job-id "$rootless_job_id"
+test -s docs/evidence/phase10-telemetry.md
+uv run python scripts/record_phase10_telemetry_evidence.py \
+  --check docs/evidence/phase10-telemetry.md
+~~~
+
+The registry runs lock, full ordinary collection, Ruff check/format, mypy, all four web gates,
+dashboard, logging audit, both rootless Compose model authorities, and leased base/observed. The
+one validated private manifest spans the run and reaches only the two scenarios/validator. Install
+evidence only after every local gate, two-mode CI check, canary scan, cleanup attestation,
+provenance snapshot, and version check passes. After generation rerun only the fast parser,
+scoped-diff, staging, ordered-history, and post-commit checks.
+
+### 19.9 Make Task 12's three paths and committed tree exact
+
+Task 12 owns exactly:
+
+~~~text
+docs/evidence/phase10-telemetry.md
+scripts/record_phase10_telemetry_evidence.py
+tests/test_phase10_telemetry_evidence.py
+~~~
+
+Use this exact staging block:
+
+~~~bash
+set -euo pipefail
+task12_paths=(
+  docs/evidence/phase10-telemetry.md
+  scripts/record_phase10_telemetry_evidence.py
+  tests/test_phase10_telemetry_evidence.py
+)
+test -z "$(git diff --cached --name-only)"
+git status --short -- "${task12_paths[@]}"
+git add -- "${task12_paths[@]}"
+expected_index="$(printf '%s\n' "${task12_paths[@]}" | LC_ALL=C sort)"
+actual_index="$(git diff --cached --name-only | LC_ALL=C sort)"
+test "$actual_index" = "$expected_index"
+git diff --cached --check -- "${task12_paths[@]}"
+git commit --only "${task12_paths[@]}" \
+  -m "docs(observability): record Phase 10 telemetry evidence"
+test "$(git show -s --format=%s HEAD)" = \
+  "docs(observability): record Phase 10 telemetry evidence"
+actual_commit_paths="$(git diff-tree --no-commit-id --name-only -r HEAD | LC_ALL=C sort)"
+test "$actual_commit_paths" = "$expected_index"
+test -z "$(git diff --cached --name-only)"
+~~~
+
+Task 12 consumes but never restages Make, CI, Compose, harness, artifact, dashboard, integration,
+or predecessor production paths.
+
+### 19.10 Bind protected-health and release handoffs
+
+The final Markdown is accepted only if every gate/claim/version/provenance row is exact and PASS;
+both CI modes/scenarios and local rootless work are present; exact fifteen-kind raw/percent/base64
+variants are absent from complete sinks and gate output; harness success proves cleanup; and no raw
+log, trace, metric, config, port, mount, environment, socket path, project, URL, credential,
+canary, or product identifier is embedded.
+
+Protected health begins only after the unique Task 12 evidence commit is pushed and receives its
+fresh exact-head required CI run. It verifies checkpoint blob equality and exact ordered telemetry
+history. Evidence is documentation/verification, not authorization to merge, tag, release, deploy,
+or delete production data.
+
+#### Combined two-plan structural validation
+
+
+This section extends and supersedes section 15 after sections 17-19 are applied. Run it against
+only the two tracked plans before staging the checkpoint. It is Bash-3.2 compatible and verifies
+that every telemetry task's `Files` block, exact staging array, count, and commit subject agree.
+It also validates Task 0's two-plan ownership and the exact Task 10-12 manifests.
+
+~~~bash
+set -euo pipefail
+plan_paths=(
+  docs/superpowers/plans/2026-08-18-phase-10-protected-health.md
+  docs/superpowers/plans/2026-08-18-phase-10-telemetry-core.md
+)
+telemetry_plan="${plan_paths[1]}"
+protected_plan="${plan_paths[0]}"
+
+git diff --check -- "${plan_paths[@]}" || exit 1
+cached_paths="$(git diff --cached --name-only)" || exit 1
+test -z "$cached_paths" || exit 1
+
+executable_violations="$(
+  awk '
+    FNR == 1 { in_shell = 0; stop_scan = 0 }
+    /^#### Combined two-plan structural validation$/ {
+      stop_scan = 1
+      next
+    }
+    stop_scan { next }
+    /^(```|~~~)(bash|sh)$/ {
+      in_shell = 1
+      next
+    }
+    in_shell && /^(```|~~~)$/ {
+      in_shell = 0
+      next
+    }
+    in_shell && /^[[:space:]]*(mapfile|readarray)([[:space:]]|$)/ {
+      print FILENAME ":" FNR ":" $0
+      next
+    }
+    in_shell && /^[[:space:]]*git[[:space:]].*HEAD~[0-9]+/ {
+      print FILENAME ":" FNR ":" $0
+    }
+  ' "${plan_paths[@]}"
+)" || exit 1
+test -z "$executable_violations" || exit 1
+
+acceptance_variables=(
+  accepted_run_id
+  rootful_job_id
+  rootless_job_id
+  synthetic_merge
+  shared_tree
+)
+expected_assignment_values=(
+  32404319465
+  96539679313
+  96539679660
+  5e7373aa9413f4500fde1f0f87c520eb14ba62b3
+  7b50d34bfd0db0d30e4ab68589c55ef853acd40d
+)
+assignment_index=0
+for acceptance_variable in "${acceptance_variables[@]}"; do
+  assignment_values="$(
+    awk -F= -v key="$acceptance_variable" '
+      $1 == key { print substr($0, length(key) + 2) }
+    ' "$telemetry_plan"
+  )" || exit 1
+  assignment_count="$(printf '%s\n' "$assignment_values" | \
+    awk 'NF { count += 1 } END { print count + 0 }')" || exit 1
+  test "$assignment_count" -eq 1 || exit 1
+  test "$assignment_values" = \
+    "${expected_assignment_values[$assignment_index]}" || exit 1
+  assignment_index=$((assignment_index + 1))
+done
+
+task_files() {
+  local task_number="$1"
+  awk -v task_number="$task_number" '
+    $0 ~ ("^### Task " task_number ":") {
+      if (task_seen) exit 2
+      task_seen = 1
+      in_task = 1
+      next
+    }
+    in_task && /^### Task [0-9]+:/ { exit }
+    in_task && /^\*\*Files:\*\*/ { in_files = 1; next }
+    in_files && /^\*\*Interfaces:\*\*/ { complete = 1; exit }
+    in_files && /^- (Create|Modify): `/ {
+      line = $0
+      sub(/^- (Create|Modify): `/, "", line)
+      sub(/`$/, "", line)
+      print line
+    }
+    END {
+      if (!task_seen || !in_files || !complete) exit 1
+    }
+  ' "$telemetry_plan" | LC_ALL=C sort || return 1
+}
+
+task_index() {
+  local task_number="$1"
+  local marker marker_count
+  marker="task${task_number}_paths=("
+  marker_count="$(rg -F -c -x -- "$marker" "$telemetry_plan")" || return 1
+  test "$marker_count" -eq 1 || return 1
+  awk -v marker="$marker" '
+    $0 == marker { found = 1; inside = 1; next }
+    inside && /^\)$/ { complete = 1; exit }
+    inside && /^  [^ ]/ { print substr($0, 3) }
+    END { if (!found || !complete) exit 1 }
+  ' "$telemetry_plan" | LC_ALL=C sort || return 1
+}
+
+task_section() {
+  local task_number="$1"
+  awk -v task_number="$task_number" '
+    $0 ~ ("^### Task " task_number ":") { found = 1 }
+    found && $0 ~ /^### Task [0-9]+:/ &&
+      $0 !~ ("^### Task " task_number ":") { exit }
+    found { print }
+    END { if (!found) exit 1 }
+  ' "$telemetry_plan" || return 1
+}
+
+line_count() {
+  awk 'NF { count += 1 } END { print count + 0 }' || return 1
+}
+
+task0_expected="$(printf '%s\n' \
+  docs/superpowers/plans/2026-08-18-phase-10-protected-health.md \
+  docs/superpowers/plans/2026-08-18-phase-10-telemetry-core.md | LC_ALL=C sort)" || exit 1
+task0_actual="$(task_files 0)" || exit 1
+task0_count="$(printf '%s\n' "$task0_actual" | line_count)" || exit 1
+test "$task0_count" -eq 2 || exit 1
+test "$task0_actual" = "$task0_expected" || exit 1
+task0_checkpoint_text="$(task_section 0)" || exit 1
+rg -F -q -- 'docs(observability): checkpoint Phase 10 telemetry execution' \
+  <<<"$task0_checkpoint_text" || exit 1
+
+expected_candidate_tip=0439fb2c92075ee5cdd5adf9bc54d2805de6670e
+expected_handoff_tip=ee66c588014acf8e448352a7e5e458aca63d37fe
+task0_text="$(task_section 0)" || exit 1
+task0_tip="$(printf '%s\n' "$task0_text" | \
+  awk -F= '$1 == "accepted_tip" { print $2 }')" || exit 1
+task0_tip_count="$(printf '%s\n' "$task0_tip" | line_count)" || exit 1
+test "$task0_tip_count" -eq 1 || exit 1
+test "$task0_tip" = "$expected_candidate_tip" || exit 1
+task0_pr_head="$(printf '%s\n' "$task0_text" | \
+  awk -F= '$1 == "pr_head" { print $2 }')" || exit 1
+task0_pr_head_count="$(printf '%s\n' "$task0_pr_head" | line_count)" || exit 1
+test "$task0_pr_head_count" -eq 1 || exit 1
+test "$task0_pr_head" = "$expected_candidate_tip" || exit 1
+rg -F -q -- \
+  'test "$(git rev-list --count "$predecessor_base".."$accepted_tip")" = 30' \
+  <<<"$task0_text" || exit 1
+rg -F -q -- 'test "$actual_path_count" = 36' <<<"$task0_text" || exit 1
+for candidate_commit in \
+  3deb7da456ebbcdd904d1e873270097edc0a7ed4 \
+  41bc0f44033785f77c20d0fa5ddcaed1792dfab9 \
+  ee66c588014acf8e448352a7e5e458aca63d37fe \
+  639cf43d1d1189971b26c6d9809f0ed89c52eabd \
+  7d8f6b14466047404b3face0c98211310995dc47 \
+  bee85b90e69dbbd79ce0576d25f0e95efac2b09f \
+  a430ccd8d6054f32f7e959abde85aa1f78c4a6a8 \
+  0439fb2c92075ee5cdd5adf9bc54d2805de6670e; do
+  rg -F -q -- "$candidate_commit" <<<"$task0_text" || exit 1
+done
+
+for handoff_task in 10 11 12; do
+  handoff_text="$(task_section "$handoff_task")" || exit 1
+  rg -F -q -- "$expected_handoff_tip" <<<"$handoff_text" || exit 1
+done
+
+task_counts=(51 15 5 15 15 39 32 44 12 18 14 3)
+task_subjects=(
+  "feat(observability): enforce safe JSON log schema"
+  "feat(observability): add bounded optional OTLP bootstrap"
+  "feat(observability): enforce telemetry metric cardinality"
+  "feat(observability): trace API and database boundaries"
+  "feat(observability): propagate traces through NATS"
+  "feat(observability): trace Temporal service boundaries"
+  "feat(observability): record committed agent and tool metrics"
+  "feat(observability): trace connector and sandbox boundaries"
+  "feat(web): emit safe versioned server logs"
+  "feat(observability): add optional monitoring profile"
+  "test(observability): prove end-to-end telemetry safety"
+  "docs(observability): record Phase 10 telemetry evidence"
+)
+test "${#task_counts[@]}" -eq 12 || exit 1
+test "${#task_subjects[@]}" -eq 12 || exit 1
+
+task_number=1
+while test "$task_number" -le 12; do
+  index_number=$((task_number - 1))
+  files="$(task_files "$task_number")" || exit 1
+  index="$(task_index "$task_number")" || exit 1
+  expected_count="${task_counts[$index_number]}"
+  subject="${task_subjects[$index_number]}"
+  files_count="$(printf '%s\n' "$files" | line_count)" || exit 1
+  index_count="$(printf '%s\n' "$index" | line_count)" || exit 1
+  test "$files_count" -eq "$expected_count" || exit 1
+  test "$index_count" -eq "$expected_count" || exit 1
+  test "$files" = "$index" || exit 1
+  duplicate_paths="$(printf '%s\n' "$index" | LC_ALL=C sort | uniq -d)" || exit 1
+  test -z "$duplicate_paths" || exit 1
+  task_text="$(task_section "$task_number")" || exit 1
+  rg -F -q -- "$subject" <<<"$task_text" || exit 1
+  task_number=$((task_number + 1))
+done
+
+task10_expected="$(printf '%s\n' \
+  .env.example \
+  Makefile \
+  compose.dev.yaml \
+  compose.rootless.yaml \
+  compose.yaml \
+  docker/monitoring.Dockerfile \
+  ops/observability/collector.yaml \
+  ops/observability/grafana/dashboards/jhin-overview.json \
+  ops/observability/grafana/provisioning/dashboards/jhin.yaml \
+  ops/observability/grafana/provisioning/datasources/jhin.yaml \
+  ops/observability/prometheus.yaml \
+  ops/observability/tempo.yaml \
+  scripts/assert_phase10_observability_compose.py \
+  scripts/assert_phase10_tool_worker_compose.py \
+  scripts/build_phase10_dashboard.py \
+  tests/integration/phase10_upgrade_harness.py \
+  tests/test_phase10_observability_compose.py \
+  tests/test_phase10_tool_worker_compose.py | LC_ALL=C sort)" || exit 1
+task10_actual="$(task_index 10)" || exit 1
+test "$task10_actual" = "$task10_expected" || exit 1
+
+task11_expected="$(printf '%s\n' \
+  .github/workflows/ci.yml \
+  Makefile \
+  docs/operations/telemetry.md \
+  packages/connectors/src/jhin_connectors/testing/fake_linear.py \
+  packages/connectors/tests/linear/test_fake_linear_admin.py \
+  packages/models/src/jhin_models/testing/fake_openai.py \
+  packages/models/tests/test_fake_openai.py \
+  scripts/phase10_artifact.py \
+  tests/integration/conftest.py \
+  tests/integration/emit_phase10_metrics.py \
+  tests/integration/phase10_upgrade_harness.py \
+  tests/integration/test_phase10_telemetry.py \
+  tests/test_phase10_artifact.py \
+  tests/test_phase10_telemetry_harness.py | LC_ALL=C sort)" || exit 1
+task11_actual="$(task_index 11)" || exit 1
+test "$task11_actual" = "$task11_expected" || exit 1
+
+task12_expected="$(printf '%s\n' \
+  docs/evidence/phase10-telemetry.md \
+  scripts/record_phase10_telemetry_evidence.py \
+  tests/test_phase10_telemetry_evidence.py | LC_ALL=C sort)" || exit 1
+task12_actual="$(task_index 12)" || exit 1
+test "$task12_actual" = "$task12_expected" || exit 1
+
+rg -q 'head_sha.*pr_head' "$telemetry_plan" || exit 1
+rg -q 'checkout_log_has_sha' "$telemetry_plan" || exit 1
+rg -q 'git diff --quiet "\$checkpoint_commit" HEAD' "$protected_plan" || exit 1
+rg -q 'require_rootless_socket' "$telemetry_plan" || exit 1
+rg -q 'SocketMetadata\.capture' "$telemetry_plan" || exit 1
+rg -q 'ComposeAuthority\.create.*observability' "$telemetry_plan" || exit 1
+rg -q 'telemetry-api' "$telemetry_plan" || exit 1
+rg -q 'telemetry-sandbox' "$telemetry_plan" || exit 1
+rg -q 'UnderscoreEscapingWithoutSuffixes' "$telemetry_plan" || exit 1
+rg -q 'task10_paths=' "$telemetry_plan" || exit 1
+rg -q 'telemetry-base' "$telemetry_plan" || exit 1
+rg -q 'telemetry-observed' "$telemetry_plan" || exit 1
+rg -q 'expected_tests=12' "$telemetry_plan" || exit 1
+rg -q 'validate_telemetry_status_rootful' "$telemetry_plan" || exit 1
+rg -q 'validate_telemetry_status_rootless' "$telemetry_plan" || exit 1
+rg -q 'sandbox_secret_env' "$telemetry_plan" || exit 1
+rg -q 'task11_paths=' "$telemetry_plan" || exit 1
+rg -q 'lock:grpcio' "$telemetry_plan" || exit 1
+rg -q 'Dashboard/provisioning contract' "$telemetry_plan" || exit 1
+rg -q 'phase10-rootful-live' "$telemetry_plan" || exit 1
+rg -q 'phase10-rootless-live' "$telemetry_plan" || exit 1
+rg -q 'unique_commit_with_subject' "$telemetry_plan" || exit 1
+rg -q 'test_bash32_history_audit_fails_closed' "$telemetry_plan" || exit 1
+rg -q 'task12_paths=' "$telemetry_plan" || exit 1
+rg -q 'verify_final_telemetry_ci' "$protected_plan" || exit 1
+rg -F -q -- 'health.heartbeat_write_failed' "$telemetry_plan" || exit 1
+rg -F -q -- 'validated_sandbox_runner_base_url() -> str' "$telemetry_plan" || exit 1
+cached_paths="$(git diff --cached --name-only)" || exit 1
+test -z "$cached_paths" || exit 1
+~~~
+
+The five acceptance values are fixed to the mutually verified exact-head PR run, jobs, synthetic
+merge, and shared tree. This combined structure gate, exact
+two-plan staging equality, checkpoint subject/path equality, and empty-index postcondition must all
+pass before committing the checkpoint.
 
 ## Completion Checklist
 
