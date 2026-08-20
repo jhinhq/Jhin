@@ -52,6 +52,7 @@ from .phase10_upgrade_harness import (
     ComposePsError,
     FrozenPhase9Image,
     LiveScenario,
+    RunningSandboxJob,
     SandboxArtifact,
     SocketMetadata,
     UpgradeHarness,
@@ -7652,6 +7653,7 @@ def _install_sandbox_cancel_scenario(
     job_id: str,
     label_snapshots: list[list[str]],
     status_payloads: list[Any],
+    cancel_payload: Any | None = None,
 ) -> tuple[Any, list[tuple[str, ...]], list[Any]]:
     label_outputs = iter(label_snapshots)
     statuses = iter(status_payloads)
@@ -7694,9 +7696,13 @@ def _install_sandbox_cancel_scenario(
         if request.get_method() == "POST" and request.full_url.endswith(
             f"/v1/jobs/{job_id}/cancel"
         ):
+            if isinstance(cancel_payload, BaseException):
+                raise cancel_payload
             return _SandboxHTTPResponse(
                 200,
-                _sandbox_status_payload(authority, job_id, "running"),
+                cancel_payload
+                if cancel_payload is not None
+                else _sandbox_status_payload(authority, job_id, "running"),
             )
         if request.get_method() == "GET" and request.full_url.endswith(f"/v1/jobs/{job_id}/logs"):
             return _SandboxHTTPResponse(
@@ -7711,7 +7717,10 @@ def _install_sandbox_cancel_scenario(
                 },
             )
         if request.get_method() == "GET" and request.full_url.endswith(f"/v1/jobs/{job_id}"):
-            return _SandboxHTTPResponse(200, next(statuses))
+            payload = next(statuses)
+            if isinstance(payload, BaseException):
+                raise payload
+            return _SandboxHTTPResponse(200, payload)
         raise AssertionError(f"unexpected sandbox cancellation request: {request.full_url}")
 
     monkeypatch.setattr(time, "sleep", lambda _interval: None)
@@ -7747,7 +7756,19 @@ def test_cancel_sandbox_job_waits_for_label_absence_and_refreshed_cancelled_stat
         lambda self: socket_checks.append(self.project),
     )
     try:
-        assert authority.cancel_sandbox_job(job_id, runner=runner) == cancelled
+        job = RunningSandboxJob(
+            job_id=job_id,
+            container_id=container_id,
+            container={"Id": container_id},
+        )
+        assert (
+            authority.cancel_sandbox_job(
+                job,
+                runner=runner,
+                require_cancelled=True,
+            )
+            == cancelled
+        )
         assert len(calls) == 3
         assert socket_checks == [authority.project] * 3
         assert [request.get_method() for request in requests] == [
@@ -7779,7 +7800,14 @@ def test_cancel_sandbox_job_does_not_return_cancelled_while_its_label_remains(
         status_payloads=[cancelled, cancelled],
     )
     try:
-        assert authority.cancel_sandbox_job(job_id, runner=runner) == cancelled
+        assert (
+            authority.cancel_sandbox_job(
+                job_id,
+                runner=runner,
+                require_cancelled=True,
+            )
+            == cancelled
+        )
         assert len(calls) == 2
         assert [request.get_method() for request in requests] == ["POST", "GET", "GET"]
     finally:
@@ -7801,22 +7829,28 @@ def test_cancel_sandbox_job_rejects_other_terminal_status_with_redacted_diagnost
         monkeypatch,
         authority,
         job_id=job_id,
-        label_snapshots=[[]],
+        label_snapshots=[["a" * 64], []],
         status_payloads=[
+            _sandbox_status_payload(authority, job_id, terminal_status),
             _sandbox_status_payload(authority, job_id, terminal_status),
             _sandbox_status_payload(authority, job_id, terminal_status, error=token),
         ],
     )
     try:
         with pytest.raises(RuntimeError, match=rf"terminal.*{terminal_status}") as caught:
-            authority.cancel_sandbox_job(job_id, runner=runner)
+            authority.cancel_sandbox_job(
+                job_id,
+                runner=runner,
+                require_cancelled=True,
+            )
         rendered = str(caught.value)
         assert token not in rendered
         assert "<redacted>" in rendered
         assert len(rendered) <= lifecycle.LIVE_FAILURE_OUTPUT_LIMIT + 512
-        assert len(calls) == 1
+        assert len(calls) == 2
         assert [request.get_method() for request in requests] == [
             "POST",
+            "GET",
             "GET",
             "GET",
             "GET",
@@ -7847,22 +7881,28 @@ def test_cancel_sandbox_job_rejects_malformed_refreshed_status_with_diagnostics(
         monkeypatch,
         authority,
         job_id=job_id,
-        label_snapshots=[[]],
+        label_snapshots=[["a" * 64], []],
         status_payloads=[
+            malformed,
             malformed,
             _sandbox_status_payload(authority, job_id, "running", error=token),
         ],
     )
     try:
         with pytest.raises(RuntimeError, match="malformed cancellation status") as caught:
-            authority.cancel_sandbox_job(job_id, runner=runner)
+            authority.cancel_sandbox_job(
+                job_id,
+                runner=runner,
+                require_cancelled=True,
+            )
         rendered = str(caught.value)
         assert token not in rendered
         assert "<redacted>" in rendered
         assert len(rendered) <= lifecycle.LIVE_FAILURE_OUTPUT_LIMIT + 512
-        assert len(calls) == 1
+        assert len(calls) == 2
         assert [request.get_method() for request in requests] == [
             "POST",
+            "GET",
             "GET",
             "GET",
             "GET",
@@ -7894,7 +7934,12 @@ def test_cancel_sandbox_job_timeout_includes_bounded_redacted_diagnostics(
     monkeypatch.setattr(time, "monotonic", lambda: next(moments))
     try:
         with pytest.raises(TimeoutError, match="diagnostics=") as caught:
-            authority.cancel_sandbox_job(job_id, runner=runner, timeout=0.5)
+            authority.cancel_sandbox_job(
+                job_id,
+                runner=runner,
+                timeout=0.5,
+                require_cancelled=True,
+            )
         rendered = str(caught.value)
         assert token not in rendered
         assert "<redacted>" in rendered
@@ -7902,6 +7947,155 @@ def test_cancel_sandbox_job_timeout_includes_bounded_redacted_diagnostics(
         assert len(calls) == 1
         assert [request.get_method() for request in requests] == [
             "POST",
+            "GET",
+            "GET",
+            "GET",
+        ]
+    finally:
+        authority.remove_runtime_paths()
+
+
+@pytest.mark.parametrize("ack_mutation", ["not-object", "wrong-job", "wrong-terminal"])
+def test_cancel_sandbox_job_defers_invalid_acknowledgement_until_exact_absence(
+    monkeypatch: pytest.MonkeyPatch,
+    ack_mutation: str,
+) -> None:
+    authority = replace(
+        _authority_for_recorder(),
+        _published_port_items=(("SANDBOX_RUNNER_DEV_PORT", 49152),),
+    )
+    job_id = "deadc0dedeadc0dedeadc0de"
+    token = authority.environment["SANDBOX_RUNNER_TOKEN"]
+    if ack_mutation == "not-object":
+        invalid_ack: Any = []
+        expected_error = "malformed cancellation status"
+    elif ack_mutation == "wrong-job":
+        invalid_ack = _sandbox_status_payload(authority, "wrong", "running")
+        expected_error = "malformed cancellation status"
+    else:
+        invalid_ack = _sandbox_status_payload(authority, job_id, "failed")
+        expected_error = "terminal status failed"
+    runner, calls, requests = _install_sandbox_cancel_scenario(
+        monkeypatch,
+        authority,
+        job_id=job_id,
+        label_snapshots=[["a" * 64], []],
+        status_payloads=[
+            _sandbox_status_payload(authority, job_id, "running"),
+            _sandbox_status_payload(authority, job_id, "cancelled"),
+            _sandbox_status_payload(authority, job_id, "cancelled", error=token),
+        ],
+        cancel_payload=invalid_ack,
+    )
+    try:
+        with pytest.raises(RuntimeError, match=expected_error) as caught:
+            authority.cancel_sandbox_job(
+                job_id,
+                runner=runner,
+                require_cancelled=True,
+            )
+        rendered = str(caught.value)
+        assert token not in rendered
+        assert "<redacted>" in rendered
+        assert len(calls) == 2
+        assert [request.get_method() for request in requests] == [
+            "POST",
+            "GET",
+            "GET",
+            "GET",
+            "GET",
+        ]
+    finally:
+        authority.remove_runtime_paths()
+
+
+def test_cancel_sandbox_job_surviving_label_times_out_after_cancelled_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = replace(
+        _authority_for_recorder(),
+        _published_port_items=(("SANDBOX_RUNNER_DEV_PORT", 49152),),
+    )
+    job_id = "deadc0dedeadc0dedeadc0de"
+    token = authority.environment["SANDBOX_RUNNER_TOKEN"]
+    runner, calls, requests = _install_sandbox_cancel_scenario(
+        monkeypatch,
+        authority,
+        job_id=job_id,
+        label_snapshots=[["a" * 64]],
+        status_payloads=[
+            _sandbox_status_payload(authority, job_id, "cancelled"),
+            _sandbox_status_payload(authority, job_id, "cancelled", error=token),
+        ],
+    )
+    moments = iter((0.0, 0.0, 1.0))
+    monkeypatch.setattr(time, "monotonic", lambda: next(moments))
+    try:
+        with pytest.raises(TimeoutError, match="container_count=1") as caught:
+            authority.cancel_sandbox_job(
+                job_id,
+                runner=runner,
+                timeout=0.5,
+                require_cancelled=True,
+            )
+        rendered = str(caught.value)
+        assert token not in rendered
+        assert "<redacted>" in rendered
+        assert len(calls) == 1
+        assert [request.get_method() for request in requests] == [
+            "POST",
+            "GET",
+            "GET",
+            "GET",
+        ]
+    finally:
+        authority.remove_runtime_paths()
+
+
+@pytest.mark.parametrize("failure_phase", ["acknowledgement", "status"])
+def test_cancel_sandbox_job_defers_request_errors_until_exact_absence(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_phase: str,
+) -> None:
+    authority = replace(
+        _authority_for_recorder(),
+        _published_port_items=(("SANDBOX_RUNNER_DEV_PORT", 49152),),
+    )
+    job_id = "deadc0dedeadc0dedeadc0de"
+    token = authority.environment["SANDBOX_RUNNER_TOKEN"]
+    request_error = OSError(token)
+    statuses: list[Any] = [
+        _sandbox_status_payload(authority, job_id, "running"),
+        _sandbox_status_payload(authority, job_id, "cancelled"),
+        _sandbox_status_payload(authority, job_id, "cancelled", error=token),
+    ]
+    cancel_payload: Any | None = None
+    if failure_phase == "acknowledgement":
+        cancel_payload = request_error
+    else:
+        statuses[0] = request_error
+    runner, calls, requests = _install_sandbox_cancel_scenario(
+        monkeypatch,
+        authority,
+        job_id=job_id,
+        label_snapshots=[["a" * 64], []],
+        status_payloads=statuses,
+        cancel_payload=cancel_payload,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="request failed") as caught:
+            authority.cancel_sandbox_job(
+                job_id,
+                runner=runner,
+                require_cancelled=True,
+            )
+        rendered = str(caught.value)
+        assert token not in rendered
+        assert "<redacted>" in rendered
+        assert len(calls) == 2
+        assert [request.get_method() for request in requests] == [
+            "POST",
+            "GET",
             "GET",
             "GET",
             "GET",
@@ -7964,6 +8158,7 @@ def _install_inspectable_job_scenario(
     *,
     identifier_polls: list[list[str]],
     containers: list[dict[str, Any]],
+    cleanup_status: str = "cancelled",
 ) -> list[tuple[str, str]]:
     job_id = "deadc0dedeadc0dedeadc0de"
     polls = iter(identifier_polls)
@@ -8008,7 +8203,7 @@ def _install_inspectable_job_scenario(
         if method == "POST" and url.endswith("/v1/jobs"):
             return _SandboxHTTPResponse(202, {"job_id": job_id, "status": "queued"})
         if method == "GET" and url.endswith(f"/v1/jobs/{job_id}"):
-            status = "cancelled" if cancel_requested else "failed"
+            status = cleanup_status if cancel_requested else "failed"
             return _SandboxHTTPResponse(
                 200,
                 {"job_id": job_id, "status": status, "exit_code": 137},
@@ -8025,7 +8220,8 @@ def _install_inspectable_job_scenario(
             )
         if method == "POST" and url.endswith(f"/v1/jobs/{job_id}/cancel"):
             cancel_requested = True
-            return _SandboxHTTPResponse(200, {"job_id": job_id, "status": "running"})
+            status = "running" if cleanup_status == "cancelled" else cleanup_status
+            return _SandboxHTTPResponse(200, {"job_id": job_id, "status": status})
         raise AssertionError(f"unexpected sandbox request: {method} {url}")
 
     monkeypatch.setattr(secrets, "token_hex", lambda _length: job_id)
@@ -8153,6 +8349,45 @@ def test_inspectable_job_terminal_state_emits_diagnostics_then_cleans_up(
         assert "bounded stdout" in rendered
         assert "<redacted>" in rendered
         assert authority.environment["SANDBOX_RUNNER_TOKEN"] not in rendered
+        assert [method for method, _url in requests] == [
+            "POST",
+            "GET",
+            "GET",
+            "POST",
+            "GET",
+        ]
+    finally:
+        authority.remove_runtime_paths()
+
+
+@pytest.mark.parametrize("cleanup_status", ["completed", "failed", "timeout"])
+def test_inspectable_job_terminal_cleanup_preserves_original_startup_error(
+    monkeypatch: pytest.MonkeyPatch,
+    cleanup_status: str,
+) -> None:
+    authority = replace(
+        _authority_for_recorder(),
+        _published_port_items=(("SANDBOX_RUNNER_DEV_PORT", 49152),),
+    )
+    identifier = "sandbox-container"
+    requests = _install_inspectable_job_scenario(
+        monkeypatch,
+        authority,
+        identifier_polls=[[identifier], []],
+        containers=[
+            _sandbox_container(
+                authority,
+                identifier=identifier,
+                status="exited",
+                running=False,
+            )
+        ],
+        cleanup_status=cleanup_status,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="terminal sandbox job state") as raised:
+            authority.start_inspectable_sandbox_job(timeout=1.0)
+        assert not isinstance(raised.value, BaseExceptionGroup)
         assert [method for method, _url in requests] == [
             "POST",
             "GET",
@@ -8904,7 +9139,7 @@ def test_live_sandbox_job_security_contract() -> None:
         assert all("docker.sock" not in str(mount) for mount in container.get("Mounts", []))
         assert not any("docker.sock" in bind for bind in host.get("Binds", []) or [])
     finally:
-        cancelled = authority.cancel_sandbox_job(job)
+        cancelled = authority.cancel_sandbox_job(job, require_cancelled=True)
     assert cancelled["status"] == "cancelled"
 
 

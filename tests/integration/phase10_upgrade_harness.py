@@ -3437,42 +3437,21 @@ class ComposeAuthority:
         encoded: bytes,
         *,
         job_id: str,
-        endpoint: str,
-        headers: dict[str, str],
-        observed_ids: Sequence[str],
-    ) -> dict[str, Any]:
+        require_cancelled: bool,
+    ) -> tuple[dict[str, Any] | None, RuntimeError | None]:
         try:
             payload = json.loads(encoded)
-        except json.JSONDecodeError as error:
-            malformed = RuntimeError("sandbox runner returned malformed cancellation status")
-            raise self._sandbox_startup_error(
-                malformed,
-                job_id=job_id,
-                endpoint=endpoint,
-                headers=headers,
-                observed_ids=observed_ids,
-                container=None,
-            ) from error
-        failure: RuntimeError | None = None
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None, RuntimeError("sandbox runner returned malformed cancellation status")
         if not isinstance(payload, dict) or payload.get("job_id") != job_id:
-            failure = RuntimeError("sandbox runner returned malformed cancellation status")
-            status = None
-        else:
-            status = payload.get("status")
-        if status in {"completed", "failed", "timeout"}:
-            failure = RuntimeError(f"sandbox cancellation reached terminal status {status}")
-        elif status not in {"running", "cancelled"}:
-            failure = RuntimeError("sandbox runner returned malformed cancellation status")
-        if failure is not None:
-            raise self._sandbox_startup_error(
-                failure,
-                job_id=job_id,
-                endpoint=endpoint,
-                headers=headers,
-                observed_ids=observed_ids,
-                container=None,
-            ) from failure
-        return cast(dict[str, Any], payload)
+            return None, RuntimeError("sandbox runner returned malformed cancellation status")
+        status = payload.get("status")
+        if status not in {"running", "completed", "failed", "timeout", "cancelled"}:
+            return None, RuntimeError("sandbox runner returned malformed cancellation status")
+        response = cast(dict[str, Any], payload)
+        if require_cancelled and status in {"completed", "failed", "timeout"}:
+            return response, RuntimeError(f"sandbox cancellation reached terminal status {status}")
+        return response, None
 
     def start_inspectable_sandbox_job(
         self,
@@ -3600,7 +3579,12 @@ class ComposeAuthority:
             )
         except BaseException as error:
             try:
-                self.cancel_sandbox_job(job_id, runner=runner, timeout=30.0)
+                self.cancel_sandbox_job(
+                    job_id,
+                    runner=runner,
+                    timeout=30.0,
+                    require_cancelled=False,
+                )
             except BaseException as cleanup_error:
                 raise BaseExceptionGroup(
                     "sandbox startup failed and exact cleanup also failed",
@@ -3614,6 +3598,7 @@ class ComposeAuthority:
         *,
         runner: CommandRunner = run_command,
         timeout: float = 30.0,
+        require_cancelled: bool,
     ) -> dict[str, Any]:
         job_id = job.job_id if isinstance(job, RunningSandboxJob) else job
         label = self.sandbox_job_label(job_id)
@@ -3624,17 +3609,23 @@ class ComposeAuthority:
             headers=headers,
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=5.0) as response:
-            initial_payload = self._sandbox_cancellation_status_response(
-                response.read(),
-                job_id=job_id,
-                endpoint=endpoint,
-                headers=headers,
-                observed_ids=(),
+        try:
+            with urllib.request.urlopen(request, timeout=5.0) as response:
+                latest_payload, pending_failure = self._sandbox_cancellation_status_response(
+                    response.read(),
+                    job_id=job_id,
+                    require_cancelled=require_cancelled,
+                )
+        except Exception as error:
+            latest_payload = None
+            pending_failure = RuntimeError(
+                f"sandbox cancellation acknowledgement request failed ({type(error).__name__})"
             )
         deadline = time.monotonic() + timeout
         last_identifiers: list[str] = []
-        last_status = cast(str, initial_payload["status"])
+        last_status = (
+            cast(str, latest_payload["status"]) if latest_payload is not None else "malformed"
+        )
         while time.monotonic() < deadline:
             identifiers = self._exact_label_ids(
                 runner=runner,
@@ -3646,17 +3637,40 @@ class ComposeAuthority:
                 f"{endpoint}/v1/jobs/{job_id}",
                 headers=headers,
             )
-            with urllib.request.urlopen(status_request, timeout=5.0) as response:
-                refreshed = self._sandbox_cancellation_status_response(
-                    response.read(),
-                    job_id=job_id,
-                    endpoint=endpoint,
-                    headers=headers,
-                    observed_ids=identifiers,
+            try:
+                with urllib.request.urlopen(status_request, timeout=5.0) as response:
+                    refreshed, refresh_failure = self._sandbox_cancellation_status_response(
+                        response.read(),
+                        job_id=job_id,
+                        require_cancelled=require_cancelled,
+                    )
+            except Exception as error:
+                refreshed = None
+                refresh_failure = RuntimeError(
+                    f"sandbox cancellation status request failed ({type(error).__name__})"
                 )
-            last_status = cast(str, refreshed["status"])
-            if last_status == "cancelled" and not identifiers:
-                return refreshed
+            if refreshed is not None:
+                latest_payload = refreshed
+                last_status = cast(str, refreshed["status"])
+            else:
+                last_status = "malformed"
+            if pending_failure is None and refresh_failure is not None:
+                pending_failure = refresh_failure
+            if not identifiers:
+                if pending_failure is not None:
+                    raise self._sandbox_startup_error(
+                        pending_failure,
+                        job_id=job_id,
+                        endpoint=endpoint,
+                        headers=headers,
+                        observed_ids=identifiers,
+                        container=None,
+                    ) from pending_failure
+                if latest_payload is not None and (
+                    last_status == "cancelled"
+                    or (not require_cancelled and last_status in {"completed", "failed", "timeout"})
+                ):
+                    return latest_payload
             time.sleep(0.05)
         timeout_error = TimeoutError(
             "sandbox cancellation did not converge before its deadline "
