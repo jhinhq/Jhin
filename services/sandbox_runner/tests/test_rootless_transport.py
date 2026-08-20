@@ -34,6 +34,11 @@ def restore_logging_globals() -> Iterator[None]:
     root = logging.getLogger()
     original_handlers = list(root.handlers)
     original_level = root.level
+    original_named = {
+        candidate: (list(candidate.handlers), candidate.level, candidate.propagate)
+        for candidate in logging.root.manager.loggerDict.values()
+        if isinstance(candidate, logging.Logger)
+    }
     original_structlog_config = dict(structlog.get_config())
     try:
         yield
@@ -43,6 +48,10 @@ def restore_logging_globals() -> Iterator[None]:
         ]
         root.handlers[:] = original_handlers
         root.setLevel(original_level)
+        for named, (handlers, level, propagate) in original_named.items():
+            named.handlers[:] = handlers
+            named.setLevel(level)
+            named.propagate = propagate
         for handler in installed_handlers:
             handler.close()
         structlog.configure(**original_structlog_config)
@@ -635,3 +644,39 @@ def test_rootless_main_emits_closed_json_failure_before_exit(
     assert record["event"] == "rootless_transport.failed"
     assert record["error_code"] == "configuration_error"
     assert canary not in rendered
+
+
+def test_rootless_main_maps_generic_runtime_failure_to_closed_json(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    restore_logging_globals: None,
+) -> None:
+    canary = "generic-start-server-failure-canary"
+
+    def validated_boundary(**_kwargs: object) -> Path:
+        return Path("/run/host/docker.sock")
+
+    async def skip_probe(_upstream: Path) -> None:
+        return None
+
+    async def fail_start_server(*_args: object, **_kwargs: object) -> None:
+        raise OSError(canary)
+
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("LOG_LEVEL", "WARNING")
+    monkeypatch.setattr(transport_module, "validate_production_boundary", validated_boundary)
+    monkeypatch.setattr(transport_module, "_probe_upstream", skip_probe)
+    monkeypatch.setattr(transport_module.asyncio, "start_server", fail_start_server)
+
+    with pytest.raises(SystemExit, match="1"):
+        transport_module.main()
+
+    captured = capsys.readouterr()
+    record = json.loads(captured.out)
+    assert record["schema_version"] == 1
+    assert record["service"] == "rootless-docker-transport"
+    assert record["environment"] == "test"
+    assert record["event"] == "rootless_transport.failed"
+    assert record["error_code"] == "upstream_unavailable"
+    assert captured.err == ""
+    assert canary not in captured.out

@@ -98,6 +98,20 @@ def test_unresolved_actual_logger_shape_still_fails_closed(tmp_path: Path) -> No
     assert _failure_codes(audit.audit_paths((source,))) == ["unresolved_logger_receiver"]
 
 
+def test_dynamic_and_extracted_logger_methods_fail_closed(tmp_path: Path) -> None:
+    audit = _load_audit()
+    source = tmp_path / "service.py"
+    candidates = (
+        "from jhin_observability import get_logger\n"
+        "logger = get_logger(__name__)\ngetattr(logger, 'info')('api.started')\n",
+        "from jhin_observability import get_logger\n"
+        "logger = get_logger(__name__)\nemit = logger.info\nemit('api.started')\n",
+    )
+    for candidate in candidates:
+        source.write_text(candidate)
+        assert _failure_codes(audit.audit_paths((source,))) == ["unresolved_logger_receiver"]
+
+
 def test_bound_stdlib_logger_is_always_foreign_logging(tmp_path: Path) -> None:
     audit = _load_audit()
     source = tmp_path / "service.py"
@@ -112,7 +126,8 @@ def test_poller_health_allows_only_closed_protocol_prints(tmp_path: Path) -> Non
     source = tmp_path / "packages/workflows/src/jhin_workflows/poller_health.py"
     source.parent.mkdir(parents=True)
     source.write_text(
-        "_READY_OUTPUT = 'ready'\n_UNAVAILABLE_OUTPUT = 'unavailable'\n"
+        "_READY_OUTPUT = 'workflow-poller-ready'\n"
+        "_UNAVAILABLE_OUTPUT = 'workflow-poller-unavailable'\n"
         "def main(ok):\n"
         " print(_READY_OUTPUT if ok else _UNAVAILABLE_OUTPUT)\n"
         "def run():\n print(_UNAVAILABLE_OUTPUT)\n"
@@ -132,8 +147,30 @@ def test_poller_health_rejects_print_near_misses(tmp_path: Path) -> None:
     )
     for candidate in candidates:
         source.write_text(
-            "_READY_OUTPUT = 'ready'\n_UNAVAILABLE_OUTPUT = 'unavailable'\n" + candidate
+            "_READY_OUTPUT = 'workflow-poller-ready'\n"
+            "_UNAVAILABLE_OUTPUT = 'workflow-poller-unavailable'\n" + candidate
         )
+        assert "direct_print" in _failure_codes(audit.audit_paths((source,)))
+
+
+def test_poller_health_rejects_mutated_or_rebound_output_constants(tmp_path: Path) -> None:
+    audit = _load_audit()
+    source = tmp_path / "packages/workflows/src/jhin_workflows/poller_health.py"
+    source.parent.mkdir(parents=True)
+    print_shapes = (
+        "def main(ok):\n print(_READY_OUTPUT if ok else _UNAVAILABLE_OUTPUT)\n"
+        "def run():\n print(_UNAVAILABLE_OUTPUT)\n"
+    )
+    candidates = (
+        "_READY_OUTPUT = 'secret-canary'\n_UNAVAILABLE_OUTPUT = 'workflow-poller-unavailable'\n",
+        "import os\n_READY_OUTPUT = os.environ['SECRET_CANARY']\n"
+        "_UNAVAILABLE_OUTPUT = 'workflow-poller-unavailable'\n",
+        "import os\n_READY_OUTPUT = 'workflow-poller-ready'\n"
+        "_UNAVAILABLE_OUTPUT = 'workflow-poller-unavailable'\n"
+        "_UNAVAILABLE_OUTPUT = os.environ['SECRET_CANARY']\n",
+    )
+    for candidate in candidates:
+        source.write_text(candidate + print_shapes)
         assert "direct_print" in _failure_codes(audit.audit_paths((source,)))
 
 
@@ -162,6 +199,12 @@ def test_job_manager_rejects_docker_info_near_misses(tmp_path: Path) -> None:
         "  client = aiodocker.Docker(url=validated_url)\n  client.system.info()\n",
         "import aiodocker\nclass JobManager:\n async def start(self, validated_url):\n"
         "  client = object()\n  await client.system.info()\n",
+        "import aiodocker\nclass JobManager:\n async def start(self, validated_url, foreign):\n"
+        "  client = aiodocker.Docker(url=validated_url)\n"
+        "  client = foreign\n  await client.system.info()\n",
+        "import aiodocker\nclass JobManager:\n async def start(self, validated_url, use_it):\n"
+        "  if use_it:\n   client = aiodocker.Docker(url=validated_url)\n"
+        "  await client.system.info()\n",
     )
     for candidate in candidates:
         source.write_text(candidate)

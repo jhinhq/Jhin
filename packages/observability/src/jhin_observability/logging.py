@@ -109,6 +109,16 @@ def _filter_log_event_processor(
     return filter_log_event(event_dict)
 
 
+def _route_named_loggers_through_root() -> None:
+    """Remove pre-existing formatter bypasses while preserving logger identity."""
+    for candidate in logging.root.manager.loggerDict.values():
+        if not isinstance(candidate, logging.Logger):
+            continue
+        candidate.handlers.clear()
+        candidate.setLevel(logging.NOTSET)
+        candidate.propagate = True
+
+
 def configure_json_logging(
     service: str,
     environment: str,
@@ -154,6 +164,7 @@ def configure_json_logging(
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(level.upper())
+    _route_named_loggers_through_root()
 
 
 configure_logging = configure_json_logging

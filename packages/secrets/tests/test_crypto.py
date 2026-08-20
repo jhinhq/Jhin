@@ -105,6 +105,11 @@ def restore_logging_globals() -> Iterator[None]:
     root = logging.getLogger()
     original_handlers = list(root.handlers)
     original_level = root.level
+    original_named = {
+        candidate: (list(candidate.handlers), candidate.level, candidate.propagate)
+        for candidate in logging.root.manager.loggerDict.values()
+        if isinstance(candidate, logging.Logger)
+    }
     original_structlog_config = dict(structlog.get_config())
     try:
         yield
@@ -114,6 +119,10 @@ def restore_logging_globals() -> Iterator[None]:
         ]
         root.handlers[:] = original_handlers
         root.setLevel(original_level)
+        for named, (handlers, level, propagate) in original_named.items():
+            named.handlers[:] = handlers
+            named.setLevel(level)
+            named.propagate = propagate
         for handler in installed_handlers:
             handler.close()
         structlog.configure(**original_structlog_config)

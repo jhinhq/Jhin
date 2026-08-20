@@ -42,6 +42,11 @@ def clear_process_secret_registry() -> Iterator[None]:
     root = logging.getLogger()
     original_handlers = list(root.handlers)
     original_level = root.level
+    original_named = {
+        candidate: (list(candidate.handlers), candidate.level, candidate.propagate)
+        for candidate in logging.root.manager.loggerDict.values()
+        if isinstance(candidate, logging.Logger)
+    }
     original_structlog_config = dict(structlog.get_config())
     try:
         yield
@@ -52,6 +57,10 @@ def clear_process_secret_registry() -> Iterator[None]:
         ]
         root.handlers[:] = original_handlers
         root.setLevel(original_level)
+        for named, (handlers, level, propagate) in original_named.items():
+            named.handlers[:] = handlers
+            named.setLevel(level)
+            named.propagate = propagate
         for handler in installed_handlers:
             handler.close()
         structlog.configure(**original_structlog_config)
@@ -75,6 +84,37 @@ def test_every_record_has_exact_v1_required_fields(
     assert record["logger"] in {"jhin.test", "uvicorn.error"}
     assert datetime.fromisoformat(record["timestamp"].replace("Z", "+00:00")).tzinfo
     assert "private-host-canary" not in json.dumps(record)
+
+
+def test_preexisting_named_handler_is_forced_through_single_json_path(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    canary = "named-handler-message-canary"
+    named = logging.getLogger("uvicorn.error")
+    original_handlers = list(named.handlers)
+    original_level = named.level
+    original_propagate = named.propagate
+    raw_handler = logging.StreamHandler()
+    raw_handler.setFormatter(logging.Formatter("RAW:%(message)s"))
+    named.handlers[:] = [raw_handler]
+    named.setLevel(logging.INFO)
+    named.propagate = False
+    try:
+        configure_json_logging(service="api", environment="test", level="INFO")
+        named.warning("server booted with %s", canary)
+
+        captured = capsys.readouterr()
+        record = json.loads(captured.out)
+        assert record["event"] == "stdlib.message"
+        assert record["logger"] == "uvicorn.error"
+        assert captured.err == ""
+        assert canary not in captured.out
+        assert "server booted" not in captured.out
+    finally:
+        named.handlers[:] = original_handlers
+        named.setLevel(original_level)
+        named.propagate = original_propagate
+        raw_handler.close()
 
 
 def test_structural_redaction_removes_nested_keys_and_url_parts() -> None:

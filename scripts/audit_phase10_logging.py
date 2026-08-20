@@ -118,6 +118,52 @@ def _logger_bindings(
     return bindings
 
 
+def _logger_method_aliases(tree: ast.AST) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        value = node.value
+        if not isinstance(value, ast.Attribute) or value.attr not in LOGGER_METHODS:
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        aliases.update(
+            (target.id, value.attr) for target in targets if isinstance(target, ast.Name)
+        )
+    return aliases
+
+
+def _dynamic_bound_logger_method(
+    node: ast.Call,
+    bindings: Mapping[str, Literal["logger", "foreign_logging"]],
+    aliases: Mapping[str, str],
+) -> str | None:
+    if (
+        not isinstance(node.func, ast.Call)
+        or _qualified_name(node.func.func, aliases) not in {"getattr", "builtins.getattr"}
+        or len(node.func.args) < 2
+    ):
+        return None
+    receiver = node.func.args[0]
+    receiver_name = _qualified_name(receiver, aliases)
+    direct_kind = (
+        LOGGER_FACTORY_KINDS.get(_qualified_name(receiver.func, aliases))
+        if isinstance(receiver, ast.Call)
+        else None
+    )
+    is_logger = (
+        (isinstance(receiver, ast.Name) and receiver.id in bindings)
+        or receiver_name == "temporalio.activity.logger"
+        or direct_kind is not None
+    )
+    if not is_logger:
+        return None
+    method_arg = node.func.args[1]
+    if isinstance(method_arg, ast.Constant) and isinstance(method_arg.value, str):
+        return method_arg.value if method_arg.value in LOGGER_METHODS else None
+    return "<dynamic>"
+
+
 def _enclosing_function(
     node: ast.AST, parents: Mapping[ast.AST, ast.AST]
 ) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
@@ -174,31 +220,83 @@ def _is_within_await(
     return False
 
 
-def _assigns_validated_docker_client(
-    function: ast.FunctionDef | ast.AsyncFunctionDef,
+def _nearest_statement(
+    node: ast.AST,
+    parents: Mapping[ast.AST, ast.AST],
+) -> ast.stmt | None:
+    current: ast.AST | None = node
+    while current is not None and not isinstance(current, ast.stmt):
+        current = parents.get(current)
+    return current
+
+
+def _statement_dominates(
+    definition: ast.stmt,
+    use: ast.AST,
+    parents: Mapping[ast.AST, ast.AST],
+) -> bool:
+    container = parents.get(definition)
+    if container is None:
+        return False
+    child: ast.AST = use
+    while (parent := parents.get(child)) is not None and parent is not container:
+        child = parent
+    if parents.get(child) is not container or not isinstance(child, ast.stmt):
+        return False
+    for field in ("body", "orelse", "finalbody"):
+        statements = getattr(container, field, None)
+        if isinstance(statements, list) and definition in statements and child in statements:
+            return statements.index(definition) < statements.index(child)
+    return False
+
+
+def _is_validated_docker_client_assignment(
+    candidate: ast.stmt,
     aliases: Mapping[str, str],
 ) -> bool:
-    for candidate in ast.walk(function):
-        if not isinstance(candidate, ast.Assign) or not isinstance(candidate.value, ast.Call):
-            continue
-        if not any(
-            isinstance(target, ast.Name) and target.id == "client" for target in candidate.targets
-        ):
-            continue
-        if _qualified_name(candidate.value.func, aliases) != "aiodocker.Docker":
-            continue
-        if candidate.value.args:
-            continue
-        if len(candidate.value.keywords) != 1:
-            continue
-        keyword = candidate.value.keywords[0]
-        if (
-            keyword.arg == "url"
-            and isinstance(keyword.value, ast.Name)
-            and keyword.value.id == "validated_url"
-        ):
-            return True
-    return False
+    if (
+        not isinstance(candidate, ast.Assign)
+        or len(candidate.targets) != 1
+        or not isinstance(candidate.targets[0], ast.Name)
+        or candidate.targets[0].id != "client"
+        or not isinstance(candidate.value, ast.Call)
+        or _qualified_name(candidate.value.func, aliases) != "aiodocker.Docker"
+        or candidate.value.args
+        or len(candidate.value.keywords) != 1
+    ):
+        return False
+    keyword = candidate.value.keywords[0]
+    return (
+        keyword.arg == "url"
+        and isinstance(keyword.value, ast.Name)
+        and keyword.value.id == "validated_url"
+    )
+
+
+def _has_reaching_validated_docker_client(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+    node: ast.Call,
+    parents: Mapping[ast.AST, ast.AST],
+    aliases: Mapping[str, str],
+) -> bool:
+    definitions = {
+        statement
+        for candidate in ast.walk(function)
+        if isinstance(candidate, ast.Name)
+        and isinstance(candidate.ctx, ast.Store)
+        and candidate.id == "client"
+        and (statement := _nearest_statement(candidate, parents)) is not None
+        and (candidate.lineno, candidate.col_offset) < (node.lineno, node.col_offset)
+    }
+    if not definitions:
+        return False
+    reaching = max(
+        definitions,
+        key=lambda statement: (statement.lineno, statement.col_offset),
+    )
+    return _is_validated_docker_client_assignment(reaching, aliases) and _statement_dominates(
+        reaching, node, parents
+    )
 
 
 def _is_reviewed_non_logger_call(
@@ -250,8 +348,44 @@ def _is_reviewed_non_logger_call(
         and not node.args
         and not node.keywords
         and _is_within_await(node, parents)
-        and _assigns_validated_docker_client(function, aliases)
+        and _has_reaching_validated_docker_client(function, node, parents, aliases)
     )
+
+
+def _has_exact_poller_output_bindings(
+    node: ast.AST,
+    parents: Mapping[ast.AST, ast.AST],
+) -> bool:
+    root: ast.AST = node
+    while root in parents:
+        root = parents[root]
+    if not isinstance(root, ast.Module):
+        return False
+    expected = {
+        "_READY_OUTPUT": "workflow-poller-ready",
+        "_UNAVAILABLE_OUTPUT": "workflow-poller-unavailable",
+    }
+    for name, value in expected.items():
+        stores = [
+            candidate
+            for candidate in ast.walk(root)
+            if isinstance(candidate, ast.Name)
+            and isinstance(candidate.ctx, ast.Store)
+            and candidate.id == name
+        ]
+        if len(stores) != 1:
+            return False
+        statement = _nearest_statement(stores[0], parents)
+        if (
+            not isinstance(statement, ast.Assign)
+            or parents.get(statement) is not root
+            or len(statement.targets) != 1
+            or not isinstance(statement.targets[0], ast.Name)
+            or not isinstance(statement.value, ast.Constant)
+            or statement.value.value != value
+        ):
+            return False
+    return True
 
 
 def _is_closed_poller_print(
@@ -262,7 +396,12 @@ def _is_closed_poller_print(
     if not path.as_posix().endswith("packages/workflows/src/jhin_workflows/poller_health.py"):
         return False
     function = _enclosing_function(node, parents)
-    if function is None or node.keywords or len(node.args) != 1:
+    if (
+        function is None
+        or node.keywords
+        or len(node.args) != 1
+        or not _has_exact_poller_output_bindings(node, parents)
+    ):
         return False
     argument = node.args[0]
     if function.name == "run":
@@ -286,8 +425,33 @@ def collect_logging_method_calls(paths: Sequence[Path]) -> tuple[LoggingCall, ..
         }
         aliases = _import_aliases(tree)
         bindings = _logger_bindings(tree, aliases)
+        method_aliases = _logger_method_aliases(tree)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
+                continue
+            if isinstance(node.func, ast.Name) and node.func.id in method_aliases:
+                calls.append(
+                    LoggingCall(
+                        path,
+                        node.lineno,
+                        node.col_offset,
+                        method_aliases[node.func.id],
+                        "unresolved_logger_receiver",
+                    )
+                )
+                continue
+            if (
+                dynamic_method := _dynamic_bound_logger_method(node, bindings, aliases)
+            ) is not None:
+                calls.append(
+                    LoggingCall(
+                        path,
+                        node.lineno,
+                        node.col_offset,
+                        dynamic_method,
+                        "unresolved_logger_receiver",
+                    )
+                )
                 continue
             qualified_call = _qualified_name(node.func, aliases)
             method = qualified_call.rsplit(".", 1)[-1]
@@ -357,7 +521,8 @@ def collect_logging_method_calls(paths: Sequence[Path]) -> tuple[LoggingCall, ..
 def audit_paths(paths: Sequence[Path]) -> list[AuditFailure]:
     calls = collect_logging_method_calls(paths)
     failures: list[AuditFailure] = []
-    call_nodes: dict[tuple[Path, int, int, str], ast.Call] = {}
+    call_locations = {(item.path, item.line, item.column) for item in calls}
+    call_nodes: dict[tuple[Path, int, int], ast.Call] = {}
     for path in sorted(paths):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         parents = {
@@ -376,13 +541,12 @@ def audit_paths(paths: Sequence[Path]) -> list[AuditFailure]:
             if qualified in {"sys.stdout.write", "sys.stderr.write"}:
                 failures.append(AuditFailure(path, node.lineno, "direct_stream_write"))
                 continue
-            method = qualified.rsplit(".", 1)[-1]
-            if method not in LOGGER_METHODS:
-                continue
-            call_nodes[(path, node.lineno, node.col_offset, method)] = node
+            location = (path, node.lineno, node.col_offset)
+            if location in call_locations:
+                call_nodes[location] = node
 
     for found in calls:
-        node = call_nodes[(found.path, found.line, found.column, found.method)]
+        node = call_nodes[(found.path, found.line, found.column)]
         if found.receiver != "logger":
             failures.append(AuditFailure(found.path, found.line, found.receiver))
             continue

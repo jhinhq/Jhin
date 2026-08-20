@@ -315,6 +315,9 @@ def main() -> None:
     except RootlessTransportConfigurationError as exc:
         logger.error("rootless_transport.failed", error_code=exc.code)
         raise SystemExit(1) from None
+    except Exception:
+        logger.error("rootless_transport.failed", error_code="upstream_unavailable")
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":
