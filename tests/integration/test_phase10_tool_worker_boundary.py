@@ -7607,7 +7607,7 @@ def test_inspectable_job_uses_a_runner_valid_hex_identifier(
 
 
 class _SandboxHTTPResponse:
-    def __init__(self, status: int, payload: dict[str, Any]) -> None:
+    def __init__(self, status: int, payload: Any) -> None:
         self.status = status
         self._body = json.dumps(payload).encode()
 
@@ -7619,6 +7619,295 @@ class _SandboxHTTPResponse:
 
     def read(self) -> bytes:
         return self._body
+
+
+def _sandbox_status_payload(
+    authority: ComposeAuthority,
+    job_id: str,
+    status: str,
+    *,
+    error: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "job_id": job_id,
+        "status": status,
+        "image": authority.sandbox_image,
+        "network_policy": "none",
+        "exit_code": None,
+        "started_at": "2026-08-20T00:00:00Z",
+        "finished_at": None if status == "running" else "2026-08-20T00:00:01Z",
+        "duration_ms": None if status == "running" else 1000,
+        "stdout": "",
+        "stderr": "",
+        "stdout_truncated": False,
+        "stderr_truncated": False,
+        "error": error,
+    }
+
+
+def _install_sandbox_cancel_scenario(
+    monkeypatch: pytest.MonkeyPatch,
+    authority: ComposeAuthority,
+    *,
+    job_id: str,
+    label_snapshots: list[list[str]],
+    status_payloads: list[Any],
+) -> tuple[Any, list[tuple[str, ...]], list[Any]]:
+    label_outputs = iter(label_snapshots)
+    statuses = iter(status_payloads)
+    calls: list[tuple[str, ...]] = []
+    requests: list[Any] = []
+    label_command = authority.docker_command(
+        "ps",
+        "-aq",
+        "--no-trunc",
+        "--filter",
+        f"label=jhin.sandbox.job={job_id}",
+    )
+
+    def runner(
+        command: tuple[str, ...],
+        *,
+        env: dict[str, str],
+        cwd: Path,
+        timeout: float,
+        check: bool,
+        input_bytes: bytes | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del input_bytes
+        assert command == label_command
+        assert env == authority.environment
+        assert cwd == authority.repo
+        assert timeout == 30.0
+        assert check is False
+        calls.append(command)
+        identifiers = next(label_outputs)
+        output = "".join(f"{identifier}\n" for identifier in identifiers)
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    def urlopen(request: Any, *, timeout: float) -> _SandboxHTTPResponse:
+        assert timeout == 5.0
+        assert request.get_header("Authorization") == (
+            f"Bearer {authority.environment['SANDBOX_RUNNER_TOKEN']}"
+        )
+        requests.append(request)
+        if request.get_method() == "POST" and request.full_url.endswith(
+            f"/v1/jobs/{job_id}/cancel"
+        ):
+            return _SandboxHTTPResponse(
+                200,
+                _sandbox_status_payload(authority, job_id, "running"),
+            )
+        if request.get_method() == "GET" and request.full_url.endswith(f"/v1/jobs/{job_id}/logs"):
+            return _SandboxHTTPResponse(
+                200,
+                {
+                    "job_id": job_id,
+                    "status": "running",
+                    "stdout": "",
+                    "stderr": authority.environment["SANDBOX_RUNNER_TOKEN"],
+                    "stdout_truncated": False,
+                    "stderr_truncated": False,
+                },
+            )
+        if request.get_method() == "GET" and request.full_url.endswith(f"/v1/jobs/{job_id}"):
+            return _SandboxHTTPResponse(200, next(statuses))
+        raise AssertionError(f"unexpected sandbox cancellation request: {request.full_url}")
+
+    monkeypatch.setattr(time, "sleep", lambda _interval: None)
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    return runner, calls, requests
+
+
+def test_cancel_sandbox_job_waits_for_label_absence_and_refreshed_cancelled_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = replace(
+        _authority_for_recorder(),
+        _published_port_items=(("SANDBOX_RUNNER_DEV_PORT", 49152),),
+    )
+    job_id = "deadc0dedeadc0dedeadc0de"
+    container_id = "a" * 64
+    cancelled = _sandbox_status_payload(authority, job_id, "cancelled")
+    runner, calls, requests = _install_sandbox_cancel_scenario(
+        monkeypatch,
+        authority,
+        job_id=job_id,
+        label_snapshots=[[container_id], [], []],
+        status_payloads=[
+            _sandbox_status_payload(authority, job_id, "running"),
+            _sandbox_status_payload(authority, job_id, "running"),
+            cancelled,
+        ],
+    )
+    socket_checks: list[str] = []
+    monkeypatch.setattr(
+        ComposeAuthority,
+        "assert_socket_unchanged",
+        lambda self: socket_checks.append(self.project),
+    )
+    try:
+        assert authority.cancel_sandbox_job(job_id, runner=runner) == cancelled
+        assert len(calls) == 3
+        assert socket_checks == [authority.project] * 3
+        assert [request.get_method() for request in requests] == [
+            "POST",
+            "GET",
+            "GET",
+            "GET",
+        ]
+        assert all(request.full_url.endswith(f"/v1/jobs/{job_id}") for request in requests[1:])
+    finally:
+        authority.remove_runtime_paths()
+
+
+def test_cancel_sandbox_job_does_not_return_cancelled_while_its_label_remains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = replace(
+        _authority_for_recorder(),
+        _published_port_items=(("SANDBOX_RUNNER_DEV_PORT", 49152),),
+    )
+    job_id = "deadc0dedeadc0dedeadc0de"
+    container_id = "a" * 64
+    cancelled = _sandbox_status_payload(authority, job_id, "cancelled")
+    runner, calls, requests = _install_sandbox_cancel_scenario(
+        monkeypatch,
+        authority,
+        job_id=job_id,
+        label_snapshots=[[container_id], []],
+        status_payloads=[cancelled, cancelled],
+    )
+    try:
+        assert authority.cancel_sandbox_job(job_id, runner=runner) == cancelled
+        assert len(calls) == 2
+        assert [request.get_method() for request in requests] == ["POST", "GET", "GET"]
+    finally:
+        authority.remove_runtime_paths()
+
+
+@pytest.mark.parametrize("terminal_status", ["completed", "failed", "timeout"])
+def test_cancel_sandbox_job_rejects_other_terminal_status_with_redacted_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_status: str,
+) -> None:
+    authority = replace(
+        _authority_for_recorder(),
+        _published_port_items=(("SANDBOX_RUNNER_DEV_PORT", 49152),),
+    )
+    job_id = "deadc0dedeadc0dedeadc0de"
+    token = authority.environment["SANDBOX_RUNNER_TOKEN"]
+    runner, calls, requests = _install_sandbox_cancel_scenario(
+        monkeypatch,
+        authority,
+        job_id=job_id,
+        label_snapshots=[[]],
+        status_payloads=[
+            _sandbox_status_payload(authority, job_id, terminal_status),
+            _sandbox_status_payload(authority, job_id, terminal_status, error=token),
+        ],
+    )
+    try:
+        with pytest.raises(RuntimeError, match=rf"terminal.*{terminal_status}") as caught:
+            authority.cancel_sandbox_job(job_id, runner=runner)
+        rendered = str(caught.value)
+        assert token not in rendered
+        assert "<redacted>" in rendered
+        assert len(rendered) <= lifecycle.LIVE_FAILURE_OUTPUT_LIMIT + 512
+        assert len(calls) == 1
+        assert [request.get_method() for request in requests] == [
+            "POST",
+            "GET",
+            "GET",
+            "GET",
+        ]
+    finally:
+        authority.remove_runtime_paths()
+
+
+@pytest.mark.parametrize("mutation", ["not-object", "wrong-job", "unknown-status"])
+def test_cancel_sandbox_job_rejects_malformed_refreshed_status_with_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    authority = replace(
+        _authority_for_recorder(),
+        _published_port_items=(("SANDBOX_RUNNER_DEV_PORT", 49152),),
+    )
+    job_id = "deadc0dedeadc0dedeadc0de"
+    token = authority.environment["SANDBOX_RUNNER_TOKEN"]
+    malformed: Any
+    if mutation == "not-object":
+        malformed = []
+    elif mutation == "wrong-job":
+        malformed = _sandbox_status_payload(authority, "different-job", "running")
+    else:
+        malformed = _sandbox_status_payload(authority, job_id, "unknown")
+    runner, calls, requests = _install_sandbox_cancel_scenario(
+        monkeypatch,
+        authority,
+        job_id=job_id,
+        label_snapshots=[[]],
+        status_payloads=[
+            malformed,
+            _sandbox_status_payload(authority, job_id, "running", error=token),
+        ],
+    )
+    try:
+        with pytest.raises(RuntimeError, match="malformed cancellation status") as caught:
+            authority.cancel_sandbox_job(job_id, runner=runner)
+        rendered = str(caught.value)
+        assert token not in rendered
+        assert "<redacted>" in rendered
+        assert len(rendered) <= lifecycle.LIVE_FAILURE_OUTPUT_LIMIT + 512
+        assert len(calls) == 1
+        assert [request.get_method() for request in requests] == [
+            "POST",
+            "GET",
+            "GET",
+            "GET",
+        ]
+    finally:
+        authority.remove_runtime_paths()
+
+
+def test_cancel_sandbox_job_timeout_includes_bounded_redacted_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = replace(
+        _authority_for_recorder(),
+        _published_port_items=(("SANDBOX_RUNNER_DEV_PORT", 49152),),
+    )
+    job_id = "deadc0dedeadc0dedeadc0de"
+    token = authority.environment["SANDBOX_RUNNER_TOKEN"]
+    runner, calls, requests = _install_sandbox_cancel_scenario(
+        monkeypatch,
+        authority,
+        job_id=job_id,
+        label_snapshots=[[]],
+        status_payloads=[
+            _sandbox_status_payload(authority, job_id, "running"),
+            _sandbox_status_payload(authority, job_id, "running", error=token),
+        ],
+    )
+    moments = iter((0.0, 0.0, 1.0))
+    monkeypatch.setattr(time, "monotonic", lambda: next(moments))
+    try:
+        with pytest.raises(TimeoutError, match="diagnostics=") as caught:
+            authority.cancel_sandbox_job(job_id, runner=runner, timeout=0.5)
+        rendered = str(caught.value)
+        assert token not in rendered
+        assert "<redacted>" in rendered
+        assert len(rendered) <= lifecycle.LIVE_FAILURE_OUTPUT_LIMIT + 512
+        assert len(calls) == 1
+        assert [request.get_method() for request in requests] == [
+            "POST",
+            "GET",
+            "GET",
+            "GET",
+        ]
+    finally:
+        authority.remove_runtime_paths()
 
 
 @pytest.mark.parametrize("survivor", [False, True])
@@ -7680,6 +7969,7 @@ def _install_inspectable_job_scenario(
     polls = iter(identifier_polls)
     inspections = iter(containers)
     requests: list[tuple[str, str]] = []
+    cancel_requested = False
 
     def exact_label_ids(
         self: ComposeAuthority,
@@ -7710,6 +8000,7 @@ def _install_inspectable_job_scenario(
         return subprocess.CompletedProcess(command, 0, json.dumps([container]), "")
 
     def urlopen(request: Any, *, timeout: float) -> _SandboxHTTPResponse:
+        nonlocal cancel_requested
         assert timeout == 5.0
         method = request.get_method()
         url = request.full_url
@@ -7717,9 +8008,10 @@ def _install_inspectable_job_scenario(
         if method == "POST" and url.endswith("/v1/jobs"):
             return _SandboxHTTPResponse(202, {"job_id": job_id, "status": "queued"})
         if method == "GET" and url.endswith(f"/v1/jobs/{job_id}"):
+            status = "cancelled" if cancel_requested else "failed"
             return _SandboxHTTPResponse(
                 200,
-                {"job_id": job_id, "status": "failed", "exit_code": 137},
+                {"job_id": job_id, "status": status, "exit_code": 137},
             )
         if method == "GET" and url.endswith(f"/v1/jobs/{job_id}/logs"):
             return _SandboxHTTPResponse(
@@ -7732,7 +8024,8 @@ def _install_inspectable_job_scenario(
                 },
             )
         if method == "POST" and url.endswith(f"/v1/jobs/{job_id}/cancel"):
-            return _SandboxHTTPResponse(200, {"job_id": job_id, "status": "cancelled"})
+            cancel_requested = True
+            return _SandboxHTTPResponse(200, {"job_id": job_id, "status": "running"})
         raise AssertionError(f"unexpected sandbox request: {method} {url}")
 
     monkeypatch.setattr(secrets, "token_hex", lambda _length: job_id)
@@ -7860,7 +8153,13 @@ def test_inspectable_job_terminal_state_emits_diagnostics_then_cleans_up(
         assert "bounded stdout" in rendered
         assert "<redacted>" in rendered
         assert authority.environment["SANDBOX_RUNNER_TOKEN"] not in rendered
-        assert [method for method, _url in requests] == ["POST", "GET", "GET", "POST"]
+        assert [method for method, _url in requests] == [
+            "POST",
+            "GET",
+            "GET",
+            "POST",
+            "GET",
+        ]
     finally:
         authority.remove_runtime_paths()
 
@@ -7887,7 +8186,13 @@ def test_inspectable_job_rejects_identity_change_with_diagnostics_and_cleanup(
             authority.start_inspectable_sandbox_job(timeout=1.0)
         assert first in str(raised.value)
         assert "replacement-container" in str(raised.value)
-        assert [method for method, _url in requests] == ["POST", "GET", "GET", "POST"]
+        assert [method for method, _url in requests] == [
+            "POST",
+            "GET",
+            "GET",
+            "POST",
+            "GET",
+        ]
     finally:
         authority.remove_runtime_paths()
 
@@ -7915,7 +8220,13 @@ def test_inspectable_job_created_state_timeout_emits_diagnostics_and_cleanup(
         with pytest.raises(TimeoutError, match="remained created") as raised:
             authority.start_inspectable_sandbox_job(timeout=0.5)
         assert "bounded stdout" in str(raised.value)
-        assert [method for method, _url in requests] == ["POST", "GET", "GET", "POST"]
+        assert [method for method, _url in requests] == [
+            "POST",
+            "GET",
+            "GET",
+            "POST",
+            "GET",
+        ]
     finally:
         authority.remove_runtime_paths()
 

@@ -3432,6 +3432,48 @@ class ComposeAuthority:
         )
         return type(error)(f"{error}; diagnostics={diagnostics}")
 
+    def _sandbox_cancellation_status_response(
+        self,
+        encoded: bytes,
+        *,
+        job_id: str,
+        endpoint: str,
+        headers: dict[str, str],
+        observed_ids: Sequence[str],
+    ) -> dict[str, Any]:
+        try:
+            payload = json.loads(encoded)
+        except json.JSONDecodeError as error:
+            malformed = RuntimeError("sandbox runner returned malformed cancellation status")
+            raise self._sandbox_startup_error(
+                malformed,
+                job_id=job_id,
+                endpoint=endpoint,
+                headers=headers,
+                observed_ids=observed_ids,
+                container=None,
+            ) from error
+        failure: RuntimeError | None = None
+        if not isinstance(payload, dict) or payload.get("job_id") != job_id:
+            failure = RuntimeError("sandbox runner returned malformed cancellation status")
+            status = None
+        else:
+            status = payload.get("status")
+        if status in {"completed", "failed", "timeout"}:
+            failure = RuntimeError(f"sandbox cancellation reached terminal status {status}")
+        elif status not in {"running", "cancelled"}:
+            failure = RuntimeError("sandbox runner returned malformed cancellation status")
+        if failure is not None:
+            raise self._sandbox_startup_error(
+                failure,
+                job_id=job_id,
+                endpoint=endpoint,
+                headers=headers,
+                observed_ids=observed_ids,
+                container=None,
+            ) from failure
+        return cast(dict[str, Any], payload)
+
     def start_inspectable_sandbox_job(
         self,
         *,
@@ -3583,19 +3625,51 @@ class ComposeAuthority:
             method="POST",
         )
         with urllib.request.urlopen(request, timeout=5.0) as response:
-            payload = json.loads(response.read())
-        if not isinstance(payload, dict):
-            raise RuntimeError("sandbox runner returned malformed cancellation status")
+            initial_payload = self._sandbox_cancellation_status_response(
+                response.read(),
+                job_id=job_id,
+                endpoint=endpoint,
+                headers=headers,
+                observed_ids=(),
+            )
         deadline = time.monotonic() + timeout
+        last_identifiers: list[str] = []
+        last_status = cast(str, initial_payload["status"])
         while time.monotonic() < deadline:
-            if not self._exact_label_ids(
+            identifiers = self._exact_label_ids(
                 runner=runner,
                 resource="container",
                 label=label,
-            ):
-                return cast(dict[str, Any], payload)
+            )
+            last_identifiers = identifiers
+            status_request = urllib.request.Request(
+                f"{endpoint}/v1/jobs/{job_id}",
+                headers=headers,
+            )
+            with urllib.request.urlopen(status_request, timeout=5.0) as response:
+                refreshed = self._sandbox_cancellation_status_response(
+                    response.read(),
+                    job_id=job_id,
+                    endpoint=endpoint,
+                    headers=headers,
+                    observed_ids=identifiers,
+                )
+            last_status = cast(str, refreshed["status"])
+            if last_status == "cancelled" and not identifiers:
+                return refreshed
             time.sleep(0.05)
-        raise TimeoutError("cancelled sandbox job container survived")
+        timeout_error = TimeoutError(
+            "sandbox cancellation did not converge before its deadline "
+            f"(status={last_status}, container_count={len(last_identifiers)})"
+        )
+        raise self._sandbox_startup_error(
+            timeout_error,
+            job_id=job_id,
+            endpoint=endpoint,
+            headers=headers,
+            observed_ids=last_identifiers,
+            container=None,
+        )
 
     def run_wrong_gid_probe(
         self,
