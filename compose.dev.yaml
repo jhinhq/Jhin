@@ -39,7 +39,11 @@ services:
     ports:
       - "127.0.0.1:${FAKE_SUPABASE_DB_DEV_PORT:-55433}:5432"
     volumes:
-      - fake_supabase_db_data:/var/lib/postgresql/data
+      - type: volume
+        source: fake_supabase_db_data
+        target: /var/lib/postgresql/data
+        volume:
+          nocopy: true
       - ./tests/fixtures/supabase/init.sql:/docker-entrypoint-initdb.d/00-jhin-fixture.sql:ro
     healthcheck:
       test:

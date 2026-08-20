@@ -75,7 +75,7 @@ def test_development_compose_defines_an_isolated_sentinel_ready_fixture() -> Non
         "type": "volume",
         "source": "fake_supabase_db_data",
         "target": "/var/lib/postgresql/data",
-        "volume": {},
+        "volume": {"nocopy": True},
     } in volumes
     init_mount = next(
         volume
@@ -101,6 +101,24 @@ def test_development_compose_defines_an_isolated_sentinel_ready_fixture() -> Non
     assert "supabase_fixture" in health_command
     assert "public.fixture_ready" in health_command
     assert "pg_isready" not in health_command
+
+
+def test_stateful_named_volumes_never_copy_image_metadata() -> None:
+    development = _render_compose("compose.yaml", "compose.dev.yaml")
+
+    expected = {
+        ("postgres", "postgres_data", "/var/lib/postgresql/data"),
+        ("nats", "nats_data", "/data"),
+        ("fake-supabase-db", "fake_supabase_db_data", "/var/lib/postgresql/data"),
+    }
+    observed = {
+        (service_name, mount["source"], mount["target"]): mount
+        for service_name, service in development["services"].items()
+        for mount in service.get("volumes", [])
+        if mount.get("type") == "volume"
+    }
+    assert set(observed) == expected
+    assert all(mount.get("volume") == {"nocopy": True} for mount in observed.values())
 
 
 def test_only_database_callers_receive_the_dev_fixture_allowlist() -> None:
