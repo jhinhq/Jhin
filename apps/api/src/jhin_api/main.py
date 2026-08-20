@@ -28,7 +28,12 @@ from jhin_api.webhooks.router import router as webhooks_router
 from jhin_api.workspaces.router import router as workspaces_router
 from jhin_db import create_engine, create_session_factory
 from jhin_domain import new_uuid7
-from jhin_observability import configure_logging, get_logger
+from jhin_observability import (
+    SafeErrorCode,
+    configure_json_logging,
+    get_logger,
+    normalize_environment,
+)
 from jhin_secrets import SecretCrypto, load_master_key
 from jhin_secrets.crypto import MasterKeyError
 from jhin_secrets.redaction import redact_event_dict
@@ -39,15 +44,23 @@ logger = get_logger(__name__)
 def _load_secret_crypto() -> SecretCrypto | None:
     try:
         return SecretCrypto(load_master_key())
-    except MasterKeyError as exc:
-        logger.warning("secrets.master_key_unavailable", error=str(exc))
+    except MasterKeyError:
+        logger.warning(
+            "secrets.master_key_unavailable",
+            error_code=SafeErrorCode.INTERNAL_ERROR.value,
+        )
         return None
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     # Known secret values are scrubbed from every log record (plan 13.5).
-    configure_logging("api", settings.log_level, extra_processors=[redact_event_dict])
+    configure_json_logging(
+        service="api",
+        environment=normalize_environment(settings.app_env),
+        level=settings.log_level,
+        extra_processors=(redact_event_dict,),
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -59,7 +72,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.temporal_connect_lock = asyncio.Lock()
         app.state.nats_client = None
         app.state.nats_connect_lock = asyncio.Lock()
-        logger.info("api.started", app_name=settings.app_name, env=settings.app_env)
+        logger.info("api.started")
         yield
         if app.state.nats_client is not None and not app.state.nats_client.is_closed:
             await app.state.nats_client.close()

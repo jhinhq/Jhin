@@ -37,7 +37,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from jhin_db.models import Agent, AuditEvent, Team, Trigger, TriggerInvocation
 from jhin_domain import AgentStatus, TriggerInvocationStatus, TriggerType
 from jhin_events.envelope import EventEnvelope
-from jhin_observability import get_logger
+from jhin_observability import get_logger, normalize_connector_type
 from jhin_triggers import (
     build_idempotency_key,
     evaluate_filter,
@@ -168,7 +168,10 @@ class TriggerMatcher:
                 invocation.error = "no active agent to assign (trigger target missing)"
                 self._audit(session, spec, envelope, key, "failed", workflow_id)
                 await session.commit()
-                logger.warning("trigger.no_agent", trigger_id=str(spec.id))
+                logger.warning(
+                    "trigger.no_agent",
+                    connector_type=normalize_connector_type(envelope.source.type),
+                )
                 return
 
             params = self._workflow_input(spec, envelope, invocation.id, external_id, agent_id)
@@ -187,7 +190,10 @@ class TriggerMatcher:
         except WorkflowAlreadyStartedError:
             # The work already exists exactly once (e.g. crash after a prior
             # start but before its invocation row committed). Not an error.
-            logger.info("trigger.workflow_already_started", workflow_id=workflow_id)
+            logger.info(
+                "trigger.workflow_already_started",
+                connector_type=normalize_connector_type(envelope.source.type),
+            )
         except Exception as exc:
             async with self._session_factory() as session:
                 row = await session.get(TriggerInvocation, invocation_id)
@@ -199,10 +205,8 @@ class TriggerMatcher:
 
         logger.info(
             "trigger.invoked",
-            trigger_id=str(spec.id),
-            workflow_id=workflow_id,
-            external_id=external_id,
-            event_id=str(envelope.event_id),
+            connector_type=normalize_connector_type(envelope.source.type),
+            outcome="started",
         )
 
     async def _record_started(
@@ -254,9 +258,7 @@ class TriggerMatcher:
         await session.commit()
         logger.info(
             "trigger.duplicate_suppressed",
-            trigger_id=str(spec.id),
-            idempotency_key=key,
-            event_id=str(envelope.event_id),
+            connector_type=normalize_connector_type(envelope.source.type),
         )
         return None
 

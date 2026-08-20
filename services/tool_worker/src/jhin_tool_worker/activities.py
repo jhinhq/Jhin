@@ -14,6 +14,7 @@ from temporalio.exceptions import ApplicationError
 
 from jhin_db.models import Agent, AgentCapabilityGrant, AgentRun, Approval, RunEvent, ToolCall
 from jhin_domain import ApprovalStatus
+from jhin_observability import SafeErrorCode
 from jhin_policy import Grant, GrantEffect
 from jhin_tool_worker.resources import ToolWorkerResources
 from jhin_tools import (
@@ -148,7 +149,7 @@ def _bound_result(outcome: GatewayOutcome) -> BoundToolResult:
     if outcome.status == "needs_approval":
         stop_reason = "needs_approval"
     elif outcome.status == "execution_unknown":
-        stop_reason = "execution_unknown"
+        stop_reason = SafeErrorCode.EXECUTION_UNKNOWN.value
     elif (
         outcome.status == "executed"
         and outcome.tool_name == "organization.delegate_task"

@@ -38,7 +38,6 @@ from jhin_domain import (
     TaskState,
     structured_content,
 )
-from jhin_observability import get_logger
 from jhin_secrets.redaction import redact_text
 from jhin_workflows.agent_task import (
     ACTIVITY_RESOLVE_SNAPSHOT,
@@ -54,8 +53,6 @@ from jhin_workflows.delegated_task import (
 )
 
 _ACTIVE_RUN_STATUSES = tuple(status.value for status in RUN_ACTIVE_STATUSES)
-
-logger = get_logger(__name__)
 
 
 def _workspace_run_limit(workspace: Workspace | None) -> int | None:

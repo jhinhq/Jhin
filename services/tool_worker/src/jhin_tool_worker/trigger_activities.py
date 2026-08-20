@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -38,6 +37,7 @@ from jhin_domain import (
     ToolCallStatus,
 )
 from jhin_events import EventEnvelope, EventSource
+from jhin_observability import get_logger, normalize_event_family
 from jhin_tool_worker.resources import ToolWorkerResources
 from jhin_tools import (
     ToolCatalog,
@@ -51,7 +51,7 @@ from jhin_workflows.triggered_task.shared import (
     SyncExternalResult,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _SYNC_TOOL_NAME = "system.trigger.sync_external"
 _CONNECTOR_TOOL_NAME = "linear.comment.create"
@@ -176,8 +176,9 @@ class TriggerToolActivities:
             )
         except Exception as error:
             logger.warning(
-                "Trigger sync publish failed (%s)",
-                type(error).__name__[:100],
+                "events.publish_failed",
+                event_type=normalize_event_family("trigger.synced_external"),
+                error_type=type(error).__name__,
             )
 
     @asynccontextmanager

@@ -27,7 +27,7 @@ from jhin_domain import (
     new_uuid7,
 )
 from jhin_events import EventEnvelope, EventSource
-from jhin_observability import get_logger
+from jhin_observability import get_logger, normalize_event_family
 from jhin_workflows.tool_compat import (
     SyncExternalCompatibilityWorkflow,
     SyncExternalToolInput,
@@ -104,7 +104,9 @@ class TriggerActivities:
             )
         except Exception as exc:
             logger.warning(
-                "events.publish_failed", event_type=event_type, error=f"{type(exc).__name__}"
+                "events.publish_failed",
+                event_type=normalize_event_family(event_type),
+                error_type=type(exc).__name__,
             )
 
     @activity.defn(name=ACTIVITY_PREPARE_TRIGGERED_TASK)
@@ -140,7 +142,6 @@ class TriggerActivities:
                 logger.info(
                     "trigger.task_deduped",
                     task_id=str(existing.id),
-                    external_id=params.external_id,
                 )
                 return PreparedTask(task_id=str(existing.id), created=False)
 

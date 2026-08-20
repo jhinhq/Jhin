@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -118,7 +117,11 @@ async def _capture_agent_registration(
 
     monkeypatch.setattr(agent_main, "connect_with_retry", connect_with_retry)
     monkeypatch.setattr(agent_main, "resources_with_retry", resources_with_retry)
-    monkeypatch.setattr(agent_main, "configure_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        agent_main,
+        "configure_json_logging",
+        lambda **kwargs: captured.update(logging=kwargs),
+    )
     monkeypatch.setattr(agent_main, "run_heartbeat", completed_heartbeat)
     monkeypatch.setattr(agent_main, "clear_heartbeat", lambda: None)
     monkeypatch.setattr(agent_main, "Worker", _Worker)
@@ -154,7 +157,11 @@ async def _capture_tool_registration(
     monkeypatch.setattr(tool_main, "connect_with_retry", connect_with_retry)
     monkeypatch.setattr(tool_main, "resources_with_retry", resources_with_retry)
     monkeypatch.setattr(tool_main, "build_default_catalog", ToolCatalog)
-    monkeypatch.setattr(tool_main, "configure_current_logging", lambda _level: None)
+    monkeypatch.setattr(
+        tool_main,
+        "configure_json_logging",
+        lambda **kwargs: captured.update(logging=kwargs),
+    )
     monkeypatch.setattr(tool_main, "Worker", _Worker)
     monkeypatch.setattr(asyncio, "Event", _ImmediateEvent)
     monkeypatch.setattr(asyncio, "get_running_loop", _SignalLoop)
@@ -184,6 +191,12 @@ async def test_agent_worker_registration_uses_only_agent_and_legacy_coordinators
         TriggerCompatibilityActivities,
     )
     assert resources.close_count == 1
+    assert captured["logging"] == {
+        "service": "agent-worker",
+        "environment": "dev",
+        "level": "INFO",
+        "extra_processors": (agent_main.redact_event_dict,),
+    }
 
 
 def test_agent_activity_class_no_longer_defines_legacy_effect_handlers() -> None:
@@ -216,19 +229,13 @@ async def test_tool_worker_registration_is_exactly_the_effect_boundary(
     assert isinstance(registered["sync_external_tool"].__self__, TriggerToolActivities)
     assert isinstance(registered["cleanup_run_workspace"].__self__, CleanupActivities)
     assert resources.close_count == 1
+    assert captured["logging"] == {
+        "service": "tool-worker",
+        "environment": "dev",
+        "level": "INFO",
+        "extra_processors": (tool_main.redact_event_dict,),
+    }
 
 
-def test_tool_worker_uses_current_dependency_free_logging_bootstrap(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    configured: list[dict[str, object]] = []
-    monkeypatch.setattr(logging, "basicConfig", lambda **kwargs: configured.append(kwargs))
-
-    tool_main.configure_current_logging("warning")
-
-    assert configured == [
-        {
-            "level": "WARNING",
-            "format": "%(asctime)s %(levelname)s %(name)s %(message)s",
-        }
-    ]
+def test_tool_worker_settings_default_to_closed_environment() -> None:
+    assert ToolWorkerSettings().app_env == "dev"

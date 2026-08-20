@@ -29,7 +29,7 @@ from jhin_domain import (
     structured_content,
 )
 from jhin_events import EventEnvelope, EventSource
-from jhin_observability import get_logger
+from jhin_observability import get_logger, normalize_event_family
 from jhin_tools.organization import create_delegated_task
 from jhin_workflows.engineering_ticket import (
     ACTIVITY_CREATE_ENGINEERING_CHILD_TASK,
@@ -73,7 +73,9 @@ class EngineeringActivities:
             )
         except Exception as exc:
             logger.warning(
-                "events.publish_failed", event_type=event_type, error=f"{type(exc).__name__}"
+                "events.publish_failed",
+                event_type=normalize_event_family(event_type),
+                error_type=type(exc).__name__,
             )
 
     @activity.defn(name=ACTIVITY_RESOLVE_ENGINEERING_PLAN)

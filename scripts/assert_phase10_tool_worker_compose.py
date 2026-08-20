@@ -60,6 +60,7 @@ _ADAPTER_HEALTHCHECK = {
     "timeout": "2s",
 }
 _RUNNER_BASE_ENVIRONMENT_KEYS = {
+    "APP_ENV",
     "LOG_LEVEL",
     "SANDBOX_DEFAULT_IMAGE",
     "SANDBOX_NETWORK",
@@ -186,6 +187,9 @@ def render_compose(
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Render one exact authority vector from the repository root."""
+    render_env = dict(env or {})
+    if dev:
+        render_env.setdefault("APP_ENV", "dev")
     command = ["docker", "compose"]
     for filename in compose_files(mode, dev=dev):
         command.extend(("-f", filename))
@@ -193,7 +197,7 @@ def render_compose(
     completed = subprocess.run(
         command,
         cwd=ROOT,
-        env=_clean_environment(env),
+        env=_clean_environment(render_env),
         check=True,
         text=True,
         capture_output=True,
@@ -393,6 +397,7 @@ def assert_source_contract() -> None:
 def _assert_common_workers(
     services: Mapping[str, Any],
     *,
+    dev: bool,
     expected_app_env: str,
     expected_sandbox_network: str,
 ) -> None:
@@ -400,10 +405,23 @@ def _assert_common_workers(
     tool = cast(dict[str, Any], services["tool-worker"])
     runner = cast(dict[str, Any], services["sandbox-runner"])
 
+    for service_name in (
+        "api",
+        "agent-worker",
+        "tool-worker",
+        "event-worker",
+        "workflow-worker",
+        "sandbox-runner",
+    ):
+        environment = cast(dict[str, Any], services[service_name]["environment"])
+        service_app_env = "dev" if dev and service_name == "api" else expected_app_env
+        _require(
+            environment.get("APP_ENV") == service_app_env,
+            f"{service_name} APP_ENV drifted",
+        )
+
     _require(agent["command"] == ["jhin-agent-worker"], "agent command drifted")
     _require(tool["command"] == ["jhin-tool-worker"], "tool command drifted")
-    _require(agent["environment"]["APP_ENV"] == expected_app_env, "agent APP_ENV drifted")
-    _require(tool["environment"]["APP_ENV"] == expected_app_env, "tool APP_ENV drifted")
     _require(_network_names(agent) == {"control", "data"}, "agent network boundary drifted")
     _require(
         _network_names(tool) == {"control", "data", "runner"},
@@ -654,6 +672,7 @@ def _assert_rootless(
     config: Mapping[str, Any],
     services: Mapping[str, Any],
     *,
+    expected_app_env: str,
     expected_socket_source: str | None,
 ) -> None:
     runner = cast(dict[str, Any], services["sandbox-runner"])
@@ -706,8 +725,13 @@ def _assert_rootless(
     _require(adapter.get("pull_policy") == "never", "adapter must never pull")
     adapter_environment = adapter.get("environment", {})
     _require(
-        isinstance(adapter_environment, dict) and set(adapter_environment) == set(),
+        isinstance(adapter_environment, dict)
+        and set(adapter_environment) == {"APP_ENV", "LOG_LEVEL"},
         "adapter environment key set drifted",
+    )
+    _require(
+        adapter_environment.get("APP_ENV") == expected_app_env,
+        "adapter APP_ENV drifted",
     )
     _require(
         adapter.get("command") == ["python", "-m", "jhin_sandbox_runner.rootless_transport"],
@@ -820,6 +844,7 @@ def assert_rendered_contract(
 
     _assert_common_workers(
         services,
+        dev=dev,
         expected_app_env=expected_app_env,
         expected_sandbox_network=expected_sandbox_network,
     )
@@ -835,6 +860,7 @@ def assert_rendered_contract(
         _assert_rootless(
             config,
             services,
+            expected_app_env=expected_app_env,
             expected_socket_source=expected_socket_source,
         )
     else:

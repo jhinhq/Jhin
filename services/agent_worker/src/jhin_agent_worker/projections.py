@@ -32,7 +32,7 @@ from jhin_domain import (
     ToolCallStatus,
 )
 from jhin_events import EventEnvelope, EventSource
-from jhin_observability import get_logger
+from jhin_observability import get_logger, normalize_event_family
 from jhin_secrets.redaction import redact_text
 from jhin_tools import stable_tool_invocation_id
 from jhin_workflows.agent_task.shared import (
@@ -181,8 +181,8 @@ class AgentProjectionActivities:
         except Exception as error:
             logger.warning(
                 "events.publish_failed",
-                event_type=event_type,
-                error=type(error).__name__,
+                event_type=normalize_event_family(event_type),
+                error_type=type(error).__name__,
             )
 
     async def _next_seq(self, session: AsyncSession, run_id: UUID) -> int:
@@ -1311,8 +1311,7 @@ class AgentProjectionActivities:
             except Exception as error:
                 logger.warning(
                     "concurrency.kick_failed",
-                    workflow_id=workflow_id,
-                    error=type(error).__name__,
+                    error_type=type(error).__name__,
                 )
 
     @activity.defn(name=ACTIVITY_FINALIZE_RUN_PROJECTION)

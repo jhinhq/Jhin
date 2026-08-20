@@ -8,10 +8,12 @@ dependencies = [
     "pydantic>=2.10",
     "structlog>=25.1",
     "jhin-domain",
+    "jhin-observability",
 ]
 
 [tool.uv.sources]
 jhin-domain = { workspace = true }
+jhin-observability = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

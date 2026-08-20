@@ -4,18 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import socket
 import stat
 import struct
 import tempfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Coroutine, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import structlog
 
 import jhin_sandbox_runner.rootless_transport as transport_module
+from jhin_observability import configure_json_logging
 from jhin_sandbox_runner.rootless_transport import (
     RootlessTransportConfigurationError,
     serve_rootless_transport,
@@ -24,6 +27,25 @@ from jhin_sandbox_runner.rootless_transport import (
 
 PING = b"GET /_ping HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n"
 RESPONSE = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
+
+
+@pytest.fixture
+def restore_logging_globals() -> Iterator[None]:
+    root = logging.getLogger()
+    original_handlers = list(root.handlers)
+    original_level = root.level
+    original_structlog_config = dict(structlog.get_config())
+    try:
+        yield
+    finally:
+        installed_handlers = [
+            handler for handler in root.handlers if handler not in original_handlers
+        ]
+        root.handlers[:] = original_handlers
+        root.setLevel(original_level)
+        for handler in installed_handlers:
+            handler.close()
+        structlog.configure(**original_structlog_config)
 
 
 class _RecordingWriter:
@@ -544,10 +566,16 @@ def test_production_boundary_rejects_wrong_socket_identity(
 async def test_transport_logs_never_contain_payload_or_socket_path(
     fake_docker_socket: tuple[Path, asyncio.Queue[bytes]],
     unused_tcp_port: int,
-    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+    restore_logging_globals: None,
 ) -> None:
     path, _requests = fake_docker_socket
     canary = b"GET /containers/SECRET-CANARY HTTP/1.1\r\nHost: docker\r\n\r\n"
+    configure_json_logging(
+        service="rootless-docker-transport",
+        environment="test",
+        level="INFO",
+    )
     task = asyncio.create_task(
         serve_rootless_transport(
             upstream=path,
@@ -567,7 +595,43 @@ async def test_transport_logs_never_contain_payload_or_socket_path(
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-    logs = "\n".join(record.getMessage() for record in caplog.records)
-    assert "SECRET-CANARY" not in logs
-    assert str(path) not in logs
-    assert logging.getLogger("jhin_sandbox_runner.rootless_transport").isEnabledFor(logging.ERROR)
+    rendered = capsys.readouterr().out
+    records = [json.loads(line) for line in rendered.splitlines()]
+    ready = next(record for record in records if record["event"] == "rootless_transport.ready")
+    assert ready["schema_version"] == 1
+    assert ready["service"] == "rootless-docker-transport"
+    assert ready["environment"] == "test"
+    assert "SECRET-CANARY" not in rendered
+    assert str(path) not in rendered
+
+
+def test_rootless_main_emits_closed_json_failure_before_exit(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    restore_logging_globals: None,
+) -> None:
+    canary = "socket-error-payload-canary"
+    error = RootlessTransportConfigurationError(
+        canary,
+        code="configuration_error",
+    )
+
+    def fail_run(coroutine: Coroutine[object, object, object]) -> None:
+        coroutine.close()
+        raise error
+
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("LOG_LEVEL", "WARNING")
+    monkeypatch.setattr(transport_module.asyncio, "run", fail_run)
+
+    with pytest.raises(SystemExit, match="1"):
+        transport_module.main()
+
+    rendered = capsys.readouterr().out
+    record = json.loads(rendered)
+    assert record["schema_version"] == 1
+    assert record["service"] == "rootless-docker-transport"
+    assert record["environment"] == "test"
+    assert record["event"] == "rootless_transport.failed"
+    assert record["error_code"] == "configuration_error"
+    assert canary not in rendered

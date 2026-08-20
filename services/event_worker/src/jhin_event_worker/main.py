@@ -20,7 +20,7 @@ from jhin_event_worker.processor import EventProcessor
 from jhin_event_worker.settings import Settings
 from jhin_events.consumer import run_pull_consumer
 from jhin_events.streams import EVENTS_STREAM, INGRESS_STREAM, ensure_streams
-from jhin_observability import configure_logging, get_logger
+from jhin_observability import configure_json_logging, get_logger, normalize_environment
 from jhin_observability.healthfile import clear_heartbeat, run_heartbeat
 
 logger = get_logger(__name__)
@@ -34,8 +34,7 @@ async def connect_with_retry(settings: Settings) -> NatsClient:
         except Exception as exc:
             logger.warning(
                 "nats.connect_retry",
-                url=settings.nats_url,
-                error=f"{type(exc).__name__}: {exc}"[:200],
+                error_type=type(exc).__name__,
                 retry_in_seconds=delay,
             )
             await asyncio.sleep(delay)
@@ -52,8 +51,7 @@ async def temporal_with_retry(settings: Settings) -> TemporalClient:
         except Exception as exc:
             logger.warning(
                 "temporal.connect_retry",
-                address=settings.temporal_address,
-                error=f"{type(exc).__name__}: {exc}"[:200],
+                error_type=type(exc).__name__,
                 retry_in_seconds=delay,
             )
             await asyncio.sleep(delay)
@@ -62,17 +60,21 @@ async def temporal_with_retry(settings: Settings) -> TemporalClient:
 
 async def main() -> None:
     settings = Settings()
-    configure_logging("event-worker", settings.log_level)
+    configure_json_logging(
+        service="event-worker",
+        environment=normalize_environment(settings.app_env),
+        level=settings.log_level,
+    )
 
     client = await connect_with_retry(settings)
     js = client.jetstream()
     await ensure_streams(js)
-    logger.info("nats.connected", url=settings.nats_url, stream=EVENTS_STREAM)
+    logger.info("nats.connected", stream=EVENTS_STREAM)
 
     temporal = await temporal_with_retry(settings)
     engine = create_engine(settings.database_url)
     session_factory = create_session_factory(engine)
-    logger.info("temporal.connected", address=settings.temporal_address)
+    logger.info("temporal.connected", task_queue="other")
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

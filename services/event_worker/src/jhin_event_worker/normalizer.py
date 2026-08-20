@@ -23,7 +23,12 @@ from jhin_events.envelope import EventEnvelope
 from jhin_events.publisher import EventPublisher
 from jhin_events.streams import INGRESS_STREAM
 from jhin_events.subjects import dlq_subject
-from jhin_observability import get_logger
+from jhin_observability import (
+    SafeErrorCode,
+    get_logger,
+    normalize_connector_type,
+    normalize_event_family,
+)
 
 logger = get_logger(__name__)
 
@@ -57,7 +62,10 @@ class IngressNormalizer:
                     }
                 ).encode(),
             )
-            logger.error("ingress.invalid_envelope", subject=msg.subject)
+            logger.error(
+                "ingress.invalid_envelope",
+                error_code=SafeErrorCode.INVALID_REQUEST.value,
+            )
             await msg.term()
             return
 
@@ -68,9 +76,8 @@ class IngressNormalizer:
             # Nothing can ever normalize this; drop it without redelivery.
             logger.warning(
                 "ingress.unhandled",
-                subject=msg.subject,
-                connector=envelope.source.type,
-                event_name=event_name,
+                connector_type=normalize_connector_type(envelope.source.type),
+                event_type=normalize_event_family(event_name),
             )
             await msg.term()
             return
@@ -95,9 +102,8 @@ class IngressNormalizer:
             )
         logger.info(
             "ingress.normalized",
-            subject=msg.subject,
-            connector=envelope.source.type,
-            event_name=event_name,
+            connector_type=normalize_connector_type(envelope.source.type),
+            event_type=normalize_event_family(event_name),
             produced=len(normalized),
         )
         await msg.ack()

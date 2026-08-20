@@ -9,7 +9,7 @@ from jhin_tools import CrashBarrierName
 
 
 class BarrierSettingsMixin(BaseModel):
-    app_env: str = Field(default="development", validation_alias="APP_ENV")
+    app_env: str = Field(default="dev", validation_alias="APP_ENV")
     test_crash_barrier_dir: Path | None = Field(
         default=None, validation_alias="JHIN_TEST_CRASH_BARRIER_DIR"
     )

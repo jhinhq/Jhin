@@ -47,7 +47,7 @@ class Resources:
                 match_identity=settings.test_crash_barrier_match,
             )
         )
-        logger.info("resources.ready", nats_url=settings.nats_url)
+        logger.info("resources.ready")
         return cls(
             engine=engine,
             session_factory=session_factory,

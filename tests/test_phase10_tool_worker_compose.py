@@ -180,9 +180,18 @@ def test_dev_defaults_to_dev_but_explicit_test_app_env_wins() -> None:
             "PHASE10_ROOTLESS_DOCKER_SOCKET": ROOTLESS_SOCKET,
         },
     )
-    for worker in ("agent-worker", "tool-worker"):
+    for worker in (
+        "agent-worker",
+        "tool-worker",
+        "event-worker",
+        "workflow-worker",
+        "sandbox-runner",
+        "rootless-docker-transport",
+    ):
         assert defaulted["services"][worker]["environment"]["APP_ENV"] == "dev"
         assert explicit["services"][worker]["environment"]["APP_ENV"] == "test"
+    assert defaulted["services"]["api"]["environment"]["APP_ENV"] == "dev"
+    assert explicit["services"]["api"]["environment"]["APP_ENV"] == "dev"
 
 
 def test_default_sandbox_network_is_explicitly_asserted_in_production_and_dev() -> None:

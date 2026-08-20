@@ -33,7 +33,7 @@ from jhin_domain import ActorType, ConnectionStatus
 from jhin_events.envelope import EventEnvelope, EventSource
 from jhin_events.publisher import MSG_ID_HEADER
 from jhin_events.subjects import ingress_subject
-from jhin_observability import get_logger
+from jhin_observability import get_logger, normalize_connector_type
 from jhin_secrets import SecretCrypto, SecretStore
 
 logger = get_logger(__name__)
@@ -153,7 +153,7 @@ async def _ingest(
         data={"event": raw.event, "delivery_id": raw.delivery_id, "payload": raw.payload},
     )
     subject = ingress_subject(str(connection.workspace_id), connection.connector_type, raw.event)
-    connection_id = str(connection.id)  # read before any rollback expires the row
+    connector_type = normalize_connector_type(connection.connector_type)
     # Publish before commit: if NATS is down the row rolls back and the
     # provider's retry re-processes cleanly; JetStream's duplicate window
     # (keyed on event_id) covers the crash-after-publish edge.
@@ -166,13 +166,11 @@ async def _ingest(
         except Exception:
             logger.error(
                 "webhook.rollback_failed",
-                connection_id=connection_id,
-                event_name=raw.event,
+                connector_type=connector_type,
             )
         logger.error(
             "webhook.publish_or_commit_failed",
-            connection_id=connection_id,
-            event_name=raw.event,
+            connector_type=connector_type,
             error_type=type(exc).__name__,
         )
         raise HTTPException(
@@ -181,9 +179,7 @@ async def _ingest(
         ) from None
     logger.info(
         "webhook.accepted",
-        connection_id=connection_id,
-        event_name=raw.event,
-        delivery_id=raw.delivery_id,
-        event_id=str(event_id),
+        connector_type=connector_type,
+        outcome="accepted",
     )
     return WebhookResult(outcome="accepted", event_id=event_id)

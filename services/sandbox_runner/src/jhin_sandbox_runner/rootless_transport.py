@@ -8,16 +8,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import logging
 import os
 import stat
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Literal
 
+from jhin_observability import configure_json_logging, get_logger, normalize_environment
 from jhin_sandbox_runner.docker_socket import normalize_supplemental_groups
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _FIXED_UPSTREAM = Path("/run/host/docker.sock")
 _FIXED_LISTEN_HOST = "0.0.0.0"
@@ -30,6 +31,15 @@ _PING_REQUEST = b"GET /_ping HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r
 
 class RootlessTransportConfigurationError(RuntimeError):
     """The adapter cannot safely provide its fixed Docker transport."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: Literal["configuration_error", "upstream_unavailable"],
+    ) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class _UpstreamConnectionError(Exception):
@@ -47,7 +57,9 @@ def validate_production_boundary(
 ) -> Path:
     """Validate the immutable production identity and socket boundary."""
     if argv:
-        raise RootlessTransportConfigurationError("transport accepts no arguments")
+        raise RootlessTransportConfigurationError(
+            "transport accepts no arguments", code="configuration_error"
+        )
     forbidden_env = {
         name
         for name in environ
@@ -55,26 +67,37 @@ def validate_production_boundary(
     }
     if forbidden_env:
         raise RootlessTransportConfigurationError(
-            "transport accepts no Docker environment override"
+            "transport accepts no Docker environment override",
+            code="configuration_error",
         )
     if effective_uid != 0 or effective_gid != 0:
-        raise RootlessTransportConfigurationError("transport requires UID/GID 0:0")
+        raise RootlessTransportConfigurationError(
+            "transport requires UID/GID 0:0", code="configuration_error"
+        )
     authority_groups = normalize_supplemental_groups(
         effective_gid=effective_gid,
         process_groups=supplemental_groups,
     )
     if authority_groups:
-        raise RootlessTransportConfigurationError("transport requires no supplemental groups")
+        raise RootlessTransportConfigurationError(
+            "transport requires no supplemental groups", code="configuration_error"
+        )
     try:
         info = upstream.lstat()
     except OSError as exc:
-        raise RootlessTransportConfigurationError("cannot inspect fixed upstream socket") from exc
+        raise RootlessTransportConfigurationError(
+            "cannot inspect fixed upstream socket", code="configuration_error"
+        ) from exc
     if not stat.S_ISSOCK(info.st_mode):
-        raise RootlessTransportConfigurationError("fixed upstream is not a socket")
+        raise RootlessTransportConfigurationError(
+            "fixed upstream is not a socket", code="configuration_error"
+        )
     # The rootless daemon owner maps to UID 0 here, while its host socket GID
     # may map through the subordinate range to any nonnegative container GID.
     if info.st_uid != 0:
-        raise RootlessTransportConfigurationError("upstream socket requires UID 0")
+        raise RootlessTransportConfigurationError(
+            "upstream socket requires UID 0", code="configuration_error"
+        )
     return upstream
 
 
@@ -96,11 +119,15 @@ async def _probe_upstream(upstream: Path) -> None:
         headers = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=_IO_TIMEOUT_SECONDS)
         status_line = headers.split(b"\r\n", 1)[0]
         if status_line not in (b"HTTP/1.0 200 OK", b"HTTP/1.1 200 OK"):
-            raise RootlessTransportConfigurationError("upstream Docker ping failed")
+            raise RootlessTransportConfigurationError(
+                "upstream Docker ping failed", code="upstream_unavailable"
+            )
     except RootlessTransportConfigurationError:
         raise
     except (OSError, TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError) as exc:
-        raise RootlessTransportConfigurationError("upstream Docker ping failed") from exc
+        raise RootlessTransportConfigurationError(
+            "upstream Docker ping failed", code="upstream_unavailable"
+        ) from exc
     finally:
         if writer is not None:
             await _close_writer(writer)
@@ -192,7 +219,9 @@ async def serve_rootless_transport(
 ) -> None:
     """Probe Docker, then relay TCP connections to one Unix socket."""
     if connection_limit < 1 or connection_limit > _MAX_CONNECTIONS:
-        raise RootlessTransportConfigurationError("invalid connection limit")
+        raise RootlessTransportConfigurationError(
+            "invalid connection limit", code="configuration_error"
+        )
     await _probe_upstream(upstream)
 
     semaphore = asyncio.Semaphore(connection_limit)
@@ -217,7 +246,9 @@ async def serve_rootless_transport(
             except _UpstreamConnectionError:
                 if not fatal.done():
                     fatal.set_result(
-                        RootlessTransportConfigurationError("upstream connection failed")
+                        RootlessTransportConfigurationError(
+                            "upstream connection failed", code="upstream_unavailable"
+                        )
                     )
         finally:
             if acquired:
@@ -235,7 +266,7 @@ async def serve_rootless_transport(
 
     server_task = asyncio.create_task(run_server())
     fatal_task = asyncio.create_task(receive_fatal())
-    logger.info("rootless_transport.ready", extra={"code": "ready"})
+    logger.info("rootless_transport.ready")
     try:
         done, _pending = await asyncio.wait(
             {server_task, fatal_task}, return_when=asyncio.FIRST_COMPLETED
@@ -274,10 +305,15 @@ async def _run_production() -> None:
 
 
 def main() -> None:
+    configure_json_logging(
+        service="rootless-docker-transport",
+        environment=normalize_environment(os.environ.get("APP_ENV")),
+        level=os.environ.get("LOG_LEVEL", "INFO"),
+    )
     try:
         asyncio.run(_run_production())
-    except RootlessTransportConfigurationError:
-        logger.error("rootless_transport.failed", extra={"code": "configuration_error"})
+    except RootlessTransportConfigurationError as exc:
+        logger.error("rootless_transport.failed", error_code=exc.code)
         raise SystemExit(1) from None
 
 

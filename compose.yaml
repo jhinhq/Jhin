@@ -79,6 +79,7 @@ services:
         SERVICE_PACKAGE: jhin-workflow-worker
     command: ["jhin-workflow-worker"]
     environment:
+      APP_ENV: ${APP_ENV:-production}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
@@ -177,6 +178,7 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     environment:
+      APP_ENV: ${APP_ENV:-production}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:-dev-sandbox-runner-token}
       SANDBOX_DEFAULT_IMAGE: ${SANDBOX_DEFAULT_IMAGE:-jhin-sandbox:latest}
@@ -216,6 +218,7 @@ services:
         SERVICE_PACKAGE: jhin-event-worker
     command: ["jhin-event-worker"]
     environment:
+      APP_ENV: ${APP_ENV:-production}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       NATS_URL: nats://nats:4222
       # Trigger matching: reads triggers, records invocations, starts

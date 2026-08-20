@@ -9,6 +9,9 @@ services:
     security_opt: [no-new-privileges:true]
     read_only: true
     tmpfs: [/tmp]
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       - type: bind
         source: ${PHASE10_ROOTLESS_DOCKER_SOCKET:?set the verified rootless socket}

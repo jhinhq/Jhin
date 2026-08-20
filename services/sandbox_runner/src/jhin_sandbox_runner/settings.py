@@ -22,6 +22,8 @@ from jhin_sandbox_runner.docker_socket import (
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
+    app_env: str = "dev"
+
     # Shared bearer token required on every job endpoint (defense in depth on
     # top of Docker network isolation). Empty token = every request denied.
     sandbox_runner_token: str = ""

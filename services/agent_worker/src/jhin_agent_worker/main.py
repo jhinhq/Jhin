@@ -22,7 +22,7 @@ from jhin_agent_worker.trigger_activities import (
     TriggerActivities,
     TriggerCompatibilityActivities,
 )
-from jhin_observability import configure_logging, get_logger
+from jhin_observability import configure_json_logging, get_logger, normalize_environment
 from jhin_observability.healthfile import clear_heartbeat, run_heartbeat
 from jhin_secrets.redaction import redact_event_dict
 from jhin_workflows import AGENT_TASK_QUEUE
@@ -44,8 +44,7 @@ async def connect_with_retry(settings: Settings) -> Client:
         except Exception as exc:
             logger.warning(
                 "temporal.connect_retry",
-                address=settings.temporal_address,
-                error=f"{type(exc).__name__}: {exc}"[:200],
+                error_type=type(exc).__name__,
                 retry_in_seconds=delay,
             )
             await asyncio.sleep(delay)
@@ -60,7 +59,7 @@ async def resources_with_retry(settings: Settings) -> Resources:
         except Exception as exc:
             logger.warning(
                 "resources.retry",
-                error=f"{type(exc).__name__}: {exc}"[:200],
+                error_type=type(exc).__name__,
                 retry_in_seconds=delay,
             )
             await asyncio.sleep(delay)
@@ -70,7 +69,12 @@ async def resources_with_retry(settings: Settings) -> Resources:
 async def main() -> None:
     settings = Settings()
     # This worker decrypts credentials: redact known secrets from every log.
-    configure_logging("agent-worker", settings.log_level, extra_processors=[redact_event_dict])
+    configure_json_logging(
+        service="agent-worker",
+        environment=normalize_environment(settings.app_env),
+        level=settings.log_level,
+        extra_processors=(redact_event_dict,),
+    )
 
     client = await connect_with_retry(settings)
     resources = await resources_with_retry(settings)
@@ -83,8 +87,6 @@ async def main() -> None:
         engineering_activities = EngineeringActivities(resources)
         logger.info(
             "temporal.connected",
-            address=settings.temporal_address,
-            namespace=settings.temporal_namespace,
             task_queue=AGENT_TASK_QUEUE,
         )
 

@@ -13,7 +13,7 @@ from pydantic import ValidationError
 from jhin_events.envelope import EventEnvelope
 from jhin_events.streams import EVENTS_STREAM
 from jhin_events.subjects import dlq_subject
-from jhin_observability import get_logger
+from jhin_observability import SafeErrorCode, get_logger, normalize_event_family
 
 logger = get_logger(__name__)
 
@@ -59,7 +59,10 @@ class EventProcessor:
                     }
                 ).encode(),
             )
-            logger.error("event.invalid_envelope", subject=msg.subject)
+            logger.error(
+                "event.invalid_envelope",
+                error_code=SafeErrorCode.INVALID_REQUEST.value,
+            )
             await msg.term()
             return
 
@@ -68,8 +71,6 @@ class EventProcessor:
         if event_id in self._seen:
             logger.info(
                 "event.duplicate_skipped",
-                event_id=event_id,
-                subject=msg.subject,
                 num_delivered=metadata.num_delivered,
             )
             await msg.ack()
@@ -86,11 +87,7 @@ class EventProcessor:
 
         logger.info(
             "event.processed",
-            event_id=event_id,
-            event_type=envelope.event_type,
-            workspace_id=envelope.workspace_id,
-            subject=msg.subject,
+            event_type=normalize_event_family(envelope.event_type),
             num_delivered=metadata.num_delivered,
-            stream_seq=metadata.sequence.stream if metadata.sequence else None,
         )
         await msg.ack()

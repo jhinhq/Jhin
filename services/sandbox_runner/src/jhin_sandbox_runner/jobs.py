@@ -28,7 +28,7 @@ from typing import Any
 import aiodocker
 from aiodocker.exceptions import DockerError
 
-from jhin_observability import get_logger
+from jhin_observability import get_logger, normalize_sandbox_outcome
 from jhin_sandbox_runner.docker_socket import (
     DockerSocketConfigurationError,
     normalize_supplemental_groups,
@@ -306,7 +306,7 @@ class JobManager:
             await self.docker.networks.create(
                 {"Name": name, "Driver": "bridge", "Labels": {"jhin.sandbox.network": "1"}}
             )
-            logger.info("sandbox.network_created", network=name)
+            logger.info("sandbox.network_created")
 
     async def close(self) -> None:
         for record in self._jobs.values():
@@ -417,9 +417,8 @@ class JobManager:
             logger.info(
                 "sandbox.job.finished",
                 job_id=request.job_id,
-                status=record.status,
-                exit_code=record.exit_code,
-                image=record.image,
+                outcome=normalize_sandbox_outcome(record.status),
+                exit_code=max(0, record.exit_code or 0),
                 network_policy=request.network_policy,
             )
 
@@ -547,6 +546,7 @@ class JobManager:
         """Remove leftover job containers (and stale workspace volumes) from
         a previous runner process that died mid-job."""
         seen_containers: set[str] = set()
+        reaped_containers = 0
         for label in (JOB_LABEL, WORKSPACE_INIT_LABEL):
             containers = await self.docker.containers.list(
                 all=1, filters=json.dumps({"label": [label]})
@@ -557,14 +557,19 @@ class JobManager:
                     continue
                 seen_containers.add(identifier)
                 await container.delete(force=True, v=True)
-                logger.info("sandbox.reaped_container", container_id=identifier[:12])
+                reaped_containers += 1
+        if reaped_containers:
+            logger.info("sandbox.reaped_container", count=reaped_containers)
 
         max_age = self._settings.sandbox_workspace_max_age_hours * 3600
         listing = await self.docker.volumes.list(filters={"label": [WORKSPACE_LABEL]})
+        reaped_workspaces = 0
         for entry in listing.get("Volumes") or []:
             created = entry.get("CreatedAt", "")
             age = (datetime.now(UTC) - datetime.fromisoformat(created)).total_seconds()
             if age > max_age:
                 volume = await self.docker.volumes.get(entry["Name"])
                 await volume.delete()
-                logger.info("sandbox.reaped_workspace", volume=entry["Name"])
+                reaped_workspaces += 1
+        if reaped_workspaces:
+            logger.info("sandbox.reaped_workspace", count=reaped_workspaces)

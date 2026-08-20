@@ -159,7 +159,7 @@ def test_tool_worker_settings_ignore_unrelated_environment(
 
     settings = ToolWorkerSettings()
 
-    assert settings.app_env == "development"
+    assert settings.app_env == "dev"
     assert marker not in repr(settings)
 
 
@@ -245,7 +245,7 @@ async def test_main_closes_resources_after_post_acquisition_construction_failure
             return None
 
     monkeypatch.setattr(main_module, "ToolWorkerSettings", lambda: settings)
-    monkeypatch.setattr(main_module, "configure_current_logging", lambda _level: None)
+    monkeypatch.setattr(main_module, "configure_json_logging", lambda **_kwargs: None)
     monkeypatch.setattr(main_module, "connect_with_retry", connect_with_retry)
     monkeypatch.setattr(main_module, "resources_with_retry", resources_with_retry)
     monkeypatch.setattr(main_module, "build_default_catalog", build_catalog)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import logging
+import contextlib
 from dataclasses import dataclass
 
 import nats
@@ -12,11 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from jhin_db import create_engine, create_session_factory
 from jhin_events import EventPublisher
 from jhin_events.streams import ensure_streams
+from jhin_observability import get_logger
 from jhin_secrets import SecretCrypto, load_master_key
 from jhin_tool_worker.settings import ToolWorkerSettings
 from jhin_tools import CrashBarrier, CrashBarrierConfig
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -53,22 +54,12 @@ class ToolWorkerResources:
             )
         except BaseException:
             if nats_connection is not None:
-                try:
+                with contextlib.suppress(Exception):
                     await nats_connection.drain()
-                except Exception as error:
-                    logger.warning(
-                        "Partial NATS cleanup failed (%s)",
-                        type(error).__name__[:100],
-                    )
-            try:
+            with contextlib.suppress(Exception):
                 await engine.dispose()
-            except Exception as error:
-                logger.warning(
-                    "Partial database cleanup failed (%s)",
-                    type(error).__name__[:100],
-                )
             raise
-        logger.info("tool worker resources ready")
+        logger.info("resources.ready")
         return resources
 
     async def close(self) -> None:

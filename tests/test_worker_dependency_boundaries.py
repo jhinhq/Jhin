@@ -40,11 +40,34 @@ def test_distribution_dependencies_and_imports_are_one_way() -> None:
     assert "jhin-connectors" not in agent["tool"]["uv"]["sources"]
     assert "jhin-agents" not in tool_dependencies
     assert "jhin-models" not in tool_dependencies
-    assert "jhin-observability" not in tool_dependencies
+    assert "jhin-observability" in tool_dependencies
+    assert tool["tool"]["uv"]["sources"]["jhin-observability"] == {"workspace": True}
     assert not _imports_under("services/agent_worker/src", "jhin_connectors")
     assert not _imports_under("services/tool_worker/src", "jhin_agents")
     assert not _imports_under("services/tool_worker/src", "jhin_models")
-    assert not _imports_under("services/tool_worker/src", "jhin_observability")
+    assert _imports_under("services/tool_worker/src", "jhin_observability")
+
+
+def test_worker_settings_store_closed_environment_defaults(
+    monkeypatch: Any,
+) -> None:
+    from jhin_agent_worker.settings import Settings as AgentSettings
+    from jhin_event_worker.settings import Settings as EventSettings
+    from jhin_sandbox_runner.settings import Settings as SandboxSettings
+    from jhin_tool_worker.settings import ToolWorkerSettings
+    from jhin_workflow_worker.settings import Settings as WorkflowSettings
+
+    monkeypatch.delenv("APP_ENV", raising=False)
+    assert AgentSettings().app_env == "dev"
+    assert ToolWorkerSettings().app_env == "dev"
+    assert EventSettings().app_env == "dev"
+    assert WorkflowSettings().app_env == "dev"
+    sandbox = SandboxSettings(
+        sandbox_docker_mode="rootful",
+        sandbox_docker_socket=Path("/run/docker.sock"),
+        sandbox_docker_gid=1,
+    )
+    assert sandbox.app_env == "dev"
 
 
 def test_agent_worker_source_contains_no_local_tool_or_runner_effect_path() -> None:

@@ -17,7 +17,7 @@ import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
-from jhin_observability import configure_logging, get_logger
+from jhin_observability import configure_json_logging, get_logger, normalize_environment
 from jhin_sandbox_runner.jobs import JobManager, JobValidationError
 from jhin_sandbox_runner.schemas import (
     SandboxJobRequest,
@@ -38,8 +38,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await manager.start()
         logger.info(
             "sandbox_runner.started",
-            default_image=active_settings.sandbox_default_image,
-            network=active_settings.sandbox_network,
             token_configured=bool(active_settings.sandbox_runner_token),
         )
         try:
@@ -127,9 +125,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 
-def run() -> None:
+def main() -> None:
     settings = Settings()
-    configure_logging("sandbox-runner", settings.log_level)
+    configure_json_logging(
+        service="sandbox-runner",
+        environment=normalize_environment(settings.app_env),
+        level=settings.log_level,
+    )
     uvicorn.run(
         create_app(settings),
         host="0.0.0.0",  # internal network only; never published to the host
@@ -138,5 +140,8 @@ def run() -> None:
     )
 
 
+run = main
+
+
 if __name__ == "__main__":
-    run()
+    main()

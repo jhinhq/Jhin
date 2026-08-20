@@ -586,7 +586,7 @@ class AgentReasoningActivities:
                 except Exception as error:
                     logger.warning(
                         "model.client_close_failed",
-                        error=(redact_text(str(error))[:2_000] or "model client close failed"),
+                        error_type=type(error).__name__,
                     )
 
             if len(outcome.tool_calls) > MAX_TOOL_CALLS_PER_STEP:

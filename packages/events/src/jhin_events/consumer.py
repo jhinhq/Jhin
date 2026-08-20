@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 
-import structlog
 from nats.errors import TimeoutError as NatsTimeoutError
 from nats.js import JetStreamContext
 from nats.js.api import AckPolicy, ConsumerConfig
@@ -13,7 +12,9 @@ from nats.js.errors import NotFoundError
 
 from nats.aio.msg import Msg  # isort: skip
 
-logger = structlog.stdlib.get_logger(__name__)
+from jhin_observability import SafeErrorCode, get_logger
+
+logger = get_logger(__name__)
 
 MessageHandler = Callable[[Msg], Awaitable[None]]
 
@@ -42,7 +43,7 @@ async def ensure_pull_consumer(
                 max_deliver=max_deliver,
             ),
         )
-        logger.info("jetstream.consumer.created", stream=stream, durable=durable)
+        logger.info("jetstream.consumer_created", stream=stream, consumer=durable)
 
 
 async def run_pull_consumer(
@@ -62,7 +63,7 @@ async def run_pull_consumer(
     """
     await ensure_pull_consumer(js, stream=stream, durable=durable)
     subscription = await js.pull_subscribe_bind(durable, stream=stream)
-    logger.info("jetstream.consumer.loop_started", stream=stream, durable=durable)
+    logger.info("jetstream.consumer_loop_started", stream=stream, consumer=durable)
     while not stop.is_set():
         try:
             messages = await subscription.fetch(batch=batch, timeout=fetch_timeout_seconds)
@@ -71,11 +72,12 @@ async def run_pull_consumer(
         for message in messages:
             try:
                 await handler(message)
-            except Exception:
+            except Exception as exc:
                 logger.exception(
-                    "jetstream.consumer.handler_error",
+                    "jetstream.consumer_handler_failed",
                     stream=stream,
-                    durable=durable,
-                    subject=message.subject,
+                    consumer=durable,
+                    error_type=type(exc).__name__,
+                    error_code=SafeErrorCode.INTERNAL_ERROR.value,
                 )
                 await message.nak(delay=2)

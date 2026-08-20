@@ -13,7 +13,7 @@ import signal
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from jhin_observability import configure_logging, get_logger
+from jhin_observability import configure_json_logging, get_logger, normalize_environment
 from jhin_observability.healthfile import clear_heartbeat, run_heartbeat
 from jhin_workflow_worker.settings import Settings
 from jhin_workflows import WORKFLOW_TASK_QUEUE
@@ -32,8 +32,7 @@ async def connect_with_retry(settings: Settings) -> Client:
         except Exception as exc:
             logger.warning(
                 "temporal.connect_retry",
-                address=settings.temporal_address,
-                error=f"{type(exc).__name__}: {exc}"[:200],
+                error_type=type(exc).__name__,
                 retry_in_seconds=delay,
             )
             await asyncio.sleep(delay)
@@ -42,13 +41,15 @@ async def connect_with_retry(settings: Settings) -> Client:
 
 async def main() -> None:
     settings = Settings()
-    configure_logging("workflow-worker", settings.log_level)
+    configure_json_logging(
+        service="workflow-worker",
+        environment=normalize_environment(settings.app_env),
+        level=settings.log_level,
+    )
 
     client = await connect_with_retry(settings)
     logger.info(
         "temporal.connected",
-        address=settings.temporal_address,
-        namespace=settings.temporal_namespace,
         task_queue=WORKFLOW_TASK_QUEUE,
     )
 
