@@ -268,13 +268,13 @@ jobs:
               journalctl --user --no-pager -n 100 -u docker.service || true
             exit 1
           fi
-          test "$(stat -c %u /run/user/10001/docker.sock)" = "10001"
-          security_options="$(docker --host unix:///run/user/10001/docker.sock info --format '{{json .SecurityOptions}}')"
+          test "$(sudo -u phase10rootless -H stat -c %u /run/user/10001/docker.sock)" = "10001"
+          security_options="$(sudo -u phase10rootless -H docker --host unix:///run/user/10001/docker.sock info --format '{{json .SecurityOptions}}')"
           case "$security_options" in *rootless*) ;; *) exit 1 ;; esac
-          test "$(docker --host unix:///run/user/10001/docker.sock info --format '{{.CgroupVersion}}')" = "2"
-          test "$(docker --host unix:///run/user/10001/docker.sock info --format '{{.CgroupDriver}}')" = "systemd"
+          test "$(sudo -u phase10rootless -H docker --host unix:///run/user/10001/docker.sock info --format '{{.CgroupVersion}}')" = "2"
+          test "$(sudo -u phase10rootless -H docker --host unix:///run/user/10001/docker.sock info --format '{{.CgroupDriver}}')" = "systemd"
           echo "PHASE10_ROOTLESS_DOCKER_SOCKET=/run/user/10001/docker.sock" >> "$GITHUB_ENV"
-          echo "ROOTLESS_SOCKET_SNAPSHOT=$(stat -c '%d:%i:%f:%u:%g' /run/user/10001/docker.sock)" >> "$GITHUB_ENV"
+          echo "ROOTLESS_SOCKET_SNAPSHOT=$(sudo -u phase10rootless -H stat -c '%d:%i:%f:%u:%g' /run/user/10001/docker.sock)" >> "$GITHUB_ENV"
 
       - name: Sync workspace for the rootless test UID
         run: |
@@ -335,7 +335,7 @@ jobs:
           }
           trap 'stop_rootless || true' EXIT
           test -n "$ROOTLESS_SOCKET_SNAPSHOT"
-          test -S /run/user/10001/docker.sock
-          test "$(stat -c '%d:%i:%f:%u:%g' /run/user/10001/docker.sock)" = "$ROOTLESS_SOCKET_SNAPSHOT"
+          sudo -u phase10rootless -H test -S /run/user/10001/docker.sock
+          test "$(sudo -u phase10rootless -H stat -c '%d:%i:%f:%u:%g' /run/user/10001/docker.sock)" = "$ROOTLESS_SOCKET_SNAPSHOT"
           stop_rootless
           trap - EXIT

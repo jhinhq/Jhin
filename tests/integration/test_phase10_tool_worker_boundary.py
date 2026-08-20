@@ -2958,20 +2958,29 @@ def test_make_and_ci_delegate_all_live_modes_to_the_shared_harness() -> None:
     assert "journalctl --user --no-pager -n 100 -u docker.service || true" in failure_branch
     assert failure_branch.endswith("exit 1\nfi")
     socket_owner_check = start_script.index(
-        'test "$(stat -c %u /run/user/10001/docker.sock)" = "10001"',
+        'test "$(sudo -u phase10rootless -H stat -c %u /run/user/10001/docker.sock)" = "10001"',
         installer,
     )
-    cgroup_version_check = start_script.index("{{.CgroupVersion}}", socket_owner_check)
+    security_check = start_script.index(
+        "sudo -u phase10rootless -H docker --host ", socket_owner_check
+    )
+    cgroup_version_check = start_script.index("{{.CgroupVersion}}", security_check)
     cgroup_driver_check = start_script.index("{{.CgroupDriver}}", cgroup_version_check)
     socket_export = start_script.index(
         "PHASE10_ROOTLESS_DOCKER_SOCKET=/run/user/10001/docker.sock",
         cgroup_driver_check,
     )
     assert (
-        installer < socket_owner_check < cgroup_version_check < cgroup_driver_check < socket_export
+        installer
+        < socket_owner_check
+        < security_check
+        < cgroup_version_check
+        < cgroup_driver_check
+        < socket_export
     )
     assert (
-        "echo \"ROOTLESS_SOCKET_SNAPSHOT=$(stat -c '%d:%i:%f:%u:%g' "
+        'echo "ROOTLESS_SOCKET_SNAPSHOT=$(sudo -u phase10rootless -H '
+        "stat -c '%d:%i:%f:%u:%g' "
         '/run/user/10001/docker.sock)" >> "$GITHUB_ENV"' in start_script
     )
     cleanup_step = next(
@@ -2981,8 +2990,10 @@ def test_make_and_ci_delegate_all_live_modes_to_the_shared_harness() -> None:
     )
     assert cleanup_step["if"] == ("${{ always() && env.ROOTLESS_SOCKET_SNAPSHOT != '' }}")
     assert 'test -n "$ROOTLESS_SOCKET_SNAPSHOT"' in cleanup_step["run"]
+    assert "sudo -u phase10rootless -H test -S /run/user/10001/docker.sock" in cleanup_step["run"]
     assert (
-        "test \"$(stat -c '%d:%i:%f:%u:%g' /run/user/10001/docker.sock)\" "
+        "test \"$(sudo -u phase10rootless -H stat -c '%d:%i:%f:%u:%g' "
+        '/run/user/10001/docker.sock)" '
         '= "$ROOTLESS_SOCKET_SNAPSHOT"' in cleanup_step["run"]
     )
 
