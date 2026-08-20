@@ -90,12 +90,13 @@ def _scheduled(
     )
 
 
-def _started(event_id: int, scheduled_event_id: int) -> SimpleNamespace:
+def _started(event_id: int, scheduled_event_id: Any, *, attempt: Any) -> SimpleNamespace:
     return SimpleNamespace(
         event_id=event_id,
         activity_task_scheduled_event_attributes=None,
         activity_task_started_event_attributes=SimpleNamespace(
             scheduled_event_id=scheduled_event_id,
+            attempt=attempt,
         ),
     )
 
@@ -401,20 +402,67 @@ def test_barrier_arrival_waits_for_cross_uid_mode_publication(
 def test_history_parser_preserves_order_and_correlates_retried_starts() -> None:
     events = [
         _scheduled(1, "reason_agent_step", "jhin-agent-queue"),
-        _started(2, 1),
-        _started(3, 1),
-        _scheduled(4, "resolve_advertised_tools", "jhin-tool-queue"),
-        _started(5, 4),
-        _scheduled(6, "execute_bound_tool", "jhin-tool-queue"),
-        _started(7, 6),
+        _started(2, 1, attempt=2),
+        _scheduled(3, "resolve_advertised_tools", "jhin-tool-queue"),
+        _started(4, 3, attempt=1),
+        _scheduled(5, "reason_agent_step", "jhin-agent-queue"),
+        _started(6, 5, attempt=1),
+        _scheduled(7, "execute_bound_tool", "jhin-tool-queue"),
+        _started(8, 7, attempt=2),
     ]
     assert activity_schedule_pairs(events) == [
         ("reason_agent_step", "jhin-agent-queue"),
         ("resolve_advertised_tools", "jhin-tool-queue"),
+        ("reason_agent_step", "jhin-agent-queue"),
         ("execute_bound_tool", "jhin-tool-queue"),
     ]
+    assert lifecycle.activity_attempts(events, "reason_agent_step") == [2, 1]
+    assert lifecycle.activity_attempts(events, "execute_bound_tool") == [2]
     assert activity_start_count(events, "reason_agent_step") == 2
     assert activity_start_count(events, "execute_bound_tool") == 1
+
+
+@pytest.mark.parametrize(
+    ("events", "message"),
+    (
+        (
+            [_scheduled(1, "execute_bound_tool", "jhin-tool-queue")],
+            "missing",
+        ),
+        (
+            [
+                _scheduled(1, "execute_bound_tool", "jhin-tool-queue"),
+                _started(2, 1, attempt=1),
+                _started(3, 1, attempt=2),
+            ],
+            "duplicate",
+        ),
+        (
+            [_started(2, 999, attempt=1)],
+            "unknown schedule",
+        ),
+        (
+            [
+                _scheduled(1, "execute_bound_tool", "jhin-tool-queue"),
+                _started(2, 1, attempt=True),
+            ],
+            "attempt",
+        ),
+        (
+            [
+                _scheduled(1, "execute_bound_tool", "jhin-tool-queue"),
+                _started(2, 1, attempt=0),
+            ],
+            "attempt",
+        ),
+    ),
+)
+def test_activity_attempts_rejects_incomplete_or_malformed_correlations(
+    events: list[SimpleNamespace],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        lifecycle.activity_attempts(events, "execute_bound_tool")
 
 
 def test_history_parser_ignores_unset_protobuf_activity_attributes() -> None:
@@ -6666,6 +6714,261 @@ def test_worker_recreation_uses_exact_barrier_mount_and_bounded_wait() -> None:
         authority.remove_runtime_paths()
 
 
+def _worker_topology_rows(
+    authority: ComposeAuthority,
+    *,
+    states: dict[str, tuple[str, Any]] | None = None,
+    identities: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    selected_states = states or {}
+    selected_identities = identities or {}
+    return [
+        {
+            "ID": selected_identities.get(service, f"{service}-container"),
+            "Name": f"{authority.project}-{service}-1",
+            "Project": authority.project,
+            "Service": service,
+            "State": selected_states.get(service, ("running", "healthy"))[0],
+            "Health": selected_states.get(service, ("running", "healthy"))[1],
+            "ExitCode": 0,
+            "Publishers": [],
+        }
+        for service in sorted(EXPECTED_ROOTFUL_SERVICES)
+    ]
+
+
+class _WorkerRecoveryRecorder:
+    def __init__(
+        self,
+        authority: ComposeAuthority,
+        snapshots: list[list[dict[str, Any]]],
+    ) -> None:
+        self.authority = authority
+        self.snapshots = iter(snapshots)
+        self.calls: list[tuple[str, ...]] = []
+        self.ps_calls = 0
+
+    def __call__(
+        self,
+        command: tuple[str, ...],
+        *,
+        env: dict[str, str],
+        cwd: Path,
+        timeout: float,
+        check: bool,
+        input_bytes: bytes | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del env, timeout, check, input_bytes
+        assert cwd == self.authority.repo
+        self.calls.append(command)
+        if "ps" in command:
+            index = command.index("ps")
+            if command[index : index + 4] == ("ps", "--all", "--format", "json"):
+                self.ps_calls += 1
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    json.dumps(next(self.snapshots)),
+                    "",
+                )
+        if "logs" in command:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                f"event-worker {self.authority.environment['SANDBOX_RUNNER_TOKEN']}",
+                "",
+            )
+        if command[-2:] == ("inspect", "event-worker-container"):
+            container = _sandbox_container(
+                self.authority,
+                identifier="event-worker-container",
+                status="exited",
+                running=False,
+            )
+            container["Config"]["Labels"]["com.docker.compose.service"] = "event-worker"
+            container["RestartCount"] = 3
+            container["State"]["Health"] = {
+                "Status": "unhealthy",
+                "Log": [
+                    {
+                        "Start": "2026-08-20T00:00:00Z",
+                        "End": "2026-08-20T00:00:01Z",
+                        "ExitCode": 1,
+                        "Output": self.authority.environment["SANDBOX_RUNNER_TOKEN"],
+                    }
+                ],
+            }
+            return subprocess.CompletedProcess(command, 0, json.dumps([container]), "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+
+def _install_worker_environment_inspect(
+    monkeypatch: pytest.MonkeyPatch,
+    authority: ComposeAuthority,
+) -> None:
+    environment = authority.worker_environment()
+
+    def inspect_service(
+        self: ComposeAuthority,
+        service: str,
+        *,
+        runner: Any,
+    ) -> dict[str, Any]:
+        del self, service, runner
+        return {
+            "Config": {
+                "Env": [
+                    f"{key}={environment[key]}"
+                    for key in (
+                        "APP_ENV",
+                        "JHIN_TEST_CRASH_BARRIER_DIR",
+                        "JHIN_TEST_CRASH_BARRIER_NAME",
+                        "JHIN_TEST_CRASH_BARRIER_MATCH",
+                    )
+                ]
+            }
+        }
+
+    monkeypatch.setattr(ComposeAuthority, "inspect_service", inspect_service)
+
+
+def test_worker_recreation_recovers_only_through_exact_transitional_topologies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _authority_for_recorder()
+    baseline = _worker_topology_rows(authority)
+    restarting = _worker_topology_rows(
+        authority,
+        states={"event-worker": ("restarting", "unhealthy")},
+        identities={"agent-worker": "replacement-agent-container"},
+    )
+    starting = _worker_topology_rows(
+        authority,
+        states={"event-worker": ("running", "starting")},
+        identities={"agent-worker": "replacement-agent-container"},
+    )
+    healthy = _worker_topology_rows(
+        authority,
+        identities={"agent-worker": "replacement-agent-container"},
+    )
+    recorder = _WorkerRecoveryRecorder(
+        authority,
+        [baseline, restarting, starting, healthy],
+    )
+    _install_worker_environment_inspect(monkeypatch, authority)
+    monkeypatch.setattr(time, "sleep", lambda _interval: None)
+    try:
+        authority.recreate_worker("agent-worker", runner=recorder)
+        assert recorder.ps_calls == 4
+    finally:
+        authority.remove_runtime_paths()
+
+
+def test_worker_recreation_mixed_terminal_topology_fails_fast_with_redacted_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    authority = _authority_for_recorder()
+    baseline = _worker_topology_rows(authority)
+    terminal = _worker_topology_rows(
+        authority,
+        states={
+            "event-worker": ("exited", "unhealthy"),
+            "nats": ("running", "starting"),
+        },
+        identities={"agent-worker": "replacement-agent-container"},
+    )
+    recorder = _WorkerRecoveryRecorder(authority, [baseline, terminal])
+    _install_worker_environment_inspect(monkeypatch, authority)
+    try:
+        with pytest.raises(ComposePsError, match=r"event-worker.*exited"):
+            authority.recreate_worker("agent-worker", runner=recorder)
+        assert recorder.ps_calls == 2
+        rendered = capsys.readouterr().err
+        assert "RestartCount" in rendered
+        assert "OOMKilled" in rendered
+        assert "<redacted>" in rendered
+        assert authority.environment["SANDBOX_RUNNER_TOKEN"] not in rendered
+    finally:
+        authority.remove_runtime_paths()
+
+
+def test_worker_recreation_rejects_unselected_service_identity_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _authority_for_recorder()
+    baseline = _worker_topology_rows(authority)
+    changed = _worker_topology_rows(
+        authority,
+        identities={
+            "agent-worker": "replacement-agent-container",
+            "event-worker": "replacement-event-container",
+        },
+    )
+    recorder = _WorkerRecoveryRecorder(authority, [baseline, changed])
+    _install_worker_environment_inspect(monkeypatch, authority)
+    try:
+        with pytest.raises(ComposePsError, match=r"identity changed.*event-worker"):
+            authority.recreate_worker("agent-worker", runner=recorder)
+        assert recorder.ps_calls == 2
+    finally:
+        authority.remove_runtime_paths()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (("missing", "missing services"), ("duplicate", "duplicate service")),
+)
+def test_worker_recreation_rejects_inexact_inventory_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    message: str,
+) -> None:
+    authority = _authority_for_recorder()
+    baseline = _worker_topology_rows(authority)
+    inexact = _worker_topology_rows(
+        authority,
+        identities={"agent-worker": "replacement-agent-container"},
+    )
+    if mutation == "missing":
+        inexact = [row for row in inexact if row["Service"] != "event-worker"]
+    else:
+        inexact.append(dict(inexact[0]))
+    recorder = _WorkerRecoveryRecorder(authority, [baseline, inexact])
+    _install_worker_environment_inspect(monkeypatch, authority)
+    try:
+        with pytest.raises(ComposePsError, match=message):
+            authority.recreate_worker("agent-worker", runner=recorder)
+        assert recorder.ps_calls == 2
+    finally:
+        authority.remove_runtime_paths()
+
+
+def test_worker_recreation_expiry_reports_last_transition_and_operational_state(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    authority = _authority_for_recorder()
+    baseline = _worker_topology_rows(authority)
+    restarting = _worker_topology_rows(
+        authority,
+        states={"event-worker": ("restarting", "starting")},
+        identities={"agent-worker": "replacement-agent-container"},
+    )
+    recorder = _WorkerRecoveryRecorder(authority, [baseline, restarting, restarting])
+    _install_worker_environment_inspect(monkeypatch, authority)
+    moments = iter((0.0, 0.0, 100.0))
+    monkeypatch.setattr(time, "monotonic", lambda: next(moments))
+    monkeypatch.setattr(time, "sleep", lambda _interval: None)
+    try:
+        with pytest.raises(TimeoutError, match=r"restarting.*100"):
+            authority.recreate_worker("agent-worker", runner=recorder)
+        assert recorder.ps_calls == 3
+        assert "operational-inspect" in capsys.readouterr().err
+    finally:
+        authority.remove_runtime_paths()
+
+
 def test_worker_recreation_reasserts_the_whole_live_topology(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6673,7 +6976,12 @@ def test_worker_recreation_reasserts_the_whole_live_topology(
     recorder = _Recorder(authority)
     recorder.ps_output = json.dumps(
         [
-            {"Service": service, "State": "running", "Health": "healthy"}
+            {
+                "ID": f"{service}-container",
+                "Service": service,
+                "State": "running",
+                "Health": "healthy",
+            }
             for service in sorted(EXPECTED_ROOTFUL_SERVICES)
         ]
     )
@@ -6698,8 +7006,8 @@ def test_worker_recreation_reasserts_the_whole_live_topology(
     try:
         authority.recreate_worker("agent-worker", runner=recorder)
         ps_calls = [call for call in recorder.calls if "ps" in call]
-        assert len(ps_calls) == 1
-        assert ps_calls[0][-4:] == ("ps", "--all", "--format", "json")
+        assert len(ps_calls) == 2
+        assert all(call[-4:] == ("ps", "--all", "--format", "json") for call in ps_calls)
     finally:
         authority.remove_runtime_paths()
 
@@ -6711,7 +7019,12 @@ def test_worker_pair_recreation_is_combined_before_whole_topology_validation(
     recorder = _Recorder(authority)
     recorder.ps_output = json.dumps(
         [
-            {"Service": service, "State": "running", "Health": "healthy"}
+            {
+                "ID": f"{service}-container",
+                "Service": service,
+                "State": "running",
+                "Health": "healthy",
+            }
             for service in sorted(EXPECTED_ROOTFUL_SERVICES)
         ]
     )
@@ -6753,10 +7066,12 @@ def test_worker_pair_recreation_is_combined_before_whole_topology_validation(
             identity=identity,
             runner=recorder,
         )
-        assert recorder.calls[0][-2:] == ("tool-worker", "agent-worker")
+        recreate_calls = [call for call in recorder.calls if "up" in call]
+        assert len(recreate_calls) == 1
+        assert recreate_calls[0][-2:] == ("tool-worker", "agent-worker")
         assert inspected == ["tool-worker", "agent-worker"]
         ps_calls = [call for call in recorder.calls if "ps" in call]
-        assert len(ps_calls) == 1
+        assert len(ps_calls) == 2
     finally:
         barrier.cleanup()
         authority.remove_runtime_paths()
@@ -6960,6 +7275,247 @@ def test_inspectable_job_uses_a_runner_valid_hex_identifier(
             "deadc0dedeadc0dedeadc0de"
         )
         assert captured["timeout"] == 5.0
+    finally:
+        authority.remove_runtime_paths()
+
+
+class _SandboxHTTPResponse:
+    def __init__(self, status: int, payload: dict[str, Any]) -> None:
+        self.status = status
+        self._body = json.dumps(payload).encode()
+
+    def __enter__(self) -> _SandboxHTTPResponse:
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        del exc_info
+
+    def read(self) -> bytes:
+        return self._body
+
+
+def _install_inspectable_job_scenario(
+    monkeypatch: pytest.MonkeyPatch,
+    authority: ComposeAuthority,
+    *,
+    identifier_polls: list[list[str]],
+    containers: list[dict[str, Any]],
+) -> list[tuple[str, str]]:
+    job_id = "deadc0dedeadc0dedeadc0de"
+    polls = iter(identifier_polls)
+    inspections = iter(containers)
+    requests: list[tuple[str, str]] = []
+
+    def exact_label_ids(
+        self: ComposeAuthority,
+        *,
+        runner: Any,
+        resource: str,
+        label: str,
+    ) -> list[str]:
+        del self, runner
+        assert resource == "container"
+        assert label == f"jhin.sandbox.job={job_id}"
+        return next(polls, [])
+
+    def run(
+        self: ComposeAuthority,
+        command: tuple[str, ...],
+        *,
+        runner: Any,
+        timeout: float,
+        check: bool = True,
+        input_bytes: bytes | None = None,
+        environment: Any = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del self, runner, timeout, check, input_bytes, environment
+        assert command[-2] == "inspect"
+        container = next(inspections)
+        assert command[-1] == container["Id"]
+        return subprocess.CompletedProcess(command, 0, json.dumps([container]), "")
+
+    def urlopen(request: Any, *, timeout: float) -> _SandboxHTTPResponse:
+        assert timeout == 5.0
+        method = request.get_method()
+        url = request.full_url
+        requests.append((method, url))
+        if method == "POST" and url.endswith("/v1/jobs"):
+            return _SandboxHTTPResponse(202, {"job_id": job_id, "status": "queued"})
+        if method == "GET" and url.endswith(f"/v1/jobs/{job_id}"):
+            return _SandboxHTTPResponse(
+                200,
+                {"job_id": job_id, "status": "failed", "exit_code": 137},
+            )
+        if method == "GET" and url.endswith(f"/v1/jobs/{job_id}/logs"):
+            return _SandboxHTTPResponse(
+                200,
+                {
+                    "job_id": job_id,
+                    "status": "failed",
+                    "stdout": "bounded stdout",
+                    "stderr": authority.environment["SANDBOX_RUNNER_TOKEN"],
+                },
+            )
+        if method == "POST" and url.endswith(f"/v1/jobs/{job_id}/cancel"):
+            return _SandboxHTTPResponse(200, {"job_id": job_id, "status": "cancelled"})
+        raise AssertionError(f"unexpected sandbox request: {method} {url}")
+
+    monkeypatch.setattr(secrets, "token_hex", lambda _length: job_id)
+    monkeypatch.setattr(ComposeAuthority, "_exact_label_ids", exact_label_ids)
+    monkeypatch.setattr(ComposeAuthority, "_run", run)
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    return requests
+
+
+def _sandbox_container(
+    authority: ComposeAuthority,
+    *,
+    identifier: str,
+    status: str,
+    running: bool,
+) -> dict[str, Any]:
+    return {
+        "Id": identifier,
+        "Name": f"/{identifier}",
+        "Image": "sha256:" + "a" * 64,
+        "Config": {
+            "Image": authority.sandbox_image,
+            "Labels": {
+                "jhin.sandbox.job": "deadc0dedeadc0dedeadc0de",
+                "com.docker.compose.project": authority.project,
+            },
+        },
+        "HostConfig": {"GroupAdd": None},
+        "RestartCount": 0,
+        "State": {
+            "Status": status,
+            "Running": running,
+            "Restarting": False,
+            "ExitCode": 137 if status == "exited" else 0,
+            "OOMKilled": status == "exited",
+            "Error": authority.environment["SANDBOX_RUNNER_TOKEN"],
+            "StartedAt": "2026-08-20T00:00:00Z",
+            "FinishedAt": "2026-08-20T00:00:01Z",
+        },
+    }
+
+
+def test_inspectable_job_waits_for_same_created_identity_to_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = replace(
+        _authority_for_recorder(),
+        _published_port_items=(("SANDBOX_RUNNER_DEV_PORT", 49152),),
+    )
+    identifier = "sandbox-container"
+    requests = _install_inspectable_job_scenario(
+        monkeypatch,
+        authority,
+        identifier_polls=[[identifier], [identifier]],
+        containers=[
+            _sandbox_container(authority, identifier=identifier, status="created", running=False),
+            _sandbox_container(authority, identifier=identifier, status="running", running=True),
+        ],
+    )
+    monkeypatch.setattr(time, "sleep", lambda _interval: None)
+    try:
+        job = authority.start_inspectable_sandbox_job(timeout=1.0)
+        assert job.container_id == identifier
+        assert job.container["State"]["Status"] == "running"
+        assert job.container["State"]["Running"] is True
+        assert len(requests) == 1
+    finally:
+        authority.remove_runtime_paths()
+
+
+@pytest.mark.parametrize("terminal_status", ("exited", "dead"))
+def test_inspectable_job_terminal_state_emits_diagnostics_then_cleans_up(
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_status: str,
+) -> None:
+    authority = replace(
+        _authority_for_recorder(),
+        _published_port_items=(("SANDBOX_RUNNER_DEV_PORT", 49152),),
+    )
+    identifier = "sandbox-container"
+    requests = _install_inspectable_job_scenario(
+        monkeypatch,
+        authority,
+        identifier_polls=[[identifier], []],
+        containers=[
+            _sandbox_container(
+                authority,
+                identifier=identifier,
+                status=terminal_status,
+                running=False,
+            )
+        ],
+    )
+    try:
+        with pytest.raises(RuntimeError, match="terminal sandbox job state") as raised:
+            authority.start_inspectable_sandbox_job(timeout=1.0)
+        rendered = str(raised.value)
+        assert "exit_code" in rendered
+        assert "OOMKilled" in rendered
+        assert "bounded stdout" in rendered
+        assert "<redacted>" in rendered
+        assert authority.environment["SANDBOX_RUNNER_TOKEN"] not in rendered
+        assert [method for method, _url in requests] == ["POST", "GET", "GET", "POST"]
+    finally:
+        authority.remove_runtime_paths()
+
+
+def test_inspectable_job_rejects_identity_change_with_diagnostics_and_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = replace(
+        _authority_for_recorder(),
+        _published_port_items=(("SANDBOX_RUNNER_DEV_PORT", 49152),),
+    )
+    first = "sandbox-container"
+    requests = _install_inspectable_job_scenario(
+        monkeypatch,
+        authority,
+        identifier_polls=[[first], ["replacement-container"], []],
+        containers=[
+            _sandbox_container(authority, identifier=first, status="created", running=False)
+        ],
+    )
+    monkeypatch.setattr(time, "sleep", lambda _interval: None)
+    try:
+        with pytest.raises(RuntimeError, match="sandbox job identity changed") as raised:
+            authority.start_inspectable_sandbox_job(timeout=1.0)
+        assert first in str(raised.value)
+        assert "replacement-container" in str(raised.value)
+        assert [method for method, _url in requests] == ["POST", "GET", "GET", "POST"]
+    finally:
+        authority.remove_runtime_paths()
+
+
+def test_inspectable_job_created_state_timeout_emits_diagnostics_and_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = replace(
+        _authority_for_recorder(),
+        _published_port_items=(("SANDBOX_RUNNER_DEV_PORT", 49152),),
+    )
+    identifier = "sandbox-container"
+    requests = _install_inspectable_job_scenario(
+        monkeypatch,
+        authority,
+        identifier_polls=[[identifier], []],
+        containers=[
+            _sandbox_container(authority, identifier=identifier, status="created", running=False)
+        ],
+    )
+    moments = iter((0.0, 0.0, 1.0, 1.0, 1.0))
+    monkeypatch.setattr(time, "monotonic", lambda: next(moments))
+    monkeypatch.setattr(time, "sleep", lambda _interval: None)
+    try:
+        with pytest.raises(TimeoutError, match="remained created") as raised:
+            authority.start_inspectable_sandbox_job(timeout=0.5)
+        assert "bounded stdout" in str(raised.value)
+        assert [method for method, _url in requests] == ["POST", "GET", "GET", "POST"]
     finally:
         authority.remove_runtime_paths()
 
@@ -7471,7 +8027,37 @@ async def test_all_effect_classes_cross_tool_queue_once() -> None:
         cleanup_calls = await _calls(client, workspace_id, cleanup_run)
         assert len(cleanup_calls) == 1
         assert cleanup_calls[0]["status"] == "completed"
-        assert cleanup_calls[0]["sanitized_output_json"]["exit_code"] == 0
+        cleanup_output = cleanup_calls[0]["sanitized_output_json"]
+        cleanup_evidence = json.dumps(cleanup_output, sort_keys=True, default=str)[
+            -lifecycle.LIVE_FAILURE_OUTPUT_LIMIT :
+        ]
+        if cleanup_output.get("status") != "completed" or cleanup_output.get("exit_code") != 0:
+            failed_audits = await client.get(
+                f"/api/v1/workspaces/{workspace_id}/audit-events",
+                params={
+                    "action": "sandbox.job.failed",
+                    "target_type": "sandbox_job",
+                    "limit": 200,
+                },
+            )
+            assert failed_audits.status_code == 200, cleanup_evidence
+            sandbox_job_id = cleanup_output.get("sandbox_job_id")
+            matching_audits = [
+                row
+                for row in failed_audits.json()["events"]
+                if row.get("target_id") == sandbox_job_id
+            ]
+            audit_error: Any = "<missing exact sandbox.job.failed audit>"
+            if len(matching_audits) == 1:
+                candidate = matching_audits[0].get("metadata_json", {}).get("error")
+                audit_error = (
+                    candidate
+                    if isinstance(candidate, str)
+                    else "<malformed sandbox.job.failed metadata error>"
+                )
+            cleanup_evidence += f"; sandbox.job.failed error={audit_error!r}"
+        assert cleanup_output.get("status") == "completed", cleanup_evidence
+        assert cleanup_output.get("exit_code") == 0, cleanup_evidence
         cleanup_history = await _history(
             str(cleanup_task["temporal_workflow_id"]),
             authority.temporal_run_id(cleanup_run),
@@ -7571,8 +8157,11 @@ async def test_tool_queue_loss_blocks_effect_and_live_networks_are_isolated() ->
             runner = authority.inspect_service("sandbox-runner")
             assert runner["Config"]["User"] == "10001:10001"
             assert runner["HostConfig"]["Privileged"] is False
-            expected_groups = [] if authority.mode == "rootless" else [str(authority.socket_gid)]
-            assert runner["HostConfig"].get("GroupAdd", []) == expected_groups
+            runner_groups = runner["HostConfig"].get("GroupAdd")
+            if authority.mode == "rootless":
+                assert runner_groups is None or runner_groups == []
+            else:
+                assert runner_groups == [str(authority.socket_gid)]
             assert authority.service_dns_probe("agent-worker", "sandbox-runner") != 0
             assert authority.service_dns_probe("tool-worker", "sandbox-runner") == 0
             assert authority.service_http_json(
@@ -7599,7 +8188,11 @@ def test_live_sandbox_job_security_contract() -> None:
         assert host["Privileged"] is False
         assert host["CapDrop"] == ["ALL"]
         assert host["ReadonlyRootfs"] is True
-        assert host.get("GroupAdd", []) == []
+        job_groups = host.get("GroupAdd")
+        if authority.mode == "rootless":
+            assert job_groups is None or job_groups == []
+        else:
+            assert host.get("GroupAdd", []) == []
         assert host["NetworkMode"] == "none"
         assert all("docker.sock" not in str(mount) for mount in container.get("Mounts", []))
         assert not any("docker.sock" in bind for bind in host.get("Binds", []) or [])
@@ -7682,16 +8275,103 @@ async def test_agent_crash_matrix_retries_without_tool_effect_duplication(
             final = await _wait_task(client, workspace_id, assigned["id"], deadline_seconds=780.0)
             assert final["task"]["state"] == "completed", final
             final_timeline = await _timeline(client, workspace_id, run_id)
-            final_types = [row["event_type"] for row in final_timeline]
-            assert final_types.count("agent.step.tool_manifest") == 1
-            assert final_types.count("agent.step.reasoning") == 1
-            assert final_types.count("run.completed") == 1
+            public_manifests = [
+                row for row in final_timeline if row["event_type"] == "agent.step.tool_manifest"
+            ]
+            assert [
+                (
+                    row["payload_json"].get("step"),
+                    row["payload_json"].get("manifest", {}).get("count"),
+                )
+                for row in public_manifests
+            ] == [(0, 1), (1, 0)]
+            public_reasoning = [
+                row for row in final_timeline if row["event_type"] == "agent.step.reasoning"
+            ]
+            assert len(public_reasoning) == 2
+            assert [row["payload_json"] for row in public_reasoning] == [{}, {}]
+            completions = [row for row in final_timeline if row["event_type"] == "run.completed"]
+            assert len(completions) == 1
+            completion_payload = completions[0]["payload_json"]
+            assert set(completion_payload) == {
+                "input_tokens",
+                "output_tokens",
+                "cost_micros",
+                "steps_used",
+                "error_code",
+                "error_message",
+            }
+            assert completion_payload["steps_used"] == 2
+            assert completion_payload["error_code"] is None
+            assert completion_payload["error_message"] is None
+
+            private_manifests = [
+                authority.run_event_payload(
+                    run_id,
+                    event_type="agent.step.tool_manifest",
+                    step=step,
+                )
+                for step in (0, 1)
+            ]
+            assert [payload.get("step") for payload in private_manifests] == [0, 1]
+            assert [payload.get("manifest", {}).get("count") for payload in private_manifests] == [
+                1,
+                0,
+            ]
+            assert [
+                len(payload.get("manifest", {}).get("calls", [])) for payload in private_manifests
+            ] == [
+                1,
+                0,
+            ]
+            private_reasoning = [
+                authority.run_event_payload(
+                    run_id,
+                    event_type="agent.step.reasoning",
+                    step=step,
+                )
+                for step in (0, 1)
+            ]
+            reasoning_keys = {
+                "format_version",
+                "step",
+                "completion_sanitized",
+                "model",
+                "finish_reason",
+                "provider_request_id",
+                "provider_call_ids",
+                "transitions",
+                "done",
+                "usage",
+                "latency_ms",
+            }
+            assert [set(payload) for payload in private_reasoning] == [
+                reasoning_keys,
+                reasoning_keys,
+            ]
+            assert [set(payload.get("usage", {})) for payload in private_reasoning] == [
+                {"input_tokens", "output_tokens", "cached_tokens", "cost_micros"},
+                {"input_tokens", "output_tokens", "cached_tokens", "cost_micros"},
+            ]
+            assert [payload.get("step") for payload in private_reasoning] == [0, 1]
+            assert [payload.get("done") for payload in private_reasoning] == [False, True]
+            assert [payload.get("finish_reason") for payload in private_reasoning] == [
+                "tool_calls",
+                "stop",
+            ]
+            assert [len(payload.get("provider_call_ids", [])) for payload in private_reasoning] == [
+                1,
+                0,
+            ]
+            assert isinstance(private_reasoning[1].get("completion_sanitized"), str)
+            assert private_reasoning[1]["completion_sanitized"]
             assert provider.count() == expected_model_calls
             assert await _comment_count(effect_marker) == 1
             calls = await _calls(client, workspace_id, run_id)
             assert len(calls) == 1 and calls[0]["status"] == "completed"
             history = await _history(str(assigned["temporal_workflow_id"]), temporal_run_id)
             assert activity_start_count(history, "reason_agent_step") == 2
+            assert lifecycle.activity_attempts(history, "reason_agent_step") == [2, 1]
             _assert_queue_ownership(history, expected=_one_tool_history())
     finally:
         with contextlib.suppress(Exception):
@@ -7760,7 +8440,8 @@ async def test_tool_crash_matrix_preserves_claim_and_ambiguity_contract(
             assert terminal_calls[0]["status"] == expected_status
             assert await _comment_count(marker) == expected_effects
             history = await _history(str(assigned["temporal_workflow_id"]), temporal_run_id)
-            assert activity_start_count(history, "execute_bound_tool") == 2
+            assert activity_start_count(history, "execute_bound_tool") == 1
+            assert lifecycle.activity_attempts(history, "execute_bound_tool") == [2]
             if expected_status == "completed":
                 assert final["task"]["state"] == "completed", final
                 _assert_queue_ownership(history, expected=_one_tool_history())

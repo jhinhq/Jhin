@@ -308,6 +308,8 @@ async def test_complete_reasoning_pair_replays_without_model_call(world: Reasoni
 
     assert replay == first
     assert len(world.model.requests) == 1
+    assert await world.count_events("agent.step.tool_manifest") == 1
+    assert await world.count_events("agent.step.reasoning") == 1
 
 
 async def test_manifest_without_reasoning_fails_closed_for_new_activity(

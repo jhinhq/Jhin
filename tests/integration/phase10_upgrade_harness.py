@@ -516,6 +516,57 @@ def _redact_live_failure_text(value: Any, environment: dict[str, str]) -> str:
     return rendered[-LIVE_FAILURE_OUTPUT_LIMIT:]
 
 
+def _operational_container_fields(container: Mapping[str, Any]) -> dict[str, Any]:
+    """Project Docker inspect data to bounded, non-configuration diagnostics."""
+    config = container.get("Config")
+    config = config if isinstance(config, Mapping) else {}
+    labels = config.get("Labels")
+    labels = labels if isinstance(labels, Mapping) else {}
+    state = container.get("State")
+    state = state if isinstance(state, Mapping) else {}
+    health = state.get("Health")
+    health = health if isinstance(health, Mapping) else {}
+    raw_log = health.get("Log")
+    health_log = raw_log[-10:] if isinstance(raw_log, list) else []
+    return {
+        "Id": container.get("Id"),
+        "Name": container.get("Name"),
+        "Image": container.get("Image"),
+        "ConfigImage": config.get("Image"),
+        "Labels": {
+            key: labels.get(key)
+            for key in (
+                "com.docker.compose.project",
+                "com.docker.compose.service",
+                "jhin.sandbox.job",
+            )
+            if key in labels
+        },
+        "State": {
+            key: state.get(key)
+            for key in (
+                "Status",
+                "Running",
+                "Restarting",
+                "ExitCode",
+                "OOMKilled",
+                "Error",
+                "StartedAt",
+                "FinishedAt",
+            )
+        },
+        "RestartCount": container.get("RestartCount"),
+        "Health": {
+            "Status": health.get("Status"),
+            "Log": [
+                {key: entry.get(key) for key in ("Start", "End", "ExitCode", "Output")}
+                for entry in health_log
+                if isinstance(entry, Mapping)
+            ],
+        },
+    }
+
+
 def emit_live_failure_output(
     error: subprocess.CalledProcessError,
     *,
@@ -1153,6 +1204,83 @@ def parse_compose_ps(
     return parsed
 
 
+def _parse_worker_recovery_inventory(
+    output: str,
+    expected_services: Iterable[str],
+) -> dict[str, dict[str, Any]]:
+    """Require an exact Compose inventory with one stable container ID per service."""
+    expected = set(expected_services)
+    parsed: dict[str, dict[str, Any]] = {}
+    duplicates: set[str] = set()
+    for row in _decode_compose_rows(output):
+        service = row.get("Service")
+        if not isinstance(service, str) or not service:
+            raise ComposePsError("Compose ps row is malformed: missing Service")
+        if service in parsed:
+            duplicates.add(service)
+            continue
+        identifier = row.get("ID")
+        if not isinstance(identifier, str) or not identifier:
+            raise ComposePsError(f"Compose ps service {service} is missing its container ID")
+        parsed[service] = row
+    present = set(parsed)
+    missing = sorted(expected - present)
+    unexpected = sorted(present - expected)
+    if missing or unexpected or duplicates:
+        reasons = []
+        if missing:
+            reasons.append("missing services")
+        if unexpected:
+            reasons.append("unexpected services")
+        if duplicates:
+            reasons.append("duplicate services")
+        raise ComposePsError(
+            f"Compose ps inventory mismatch ({', '.join(reasons)}): "
+            f"expected={sorted(expected)}, present={sorted(present)}, missing={missing}, "
+            f"unexpected={unexpected}, duplicate={sorted(duplicates)}"
+        )
+    return parsed
+
+
+def _classify_worker_recovery(
+    output: str,
+    *,
+    expected_services: Iterable[str],
+    fixed_identities: Mapping[str, str],
+) -> tuple[dict[str, dict[str, Any]], tuple[str, ...]]:
+    """Accept only fully ready rows or the two bounded restart transitions."""
+    parsed = _parse_worker_recovery_inventory(output, expected_services)
+    changed = sorted(
+        service
+        for service, expected_identifier in fixed_identities.items()
+        if parsed[service]["ID"] != expected_identifier
+    )
+    if changed:
+        raise ComposePsError(f"worker recovery identity changed for services: {changed}")
+
+    transitional: list[str] = []
+    terminal: list[str] = []
+    for service in sorted(parsed):
+        row = parsed[service]
+        state = str(row.get("State", "")).lower()
+        health_value = row.get("Health")
+        health = "" if health_value is None else str(health_value).lower()
+        if state == "running" and health == "healthy":
+            continue
+        if state == "restarting":
+            transitional.append(f"{service}=restarting/{health or 'missing-health'}")
+            continue
+        if state == "running" and health == "starting":
+            transitional.append(f"{service}=running/starting")
+            continue
+        terminal.append(f"{service}={state or 'missing-state'}/{health or 'missing-health'}")
+    if terminal:
+        raise ComposePsError(
+            "worker recovery contains terminal service states: " + ", ".join(terminal)
+        )
+    return parsed, tuple(transitional)
+
+
 def parse_compose_port(output: str) -> int:
     """Return one Docker-allocated published port from ``compose port``."""
     lines = [line.strip() for line in output.splitlines() if line.strip()]
@@ -1410,7 +1538,7 @@ def activity_schedule_pairs(history_or_events: Any) -> list[tuple[str, str]]:
 
 
 def activity_start_count(history_or_events: Any, activity_name: str) -> int:
-    """Count starts for all schedules of one exact activity name."""
+    """Count recorded final Started events, not retry attempts."""
     scheduled_ids: set[int] = set()
     events = _events(history_or_events)
     for event in events:
@@ -1436,6 +1564,60 @@ def activity_start_count(history_or_events: Any, activity_name: str) -> int:
         if scheduled_event_id in scheduled_ids:
             count += 1
     return count
+
+
+def activity_attempts(history_or_events: Any, activity_name: str) -> list[int]:
+    """Return final attempt numbers for exact activity schedules in order."""
+    events = _events(history_or_events)
+    schedule_order: list[int] = []
+    schedule_names: dict[int, str] = {}
+    for event in events:
+        attributes = _present_event_attributes(
+            event,
+            "activity_task_scheduled_event_attributes",
+        )
+        if attributes is None:
+            continue
+        event_id = getattr(event, "event_id", None)
+        name = getattr(getattr(attributes, "activity_type", None), "name", None)
+        if (
+            type(event_id) is not int
+            or event_id < 1
+            or event_id in schedule_names
+            or not isinstance(name, str)
+            or not name
+        ):
+            raise ValueError("scheduled activity correlation is malformed")
+        schedule_order.append(event_id)
+        schedule_names[event_id] = name
+
+    started_attempts: dict[int, int] = {}
+    for event in events:
+        attributes = _present_event_attributes(
+            event,
+            "activity_task_started_event_attributes",
+        )
+        if attributes is None:
+            continue
+        scheduled_event_id = getattr(attributes, "scheduled_event_id", None)
+        if type(scheduled_event_id) is not int or scheduled_event_id not in schedule_names:
+            raise ValueError("activity Started event references an unknown schedule")
+        if scheduled_event_id in started_attempts:
+            raise ValueError("activity schedule has duplicate Started events")
+        attempt = getattr(attributes, "attempt", None)
+        if type(attempt) is not int or attempt < 1:
+            raise ValueError("activity Started attempt is malformed")
+        started_attempts[scheduled_event_id] = attempt
+
+    selected = [
+        schedule_id
+        for schedule_id in schedule_order
+        if schedule_names[schedule_id] == activity_name
+    ]
+    missing = [schedule_id for schedule_id in selected if schedule_id not in started_attempts]
+    if missing:
+        raise ValueError(f"activity schedules are missing Started events: {missing}")
+    return [started_attempts[schedule_id] for schedule_id in selected]
 
 
 def read_phase9_source_ref(
@@ -2233,6 +2415,142 @@ class ComposeAuthority:
                     raise TimeoutError("counting provider did not become ready")
             time.sleep(0.1)
 
+    def _emit_worker_recovery_diagnostics(
+        self,
+        *,
+        output: str,
+        selected: Sequence[str],
+        fixed_identities: Mapping[str, str],
+        runner: CommandRunner,
+        environment: Mapping[str, str],
+    ) -> None:
+        """Emit final bounded ps/log/inspect evidence without exposing configuration."""
+        ps_command = self.compose_command("ps", "--all", "--format", "json")
+        emit_live_failure_output(
+            subprocess.CalledProcessError(1, ps_command, output=output, stderr=""),
+            environment=dict(environment),
+            context="stack-ps",
+        )
+
+        rows: dict[str, dict[str, Any]] = {}
+        try:
+            for row in _decode_compose_rows(output):
+                service = row.get("Service")
+                if isinstance(service, str) and service and service not in rows:
+                    rows[service] = row
+        except ComposePsError:
+            rows = {}
+        diagnostic_services = set(selected)
+        for service, row in rows.items():
+            state = str(row.get("State", "")).lower()
+            health_value = row.get("Health")
+            health = "" if health_value is None else str(health_value).lower()
+            identifier = row.get("ID")
+            if (
+                state != "running"
+                or health != "healthy"
+                or (service in fixed_identities and identifier != fixed_identities[service])
+            ):
+                diagnostic_services.add(service)
+
+        logs_command = self.compose_command(
+            "logs",
+            "--no-color",
+            "--tail",
+            "100",
+            *sorted(diagnostic_services),
+        )
+        logs = self._run(
+            logs_command,
+            runner=runner,
+            timeout=60.0,
+            check=False,
+            environment=environment,
+        )
+        emit_live_failure_output(
+            subprocess.CalledProcessError(
+                logs.returncode or 1,
+                logs_command,
+                output=logs.stdout,
+                stderr=logs.stderr,
+            ),
+            environment=dict(environment),
+            context="stack-logs",
+        )
+
+        operational: dict[str, Any] = {}
+        for service in sorted(diagnostic_services):
+            diagnostic_row = rows.get(service)
+            identifier = None if diagnostic_row is None else diagnostic_row.get("ID")
+            if not isinstance(identifier, str) or not identifier:
+                operational[service] = {"error": "Compose ps omitted the container ID"}
+                continue
+            inspect_command = self.docker_command("inspect", identifier)
+            inspected = self._run(
+                inspect_command,
+                runner=runner,
+                timeout=30.0,
+                check=False,
+                environment=environment,
+            )
+            if inspected.returncode != 0:
+                operational[service] = {
+                    "container_id": identifier,
+                    "inspect_returncode": inspected.returncode,
+                }
+                continue
+            try:
+                payload = json.loads(_text(inspected.stdout))
+            except json.JSONDecodeError:
+                payload = None
+            if (
+                not isinstance(payload, list)
+                or len(payload) != 1
+                or not isinstance(payload[0], dict)
+                or payload[0].get("Id") != identifier
+            ):
+                operational[service] = {
+                    "container_id": identifier,
+                    "error": "Docker inspect output was malformed or changed identity",
+                }
+                continue
+            operational[service] = _operational_container_fields(payload[0])
+        rendered = _redact_live_failure_text(
+            json.dumps(operational, sort_keys=True, default=str),
+            dict(environment),
+        )
+        if rendered:
+            sys.stderr.write("\n--- live operational-inspect (redacted tail) ---\n")
+            sys.stderr.write(rendered)
+            if not rendered.endswith("\n"):
+                sys.stderr.write("\n")
+        self.assert_socket_unchanged()
+
+    def _raise_worker_recovery_failure(
+        self,
+        error: BaseException,
+        *,
+        output: str,
+        selected: Sequence[str],
+        fixed_identities: Mapping[str, str],
+        runner: CommandRunner,
+        environment: Mapping[str, str],
+    ) -> None:
+        try:
+            self._emit_worker_recovery_diagnostics(
+                output=output,
+                selected=selected,
+                fixed_identities=fixed_identities,
+                runner=runner,
+                environment=environment,
+            )
+        except BaseException as diagnostic_error:
+            raise BaseExceptionGroup(
+                "worker recovery and bounded diagnostics failed",
+                [error, diagnostic_error],
+            ) from error
+        raise error
+
     def recreate_workers(
         self,
         services: Sequence[str],
@@ -2243,19 +2561,78 @@ class ComposeAuthority:
     ) -> None:
         selected = tuple(services)
         environment = self.worker_environment(barrier=barrier, identity=identity)
+        baseline_result = self._run(
+            self.compose_command("ps", "--all", "--format", "json"),
+            runner=runner,
+            timeout=60.0,
+            environment=environment,
+        )
+        baseline = _parse_worker_recovery_inventory(
+            _text(baseline_result.stdout),
+            self.expected_services,
+        )
+        fixed_identities = {
+            service: cast(str, row["ID"])
+            for service, row in baseline.items()
+            if service not in selected
+        }
         self._run(
             self.worker_recreate_command(*selected),
             runner=runner,
             timeout=1200.0,
             environment=environment,
         )
-        result = self._run(
-            self.compose_command("ps", "--all", "--format", "json"),
-            runner=runner,
-            timeout=60.0,
-            environment=environment,
-        )
-        parse_compose_ps(_text(result.stdout), self.expected_services)
+        deadline_started = time.monotonic()
+        replacement_identities: dict[str, str] = {}
+        while True:
+            result = self._run(
+                self.compose_command("ps", "--all", "--format", "json"),
+                runner=runner,
+                timeout=60.0,
+                environment=environment,
+            )
+            output = _text(result.stdout)
+            try:
+                parsed, transitional = _classify_worker_recovery(
+                    output,
+                    expected_services=self.expected_services,
+                    fixed_identities={**fixed_identities, **replacement_identities},
+                )
+            except ComposePsError as error:
+                self._raise_worker_recovery_failure(
+                    error,
+                    output=output,
+                    selected=selected,
+                    fixed_identities={**fixed_identities, **replacement_identities},
+                    runner=runner,
+                    environment=environment,
+                )
+                raise AssertionError("worker recovery failure unexpectedly returned") from error
+            if not replacement_identities:
+                replacement_identities = {
+                    service: cast(str, parsed[service]["ID"]) for service in selected
+                }
+            if not transitional:
+                break
+            elapsed = time.monotonic() - deadline_started
+            if elapsed >= 90.0:
+                timeout_error = TimeoutError(
+                    "worker recovery remained transitional "
+                    f"({', '.join(transitional)}) for {elapsed:.1f} seconds"
+                )
+                self._raise_worker_recovery_failure(
+                    timeout_error,
+                    output=output,
+                    selected=selected,
+                    fixed_identities={**fixed_identities, **replacement_identities},
+                    runner=runner,
+                    environment=environment,
+                )
+                raise AssertionError(
+                    "worker recovery timeout unexpectedly returned"
+                ) from timeout_error
+            time.sleep(min(3.0, 90.0 - elapsed))
+        self.assert_socket_unchanged()
         expected = {
             key: environment[key]
             for key in (
@@ -2828,6 +3205,53 @@ class ComposeAuthority:
             },
         )
 
+    def _sandbox_startup_diagnostics(
+        self,
+        *,
+        job_id: str,
+        endpoint: str,
+        headers: dict[str, str],
+        observed_ids: Sequence[str],
+        container: Mapping[str, Any] | None,
+    ) -> str:
+        evidence: dict[str, Any] = {"observed_container_ids": list(observed_ids)}
+        for key, suffix in (("runner_status", ""), ("runner_logs", "/logs")):
+            request = urllib.request.Request(
+                f"{endpoint}/v1/jobs/{job_id}{suffix}",
+                headers=headers,
+            )
+            with urllib.request.urlopen(request, timeout=5.0) as response:
+                payload = json.loads(response.read())
+            if not isinstance(payload, dict):
+                raise RuntimeError(f"sandbox runner returned malformed {key} diagnostics")
+            evidence[key] = payload
+        evidence["container"] = (
+            None if container is None else _operational_container_fields(container)
+        )
+        return _redact_live_failure_text(
+            json.dumps(evidence, sort_keys=True, separators=(",", ":")),
+            self.environment,
+        )
+
+    def _sandbox_startup_error(
+        self,
+        error: RuntimeError | TimeoutError,
+        *,
+        job_id: str,
+        endpoint: str,
+        headers: dict[str, str],
+        observed_ids: Sequence[str],
+        container: Mapping[str, Any] | None,
+    ) -> RuntimeError | TimeoutError:
+        diagnostics = self._sandbox_startup_diagnostics(
+            job_id=job_id,
+            endpoint=endpoint,
+            headers=headers,
+            observed_ids=observed_ids,
+            container=container,
+        )
+        return type(error)(f"{error}; diagnostics={diagnostics}")
+
     def start_inspectable_sandbox_job(
         self,
         *,
@@ -2847,6 +3271,9 @@ class ComposeAuthority:
             if response.status != 202:
                 raise RuntimeError("sandbox runner rejected the inspectable job")
         deadline = time.monotonic() + timeout
+        container_id: str | None = None
+        last_container: dict[str, Any] | None = None
+        last_identifiers: list[str] = []
         try:
             while time.monotonic() < deadline:
                 identifiers = self._exact_label_ids(
@@ -2854,11 +3281,34 @@ class ComposeAuthority:
                     resource="container",
                     label=self.sandbox_job_label(job_id),
                 )
-                if len(identifiers) > 1:
-                    raise RuntimeError("sandbox job label resolved multiple containers")
+                last_identifiers = identifiers
+                if container_id is None:
+                    if len(identifiers) > 1:
+                        raise self._sandbox_startup_error(
+                            RuntimeError("sandbox job label resolved multiple containers"),
+                            job_id=job_id,
+                            endpoint=endpoint,
+                            headers=headers,
+                            observed_ids=identifiers,
+                            container=None,
+                        )
+                    if identifiers:
+                        container_id = identifiers[0]
+                elif identifiers != [container_id]:
+                    raise self._sandbox_startup_error(
+                        RuntimeError(
+                            "sandbox job identity changed after publication: "
+                            f"expected {container_id}, observed {identifiers}"
+                        ),
+                        job_id=job_id,
+                        endpoint=endpoint,
+                        headers=headers,
+                        observed_ids=identifiers,
+                        container=last_container,
+                    )
                 if identifiers:
                     inspected = self._run(
-                        self.docker_command("inspect", identifiers[0]),
+                        self.docker_command("inspect", cast(str, container_id)),
                         runner=runner,
                         timeout=30.0,
                     )
@@ -2870,19 +3320,70 @@ class ComposeAuthority:
                         not isinstance(payload, list)
                         or len(payload) != 1
                         or not isinstance(payload[0], dict)
-                        or payload[0].get("Id") != identifiers[0]
-                        or payload[0].get("State", {}).get("Running") is not True
                     ):
-                        raise RuntimeError("sandbox job inspect identity is not running")
-                    return RunningSandboxJob(
+                        raise RuntimeError("sandbox job inspect returned malformed identity data")
+                    last_container = cast(dict[str, Any], payload[0])
+                    labels = last_container.get("Config", {}).get("Labels", {})
+                    state = last_container.get("State")
+                    if (
+                        last_container.get("Id") != container_id
+                        or not isinstance(labels, dict)
+                        or labels.get("jhin.sandbox.job") != job_id
+                        or not isinstance(state, dict)
+                    ):
+                        raise self._sandbox_startup_error(
+                            RuntimeError("sandbox job inspect identity changed or is malformed"),
+                            job_id=job_id,
+                            endpoint=endpoint,
+                            headers=headers,
+                            observed_ids=identifiers,
+                            container=last_container,
+                        )
+                    status = state.get("Status")
+                    running = state.get("Running")
+                    if status == "running" and running is True:
+                        return RunningSandboxJob(
+                            job_id=job_id,
+                            container_id=cast(str, container_id),
+                            container=last_container,
+                        )
+                    if status == "created" and running is False:
+                        time.sleep(0.05)
+                        continue
+                    raise self._sandbox_startup_error(
+                        RuntimeError(
+                            "terminal sandbox job state before security inspection: "
+                            f"status={status!r}, running={running!r}"
+                        ),
                         job_id=job_id,
-                        container_id=identifiers[0],
-                        container=cast(dict[str, Any], payload[0]),
+                        endpoint=endpoint,
+                        headers=headers,
+                        observed_ids=identifiers,
+                        container=last_container,
                     )
                 time.sleep(0.05)
-            raise TimeoutError("inspectable sandbox job did not start")
-        except BaseException:
-            self.cancel_sandbox_job(job_id, runner=runner, timeout=30.0)
+            detail = (
+                "inspectable sandbox job remained created until its startup deadline"
+                if last_container is not None
+                and last_container.get("State", {}).get("Status") == "created"
+                else "inspectable sandbox job identity was not published before its deadline"
+            )
+            raise self._sandbox_startup_error(
+                TimeoutError(detail),
+                job_id=job_id,
+                endpoint=endpoint,
+                headers=headers,
+                observed_ids=last_identifiers,
+                container=last_container,
+            )
+        except BaseException as error:
+            try:
+                self.cancel_sandbox_job(job_id, runner=runner, timeout=30.0)
+            except BaseException as cleanup_error:
+                raise BaseExceptionGroup(
+                    "sandbox startup failed and exact cleanup also failed",
+                    [error, cleanup_error],
+                ) from error
             raise
 
     def cancel_sandbox_job(
