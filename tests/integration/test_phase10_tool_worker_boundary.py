@@ -820,6 +820,105 @@ def _upgrade_harness_for_recorder() -> UpgradeHarness:
     return UpgradeHarness.from_authority(authority.with_upgrade_runtime(frozen))
 
 
+def test_upgrade_database_mutations_request_tuple_output_only() -> None:
+    harness = _upgrade_harness_for_recorder()
+    authority = harness.authority
+    task_id = "11111111-1111-4111-8111-111111111111"
+    agent_id = "22222222-2222-4222-8222-222222222222"
+    invocation_id = "33333333-3333-4333-8333-333333333333"
+    workspace_id = "44444444-4444-4444-8444-444444444444"
+    trigger_id = "55555555-5555-4555-8555-555555555555"
+    event_id = "66666666-6666-4666-8666-666666666666"
+    commands: list[tuple[str, ...]] = []
+
+    def psql_recorder(command: tuple[str, ...], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert kwargs["env"] == authority.environment
+        assert kwargs["cwd"] == authority.repo
+        commands.append(command)
+        statement = command[-1]
+        if statement.startswith("UPDATE task SET"):
+            returned_id = task_id
+            command_tag = "UPDATE 1"
+        elif statement.startswith("INSERT INTO trigger_invocation"):
+            returned_id = invocation_id
+            command_tag = "INSERT 0 1"
+        else:
+            raise AssertionError(f"unexpected database command: {command}")
+        quiet = "-qAt" in command or ("-q" in command and "-At" in command)
+        stdout = f"{returned_id}\n" if quiet else f"{returned_id}\n{command_tag}\n"
+        return subprocess.CompletedProcess(command, 0, stdout, "")
+
+    try:
+        harness.bind_upgrade_task(
+            task_id=task_id,
+            agent_id=agent_id,
+            workflow_id="phase10-upgrade-normal-12345678",
+            runner=psql_recorder,
+        )
+        harness.insert_trigger_invocation(
+            invocation_id=invocation_id,
+            workspace_id=workspace_id,
+            trigger_id=trigger_id,
+            event_id=event_id,
+            workflow_id="phase10-upgrade-sync-12345678",
+            runner=psql_recorder,
+        )
+        assert len(commands) == 2
+        assert all("-qAt" in command for command in commands)
+    finally:
+        authority.remove_runtime_paths()
+
+
+@pytest.mark.parametrize(
+    ("operation", "stdout"),
+    [
+        ("task", ""),
+        ("task", "99999999-9999-4999-8999-999999999999\n"),
+        (
+            "task",
+            "11111111-1111-4111-8111-111111111111\n11111111-1111-4111-8111-111111111111\n",
+        ),
+        ("invocation", ""),
+        ("invocation", "99999999-9999-4999-8999-999999999999\n"),
+        (
+            "invocation",
+            "33333333-3333-4333-8333-333333333333\n33333333-3333-4333-8333-333333333333\n",
+        ),
+    ],
+)
+def test_upgrade_database_mutations_reject_nonexact_tuple_output(
+    operation: str, stdout: str
+) -> None:
+    harness = _upgrade_harness_for_recorder()
+    authority = harness.authority
+
+    def psql_recorder(command: tuple[str, ...], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert kwargs["env"] == authority.environment
+        assert kwargs["cwd"] == authority.repo
+        return subprocess.CompletedProcess(command, 0, stdout, "")
+
+    try:
+        with pytest.raises(RuntimeError, match=r"exactly one|inserted exactly once"):
+            if operation == "task":
+                harness.bind_upgrade_task(
+                    task_id="11111111-1111-4111-8111-111111111111",
+                    agent_id="22222222-2222-4222-8222-222222222222",
+                    workflow_id="phase10-upgrade-normal-12345678",
+                    runner=psql_recorder,
+                )
+            else:
+                harness.insert_trigger_invocation(
+                    invocation_id="33333333-3333-4333-8333-333333333333",
+                    workspace_id="44444444-4444-4444-8444-444444444444",
+                    trigger_id="55555555-5555-4555-8555-555555555555",
+                    event_id="66666666-6666-4666-8666-666666666666",
+                    workflow_id="phase10-upgrade-sync-12345678",
+                    runner=psql_recorder,
+                )
+    finally:
+        authority.remove_runtime_paths()
+
+
 def test_phase9_sigkill_reaps_exact_container_before_current_tool_first_swap() -> None:
     harness = _upgrade_harness_for_recorder()
     authority = harness.authority

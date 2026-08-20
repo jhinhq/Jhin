@@ -415,7 +415,7 @@ async def test_linear_todo_starts_swe_task_that_opens_pr(
     assert len(tasks) == 1, tasks
 
     # Timeline chain: trigger origin recorded as a system message, then the
-    # run with every scripted tool call in order.
+    # run with every scripted tool call followed by the durable sync claim.
     messages = await _get(client, f"/api/v1/workspaces/{ws}/tasks/{task['id']}/messages")
     origin = [
         m
@@ -429,7 +429,17 @@ async def test_linear_todo_starts_swe_task_that_opens_pr(
     assert "ENG-142" in origin_text
 
     run_id = detail["runs"][0]["id"]
-    calls = await _get(client, f"/api/v1/workspaces/{ws}/runs/{run_id}/tool-calls")
+    deadline = time.monotonic() + 30.0
+    calls: list[dict[str, Any]] = []
+    while time.monotonic() < deadline:
+        calls = await _get(client, f"/api/v1/workspaces/{ws}/runs/{run_id}/tool-calls")
+        sync_completed = bool(calls) and calls[-1]["tool_name"] == "system.trigger.sync_external"
+        sync_completed = sync_completed and calls[-1]["status"] == "completed"
+        if sync_completed:
+            break
+        await asyncio.sleep(0.2)
+    else:
+        pytest.fail(f"trigger sync claim did not complete: {calls}")
     assert [c["tool_name"] for c in calls] == [
         "cli.repository.checkout",
         "cli.file.read",
@@ -438,6 +448,7 @@ async def test_linear_todo_starts_swe_task_that_opens_pr(
         "cli.test.run",
         "cli.command.execute",
         "github.pull_request.create",
+        "system.trigger.sync_external",
     ], calls
     assert all(c["status"] == "completed" for c in calls), calls
     assert calls[2]["sanitized_output_json"]["passed"] is False  # red before the fix

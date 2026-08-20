@@ -169,17 +169,22 @@ async def test_two_agents_two_profiles_run_through_temporal(
         assert len(run["snapshot_hash"]) == 64
         assert detail["total_cost_micros"] == run["estimated_cost_micros"]
 
-        # Timeline includes durable tool-manifest and committed-step markers.
+        # Timeline includes the durable manifest/reasoning pair and committed-step markers.
         response = await client.get(f"/api/v1/workspaces/{ws}/tasks/{task['id']}/timeline")
-        events = [e["event_type"] for e in response.json()]
+        timeline = response.json()
+        events = [e["event_type"] for e in timeline]
         assert events == [
             "run.started",
             "agent.step.tool_manifest",
+            "agent.step.reasoning",
             "node.load_context",
             "node.reason",
             "agent.step.committed",
             "run.completed",
         ], events
+        reasoning = [e for e in timeline if e["event_type"] == "agent.step.reasoning"]
+        assert len(reasoning) == 1
+        assert reasoning[0]["payload_json"] == {}
 
         # The agent's reply proves which model served it (fake echoes [model]).
         response = await client.get(f"/api/v1/workspaces/{ws}/tasks/{task['id']}/messages")
