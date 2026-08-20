@@ -2864,6 +2864,29 @@ def test_make_and_ci_delegate_all_live_modes_to_the_shared_harness() -> None:
     assert start_script.index(
         "XDG_CONFIG_HOME=/home/phase10rootless/.config", installer_env, installer
     )
+    status_diagnostic = start_script.index(
+        "systemctl --user --no-pager --full status docker.service", installer
+    )
+    journal_diagnostic = start_script.index(
+        "journalctl --user --no-pager -n 100 -u docker.service", status_diagnostic
+    )
+    failure_branch_start = start_script.rfind(
+        "if ! sudo -u phase10rootless -H env", rootlesskit_preflight, installer
+    )
+    failure_branch_end = start_script.index("\nfi\n", journal_diagnostic) + len("\nfi")
+    failure_branch = start_script[failure_branch_start:failure_branch_end]
+    assert failure_branch_start > rootlesskit_preflight
+    assert installer < status_diagnostic < journal_diagnostic
+    for assignment in (
+        "HOME=/home/phase10rootless",
+        "XDG_CONFIG_HOME=/home/phase10rootless/.config",
+        "XDG_RUNTIME_DIR=/run/user/10001",
+        "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/10001/bus",
+    ):
+        assert sum(line.strip() == f"{assignment} \\" for line in failure_branch.splitlines()) == 3
+    assert "systemctl --user --no-pager --full status docker.service || true" in failure_branch
+    assert "journalctl --user --no-pager -n 100 -u docker.service || true" in failure_branch
+    assert failure_branch.endswith("exit 1\nfi")
     assert (
         "echo \"ROOTLESS_SOCKET_SNAPSHOT=$(stat -c '%d:%i:%f:%u:%g' "
         '/run/user/10001/docker.sock)" >> "$GITHUB_ENV"' in start_script
@@ -2980,6 +3003,77 @@ def test_one_shot_lifecycle_publishes_lease_before_child_and_cleans_every_exit(
             child_runner=child_runner,
         )
         assert result.returncode == 0
+        assert observed == ["start", "child", "cleanup"]
+        assert not lease.exists()
+    finally:
+        lease.unlink(missing_ok=True)
+        authority.remove_runtime_paths()
+
+
+def test_one_shot_emits_redacted_child_failure_and_preserves_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    authority = _authority_for_recorder()
+    ports = {
+        variable: 51200 + index
+        for index, (variable, _service, _container_port) in enumerate(PUBLISHED_ENDPOINTS)
+    }
+    lease = Path("/tmp") / f"jhin-p10-child-failure-{uuid.uuid4().hex}.json"
+    observed: list[str] = []
+    sensitive_values: list[str] = []
+
+    def fake_start(self: ComposeAuthority, *, runner: Any) -> dict[str, int]:
+        del self, runner
+        observed.append("start")
+        return ports
+
+    def fake_cleanup(
+        self: ComposeAuthority,
+        *,
+        runner: Any,
+        upgrade: bool = False,
+    ) -> None:
+        del self, runner, upgrade
+        observed.append("cleanup")
+
+    def failing_child(
+        command: tuple[str, ...],
+        *,
+        env: dict[str, str],
+        cwd: Path,
+        timeout: float,
+        check: bool,
+        input_bytes: bytes | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd, timeout, input_bytes
+        assert check is True
+        observed.append("child")
+        sensitive_values.extend((env["SANDBOX_RUNNER_TOKEN"], env["JHIN_PHASE9_DB_READER_DSN"]))
+        raise subprocess.CalledProcessError(
+            1,
+            command,
+            output=f"FAILED live-node {sensitive_values[0]}\n",
+            stderr=f"database detail {sensitive_values[1]}\n",
+        )
+
+    monkeypatch.setattr(ComposeAuthority, "start_stack", fake_start)
+    monkeypatch.setattr(ComposeAuthority, "down_and_cleanup", fake_cleanup)
+    scenario = LiveScenario(nodes=("tests/integration/fake.py::test_live",), expected_tests=1)
+    try:
+        with pytest.raises(subprocess.CalledProcessError) as raised:
+            execute_one_shot(
+                authority,
+                scenario=scenario,
+                lease_path=lease,
+                child_runner=failing_child,
+            )
+        assert raised.value.returncode == 1
+        emitted = capsys.readouterr().err
+        assert "FAILED live-node" in emitted
+        assert "database detail" in emitted
+        assert sensitive_values
+        assert all(value not in emitted for value in sensitive_values)
         assert observed == ["start", "child", "cleanup"]
         assert not lease.exists()
     finally:
@@ -4491,6 +4585,46 @@ def test_owned_live_child_preserves_output_and_check_semantics(tmp_path: Path) -
     assert raised.value.returncode == 7
     assert raised.value.stdout == "stdout-value\n"
     assert raised.value.stderr == "stderr-value\n"
+
+
+def test_live_child_failure_output_is_bounded_and_redacted(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    master_key = "phase10-sensitive-master-key"
+    runner_token = "phase10-sensitive-runner-token"
+    reader_dsn = "postgresql://reader:phase10-sensitive-password@127.0.0.1:5432/jhin"
+    stdout = "x" * (lifecycle.LIVE_FAILURE_OUTPUT_LIMIT + 20)
+    stderr = "y" * (lifecycle.LIVE_FAILURE_OUTPUT_LIMIT + 20)
+    error = subprocess.CalledProcessError(
+        1,
+        ("pytest",),
+        output=f"{stdout}\nFAILED boundary-node {master_key} {reader_dsn}\n",
+        stderr=f"{stderr}\nassertion detail {runner_token}\n",
+    )
+
+    lifecycle.emit_live_child_failure_output(
+        error,
+        environment={
+            "JHIN_MASTER_KEY": master_key,
+            "JHIN_PHASE9_DB_READER_DSN": reader_dsn,
+            "SANDBOX_RUNNER_TOKEN": runner_token,
+        },
+    )
+
+    captured = capsys.readouterr()
+    emitted = captured.out + captured.err
+    assert master_key not in emitted
+    assert reader_dsn not in emitted
+    assert runner_token not in emitted
+    assert "<redacted>" in emitted
+    assert "FAILED boundary-node" in emitted
+    assert "assertion detail" in emitted
+    stdout_marker = "--- live pytest stdout (redacted tail) ---\n"
+    stderr_marker = "--- live pytest stderr (redacted tail) ---\n"
+    stdout_emitted = emitted.split(stdout_marker, 1)[1].split(stderr_marker, 1)[0]
+    stderr_emitted = emitted.split(stderr_marker, 1)[1]
+    assert len(stdout_emitted) <= lifecycle.LIVE_FAILURE_OUTPUT_LIMIT + 1
+    assert len(stderr_emitted) <= lifecycle.LIVE_FAILURE_OUTPUT_LIMIT + 1
 
 
 def test_owned_child_restores_the_callers_exact_signal_mask(tmp_path: Path) -> None:

@@ -223,12 +223,26 @@ jobs:
             XDG_RUNTIME_DIR=/run/user/10001 \
             DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/10001/bus \
             rootlesskit true
-          sudo -u phase10rootless -H env \
+          if ! sudo -u phase10rootless -H env \
             HOME=/home/phase10rootless \
             XDG_CONFIG_HOME=/home/phase10rootless/.config \
             XDG_RUNTIME_DIR=/run/user/10001 \
             DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/10001/bus \
-            dockerd-rootless-setuptool.sh install --force
+            dockerd-rootless-setuptool.sh install --force; then
+            sudo -u phase10rootless -H env \
+              HOME=/home/phase10rootless \
+              XDG_CONFIG_HOME=/home/phase10rootless/.config \
+              XDG_RUNTIME_DIR=/run/user/10001 \
+              DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/10001/bus \
+              systemctl --user --no-pager --full status docker.service || true
+            sudo -u phase10rootless -H env \
+              HOME=/home/phase10rootless \
+              XDG_CONFIG_HOME=/home/phase10rootless/.config \
+              XDG_RUNTIME_DIR=/run/user/10001 \
+              DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/10001/bus \
+              journalctl --user --no-pager -n 100 -u docker.service || true
+            exit 1
+          fi
           sudo install -d -o 10001 -g 10001 -m 0700 /home/phase10rootless/.config/docker
           printf '%s\n' '{"exec-opts":["native.cgroupdriver=systemd"]}' \
             | sudo -u phase10rootless tee /home/phase10rootless/.config/docker/daemon.json >/dev/null

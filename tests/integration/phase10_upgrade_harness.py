@@ -488,6 +488,46 @@ def build_live_pytest_command(scenario: LiveScenario) -> tuple[str, ...]:
     )
 
 
+LIVE_FAILURE_OUTPUT_LIMIT = 64 * 1024
+_SENSITIVE_ENV_NAME_PARTS = (
+    "DSN",
+    "KEY",
+    "PASSWORD",
+    "SECRET",
+    "TOKEN",
+    "DATABASE_URL",
+    "NATS_URL",
+)
+
+
+def _redact_live_failure_text(value: Any, environment: dict[str, str]) -> str:
+    rendered = _text(value)
+    sensitive_values = {
+        item
+        for name, item in environment.items()
+        if item and any(part in name.upper() for part in _SENSITIVE_ENV_NAME_PARTS)
+    }
+    for sensitive_value in sorted(sensitive_values, key=len, reverse=True):
+        rendered = rendered.replace(sensitive_value, "<redacted>")
+    return rendered[-LIVE_FAILURE_OUTPUT_LIMIT:]
+
+
+def emit_live_child_failure_output(
+    error: subprocess.CalledProcessError,
+    *,
+    environment: dict[str, str],
+) -> None:
+    """Emit bounded, secret-redacted pytest diagnostics for CI failures."""
+    for label, value in (("stdout", error.stdout), ("stderr", error.stderr)):
+        rendered = _redact_live_failure_text(value, environment)
+        if not rendered:
+            continue
+        sys.stderr.write(f"\n--- live pytest {label} (redacted tail) ---\n")
+        sys.stderr.write(rendered)
+        if not rendered.endswith("\n"):
+            sys.stderr.write("\n")
+
+
 def run_command(
     command: tuple[str, ...],
     *,
@@ -5008,14 +5048,18 @@ def execute_one_shot(
                     "JHIN_TEST_COMPOSE_PROJECT": live_authority.project,
                 }
             )
-        result = child_runner(
-            build_live_pytest_command(scenario),
-            env=child_environment,
-            cwd=live_authority.repo,
-            timeout=5400.0,
-            check=True,
-            input_bytes=None,
-        )
+        try:
+            result = child_runner(
+                build_live_pytest_command(scenario),
+                env=child_environment,
+                cwd=live_authority.repo,
+                timeout=5400.0,
+                check=True,
+                input_bytes=None,
+            )
+        except subprocess.CalledProcessError as error:
+            emit_live_child_failure_output(error, environment=child_environment)
+            raise
         if result.returncode != 0:
             raise subprocess.CalledProcessError(
                 result.returncode,
