@@ -231,6 +231,7 @@ def _nearest_statement(
 
 
 _FUNCTION_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+_DECLARATION_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 _COMPREHENSION_SCOPES = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 _BINDING_SCOPES = (
     ast.Module,
@@ -309,19 +310,32 @@ def _module_scope(
     return None
 
 
-def _is_enclosing_function_scope(
-    inner: ast.AST,
-    target: ast.AST,
+def _scope_binds_locally(
+    scope: ast.AST,
+    name: str,
     parents: Mapping[ast.AST, ast.AST],
 ) -> bool:
-    current = parents.get(inner)
+    if _scope_declares(scope, ast.Global, name, parents) or _scope_declares(
+        scope, ast.Nonlocal, name, parents
+    ):
+        return False
+    return any(
+        _bound_name(candidate) in {name, "*"} and _binding_scope(candidate, parents) is scope
+        for candidate in ast.walk(scope)
+    )
+
+
+def _nonlocal_target_scope(
+    scope: ast.AST,
+    name: str,
+    parents: Mapping[ast.AST, ast.AST],
+) -> ast.AST | None:
+    current = parents.get(scope)
     while current is not None:
-        if isinstance(current, _FUNCTION_SCOPES) and current is target:
-            return True
-        if isinstance(current, ast.Module):
-            return False
+        if isinstance(current, _FUNCTION_SCOPES) and _scope_binds_locally(current, name, parents):
+            return current
         current = parents.get(current)
-    return False
+    return None
 
 
 def _binding_applies_to_scope(
@@ -331,12 +345,11 @@ def _binding_applies_to_scope(
     parents: Mapping[ast.AST, ast.AST],
 ) -> bool:
     lexical_scope = _binding_scope(candidate, parents)
-    if not isinstance(lexical_scope, _FUNCTION_SCOPES):
-        return lexical_scope is scope
-    if _scope_declares(lexical_scope, ast.Global, name, parents):
-        return _module_scope(lexical_scope, parents) is scope
-    if _scope_declares(lexical_scope, ast.Nonlocal, name, parents):
-        return _is_enclosing_function_scope(lexical_scope, scope, parents)
+    if isinstance(lexical_scope, _DECLARATION_SCOPES):
+        if _scope_declares(lexical_scope, ast.Global, name, parents):
+            return _module_scope(lexical_scope, parents) is scope
+        if _scope_declares(lexical_scope, ast.Nonlocal, name, parents):
+            return _nonlocal_target_scope(lexical_scope, name, parents) is scope
     return lexical_scope is scope
 
 

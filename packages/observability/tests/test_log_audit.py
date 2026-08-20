@@ -222,11 +222,29 @@ def test_poller_health_ignores_nested_scope_output_bindings(tmp_path: Path) -> N
         "def helper():\n"
         " _READY_OUTPUT = 'function-local'\n"
         " return _READY_OUTPUT\n"
+        "class Namespace:\n"
+        " _READY_OUTPUT = 'class-local'\n"
         "values = [_READY_OUTPUT for _READY_OUTPUT in ()]\n"
         "def main(ok):\n"
         " print(_READY_OUTPUT if ok else _UNAVAILABLE_OUTPUT)\n"
     )
     assert audit.audit_paths((source,)) == []
+
+
+def test_poller_health_rejects_nested_class_global_output_rebinding(tmp_path: Path) -> None:
+    audit = _load_audit()
+    source = tmp_path / "packages/workflows/src/jhin_workflows/poller_health.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "_READY_OUTPUT = 'workflow-poller-ready'\n"
+        "_UNAVAILABLE_OUTPUT = 'workflow-poller-unavailable'\n"
+        "class Mutator:\n"
+        " global _READY_OUTPUT\n"
+        " _READY_OUTPUT = object()\n"
+        "def main(ok):\n"
+        " print(_READY_OUTPUT if ok else _UNAVAILABLE_OUTPUT)\n"
+    )
+    assert "direct_print" in _failure_codes(audit.audit_paths((source,)))
 
 
 def test_job_manager_allows_only_awaited_validated_docker_info(tmp_path: Path) -> None:
@@ -317,10 +335,71 @@ def test_job_manager_ignores_nested_scope_client_bindings(tmp_path: Path) -> Non
         "  def helper():\n"
         "   client = object()\n"
         "   return client\n"
+        "  class Namespace:\n"
+        "   client = object()\n"
+        "  class GlobalNamespace:\n"
+        "   global client\n"
+        "   client = object()\n"
         "  values = [client for client in ()]\n"
         "  await client.system.info()\n"
     )
     assert audit.audit_paths((source,)) == []
+
+
+def test_job_manager_rejects_nested_class_nonlocal_client_rebinding(tmp_path: Path) -> None:
+    audit = _load_audit()
+    source = tmp_path / "services/sandbox_runner/src/jhin_sandbox_runner/jobs.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import aiodocker\n"
+        "class JobManager:\n"
+        " async def start(self, validated_url, foreign):\n"
+        "  client = aiodocker.Docker(url=validated_url)\n"
+        "  class Mutator:\n"
+        "   nonlocal client\n"
+        "   client = foreign\n"
+        "  await client.system.info()\n"
+    )
+    assert "unresolved_logger_receiver" in _failure_codes(audit.audit_paths((source,)))
+
+
+def test_job_manager_nonlocal_targets_nearest_enclosing_binding(tmp_path: Path) -> None:
+    audit = _load_audit()
+    source = tmp_path / "services/sandbox_runner/src/jhin_sandbox_runner/jobs.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import aiodocker\n"
+        "class JobManager:\n"
+        " async def start(self, validated_url, foreign):\n"
+        "  client = aiodocker.Docker(url=validated_url)\n"
+        "  def intermediate():\n"
+        "   client = foreign\n"
+        "   def inner():\n"
+        "    nonlocal client\n"
+        "    client = foreign\n"
+        "   return inner\n"
+        "  await client.system.info()\n"
+    )
+    assert audit.audit_paths((source,)) == []
+
+
+def test_job_manager_nonlocal_skips_unbound_intermediate_scope(tmp_path: Path) -> None:
+    audit = _load_audit()
+    source = tmp_path / "services/sandbox_runner/src/jhin_sandbox_runner/jobs.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import aiodocker\n"
+        "class JobManager:\n"
+        " async def start(self, validated_url, foreign):\n"
+        "  client = aiodocker.Docker(url=validated_url)\n"
+        "  def intermediate():\n"
+        "   def inner():\n"
+        "    nonlocal client\n"
+        "    client = foreign\n"
+        "   return inner\n"
+        "  await client.system.info()\n"
+    )
+    assert "unresolved_logger_receiver" in _failure_codes(audit.audit_paths((source,)))
 
 
 def _entrypoint_function(path: Path, function_name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
