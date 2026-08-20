@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import os
+import secrets
 import shutil
 import signal
 import stat
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -24,6 +26,9 @@ from typing import Any, cast
 import httpx
 import pytest
 import yaml  # type: ignore[import-untyped]
+from temporalio.api.common.v1 import ActivityType
+from temporalio.api.history.v1 import ActivityTaskScheduledEventAttributes, HistoryEvent
+from temporalio.api.taskqueue.v1 import TaskQueue
 from temporalio.client import Client as TemporalClient
 
 from jhin_api.seed import DEV_OWNER_EMAIL, DEV_OWNER_PASSWORD
@@ -359,13 +364,36 @@ def test_barrier_arrival_wait_requires_one_fsynced_uuid_marker() -> None:
     try:
         arrived = barrier.selected_dir / f"{identity}.arrived"
         arrived.write_text("arrived\n", encoding="utf-8")
-        arrived.chmod(0o666)
+        arrived.chmod(0o644)
         assert barrier.wait_arrival(timeout=0.1) == identity
         with pytest.raises(RuntimeError, match="unexpected barrier marker"):
             (barrier.selected_dir / "not-an-identity.arrived").write_text(
                 "arrived\n", encoding="utf-8"
             )
             barrier.wait_arrival(timeout=0.1)
+    finally:
+        barrier.cleanup()
+
+
+def test_barrier_arrival_waits_for_cross_uid_mode_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    barrier = create_barrier_root("phase10.tool.before_claim.v1")
+    identity = "018f4d52-8b93-7d41-8ac7-7f190f091111"
+    arrived = barrier.selected_dir / f"{identity}.arrived"
+    arrived.write_bytes(b"arrived\n")
+    arrived.chmod(0o600)
+    sleeps = 0
+
+    def publish(_duration: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        arrived.chmod(0o644)
+
+    monkeypatch.setattr(time, "sleep", publish)
+    try:
+        assert barrier.wait_arrival(timeout=0.1) == identity
+        assert sleeps == 1
     finally:
         barrier.cleanup()
 
@@ -387,6 +415,20 @@ def test_history_parser_preserves_order_and_correlates_retried_starts() -> None:
     ]
     assert activity_start_count(events, "reason_agent_step") == 2
     assert activity_start_count(events, "execute_bound_tool") == 1
+
+
+def test_history_parser_ignores_unset_protobuf_activity_attributes() -> None:
+    scheduled = HistoryEvent(
+        event_id=2,
+        activity_task_scheduled_event_attributes=ActivityTaskScheduledEventAttributes(
+            activity_type=ActivityType(name="execute_bound_tool"),
+            task_queue=TaskQueue(name="jhin-tool-queue"),
+        ),
+    )
+
+    assert activity_schedule_pairs([HistoryEvent(event_id=1), scheduled]) == [
+        ("execute_bound_tool", "jhin-tool-queue")
+    ]
 
 
 def test_phase9_source_ref_is_exact_committed_ancestor() -> None:
@@ -2849,8 +2891,33 @@ def test_make_and_ci_delegate_all_live_modes_to_the_shared_harness() -> None:
         if step.get("name") == "Start and validate UID-10001 rootless Docker"
     )
     start_script = start_step["run"]
+    manager_set = start_script.index(
+        "systemctl --user set-environment \\\n"
+        "  HOME=/home/phase10rootless \\\n"
+        "  XDG_CONFIG_HOME=/home/phase10rootless/.config \\\n"
+        "  XDG_RUNTIME_DIR=/run/user/10001"
+    )
+    manager_verify = start_script.index("systemctl --user show-environment", manager_set)
     rootlesskit_preflight = start_script.index("rootlesskit true")
     installer = start_script.index("dockerd-rootless-setuptool.sh install --force")
+    manager_set_env = start_script.rfind("sudo -u phase10rootless -H env", 0, manager_set)
+    assert manager_set_env >= 0
+    for assignment in (
+        "HOME=/home/phase10rootless",
+        "XDG_CONFIG_HOME=/home/phase10rootless/.config",
+        "XDG_RUNTIME_DIR=/run/user/10001",
+        "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/10001/bus",
+    ):
+        assert start_script.index(assignment, manager_set_env, manager_set)
+    assert manager_set < manager_verify < rootlesskit_preflight
+    manager_verification = start_script[manager_verify:rootlesskit_preflight]
+    for assignment in (
+        "HOME=/home/phase10rootless",
+        "XDG_CONFIG_HOME=/home/phase10rootless/.config",
+        "XDG_RUNTIME_DIR=/run/user/10001",
+    ):
+        assert f"'{assignment}'" in manager_verification
+    assert 'grep -Fx "$expected" <<<"$manager_environment" >/dev/null' in manager_verification
     assert start_script.index("HOME=/home/phase10rootless") < rootlesskit_preflight
     assert (
         start_script.index("XDG_CONFIG_HOME=/home/phase10rootless/.config") < rootlesskit_preflight
@@ -6103,6 +6170,19 @@ def test_worker_recreation_uses_exact_barrier_mount_and_bounded_wait() -> None:
             "300",
             "tool-worker",
         )
+        pair_command = authority.worker_recreate_command("tool-worker", "agent-worker")
+        assert pair_command[-10:] == (
+            "up",
+            "-d",
+            "--no-deps",
+            "--force-recreate",
+            "--build",
+            "--wait",
+            "--wait-timeout",
+            "300",
+            "tool-worker",
+            "agent-worker",
+        )
     finally:
         barrier.cleanup()
         authority.remove_runtime_paths()
@@ -6143,6 +6223,64 @@ def test_worker_recreation_reasserts_the_whole_live_topology(
         assert len(ps_calls) == 1
         assert ps_calls[0][-4:] == ("ps", "--all", "--format", "json")
     finally:
+        authority.remove_runtime_paths()
+
+
+def test_worker_pair_recreation_is_combined_before_whole_topology_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _authority_for_recorder()
+    recorder = _Recorder(authority)
+    recorder.ps_output = json.dumps(
+        [
+            {"Service": service, "State": "running", "Health": "healthy"}
+            for service in sorted(EXPECTED_ROOTFUL_SERVICES)
+        ]
+    )
+    barrier = create_barrier_root("phase10.agent.before_manifest_bind.v1")
+    identity = "018f4d52-8b93-7d41-8ac7-7f190f091111"
+    environment = authority.worker_environment(barrier=barrier, identity=identity)
+    recorder.authority = replace(
+        authority,
+        _environment_items=tuple(sorted(environment.items())),
+    )
+    inspected: list[str] = []
+
+    def inspect_service(
+        self: ComposeAuthority,
+        service: str,
+        *,
+        runner: Any,
+    ) -> dict[str, Any]:
+        inspected.append(service)
+        return {
+            "Config": {
+                "Env": [
+                    f"{key}={environment[key]}"
+                    for key in (
+                        "APP_ENV",
+                        "JHIN_TEST_CRASH_BARRIER_DIR",
+                        "JHIN_TEST_CRASH_BARRIER_NAME",
+                        "JHIN_TEST_CRASH_BARRIER_MATCH",
+                    )
+                ]
+            }
+        }
+
+    monkeypatch.setattr(ComposeAuthority, "inspect_service", inspect_service)
+    try:
+        authority.recreate_workers(
+            ("tool-worker", "agent-worker"),
+            barrier=barrier,
+            identity=identity,
+            runner=recorder,
+        )
+        assert recorder.calls[0][-2:] == ("tool-worker", "agent-worker")
+        assert inspected == ["tool-worker", "agent-worker"]
+        ps_calls = [call for call in recorder.calls if "ps" in call]
+        assert len(ps_calls) == 1
+    finally:
+        barrier.cleanup()
         authority.remove_runtime_paths()
 
 
@@ -6304,7 +6442,7 @@ def test_service_once_uses_exact_vector_and_explicit_container_environment() -> 
 
 def test_inspectable_job_request_is_nonnetworked_and_exactly_label_addressable() -> None:
     authority = _authority_for_recorder()
-    job_id = "phase10-security-deadc0de"
+    job_id = "deadc0dedeadc0dedeadc0de"
     try:
         assert authority.blocking_sandbox_job_request(job_id) == {
             "job_id": job_id,
@@ -6313,6 +6451,37 @@ def test_inspectable_job_request_is_nonnetworked_and_exactly_label_addressable()
             "timeout_seconds": 300,
         }
         assert authority.sandbox_job_label(job_id) == f"jhin.sandbox.job={job_id}"
+    finally:
+        authority.remove_runtime_paths()
+
+
+def test_inspectable_job_uses_a_runner_valid_hex_identifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = replace(
+        _authority_for_recorder(),
+        _published_port_items=(("SANDBOX_RUNNER_DEV_PORT", 49152),),
+    )
+    captured: dict[str, Any] = {}
+
+    class RequestCaptured(Exception):
+        pass
+
+    def capture_request(request: Any, *, timeout: float) -> Any:
+        captured["request"] = request
+        captured["timeout"] = timeout
+        raise RequestCaptured
+
+    monkeypatch.setattr(secrets, "token_hex", lambda _length: "deadc0dedeadc0dedeadc0de")
+    monkeypatch.setattr(urllib.request, "urlopen", capture_request)
+    try:
+        with pytest.raises(RequestCaptured):
+            authority.start_inspectable_sandbox_job()
+        request = captured["request"]
+        assert json.loads(request.data) == authority.blocking_sandbox_job_request(
+            "deadc0dedeadc0dedeadc0de"
+        )
+        assert captured["timeout"] == 5.0
     finally:
         authority.remove_runtime_paths()
 
@@ -6888,43 +7057,56 @@ async def test_tool_queue_loss_blocks_effect_and_live_networks_are_isolated() ->
             preset="autonomous",
         )
         authority.stop_service("tool-worker")
-        assigned = await _assign(
-            client,
-            workspace_id,
-            agent["id"],
-            marker=marker,
-            description=_comment_marker(connection["id"], marker),
-        )
-        _started, run_id = await _wait_run_started(client, workspace_id, str(assigned["id"]))
-        temporal_run_id = authority.temporal_run_id(run_id)
-        deadline = time.monotonic() + 30.0
-        while time.monotonic() < deadline:
-            history = await _history(str(assigned["temporal_workflow_id"]), temporal_run_id)
-            if ("resolve_advertised_tools", _TOOL_QUEUE) in activity_schedule_pairs(history):
-                break
-            await asyncio.sleep(0.25)
-        else:
-            pytest.fail("workflow never scheduled tool-queue schema resolution")
-        assert await _comment_count(marker) == 0
-        authority.recreate_worker("tool-worker")
-        detail = await _wait_task(client, workspace_id, assigned["id"])
-        assert detail["task"]["state"] == "completed", detail
-        assert await _comment_count(marker) == 1
-        _assert_queue_ownership(
-            await _history(str(assigned["temporal_workflow_id"]), temporal_run_id),
-            expected=_one_tool_history(),
-        )
-        runner = authority.inspect_service("sandbox-runner")
-        assert runner["Config"]["User"] == "10001:10001"
-        assert runner["HostConfig"]["Privileged"] is False
-        expected_groups = [] if authority.mode == "rootless" else [str(authority.socket_gid)]
-        assert runner["HostConfig"].get("GroupAdd", []) == expected_groups
-        assert authority.service_dns_probe("agent-worker", "sandbox-runner") != 0
-        assert authority.service_dns_probe("tool-worker", "sandbox-runner") == 0
-        assert authority.service_http_json("tool-worker", "http://sandbox-runner:8085/health") == {
-            "docker": True,
-            "status": "ok",
-        }
+        tool_worker_stopped = True
+        try:
+            assigned = await _assign(
+                client,
+                workspace_id,
+                agent["id"],
+                marker=marker,
+                description=_comment_marker(connection["id"], marker),
+            )
+            _started, run_id = await _wait_run_started(
+                client,
+                workspace_id,
+                str(assigned["id"]),
+            )
+            temporal_run_id = authority.temporal_run_id(run_id)
+            deadline = time.monotonic() + 30.0
+            while time.monotonic() < deadline:
+                history = await _history(str(assigned["temporal_workflow_id"]), temporal_run_id)
+                if ("resolve_advertised_tools", _TOOL_QUEUE) in activity_schedule_pairs(history):
+                    break
+                await asyncio.sleep(0.25)
+            else:
+                pytest.fail("workflow never scheduled tool-queue schema resolution")
+            assert await _comment_count(marker) == 0
+            authority.recreate_worker("tool-worker")
+            tool_worker_stopped = False
+            detail = await _wait_task(client, workspace_id, assigned["id"])
+            assert detail["task"]["state"] == "completed", detail
+            assert await _comment_count(marker) == 1
+            _assert_queue_ownership(
+                await _history(str(assigned["temporal_workflow_id"]), temporal_run_id),
+                expected=_one_tool_history(),
+            )
+            runner = authority.inspect_service("sandbox-runner")
+            assert runner["Config"]["User"] == "10001:10001"
+            assert runner["HostConfig"]["Privileged"] is False
+            expected_groups = [] if authority.mode == "rootless" else [str(authority.socket_gid)]
+            assert runner["HostConfig"].get("GroupAdd", []) == expected_groups
+            assert authority.service_dns_probe("agent-worker", "sandbox-runner") != 0
+            assert authority.service_dns_probe("tool-worker", "sandbox-runner") == 0
+            assert authority.service_http_json(
+                "tool-worker",
+                "http://sandbox-runner:8085/health",
+            ) == {
+                "docker": True,
+                "status": "ok",
+            }
+        finally:
+            if tool_worker_stopped:
+                authority.recreate_worker("tool-worker")
 
 
 @pytest.mark.integration
@@ -7004,8 +7186,11 @@ async def test_agent_crash_matrix_retries_without_tool_effect_duplication(
             _detail, run_id = await _wait_run_started(client, workspace_id, str(assigned["id"]))
             temporal_run_id = authority.temporal_run_id(run_id)
             authority.stop_service("agent-worker")
-            authority.recreate_worker("agent-worker", barrier=barrier, identity=run_id)
-            authority.recreate_worker("tool-worker")
+            authority.recreate_workers(
+                ("tool-worker", "agent-worker"),
+                barrier=barrier,
+                identity=run_id,
+            )
             assert barrier.wait_arrival(timeout=120.0) == run_id
             timeline = await _timeline(client, workspace_id, run_id)
             event_types = [row["event_type"] for row in timeline]
@@ -7032,9 +7217,7 @@ async def test_agent_crash_matrix_retries_without_tool_effect_duplication(
             _assert_queue_ownership(history, expected=_one_tool_history())
     finally:
         with contextlib.suppress(Exception):
-            authority.recreate_worker("agent-worker")
-        with contextlib.suppress(Exception):
-            authority.recreate_worker("tool-worker")
+            authority.recreate_workers(("tool-worker", "agent-worker"))
         barrier.cleanup()
         provider.close()
 

@@ -1204,9 +1204,15 @@ class BarrierRoot:
             if entries:
                 marker = entries[0]
                 metadata = marker.lstat()
-                if not stat.S_ISREG(metadata.st_mode) or marker.read_bytes() != b"arrived\n":
+                mode = stat.S_IMODE(metadata.st_mode)
+                if not stat.S_ISREG(metadata.st_mode):
                     raise RuntimeError("barrier arrival marker is malformed")
-                return marker.name.removesuffix(".arrived")
+                if mode == 0o644:
+                    if marker.read_bytes() != b"arrived\n":
+                        raise RuntimeError("barrier arrival marker is malformed")
+                    return marker.name.removesuffix(".arrived")
+                if mode != 0o600:
+                    raise RuntimeError("barrier arrival marker mode is invalid")
             if time.monotonic() >= deadline:
                 raise TimeoutError("worker did not reach the selected crash barrier")
             time.sleep(0.02)
@@ -1354,11 +1360,21 @@ def _events(history_or_events: Any) -> Sequence[Any]:
     return cast(Sequence[Any], events)
 
 
+def _present_event_attributes(event: Any, field: str) -> Any:
+    has_field = getattr(event, "HasField", None)
+    if callable(has_field) and not has_field(field):
+        return None
+    return getattr(event, field, None)
+
+
 def activity_schedule_pairs(history_or_events: Any) -> list[tuple[str, str]]:
     """Extract scheduled activity name/queue pairs in history order."""
     pairs: list[tuple[str, str]] = []
     for event in _events(history_or_events):
-        attributes = getattr(event, "activity_task_scheduled_event_attributes", None)
+        attributes = _present_event_attributes(
+            event,
+            "activity_task_scheduled_event_attributes",
+        )
         if attributes is None:
             continue
         activity_type = getattr(attributes, "activity_type", None)
@@ -1376,7 +1392,10 @@ def activity_start_count(history_or_events: Any, activity_name: str) -> int:
     scheduled_ids: set[int] = set()
     events = _events(history_or_events)
     for event in events:
-        attributes = getattr(event, "activity_task_scheduled_event_attributes", None)
+        attributes = _present_event_attributes(
+            event,
+            "activity_task_scheduled_event_attributes",
+        )
         if attributes is None:
             continue
         name = getattr(getattr(attributes, "activity_type", None), "name", None)
@@ -1387,7 +1406,10 @@ def activity_start_count(history_or_events: Any, activity_name: str) -> int:
             scheduled_ids.add(event_id)
     count = 0
     for event in events:
-        attributes = getattr(event, "activity_task_started_event_attributes", None)
+        attributes = _present_event_attributes(
+            event,
+            "activity_task_started_event_attributes",
+        )
         scheduled_event_id = getattr(attributes, "scheduled_event_id", None)
         if scheduled_event_id in scheduled_ids:
             count += 1
@@ -2047,9 +2069,13 @@ class ComposeAuthority:
         )
         return environment
 
-    def worker_recreate_command(self, service: str) -> tuple[str, ...]:
-        if service not in {"agent-worker", "tool-worker"}:
-            raise ValueError("only a Phase 10 worker may be recreated")
+    def worker_recreate_command(self, *services: str) -> tuple[str, ...]:
+        if (
+            not services
+            or len(set(services)) != len(services)
+            or any(service not in {"agent-worker", "tool-worker"} for service in services)
+        ):
+            raise ValueError("only distinct Phase 10 workers may be recreated")
         return self.compose_command(
             "up",
             "-d",
@@ -2059,7 +2085,7 @@ class ComposeAuthority:
             "--wait",
             "--wait-timeout",
             "300",
-            service,
+            *services,
         )
 
     def service_once_command(
@@ -2185,17 +2211,18 @@ class ComposeAuthority:
                     raise TimeoutError("counting provider did not become ready")
             time.sleep(0.1)
 
-    def recreate_worker(
+    def recreate_workers(
         self,
-        service: str,
+        services: Sequence[str],
         *,
         barrier: BarrierRoot | None = None,
         identity: str | None = None,
         runner: CommandRunner = run_command,
     ) -> None:
+        selected = tuple(services)
         environment = self.worker_environment(barrier=barrier, identity=identity)
         self._run(
-            self.worker_recreate_command(service),
+            self.worker_recreate_command(*selected),
             runner=runner,
             timeout=1200.0,
             environment=environment,
@@ -2207,13 +2234,6 @@ class ComposeAuthority:
             environment=environment,
         )
         parse_compose_ps(_text(result.stdout), self.expected_services)
-        inspected = self.inspect_service(service, runner=runner)
-        values = inspected.get("Config", {}).get("Env", [])
-        if not isinstance(values, list):
-            raise RuntimeError("worker inspect omitted its environment")
-        observed = dict(
-            item.split("=", 1) for item in values if isinstance(item, str) and "=" in item
-        )
         expected = {
             key: environment[key]
             for key in (
@@ -2223,8 +2243,31 @@ class ComposeAuthority:
                 "JHIN_TEST_CRASH_BARRIER_MATCH",
             )
         }
-        if any(observed.get(key) != value for key, value in expected.items()):
-            raise RuntimeError("worker barrier environment differs from the selected identity")
+        for service in selected:
+            inspected = self.inspect_service(service, runner=runner)
+            values = inspected.get("Config", {}).get("Env", [])
+            if not isinstance(values, list):
+                raise RuntimeError("worker inspect omitted its environment")
+            observed = dict(
+                item.split("=", 1) for item in values if isinstance(item, str) and "=" in item
+            )
+            if any(observed.get(key) != value for key, value in expected.items()):
+                raise RuntimeError("worker barrier environment differs from the selected identity")
+
+    def recreate_worker(
+        self,
+        service: str,
+        *,
+        barrier: BarrierRoot | None = None,
+        identity: str | None = None,
+        runner: CommandRunner = run_command,
+    ) -> None:
+        self.recreate_workers(
+            (service,),
+            barrier=barrier,
+            identity=identity,
+            runner=runner,
+        )
 
     def stop_service(
         self,
@@ -2689,7 +2732,7 @@ class ComposeAuthority:
         runner: CommandRunner = run_command,
         timeout: float = 30.0,
     ) -> RunningSandboxJob:
-        job_id = f"phase10-security-{secrets.token_hex(8)}"
+        job_id = secrets.token_hex(12)
         self.record_direct_sandbox_job(job_id)
         endpoint, headers = self._sandbox_endpoint()
         request = urllib.request.Request(

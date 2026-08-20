@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import stat
 from collections.abc import Callable
 from pathlib import Path
 from uuid import UUID
@@ -34,6 +35,7 @@ async def test_barrier_fsyncs_arrival_and_waits_for_release(tmp_path: Path) -> N
     release = tmp_path / TOOL_AFTER_CLAIM / f"{identity}.release"
     await wait_until(arrived.exists)
     assert arrived.read_bytes() == b"arrived\n"
+    assert stat.S_IMODE(arrived.stat().st_mode) == 0o644
     assert not waiting.done()
     release_barrier(tmp_path, TOOL_AFTER_CLAIM, identity)
     assert release.read_bytes() == b"release\n"

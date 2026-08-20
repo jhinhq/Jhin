@@ -222,6 +222,31 @@ jobs:
             XDG_CONFIG_HOME=/home/phase10rootless/.config \
             XDG_RUNTIME_DIR=/run/user/10001 \
             DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/10001/bus \
+            systemctl --user set-environment \
+            HOME=/home/phase10rootless \
+            XDG_CONFIG_HOME=/home/phase10rootless/.config \
+            XDG_RUNTIME_DIR=/run/user/10001
+          manager_environment="$(
+            sudo -u phase10rootless -H env \
+              HOME=/home/phase10rootless \
+              XDG_CONFIG_HOME=/home/phase10rootless/.config \
+              XDG_RUNTIME_DIR=/run/user/10001 \
+              DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/10001/bus \
+              systemctl --user show-environment
+          )"
+          for expected in \
+            'HOME=/home/phase10rootless' \
+            'XDG_CONFIG_HOME=/home/phase10rootless/.config' \
+            'XDG_RUNTIME_DIR=/run/user/10001'
+          do
+            grep -Fx "$expected" <<<"$manager_environment" >/dev/null
+          done
+          unset manager_environment
+          sudo -u phase10rootless -H env \
+            HOME=/home/phase10rootless \
+            XDG_CONFIG_HOME=/home/phase10rootless/.config \
+            XDG_RUNTIME_DIR=/run/user/10001 \
+            DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/10001/bus \
             rootlesskit true
           if ! sudo -u phase10rootless -H env \
             HOME=/home/phase10rootless \

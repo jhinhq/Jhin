@@ -53,6 +53,8 @@ class CrashBarrier:
             try:
                 os.write(fd, b"arrived\n")
                 os.fsync(fd)
+                os.fchmod(fd, 0o644)
+                os.fsync(fd)
             finally:
                 os.close(fd)
             directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
