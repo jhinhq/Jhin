@@ -230,6 +230,133 @@ def _nearest_statement(
     return current
 
 
+_FUNCTION_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+_COMPREHENSION_SCOPES = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+_BINDING_SCOPES = (
+    ast.Module,
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.Lambda,
+    ast.ClassDef,
+    *_COMPREHENSION_SCOPES,
+)
+
+
+def _bound_name(candidate: ast.AST) -> str | None:
+    if isinstance(candidate, ast.Name) and isinstance(candidate.ctx, (ast.Store, ast.Del)):
+        return candidate.id
+    if isinstance(candidate, ast.alias):
+        return candidate.asname or candidate.name.split(".", 1)[0]
+    if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return candidate.name
+    if isinstance(candidate, ast.arg):
+        return candidate.arg
+    if isinstance(candidate, ast.ExceptHandler):
+        return candidate.name
+    if isinstance(candidate, (ast.MatchAs, ast.MatchStar)):
+        return candidate.name
+    if isinstance(candidate, ast.MatchMapping):
+        return candidate.rest
+    return None
+
+
+def _binding_scope(
+    candidate: ast.AST,
+    parents: Mapping[ast.AST, ast.AST],
+) -> ast.AST | None:
+    current = (
+        parents.get(candidate)
+        if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        else candidate
+    )
+    named_expression_target = (
+        isinstance(candidate, ast.Name)
+        and isinstance((parent := parents.get(candidate)), ast.NamedExpr)
+        and parent.target is candidate
+    )
+    while current is not None:
+        if isinstance(current, _BINDING_SCOPES) and not (
+            named_expression_target and isinstance(current, _COMPREHENSION_SCOPES)
+        ):
+            return current
+        current = parents.get(current)
+    return None
+
+
+def _scope_declares(
+    scope: ast.AST,
+    declaration: type[ast.Global] | type[ast.Nonlocal],
+    name: str,
+    parents: Mapping[ast.AST, ast.AST],
+) -> bool:
+    return any(
+        isinstance(candidate, declaration)
+        and name in candidate.names
+        and _binding_scope(candidate, parents) is scope
+        for candidate in ast.walk(scope)
+    )
+
+
+def _module_scope(
+    node: ast.AST,
+    parents: Mapping[ast.AST, ast.AST],
+) -> ast.Module | None:
+    current: ast.AST | None = node
+    while current is not None:
+        if isinstance(current, ast.Module):
+            return current
+        current = parents.get(current)
+    return None
+
+
+def _is_enclosing_function_scope(
+    inner: ast.AST,
+    target: ast.AST,
+    parents: Mapping[ast.AST, ast.AST],
+) -> bool:
+    current = parents.get(inner)
+    while current is not None:
+        if isinstance(current, _FUNCTION_SCOPES) and current is target:
+            return True
+        if isinstance(current, ast.Module):
+            return False
+        current = parents.get(current)
+    return False
+
+
+def _binding_applies_to_scope(
+    candidate: ast.AST,
+    name: str,
+    scope: ast.AST,
+    parents: Mapping[ast.AST, ast.AST],
+) -> bool:
+    lexical_scope = _binding_scope(candidate, parents)
+    if not isinstance(lexical_scope, _FUNCTION_SCOPES):
+        return lexical_scope is scope
+    if _scope_declares(lexical_scope, ast.Global, name, parents):
+        return _module_scope(lexical_scope, parents) is scope
+    if _scope_declares(lexical_scope, ast.Nonlocal, name, parents):
+        return _is_enclosing_function_scope(lexical_scope, scope, parents)
+    return lexical_scope is scope
+
+
+def _scope_name_bindings(
+    scope: ast.AST,
+    name: str,
+    parents: Mapping[ast.AST, ast.AST],
+) -> tuple[ast.AST, ...]:
+    return tuple(
+        candidate
+        for candidate in ast.walk(scope)
+        if (bound_name := _bound_name(candidate)) in {name, "*"}
+        and _binding_applies_to_scope(candidate, bound_name, scope, parents)
+    )
+
+
+def _source_position(node: ast.AST) -> tuple[int, int]:
+    return (getattr(node, "lineno", -1), getattr(node, "col_offset", -1))
+
+
 def _statement_dominates(
     definition: ast.stmt,
     use: ast.AST,
@@ -279,21 +406,20 @@ def _has_reaching_validated_docker_client(
     parents: Mapping[ast.AST, ast.AST],
     aliases: Mapping[str, str],
 ) -> bool:
-    definitions = {
-        statement
-        for candidate in ast.walk(function)
-        if isinstance(candidate, ast.Name)
-        and isinstance(candidate.ctx, ast.Store)
-        and candidate.id == "client"
-        and (statement := _nearest_statement(candidate, parents)) is not None
-        and (candidate.lineno, candidate.col_offset) < (node.lineno, node.col_offset)
-    }
+    definitions = [
+        candidate
+        for candidate in _scope_name_bindings(function, "client", parents)
+        if _source_position(candidate) < _source_position(node)
+    ]
     if not definitions:
         return False
-    reaching = max(
+    reaching_binding = max(
         definitions,
-        key=lambda statement: (statement.lineno, statement.col_offset),
+        key=_source_position,
     )
+    reaching = _nearest_statement(reaching_binding, parents)
+    if reaching is None:
+        return False
     return _is_validated_docker_client_assignment(reaching, aliases) and _statement_dominates(
         reaching, node, parents
     )
@@ -366,16 +492,10 @@ def _has_exact_poller_output_bindings(
         "_UNAVAILABLE_OUTPUT": "workflow-poller-unavailable",
     }
     for name, value in expected.items():
-        stores = [
-            candidate
-            for candidate in ast.walk(root)
-            if isinstance(candidate, ast.Name)
-            and isinstance(candidate.ctx, ast.Store)
-            and candidate.id == name
-        ]
-        if len(stores) != 1:
+        bindings = _scope_name_bindings(root, name, parents)
+        if len(bindings) != 1:
             return False
-        statement = _nearest_statement(stores[0], parents)
+        statement = _nearest_statement(bindings[0], parents)
         if (
             not isinstance(statement, ast.Assign)
             or parents.get(statement) is not root

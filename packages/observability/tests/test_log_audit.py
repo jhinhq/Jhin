@@ -9,6 +9,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Protocol, cast
 
+import pytest
+
 from jhin_observability import EVENT_FIELD_RULES
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -174,6 +176,59 @@ def test_poller_health_rejects_mutated_or_rebound_output_constants(tmp_path: Pat
         assert "direct_print" in _failure_codes(audit.audit_paths((source,)))
 
 
+@pytest.mark.parametrize(
+    "rebind",
+    (
+        "from provider import value as _READY_OUTPUT\n",
+        "import provider as _READY_OUTPUT\n",
+        "def _READY_OUTPUT():\n pass\n",
+        "async def _READY_OUTPUT():\n pass\n",
+        "class _READY_OUTPUT:\n pass\n",
+        "try:\n raise RuntimeError\nexcept RuntimeError as _READY_OUTPUT:\n pass\n",
+        "del _READY_OUTPUT\n",
+    ),
+    ids=(
+        "from-import",
+        "import",
+        "function",
+        "async-function",
+        "class",
+        "except-target",
+        "delete",
+    ),
+)
+def test_poller_health_rejects_every_module_rebinding_form(
+    tmp_path: Path,
+    rebind: str,
+) -> None:
+    audit = _load_audit()
+    source = tmp_path / "packages/workflows/src/jhin_workflows/poller_health.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "_READY_OUTPUT = 'workflow-poller-ready'\n"
+        "_UNAVAILABLE_OUTPUT = 'workflow-poller-unavailable'\n" + rebind + "def main(ok):\n"
+        " print(_READY_OUTPUT if ok else _UNAVAILABLE_OUTPUT)\n"
+    )
+    assert "direct_print" in _failure_codes(audit.audit_paths((source,)))
+
+
+def test_poller_health_ignores_nested_scope_output_bindings(tmp_path: Path) -> None:
+    audit = _load_audit()
+    source = tmp_path / "packages/workflows/src/jhin_workflows/poller_health.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "_READY_OUTPUT = 'workflow-poller-ready'\n"
+        "_UNAVAILABLE_OUTPUT = 'workflow-poller-unavailable'\n"
+        "def helper():\n"
+        " _READY_OUTPUT = 'function-local'\n"
+        " return _READY_OUTPUT\n"
+        "values = [_READY_OUTPUT for _READY_OUTPUT in ()]\n"
+        "def main(ok):\n"
+        " print(_READY_OUTPUT if ok else _UNAVAILABLE_OUTPUT)\n"
+    )
+    assert audit.audit_paths((source,)) == []
+
+
 def test_job_manager_allows_only_awaited_validated_docker_info(tmp_path: Path) -> None:
     audit = _load_audit()
     source = tmp_path / "services/sandbox_runner/src/jhin_sandbox_runner/jobs.py"
@@ -209,6 +264,63 @@ def test_job_manager_rejects_docker_info_near_misses(tmp_path: Path) -> None:
     for candidate in candidates:
         source.write_text(candidate)
         assert "unresolved_logger_receiver" in _failure_codes(audit.audit_paths((source,)))
+
+
+@pytest.mark.parametrize(
+    "rebind",
+    (
+        "  from provider import client\n",
+        "  import provider as client\n",
+        "  def client():\n   return None\n",
+        "  async def client():\n   return None\n",
+        "  class client:\n   pass\n",
+        "  try:\n   raise RuntimeError\n  except RuntimeError as client:\n   pass\n",
+        "  del client\n",
+    ),
+    ids=(
+        "from-import",
+        "import",
+        "function",
+        "async-function",
+        "class",
+        "except-target",
+        "delete",
+    ),
+)
+def test_job_manager_rejects_every_local_rebinding_form(
+    tmp_path: Path,
+    rebind: str,
+) -> None:
+    audit = _load_audit()
+    source = tmp_path / "services/sandbox_runner/src/jhin_sandbox_runner/jobs.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import aiodocker\n"
+        "class JobManager:\n"
+        " async def start(self, validated_url):\n"
+        "  client = aiodocker.Docker(url=validated_url)\n"
+        + rebind
+        + "  await client.system.info()\n"
+    )
+    assert "unresolved_logger_receiver" in _failure_codes(audit.audit_paths((source,)))
+
+
+def test_job_manager_ignores_nested_scope_client_bindings(tmp_path: Path) -> None:
+    audit = _load_audit()
+    source = tmp_path / "services/sandbox_runner/src/jhin_sandbox_runner/jobs.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import aiodocker\n"
+        "class JobManager:\n"
+        " async def start(self, validated_url):\n"
+        "  client = aiodocker.Docker(url=validated_url)\n"
+        "  def helper():\n"
+        "   client = object()\n"
+        "   return client\n"
+        "  values = [client for client in ()]\n"
+        "  await client.system.info()\n"
+    )
+    assert audit.audit_paths((source,)) == []
 
 
 def _entrypoint_function(path: Path, function_name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
