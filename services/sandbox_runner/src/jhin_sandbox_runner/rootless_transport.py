@@ -71,8 +71,10 @@ def validate_production_boundary(
         raise RootlessTransportConfigurationError("cannot inspect fixed upstream socket") from exc
     if not stat.S_ISSOCK(info.st_mode):
         raise RootlessTransportConfigurationError("fixed upstream is not a socket")
-    if info.st_uid != 0 or info.st_gid != 0:
-        raise RootlessTransportConfigurationError("upstream socket requires UID/GID 0:0")
+    # The rootless daemon owner maps to UID 0 here, while its host socket GID
+    # may map through the subordinate range to any nonnegative container GID.
+    if info.st_uid != 0:
+        raise RootlessTransportConfigurationError("upstream socket requires UID 0")
     return upstream
 
 

@@ -430,6 +430,7 @@ async def test_repeated_bare_health_connections_do_not_exhaust_limit(
         ({"effective_gid": 1}, "UID/GID 0:0"),
         ({"supplemental_groups": {1}}, "no supplemental groups"),
         ({"supplemental_groups": {0, 1}}, "no supplemental groups"),
+        ({"supplemental_groups": {118}}, "no supplemental groups"),
         ({"supplemental_groups": {10001}}, "no supplemental groups"),
     ],
 )
@@ -486,13 +487,37 @@ def test_production_boundary_accepts_empty_or_primary_only_process_groups(
     )
 
 
+def test_production_boundary_accepts_root_owned_socket_with_mapped_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    upstream = tmp_path / "docker.sock"
+    upstream.touch()
+    monkeypatch.setattr(
+        Path,
+        "lstat",
+        lambda _path: SimpleNamespace(st_mode=stat.S_IFSOCK, st_uid=0, st_gid=118),
+    )
+
+    assert (
+        validate_production_boundary(
+            argv=[],
+            environ={},
+            effective_uid=0,
+            effective_gid=0,
+            supplemental_groups=set(),
+            upstream=upstream,
+        )
+        == upstream
+    )
+
+
 @pytest.mark.parametrize(
     ("metadata", "message"),
     [
         (SimpleNamespace(st_mode=stat.S_IFLNK, st_uid=0, st_gid=0), "not a socket"),
         (SimpleNamespace(st_mode=stat.S_IFREG, st_uid=0, st_gid=0), "not a socket"),
-        (SimpleNamespace(st_mode=stat.S_IFSOCK, st_uid=1, st_gid=0), "UID/GID 0:0"),
-        (SimpleNamespace(st_mode=stat.S_IFSOCK, st_uid=0, st_gid=1), "UID/GID 0:0"),
+        (SimpleNamespace(st_mode=stat.S_IFSOCK, st_uid=1, st_gid=118), "UID 0"),
     ],
 )
 def test_production_boundary_rejects_wrong_socket_identity(

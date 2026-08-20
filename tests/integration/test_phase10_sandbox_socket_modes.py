@@ -48,7 +48,7 @@ def test_selected_socket_mode_live_boundary() -> None:
         assert mounts[0]["Destination"] == "/run/jhin/docker.sock"
     else:
         authority.probe_rootless_capabilities()
-        assert runner["HostConfig"].get("GroupAdd", []) == []
+        assert runner["HostConfig"].get("GroupAdd") in (None, [])
         assert _socket_mounts(runner, str(authority.socket_path)) == []
         assert not any("docker.sock" in item for item in runner["Config"].get("Env", []))
         assert _networks(runner) == {
@@ -60,13 +60,16 @@ def test_selected_socket_mode_live_boundary() -> None:
         assert adapter["Config"]["User"] == "0:0"
         assert adapter["HostConfig"]["Privileged"] is False
         assert adapter["HostConfig"]["CapDrop"] == ["ALL"]
+        assert adapter["HostConfig"].get("GroupAdd") in (None, [])
         assert adapter["HostConfig"]["ReadonlyRootfs"] is True
         assert adapter["HostConfig"].get("PortBindings") in ({}, None)
         assert _networks(adapter) == {f"{authority.project}_engine"}
         adapter_mounts = _socket_mounts(adapter, str(authority.socket_path))
         assert len(adapter_mounts) == 1
         assert adapter_mounts[0]["Destination"] == "/run/host/docker.sock"
-        assert authority.inspect_socket_from_adapter() == {"gid": 0, "socket": True, "uid": 0}
+        adapter_socket = authority.inspect_socket_from_adapter()
+        assert adapter_socket["socket"] is True
+        assert adapter_socket["uid"] == 0
 
         for service in ("agent-worker", "tool-worker"):
             inspected = authority.inspect_service(service)
