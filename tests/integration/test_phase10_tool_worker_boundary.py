@@ -2909,7 +2909,7 @@ def test_make_and_ci_delegate_all_live_modes_to_the_shared_harness() -> None:
         "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/10001/bus",
     ):
         assert start_script.index(assignment, manager_set_env, manager_set)
-    assert manager_set < manager_verify < rootlesskit_preflight
+    assert manager_set < manager_verify < rootlesskit_preflight < installer
     manager_verification = start_script[manager_verify:rootlesskit_preflight]
     for assignment in (
         "HOME=/home/phase10rootless",
@@ -2918,6 +2918,9 @@ def test_make_and_ci_delegate_all_live_modes_to_the_shared_harness() -> None:
     ):
         assert f"'{assignment}'" in manager_verification
     assert 'grep -Fx "$expected" <<<"$manager_environment" >/dev/null' in manager_verification
+    assert "daemon.json" not in start_script
+    assert "native.cgroupdriver" not in start_script
+    assert "systemctl --user restart docker.service" not in start_script
     assert start_script.index("HOME=/home/phase10rootless") < rootlesskit_preflight
     assert (
         start_script.index("XDG_CONFIG_HOME=/home/phase10rootless/.config") < rootlesskit_preflight
@@ -2954,6 +2957,19 @@ def test_make_and_ci_delegate_all_live_modes_to_the_shared_harness() -> None:
     assert "systemctl --user --no-pager --full status docker.service || true" in failure_branch
     assert "journalctl --user --no-pager -n 100 -u docker.service || true" in failure_branch
     assert failure_branch.endswith("exit 1\nfi")
+    socket_owner_check = start_script.index(
+        'test "$(stat -c %u /run/user/10001/docker.sock)" = "10001"',
+        installer,
+    )
+    cgroup_version_check = start_script.index("{{.CgroupVersion}}", socket_owner_check)
+    cgroup_driver_check = start_script.index("{{.CgroupDriver}}", cgroup_version_check)
+    socket_export = start_script.index(
+        "PHASE10_ROOTLESS_DOCKER_SOCKET=/run/user/10001/docker.sock",
+        cgroup_driver_check,
+    )
+    assert (
+        installer < socket_owner_check < cgroup_version_check < cgroup_driver_check < socket_export
+    )
     assert (
         "echo \"ROOTLESS_SOCKET_SNAPSHOT=$(stat -c '%d:%i:%f:%u:%g' "
         '/run/user/10001/docker.sock)" >> "$GITHUB_ENV"' in start_script
