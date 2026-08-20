@@ -3147,6 +3147,38 @@ def test_live_scenarios_use_exact_pytest_selection_without_default_addopts() -> 
     assert LIVE_SCENARIOS["socket-rootful"].start_stack is True
 
 
+def test_sandbox_image_initializes_readline_without_preserving_overlay_metadata() -> None:
+    dockerfile = Path("docker/sandbox.Dockerfile").read_text(encoding="utf-8")
+
+    initialize = dockerfile.index("install -m 0644 /dev/null /etc/inputrc")
+    install_packages = dockerfile.index("apt-get install")
+    populate = dockerfile.index("cat /usr/share/readline/inputrc > /etc/inputrc")
+    verify_content = dockerfile.index("cmp -s /usr/share/readline/inputrc /etc/inputrc")
+    verify_metadata = dockerfile.index("0:0:644")
+
+    assert initialize < install_packages < populate < verify_content < verify_metadata
+
+
+def test_noop_sandbox_job_verifies_canonical_readline_content_and_metadata() -> None:
+    authority = _authority_for_recorder()
+    job_id = "deadc0dedeadc0dedeadc0de"
+    try:
+        request = authority.noop_sandbox_job_request(job_id)
+        assert request["job_id"] == job_id
+        assert request["network_policy"] == "none"
+        assert request["command"][:2] == ["python3", "-c"]
+        script = request["command"][2]
+        assert "/usr/share/readline/inputrc" in script
+        assert "/etc/inputrc" in script
+        assert "read_bytes()" in script
+        assert "st_uid" in script
+        assert "st_gid" in script
+        assert "0o644" in script
+        assert "phase10-noop" in script
+    finally:
+        authority.remove_runtime_paths()
+
+
 def test_make_and_ci_delegate_all_live_modes_to_the_shared_harness() -> None:
     makefile = Path("Makefile").read_text(encoding="utf-8")
     workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")

@@ -2669,6 +2669,26 @@ class ComposeAuthority:
             raise RuntimeError("sandbox runner could not reach the private rootless adapter")
         return _text(result.stdout).strip().encode()
 
+    @classmethod
+    def noop_sandbox_job_request(cls, job_id: str) -> dict[str, Any]:
+        cls.sandbox_job_label(job_id)
+        verification = (
+            "import os\n"
+            "from pathlib import Path\n"
+            "installed = Path('/etc/inputrc')\n"
+            "canonical = Path('/usr/share/readline/inputrc')\n"
+            "assert installed.read_bytes() == canonical.read_bytes()\n"
+            "metadata = os.stat(installed)\n"
+            "assert (metadata.st_uid, metadata.st_gid, metadata.st_mode & 0o777) == "
+            "(0, 0, 0o644)\n"
+            "print('phase10-noop')\n"
+        )
+        return {
+            "job_id": job_id,
+            "command": ["python3", "-c", verification],
+            "network_policy": "none",
+        }
+
     def run_noop_sandbox_job(self, *, timeout: float = 30.0) -> dict[str, Any]:
         port = self.published_ports.get("SANDBOX_RUNNER_DEV_PORT")
         if port is None:
@@ -2680,13 +2700,7 @@ class ComposeAuthority:
             "Authorization": f"Bearer {self.environment['SANDBOX_RUNNER_TOKEN']}",
             "Content-Type": "application/json",
         }
-        body = json.dumps(
-            {
-                "job_id": job_id,
-                "command": ["python3", "-c", "print('phase10-noop')"],
-                "network_policy": "none",
-            }
-        ).encode()
+        body = json.dumps(self.noop_sandbox_job_request(job_id)).encode()
         request = urllib.request.Request(
             f"{endpoint}/v1/jobs",
             data=body,
