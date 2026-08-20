@@ -1686,6 +1686,182 @@ def test_upgrade_stage_topology_is_profiled_healthy_and_exact(
         authority.remove_runtime_paths()
 
 
+def test_bounded_upgrade_stage_topology_retries_starting_until_healthy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _upgrade_harness_for_recorder()
+    authority = harness.authority
+    expected = authority.expected_services | {
+        f"phase9-agent-worker-{scenario}" for scenario in ("normal", "approval", "sync", "cleanup")
+    }
+    command = authority.compose_command(
+        "--profile",
+        "phase10-upgrade",
+        "ps",
+        "--all",
+        "--format",
+        "json",
+        upgrade=True,
+    )
+    starting = [
+        {
+            "Service": service,
+            "State": "running",
+            "Health": "starting" if service == "event-worker" else "healthy",
+        }
+        for service in sorted(expected)
+    ]
+    healthy = [
+        {"Service": service, "State": "running", "Health": "healthy"}
+        for service in sorted(expected)
+    ]
+    outputs = iter((json.dumps(starting), json.dumps(healthy)))
+    calls: list[tuple[str, ...]] = []
+    sleeps: list[float] = []
+
+    def runner(command_value: tuple[str, ...], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert command_value == command
+        assert kwargs["env"] == authority.environment
+        assert kwargs["cwd"] == authority.repo
+        calls.append(command_value)
+        return subprocess.CompletedProcess(command_value, 0, next(outputs), "")
+
+    monotonic = iter((0.0, 0.0))
+    monkeypatch.setattr(time, "monotonic", lambda: next(monotonic))
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    try:
+        observed = harness.wait_stage_topology(
+            "parked-phase9",
+            runner=runner,
+            timeout_seconds=5.0,
+            interval_seconds=1.0,
+        )
+        assert set(observed) == expected
+        assert calls == [command, command]
+        assert sleeps == [1.0]
+    finally:
+        authority.remove_runtime_paths()
+
+
+def test_bounded_upgrade_stage_topology_timeout_emits_profiled_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    harness = _upgrade_harness_for_recorder()
+    authority = harness.authority
+    expected = authority.expected_services | {
+        f"phase9-agent-worker-{scenario}" for scenario in ("normal", "approval", "sync", "cleanup")
+    }
+    ps = authority.compose_command(
+        "--profile",
+        "phase10-upgrade",
+        "ps",
+        "--all",
+        "--format",
+        "json",
+        upgrade=True,
+    )
+    logs = authority.compose_command(
+        "--profile",
+        "phase10-upgrade",
+        "logs",
+        "--no-color",
+        "--tail",
+        "100",
+        upgrade=True,
+    )
+    starting = json.dumps(
+        [
+            {
+                "Service": service,
+                "State": "running",
+                "Health": "starting" if service == "event-worker" else "healthy",
+            }
+            for service in sorted(expected)
+        ]
+    )
+    calls: list[tuple[str, ...]] = []
+    sleeps: list[float] = []
+
+    def runner(command: tuple[str, ...], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append(command)
+        if command == ps:
+            return subprocess.CompletedProcess(command, 0, starting, "")
+        assert command == logs
+        return subprocess.CompletedProcess(command, 0, "event-worker restart detail\n", "")
+
+    monotonic = iter((0.0, 0.0, 6.0))
+    monkeypatch.setattr(time, "monotonic", lambda: next(monotonic))
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    try:
+        with pytest.raises(lifecycle.ComposeStartingError, match="event-worker"):
+            harness.wait_stage_topology(
+                "parked-phase9",
+                runner=runner,
+                timeout_seconds=5.0,
+                interval_seconds=1.0,
+            )
+        assert calls == [ps, ps, ps, logs]
+        assert sleeps == [1.0]
+        assert "event-worker restart detail" in capsys.readouterr().err
+    finally:
+        authority.remove_runtime_paths()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        "not-json",
+        json.dumps(
+            [
+                {
+                    "Service": service,
+                    "State": "exited" if service == "event-worker" else "running",
+                    "Health": "unhealthy" if service == "event-worker" else "healthy",
+                }
+                for service in sorted(EXPECTED_ROOTFUL_SERVICES)
+            ]
+        ),
+    ),
+)
+def test_bounded_upgrade_stage_topology_fails_immediately_on_nonstarting_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: str,
+) -> None:
+    harness = _upgrade_harness_for_recorder()
+    authority = harness.authority
+    ps = authority.compose_command(
+        "--profile",
+        "phase10-upgrade",
+        "ps",
+        "--all",
+        "--format",
+        "json",
+        upgrade=True,
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def runner(command: tuple[str, ...], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append(command)
+        assert command == ps
+        return subprocess.CompletedProcess(command, 0, payload, "")
+
+    monkeypatch.setattr(
+        time,
+        "sleep",
+        lambda _seconds: pytest.fail("nonstarting errors must not be retried"),
+    )
+    try:
+        with pytest.raises(ComposePsError) as raised:
+            harness.wait_stage_topology("base-only", runner=runner)
+        assert not isinstance(raised.value, lifecycle.ComposeStartingError)
+        assert calls == [ps]
+    finally:
+        authority.remove_runtime_paths()
+
+
 def test_authority_uses_unique_exact_targets_and_all_ephemeral_ports() -> None:
     repo = Path(__file__).resolve().parents[2]
     authority = ComposeAuthority.create(

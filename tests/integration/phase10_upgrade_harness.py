@@ -4997,6 +4997,84 @@ class UpgradeHarness:
         )
         return parse_compose_ps(_text(result.stdout), expected)
 
+    def _emit_stage_topology_diagnostics(
+        self,
+        *,
+        runner: CommandRunner = run_command,
+    ) -> None:
+        """Emit bounded selected-project diagnostics with the upgrade profile."""
+        diagnostics = (
+            (
+                "stack-ps",
+                self.authority.compose_command(
+                    "--profile",
+                    "phase10-upgrade",
+                    "ps",
+                    "--all",
+                    "--format",
+                    "json",
+                    upgrade=True,
+                ),
+            ),
+            (
+                "stack-logs",
+                self.authority.compose_command(
+                    "--profile",
+                    "phase10-upgrade",
+                    "logs",
+                    "--no-color",
+                    "--tail",
+                    "100",
+                    upgrade=True,
+                ),
+            ),
+        )
+        for context, command in diagnostics:
+            result = self.authority._run(
+                command,
+                runner=runner,
+                timeout=60.0,
+                check=False,
+            )
+            emit_live_failure_output(
+                subprocess.CalledProcessError(
+                    result.returncode or 1,
+                    command,
+                    output=result.stdout,
+                    stderr=result.stderr,
+                ),
+                environment=self.authority.environment,
+                context=context,
+            )
+
+    def wait_stage_topology(
+        self,
+        stage: UpgradeStage,
+        *,
+        runner: CommandRunner = run_command,
+        timeout_seconds: float = 90.0,
+        interval_seconds: float = 3.0,
+    ) -> dict[str, dict[str, Any]]:
+        """Wait boundedly only while an exact upgrade inventory is starting."""
+        if timeout_seconds <= 0 or interval_seconds <= 0:
+            raise ValueError("upgrade topology timeout and interval must be positive")
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            try:
+                return self.assert_stage_topology(stage, runner=runner)
+            except ComposeStartingError as error:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    try:
+                        self._emit_stage_topology_diagnostics(runner=runner)
+                    except BaseException as diagnostic_error:
+                        raise BaseExceptionGroup(
+                            "Phase 10 upgrade topology and diagnostics failed",
+                            [error, diagnostic_error],
+                        ) from error
+                    raise
+                time.sleep(min(interval_seconds, remaining))
+
     def start_phase9_worker(
         self,
         scenario: str,

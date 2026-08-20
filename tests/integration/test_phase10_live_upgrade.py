@@ -413,7 +413,7 @@ async def test_inflight_phase9_histories_finish_after_phase10_swap() -> None:
         assert len(cleanup_volumes) == 1
 
         parked_topology = await asyncio.to_thread(
-            upgrade.assert_stage_topology,
+            upgrade.wait_stage_topology,
             "parked-phase9",
         )
         assert set(parked_topology) == authority.expected_services | {
@@ -424,7 +424,7 @@ async def test_inflight_phase9_histories_finish_after_phase10_swap() -> None:
         for parked in (normal, approval, cleanup, sync):
             await asyncio.to_thread(upgrade.stop_phase9_worker, parked.scenario, kill=True)
         base_topology = await asyncio.to_thread(
-            upgrade.assert_stage_topology,
+            upgrade.wait_stage_topology,
             "base-only",
         )
         assert set(base_topology) == authority.expected_services
@@ -451,7 +451,7 @@ async def test_inflight_phase9_histories_finish_after_phase10_swap() -> None:
         assert all(len(images) == 1 for images in current_images.values())
         assert upgrade.frozen.image_id not in current_images["agent"] | current_images["tool"]
         current_topology = await asyncio.to_thread(
-            upgrade.assert_stage_topology,
+            upgrade.wait_stage_topology,
             "current-phase10",
         )
         assert set(current_topology) == authority.expected_services | set(current_workers)
@@ -517,8 +517,18 @@ async def test_inflight_phase9_histories_finish_after_phase10_swap() -> None:
 
         repaired = await _timeline(client, workspace_id, normal.domain_run_id)
         repaired_types = [row["event_type"] for row in repaired]
-        assert repaired_types.count("agent.step.tool_manifest") == 1
-        assert repaired_types.count("agent.step.reasoning") == 1
+        public_manifests = [
+            row for row in repaired if row["event_type"] == "agent.step.tool_manifest"
+        ]
+        assert [
+            (
+                row["payload_json"].get("step"),
+                row["payload_json"].get("manifest", {}).get("count"),
+            )
+            for row in public_manifests
+        ] == [(0, 1), (1, 0)]
+        public_reasoning = [row for row in repaired if row["event_type"] == "agent.step.reasoning"]
+        assert [row["payload_json"] for row in public_reasoning] == [{}, {}]
         assert repaired_types.count("run.completed") == 1
         normal_manifest_after = authority.run_event_payload(
             normal.domain_run_id,
@@ -526,6 +536,11 @@ async def test_inflight_phase9_histories_finish_after_phase10_swap() -> None:
             step=0,
         )
         assert normal_manifest_after == normal_manifest_before
+        assert authority.run_event_payload(
+            normal.domain_run_id,
+            event_type="agent.step.tool_manifest",
+            step=1,
+        ) == {"step": 1, "manifest": {"count": 0, "calls": []}}
 
         expected_outer_histories = {
             "normal": [
