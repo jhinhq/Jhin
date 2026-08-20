@@ -27,7 +27,6 @@ ENV NODE_ENV=production \
     HOSTNAME=0.0.0.0
 COPY --from=build --chown=jhin:jhin /repo/apps/web/.next/standalone ./
 COPY --from=build --chown=jhin:jhin /repo/apps/web/.next/static ./apps/web/.next/static
-COPY --from=build --chown=jhin:jhin /repo/apps/web/public ./apps/web/public
 USER jhin
 EXPOSE 3000
 CMD ["node", "apps/web/server.js"]

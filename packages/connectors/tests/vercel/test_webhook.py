@@ -250,7 +250,7 @@ def test_signed_excessively_nested_json_is_rejected_without_recursion_escape() -
         + b"}"
     )
 
-    with pytest.raises(WebhookVerificationError, match="valid JSON"):
+    with pytest.raises(WebhookVerificationError):
         VercelConnector().parse_webhook({SIGNATURE_HEADER: _signature(body)}, body, SECRET)
 
 

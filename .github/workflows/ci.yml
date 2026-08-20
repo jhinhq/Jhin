@@ -177,10 +177,25 @@ jobs:
 
       - name: Provision UID-10001 rootless Docker prerequisites
         run: |
+          sudo install -m 0755 -d /etc/apt/keyrings
+          sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+            -o /etc/apt/keyrings/docker.asc
+          sudo chmod a+r /etc/apt/keyrings/docker.asc
+          . /etc/os-release
+          printf '%s\n' \
+            'Types: deb' \
+            'URIs: https://download.docker.com/linux/ubuntu' \
+            "Suites: ${UBUNTU_CODENAME:-$VERSION_CODENAME}" \
+            'Components: stable' \
+            "Architectures: $(dpkg --print-architecture)" \
+            'Signed-By: /etc/apt/keyrings/docker.asc' \
+            | sudo tee /etc/apt/sources.list.d/docker.sources >/dev/null
           sudo apt-get update
+          docker_ce_version="$(dpkg-query -W -f='${Version}' docker-ce)"
+          test -n "$docker_ce_version"
           sudo apt-get install -y \
             uidmap dbus-user-session slirp4netns fuse-overlayfs \
-            docker-ce-rootless-extras
+            docker-ce-rootless-extras="$docker_ce_version"
           sudo groupadd --gid 10001 phase10rootless
           sudo useradd --uid 10001 --gid 10001 --create-home \
             --shell /bin/bash phase10rootless
@@ -275,7 +290,7 @@ jobs:
             make test-tool-worker-live-upgrade
 
       - name: Stop the CI-owned rootless daemon after identity verification
-        if: always()
+        if: ${{ always() && env.ROOTLESS_SOCKET_SNAPSHOT != '' }}
         run: |
           stop_rootless() {
             sudo -u phase10rootless -H env \

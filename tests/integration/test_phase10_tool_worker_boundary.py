@@ -2793,6 +2793,7 @@ def test_live_scenarios_use_exact_pytest_selection_without_default_addopts() -> 
 def test_make_and_ci_delegate_all_live_modes_to_the_shared_harness() -> None:
     makefile = Path("Makefile").read_text(encoding="utf-8")
     workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    workflow_payload = yaml.safe_load(workflow)
     for target in (
         "test-tool-worker-boundary:",
         "test-tool-worker-boundary-integration:",
@@ -2825,6 +2826,43 @@ def test_make_and_ci_delegate_all_live_modes_to_the_shared_harness() -> None:
     rootless_job = workflow.split("  phase10-rootless-live:", 1)[1]
     assert "assert_phase10_tool_worker_compose.py --mode rootful" in rootful_job
     assert "assert_phase10_tool_worker_compose.py --mode rootless" in rootless_job
+
+    rootless_steps = workflow_payload["jobs"]["phase10-rootless-live"]["steps"]
+    provision_step = next(
+        step
+        for step in rootless_steps
+        if step.get("name") == "Provision UID-10001 rootless Docker prerequisites"
+    )
+    provision_script = provision_step["run"]
+    apt_update = provision_script.index("sudo apt-get update")
+    assert provision_script.index("https://download.docker.com/linux/ubuntu/gpg") < apt_update
+    assert provision_script.index("/etc/apt/keyrings/docker.asc") < apt_update
+    assert provision_script.index("/etc/apt/sources.list.d/docker.sources") < apt_update
+    assert provision_script.index("URIs: https://download.docker.com/linux/ubuntu") < apt_update
+    assert provision_script.index("Signed-By: /etc/apt/keyrings/docker.asc") < apt_update
+    assert "dpkg-query -W -f='${Version}' docker-ce" in provision_script
+    assert 'docker-ce-rootless-extras="$docker_ce_version"' in provision_script
+
+    start_step = next(
+        step
+        for step in rootless_steps
+        if step.get("name") == "Start and validate UID-10001 rootless Docker"
+    )
+    assert (
+        "echo \"ROOTLESS_SOCKET_SNAPSHOT=$(stat -c '%d:%i:%f:%u:%g' "
+        '/run/user/10001/docker.sock)" >> "$GITHUB_ENV"' in start_step["run"]
+    )
+    cleanup_step = next(
+        step
+        for step in rootless_steps
+        if step.get("name") == "Stop the CI-owned rootless daemon after identity verification"
+    )
+    assert cleanup_step["if"] == ("${{ always() && env.ROOTLESS_SOCKET_SNAPSHOT != '' }}")
+    assert 'test -n "$ROOTLESS_SOCKET_SNAPSHOT"' in cleanup_step["run"]
+    assert (
+        "test \"$(stat -c '%d:%i:%f:%u:%g' /run/user/10001/docker.sock)\" "
+        '= "$ROOTLESS_SOCKET_SNAPSHOT"' in cleanup_step["run"]
+    )
 
 
 def test_live_authority_selection_binds_requested_socket_snapshot(
