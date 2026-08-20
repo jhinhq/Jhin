@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -48,6 +49,34 @@ class UpgradeRun:
     temporal_run_id: str
     domain_run_id: str
     handle: Any
+
+
+async def _wait_frozen_phase9_arrivals(
+    upgrade: UpgradeHarness,
+    arrivals: Sequence[tuple[str, str]],
+    *,
+    probe_timeout: float,
+) -> list[str]:
+    results = await asyncio.gather(
+        *(
+            asyncio.to_thread(
+                upgrade.wait_frozen_phase9_arrival,
+                scenario,
+                identity=identity,
+                timeout=probe_timeout,
+            )
+            for scenario, identity in arrivals
+        ),
+        return_exceptions=True,
+    )
+    failures = [result for result in results if isinstance(result, BaseException)]
+    if len(failures) == 1:
+        raise failures[0]
+    if failures:
+        raise BaseExceptionGroup("frozen Phase 9 barrier probes failed", failures)
+    if not all(isinstance(result, str) for result in results):
+        raise TypeError("frozen Phase 9 barrier probe returned a non-string identity")
+    return [result for result in results if isinstance(result, str)]
 
 
 async def _start_direct_task(
@@ -346,14 +375,10 @@ async def test_inflight_phase9_histories_finish_after_phase10_swap() -> None:
             )
         await asyncio.to_thread(upgrade.start_phase9_worker, "approval")
 
-        arrivals = await asyncio.gather(
-            *(
-                asyncio.to_thread(
-                    upgrade.scenarios[parked.scenario].barrier.wait_arrival,
-                    timeout=180.0,
-                )
-                for parked in (normal, cleanup, sync)
-            )
+        arrivals = await _wait_frozen_phase9_arrivals(
+            upgrade,
+            tuple((parked.scenario, parked.domain_run_id) for parked in (normal, cleanup, sync)),
+            probe_timeout=180.0,
         )
         assert arrivals == [
             normal.domain_run_id,

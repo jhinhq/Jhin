@@ -116,6 +116,88 @@ _UPGRADE_FAILPOINTS = {
     "sync": "phase9.agent.sync.before_effect.v1",
     "cleanup": "phase9.agent.cleanup.before_effect.v1",
 }
+_FROZEN_PHASE9_BARRIER_SOURCE_REF = "6318781b57692bf39f37cd428d73de115d7458e2"
+_FROZEN_PHASE9_BARRIER_CONTAINER_ROOT = "/run/jhin/test-barriers"
+_FROZEN_PHASE9_BARRIER_PUBLISH_SCRIPT = r"""
+import os
+import re
+import stat
+import sys
+import time
+from pathlib import Path
+
+root_value, name, identity, timeout_value = sys.argv[1:]
+timeout = float(timeout_value)
+if timeout <= 0:
+    raise SystemExit("barrier compatibility timeout must be positive")
+if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", identity) is None:
+    raise SystemExit("barrier compatibility identity is malformed")
+expected_environment = {
+    "JHIN_TEST_CRASH_BARRIER_DIR": root_value,
+    "JHIN_TEST_CRASH_BARRIER_NAME": name,
+    "JHIN_TEST_CRASH_BARRIER_MATCH": identity,
+}
+if any(os.environ.get(key) != value for key, value in expected_environment.items()):
+    raise SystemExit("frozen Phase 9 barrier environment differs from the selected authority")
+
+root = Path(root_value)
+selected = root / name
+for path in (root, selected):
+    metadata = path.lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+        raise SystemExit("frozen Phase 9 barrier directory is malformed")
+
+marker_name = f"{identity}.arrived"
+marker = selected / marker_name
+historical_bytes = b"arrived\n"
+deadline = time.monotonic() + timeout
+timeout_state = "no arrival marker"
+while True:
+    entries = list(os.scandir(selected))
+    if len(entries) > 1:
+        raise SystemExit("multiple frozen Phase 9 barrier markers are ambiguous")
+    if entries:
+        entry = entries[0]
+        if entry.name != marker_name:
+            raise SystemExit("frozen Phase 9 barrier marker has the wrong identity")
+        metadata = entry.stat(follow_symlinks=False)
+        if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+            raise SystemExit("frozen Phase 9 barrier marker is not a regular file")
+        if metadata.st_uid != os.geteuid():
+            raise SystemExit("frozen Phase 9 barrier marker has the wrong owner")
+        if stat.S_IMODE(metadata.st_mode) != 0o600:
+            raise SystemExit("frozen Phase 9 barrier marker mode is not historical 0600")
+        descriptor = os.open(marker, os.O_RDWR | os.O_NOFOLLOW)
+        try:
+            opened = os.fstat(descriptor)
+            if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+                raise SystemExit("frozen Phase 9 barrier marker changed during validation")
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            contents = os.read(descriptor, len(historical_bytes) + 1)
+            if contents == historical_bytes:
+                os.fsync(descriptor)
+                os.fchmod(descriptor, 0o644)
+                os.fsync(descriptor)
+                if stat.S_IMODE(os.fstat(descriptor).st_mode) != 0o644:
+                    raise SystemExit("frozen Phase 9 barrier marker publication failed")
+            elif historical_bytes.startswith(contents):
+                timeout_state = "arrival marker remained incomplete"
+            else:
+                raise SystemExit("frozen Phase 9 barrier marker bytes are not historical")
+        finally:
+            os.close(descriptor)
+        if contents == historical_bytes:
+            directory = os.open(selected, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+            print(identity)
+            raise SystemExit(0)
+    if time.monotonic() >= deadline:
+        raise SystemExit(timeout_state)
+    time.sleep(0.02)
+"""
 _BASE_COMPOSE_AUTO_IMAGE_SERVICES = (
     "web",
     "api",
@@ -3720,7 +3802,30 @@ class ComposeAuthority:
             )
             if result.returncode == 0:
                 raise RuntimeError("sandbox runner unexpectedly accepted an incorrect socket GID")
-            return result
+            logs = failure._run(
+                failure.compose_command(
+                    "logs",
+                    "--no-color",
+                    "--tail",
+                    "100",
+                    "sandbox-runner",
+                ),
+                runner=runner,
+                timeout=60.0,
+                check=False,
+            )
+            return subprocess.CompletedProcess(
+                result.args,
+                result.returncode,
+                stdout=_redact_live_failure_text(
+                    f"{_text(result.stdout)}\n{_text(logs.stdout)}",
+                    failure.environment,
+                ),
+                stderr=_redact_live_failure_text(
+                    f"{_text(result.stderr)}\n{_text(logs.stderr)}",
+                    failure.environment,
+                ),
+            )
         finally:
             failure._run(
                 failure.compose_command("rm", "-s", "-f", "sandbox-runner"),
@@ -4927,6 +5032,102 @@ class UpgradeHarness:
             upgrade=True,
         )
         return inspected
+
+    def wait_frozen_phase9_arrival(
+        self,
+        scenario: str,
+        *,
+        identity: str,
+        timeout: float,
+        runner: CommandRunner = run_command,
+    ) -> str:
+        """Publish one exact legacy 0600 arrival for the archived Phase 9 worker."""
+        if self.frozen.source_ref != _FROZEN_PHASE9_BARRIER_SOURCE_REF:
+            raise ValueError("barrier compatibility requires the exact frozen Phase 9 source ref")
+        if scenario not in {"normal", "sync", "cleanup"}:
+            raise ValueError("scenario has no frozen Phase 9 crash barrier")
+        if _UUID.fullmatch(identity) is None:
+            raise ValueError("upgrade barrier identity is malformed")
+        if type(timeout) not in {int, float} or not 0 < timeout <= 300:
+            raise ValueError("frozen Phase 9 barrier timeout must be in (0, 300]")
+
+        selected = self.scenarios[scenario]
+        service = f"phase9-agent-worker-{scenario}"
+        inspected = self.authority.inspect_service(service, runner=runner, upgrade=True)
+        container_id = inspected.get("Id")
+        values = inspected.get("Config", {}).get("Env", [])
+        expected_environment = {
+            "APP_ENV": "test",
+            "TEMPORAL_NAMESPACE": selected.namespace,
+            "JHIN_TEST_CRASH_BARRIER_DIR": _FROZEN_PHASE9_BARRIER_CONTAINER_ROOT,
+            "JHIN_TEST_CRASH_BARRIER_NAME": selected.barrier.failpoint,
+            "JHIN_TEST_CRASH_BARRIER_MATCH": identity,
+        }
+        valid_environment = isinstance(values, list) and all(
+            [value for value in values if isinstance(value, str) and value.startswith(f"{key}=")]
+            == [f"{key}={expected}"]
+            for key, expected in expected_environment.items()
+        )
+        if inspected.get("Image") != self.frozen.image_id or not valid_environment:
+            raise RuntimeError("frozen Phase 9 worker authority differs from the selected scenario")
+        if (
+            not isinstance(container_id, str)
+            or _DOCKER_CONTAINER_ID.fullmatch(container_id) is None
+        ):
+            raise RuntimeError("frozen Phase 9 worker has no exact container identity")
+        mounts = inspected.get("Mounts")
+        host_root = str(selected.barrier.root)
+        related_mounts = (
+            [
+                mount
+                for mount in mounts
+                if isinstance(mount, dict)
+                and (
+                    mount.get("Source") == host_root
+                    or mount.get("Destination") == _FROZEN_PHASE9_BARRIER_CONTAINER_ROOT
+                )
+            ]
+            if isinstance(mounts, list)
+            else []
+        )
+        if (
+            len(related_mounts) != 1
+            or related_mounts[0].get("Type") != "bind"
+            or related_mounts[0].get("Source") != host_root
+            or related_mounts[0].get("Destination") != _FROZEN_PHASE9_BARRIER_CONTAINER_ROOT
+            or related_mounts[0].get("RW") is not True
+        ):
+            raise RuntimeError("frozen Phase 9 barrier mount authority is not exact and writable")
+
+        environment = self._worker_environment(scenario, identity=identity)
+        result = self.authority._run(
+            self.authority.docker_command(
+                "exec",
+                container_id,
+                "python",
+                "-c",
+                _FROZEN_PHASE9_BARRIER_PUBLISH_SCRIPT,
+                _FROZEN_PHASE9_BARRIER_CONTAINER_ROOT,
+                selected.barrier.failpoint,
+                identity,
+                str(timeout),
+            ),
+            runner=runner,
+            timeout=timeout + 30.0,
+            check=False,
+            environment=environment,
+        )
+        if result.returncode != 0:
+            detail = _text(result.stderr).strip()[-512:] or "probe returned no diagnostic"
+            raise RuntimeError(f"frozen Phase 9 barrier compatibility probe failed: {detail}")
+        if [line.strip() for line in _text(result.stdout).splitlines() if line.strip()] != [
+            identity
+        ]:
+            raise RuntimeError("frozen Phase 9 barrier compatibility probe was ambiguous")
+        observed = selected.barrier.wait_arrival(timeout=min(timeout, 5.0))
+        if observed != identity:
+            raise RuntimeError("frozen Phase 9 barrier identity changed after publication")
+        return observed
 
     def stop_phase9_worker(
         self,

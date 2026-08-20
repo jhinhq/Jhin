@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib
 import json
 import os
 import secrets
@@ -818,6 +819,562 @@ def _upgrade_harness_for_recorder() -> UpgradeHarness:
         image_id="sha256:" + "a" * 64,
     )
     return UpgradeHarness.from_authority(authority.with_upgrade_runtime(frozen))
+
+
+def _phase9_worker_inspect_payload(
+    harness: UpgradeHarness,
+    scenario: str,
+    identity: str,
+    container_id: str,
+) -> dict[str, Any]:
+    selected = harness.scenarios[scenario]
+    return {
+        "Id": container_id,
+        "Image": harness.frozen.image_id,
+        "Config": {
+            "Env": [
+                "APP_ENV=test",
+                f"TEMPORAL_NAMESPACE={selected.namespace}",
+                "JHIN_TEST_CRASH_BARRIER_DIR=/run/jhin/test-barriers",
+                f"JHIN_TEST_CRASH_BARRIER_NAME={selected.barrier.failpoint}",
+                f"JHIN_TEST_CRASH_BARRIER_MATCH={identity}",
+            ]
+        },
+        "Mounts": [
+            {
+                "Type": "bind",
+                "Source": str(selected.barrier.root),
+                "Destination": "/run/jhin/test-barriers",
+                "RW": True,
+            }
+        ],
+    }
+
+
+def test_frozen_phase9_arrival_is_published_inside_the_verified_selected_service() -> None:
+    harness = _upgrade_harness_for_recorder()
+    authority = harness.authority
+    scenario = "sync"
+    identity = "11111111-1111-4111-8111-111111111111"
+    service = f"phase9-agent-worker-{scenario}"
+    container_id = "d" * 64
+    selected = authority.compose_command(
+        "--profile", "phase10-upgrade", "ps", "-q", service, upgrade=True
+    )
+    inspected = authority.docker_command("inspect", container_id)
+    calls: list[tuple[str, ...]] = []
+
+    def recorder(command: tuple[str, ...], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command == selected:
+            return subprocess.CompletedProcess(command, 0, f"{container_id}\n", "")
+        if command == inspected:
+            payload = [_phase9_worker_inspect_payload(harness, scenario, identity, container_id)]
+            return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+        if command == expected_exec:
+            marker = harness.scenarios[scenario].barrier.selected_dir / f"{identity}.arrived"
+            marker.write_bytes(b"arrived\n")
+            marker.chmod(0o644)
+            return subprocess.CompletedProcess(command, 0, f"{identity}\n", "")
+        raise AssertionError(f"unexpected command: {command}")
+
+    expected_exec = authority.docker_command(
+        "exec",
+        container_id,
+        "python",
+        "-c",
+        lifecycle._FROZEN_PHASE9_BARRIER_PUBLISH_SCRIPT,
+        "/run/jhin/test-barriers",
+        harness.scenarios[scenario].barrier.failpoint,
+        identity,
+        "0.25",
+    )
+    try:
+        assert (
+            harness.wait_frozen_phase9_arrival(
+                scenario,
+                identity=identity,
+                timeout=0.25,
+                runner=recorder,
+            )
+            == identity
+        )
+        assert expected_exec in calls
+        assert calls.index(inspected) < calls.index(expected_exec)
+        assert sum(command == selected for command in calls) == 1
+        assert not any("compose" in command and "exec" in command for command in calls)
+    finally:
+        authority.remove_runtime_paths()
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("Image", "sha256:" + "b" * 64),
+        ("JHIN_TEST_CRASH_BARRIER_DIR", "/tmp/wrong"),
+        ("JHIN_TEST_CRASH_BARRIER_NAME", "phase9.agent.cleanup.before_effect.v1"),
+        ("JHIN_TEST_CRASH_BARRIER_MATCH", "22222222-2222-4222-8222-222222222222"),
+    ],
+)
+def test_frozen_phase9_arrival_revalidates_image_and_exact_barrier_environment(
+    field: str,
+    replacement: str,
+) -> None:
+    harness = _upgrade_harness_for_recorder()
+    authority = harness.authority
+    scenario = "sync"
+    identity = "11111111-1111-4111-8111-111111111111"
+    service = f"phase9-agent-worker-{scenario}"
+    container_id = "d" * 64
+    selected = authority.compose_command(
+        "--profile", "phase10-upgrade", "ps", "-q", service, upgrade=True
+    )
+    inspected = authority.docker_command("inspect", container_id)
+    exec_seen = False
+
+    def recorder(command: tuple[str, ...], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal exec_seen
+        del kwargs
+        if command == selected:
+            return subprocess.CompletedProcess(command, 0, f"{container_id}\n", "")
+        if command == inspected:
+            payload = _phase9_worker_inspect_payload(
+                harness,
+                scenario,
+                identity,
+                container_id,
+            )
+            if field == "Image":
+                payload["Image"] = replacement
+            else:
+                values = payload["Config"]["Env"]
+                payload["Config"]["Env"] = [
+                    f"{field}={replacement}" if value.startswith(f"{field}=") else value
+                    for value in values
+                ]
+            return subprocess.CompletedProcess(command, 0, json.dumps([payload]), "")
+        if "exec" in command:
+            exec_seen = True
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    try:
+        with pytest.raises(RuntimeError, match="frozen Phase 9 worker authority"):
+            harness.wait_frozen_phase9_arrival(
+                scenario,
+                identity=identity,
+                timeout=0.25,
+                runner=recorder,
+            )
+        assert not exec_seen
+    finally:
+        authority.remove_runtime_paths()
+
+
+@pytest.mark.parametrize("mount_state", ("missing", "wrong", "readonly", "multiple"))
+def test_frozen_phase9_arrival_rejects_nonexact_barrier_mount_authority(
+    mount_state: str,
+) -> None:
+    harness = _upgrade_harness_for_recorder()
+    authority = harness.authority
+    scenario = "sync"
+    identity = "11111111-1111-4111-8111-111111111111"
+    service = f"phase9-agent-worker-{scenario}"
+    container_id = "d" * 64
+    selected = authority.compose_command(
+        "--profile", "phase10-upgrade", "ps", "-q", service, upgrade=True
+    )
+    inspected = authority.docker_command("inspect", container_id)
+    exec_seen = False
+
+    def recorder(command: tuple[str, ...], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal exec_seen
+        del kwargs
+        if command == selected:
+            return subprocess.CompletedProcess(command, 0, f"{container_id}\n", "")
+        if command == inspected:
+            payload = _phase9_worker_inspect_payload(
+                harness,
+                scenario,
+                identity,
+                container_id,
+            )
+            exact = payload["Mounts"][0]
+            if mount_state == "missing":
+                payload["Mounts"] = []
+            elif mount_state == "wrong":
+                payload["Mounts"] = [{**exact, "Source": "/tmp/wrong-barrier-root"}]
+            elif mount_state == "readonly":
+                payload["Mounts"] = [{**exact, "RW": False}]
+            else:
+                payload["Mounts"] = [
+                    exact,
+                    {**exact, "Source": "/tmp/alternate-barrier-root"},
+                ]
+            return subprocess.CompletedProcess(command, 0, json.dumps([payload]), "")
+        if "exec" in command:
+            exec_seen = True
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    try:
+        with pytest.raises(RuntimeError, match="barrier mount authority"):
+            harness.wait_frozen_phase9_arrival(
+                scenario,
+                identity=identity,
+                timeout=0.25,
+                runner=recorder,
+            )
+        assert not exec_seen
+    finally:
+        authority.remove_runtime_paths()
+
+
+def test_frozen_phase9_arrival_never_reresolves_or_falls_back_after_replacement() -> None:
+    harness = _upgrade_harness_for_recorder()
+    authority = harness.authority
+    scenario = "sync"
+    identity = "11111111-1111-4111-8111-111111111111"
+    service = f"phase9-agent-worker-{scenario}"
+    latched_id = "d" * 64
+    replacement_id = "e" * 64
+    selected = authority.compose_command(
+        "--profile", "phase10-upgrade", "ps", "-q", service, upgrade=True
+    )
+    inspected = authority.docker_command("inspect", latched_id)
+    exact_exec = authority.docker_command(
+        "exec",
+        latched_id,
+        "python",
+        "-c",
+        lifecycle._FROZEN_PHASE9_BARRIER_PUBLISH_SCRIPT,
+        "/run/jhin/test-barriers",
+        harness.scenarios[scenario].barrier.failpoint,
+        identity,
+        "0.25",
+    )
+    service_queries = 0
+    calls: list[tuple[str, ...]] = []
+
+    def recorder(command: tuple[str, ...], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal service_queries
+        del kwargs
+        calls.append(command)
+        if command == selected:
+            service_queries += 1
+            resolved = latched_id if service_queries == 1 else replacement_id
+            return subprocess.CompletedProcess(command, 0, f"{resolved}\n", "")
+        if command == inspected:
+            payload = _phase9_worker_inspect_payload(
+                harness,
+                scenario,
+                identity,
+                latched_id,
+            )
+            return subprocess.CompletedProcess(command, 0, json.dumps([payload]), "")
+        if command == exact_exec:
+            return subprocess.CompletedProcess(command, 1, "", "No such container")
+        if replacement_id in command:
+            raise AssertionError("replacement container must not be resolved or executed")
+        raise AssertionError(f"unexpected command: {command}")
+
+    try:
+        with pytest.raises(RuntimeError, match="compatibility probe failed"):
+            harness.wait_frozen_phase9_arrival(
+                scenario,
+                identity=identity,
+                timeout=0.25,
+                runner=recorder,
+            )
+        assert service_queries == 1
+        assert exact_exec in calls
+        assert not any(replacement_id in command for command in calls)
+    finally:
+        authority.remove_runtime_paths()
+
+
+def test_frozen_phase9_arrival_is_gated_to_the_exact_archived_source_ref() -> None:
+    harness = _upgrade_harness_for_recorder()
+    authority = harness.authority
+    unsupported = replace(
+        harness,
+        frozen=replace(harness.frozen, source_ref="1" * 40),
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def recorder(command: tuple[str, ...], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    try:
+        with pytest.raises(ValueError, match="exact frozen Phase 9 source ref"):
+            unsupported.wait_frozen_phase9_arrival(
+                "normal",
+                identity="11111111-1111-4111-8111-111111111111",
+                timeout=0.25,
+                runner=recorder,
+            )
+        assert calls == []
+    finally:
+        authority.remove_runtime_paths()
+
+
+@pytest.mark.parametrize(
+    "state",
+    ("wrong-name", "wrong-mode", "symlink", "multiple", "wrong-identity", "wrong-bytes"),
+)
+def test_frozen_phase9_publish_probe_rejects_ambiguous_or_nonhistorical_marker(
+    tmp_path: Path,
+    state: str,
+) -> None:
+    root = tmp_path / "barriers"
+    name = "phase9.agent.sync.before_effect.v1"
+    selected = root / name
+    selected.mkdir(parents=True)
+    identity = "11111111-1111-4111-8111-111111111111"
+    marker = selected / f"{identity}.arrived"
+    marker.write_bytes(b"wrong\n" if state == "wrong-bytes" else b"arrived\n")
+    marker.chmod(0o640 if state == "wrong-mode" else 0o600)
+    environment = {
+        **os.environ,
+        "JHIN_TEST_CRASH_BARRIER_DIR": str(root),
+        "JHIN_TEST_CRASH_BARRIER_NAME": name,
+        "JHIN_TEST_CRASH_BARRIER_MATCH": identity,
+    }
+    if state == "wrong-name":
+        environment["JHIN_TEST_CRASH_BARRIER_NAME"] = "phase9.agent.cleanup.before_effect.v1"
+    elif state == "symlink":
+        marker.unlink()
+        marker.symlink_to(selected / "target")
+    elif state == "multiple":
+        other = selected / "22222222-2222-4222-8222-222222222222.arrived"
+        other.write_bytes(b"arrived\n")
+        other.chmod(0o600)
+    elif state == "wrong-identity":
+        other = selected / "22222222-2222-4222-8222-222222222222.arrived"
+        marker.rename(other)
+
+    result = subprocess.run(
+        (
+            sys.executable,
+            "-c",
+            lifecycle._FROZEN_PHASE9_BARRIER_PUBLISH_SCRIPT,
+            str(root),
+            name,
+            identity,
+            "0.1",
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=2.0,
+    )
+    assert result.returncode != 0
+    assert all(stat.S_IMODE(path.lstat().st_mode) != 0o644 for path in selected.iterdir())
+
+
+def test_frozen_phase9_publish_probe_waits_for_the_historical_write_then_publishes(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "barriers"
+    name = "phase9.agent.sync.before_effect.v1"
+    selected = root / name
+    selected.mkdir(parents=True)
+    identity = "11111111-1111-4111-8111-111111111111"
+    marker = selected / f"{identity}.arrived"
+    marker.touch(mode=0o600)
+
+    def finish_historical_write() -> None:
+        time.sleep(0.05)
+        marker.write_bytes(b"arrived\n")
+        marker.chmod(0o600)
+
+    writer = threading.Thread(target=finish_historical_write)
+    writer.start()
+    try:
+        result = subprocess.run(
+            (
+                sys.executable,
+                "-c",
+                lifecycle._FROZEN_PHASE9_BARRIER_PUBLISH_SCRIPT,
+                str(root),
+                name,
+                identity,
+                "0.5",
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "JHIN_TEST_CRASH_BARRIER_DIR": str(root),
+                "JHIN_TEST_CRASH_BARRIER_NAME": name,
+                "JHIN_TEST_CRASH_BARRIER_MATCH": identity,
+            },
+            timeout=2.0,
+        )
+    finally:
+        writer.join()
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == identity
+    assert marker.read_bytes() == b"arrived\n"
+    assert stat.S_IMODE(marker.stat().st_mode) == 0o644
+
+
+@pytest.mark.parametrize(
+    ("initial_bytes", "message"),
+    [(None, "no arrival marker"), (b"", "arrival marker remained incomplete")],
+)
+def test_frozen_phase9_publish_probe_distinguishes_timeout_state(
+    tmp_path: Path,
+    initial_bytes: bytes | None,
+    message: str,
+) -> None:
+    root = tmp_path / "barriers"
+    name = "phase9.agent.sync.before_effect.v1"
+    selected = root / name
+    selected.mkdir(parents=True)
+    identity = "11111111-1111-4111-8111-111111111111"
+    if initial_bytes is not None:
+        marker = selected / f"{identity}.arrived"
+        marker.write_bytes(initial_bytes)
+        marker.chmod(0o600)
+    result = subprocess.run(
+        (
+            sys.executable,
+            "-c",
+            lifecycle._FROZEN_PHASE9_BARRIER_PUBLISH_SCRIPT,
+            str(root),
+            name,
+            identity,
+            "0.05",
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "JHIN_TEST_CRASH_BARRIER_DIR": str(root),
+            "JHIN_TEST_CRASH_BARRIER_NAME": name,
+            "JHIN_TEST_CRASH_BARRIER_MATCH": identity,
+        },
+        timeout=2.0,
+    )
+    assert result.returncode != 0
+    assert message in result.stderr
+
+
+@pytest.mark.asyncio
+async def test_live_upgrade_arrival_failure_waits_for_every_probe_thread() -> None:
+    live_upgrade = cast(
+        Any,
+        importlib.import_module("tests.integration.test_phase10_live_upgrade"),
+    )
+    first_error = RuntimeError("normal failed")
+    failure_started = threading.Event()
+    slow_started = threading.Event()
+    slow_release = threading.Event()
+    slow_finished = threading.Event()
+    arrivals = (
+        ("normal", "11111111-1111-4111-8111-111111111111"),
+        ("cleanup", "22222222-2222-4222-8222-222222222222"),
+        ("sync", "33333333-3333-4333-8333-333333333333"),
+    )
+
+    def probe(scenario: str, *, identity: str, timeout: float) -> str:
+        assert timeout == 0.25
+        if scenario == "normal":
+            failure_started.set()
+            raise first_error
+        if scenario == "cleanup":
+            slow_started.set()
+            assert slow_release.wait(1.0)
+            slow_finished.set()
+        return identity
+
+    upgrade = cast(
+        UpgradeHarness,
+        SimpleNamespace(wait_frozen_phase9_arrival=probe),
+    )
+    task = asyncio.create_task(
+        live_upgrade._wait_frozen_phase9_arrivals(upgrade, arrivals, probe_timeout=0.25)
+    )
+    for _ in range(100):
+        if failure_started.is_set() and slow_started.is_set():
+            break
+        await asyncio.sleep(0.01)
+    assert failure_started.is_set() and slow_started.is_set()
+    assert not task.done()
+    slow_release.set()
+    with pytest.raises(RuntimeError) as captured:
+        await task
+    assert captured.value is first_error
+    assert slow_finished.is_set()
+
+
+@pytest.mark.asyncio
+async def test_live_upgrade_arrival_wait_groups_multiple_probe_errors() -> None:
+    live_upgrade = cast(
+        Any,
+        importlib.import_module("tests.integration.test_phase10_live_upgrade"),
+    )
+    first_error = RuntimeError("normal failed")
+    second_error = ValueError("sync failed")
+    arrivals = (
+        ("normal", "11111111-1111-4111-8111-111111111111"),
+        ("cleanup", "22222222-2222-4222-8222-222222222222"),
+        ("sync", "33333333-3333-4333-8333-333333333333"),
+    )
+
+    def probe(scenario: str, *, identity: str, timeout: float) -> str:
+        assert timeout == 0.25
+        if scenario == "normal":
+            raise first_error
+        if scenario == "sync":
+            raise second_error
+        return identity
+
+    upgrade = cast(
+        UpgradeHarness,
+        SimpleNamespace(wait_frozen_phase9_arrival=probe),
+    )
+    with pytest.raises(BaseExceptionGroup) as captured:
+        await live_upgrade._wait_frozen_phase9_arrivals(
+            upgrade,
+            arrivals,
+            probe_timeout=0.25,
+        )
+    assert captured.value.exceptions == (first_error, second_error)
+
+
+@pytest.mark.asyncio
+async def test_live_upgrade_arrival_wait_preserves_input_order_after_out_of_order_finish() -> None:
+    live_upgrade = cast(
+        Any,
+        importlib.import_module("tests.integration.test_phase10_live_upgrade"),
+    )
+    arrivals = (
+        ("normal", "11111111-1111-4111-8111-111111111111"),
+        ("cleanup", "22222222-2222-4222-8222-222222222222"),
+        ("sync", "33333333-3333-4333-8333-333333333333"),
+    )
+    delays = {"normal": 0.05, "cleanup": 0.0, "sync": 0.02}
+
+    def probe(scenario: str, *, identity: str, timeout: float) -> str:
+        assert timeout == 0.25
+        time.sleep(delays[scenario])
+        return identity
+
+    upgrade = cast(
+        UpgradeHarness,
+        SimpleNamespace(wait_frozen_phase9_arrival=probe),
+    )
+    observed = await live_upgrade._wait_frozen_phase9_arrivals(
+        upgrade,
+        arrivals,
+        probe_timeout=0.25,
+    )
+    assert observed == [identity for _scenario, identity in arrivals]
 
 
 def test_upgrade_database_mutations_request_tuple_output_only() -> None:
@@ -6933,6 +7490,59 @@ def test_wrong_gid_probe_builds_only_runner_and_never_changes_selected_gid(
         assert not any(command.endswith(" up") for command in joined)
         assert authority.socket_gid == 123
         assert failure.environment["SANDBOX_DOCKER_GID"] == "1"
+    finally:
+        authority.remove_runtime_paths()
+
+
+def test_wrong_gid_probe_includes_bounded_runner_logs_after_generic_health_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _authority_for_recorder()
+    failure = authority.with_rootful_socket_gid(1)
+    recorder = _ScriptedRecorder(failure)
+    up = failure.compose_command(
+        "up",
+        "-d",
+        "--no-deps",
+        "--force-recreate",
+        "--build",
+        "--wait",
+        "--wait-timeout",
+        "60",
+        "sandbox-runner",
+    )
+    logs = failure.compose_command(
+        "logs",
+        "--no-color",
+        "--tail",
+        "100",
+        "sandbox-runner",
+    )
+    recorder.responses[up] = (1, "", "container sandbox-runner is unhealthy")
+    secret = failure.environment["SANDBOX_RUNNER_TOKEN"]
+    recorder.responses[logs] = (
+        0,
+        (
+            "x" * (lifecycle.LIVE_FAILURE_OUTPUT_LIMIT + 128)
+            + "\nDocker socket group does not match SANDBOX_DOCKER_GID\n"
+            + secret
+        ),
+        "",
+    )
+    monkeypatch.setattr(ComposeAuthority, "preflight", lambda self, runner: None)
+    try:
+        result = authority.run_wrong_gid_probe(runner=recorder)
+        combined = f"{result.stdout}\n{result.stderr}"
+        assert result.returncode == 1
+        assert "container sandbox-runner is unhealthy" in combined
+        assert "Docker socket group does not match SANDBOX_DOCKER_GID" in combined
+        assert secret not in combined
+        assert "<redacted>" in combined
+        assert len(result.stdout) <= lifecycle.LIVE_FAILURE_OUTPUT_LIMIT
+        assert len(result.stderr) <= lifecycle.LIVE_FAILURE_OUTPUT_LIMIT
+        assert recorder.calls.index(logs) > recorder.calls.index(up)
+        remove = failure.compose_command("rm", "-s", "-f", "sandbox-runner")
+        assert recorder.calls.index(logs) < recorder.calls.index(remove)
     finally:
         authority.remove_runtime_paths()
 
