@@ -140,6 +140,10 @@ class ComposePsError(ValueError):
     """The selected project is not the exact healthy service topology."""
 
 
+class ComposeStartingError(ComposePsError):
+    """The exact project topology is present but one service is still starting."""
+
+
 class _LifecycleSignal(BaseException):
     """Catchable process signal latched until child reaping and final cleanup."""
 
@@ -512,20 +516,32 @@ def _redact_live_failure_text(value: Any, environment: dict[str, str]) -> str:
     return rendered[-LIVE_FAILURE_OUTPUT_LIMIT:]
 
 
+def emit_live_failure_output(
+    error: subprocess.CalledProcessError,
+    *,
+    environment: dict[str, str],
+    context: str,
+) -> None:
+    """Emit bounded, secret-redacted diagnostics for CI failures."""
+    if context not in {"pytest", "setup", "stack-ps", "stack-logs"}:
+        raise ValueError("live failure context is invalid")
+    for label, value in (("stdout", error.stdout), ("stderr", error.stderr)):
+        rendered = _redact_live_failure_text(value, environment)
+        if not rendered:
+            continue
+        sys.stderr.write(f"\n--- live {context} {label} (redacted tail) ---\n")
+        sys.stderr.write(rendered)
+        if not rendered.endswith("\n"):
+            sys.stderr.write("\n")
+
+
 def emit_live_child_failure_output(
     error: subprocess.CalledProcessError,
     *,
     environment: dict[str, str],
 ) -> None:
     """Emit bounded, secret-redacted pytest diagnostics for CI failures."""
-    for label, value in (("stdout", error.stdout), ("stderr", error.stderr)):
-        rendered = _redact_live_failure_text(value, environment)
-        if not rendered:
-            continue
-        sys.stderr.write(f"\n--- live pytest {label} (redacted tail) ---\n")
-        sys.stderr.write(rendered)
-        if not rendered.endswith("\n"):
-            sys.stderr.write("\n")
+    emit_live_failure_output(error, environment=environment, context="pytest")
 
 
 def run_command(
@@ -1120,14 +1136,20 @@ def parse_compose_ps(
         raise ComposePsError(f"Compose ps is missing services: {missing}")
     if unexpected:
         raise ComposePsError(f"Compose ps contains unexpected services: {unexpected}")
+    starting_services: list[str] = []
     for service, row in parsed.items():
         state = str(row.get("State", "")).lower()
         if state != "running":
             raise ComposePsError(f"service {service} is not running: {state or 'missing'}")
         health_value = row.get("Health", "")
         health = "" if health_value is None else str(health_value).lower()
+        if health == "starting":
+            starting_services.append(service)
+            continue
         if health != "healthy":
             raise ComposePsError(f"service {service} is unhealthy: {health or 'missing health'}")
+    if starting_services:
+        raise ComposeStartingError(f"services are still starting: {sorted(starting_services)}")
     return parsed
 
 
@@ -2378,18 +2400,84 @@ class ComposeAuthority:
         expected_services: Iterable[str] | None = None,
         upgrade: bool = False,
     ) -> dict[str, dict[str, Any]]:
+        expected = self.expected_services if expected_services is None else set(expected_services)
+        if not expected:
+            raise ValueError("readiness selection cannot be empty")
+        if not upgrade and not expected <= self.expected_services:
+            raise ValueError("readiness selection is outside the exact service inventory")
+        service_selection = () if expected_services is None else tuple(sorted(expected))
         result = self._run(
-            self.compose_command("ps", "--all", "--format", "json", upgrade=upgrade),
+            self.compose_command(
+                "ps",
+                "--all",
+                "--format",
+                "json",
+                *service_selection,
+                upgrade=upgrade,
+            ),
             runner=runner,
             timeout=60.0,
         )
         output = result.stdout
         if isinstance(output, bytes):
             output = output.decode("utf-8", errors="strict")
-        return parse_compose_ps(
-            cast(str, output),
-            self.expected_services if expected_services is None else expected_services,
+        return parse_compose_ps(cast(str, output), expected)
+
+    def emit_stack_diagnostics(self, *, runner: CommandRunner = run_command) -> None:
+        """Emit bounded, redacted selected-project state and logs."""
+        diagnostics = (
+            ("stack-ps", self.compose_command("ps", "--all", "--format", "json")),
+            ("stack-logs", self.compose_command("logs", "--no-color", "--tail", "100")),
         )
+        for context, command in diagnostics:
+            result = self._run(
+                command,
+                runner=runner,
+                timeout=60.0,
+                check=False,
+            )
+            error = subprocess.CalledProcessError(
+                result.returncode or 1,
+                command,
+                output=result.stdout,
+                stderr=result.stderr,
+            )
+            emit_live_failure_output(
+                error,
+                environment=self.environment,
+                context=context,
+            )
+
+    def wait_ready(
+        self,
+        *,
+        runner: CommandRunner = run_command,
+        expected_services: Iterable[str] | None = None,
+        timeout_seconds: float = 90.0,
+        interval_seconds: float = 3.0,
+    ) -> dict[str, dict[str, Any]]:
+        """Wait boundedly while an exact running service is still starting."""
+        if timeout_seconds <= 0 or interval_seconds <= 0:
+            raise ValueError("readiness timeout and interval must be positive")
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            try:
+                return self.assert_ready(
+                    runner=runner,
+                    expected_services=expected_services,
+                )
+            except ComposeStartingError as error:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    try:
+                        self.emit_stack_diagnostics(runner=runner)
+                    except BaseException as diagnostic_error:
+                        raise BaseExceptionGroup(
+                            "Phase 10 readiness and diagnostics failed",
+                            [error, diagnostic_error],
+                        ) from error
+                    raise
+                time.sleep(min(interval_seconds, remaining))
 
     def inspect_service(
         self,
@@ -2913,19 +3001,6 @@ class ComposeAuthority:
         if current != self.socket_snapshot:
             raise RuntimeError("selected Docker socket metadata changed during acceptance")
 
-    def _assert_service_ready(
-        self,
-        service: str,
-        *,
-        runner: CommandRunner,
-    ) -> None:
-        result = self._run(
-            self.compose_command("ps", "--all", "--format", "json", service),
-            runner=runner,
-            timeout=60.0,
-        )
-        parse_compose_ps(_text(result.stdout), {service})
-
     def master_key_readability_command(
         self,
         service: str,
@@ -3071,15 +3146,18 @@ class ComposeAuthority:
             timeout=1200.0,
         )
         if self.mode == "rootless":
-            self._assert_service_ready("rootless-docker-transport", runner=runner)
-        self._assert_service_ready("sandbox-runner", runner=runner)
-        self.assert_ready(runner=runner)
+            self.wait_ready(
+                runner=runner,
+                expected_services={"rootless-docker-transport"},
+            )
+        self.wait_ready(runner=runner, expected_services={"sandbox-runner"})
+        self.wait_ready(runner=runner)
         self._run(
             self.compose_command("run", "--rm", "--no-deps", "api", "jhin-db-migrate"),
             runner=runner,
             timeout=300.0,
         )
-        self.assert_ready(runner=runner)
+        self.wait_ready(runner=runner)
         self.verify_master_key_readability(runner=runner)
         return self.resolve_published_ports(runner=runner)
 
@@ -3160,6 +3238,32 @@ class ComposeAuthority:
             return ()
         if len(containers) != 1:
             raise RuntimeError("isolated PostgreSQL identity is ambiguous")
+        schema_probe = self._run(
+            self.compose_command(
+                "exec",
+                "-T",
+                "postgres",
+                "psql",
+                "-U",
+                "jhin",
+                "-d",
+                "jhin",
+                "-At",
+                "-c",
+                "SELECT CASE WHEN to_regclass('public.sandbox_job') IS NULL "
+                "THEN 'missing' ELSE 'present' END",
+            ),
+            runner=runner,
+            timeout=30.0,
+            check=False,
+        )
+        if schema_probe.returncode != 0:
+            raise RuntimeError("failed to inspect the isolated sandbox schema")
+        schema_state = _text(schema_probe.stdout).strip()
+        if schema_state == "missing":
+            return ()
+        if schema_state != "present":
+            raise RuntimeError("isolated sandbox schema inventory is malformed")
         query = self._run(
             self.compose_command(
                 "exec",
@@ -4984,6 +5088,7 @@ def execute_one_shot(
 
     primary_error: BaseException | None = None
     result: subprocess.CompletedProcess[Any] | None = None
+    failure_output_emitted = False
     try:
         signal_lifecycle.activate()
         live_authority = live_authority.with_child_barrier_journal()
@@ -5102,15 +5207,25 @@ def execute_one_shot(
             )
         except subprocess.CalledProcessError as error:
             emit_live_child_failure_output(error, environment=child_environment)
+            failure_output_emitted = True
             raise
         if result.returncode != 0:
-            raise subprocess.CalledProcessError(
+            child_error = subprocess.CalledProcessError(
                 result.returncode,
                 result.args,
                 output=result.stdout,
                 stderr=result.stderr,
             )
+            emit_live_child_failure_output(child_error, environment=child_environment)
+            failure_output_emitted = True
+            raise child_error
     except BaseException as error:
+        if isinstance(error, subprocess.CalledProcessError) and not failure_output_emitted:
+            emit_live_failure_output(
+                error,
+                environment=live_authority.environment,
+                context="setup",
+            )
         primary_error = error
     finally:
         child_group_survived = _contains_owned_process_group_survivor(primary_error)

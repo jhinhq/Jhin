@@ -1216,6 +1216,240 @@ def test_build_order_and_readiness_use_exact_authority() -> None:
         authority.remove_runtime_paths()
 
 
+def test_bounded_readiness_retries_starting_service_until_exact_topology_is_healthy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _authority_for_recorder()
+    command = authority.compose_command("ps", "--all", "--format", "json")
+    starting = [
+        {
+            "Service": name,
+            "State": "running",
+            "Health": "starting" if name == "event-worker" else "healthy",
+        }
+        for name in sorted(EXPECTED_ROOTFUL_SERVICES)
+    ]
+    healthy = [
+        {"Service": name, "State": "running", "Health": "healthy"}
+        for name in sorted(EXPECTED_ROOTFUL_SERVICES)
+    ]
+    outputs = iter((json.dumps(starting), json.dumps(healthy)))
+    calls: list[tuple[str, ...]] = []
+    sleeps: list[float] = []
+
+    def runner(command_value: tuple[str, ...], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert command_value == command
+        assert kwargs["env"] == authority.environment
+        assert kwargs["cwd"] == authority.repo
+        calls.append(command_value)
+        return subprocess.CompletedProcess(command_value, 0, next(outputs), "")
+
+    monotonic = iter((0.0, 0.0))
+    monkeypatch.setattr(time, "monotonic", lambda: next(monotonic))
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    try:
+        observed = authority.wait_ready(
+            runner=runner,
+            timeout_seconds=5.0,
+            interval_seconds=1.0,
+        )
+        assert set(observed) == EXPECTED_ROOTFUL_SERVICES
+        assert calls == [command, command]
+        assert sleeps == [1.0]
+    finally:
+        authority.remove_runtime_paths()
+
+
+def test_stack_diagnostics_are_bounded_and_secret_redacted(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    authority = _authority_for_recorder()
+    recorder = _ScriptedRecorder(authority)
+    runner_token = authority.environment["SANDBOX_RUNNER_TOKEN"]
+    ps = authority.compose_command("ps", "--all", "--format", "json")
+    logs = authority.compose_command("logs", "--no-color", "--tail", "100")
+    recorder.responses[ps] = (0, f"event-worker starting {runner_token}\n", "")
+    recorder.responses[logs] = (0, f"event-worker crashed {runner_token}\n", "")
+    try:
+        authority.emit_stack_diagnostics(runner=recorder)
+        emitted = capsys.readouterr().err
+        assert runner_token not in emitted
+        assert emitted.count("--- live stack-ps stdout (redacted tail) ---") == 1
+        assert emitted.count("--- live stack-logs stdout (redacted tail) ---") == 1
+        assert emitted.count("event-worker starting") == 1
+        assert emitted.count("event-worker crashed") == 1
+        assert recorder.calls == [ps, logs]
+    finally:
+        authority.remove_runtime_paths()
+
+
+def test_bounded_readiness_timeout_preserves_starting_error_and_emits_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    authority = _authority_for_recorder()
+    ps = authority.compose_command("ps", "--all", "--format", "json")
+    logs = authority.compose_command("logs", "--no-color", "--tail", "100")
+    starting = json.dumps(
+        [
+            {
+                "Service": name,
+                "State": "running",
+                "Health": "starting" if name == "event-worker" else "healthy",
+            }
+            for name in sorted(EXPECTED_ROOTFUL_SERVICES)
+        ]
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def runner(command: tuple[str, ...], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append(command)
+        if command == ps:
+            return subprocess.CompletedProcess(command, 0, starting, "")
+        assert command == logs
+        return subprocess.CompletedProcess(command, 0, "event-worker restart detail\n", "")
+
+    monotonic = iter((0.0, 6.0))
+    monkeypatch.setattr(time, "monotonic", lambda: next(monotonic))
+    monkeypatch.setattr(
+        time,
+        "sleep",
+        lambda _seconds: pytest.fail("expired readiness must not sleep"),
+    )
+    try:
+        with pytest.raises(lifecycle.ComposeStartingError, match="event-worker"):
+            authority.wait_ready(
+                runner=runner,
+                timeout_seconds=5.0,
+                interval_seconds=1.0,
+            )
+        assert calls == [ps, ps, logs]
+        assert "event-worker restart detail" in capsys.readouterr().err
+    finally:
+        authority.remove_runtime_paths()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        "not-json",
+        json.dumps(
+            [
+                {"Service": name, "State": "running", "Health": "healthy"}
+                for name in sorted(EXPECTED_ROOTFUL_SERVICES - {"event-worker"})
+            ]
+        ),
+        json.dumps(
+            [
+                {
+                    "Service": name,
+                    "State": "exited" if name == "event-worker" else "running",
+                    "Health": "unhealthy" if name == "event-worker" else "healthy",
+                }
+                for name in sorted(EXPECTED_ROOTFUL_SERVICES)
+            ]
+        ),
+        json.dumps(
+            [
+                {
+                    "Service": name,
+                    "State": "running",
+                    "Health": (
+                        "starting"
+                        if name == "event-worker"
+                        else "unhealthy"
+                        if name == "tool-worker"
+                        else "healthy"
+                    ),
+                }
+                for name in sorted(EXPECTED_ROOTFUL_SERVICES)
+            ]
+        ),
+    ),
+)
+def test_bounded_readiness_fails_immediately_on_nonstarting_topology_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: str,
+) -> None:
+    authority = _authority_for_recorder()
+    ps = authority.compose_command("ps", "--all", "--format", "json")
+    calls: list[tuple[str, ...]] = []
+
+    def runner(command: tuple[str, ...], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append(command)
+        assert command == ps
+        return subprocess.CompletedProcess(command, 0, payload, "")
+
+    monkeypatch.setattr(
+        time,
+        "sleep",
+        lambda _seconds: pytest.fail("nonstarting errors must not be retried"),
+    )
+    try:
+        with pytest.raises(ComposePsError):
+            authority.wait_ready(runner=runner)
+        assert calls == [ps]
+    finally:
+        authority.remove_runtime_paths()
+
+
+@pytest.mark.parametrize(
+    ("mode", "service"),
+    (
+        ("rootful", "sandbox-runner"),
+        ("rootless", "rootless-docker-transport"),
+    ),
+)
+def test_bounded_readiness_applies_to_required_socket_boundary_services(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    service: str,
+) -> None:
+    authority = ComposeAuthority.create(
+        repo=Path(__file__).resolve().parents[2],
+        mode=mode,
+        socket_path=(
+            Path("/var/run/docker.sock")
+            if mode == "rootful"
+            else Path("/run/user/10001/docker.sock")
+        ),
+        socket_gid=123 if mode == "rootful" else None,
+        token="deadc0de1234",
+        source_environment={"PATH": "/usr/bin"},
+    )
+    command = authority.compose_command("ps", "--all", "--format", "json", service)
+    outputs = iter(
+        (
+            json.dumps([{"Service": service, "State": "running", "Health": "starting"}]),
+            json.dumps([{"Service": service, "State": "running", "Health": "healthy"}]),
+        )
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def runner(command_value: tuple[str, ...], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append(command_value)
+        assert command_value == command
+        return subprocess.CompletedProcess(command_value, 0, next(outputs), "")
+
+    monotonic = iter((0.0, 0.0))
+    monkeypatch.setattr(time, "monotonic", lambda: next(monotonic))
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    try:
+        observed = authority.wait_ready(
+            runner=runner,
+            expected_services={service},
+            timeout_seconds=5.0,
+            interval_seconds=1.0,
+        )
+        assert set(observed) == {service}
+        assert calls == [command, command]
+    finally:
+        authority.remove_runtime_paths()
+
+
 def test_endpoint_discovery_resolves_all_fourteen_ports_without_env_drift() -> None:
     authority = _authority_for_recorder()
     recorder = _Recorder(authority)
@@ -1458,6 +1692,20 @@ def test_cleanup_inventory_is_database_bound_and_uses_exact_resource_labels() ->
     authority = _authority_for_recorder()
     recorder = _ScriptedRecorder(authority)
     postgres = authority.compose_command("ps", "-q", "postgres")
+    schema_probe = authority.compose_command(
+        "exec",
+        "-T",
+        "postgres",
+        "psql",
+        "-U",
+        "jhin",
+        "-d",
+        "jhin",
+        "-At",
+        "-c",
+        "SELECT CASE WHEN to_regclass('public.sandbox_job') IS NULL "
+        "THEN 'missing' ELSE 'present' END",
+    )
     query = authority.compose_command(
         "exec",
         "-T",
@@ -1476,6 +1724,7 @@ def test_cleanup_inventory_is_database_bound_and_uses_exact_resource_labels() ->
     job_id = "018f4d52-8b93-7d41-8ac7-7f190f091110"
     run_id = "018f4d52-8b93-7d41-8ac7-7f190f091111"
     recorder.responses[postgres] = (0, "postgres-id\n", "")
+    recorder.responses[schema_probe] = (0, "present\n", "")
     recorder.responses[query] = (0, f"{job_id}|{run_id}\n", "")
     try:
         inventory = authority.snapshot_sandbox_artifacts(runner=recorder)
@@ -1484,6 +1733,72 @@ def test_cleanup_inventory_is_database_bound_and_uses_exact_resource_labels() ->
             ("container", f"jhin.sandbox.job={job_id}"),
             ("volume", f"jhin.sandbox.workspace=run-{run_id}"),
         )
+    finally:
+        authority.remove_runtime_paths()
+
+
+def test_cleanup_inventory_treats_an_unmigrated_database_as_empty() -> None:
+    authority = _authority_for_recorder()
+    recorder = _ScriptedRecorder(authority)
+    postgres = authority.compose_command("ps", "-q", "postgres")
+    schema_probe = authority.compose_command(
+        "exec",
+        "-T",
+        "postgres",
+        "psql",
+        "-U",
+        "jhin",
+        "-d",
+        "jhin",
+        "-At",
+        "-c",
+        "SELECT CASE WHEN to_regclass('public.sandbox_job') IS NULL "
+        "THEN 'missing' ELSE 'present' END",
+    )
+    recorder.responses[postgres] = (0, "postgres-id\n", "")
+    recorder.responses[schema_probe] = (0, "missing\n", "")
+    try:
+        assert authority.snapshot_sandbox_artifacts(runner=recorder) == ()
+        assert recorder.calls == [postgres, schema_probe]
+    finally:
+        authority.remove_runtime_paths()
+
+
+@pytest.mark.parametrize(
+    ("returncode", "output", "message"),
+    (
+        (1, "", "failed to inspect"),
+        (0, "unknown\n", "malformed"),
+    ),
+)
+def test_cleanup_inventory_fails_closed_on_indeterminate_schema_state(
+    returncode: int,
+    output: str,
+    message: str,
+) -> None:
+    authority = _authority_for_recorder()
+    recorder = _ScriptedRecorder(authority)
+    postgres = authority.compose_command("ps", "-q", "postgres")
+    schema_probe = authority.compose_command(
+        "exec",
+        "-T",
+        "postgres",
+        "psql",
+        "-U",
+        "jhin",
+        "-d",
+        "jhin",
+        "-At",
+        "-c",
+        "SELECT CASE WHEN to_regclass('public.sandbox_job') IS NULL "
+        "THEN 'missing' ELSE 'present' END",
+    )
+    recorder.responses[postgres] = (0, "postgres-id\n", "")
+    recorder.responses[schema_probe] = (returncode, output, "probe error")
+    try:
+        with pytest.raises(RuntimeError, match=message):
+            authority.snapshot_sandbox_artifacts(runner=recorder)
+        assert recorder.calls == [postgres, schema_probe]
     finally:
         authority.remove_runtime_paths()
 
@@ -3148,6 +3463,7 @@ def test_one_shot_emits_redacted_child_failure_and_preserves_cleanup(
     lease = Path("/tmp") / f"jhin-p10-child-failure-{uuid.uuid4().hex}.json"
     observed: list[str] = []
     sensitive_values: list[str] = []
+    failures: list[subprocess.CalledProcessError] = []
 
     def fake_start(self: ComposeAuthority, *, runner: Any) -> dict[str, int]:
         del self, runner
@@ -3176,12 +3492,14 @@ def test_one_shot_emits_redacted_child_failure_and_preserves_cleanup(
         assert check is True
         observed.append("child")
         sensitive_values.extend((env["SANDBOX_RUNNER_TOKEN"], env["JHIN_PHASE9_DB_READER_DSN"]))
-        raise subprocess.CalledProcessError(
+        failure = subprocess.CalledProcessError(
             1,
             command,
             output=f"FAILED live-node {sensitive_values[0]}\n",
             stderr=f"database detail {sensitive_values[1]}\n",
         )
+        failures.append(failure)
+        raise failure
 
     monkeypatch.setattr(ComposeAuthority, "start_stack", fake_start)
     monkeypatch.setattr(ComposeAuthority, "down_and_cleanup", fake_cleanup)
@@ -3200,7 +3518,76 @@ def test_one_shot_emits_redacted_child_failure_and_preserves_cleanup(
         assert "database detail" in emitted
         assert sensitive_values
         assert all(value not in emitted for value in sensitive_values)
+        assert failures == [raised.value]
+        assert emitted.count("--- live pytest stdout (redacted tail) ---") == 1
+        assert emitted.count("--- live pytest stderr (redacted tail) ---") == 1
+        assert emitted.count("FAILED live-node") == 1
+        assert emitted.count("database detail") == 1
+        assert "--- live setup" not in emitted
         assert observed == ["start", "child", "cleanup"]
+        assert not lease.exists()
+    finally:
+        lease.unlink(missing_ok=True)
+        authority.remove_runtime_paths()
+
+
+def test_one_shot_emits_redacted_setup_failure_and_preserves_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    authority = _authority_for_recorder()
+    lease = Path("/tmp") / f"jhin-p10-setup-failure-{uuid.uuid4().hex}.json"
+    observed: list[str] = []
+    runner_token = authority.environment["SANDBOX_RUNNER_TOKEN"]
+    failure = subprocess.CalledProcessError(
+        1,
+        ("docker", "compose", "build", "sandbox-image"),
+        output=f"build output {runner_token}\n",
+        stderr=f"build failure {runner_token}\n",
+    )
+
+    def failing_start(
+        self: ComposeAuthority,
+        *,
+        runner: Any,
+    ) -> dict[str, int]:
+        del self, runner
+        observed.append("start")
+        raise failure
+
+    def fake_cleanup(
+        self: ComposeAuthority,
+        *,
+        runner: Any,
+        upgrade: bool = False,
+    ) -> None:
+        del self, runner, upgrade
+        observed.append("cleanup")
+
+    monkeypatch.setattr(ComposeAuthority, "start_stack", failing_start)
+    monkeypatch.setattr(ComposeAuthority, "down_and_cleanup", fake_cleanup)
+    scenario = LiveScenario(nodes=("tests/integration/fake.py::test_live",), expected_tests=1)
+    try:
+        with pytest.raises(subprocess.CalledProcessError) as raised:
+            execute_one_shot(
+                authority,
+                scenario=scenario,
+                lease_path=lease,
+            )
+        assert raised.value is failure
+        emitted = capsys.readouterr().err
+        assert "live setup stdout" in emitted
+        assert "live setup stderr" in emitted
+        assert "build output" in emitted
+        assert "build failure" in emitted
+        assert runner_token not in emitted
+        assert "<redacted>" in emitted
+        assert emitted.count("--- live setup stdout (redacted tail) ---") == 1
+        assert emitted.count("--- live setup stderr (redacted tail) ---") == 1
+        assert emitted.count("build output") == 1
+        assert emitted.count("build failure") == 1
+        assert "--- live pytest" not in emitted
+        assert observed == ["start", "cleanup"]
         assert not lease.exists()
     finally:
         lease.unlink(missing_ok=True)
