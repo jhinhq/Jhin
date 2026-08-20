@@ -6802,6 +6802,78 @@ class _WorkerRecoveryRecorder:
         return subprocess.CompletedProcess(command, 0, "", "")
 
 
+class _FailingWorkerRecreateRecorder:
+    def __init__(
+        self,
+        authority: ComposeAuthority,
+        baseline: list[dict[str, Any]],
+        failure_inventory: list[dict[str, Any]],
+        *,
+        fail_diagnostics: bool = False,
+    ) -> None:
+        self.authority = authority
+        self.snapshots = iter((baseline, failure_inventory))
+        self.calls: list[tuple[str, ...]] = []
+        self.fail_diagnostics = fail_diagnostics
+        self.recreate_command = authority.worker_recreate_command("agent-worker")
+        self.failure = subprocess.CalledProcessError(
+            17,
+            self.recreate_command,
+            output=f"up failed {authority.environment['SANDBOX_RUNNER_TOKEN']}",
+            stderr="compose up failed",
+        )
+
+    def __call__(
+        self,
+        command: tuple[str, ...],
+        *,
+        env: dict[str, str],
+        cwd: Path,
+        timeout: float,
+        check: bool,
+        input_bytes: bytes | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout, check, input_bytes
+        assert cwd == self.authority.repo
+        assert env == self.authority.environment
+        self.calls.append(command)
+        if command == self.recreate_command:
+            raise self.failure
+        ps_command = self.authority.compose_command("ps", "--all", "--format", "json")
+        if command == ps_command:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps(next(self.snapshots)),
+                "",
+            )
+        if "logs" in command:
+            if self.fail_diagnostics:
+                raise RuntimeError("diagnostic logs failed")
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                f"worker failure {self.authority.environment['SANDBOX_RUNNER_TOKEN']}",
+                "",
+            )
+        if command[:4] == (*self.authority.docker_command(), "inspect"):
+            identifier = command[-1]
+            service = identifier.removesuffix("-container")
+            status = "exited" if service == "event-worker" else "running"
+            container = _sandbox_container(
+                self.authority,
+                identifier=identifier,
+                status=status,
+                running=status == "running",
+            )
+            container["Config"]["Labels"]["com.docker.compose.service"] = service
+            container["Config"]["Env"] = [
+                f"SECRET={self.authority.environment['SANDBOX_RUNNER_TOKEN']}"
+            ]
+            return subprocess.CompletedProcess(command, 0, json.dumps([container]), "")
+        raise AssertionError(f"unexpected worker recovery command: {command}")
+
+
 def _install_worker_environment_inspect(
     monkeypatch: pytest.MonkeyPatch,
     authority: ComposeAuthority,
@@ -6915,6 +6987,122 @@ def test_worker_recreation_rejects_unselected_service_identity_change(
         authority.remove_runtime_paths()
 
 
+def test_worker_recreation_rejects_unchanged_selected_service_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _authority_for_recorder()
+    baseline = _worker_topology_rows(authority)
+    unchanged = _worker_topology_rows(authority)
+    recorder = _WorkerRecoveryRecorder(authority, [baseline, unchanged])
+    _install_worker_environment_inspect(monkeypatch, authority)
+    try:
+        with pytest.raises(ComposePsError, match=r"not recreated.*agent-worker"):
+            authority.recreate_worker("agent-worker", runner=recorder)
+        assert recorder.ps_calls == 2
+    finally:
+        authority.remove_runtime_paths()
+
+
+def test_worker_recreation_latches_the_selected_replacement_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _authority_for_recorder()
+    baseline = _worker_topology_rows(authority)
+    restarting = _worker_topology_rows(
+        authority,
+        states={"agent-worker": ("restarting", "healthy")},
+        identities={"agent-worker": "first-replacement-agent-container"},
+    )
+    changed = _worker_topology_rows(
+        authority,
+        identities={"agent-worker": "second-replacement-agent-container"},
+    )
+    recorder = _WorkerRecoveryRecorder(authority, [baseline, restarting, changed])
+    _install_worker_environment_inspect(monkeypatch, authority)
+    monkeypatch.setattr(time, "sleep", lambda _interval: None)
+    try:
+        with pytest.raises(ComposePsError, match=r"identity changed.*agent-worker"):
+            authority.recreate_worker("agent-worker", runner=recorder)
+        assert recorder.ps_calls == 3
+    finally:
+        authority.remove_runtime_paths()
+
+
+def test_worker_recreate_command_failure_emits_fresh_bounded_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    authority = _authority_for_recorder()
+    baseline = _worker_topology_rows(authority)
+    failure_inventory = _worker_topology_rows(
+        authority,
+        states={"event-worker": ("exited", "unhealthy")},
+        identities={"agent-worker": "replacement-agent-container"},
+    )
+    recorder = _FailingWorkerRecreateRecorder(authority, baseline, failure_inventory)
+    socket_checks: list[str] = []
+    monkeypatch.setattr(
+        ComposeAuthority,
+        "assert_socket_unchanged",
+        lambda self: socket_checks.append(self.project),
+    )
+    try:
+        with pytest.raises(subprocess.CalledProcessError) as caught:
+            authority.recreate_worker("agent-worker", runner=recorder)
+        assert caught.value is recorder.failure
+        ps_command = authority.compose_command("ps", "--all", "--format", "json")
+        logs_command = authority.compose_command(
+            "logs",
+            "--no-color",
+            "--tail",
+            "100",
+            "agent-worker",
+            "event-worker",
+        )
+        assert recorder.calls == [
+            ps_command,
+            recorder.recreate_command,
+            ps_command,
+            logs_command,
+            authority.docker_command("inspect", "replacement-agent-container"),
+            authority.docker_command("inspect", "event-worker-container"),
+        ]
+        assert socket_checks == [authority.project] * 7
+        rendered = capsys.readouterr().err
+        assert "live stack-ps" in rendered
+        assert "live stack-logs" in rendered
+        assert "live operational-inspect" in rendered
+        assert '"Env"' not in rendered
+        assert "<redacted>" in rendered
+        assert authority.environment["SANDBOX_RUNNER_TOKEN"] not in rendered
+    finally:
+        authority.remove_runtime_paths()
+
+
+def test_worker_recreate_command_failure_groups_a_diagnostic_failure() -> None:
+    authority = _authority_for_recorder()
+    baseline = _worker_topology_rows(authority)
+    failure_inventory = _worker_topology_rows(
+        authority,
+        states={"event-worker": ("exited", "unhealthy")},
+        identities={"agent-worker": "replacement-agent-container"},
+    )
+    recorder = _FailingWorkerRecreateRecorder(
+        authority,
+        baseline,
+        failure_inventory,
+        fail_diagnostics=True,
+    )
+    try:
+        with pytest.raises(BaseExceptionGroup) as caught:
+            authority.recreate_worker("agent-worker", runner=recorder)
+        assert caught.value.exceptions[0] is recorder.failure
+        assert isinstance(caught.value.exceptions[1], RuntimeError)
+        assert str(caught.value.exceptions[1]) == "diagnostic logs failed"
+    finally:
+        authority.remove_runtime_paths()
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     (("missing", "missing services"), ("duplicate", "duplicate service")),
@@ -6973,36 +7161,13 @@ def test_worker_recreation_reasserts_the_whole_live_topology(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     authority = _authority_for_recorder()
-    recorder = _Recorder(authority)
-    recorder.ps_output = json.dumps(
-        [
-            {
-                "ID": f"{service}-container",
-                "Service": service,
-                "State": "running",
-                "Health": "healthy",
-            }
-            for service in sorted(EXPECTED_ROOTFUL_SERVICES)
-        ]
+    baseline = _worker_topology_rows(authority)
+    healthy = _worker_topology_rows(
+        authority,
+        identities={"agent-worker": "replacement-agent-container"},
     )
-    environment = authority.worker_environment()
-    monkeypatch.setattr(
-        ComposeAuthority,
-        "inspect_service",
-        lambda self, service, runner: {
-            "Config": {
-                "Env": [
-                    f"{key}={environment[key]}"
-                    for key in (
-                        "APP_ENV",
-                        "JHIN_TEST_CRASH_BARRIER_DIR",
-                        "JHIN_TEST_CRASH_BARRIER_NAME",
-                        "JHIN_TEST_CRASH_BARRIER_MATCH",
-                    )
-                ]
-            }
-        },
-    )
+    recorder = _WorkerRecoveryRecorder(authority, [baseline, healthy])
+    _install_worker_environment_inspect(monkeypatch, authority)
     try:
         authority.recreate_worker("agent-worker", runner=recorder)
         ps_calls = [call for call in recorder.calls if "ps" in call]
@@ -7016,25 +7181,18 @@ def test_worker_pair_recreation_is_combined_before_whole_topology_validation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     authority = _authority_for_recorder()
-    recorder = _Recorder(authority)
-    recorder.ps_output = json.dumps(
-        [
-            {
-                "ID": f"{service}-container",
-                "Service": service,
-                "State": "running",
-                "Health": "healthy",
-            }
-            for service in sorted(EXPECTED_ROOTFUL_SERVICES)
-        ]
+    baseline = _worker_topology_rows(authority)
+    healthy = _worker_topology_rows(
+        authority,
+        identities={
+            "tool-worker": "replacement-tool-container",
+            "agent-worker": "replacement-agent-container",
+        },
     )
+    recorder = _WorkerRecoveryRecorder(authority, [baseline, healthy])
     barrier = create_barrier_root("phase10.agent.before_manifest_bind.v1")
     identity = "018f4d52-8b93-7d41-8ac7-7f190f091111"
     environment = authority.worker_environment(barrier=barrier, identity=identity)
-    recorder.authority = replace(
-        authority,
-        _environment_items=tuple(sorted(environment.items())),
-    )
     inspected: list[str] = []
 
     def inspect_service(
@@ -7398,6 +7556,31 @@ def _sandbox_container(
             "FinishedAt": "2026-08-20T00:00:01Z",
         },
     }
+
+
+def _sandbox_job_has_no_supplemental_groups(host: dict[str, Any]) -> bool:
+    group_add = host.get("GroupAdd")
+    return group_add is None or group_add == []
+
+
+@pytest.mark.parametrize(
+    ("mode", "group_add"),
+    (
+        ("rootful", None),
+        ("rootful", []),
+        ("rootless", None),
+        ("rootless", []),
+    ),
+)
+def test_sandbox_job_accepts_both_absent_group_add_encodings_in_every_mode(
+    mode: str,
+    group_add: list[str] | None,
+) -> None:
+    assert _sandbox_job_has_no_supplemental_groups({"GroupAdd": group_add}), mode
+
+
+def test_sandbox_job_rejects_present_supplemental_groups() -> None:
+    assert not _sandbox_job_has_no_supplemental_groups({"GroupAdd": ["123"]})
 
 
 def test_inspectable_job_waits_for_same_created_identity_to_run(
@@ -8188,11 +8371,7 @@ def test_live_sandbox_job_security_contract() -> None:
         assert host["Privileged"] is False
         assert host["CapDrop"] == ["ALL"]
         assert host["ReadonlyRootfs"] is True
-        job_groups = host.get("GroupAdd")
-        if authority.mode == "rootless":
-            assert job_groups is None or job_groups == []
-        else:
-            assert host.get("GroupAdd", []) == []
+        assert _sandbox_job_has_no_supplemental_groups(host)
         assert host["NetworkMode"] == "none"
         assert all("docker.sock" not in str(mount) for mount in container.get("Mounts", []))
         assert not any("docker.sock" in bind for bind in host.get("Binds", []) or [])

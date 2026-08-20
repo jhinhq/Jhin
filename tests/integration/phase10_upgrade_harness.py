@@ -2576,12 +2576,46 @@ class ComposeAuthority:
             for service, row in baseline.items()
             if service not in selected
         }
-        self._run(
-            self.worker_recreate_command(*selected),
-            runner=runner,
-            timeout=1200.0,
-            environment=environment,
-        )
+        baseline_selected_identities = {
+            service: cast(str, baseline[service]["ID"]) for service in selected
+        }
+        try:
+            self._run(
+                self.worker_recreate_command(*selected),
+                runner=runner,
+                timeout=1200.0,
+                environment=environment,
+            )
+        except subprocess.CalledProcessError as error:
+            try:
+                failed_inventory = self._run(
+                    self.compose_command("ps", "--all", "--format", "json"),
+                    runner=runner,
+                    timeout=60.0,
+                    check=False,
+                    environment=environment,
+                )
+                if failed_inventory.returncode != 0:
+                    raise subprocess.CalledProcessError(
+                        failed_inventory.returncode,
+                        failed_inventory.args,
+                        output=failed_inventory.stdout,
+                        stderr=failed_inventory.stderr,
+                    )
+            except BaseException as diagnostic_error:
+                raise BaseExceptionGroup(
+                    "worker recreation and fresh inventory diagnostics failed",
+                    [error, diagnostic_error],
+                ) from error
+            self._raise_worker_recovery_failure(
+                error,
+                output=_text(failed_inventory.stdout),
+                selected=selected,
+                fixed_identities=fixed_identities,
+                runner=runner,
+                environment=environment,
+            )
+            raise AssertionError("worker recovery failure unexpectedly returned") from error
         deadline_started = time.monotonic()
         replacement_identities: dict[str, str] = {}
         while True:
@@ -2598,6 +2632,14 @@ class ComposeAuthority:
                     expected_services=self.expected_services,
                     fixed_identities={**fixed_identities, **replacement_identities},
                 )
+                if not replacement_identities:
+                    unchanged = sorted(
+                        service
+                        for service, baseline_identifier in baseline_selected_identities.items()
+                        if parsed[service]["ID"] == baseline_identifier
+                    )
+                    if unchanged:
+                        raise ComposePsError(f"selected workers were not recreated: {unchanged}")
             except ComposePsError as error:
                 self._raise_worker_recovery_failure(
                     error,
