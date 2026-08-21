@@ -65,24 +65,21 @@ class _RaisingKeyName:
         raise RuntimeError("hostile-repr-canary")
 
 
-class _RaisingClassKeyName:
-    def __init__(self) -> None:
-        self.class_reads = 0
+_hostile_class_reads = [0]
+_hostile_strip_calls = [0]
 
-    @property
-    def __class__(self) -> type[object]:
-        self.class_reads += 1
-        raise RuntimeError("hostile-class-canary")
+
+class _RaisingClassKeyName:
+    def __getattribute__(self, name: str) -> object:
+        if name == "__class__":
+            _hostile_class_reads[0] += 1
+            raise RuntimeError("hostile-class-canary")
+        return super().__getattribute__(name)
 
 
 class _RaisingStripKeyName(str):
-    def __new__(cls, value: str) -> _RaisingStripKeyName:
-        instance = super().__new__(cls, value)
-        instance.strip_calls = 0
-        return instance
-
     def strip(self, chars: str | None = None, /) -> str:
-        self.strip_calls += 1
+        _hostile_strip_calls[0] += 1
         raise RuntimeError("hostile-strip-canary")
 
 
@@ -351,10 +348,14 @@ def test_sensitive_key_name_does_not_read_hostile_class(
 ) -> None:
     from jhin_observability import is_sensitive_key_name
 
+    _hostile_class_reads[0] = 0
     value = _RaisingClassKeyName()
 
     assert is_sensitive_key_name(value) is False
-    assert value.class_reads == 0
+    assert _hostile_class_reads[0] == 0
+    with pytest.raises(RuntimeError, match="hostile-class-canary"):
+        isinstance(value, str)
+    assert _hostile_class_reads[0] == 1
     captured = capsys.readouterr()
     assert "hostile-class-canary" not in captured.out
     assert "hostile-class-canary" not in captured.err
@@ -365,10 +366,15 @@ def test_sensitive_key_name_rejects_str_subclass_without_calling_strip(
 ) -> None:
     from jhin_observability import is_sensitive_key_name
 
+    _hostile_strip_calls[0] = 0
     value = _RaisingStripKeyName("api_key")
 
     assert is_sensitive_key_name(value) is False
-    assert value.strip_calls == 0
+    assert _hostile_strip_calls[0] == 0
+    assert isinstance(value, str) is True
+    with pytest.raises(RuntimeError, match="hostile-strip-canary"):
+        value.strip()
+    assert _hostile_strip_calls[0] == 1
     captured = capsys.readouterr()
     assert "hostile-strip-canary" not in captured.out
     assert "hostile-strip-canary" not in captured.err
