@@ -108,8 +108,24 @@ files = [
 ]
 
 [[tool.mypy.overrides]]
-module = ["nats.*", "uuid_utils.*", "asyncpg.*", "aiodocker.*"]
+module = [
+    "nats.*",
+    "uuid_utils.*",
+    "asyncpg.*",
+    "aiodocker.*",
+    "grpc",
+    "grpc.*",
+    "jhin_secrets.*",
+]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["test_logging"]
+disable_error_code = ["index"]
+
+[[tool.mypy.overrides]]
+module = ["test_log_audit"]
+disable_error_code = ["redundant-cast"]
 
 # aiodocker's volume API is untyped; calls into it are contained here.
 [[tool.mypy.overrides]]
@@ -124,6 +140,7 @@ testpaths = [
     "packages/events/tests",
     "packages/workflows/tests",
     "packages/db/tests",
+    "packages/observability/tests",
     "packages/secrets/tests",
     "packages/models/tests",
     "packages/agents/tests",

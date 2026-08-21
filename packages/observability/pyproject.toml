@@ -4,6 +4,11 @@ version = "0.1.0"
 description = "Structured JSON logging and health heartbeat helpers for Jhin services"
 requires-python = ">=3.13"
 dependencies = [
+    "grpcio>=1.63.2,<2",
+    "opentelemetry-api>=1.38,<2",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.38,<2",
+    "opentelemetry-sdk>=1.38,<2",
+    "pydantic-settings>=2.7",
     "structlog>=25.1",
 ]
 
