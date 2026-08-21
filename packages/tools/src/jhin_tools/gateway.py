@@ -86,6 +86,7 @@ _TERMINAL_TOOL_STATUSES = frozenset(
     }
 )
 _PROCESS_INVOCATION_LOCKS: dict[UUID, asyncio.Lock] = {}
+_PROCESS_INVOCATION_LOCK_ENTRANTS: dict[UUID, int] = {}
 _PROCESS_INVOCATION_LOCKS_GUARD = asyncio.Lock()
 
 
@@ -202,14 +203,25 @@ class ToolGateway:
         # tests; PostgreSQL integration remains the multi-process authority.
         async with _PROCESS_INVOCATION_LOCKS_GUARD:
             lock = _PROCESS_INVOCATION_LOCKS.setdefault(invocation_id, asyncio.Lock())
-            contended = lock.locked()
-        # Approval resolution loads the invocation id before taking this
-        # portable lock. Discard that snapshot only when it will wait behind
-        # another resolver, so the post-lock query observes its committed row.
-        if refresh_if_contended and contended:
-            self._ctx.session.expire_all()
-        async with lock:
-            yield self
+            entrants = _PROCESS_INVOCATION_LOCK_ENTRANTS.get(invocation_id, 0)
+            contended = entrants > 0
+            _PROCESS_INVOCATION_LOCK_ENTRANTS[invocation_id] = entrants + 1
+        try:
+            # Approval resolution loads the invocation id before taking this
+            # portable lock. Discard that snapshot only when another entrant
+            # owns or awaits the lease, including asyncio's fair wake-up gap.
+            if refresh_if_contended and contended:
+                self._ctx.session.expire_all()
+            async with lock:
+                yield self
+        finally:
+            async with _PROCESS_INVOCATION_LOCKS_GUARD:
+                remaining = _PROCESS_INVOCATION_LOCK_ENTRANTS[invocation_id] - 1
+                if remaining:
+                    _PROCESS_INVOCATION_LOCK_ENTRANTS[invocation_id] = remaining
+                else:
+                    del _PROCESS_INVOCATION_LOCK_ENTRANTS[invocation_id]
+                    del _PROCESS_INVOCATION_LOCKS[invocation_id]
 
     def _audit_on(
         self,
