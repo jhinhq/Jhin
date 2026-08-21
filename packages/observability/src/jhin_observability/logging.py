@@ -167,8 +167,5 @@ def configure_json_logging(
     _route_named_loggers_through_root()
 
 
-configure_logging = configure_json_logging
-
-
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:
     return structlog.stdlib.get_logger(name)

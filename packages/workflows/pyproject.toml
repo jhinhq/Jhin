@@ -4,8 +4,12 @@ version = "0.1.0"
 description = "Temporal workflow definitions for Jhin"
 requires-python = ">=3.13"
 dependencies = [
+    "jhin-observability",
     "temporalio>=1.31",
 ]
+
+[tool.uv.sources]
+jhin-observability = { workspace = true }
 
 [project.scripts]
 jhin-temporal-poller-check = "jhin_workflows.poller_health:run"

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import AsyncIterator, Callable, Coroutine
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, Any
@@ -26,6 +27,7 @@ from temporalio.service import RPCError
 
 from jhin_api.security.tokens import hash_token
 from jhin_api.settings import Settings
+from jhin_api.temporal import TemporalClientProvider
 from jhin_db.models import User, UserSession, WorkspaceMembership
 from jhin_domain import UserStatus, WorkspaceRole, role_satisfies
 from jhin_secrets import SecretCrypto
@@ -162,26 +164,14 @@ async def get_temporal_client(request: Request) -> TemporalClient:
     Lazy so the API can boot (and serve everything except task execution)
     while Temporal is still starting. 503 tells the caller to retry.
     """
-    app = request.app
-    cached: TemporalClient | None = app.state.temporal_client
-    if cached is not None:
-        return cached
-    async with app.state.temporal_connect_lock:
-        cached = app.state.temporal_client
-        if cached is not None:
-            return cached
-        settings: Settings = app.state.settings
-        try:
-            client = await TemporalClient.connect(
-                settings.temporal_address, namespace=settings.temporal_namespace
-            )
-        except (RPCError, OSError) as exc:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Task orchestration is unavailable (cannot reach Temporal)",
-            ) from exc
-        app.state.temporal_client = client
-        return client
+    provider: TemporalClientProvider = request.app.state.temporal_provider
+    try:
+        return await provider.get()
+    except (RPCError, OSError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Task orchestration is unavailable (cannot reach Temporal)",
+        ) from exc
 
 
 TemporalDep = Annotated[TemporalClient, Depends(get_temporal_client)]
@@ -206,7 +196,12 @@ async def get_jetstream(request: Request) -> JetStreamContext:
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Event backbone is unavailable (cannot reach NATS)",
             ) from exc
-        app.state.nats_client = client
+        try:
+            app.state.nats_client = client
+        except BaseException:
+            with suppress(BaseException):
+                await client.close()
+            raise
         return client.jetstream()
 
 

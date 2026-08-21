@@ -8,6 +8,7 @@ dependencies = [
     "pydantic-settings>=2.7",
     "jhin-workflows",
     "jhin-observability",
+    "jhin-secrets",
 ]
 
 [project.scripts]
@@ -16,6 +17,7 @@ jhin-workflow-worker = "jhin_workflow_worker.main:run"
 [tool.uv.sources]
 jhin-workflows = { workspace = true }
 jhin-observability = { workspace = true }
+jhin-secrets = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

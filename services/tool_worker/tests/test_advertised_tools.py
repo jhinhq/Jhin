@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -15,6 +17,7 @@ import jhin_tool_worker.resources as resources_module
 from jhin_db.base import Base
 from jhin_db.models import Agent, AgentCapabilityGrant, Workspace
 from jhin_domain import new_uuid7
+from jhin_observability import ObservabilityRuntime
 from jhin_policy import RiskLevel, ToolDefinition
 from jhin_tool_worker.activities import ToolActivities
 from jhin_tool_worker.resources import ToolWorkerResources
@@ -58,23 +61,37 @@ class _Resources:
 @dataclass
 class _DisposableEngine:
     dispose_count: int = 0
+    events: list[str] | None = None
+    failure: BaseException | None = None
 
     async def dispose(self) -> None:
         self.dispose_count += 1
+        if self.events is not None:
+            self.events.append("engine.dispose")
+        if self.failure is not None:
+            raise self.failure
 
 
 @dataclass
 class _DrainableNats:
     drain_count: int = 0
     fail_drain: bool = False
+    events: list[str] | None = None
+    failure: BaseException | None = None
 
     def jetstream(self) -> object:
+        if self.events is not None:
+            self.events.append("nats.jetstream")
         return object()
 
     async def drain(self) -> None:
         self.drain_count += 1
+        if self.events is not None:
+            self.events.append("nats.drain")
         if self.fail_drain:
             raise RuntimeError("drain failed")
+        if self.failure is not None:
+            raise self.failure
 
 
 @dataclass
@@ -163,46 +180,194 @@ def test_tool_worker_settings_ignore_unrelated_environment(
     assert marker not in repr(settings)
 
 
-@pytest.mark.parametrize("failure_stage", ["connect", "ensure_streams", "master_key"])
+@pytest.mark.parametrize("failure_kind", ["error", "base", "cancel"])
+@pytest.mark.parametrize(
+    "failure_stage",
+    [
+        "engine",
+        "session",
+        "connect",
+        "jetstream",
+        "ensure_streams",
+        "master_key",
+        "crypto",
+        "barrier",
+        "publisher",
+        "dataclass",
+        "logger",
+    ],
+)
 async def test_partial_resource_creation_closes_every_acquired_resource(
     failure_stage: str,
+    failure_kind: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    engine = _DisposableEngine()
-    nats_connection = _DrainableNats()
+    events: list[str] = []
+    engine = _DisposableEngine(events=events)
+    nats_connection = _DrainableNats(events=events)
+    tracer = object()
+    runtime = cast(
+        ObservabilityRuntime,
+        SimpleNamespace(tracer=tracer, metrics=object()),
+    )
+    engine_tracers: list[object] = []
+    failure: BaseException
+    if failure_kind == "error":
+        failure = RuntimeError(f"{failure_stage} failed")
+    elif failure_kind == "base":
+        failure = BaseException(f"{failure_stage} failed")
+    else:
+        failure = asyncio.CancelledError(f"{failure_stage} failed")
+    settings = ToolWorkerSettings()
+    settings_before = settings.model_dump()
 
-    monkeypatch.setattr(resources_module, "create_engine", lambda _url: engine)
-    monkeypatch.setattr(resources_module, "create_session_factory", lambda _engine: object())
+    def create_engine(_url: str, *, tracer: object) -> _DisposableEngine:
+        engine_tracers.append(tracer)
+        events.append("engine.create")
+        if failure_stage == "engine":
+            raise failure
+        return engine
+
+    monkeypatch.setattr(resources_module, "create_engine", create_engine)
+
+    def create_sessions(_engine: object) -> object:
+        events.append("session.create")
+        if failure_stage == "session":
+            raise failure
+        return object()
+
+    monkeypatch.setattr(resources_module, "create_session_factory", create_sessions)
 
     async def connect(_url: str) -> _DrainableNats:
+        events.append("nats.connect")
         if failure_stage == "connect":
-            raise RuntimeError("connect failed")
+            raise failure
         return nats_connection
 
+    original_jetstream = nats_connection.jetstream
+
+    def jetstream() -> object:
+        if failure_stage == "jetstream":
+            events.append("nats.jetstream")
+            raise failure
+        return original_jetstream()
+
+    nats_connection.jetstream = jetstream  # type: ignore[method-assign]
+
     async def ensure_streams(_jetstream: object) -> None:
+        events.append("streams.ensure")
         if failure_stage == "ensure_streams":
-            raise RuntimeError("ensure streams failed")
+            raise failure
 
     def load_master_key() -> bytes:
+        events.append("key.load")
         if failure_stage == "master_key":
-            raise RuntimeError("master key failed")
+            raise failure
         return b"0" * 32
+
+    class Crypto:
+        def __init__(self, _key: bytes) -> None:
+            events.append("crypto.create")
+            if failure_stage == "crypto":
+                raise failure
+
+    class Barrier:
+        def __init__(self, _config: object) -> None:
+            events.append("barrier.create")
+            if failure_stage == "barrier":
+                raise failure
+
+    class Publisher:
+        def __init__(self, _js: object, *, tracer: object) -> None:
+            events.append("publisher.create")
+            assert tracer is runtime.tracer
+            if failure_stage == "publisher":
+                raise failure
 
     monkeypatch.setattr(resources_module.nats, "connect", connect)
     monkeypatch.setattr(resources_module, "ensure_streams", ensure_streams)
     monkeypatch.setattr(resources_module, "load_master_key", load_master_key)
+    monkeypatch.setattr(resources_module, "SecretCrypto", Crypto)
+    monkeypatch.setattr(resources_module, "CrashBarrier", Barrier)
+    monkeypatch.setattr(resources_module, "EventPublisher", Publisher)
+    if failure_stage == "logger":
+        monkeypatch.setattr(
+            resources_module.logger,
+            "info",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
+        )
+    if failure_stage == "dataclass":
+        monkeypatch.setattr(
+            resources_module.ToolWorkerResources,
+            "__init__",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
+        )
 
-    with pytest.raises(RuntimeError, match=failure_stage.replace("_", " ")):
-        await ToolWorkerResources.create(ToolWorkerSettings())
+    caught: BaseException | None = None
+    try:
+        await ToolWorkerResources.create(settings, runtime=runtime)
+    except BaseException as error:
+        caught = error
 
-    assert engine.dispose_count == 1
-    assert nats_connection.drain_count == (0 if failure_stage == "connect" else 1)
+    assert caught is failure
+    assert settings.model_dump() == settings_before
+    assert runtime.tracer is tracer
+    assert engine.dispose_count == (0 if failure_stage == "engine" else 1)
+    assert nats_connection.drain_count == (
+        0 if failure_stage in {"engine", "session", "connect"} else 1
+    )
+    if failure_stage not in {"engine", "session", "connect"}:
+        assert events[-2:] == ["nats.drain", "engine.dispose"]
+    assert engine_tracers == [tracer]
+
+
+@pytest.mark.asyncio
+async def test_partial_factory_cleanup_failures_never_mask_the_active_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    acquisition_error = RuntimeError("publisher failed")
+    engine = _DisposableEngine(
+        events=events,
+        failure=asyncio.CancelledError("dispose cleanup failed"),
+    )
+    nats_connection = _DrainableNats(
+        events=events,
+        failure=BaseException("drain cleanup failed"),
+    )
+    runtime = cast(
+        ObservabilityRuntime,
+        SimpleNamespace(tracer=object(), metrics=object()),
+    )
+    monkeypatch.setattr(resources_module, "create_engine", lambda *_args, **_kwargs: engine)
+    monkeypatch.setattr(resources_module, "create_session_factory", lambda _engine: object())
+    monkeypatch.setattr(
+        resources_module.nats,
+        "connect",
+        lambda _url: _async_value(nats_connection),
+    )
+    monkeypatch.setattr(resources_module, "ensure_streams", lambda _js: _async_value(None))
+    monkeypatch.setattr(resources_module, "load_master_key", lambda: b"0" * 32)
+    monkeypatch.setattr(
+        resources_module,
+        "EventPublisher",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(acquisition_error),
+    )
+
+    caught: BaseException | None = None
+    try:
+        await ToolWorkerResources.create(ToolWorkerSettings(), runtime=runtime)
+    except BaseException as error:
+        caught = error
+    assert caught is acquisition_error
+    assert events[-2:] == ["nats.drain", "engine.dispose"]
 
 
 async def test_resource_close_disposes_engine_when_nats_drain_fails() -> None:
     engine = _DisposableEngine()
     nats_connection = _DrainableNats(fail_drain=True)
     resources = ToolWorkerResources(
+        runtime=cast(ObservabilityRuntime, object()),
         engine=engine,  # type: ignore[arg-type]
         session_factory=object(),  # type: ignore[arg-type]
         nats_connection=nats_connection,  # type: ignore[arg-type]
@@ -225,11 +390,24 @@ async def test_main_closes_resources_after_post_acquisition_construction_failure
 ) -> None:
     resources = _ClosableResources()
     settings = ToolWorkerSettings()
+    shutdowns: list[int] = []
+    runtime = cast(
+        ObservabilityRuntime,
+        SimpleNamespace(
+            tracer=object(),
+            metrics=object(),
+            shutdown=lambda timeout_millis: shutdowns.append(timeout_millis),
+        ),
+    )
 
-    async def connect_with_retry(_settings: ToolWorkerSettings) -> object:
+    async def connect_with_retry(_settings: ToolWorkerSettings, received_runtime: object) -> object:
+        assert received_runtime is runtime
         return object()
 
-    async def resources_with_retry(_settings: ToolWorkerSettings) -> _ClosableResources:
+    async def resources_with_retry(
+        _settings: ToolWorkerSettings, received_runtime: object
+    ) -> _ClosableResources:
+        assert received_runtime is runtime
         return resources
 
     def build_catalog() -> ToolCatalog:
@@ -244,15 +422,61 @@ async def test_main_closes_resources_after_post_acquisition_construction_failure
         def add_signal_handler(self, *_args: object) -> None:
             return None
 
+        def remove_signal_handler(self, *_args: object) -> bool:
+            return True
+
     monkeypatch.setattr(main_module, "ToolWorkerSettings", lambda: settings)
-    monkeypatch.setattr(main_module, "configure_json_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(main_module, "initialize_observability", lambda _config: runtime)
     monkeypatch.setattr(main_module, "connect_with_retry", connect_with_retry)
     monkeypatch.setattr(main_module, "resources_with_retry", resources_with_retry)
     monkeypatch.setattr(main_module, "build_default_catalog", build_catalog)
-    monkeypatch.setattr(main_module, "Worker", construct_worker)
+    monkeypatch.setattr(main_module, "build_temporal_worker", construct_worker)
     monkeypatch.setattr(asyncio, "get_running_loop", lambda: _SignalLoop())
 
     with pytest.raises(RuntimeError, match=f"{failure_stage} failed"):
         await main_module.main()
 
     assert resources.close_count == 1
+    assert shutdowns == [5_000]
+
+
+@pytest.mark.asyncio
+async def test_resource_graph_retains_runtime_and_tracer_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _DisposableEngine()
+    nats_connection = _DrainableNats()
+    tracer = object()
+    runtime = cast(
+        ObservabilityRuntime,
+        SimpleNamespace(tracer=tracer, metrics=object()),
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        resources_module,
+        "create_engine",
+        lambda _url, *, tracer: captured.update(engine_tracer=tracer) or engine,
+    )
+    monkeypatch.setattr(resources_module, "create_session_factory", lambda _engine: object())
+    monkeypatch.setattr(
+        resources_module.nats, "connect", lambda _url: _async_value(nats_connection)
+    )
+    monkeypatch.setattr(resources_module, "ensure_streams", lambda _js: _async_value(None))
+    monkeypatch.setattr(resources_module, "load_master_key", lambda: b"0" * 32)
+
+    class Publisher:
+        def __init__(self, _js: object, *, tracer: object) -> None:
+            captured["publisher_tracer"] = tracer
+            self._tracer = tracer
+
+    monkeypatch.setattr(resources_module, "EventPublisher", Publisher)
+    resources = await ToolWorkerResources.create(ToolWorkerSettings(), runtime=runtime)
+    assert resources.runtime is runtime
+    assert captured == {"engine_tracer": tracer, "publisher_tracer": tracer}
+    assert cast(Any, resources.publisher)._tracer is tracer
+    await resources.close()
+
+
+async def _async_value(value: object) -> object:
+    return value

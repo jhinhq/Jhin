@@ -33,6 +33,7 @@ def _imports_under(root: str, prefix: str) -> bool:
 def test_distribution_dependencies_and_imports_are_one_way() -> None:
     agent = _project("services/agent_worker/pyproject.toml")
     tool = _project("services/tool_worker/pyproject.toml")
+    workflows = _project("packages/workflows/pyproject.toml")
     agent_dependencies = set(agent["project"]["dependencies"])
     tool_dependencies = set(tool["project"]["dependencies"])
 
@@ -46,6 +47,8 @@ def test_distribution_dependencies_and_imports_are_one_way() -> None:
     assert not _imports_under("services/tool_worker/src", "jhin_agents")
     assert not _imports_under("services/tool_worker/src", "jhin_models")
     assert _imports_under("services/tool_worker/src", "jhin_observability")
+    assert workflows["project"]["dependencies"].count("jhin-observability") == 1
+    assert workflows["tool"]["uv"]["sources"]["jhin-observability"] == {"workspace": True}
 
 
 def test_worker_settings_store_closed_environment_defaults(
@@ -113,3 +116,14 @@ def test_worker_console_scripts_and_docker_metadata_are_installed() -> None:
         "jhin-temporal-poller-check": "jhin_workflows.poller_health:run"
     }
     assert "COPY services/tool_worker/pyproject.toml services/tool_worker/" in dockerfile
+
+
+def test_root_pytest_discovers_each_observability_worker_suite_exactly_once() -> None:
+    root = _project("pyproject.toml")
+    testpaths = root["tool"]["pytest"]["ini_options"]["testpaths"]
+    for expected in (
+        "packages/observability/tests",
+        "services/tool_worker/tests",
+        "services/workflow_worker/tests",
+    ):
+        assert testpaths.count(expected) == 1

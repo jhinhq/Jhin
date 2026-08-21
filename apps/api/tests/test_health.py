@@ -1,5 +1,8 @@
+import asyncio
+
 import httpx
 import pytest
+from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 import jhin_api.main as main_module
 from jhin_api.health import service
@@ -95,3 +98,59 @@ async def test_readiness_degraded_returns_503(
     nats_dep = next(dep for dep in body["dependencies"] if dep["name"] == "nats")
     assert nats_dep["status"] == "error"
     assert "unreachable" in nats_dep["detail"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cancellation",
+    [asyncio.CancelledError(), TemporalCancelledError()],
+)
+async def test_timed_preserves_both_cancellation_classes(
+    cancellation: BaseException,
+) -> None:
+    async def cancel() -> None:
+        raise cancellation
+
+    caught: BaseException | None = None
+    try:
+        await service._timed("temporal", cancel)
+    except BaseException as exc:
+        caught = exc
+    assert caught is cancellation
+
+
+@pytest.mark.asyncio
+async def test_readiness_temporal_cancellation_escapes_without_degraded_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cancellation = TemporalCancelledError()
+
+    async def ok(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def cancel(*_args: object, **_kwargs: object) -> None:
+        raise cancellation
+
+    monkeypatch.setattr(service, "check_postgres", ok)
+    monkeypatch.setattr(service, "check_nats", ok)
+    monkeypatch.setattr(service, "check_temporal", cancel)
+    provider = object()
+    caught: BaseException | None = None
+    try:
+        await service.readiness(_test_settings(), object(), provider)  # type: ignore[arg-type]
+    except BaseException as exc:
+        caught = exc
+    assert caught is cancellation
+
+
+@pytest.mark.asyncio
+async def test_temporal_health_failure_uses_one_closed_private_detail() -> None:
+    class Provider:
+        async def get(self) -> object:
+            raise RuntimeError("temporal-address-rpc-private-canary")
+
+    with pytest.raises(service.TemporalHealthUnavailable) as raised:
+        await service.check_temporal(Provider())  # type: ignore[arg-type]
+    rendered = str(raised.value)
+    assert rendered == "Temporal workflow service is unavailable"
+    assert "private-canary" not in rendered

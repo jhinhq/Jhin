@@ -722,3 +722,10 @@ def test_event_family_normalizer_is_closed(raw: object, expected: str) -> None:
 )
 def test_sandbox_outcome_normalizer_is_closed(raw: object, expected: str) -> None:
     assert normalize_sandbox_outcome(raw) == expected
+
+
+def test_one_task_logging_alias_is_removed_without_changing_json_entrypoint() -> None:
+    assert callable(configure_json_logging)
+    assert "configure_json_logging" in jhin_observability.__all__
+    assert "configure_logging" not in jhin_observability.__all__
+    assert not hasattr(jhin_observability, "configure_logging")

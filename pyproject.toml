@@ -152,6 +152,7 @@ testpaths = [
     "services/agent_worker/tests",
     "services/tool_worker/tests",
     "services/event_worker/tests",
+    "services/workflow_worker/tests",
     "services/sandbox_runner/tests",
     "tests",
 ]

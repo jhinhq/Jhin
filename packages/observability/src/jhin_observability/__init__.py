@@ -35,7 +35,7 @@ from jhin_observability.events import (
     normalize_event_family,
     normalize_sandbox_outcome,
 )
-from jhin_observability.logging import configure_json_logging, configure_logging, get_logger
+from jhin_observability.logging import configure_json_logging, get_logger
 from jhin_observability.metrics import (
     FORBIDDEN_IDENTIFIER_LABELS,
     JhinMetrics,
@@ -68,18 +68,55 @@ if TYPE_CHECKING:
         get_runtime,
         initialize_observability,
     )
+    from jhin_observability.temporal import (
+        MAX_TEMPORAL_TRACER_DATA_BYTES,
+        ObservabilityTemporalSettings,
+        SafeTemporalTracingInterceptor,
+        TemporalActivityMetricsInterceptor,
+        TemporalInterceptorRole,
+        build_temporal_worker,
+        connect_temporal_client,
+        temporal_client_interceptors,
+        temporal_worker_interceptors,
+    )
 
 
-def __getattr__(name: str) -> Any:
-    if name in {
+_BOOTSTRAP_EXPORTS = frozenset(
+    {
         "ObservabilityRuntime",
         "TelemetryExporterStatus",
         "get_runtime",
         "initialize_observability",
-    }:
+    }
+)
+_TEMPORAL_EXPORTS = frozenset(
+    {
+        "MAX_TEMPORAL_TRACER_DATA_BYTES",
+        "ObservabilityTemporalSettings",
+        "SafeTemporalTracingInterceptor",
+        "TemporalActivityMetricsInterceptor",
+        "TemporalInterceptorRole",
+        "build_temporal_worker",
+        "connect_temporal_client",
+        "temporal_client_interceptors",
+        "temporal_worker_interceptors",
+    }
+)
+
+
+def __getattr__(name: str) -> Any:
+    if name in _BOOTSTRAP_EXPORTS:
         from jhin_observability import bootstrap
 
-        return getattr(bootstrap, name)
+        value = getattr(bootstrap, name)
+        globals()[name] = value
+        return value
+    if name in _TEMPORAL_EXPORTS:
+        from jhin_observability import temporal
+
+        value = getattr(temporal, name)
+        globals()[name] = value
+        return value
     raise AttributeError(name)
 
 
@@ -91,6 +128,7 @@ __all__ = [
     "MAX_METRIC_EXPORT_INTERVAL_MILLIS",
     "MAX_SPAN_EXPORT_BATCH_SIZE",
     "MAX_SPAN_QUEUE_SIZE",
+    "MAX_TEMPORAL_TRACER_DATA_BYTES",
     "SPAN_ATTRIBUTE_VALUES",
     "SPAN_NAMES",
     "TEMPORAL_ACTIVITY_NAMES",
@@ -106,14 +144,19 @@ __all__ = [
     "ObservabilityNotInitializedError",
     "ObservabilityRuntime",
     "ObservabilitySettings",
+    "ObservabilityTemporalSettings",
     "Observation",
     "SafeError",
     "SafeErrorCode",
+    "SafeTemporalTracingInterceptor",
     "SpanName",
     "TelemetryExporterStatus",
+    "TemporalActivityMetricsInterceptor",
+    "TemporalInterceptorRole",
     "bind_context",
+    "build_temporal_worker",
     "configure_json_logging",
-    "configure_logging",
+    "connect_temporal_client",
     "extract_trace_context",
     "filter_log_event",
     "get_logger",
@@ -137,4 +180,6 @@ __all__ = [
     "safe_span",
     "service_version",
     "structural_redaction",
+    "temporal_client_interceptors",
+    "temporal_worker_interceptors",
 ]

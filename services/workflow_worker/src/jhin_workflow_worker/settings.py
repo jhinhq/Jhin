@@ -1,10 +1,10 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import SettingsConfigDict
+
+from jhin_observability import ObservabilitySettings
 
 
-class Settings(BaseSettings):
+class Settings(ObservabilitySettings):
     model_config = SettingsConfigDict(extra="ignore")
 
-    app_env: str = "dev"
     temporal_address: str = "localhost:7233"
     temporal_namespace: str = "default"
-    log_level: str = "INFO"

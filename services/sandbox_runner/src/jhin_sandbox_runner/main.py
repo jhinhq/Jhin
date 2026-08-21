@@ -9,15 +9,22 @@ network isolation is the wall, the token is the lock on the door.
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+from types import TracebackType
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
-from jhin_observability import configure_json_logging, get_logger, normalize_environment
+from jhin_observability import (
+    ObservabilityRuntime,
+    get_logger,
+    initialize_observability,
+    service_version,
+)
 from jhin_sandbox_runner.jobs import JobManager, JobValidationError
 from jhin_sandbox_runner.schemas import (
     SandboxJobRequest,
@@ -25,29 +32,16 @@ from jhin_sandbox_runner.schemas import (
     SandboxLogsResponse,
 )
 from jhin_sandbox_runner.settings import Settings
+from jhin_secrets.redaction import redact_event_dict
 
 logger = get_logger(__name__)
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
-    active_settings = settings if settings is not None else Settings()
-    manager = JobManager(active_settings)
-
-    @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        await manager.start()
-        logger.info(
-            "sandbox_runner.started",
-            token_configured=bool(active_settings.sandbox_runner_token),
-        )
-        try:
-            yield
-        finally:
-            await manager.close()
-
-    app = FastAPI(title="Jhin Sandbox Runner", lifespan=lifespan, docs_url=None, redoc_url=None)
-    app.state.manager = manager
-
+def install_existing_runner_routes(
+    app: FastAPI,
+    active_settings: Settings,
+    manager: JobManager,
+) -> None:
     def require_token(request: Request) -> None:
         """Fail closed: no configured token means no access at all."""
         configured = active_settings.sandbox_runner_token
@@ -122,22 +116,148 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def delete_workspace(workspace_key: str) -> None:
         await manager.delete_workspace(workspace_key)
 
-    return app
+
+async def _close_manager_and_runtime(
+    manager: JobManager,
+    runtime: ObservabilityRuntime,
+    *,
+    owns_runtime: bool,
+) -> BaseException | None:
+    first_cancellation: asyncio.CancelledError | None = None
+    first_error: BaseException | None = None
+
+    def remember(error: BaseException) -> None:
+        nonlocal first_cancellation, first_error
+        if isinstance(error, asyncio.CancelledError):
+            if first_cancellation is None:
+                first_cancellation = error
+        elif first_error is None:
+            first_error = error
+
+    try:
+        await manager.close()
+    except BaseException as error:
+        remember(error)
+    if owns_runtime:
+        try:
+            runtime.shutdown(timeout_millis=5_000)
+        except BaseException as error:
+            remember(error)
+    return first_cancellation or first_error
+
+
+async def _await_cleanup(
+    task: asyncio.Task[BaseException | None],
+) -> tuple[BaseException | None, asyncio.CancelledError | None]:
+    cancellation: asyncio.CancelledError | None = None
+    while True:
+        try:
+            return await asyncio.shield(task), cancellation
+        except asyncio.CancelledError as error:
+            if cancellation is None:
+                cancellation = error
+            if task.done():
+                return task.result(), cancellation
+
+
+def create_app(
+    settings: Settings | None = None,
+    *,
+    runtime: ObservabilityRuntime | None = None,
+) -> FastAPI:
+    active_settings = settings if settings is not None else Settings()
+    owns_runtime = runtime is None
+    if runtime is None:
+        active_runtime = initialize_observability(
+            active_settings.observability_config(
+                service_name="sandbox-runner",
+                service_version=service_version("jhin-sandbox-runner"),
+                extra_log_processors=(redact_event_dict,),
+            )
+        )
+    else:
+        active_runtime = runtime
+    try:
+        manager = JobManager(active_settings)
+
+        @asynccontextmanager
+        async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+            del app
+            active_error: BaseException | None = None
+            active_traceback: TracebackType | None = None
+            try:
+                await manager.start()
+                logger.info(
+                    "sandbox_runner.started",
+                    token_configured=bool(active_settings.sandbox_runner_token),
+                )
+                yield
+            except BaseException as error:
+                active_error = error
+                active_traceback = error.__traceback__
+            cleanup_task = asyncio.create_task(
+                _close_manager_and_runtime(
+                    manager,
+                    active_runtime,
+                    owns_runtime=owns_runtime,
+                ),
+                name="sandbox-runner-cleanup",
+            )
+            cleanup_error, cleanup_cancellation = await _await_cleanup(cleanup_task)
+            if isinstance(active_error, asyncio.CancelledError):
+                raise active_error.with_traceback(active_traceback)
+            if cleanup_cancellation is not None:
+                raise cleanup_cancellation
+            if active_error is not None:
+                raise active_error.with_traceback(active_traceback)
+            if cleanup_error is not None:
+                raise cleanup_error
+
+        app = FastAPI(
+            title="Jhin Sandbox Runner",
+            lifespan=lifespan,
+            docs_url=None,
+            redoc_url=None,
+        )
+        app.state.observability = active_runtime
+        app.state.manager = manager
+        install_existing_runner_routes(app, active_settings, manager)
+        return app
+    except BaseException:
+        if owns_runtime:
+            with suppress(BaseException):
+                active_runtime.shutdown(timeout_millis=5_000)
+        raise
 
 
 def main() -> None:
     settings = Settings()
-    configure_json_logging(
-        service="sandbox-runner",
-        environment=normalize_environment(settings.app_env),
-        level=settings.log_level,
+    runtime = initialize_observability(
+        settings.observability_config(
+            service_name="sandbox-runner",
+            service_version=service_version("jhin-sandbox-runner"),
+            extra_log_processors=(redact_event_dict,),
+        )
     )
-    uvicorn.run(
-        create_app(settings),
-        host="0.0.0.0",  # internal network only; never published to the host
-        port=settings.sandbox_runner_port,
-        log_config=None,
-    )
+    active_error: BaseException | None = None
+    active_traceback: TracebackType | None = None
+    try:
+        uvicorn.run(
+            create_app(settings, runtime=runtime),
+            host="0.0.0.0",  # internal network only; never published to the host
+            port=settings.sandbox_runner_port,
+            log_config=None,
+        )
+    except BaseException as error:
+        active_error = error
+        active_traceback = error.__traceback__
+    try:
+        runtime.shutdown(timeout_millis=5_000)
+    except BaseException:
+        if active_error is None:
+            raise
+    if active_error is not None:
+        raise active_error.with_traceback(active_traceback)
 
 
 run = main

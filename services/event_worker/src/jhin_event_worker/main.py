@@ -35,10 +35,9 @@ from jhin_events.telemetry import (
 from jhin_observability import (
     JhinMetrics,
     Observation,
-    configure_json_logging,
+    connect_temporal_client,
     get_logger,
     initialize_observability,
-    normalize_environment,
     service_version,
 )
 from jhin_observability.healthfile import clear_heartbeat, run_heartbeat
@@ -70,13 +69,14 @@ async def connect_with_retry(settings: Settings) -> NatsClient:
             delay = min(delay * 2, 15.0)
 
 
-async def temporal_with_retry(settings: Settings) -> TemporalClient:
+async def temporal_with_retry(
+    settings: Settings,
+    runtime: ObservabilityRuntime,
+) -> TemporalClient:
     delay = 1.0
     while True:
         try:
-            return await TemporalClient.connect(
-                settings.temporal_address, namespace=settings.temporal_namespace
-            )
+            return await connect_temporal_client(settings, runtime)
         except Exception as exc:
             logger.warning(
                 "temporal.connect_retry",
@@ -290,19 +290,13 @@ async def main() -> None:
     )
     try:
         stop = asyncio.Event()
-        configure_json_logging(
-            service="event-worker",
-            environment=normalize_environment(settings.app_env),
-            level=settings.log_level,
-            extra_processors=(redact_event_dict,),
-        )
         client = await connect_with_retry(settings)
         js = client.jetstream()
         publish_js = cast(JetStreamPublisher, js)
         await ensure_streams(js)
         logger.info("nats.connected", stream=EVENTS_STREAM)
 
-        temporal = await temporal_with_retry(settings)
+        temporal = await temporal_with_retry(settings, runtime)
         engine = create_engine(settings.database_url, trace_sql=True, tracer=runtime.tracer)
         session_factory = create_session_factory(engine)
         logger.info("temporal.connected", task_queue="other")

@@ -11,18 +11,17 @@ from __future__ import annotations
 from pathlib import Path
 
 from pydantic import Field, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import SettingsConfigDict
 
+from jhin_observability import ObservabilitySettings
 from jhin_sandbox_runner.docker_socket import (
     ROOTLESS_TRANSPORT_URL,
     DockerSocketMode,
 )
 
 
-class Settings(BaseSettings):
+class Settings(ObservabilitySettings):
     model_config = SettingsConfigDict(extra="ignore")
-
-    app_env: str = "dev"
 
     # Shared bearer token required on every job endpoint (defense in depth on
     # top of Docker network isolation). Empty token = every request denied.
@@ -52,8 +51,6 @@ class Settings(BaseSettings):
     sandbox_max_output_bytes: int = 65536
     # Startup reaping: workspace volumes older than this are removed.
     sandbox_workspace_max_age_hours: int = 24
-
-    log_level: str = "INFO"
 
     @model_validator(mode="after")
     def validate_docker_mode(self) -> Settings:

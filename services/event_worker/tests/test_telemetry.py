@@ -679,43 +679,23 @@ class FakeEngine:
             raise RuntimeError("dispose canary")
 
 
-async def test_runtime_is_owned_when_logging_configuration_fails(
+async def test_temporal_retry_forwards_the_existing_task5_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     main = worker_main()
     events: list[str] = []
     runtime = FakeRuntime(events)
-    logging_error = RuntimeError("logging-config-canary")
-    monkeypatch.setattr(main, "Settings", lambda: FakeSettings(events))
-    monkeypatch.setattr(main, "service_version", lambda _: "test-version", raising=False)
+    settings = FakeSettings(events)
+    client = object()
+    calls: list[tuple[object, object]] = []
 
-    def initialize(_config: object) -> FakeRuntime:
-        events.append("runtime.initialize")
-        return runtime
+    async def connect(received_settings: object, received_runtime: object) -> object:
+        calls.append((received_settings, received_runtime))
+        return client
 
-    monkeypatch.setattr(
-        main,
-        "initialize_observability",
-        initialize,
-        raising=False,
-    )
-
-    def fail_logging(**_kwargs: object) -> None:
-        events.append("logging.configure")
-        raise logging_error
-
-    monkeypatch.setattr(main, "configure_json_logging", fail_logging)
-
-    with pytest.raises(RuntimeError) as excinfo:
-        await main.main()
-    assert excinfo.value is logging_error
-    assert events == [
-        "settings",
-        "settings.observability_config",
-        "runtime.initialize",
-        "logging.configure",
-        "runtime.shutdown",
-    ]
+    monkeypatch.setattr(main, "connect_temporal_client", connect)
+    assert await main.temporal_with_retry(settings, runtime) is client
+    assert calls == [(settings, runtime)]
 
 
 async def test_runtime_is_owned_when_stop_event_construction_fails(
@@ -807,8 +787,9 @@ async def test_main_initializes_first_wires_exact_runtime_and_owns_all_tasks(
         assert stream_js is js
         events.append("streams.ensure")
 
-    async def temporal(settings: object) -> object:
+    async def temporal(settings: object, received_runtime: object) -> object:
         del settings
+        assert received_runtime is runtime
         events.append("temporal.connect")
         return object()
 
@@ -965,10 +946,13 @@ async def test_cleanup_supervisor_reawaits_through_repeated_outer_cancellation(
     monkeypatch.setattr(main, "Settings", lambda: FakeSettings(events))
     monkeypatch.setattr(main, "service_version", lambda _: "test-version", raising=False)
     monkeypatch.setattr(main, "initialize_observability", lambda _config: runtime)
-    monkeypatch.setattr(main, "configure_json_logging", lambda **_kwargs: None)
     monkeypatch.setattr(main, "connect_with_retry", lambda _settings: _async_value(client))
     monkeypatch.setattr(main, "ensure_streams", lambda _js: _async_value(None))
-    monkeypatch.setattr(main, "temporal_with_retry", lambda _settings: _async_value(object()))
+    monkeypatch.setattr(
+        main,
+        "temporal_with_retry",
+        lambda _settings, _runtime=None: _async_value(object()),
+    )
     monkeypatch.setattr(main, "create_engine", lambda *_args, **_kwargs: engine)
     monkeypatch.setattr(main, "create_session_factory", lambda _engine: object())
     monkeypatch.setattr(main, "TriggerMatcher", lambda *_args, **_kwargs: object())
@@ -1046,10 +1030,13 @@ async def test_cleanup_cancellation_outranks_active_body_error_after_all_steps(
     monkeypatch.setattr(main, "Settings", lambda: FakeSettings(events))
     monkeypatch.setattr(main, "service_version", lambda _: "test-version", raising=False)
     monkeypatch.setattr(main, "initialize_observability", lambda _config: runtime)
-    monkeypatch.setattr(main, "configure_json_logging", lambda **_kwargs: None)
     monkeypatch.setattr(main, "connect_with_retry", lambda _settings: _async_value(client))
     monkeypatch.setattr(main, "ensure_streams", lambda _js: _async_value(None))
-    monkeypatch.setattr(main, "temporal_with_retry", lambda _settings: _async_value(object()))
+    monkeypatch.setattr(
+        main,
+        "temporal_with_retry",
+        lambda _settings, _runtime=None: _async_value(object()),
+    )
     monkeypatch.setattr(main, "create_engine", lambda *_args, **_kwargs: engine)
 
     def fail_session_factory(_engine: object) -> object:
@@ -1079,10 +1066,13 @@ async def test_active_body_error_outranks_cleanup_error_after_all_steps(
     monkeypatch.setattr(main, "Settings", lambda: FakeSettings(events))
     monkeypatch.setattr(main, "service_version", lambda _: "test-version", raising=False)
     monkeypatch.setattr(main, "initialize_observability", lambda _config: runtime)
-    monkeypatch.setattr(main, "configure_json_logging", lambda **_kwargs: None)
     monkeypatch.setattr(main, "connect_with_retry", lambda _settings: _async_value(client))
     monkeypatch.setattr(main, "ensure_streams", lambda _js: _async_value(None))
-    monkeypatch.setattr(main, "temporal_with_retry", lambda _settings: _async_value(object()))
+    monkeypatch.setattr(
+        main,
+        "temporal_with_retry",
+        lambda _settings, _runtime=None: _async_value(object()),
+    )
     monkeypatch.setattr(main, "create_engine", lambda *_args, **_kwargs: engine)
 
     def fail_session_factory(_engine: object) -> object:
@@ -1128,7 +1118,8 @@ async def test_partial_startup_failure_still_detaches_runtime_and_owned_resource
     async def ensure(_js: object) -> None:
         events.append("streams.ensure")
 
-    async def temporal(_settings: object) -> object:
+    async def temporal(_settings: object, received_runtime: object) -> object:
+        assert received_runtime is runtime
         events.append("temporal.connect")
         if failure_stage == "temporal":
             raise RuntimeError("startup canary")
@@ -1169,7 +1160,11 @@ async def test_cleanup_failures_cannot_skip_later_cleanup(
     monkeypatch.setattr(main, "initialize_observability", lambda _config: runtime, raising=False)
     monkeypatch.setattr(main, "connect_with_retry", lambda _settings: _async_value(client))
     monkeypatch.setattr(main, "ensure_streams", lambda _js: _async_value(None))
-    monkeypatch.setattr(main, "temporal_with_retry", lambda _settings: _async_value(object()))
+    monkeypatch.setattr(
+        main,
+        "temporal_with_retry",
+        lambda _settings, _runtime=None: _async_value(object()),
+    )
     monkeypatch.setattr(main, "create_engine", lambda *_args, **_kwargs: engine)
     monkeypatch.setattr(main, "create_session_factory", lambda _engine: object())
     monkeypatch.setattr(main, "TriggerMatcher", lambda *_args, **_kwargs: object())
@@ -1281,3 +1276,15 @@ def test_main_source_initializes_runtime_before_every_resource_owner() -> None:
     assert keywords["trace_sql"].value is True
     assert ast.unparse(keywords["tracer"]) == "runtime.tracer"
     assert source.count("tracer=runtime.tracer") >= 5
+    temporal_call = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "temporal_with_retry"
+    )
+    assert [ast.unparse(argument) for argument in temporal_call.args] == [
+        "settings",
+        "runtime",
+    ]
+    assert "configure_json_logging" not in source

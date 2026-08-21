@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from types import TracebackType
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,6 +29,7 @@ from jhin_api.security.rate_limit import LoginRateLimiter
 from jhin_api.settings import Settings, get_settings
 from jhin_api.tasks.router import agent_actions_router, runs_router, tasks_router
 from jhin_api.teams.router import router as teams_router
+from jhin_api.temporal import TemporalClientProvider
 from jhin_api.triggers.router import router as triggers_router
 from jhin_api.webhooks.router import router as webhooks_router
 from jhin_api.workspaces.router import router as workspaces_router
@@ -36,11 +38,9 @@ from jhin_domain import new_uuid7
 from jhin_observability import (
     SafeErrorCode,
     bind_context,
-    configure_json_logging,
     extract_trace_context,
     get_logger,
     initialize_observability,
-    normalize_environment,
     normalize_span_attributes,
     record_span_error,
     safe_error,
@@ -200,13 +200,6 @@ def _load_secret_crypto() -> SecretCrypto | None:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
-    # Preserve the JSON-v1 logging contract before the app starts serving.
-    configure_json_logging(
-        service="api",
-        environment=normalize_environment(settings.app_env),
-        level=settings.log_level,
-        extra_processors=(redact_event_dict,),
-    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -217,36 +210,66 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 extra_log_processors=(redact_event_dict,),
             )
         )
-        app.state.observability = runtime
+        engine = None
+        active_error: BaseException | None = None
+        active_traceback: TracebackType | None = None
         try:
+            app.state.observability = runtime
+            temporal_provider = TemporalClientProvider(settings, runtime)
+            app.state.temporal_provider = temporal_provider
             app.state.secret_crypto = _load_secret_crypto()
             # Engine construction is lazy: no connection is made until first use,
             # and tables are never auto-created (migrations own the schema).
-            app.state.engine = create_engine(
-                settings.database_url, trace_sql=True, tracer=runtime.tracer
-            )
-            app.state.session_factory = create_session_factory(app.state.engine)
-            app.state.temporal_client = None
-            app.state.temporal_connect_lock = asyncio.Lock()
+            engine = create_engine(settings.database_url, trace_sql=True, tracer=runtime.tracer)
+            app.state.engine = engine
+            app.state.session_factory = create_session_factory(engine)
             app.state.nats_client = None
             app.state.nats_connect_lock = asyncio.Lock()
             logger.info("api.started")
             yield
-        finally:
+        except BaseException as error:
+            active_error = error
+            active_traceback = error.__traceback__
+
+        cleanup_cancellation: asyncio.CancelledError | None = None
+        cleanup_error: BaseException | None = None
+        cleanup_traceback: TracebackType | None = None
+
+        def remember(error: BaseException) -> None:
+            nonlocal cleanup_cancellation, cleanup_error, cleanup_traceback
+            if isinstance(error, asyncio.CancelledError):
+                if cleanup_cancellation is None:
+                    cleanup_cancellation = error
+            elif cleanup_error is None:
+                cleanup_error = error
+                cleanup_traceback = error.__traceback__
+
+        try:
+            nats = getattr(app.state, "nats_client", None)
+            if nats is not None and not nats.is_closed:
+                await nats.close()
+        except BaseException as error:
+            remember(error)
+        if engine is not None:
             try:
-                nats = getattr(app.state, "nats_client", None)
-                if nats is not None and not nats.is_closed:
-                    await nats.close()
-            finally:
-                try:
-                    engine = getattr(app.state, "engine", None)
-                    if engine is not None:
-                        await engine.dispose()
-                finally:
-                    try:
-                        logger.info("api.stopped")
-                    finally:
-                        runtime.shutdown(timeout_millis=5_000)
+                await engine.dispose()
+            except BaseException as error:
+                remember(error)
+        try:
+            logger.info("api.stopped")
+        except BaseException as error:
+            remember(error)
+        try:
+            runtime.shutdown(timeout_millis=5_000)
+        except BaseException as error:
+            remember(error)
+
+        if active_error is not None:
+            raise active_error.with_traceback(active_traceback)
+        if cleanup_cancellation is not None:
+            raise cleanup_cancellation
+        if cleanup_error is not None:
+            raise cleanup_error.with_traceback(cleanup_traceback)
 
     app = FastAPI(title=settings.app_name, version=__version__, lifespan=lifespan)
     app.state.settings = settings

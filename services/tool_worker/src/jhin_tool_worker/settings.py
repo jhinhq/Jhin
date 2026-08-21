@@ -7,20 +7,19 @@ from typing import Self
 from uuid import UUID
 
 from pydantic import Field, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import SettingsConfigDict
 
+from jhin_observability import ObservabilitySettings
 from jhin_tools import CrashBarrierName
 
 
-class ToolWorkerSettings(BaseSettings):
+class ToolWorkerSettings(ObservabilitySettings):
     model_config = SettingsConfigDict(extra="ignore")
 
-    app_env: str = Field(default="dev", validation_alias="APP_ENV")
     temporal_address: str = "localhost:7233"
     temporal_namespace: str = "default"
     database_url: str = "postgresql+asyncpg://jhin:jhin@localhost:5432/jhin"
     nats_url: str = "nats://localhost:4222"
-    log_level: str = "INFO"
     test_crash_barrier_dir: Path | None = Field(
         default=None,
         validation_alias="JHIN_TEST_CRASH_BARRIER_DIR",

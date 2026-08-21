@@ -1060,6 +1060,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "sqlalchemy" },
     { name = "structlog" },
+    { name = "temporalio" },
 ]
 
 [package.metadata]
@@ -1071,6 +1072,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.7" },
     { name = "sqlalchemy", specifier = ">=2.0.36,<3" },
     { name = "structlog", specifier = ">=25.1" },
+    { name = "temporalio", specifier = "==1.31.0" },
 ]
 
 [[package]]
@@ -1199,6 +1201,7 @@ version = "0.1.0"
 source = { editable = "services/workflow_worker" }
 dependencies = [
     { name = "jhin-observability" },
+    { name = "jhin-secrets" },
     { name = "jhin-workflows" },
     { name = "pydantic-settings" },
     { name = "temporalio" },
@@ -1207,6 +1210,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "jhin-observability", editable = "packages/observability" },
+    { name = "jhin-secrets", editable = "packages/secrets" },
     { name = "jhin-workflows", editable = "packages/workflows" },
     { name = "pydantic-settings", specifier = ">=2.7" },
     { name = "temporalio", specifier = ">=1.31" },
@@ -1217,11 +1221,15 @@ name = "jhin-workflows"
 version = "0.1.0"
 source = { editable = "packages/workflows" }
 dependencies = [
+    { name = "jhin-observability" },
     { name = "temporalio" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "temporalio", specifier = ">=1.31" }]
+requires-dist = [
+    { name = "jhin-observability", editable = "packages/observability" },
+    { name = "temporalio", specifier = ">=1.31" },
+]
 
 [[package]]
 name = "jhin-workspace"
