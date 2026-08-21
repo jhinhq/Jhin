@@ -13,6 +13,7 @@ dependencies = [
     "jhin-domain",
     "jhin-events",
     "jhin-observability",
+    "jhin-secrets",
     "jhin-triggers",
     "jhin-workflows",
 ]
@@ -26,6 +27,7 @@ jhin-db = { workspace = true }
 jhin-domain = { workspace = true }
 jhin-events = { workspace = true }
 jhin-observability = { workspace = true }
+jhin-secrets = { workspace = true }
 jhin-triggers = { workspace = true }
 jhin-workflows = { workspace = true }
 

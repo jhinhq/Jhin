@@ -5,6 +5,7 @@ recording JetStream stub instead of NATS."""
 import json
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, ClassVar
 from uuid import UUID
 
@@ -147,7 +148,9 @@ class TrackingBytearray(bytearray):
 class WebhookRouteHarness:
     client: httpx.AsyncClient
     processed_bodies: list[bytes]
+    processed_kwargs: list[dict[str, Any]]
     js: RecordingJetStream
+    tracer: object
 
 
 @pytest.fixture
@@ -157,7 +160,9 @@ async def webhook_routes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> AsyncIterator[WebhookRouteHarness]:
     processed_bodies: list[bytes] = []
+    processed_kwargs: list[dict[str, Any]] = []
     js = RecordingJetStream()
+    tracer = object()
 
     async def fake_process_delivery(
         _db: AsyncSession,
@@ -166,11 +171,13 @@ async def webhook_routes(
         **kwargs: Any,
     ) -> webhooks.WebhookResult:
         processed_bodies.append(kwargs["body"])
+        processed_kwargs.append(kwargs)
         return webhooks.WebhookResult(outcome="accepted", event_id=new_uuid7())
 
     monkeypatch.setattr(webhooks, "process_delivery", fake_process_delivery)
     app = FastAPI()
     app.state.secret_crypto = crypto
+    app.state.observability = SimpleNamespace(tracer=tracer)
 
     @app.middleware("http")
     async def request_id(request: Request, call_next: Any) -> Any:
@@ -192,7 +199,9 @@ async def webhook_routes(
         yield WebhookRouteHarness(
             client=client,
             processed_bodies=processed_bodies,
+            processed_kwargs=processed_kwargs,
             js=js,
+            tracer=tracer,
         )
 
 
@@ -255,6 +264,19 @@ async def test_webhook_body_exactly_one_mib_is_accepted(
 
     assert response.status_code == 202, response.text
     assert webhook_routes.processed_bodies == [body]
+
+
+async def test_webhook_route_passes_the_lifespan_runtime_tracer(
+    webhook_routes: WebhookRouteHarness,
+) -> None:
+    response = await webhook_routes.client.post(
+        "/api/v1/webhooks/github/public-id",
+        content=b"{}",
+    )
+
+    assert response.status_code == 202, response.text
+    assert len(webhook_routes.processed_kwargs) == 1
+    assert webhook_routes.processed_kwargs[0]["tracer"] is webhook_routes.tracer
 
 
 async def test_webhook_body_one_byte_over_cap_is_rejected_before_parse_or_publish(

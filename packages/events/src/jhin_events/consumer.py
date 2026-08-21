@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from typing import cast
 
 from nats.errors import TimeoutError as NatsTimeoutError
 from nats.js import JetStreamContext
 from nats.js.api import AckPolicy, ConsumerConfig
 from nats.js.errors import NotFoundError
+from opentelemetry.trace import Tracer
 
 from nats.aio.msg import Msg  # isort: skip
 
-from jhin_observability import SafeErrorCode, get_logger
+from jhin_events.telemetry import MessageHandler as TelemetryMessageHandler
+from jhin_events.telemetry import NatsMessage, dispatch_or_nak
+from jhin_observability import get_logger
 
 logger = get_logger(__name__)
 
@@ -49,6 +53,7 @@ async def ensure_pull_consumer(
 async def run_pull_consumer(
     js: JetStreamContext,
     *,
+    tracer: Tracer,
     stream: str,
     durable: str,
     handler: MessageHandler,
@@ -70,14 +75,10 @@ async def run_pull_consumer(
         except NatsTimeoutError:
             continue
         for message in messages:
-            try:
-                await handler(message)
-            except Exception as exc:
-                logger.exception(
-                    "jetstream.consumer_handler_failed",
-                    stream=stream,
-                    consumer=durable,
-                    error_type=type(exc).__name__,
-                    error_code=SafeErrorCode.INTERNAL_ERROR.value,
-                )
-                await message.nak(delay=2)
+            await dispatch_or_nak(
+                cast(NatsMessage, message),
+                stream=stream,
+                durable=durable,
+                handler=cast(TelemetryMessageHandler, handler),
+                tracer=tracer,
+            )

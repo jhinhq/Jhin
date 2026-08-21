@@ -74,6 +74,7 @@ async def receive_webhook(
         body=body,
         request_id=req_id(request),
         ip_hash=ip_hash(request),
+        tracer=request.app.state.observability.tracer,
     )
     return WebhookAck(
         status=result.outcome,

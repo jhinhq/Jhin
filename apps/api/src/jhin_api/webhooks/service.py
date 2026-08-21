@@ -18,10 +18,12 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import cast
 from uuid import UUID, uuid5
 
 from fastapi import HTTPException, status
 from nats.js import JetStreamContext
+from opentelemetry.trace import Tracer
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,9 +33,9 @@ from jhin_connectors import RawWebhookEvent, WebhookVerificationError, default_r
 from jhin_db.models import Connection, WebhookDelivery
 from jhin_domain import ActorType, ConnectionStatus
 from jhin_events.envelope import EventEnvelope, EventSource
-from jhin_events.publisher import MSG_ID_HEADER
 from jhin_events.subjects import ingress_subject
-from jhin_observability import get_logger, normalize_connector_type
+from jhin_events.telemetry import JetStreamPublisher, publish_jetstream
+from jhin_observability import get_logger, noop_tracer, normalize_connector_type
 from jhin_secrets import SecretCrypto, SecretStore
 
 logger = get_logger(__name__)
@@ -72,7 +74,9 @@ async def process_delivery(
     body: bytes,
     request_id: UUID,
     ip_hash: str,
+    tracer: Tracer | None = None,
 ) -> WebhookResult:
+    selected_tracer = tracer if tracer is not None else noop_tracer()
     if len(body) > MAX_WEBHOOK_BODY_BYTES:
         raise HTTPException(
             status_code=status.HTTP_413_CONTENT_TOO_LARGE,
@@ -122,11 +126,16 @@ async def process_delivery(
         # provider doesn't retry, publish nothing.
         return WebhookResult(outcome="ignored")
 
-    return await _ingest(db, js, connection, raw)
+    return await _ingest(db, js, connection, raw, tracer=selected_tracer)
 
 
 async def _ingest(
-    db: AsyncSession, js: JetStreamContext, connection: Connection, raw: RawWebhookEvent
+    db: AsyncSession,
+    js: JetStreamContext,
+    connection: Connection,
+    raw: RawWebhookEvent,
+    *,
+    tracer: Tracer,
 ) -> WebhookResult:
     event_id = ingress_event_id(connection.connector_type, connection.id, raw.delivery_id)
     delivery = WebhookDelivery(
@@ -158,7 +167,14 @@ async def _ingest(
     # provider's retry re-processes cleanly; JetStream's duplicate window
     # (keyed on event_id) covers the crash-after-publish edge.
     try:
-        await js.publish(subject, envelope.to_bytes(), headers={MSG_ID_HEADER: str(event_id)})
+        await publish_jetstream(
+            cast(JetStreamPublisher, js),
+            subject,
+            envelope.to_bytes(),
+            message_id=str(event_id),
+            stream="INGRESS",
+            tracer=tracer,
+        )
         await db.commit()
     except Exception as exc:
         try:

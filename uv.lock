@@ -983,6 +983,7 @@ dependencies = [
     { name = "jhin-domain" },
     { name = "jhin-events" },
     { name = "jhin-observability" },
+    { name = "jhin-secrets" },
     { name = "jhin-triggers" },
     { name = "jhin-workflows" },
     { name = "nats-py" },
@@ -998,6 +999,7 @@ requires-dist = [
     { name = "jhin-domain", editable = "packages/domain" },
     { name = "jhin-events", editable = "packages/events" },
     { name = "jhin-observability", editable = "packages/observability" },
+    { name = "jhin-secrets", editable = "packages/secrets" },
     { name = "jhin-triggers", editable = "packages/triggers" },
     { name = "jhin-workflows", editable = "packages/workflows" },
     { name = "nats-py", specifier = ">=2.13" },
@@ -1014,6 +1016,7 @@ dependencies = [
     { name = "jhin-domain" },
     { name = "jhin-observability" },
     { name = "nats-py" },
+    { name = "opentelemetry-api" },
     { name = "pydantic" },
     { name = "structlog" },
 ]
@@ -1023,6 +1026,7 @@ requires-dist = [
     { name = "jhin-domain", editable = "packages/domain" },
     { name = "jhin-observability", editable = "packages/observability" },
     { name = "nats-py", specifier = ">=2.13" },
+    { name = "opentelemetry-api", specifier = ">=1.38,<2" },
     { name = "pydantic", specifier = ">=2.10" },
     { name = "structlog", specifier = ">=25.1" },
 ]

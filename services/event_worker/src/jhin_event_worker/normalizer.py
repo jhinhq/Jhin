@@ -10,22 +10,24 @@ drops the copies — duplicate deliveries never duplicate events (plan 48.6).
 
 from __future__ import annotations
 
-import json
 import uuid
 from uuid import UUID
 
 from nats.aio.msg import Msg
-from nats.js import JetStreamContext
+from opentelemetry.trace import Tracer
 from pydantic import ValidationError
 
 from jhin_connectors import ConnectorRegistry, RawWebhookEvent, default_registry
 from jhin_events.envelope import EventEnvelope
 from jhin_events.publisher import EventPublisher
 from jhin_events.streams import INGRESS_STREAM
-from jhin_events.subjects import dlq_subject
+from jhin_events.telemetry import JetStreamPublisher, publish_invalid_envelope_dlq
 from jhin_observability import (
     SafeErrorCode,
+    bind_context,
     get_logger,
+    is_safe_context_id,
+    noop_tracer,
     normalize_connector_type,
     normalize_event_family,
 )
@@ -43,24 +45,27 @@ def derived_event_id(ingress_event_id: UUID, index: int) -> UUID:
 class IngressNormalizer:
     """Handler for the INGRESS pull consumer."""
 
-    def __init__(self, js: JetStreamContext, registry: ConnectorRegistry | None = None) -> None:
+    def __init__(
+        self,
+        js: JetStreamPublisher,
+        registry: ConnectorRegistry | None = None,
+        *,
+        tracer: Tracer | None = None,
+    ) -> None:
+        self._tracer = tracer if tracer is not None else noop_tracer()
         self._js = js
-        self._publisher = EventPublisher(js)
+        self._publisher = EventPublisher(js, tracer=self._tracer)
         self._registry = registry if registry is not None else default_registry()
 
     async def handle(self, msg: Msg) -> None:
         try:
             envelope = EventEnvelope.from_bytes(msg.data)
         except ValidationError as exc:
-            await self._js.publish(
-                dlq_subject(INGRESS_STREAM),
-                json.dumps(
-                    {
-                        "reason": "invalid_envelope",
-                        "subject": msg.subject,
-                        "error_count": exc.error_count(),
-                    }
-                ).encode(),
+            await publish_invalid_envelope_dlq(
+                self._js,
+                origin_stream=INGRESS_STREAM,
+                error_count=exc.error_count(),
+                tracer=self._tracer,
             )
             logger.error(
                 "ingress.invalid_envelope",
@@ -68,6 +73,19 @@ class IngressNormalizer:
             )
             await msg.term()
             return
+
+        if is_safe_context_id(envelope.workspace_id):
+            with bind_context(
+                workspace_id=envelope.workspace_id,
+                correlation_id=envelope.correlation_id,
+            ):
+                await self._handle_valid(msg, envelope)
+        else:
+            with bind_context(correlation_id=envelope.correlation_id):
+                await self._handle_valid(msg, envelope)
+
+    async def _handle_valid(self, msg: Msg, envelope: EventEnvelope) -> None:
+        """Normalize one schema-valid envelope under its safe diagnostic context."""
 
         connector = self._registry.get(envelope.source.type)
         event_name = str(envelope.data.get("event", ""))
