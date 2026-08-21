@@ -48,8 +48,11 @@ SENSITIVE_KEY_SUFFIXES = (
 )
 
 
-def is_sensitive_key(key: str) -> bool:
-    snake = re.sub(r"(?<!^)(?=[A-Z])", "_", key.strip())
+def is_sensitive_key_name(value: object) -> bool:
+    """Return whether a string is an exact sensitive key or suffix family."""
+    if not isinstance(value, str):
+        return False
+    snake = re.sub(r"(?<!^)(?=[A-Z])", "_", value.strip())
     normalized = re.sub(r"[^a-z0-9]+", "_", snake.lower()).strip("_")
     return normalized in SENSITIVE_KEYS or normalized.endswith(SENSITIVE_KEY_SUFFIXES)
 
@@ -80,7 +83,7 @@ def structural_redaction(value: object, *, _depth: int = 0) -> object:
                 safe_key = "[UNSUPPORTED]"
             result[safe_key] = (
                 REDACTED
-                if is_sensitive_key(safe_key)
+                if is_sensitive_key_name(safe_key)
                 else structural_redaction(item, _depth=_depth + 1)
             )
         return result

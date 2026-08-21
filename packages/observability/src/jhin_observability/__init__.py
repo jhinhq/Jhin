@@ -42,7 +42,7 @@ from jhin_observability.metrics import (
     instrument_contracts,
     noop_metrics,
 )
-from jhin_observability.redaction import structural_redaction
+from jhin_observability.redaction import is_sensitive_key_name, structural_redaction
 from jhin_observability.registry import (
     DB_TABLE_VALUES,
     SPAN_ATTRIBUTE_VALUES,
@@ -119,6 +119,7 @@ __all__ = [
     "inject_trace_headers",
     "install_sqlalchemy_tracing",
     "instrument_contracts",
+    "is_sensitive_key_name",
     "noop_metrics",
     "noop_tracer",
     "normalize_connector_type",

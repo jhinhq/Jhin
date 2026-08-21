@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 import structlog
 
+import jhin_observability
 from jhin_observability import (
     EVENT_FIELD_RULES,
     SafeErrorCode,
@@ -33,6 +34,35 @@ class _SecretRepr:
 
     def __str__(self) -> str:
         return self._value
+
+
+class _LeakingKeyName:
+    def __init__(self, value: str) -> None:
+        self._value = value
+        self.str_calls = 0
+        self.repr_calls = 0
+
+    def __str__(self) -> str:
+        self.str_calls += 1
+        return self._value
+
+    def __repr__(self) -> str:
+        self.repr_calls += 1
+        return self._value
+
+
+class _RaisingKeyName:
+    def __init__(self) -> None:
+        self.str_calls = 0
+        self.repr_calls = 0
+
+    def __str__(self) -> str:
+        self.str_calls += 1
+        raise RuntimeError("hostile-str-canary")
+
+    def __repr__(self) -> str:
+        self.repr_calls += 1
+        raise RuntimeError("hostile-repr-canary")
 
 
 @pytest.fixture(autouse=True)
@@ -159,6 +189,157 @@ def test_structural_redaction_removes_nested_keys_and_url_parts() -> None:
     assert isinstance(redacted["nested"], dict)
     assert redacted["nested"]["safe"] == "kept"
     assert redacted["target"] == "https://example.test/path"
+
+
+def test_sensitive_key_name_is_one_public_authority() -> None:
+    from jhin_observability import is_sensitive_key_name
+    from jhin_observability.redaction import (
+        is_sensitive_key_name as redaction_predicate,
+    )
+
+    assert "is_sensitive_key_name" in jhin_observability.__all__
+    assert is_sensitive_key_name is redaction_predicate
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "authorization",
+        "Authorization",
+        "http_authorization",
+        "httpAuthorization",
+        "http.authorization",
+        "cookie",
+        "Cookie",
+        "set_cookie",
+        "setCookie",
+        "set-cookie",
+        "password",
+        "Password",
+        "database_password",
+        "databasePassword",
+        "database/password",
+        "secret",
+        "Secret",
+        "client_secret",
+        "clientSecret",
+        "client.secret",
+        "token",
+        "Token",
+        "access_token",
+        "accessToken",
+        "access-token",
+        "api_key",
+        "apiKey",
+        "service_api_key",
+        "serviceApiKey",
+        "service-api-key",
+        "private_key",
+        "privateKey",
+        "signing_private_key",
+        "signingPrivateKey",
+        "signing.private-key",
+        "dsn",
+        "Dsn",
+        "database_dsn",
+        "databaseDsn",
+        "database-dsn",
+    ],
+)
+def test_sensitive_key_name_recognizes_existing_families_and_suffixes(key: str) -> None:
+    from jhin_observability import is_sensitive_key_name
+
+    assert is_sensitive_key_name(key) is True
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "prompt",
+        "completion",
+        "sql",
+        "tool_input",
+        "tool_output",
+        "request_body",
+        "response_body",
+        "webhook_payload",
+        "secret_env",
+    ],
+)
+def test_sensitive_key_name_preserves_exact_payload_field_authority(key: str) -> None:
+    from jhin_observability import is_sensitive_key_name
+
+    assert is_sensitive_key_name(key) is True
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "secretary",
+        "authorization_url",
+        "cookie_count",
+        "password_reset",
+        "token_count",
+        "api_keys",
+        "public_key",
+        "private_key_id",
+        "dsn_label",
+        "",
+        "  ",
+    ],
+)
+def test_sensitive_key_name_does_not_widen_benign_names(key: str) -> None:
+    from jhin_observability import is_sensitive_key_name
+
+    assert is_sensitive_key_name(key) is False
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, True, 42, 3.14, b"secret", ["token"], {"api_key": "value"}],
+)
+def test_sensitive_key_name_rejects_non_strings_without_coercion(value: object) -> None:
+    from jhin_observability import is_sensitive_key_name
+
+    assert is_sensitive_key_name(value) is False
+
+
+def test_sensitive_key_name_does_not_inspect_or_echo_hostile_objects(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from jhin_observability import is_sensitive_key_name
+
+    leaking = _LeakingKeyName("api_key")
+    raising = _RaisingKeyName()
+
+    assert is_sensitive_key_name(leaking) is False
+    assert is_sensitive_key_name(raising) is False
+    assert leaking.str_calls == 0
+    assert leaking.repr_calls == 0
+    assert raising.str_calls == 0
+    assert raising.repr_calls == 0
+    captured = capsys.readouterr()
+    assert "api_key" not in captured.out
+    assert "api_key" not in captured.err
+    assert "hostile" not in captured.out
+    assert "hostile" not in captured.err
+
+
+def test_structural_redaction_routes_keys_through_public_sensitive_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import jhin_observability.redaction as redaction_module
+
+    monkeypatch.setattr(
+        redaction_module,
+        "is_sensitive_key_name",
+        lambda value: value == "delegated_sensitive_field",
+    )
+
+    assert structural_redaction({"delegated_sensitive_field": "canary", "safe": "kept"}) == {
+        "delegated_sensitive_field": "[REDACTED]",
+        "safe": "kept",
+    }
 
 
 def test_unknown_object_is_stringified_only_inside_redaction(
