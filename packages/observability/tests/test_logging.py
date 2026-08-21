@@ -363,6 +363,25 @@ def test_sensitive_key_name_does_not_widen_uppercase_near_misses(key: str) -> No
     assert is_sensitive_key_name(key) is False
 
 
+def test_sensitive_key_name_bounds_large_uppercase_normalization_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import jhin_observability.redaction as redaction_module
+    from jhin_observability import is_sensitive_key_name
+
+    def reject_regex_work(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("large-key normalization delegated to regex")
+
+    monkeypatch.setattr(
+        redaction_module,
+        "re",
+        SimpleNamespace(sub=reject_regex_work),
+        raising=False,
+    )
+
+    assert is_sensitive_key_name("A" * 100_000) is False
+
+
 @pytest.mark.parametrize(
     "value",
     [None, True, 42, 3.14, b"secret", ["token"], {"api_key": "value"}],

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping, MutableMapping
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -48,13 +47,37 @@ SENSITIVE_KEY_SUFFIXES = (
 )
 
 
+def _normalize_sensitive_key_name(value: str) -> str:
+    output: list[str] = []
+    separator_pending = False
+    value_length = len(value)
+    for index, character in enumerate(value):
+        is_upper = "A" <= character <= "Z"
+        is_lower = "a" <= character <= "z"
+        is_digit = "0" <= character <= "9"
+        if not (is_upper or is_lower or is_digit):
+            separator_pending = bool(output)
+            continue
+
+        previous = value[index - 1] if index else ""
+        following = value[index + 1] if index + 1 < value_length else ""
+        word_boundary = is_upper and (
+            "a" <= previous <= "z"
+            or "0" <= previous <= "9"
+            or ("A" <= previous <= "Z" and "a" <= following <= "z")
+        )
+        if output and (separator_pending or word_boundary):
+            output.append("_")
+        output.append(chr(ord(character) + 32) if is_upper else character)
+        separator_pending = False
+    return "".join(output)
+
+
 def is_sensitive_key_name(value: object) -> bool:
     """Return whether a string is an exact sensitive key or suffix family."""
     if type(value) is not str:
         return False
-    snake = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", value.strip())
-    snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", snake)
-    normalized = re.sub(r"[^a-z0-9]+", "_", snake.lower()).strip("_")
+    normalized = _normalize_sensitive_key_name(value)
     return normalized in SENSITIVE_KEYS or normalized.endswith(SENSITIVE_KEY_SUFFIXES)
 
 
