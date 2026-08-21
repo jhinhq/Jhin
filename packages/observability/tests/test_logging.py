@@ -86,6 +86,32 @@ def test_every_record_has_exact_v1_required_fields(
     assert "private-host-canary" not in json.dumps(record)
 
 
+def test_retained_structlog_proxy_uses_latest_configuration(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    retained_logger = get_logger("jhin.reconfiguration")
+    configure_json_logging(service="api", environment="staging", level="INFO")
+    retained_logger.info("api.started", request_id="req-first")
+    first = json.loads(capsys.readouterr().out)
+    assert first["service"] == "api"
+    assert first["environment"] == "staging"
+
+    configure_json_logging(
+        service="rootless-docker-transport",
+        environment="test",
+        level="INFO",
+    )
+    retained_logger.info("rootless_transport.ready")
+    second_rendered = capsys.readouterr().out
+    second = json.loads(second_rendered)
+    assert second["schema_version"] == 1
+    assert second["service"] == "rootless-docker-transport"
+    assert second["environment"] == "test"
+    assert second["event"] == "rootless_transport.ready"
+    assert "api" not in second_rendered
+    assert "staging" not in second_rendered
+
+
 def test_preexisting_named_handler_is_forced_through_single_json_path(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
