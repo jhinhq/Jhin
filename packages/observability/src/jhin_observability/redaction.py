@@ -52,7 +52,8 @@ def is_sensitive_key_name(value: object) -> bool:
     """Return whether a string is an exact sensitive key or suffix family."""
     if type(value) is not str:
         return False
-    snake = re.sub(r"(?<!^)(?=[A-Z])", "_", value.strip())
+    snake = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", value.strip())
+    snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", snake)
     normalized = re.sub(r"[^a-z0-9]+", "_", snake.lower()).strip("_")
     return normalized in SENSITIVE_KEYS or normalized.endswith(SENSITIVE_KEY_SUFFIXES)
 

@@ -273,6 +273,36 @@ def test_sensitive_key_name_recognizes_existing_families_and_suffixes(key: str) 
 @pytest.mark.parametrize(
     "key",
     [
+        "AUTHORIZATION",
+        "COOKIE",
+        "PASSWORD",
+        "SECRET",
+        "TOKEN",
+        "API_KEY",
+        "X-API-KEY",
+        "PRIVATE_KEY",
+        "DSN",
+        "X-DSN",
+        "APIKey",
+        "httpAPIKey",
+        "HttpAPIKey",
+        "HTTPAuthorization",
+        "signingPRIVATEKey",
+        "databaseDSN",
+        "xDSN",
+    ],
+)
+def test_sensitive_key_name_recognizes_uppercase_and_acronym_families(
+    key: str,
+) -> None:
+    from jhin_observability import is_sensitive_key_name
+
+    assert is_sensitive_key_name(key) is True
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
         "prompt",
         "completion",
         "sql",
@@ -307,6 +337,27 @@ def test_sensitive_key_name_preserves_exact_payload_field_authority(key: str) ->
     ],
 )
 def test_sensitive_key_name_does_not_widen_benign_names(key: str) -> None:
+    from jhin_observability import is_sensitive_key_name
+
+    assert is_sensitive_key_name(key) is False
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "SECRETARY",
+        "AUTHORIZATION_URL",
+        "COOKIE_COUNT",
+        "PASSWORD_RESET",
+        "TOKEN_COUNT",
+        "API_KEYS",
+        "PUBLIC_KEY",
+        "PRIVATE_KEY_ID",
+        "DSN_LABEL",
+        "SAFE_API_KEY_LABEL",
+    ],
+)
+def test_sensitive_key_name_does_not_widen_uppercase_near_misses(key: str) -> None:
     from jhin_observability import is_sensitive_key_name
 
     assert is_sensitive_key_name(key) is False
