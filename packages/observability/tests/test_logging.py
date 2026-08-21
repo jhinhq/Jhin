@@ -65,6 +65,27 @@ class _RaisingKeyName:
         raise RuntimeError("hostile-repr-canary")
 
 
+class _RaisingClassKeyName:
+    def __init__(self) -> None:
+        self.class_reads = 0
+
+    @property
+    def __class__(self) -> type[object]:
+        self.class_reads += 1
+        raise RuntimeError("hostile-class-canary")
+
+
+class _RaisingStripKeyName(str):
+    def __new__(cls, value: str) -> _RaisingStripKeyName:
+        instance = super().__new__(cls, value)
+        instance.strip_calls = 0
+        return instance
+
+    def strip(self, chars: str | None = None, /) -> str:
+        self.strip_calls += 1
+        raise RuntimeError("hostile-strip-canary")
+
+
 @pytest.fixture(autouse=True)
 def clear_process_secret_registry() -> Iterator[None]:
     redactor = get_redactor()
@@ -323,6 +344,34 @@ def test_sensitive_key_name_does_not_inspect_or_echo_hostile_objects(
     assert "api_key" not in captured.err
     assert "hostile" not in captured.out
     assert "hostile" not in captured.err
+
+
+def test_sensitive_key_name_does_not_read_hostile_class(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from jhin_observability import is_sensitive_key_name
+
+    value = _RaisingClassKeyName()
+
+    assert is_sensitive_key_name(value) is False
+    assert value.class_reads == 0
+    captured = capsys.readouterr()
+    assert "hostile-class-canary" not in captured.out
+    assert "hostile-class-canary" not in captured.err
+
+
+def test_sensitive_key_name_rejects_str_subclass_without_calling_strip(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from jhin_observability import is_sensitive_key_name
+
+    value = _RaisingStripKeyName("api_key")
+
+    assert is_sensitive_key_name(value) is False
+    assert value.strip_calls == 0
+    captured = capsys.readouterr()
+    assert "hostile-strip-canary" not in captured.out
+    assert "hostile-strip-canary" not in captured.err
 
 
 def test_structural_redaction_routes_keys_through_public_sensitive_authority(
