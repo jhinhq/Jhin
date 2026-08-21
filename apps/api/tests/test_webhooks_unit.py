@@ -11,12 +11,20 @@ from uuid import UUID
 
 import httpx
 import pytest
+import structlog
 from fastapi import FastAPI, HTTPException, Request
+from opentelemetry import baggage, trace
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import SpanKind, TraceFlags, Tracer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from jhin_api.connections import service as connections_service
 from jhin_api.deps import WorkspaceContext, get_db, get_jetstream
+from jhin_api.main import HttpObservabilityMiddleware
 from jhin_api.webhooks import router as webhook_router_module
 from jhin_api.webhooks import service as webhooks
 from jhin_api.webhooks.router import router as webhooks_router
@@ -35,7 +43,9 @@ from jhin_db.models import (
 from jhin_domain import AgentStatus, new_uuid7
 from jhin_event_worker.matcher import TriggerMatcher
 from jhin_event_worker.normalizer import IngressNormalizer, derived_event_id
+from jhin_event_worker.processor import EventProcessor
 from jhin_events.envelope import EventEnvelope
+from jhin_events.telemetry import dispatch_or_nak
 from jhin_secrets import SecretCrypto
 
 REQ = {"request_id": new_uuid7(), "ip_hash": "test"}
@@ -48,17 +58,32 @@ ISSUE_PAYLOAD = {
     "sender": {"login": "dev"},
 }
 
+REMOTE_TRACEPARENT = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+REMOTE_TRACESTATE = "vendor=value"
+
 
 class RecordingJetStream:
     """Captures publishes; optionally fails to simulate a NATS outage."""
 
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail: bool = False,
+        timeline: list[str] | None = None,
+        publish_event: str = "publish",
+    ) -> None:
         self.fail = fail
+        self.timeline = timeline
+        self.publish_event = publish_event
         self.published: list[tuple[str, bytes, dict[str, str]]] = []
+        self.publish_span_ids: list[int] = []
 
     async def publish(
         self, subject: str, payload: bytes, headers: dict[str, str] | None = None
     ) -> None:
+        self.publish_span_ids.append(trace.get_current_span().get_span_context().span_id)
+        if self.timeline is not None:
+            self.timeline.append(self.publish_event)
         if self.fail:
             raise ConnectionError("nats is down")
         self.published.append((subject, payload, headers or {}))
@@ -95,6 +120,97 @@ class IngressMessage:
 
     async def term(self) -> None:
         self.termed = True
+
+
+class TraceBridgeMessage:
+    def __init__(
+        self,
+        subject: str,
+        data: bytes,
+        headers: Mapping[str, str],
+        *,
+        timeline: list[str] | None = None,
+        ack_event: str = "ack",
+    ) -> None:
+        self.subject = subject
+        self.data = data
+        self.headers = dict(headers)
+        self.metadata = SimpleNamespace(num_delivered=1)
+        self.acks = 0
+        self.terms = 0
+        self.naks = 0
+        self.timeline = timeline
+        self.ack_event = ack_event
+        self.ack_span_ids: list[int] = []
+
+    async def ack(self) -> None:
+        self.acks += 1
+        self.ack_span_ids.append(trace.get_current_span().get_span_context().span_id)
+        if self.timeline is not None:
+            self.timeline.append(self.ack_event)
+
+    async def term(self) -> None:
+        self.terms += 1
+
+    async def nak(self, *, delay: int) -> None:
+        assert delay == 2
+        self.naks += 1
+
+
+@dataclass
+class TraceService:
+    provider: TracerProvider
+    tracer: Tracer
+    exporter: InMemorySpanExporter
+
+
+def trace_service(service_name: str) -> TraceService:
+    provider = TracerProvider(
+        resource=Resource(
+            {
+                "service.name": service_name,
+                "service.version": "test",
+                "deployment.environment.name": "test",
+            }
+        )
+    )
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    return TraceService(provider, provider.get_tracer(f"{service_name}-test"), exporter)
+
+
+def serialized_trace_span(span: ReadableSpan) -> str:
+    return json.dumps(
+        {
+            "name": span.name,
+            "context": {
+                "trace_id": format(span.context.trace_id, "032x") if span.context else None,
+                "span_id": format(span.context.span_id, "016x") if span.context else None,
+            },
+            "parent": {
+                "trace_id": format(span.parent.trace_id, "032x") if span.parent else None,
+                "span_id": format(span.parent.span_id, "016x") if span.parent else None,
+            },
+            "resource": dict(span.resource.attributes),
+            "attributes": dict(span.attributes or {}),
+            "events": [
+                {"name": event.name, "attributes": dict(event.attributes or {})}
+                for event in span.events
+            ],
+        },
+        default=str,
+        sort_keys=True,
+    )
+
+
+def span_id_from_traceparent(value: str) -> int:
+    return int(value.split("-")[2], 16)
+
+
+def assert_telemetry_context_empty() -> None:
+    assert structlog.contextvars.get_contextvars() == {}
+    assert not trace.get_current_span().is_recording()
+    assert not baggage.get_all()
 
 
 class RecordingTemporal:
@@ -230,6 +346,316 @@ def github_headers(secret: str, body: bytes, *, event: str, delivery: str) -> Ma
         "X-GitHub-Event": event,
         "X-GitHub-Delivery": delivery,
     }
+
+
+async def test_real_webhook_to_worker_path_has_exact_five_span_parent_graph(
+    session: AsyncSession,
+    crypto: SecretCrypto,
+    github_connection: tuple[Connection, str],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    connection, secret = github_connection
+    api_trace = trace_service("api")
+    worker_trace = trace_service("event-worker")
+    timeline: list[str] = []
+    ingress_js = RecordingJetStream(
+        timeline=timeline,
+        publish_event="INGRESS publish",
+    )
+    events_js = RecordingJetStream(
+        timeline=timeline,
+        publish_event="EVENTS publish",
+    )
+    matched: list[EventEnvelope] = []
+    matched_span_ids: list[int] = []
+
+    class RecordingMatcher:
+        async def handle_event(self, envelope: EventEnvelope) -> None:
+            matched.append(envelope)
+            matched_span_ids.append(trace.get_current_span().get_span_context().span_id)
+            timeline.append("matcher")
+
+    app = FastAPI()
+    app.state.secret_crypto = crypto
+    app.state.observability = SimpleNamespace(tracer=api_trace.tracer)
+    app.add_middleware(HttpObservabilityMiddleware)
+    app.include_router(webhooks_router)
+
+    async def override_db() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    async def override_jetstream() -> RecordingJetStream:
+        return ingress_js
+
+    app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_jetstream] = override_jetstream
+    body = json.dumps(ISSUE_PAYLOAD, separators=(",", ":")).encode()
+    request_headers = dict(
+        github_headers(
+            secret,
+            body,
+            event="issues",
+            delivery="five-span-delivery",
+        )
+    )
+    request_headers.update(
+        {
+            "traceparent": REMOTE_TRACEPARENT,
+            "tracestate": REMOTE_TRACESTATE,
+            "baggage": "private-baggage-canary=do-not-propagate",
+            "authorization": "Bearer private-authorization-canary",
+            "cookie": "session=private-cookie-canary",
+            "x-private-canary": "private-header-value-canary",
+        }
+    )
+    capsys.readouterr()
+
+    try:
+        with structlog.testing.capture_logs() as captured_logs:
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://test",
+            ) as client:
+                response = await client.post(
+                    f"/api/v1/webhooks/github/{connection.public_id}",
+                    content=body,
+                    headers=request_headers,
+                )
+            assert_telemetry_context_empty()
+            assert response.status_code == 202
+            assert response.json()["status"] == "accepted"
+            assert len(ingress_js.published) == 1
+            delivery = await session.scalar(
+                select(WebhookDelivery).where(WebhookDelivery.delivery_id == "five-span-delivery")
+            )
+            assert delivery is not None
+            assert response.json()["event_id"] == str(delivery.event_id)
+
+            ingress_subject, ingress_payload, ingress_headers = ingress_js.published[0]
+            ingress_message = TraceBridgeMessage(
+                ingress_subject,
+                ingress_payload,
+                ingress_headers,
+                timeline=timeline,
+                ack_event="INGRESS ack",
+            )
+            normalizer = IngressNormalizer(events_js, tracer=worker_trace.tracer)  # type: ignore[arg-type]
+            await dispatch_or_nak(
+                ingress_message,  # type: ignore[arg-type]
+                tracer=worker_trace.tracer,
+                stream="INGRESS",
+                durable="event-worker-ingress",
+                handler=normalizer.handle,  # type: ignore[arg-type]
+            )
+            assert_telemetry_context_empty()
+            assert (ingress_message.acks, ingress_message.terms, ingress_message.naks) == (
+                1,
+                0,
+                0,
+            )
+            assert len(events_js.published) == 1
+
+            event_subject, event_payload, event_headers = events_js.published[0]
+            event_message = TraceBridgeMessage(
+                event_subject,
+                event_payload,
+                event_headers,
+                timeline=timeline,
+                ack_event="EVENTS ack",
+            )
+            processor = EventProcessor(
+                events_js,  # type: ignore[arg-type]
+                matcher=RecordingMatcher(),
+                tracer=worker_trace.tracer,
+            )
+            await dispatch_or_nak(
+                event_message,  # type: ignore[arg-type]
+                tracer=worker_trace.tracer,
+                stream="EVENTS",
+                durable="event-worker",
+                handler=processor.handle,  # type: ignore[arg-type]
+            )
+            assert_telemetry_context_empty()
+            assert (event_message.acks, event_message.terms, event_message.naks) == (1, 0, 0)
+            captured_streams = capsys.readouterr()
+
+        api_spans = list(api_trace.exporter.get_finished_spans())
+        worker_spans = list(worker_trace.exporter.get_finished_spans())
+        assert len(api_spans) == 2
+        assert len(worker_spans) == 3
+        assert len(api_spans) + len(worker_spans) == 5
+        assert {span.resource.attributes["service.name"] for span in api_spans} == {"api"}
+        assert {span.resource.attributes["service.name"] for span in worker_spans} == {
+            "event-worker"
+        }
+
+        server = next(span for span in api_spans if span.name == "http.server.request")
+        ingress_producer = next(span for span in api_spans if span.name == "nats.publish")
+        ingress_consumer = next(
+            span
+            for span in worker_spans
+            if span.name == "nats.consume"
+            and dict(span.attributes or {})["jhin.stream"] == "INGRESS"
+        )
+        events_producer = next(span for span in worker_spans if span.name == "nats.publish")
+        events_consumer = next(
+            span
+            for span in worker_spans
+            if span.name == "nats.consume"
+            and dict(span.attributes or {})["jhin.stream"] == "EVENTS"
+        )
+        ingress_envelope = EventEnvelope.from_bytes(ingress_payload)
+        event_envelope = EventEnvelope.from_bytes(event_payload)
+        assert ingress_subject == (f"jhin.v1.{ingress_envelope.workspace_id}.ingress.github.issues")
+        assert event_subject == (
+            f"jhin.v1.{event_envelope.workspace_id}.connector.github.issue.opened"
+        )
+        for span in (
+            server,
+            ingress_producer,
+            ingress_consumer,
+            events_producer,
+            events_consumer,
+        ):
+            assert span.context is not None
+            assert span.parent is not None
+            assert span.context.trace_flags == TraceFlags.SAMPLED
+            assert span.context.trace_state.to_header() == REMOTE_TRACESTATE
+        assert server.kind is SpanKind.SERVER
+        assert ingress_producer.kind is SpanKind.PRODUCER
+        assert ingress_consumer.kind is SpanKind.CONSUMER
+        assert events_producer.kind is SpanKind.PRODUCER
+        assert events_consumer.kind is SpanKind.CONSUMER
+        assert dict(server.attributes or {}) == {
+            "http.request.method": "POST",
+            "http.response.status_class": "2xx",
+            "http.response.status_code": 202,
+            "http.route": "/api/:path*",
+        }
+        assert dict(ingress_producer.attributes or {}) == {
+            "messaging.system": "nats",
+            "jhin.stream": "INGRESS",
+            "jhin.subject_family": "ingress",
+            "jhin.outcome": "ok",
+        }
+        assert dict(ingress_consumer.attributes or {}) == {
+            "messaging.system": "nats",
+            "jhin.stream": "INGRESS",
+            "jhin.consumer": "event-worker-ingress",
+            "jhin.subject_family": "ingress",
+            "jhin.outcome": "ok",
+            "jhin.correlation_id": str(ingress_envelope.correlation_id),
+            "jhin.workspace_id": ingress_envelope.workspace_id,
+        }
+        assert dict(events_producer.attributes or {}) == {
+            "messaging.system": "nats",
+            "jhin.stream": "EVENTS",
+            "jhin.subject_family": "connector",
+            "jhin.outcome": "ok",
+        }
+        assert dict(events_consumer.attributes or {}) == {
+            "messaging.system": "nats",
+            "jhin.stream": "EVENTS",
+            "jhin.consumer": "event-worker",
+            "jhin.subject_family": "connector",
+            "jhin.outcome": "ok",
+            "jhin.correlation_id": str(event_envelope.correlation_id),
+            "jhin.workspace_id": event_envelope.workspace_id,
+        }
+        remote_trace_id = int(REMOTE_TRACEPARENT.split("-")[1], 16)
+        assert server.parent.span_id == span_id_from_traceparent(REMOTE_TRACEPARENT)
+        assert server.parent.trace_id == remote_trace_id
+        assert server.parent.trace_flags == TraceFlags.SAMPLED
+        assert server.parent.trace_state.to_header() == REMOTE_TRACESTATE
+        assert server.parent.is_remote is True
+        assert ingress_producer.parent.span_id == server.context.span_id
+        assert ingress_producer.parent.trace_id == server.context.trace_id
+        assert ingress_producer.parent.is_remote is False
+        assert ingress_consumer.parent.span_id == ingress_producer.context.span_id
+        assert ingress_consumer.parent.trace_id == ingress_producer.context.trace_id
+        assert ingress_consumer.parent.trace_flags == ingress_producer.context.trace_flags
+        assert ingress_consumer.parent.trace_state == ingress_producer.context.trace_state
+        assert ingress_consumer.parent.is_remote is True
+        assert events_producer.parent.span_id == ingress_consumer.context.span_id
+        assert events_producer.parent.trace_id == ingress_consumer.context.trace_id
+        assert events_producer.parent.is_remote is False
+        assert events_consumer.parent.span_id == events_producer.context.span_id
+        assert events_consumer.parent.trace_id == events_producer.context.trace_id
+        assert events_consumer.parent.trace_flags == events_producer.context.trace_flags
+        assert events_consumer.parent.trace_state == events_producer.context.trace_state
+        assert events_consumer.parent.is_remote is True
+        assert {span.context.trace_id for span in (*api_spans, *worker_spans)} == {remote_trace_id}
+
+        assert matched == [event_envelope]
+        assert timeline == [
+            "INGRESS publish",
+            "EVENTS publish",
+            "INGRESS ack",
+            "matcher",
+            "EVENTS ack",
+        ]
+        assert ingress_envelope.event_id == delivery.event_id
+        assert event_envelope.event_id == derived_event_id(ingress_envelope.event_id, 0)
+        assert event_envelope.event_type == "connector.github.issue.opened"
+        assert event_envelope.causation_id == ingress_envelope.event_id
+        assert event_envelope.correlation_id == ingress_envelope.correlation_id
+        assert event_envelope.workspace_id == ingress_envelope.workspace_id
+        assert event_envelope.source == ingress_envelope.source
+        assert set(ingress_headers) == {"Nats-Msg-Id", "traceparent", "tracestate"}
+        assert set(event_headers) == {"Nats-Msg-Id", "traceparent", "tracestate"}
+        assert ingress_headers["Nats-Msg-Id"] == str(ingress_envelope.event_id)
+        assert event_headers["Nats-Msg-Id"] == str(event_envelope.event_id)
+        assert ingress_headers["tracestate"] == REMOTE_TRACESTATE
+        assert event_headers["tracestate"] == REMOTE_TRACESTATE
+        assert (
+            span_id_from_traceparent(ingress_headers["traceparent"])
+            == ingress_producer.context.span_id
+        )
+        assert (
+            span_id_from_traceparent(event_headers["traceparent"])
+            == events_producer.context.span_id
+        )
+        assert ingress_js.publish_span_ids == [ingress_producer.context.span_id]
+        assert events_js.publish_span_ids == [events_producer.context.span_id]
+        assert ingress_message.ack_span_ids == [ingress_consumer.context.span_id]
+        assert event_message.ack_span_ids == [events_consumer.context.span_id]
+        assert matched_span_ids == [events_consumer.context.span_id]
+        assert all(
+            sum(key.lower() == carrier for key in headers) == 1
+            for headers in (ingress_headers, event_headers)
+            for carrier in ("traceparent", "tracestate")
+        )
+        assert all(
+            "baggage" not in {key.lower() for key in headers}
+            for headers in (ingress_headers, event_headers)
+        )
+
+        rendered_telemetry = "\n".join(
+            [
+                *(serialized_trace_span(span) for span in (*api_spans, *worker_spans)),
+                json.dumps(captured_logs, default=str, sort_keys=True),
+                captured_streams.out,
+                captured_streams.err,
+            ]
+        )
+        for canary in (
+            "Login broken",
+            "octo/alpha",
+            "private-baggage-canary",
+            "private-authorization-canary",
+            "private-cookie-canary",
+            "x-private-canary",
+            "private-header-value-canary",
+            secret,
+            request_headers["X-Hub-Signature-256"],
+            connection.public_id,
+            "five-span-delivery",
+        ):
+            assert canary not in rendered_telemetry
+    finally:
+        api_trace.provider.shutdown()
+        worker_trace.provider.shutdown()
 
 
 async def deliver(

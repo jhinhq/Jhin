@@ -543,7 +543,20 @@ async def test_metric_replacement_failure_is_diagnostic_only() -> None:
 
 @pytest.mark.parametrize(
     "value",
-    [True, False, 0, -1, 0.0, -1.0, math.inf, -math.inf, math.nan, "1", None],
+    [
+        True,
+        False,
+        0,
+        -1,
+        0.0,
+        -1.0,
+        math.inf,
+        -math.inf,
+        math.nan,
+        10**1_000,
+        "1",
+        None,
+    ],
 )
 async def test_lag_timeout_and_interval_validation_is_closed(value: object) -> None:
     main = worker_main()
@@ -664,6 +677,61 @@ class FakeEngine:
         self.events.append("engine.dispose")
         if self.dispose_failure:
             raise RuntimeError("dispose canary")
+
+
+async def test_runtime_is_owned_when_logging_configuration_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    main = worker_main()
+    events: list[str] = []
+    runtime = FakeRuntime(events)
+    logging_error = RuntimeError("logging-config-canary")
+    monkeypatch.setattr(main, "Settings", lambda: FakeSettings(events))
+    monkeypatch.setattr(main, "service_version", lambda _: "test-version", raising=False)
+    monkeypatch.setattr(
+        main,
+        "initialize_observability",
+        lambda _config: (events.append("runtime.initialize"), runtime)[1],
+        raising=False,
+    )
+
+    def fail_logging(**_kwargs: object) -> None:
+        events.append("logging.configure")
+        raise logging_error
+
+    monkeypatch.setattr(main, "configure_json_logging", fail_logging)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await main.main()
+    assert excinfo.value is logging_error
+    assert events == [
+        "settings",
+        "settings.observability_config",
+        "runtime.initialize",
+        "logging.configure",
+        "runtime.shutdown",
+    ]
+
+
+class CleanupTrackingClient(FakeClient):
+    def __init__(
+        self,
+        events: list[str],
+        js: object,
+        *,
+        close_error: BaseException | None = None,
+    ) -> None:
+        super().__init__(events, js)
+        self.close_error = close_error
+        self.cleanup_task_names: list[str] = []
+
+    async def close(self) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        self.cleanup_task_names.append(task.get_name())
+        self.events.append("nats.close")
+        if self.close_error is not None:
+            raise self.close_error
 
 
 async def test_main_initializes_first_wires_exact_runtime_and_owns_all_tasks(
@@ -838,6 +906,158 @@ async def test_main_initializes_first_wires_exact_runtime_and_owns_all_tasks(
     ]
 
 
+async def test_cleanup_supervisor_reawaits_through_repeated_outer_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    main = worker_main()
+    events: list[str] = []
+    runtime = FakeRuntime(events)
+    js = object()
+    client = CleanupTrackingClient(events, js)
+    engine = FakeEngine(events)
+    consumers_ready = asyncio.Event()
+    heartbeat_ready = asyncio.Event()
+    heartbeat_unwinding = asyncio.Event()
+    release_heartbeat = asyncio.Event()
+    started_consumers = 0
+
+    monkeypatch.setattr(main, "Settings", lambda: FakeSettings(events))
+    monkeypatch.setattr(main, "service_version", lambda _: "test-version", raising=False)
+    monkeypatch.setattr(main, "initialize_observability", lambda _config: runtime)
+    monkeypatch.setattr(main, "configure_json_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(main, "connect_with_retry", lambda _settings: _async_value(client))
+    monkeypatch.setattr(main, "ensure_streams", lambda _js: _async_value(None))
+    monkeypatch.setattr(main, "temporal_with_retry", lambda _settings: _async_value(object()))
+    monkeypatch.setattr(main, "create_engine", lambda *_args, **_kwargs: engine)
+    monkeypatch.setattr(main, "create_session_factory", lambda _engine: object())
+    monkeypatch.setattr(main, "TriggerMatcher", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        main,
+        "EventProcessor",
+        lambda *_args, **_kwargs: SimpleNamespace(handle=lambda _: None),
+    )
+    monkeypatch.setattr(
+        main,
+        "IngressNormalizer",
+        lambda *_args, **_kwargs: SimpleNamespace(handle=lambda _: None),
+    )
+
+    async def stubborn_heartbeat() -> None:
+        heartbeat_ready.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            heartbeat_unwinding.set()
+            await release_heartbeat.wait()
+            raise
+
+    async def consume(*_args: object, **_kwargs: object) -> None:
+        nonlocal started_consumers
+        started_consumers += 1
+        if started_consumers == 2:
+            consumers_ready.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(main, "run_heartbeat", stubborn_heartbeat)
+    monkeypatch.setattr(main, "poll_nats_consumer_lag", _poll_until_stop)
+    monkeypatch.setattr(main, "run_pull_consumer", consume)
+    monkeypatch.setattr(main, "clear_heartbeat", lambda: events.append("heartbeat.clear"))
+
+    task = asyncio.create_task(main.main(), name="event-worker-main-test")
+    await consumers_ready.wait()
+    await heartbeat_ready.wait()
+    task.cancel("body-cancellation")
+    await heartbeat_unwinding.wait()
+    task.cancel("cleanup-cancellation-one")
+    await asyncio.sleep(0)
+    task.cancel("cleanup-cancellation-two")
+    release_heartbeat.set()
+
+    with pytest.raises(asyncio.CancelledError) as excinfo:
+        await task
+    assert excinfo.value.args == ("body-cancellation",)
+    assert client.cleanup_task_names == ["event-worker-cleanup"]
+    assert events[-4:] == [
+        "heartbeat.clear",
+        "nats.close",
+        "engine.dispose",
+        "runtime.shutdown",
+    ]
+    assert not [
+        candidate
+        for candidate in asyncio.all_tasks()
+        if candidate is not asyncio.current_task()
+        and candidate.get_name() == "event-worker-cleanup"
+        and not candidate.done()
+    ]
+
+
+async def test_cleanup_cancellation_outranks_active_body_error_after_all_steps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    main = worker_main()
+    events: list[str] = []
+    runtime = FakeRuntime(events)
+    cleanup_cancellation = asyncio.CancelledError("cleanup-cancellation")
+    client = CleanupTrackingClient(events, object(), close_error=cleanup_cancellation)
+    engine = FakeEngine(events)
+    body_error = RuntimeError("body-error-canary")
+    monkeypatch.setattr(main, "Settings", lambda: FakeSettings(events))
+    monkeypatch.setattr(main, "service_version", lambda _: "test-version", raising=False)
+    monkeypatch.setattr(main, "initialize_observability", lambda _config: runtime)
+    monkeypatch.setattr(main, "configure_json_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(main, "connect_with_retry", lambda _settings: _async_value(client))
+    monkeypatch.setattr(main, "ensure_streams", lambda _js: _async_value(None))
+    monkeypatch.setattr(main, "temporal_with_retry", lambda _settings: _async_value(object()))
+    monkeypatch.setattr(main, "create_engine", lambda *_args, **_kwargs: engine)
+
+    def fail_session_factory(_engine: object) -> object:
+        raise body_error
+
+    monkeypatch.setattr(main, "create_session_factory", fail_session_factory)
+    monkeypatch.setattr(main, "clear_heartbeat", lambda: events.append("heartbeat.clear"))
+
+    with pytest.raises(asyncio.CancelledError) as excinfo:
+        await main.main()
+    assert excinfo.value.args == ("cleanup-cancellation",)
+    assert client.cleanup_task_names == ["event-worker-cleanup"]
+    assert "engine.dispose" in events
+    assert events[-1] == "runtime.shutdown"
+
+
+async def test_active_body_error_outranks_cleanup_error_after_all_steps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    main = worker_main()
+    events: list[str] = []
+    runtime = FakeRuntime(events)
+    cleanup_error = RuntimeError("cleanup-error-canary")
+    client = CleanupTrackingClient(events, object(), close_error=cleanup_error)
+    engine = FakeEngine(events, dispose_failure=True)
+    body_error = RuntimeError("body-error-canary")
+    monkeypatch.setattr(main, "Settings", lambda: FakeSettings(events))
+    monkeypatch.setattr(main, "service_version", lambda _: "test-version", raising=False)
+    monkeypatch.setattr(main, "initialize_observability", lambda _config: runtime)
+    monkeypatch.setattr(main, "configure_json_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(main, "connect_with_retry", lambda _settings: _async_value(client))
+    monkeypatch.setattr(main, "ensure_streams", lambda _js: _async_value(None))
+    monkeypatch.setattr(main, "temporal_with_retry", lambda _settings: _async_value(object()))
+    monkeypatch.setattr(main, "create_engine", lambda *_args, **_kwargs: engine)
+
+    def fail_session_factory(_engine: object) -> object:
+        raise body_error
+
+    monkeypatch.setattr(main, "create_session_factory", fail_session_factory)
+    monkeypatch.setattr(main, "clear_heartbeat", lambda: events.append("heartbeat.clear"))
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await main.main()
+    assert excinfo.value is body_error
+    assert client.cleanup_task_names == ["event-worker-cleanup"]
+    assert "engine.dispose" in events
+    assert events[-1] == "runtime.shutdown"
+
+
 @pytest.mark.parametrize("failure_stage", ["nats", "temporal", "engine"])
 async def test_partial_startup_failure_still_detaches_runtime_and_owned_resources(
     failure_stage: str,
@@ -900,7 +1120,8 @@ async def test_cleanup_failures_cannot_skip_later_cleanup(
     main = worker_main()
     events: list[str] = []
     runtime = FakeRuntime(events)
-    client = FakeClient(events, object(), close_failure=True)
+    close_error = RuntimeError("close canary")
+    client = CleanupTrackingClient(events, object(), close_error=close_error)
     engine = FakeEngine(events, dispose_failure=True)
     monkeypatch.setattr(main, "Settings", lambda: FakeSettings(events))
     monkeypatch.setattr(main, "service_version", lambda _: "test-version", raising=False)
@@ -930,8 +1151,10 @@ async def test_cleanup_failures_cannot_skip_later_cleanup(
     monkeypatch.setattr(main, "poll_nats_consumer_lag", _poll_until_stop, raising=False)
     monkeypatch.setattr(main, "clear_heartbeat", lambda: events.append("heartbeat.clear"))
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError) as excinfo:
         await main.main()
+    assert excinfo.value is close_error
+    assert client.cleanup_task_names == ["event-worker-cleanup"]
     assert "nats.close" in events
     assert "engine.dispose" in events
     assert events[-1] == "runtime.shutdown"
@@ -972,6 +1195,18 @@ def test_main_source_initializes_runtime_before_every_resource_owner() -> None:
     ):
         assert runtime_index < source.index(resource_shape)
     tree = ast.parse(source)
+    main_node = next(
+        node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "main"
+    )
+    runtime_statement_index = next(
+        index
+        for index, statement in enumerate(main_node.body)
+        if isinstance(statement, ast.Assign)
+        and isinstance(statement.value, ast.Call)
+        and isinstance(statement.value.func, ast.Name)
+        and statement.value.func.id == "initialize_observability"
+    )
+    assert isinstance(main_node.body[runtime_statement_index + 1], ast.Try)
     engine_call = next(
         node
         for node in ast.walk(tree)

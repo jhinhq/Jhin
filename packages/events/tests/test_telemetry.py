@@ -6,7 +6,6 @@ import asyncio
 import importlib
 import json
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
 from dataclasses import dataclass
 from types import ModuleType
 from typing import Any, cast
@@ -14,6 +13,7 @@ from uuid import UUID
 
 import pytest
 import structlog
+from nats.aio.client import Client as NatsClient
 from nats.js.api import PubAck
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
@@ -27,6 +27,7 @@ from jhin_events.publisher import EventPublisher
 from jhin_events.subjects import EVENT_DOMAINS
 from jhin_observability import (
     SPAN_ATTRIBUTE_VALUES,
+    TRACE_CARRIER_KEYS,
     bind_context,
     extract_trace_context,
     noop_tracer,
@@ -85,6 +86,67 @@ class RecordingJetStream:
         if self.failure is not None:
             raise self.failure
         return cast(PubAck, object())
+
+
+class CapturingNatsClient(NatsClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.commands: list[bytes] = []
+
+    async def _send_command(self, cmd: bytes, priority: bool = False) -> None:
+        assert priority is False
+        self.commands.append(cmd)
+
+
+class NatsEncodingJetStream:
+    """Exercise the resolved nats-py HPUB encoder without a broker."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.headers: dict[str, str] = {}
+        self.header_block = b""
+        self.header_size = 0
+        self.total_size = 0
+
+    async def publish(
+        self,
+        subject: str,
+        payload: bytes = b"",
+        *,
+        headers: Mapping[str, str] | None = None,
+    ) -> PubAck:
+        self.calls += 1
+        self.headers = dict(headers or {})
+        client = CapturingNatsClient()
+        await client._send_publish(
+            subject,
+            "",
+            payload,
+            len(payload),
+            self.headers,
+        )
+        command = client.commands[-1]
+        command_line, encoded = command.split(b"\r\n", 1)
+        fields = command_line.split()
+        self.header_size = int(fields[-2])
+        self.total_size = int(fields[-1])
+        self.header_block = encoded[: self.header_size]
+        assert len(self.header_block) == self.header_size
+        assert self.total_size == self.header_size + len(payload)
+        return cast(PubAck, object())
+
+
+class BrokenSpanManager:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    def __enter__(self) -> Any:
+        self.events.append("enter")
+        raise RuntimeError("span setup failed")
+
+    def __exit__(self, *_args: Any) -> None:
+        self.events.append("exit")
+        return None
 
 
 class RecordingMessage:
@@ -195,6 +257,12 @@ def test_subject_registry_and_classifier_have_one_exact_authority() -> None:
             "EVENTS",
             domain,
         )
+
+
+def test_transport_consumes_the_one_public_trace_carrier_authority() -> None:
+    module = telemetry()
+    assert module.TRACE_CARRIER_KEYS is TRACE_CARRIER_KEYS
+    assert not hasattr(module, "_TRACE_CARRIER_KEYS")
     assert module.classify_subject("jhin.v1.workspace-1.ingress.github.issue.updated") == (
         "INGRESS",
         "ingress",
@@ -246,8 +314,16 @@ def test_stream_subject_mismatch_is_closed() -> None:
     "headers",
     [
         {"authorization": "secret"},
+        {"AUTHORIZATION": "secret"},
         {"x-api-key": "secret"},
+        {"X-API-KEY": "secret"},
         {"Cookie": "secret"},
+        {"COOKIE": "secret"},
+        {"PASSWORD": "secret"},
+        {"SECRET": "secret"},
+        {"TOKEN": "secret"},
+        {"X-PRIVATE-KEY": "secret"},
+        {"X-DSN": "secret"},
         {"bad name": "value"},
         {"-bad": "value"},
         {"x\rname": "value"},
@@ -266,6 +342,7 @@ async def test_invalid_nats_headers_fail_closed_before_transport(
 ) -> None:
     module = telemetry()
     js = RecordingJetStream()
+    original = dict(headers)
     with pytest.raises(module.UnsafeNatsHeaderError) as excinfo:
         await module.publish_jetstream(
             js,
@@ -277,10 +354,11 @@ async def test_invalid_nats_headers_fail_closed_before_transport(
         )
     assert str(excinfo.value) == "invalid NATS header"
     assert js.published == []
+    assert dict(headers) == original
     assert not any(str(value) in str(excinfo.value) for value in headers.values())
 
 
-async def test_header_count_name_value_and_wire_size_caps_are_exact() -> None:
+async def test_header_count_name_and_value_caps_are_exact() -> None:
     module = telemetry()
     subject = "jhin.v1.workspace-1.task.created"
 
@@ -302,25 +380,106 @@ async def test_header_count_name_value_and_wire_size_caps_are_exact() -> None:
             tracer=noop_tracer(),
         )
 
-    exact_wire = {f"h{index}": "v" * 1_024 for index in range(7)}
-    exact_wire["h7"] = "v" * 964
-    js = RecordingJetStream()
-    await module.publish_jetstream(
-        js, subject, b"", headers=exact_wire, stream="EVENTS", tracer=noop_tracer()
-    )
-    assert len(js.published) == 1
 
-    over_wire = dict(exact_wire)
-    over_wire["h7"] += "v"
-    with pytest.raises(module.UnsafeNatsHeaderError):
-        await module.publish_jetstream(
-            RecordingJetStream(),
-            subject,
-            b"",
-            headers=over_wire,
-            stream="EVENTS",
-            tracer=noop_tracer(),
+async def test_resolved_nats_wire_budget_includes_injected_carriers_and_dedupe(
+    tracing: TraceHarness,
+) -> None:
+    exact = {f"h{index}": "v" * 1_024 for index in range(7)}
+    exact["h7"] = "v" * 817
+    exact.update(
+        {
+            "TraceParent": "stale-parent",
+            "TRACESTATE": "stale=state",
+            "BAGGAGE": "private-canary=do-not-forward",
+            "nats-msg-id": "attacker-controlled-id",
+        }
+    )
+    exact_original = dict(exact)
+    parent = extract_trace_context(
+        {"traceparent": VALID_TRACEPARENT, "tracestate": VALID_TRACESTATE}
+    )
+    envelope = event_envelope()
+
+    js = NatsEncodingJetStream()
+    with tracing.tracer.start_as_current_span("test.parent", context=parent):
+        await EventPublisher(js, tracer=tracing.tracer).publish(
+            envelope,
+            headers=exact,
         )
+    assert exact == exact_original
+    assert js.calls == 1
+    assert js.header_size == 8_192
+    assert js.total_size == 8_192 + len(envelope.to_bytes())
+    normalized = [key.lower() for key in js.headers]
+    assert len(normalized) == len(set(normalized))
+    assert set(js.headers) == {
+        *(f"h{index}" for index in range(8)),
+        "Nats-Msg-Id",
+        "traceparent",
+        "tracestate",
+    }
+    assert js.header_block.count(b"Nats-Msg-Id: ") == 1
+    assert js.header_block.count(b"traceparent: ") == 1
+    assert js.header_block.count(b"tracestate: ") == 1
+    assert b"baggage: " not in js.header_block.lower()
+    assert b"stale-parent" not in js.header_block
+    assert b"attacker-controlled-id" not in js.header_block
+    assert b"private-canary" not in js.header_block
+
+    over = dict(exact)
+    over["h7"] += "v"
+    over_original = dict(over)
+    fallback = NatsEncodingJetStream()
+    with tracing.tracer.start_as_current_span("test.parent.over", context=parent):
+        await EventPublisher(fallback, tracer=tracing.tracer).publish(
+            event_envelope(),
+            headers=over,
+        )
+    assert over == over_original
+    assert fallback.calls == 1
+    assert fallback.header_size == 8_097
+    assert set(fallback.headers) == {
+        *(f"h{index}" for index in range(8)),
+        "Nats-Msg-Id",
+    }
+    assert fallback.header_block.count(b"Nats-Msg-Id: ") == 1
+    assert b"traceparent: " not in fallback.header_block.lower()
+    assert b"tracestate: " not in fallback.header_block.lower()
+    assert b"baggage: " not in fallback.header_block.lower()
+
+
+async def test_injected_carriers_respect_the_exact_32_header_cap(
+    tracing: TraceHarness,
+) -> None:
+    parent = extract_trace_context(
+        {"traceparent": VALID_TRACEPARENT, "tracestate": VALID_TRACESTATE}
+    )
+    at_cap = {f"h{index}": "v" for index in range(29)}
+    at_cap_original = dict(at_cap)
+    at_cap_js = NatsEncodingJetStream()
+    with tracing.tracer.start_as_current_span("test.parent.count", context=parent):
+        await EventPublisher(at_cap_js, tracer=tracing.tracer).publish(
+            event_envelope(),
+            headers=at_cap,
+        )
+    assert at_cap == at_cap_original
+    assert len(at_cap_js.headers) == 32
+    assert sum(key.lower() == "nats-msg-id" for key in at_cap_js.headers) == 1
+    assert sum(key.lower() == "traceparent" for key in at_cap_js.headers) == 1
+    assert sum(key.lower() == "tracestate" for key in at_cap_js.headers) == 1
+
+    over_cap = {f"h{index}": "v" for index in range(30)}
+    over_cap_original = dict(over_cap)
+    fallback_js = NatsEncodingJetStream()
+    with tracing.tracer.start_as_current_span("test.parent.count.over", context=parent):
+        await EventPublisher(fallback_js, tracer=tracing.tracer).publish(
+            event_envelope(),
+            headers=over_cap,
+        )
+    assert over_cap == over_cap_original
+    assert len(fallback_js.headers) == 31
+    assert sum(key.lower() == "nats-msg-id" for key in fallback_js.headers) == 1
+    assert all(key.lower() not in TRACE_CARRIER_KEYS for key in fallback_js.headers)
 
 
 async def test_publisher_rebuilds_trace_carrier_and_preserves_input_mapping(
@@ -639,11 +798,10 @@ async def test_consumer_instrumentation_failures_do_not_skip_handler_or_nak(
     module = telemetry()
     message = RecordingMessage(subject="jhin.v1.workspace-1.task.created")
     calls = 0
+    span_events: list[str] = []
 
-    @contextmanager
-    def broken_span(*_args: Any, **_kwargs: Any) -> Any:
-        raise RuntimeError("span setup failed")
-        yield  # pragma: no cover
+    def broken_span(*_args: Any, **_kwargs: Any) -> BrokenSpanManager:
+        return BrokenSpanManager(span_events)
 
     def broken_extract(_headers: Mapping[str, str]) -> Any:
         raise RuntimeError("extract failed")
@@ -671,6 +829,7 @@ async def test_consumer_instrumentation_failures_do_not_skip_handler_or_nak(
     )
     assert calls == 1
     assert message.naks == 1
+    assert span_events == ["enter", "exit"]
     _assert_empty_contexts()
 
 
@@ -679,16 +838,11 @@ async def test_publish_instrumentation_failure_is_fail_open_and_transport_is_onc
 ) -> None:
     module = telemetry()
     js = RecordingJetStream()
+    span_events: list[str] = []
 
-    def broken_inject(_headers: Mapping[str, str] | None = None) -> dict[str, str]:
-        raise RuntimeError("inject failed")
+    def broken_span(*_args: Any, **_kwargs: Any) -> BrokenSpanManager:
+        return BrokenSpanManager(span_events)
 
-    @contextmanager
-    def broken_span(*_args: Any, **_kwargs: Any) -> Any:
-        raise RuntimeError("span setup failed")
-        yield  # pragma: no cover
-
-    monkeypatch.setattr(module, "inject_trace_headers", broken_inject)
     monkeypatch.setattr(module, "safe_span", broken_span)
     await module.publish_jetstream(
         js,
@@ -704,6 +858,38 @@ async def test_publish_instrumentation_failure_is_fail_open_and_transport_is_onc
         "safe-header": "safe",
         "Nats-Msg-Id": "id-1",
     }
+    assert span_events == ["enter", "exit"]
+
+
+async def test_publish_trace_injection_failure_closes_real_span_and_publishes_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tracing: TraceHarness,
+) -> None:
+    module = telemetry()
+    js = RecordingJetStream()
+
+    def broken_inject(_headers: Mapping[str, str] | None = None) -> dict[str, str]:
+        raise RuntimeError("inject failed")
+
+    monkeypatch.setattr(module, "inject_trace_headers", broken_inject)
+    await module.publish_jetstream(
+        js,
+        "jhin.v1.workspace-1.task.created",
+        b"payload",
+        headers={"safe-header": "safe"},
+        message_id="id-1",
+        stream="EVENTS",
+        tracer=tracing.tracer,
+    )
+    assert len(js.published) == 1
+    assert js.published[0].headers == {
+        "safe-header": "safe",
+        "Nats-Msg-Id": "id-1",
+    }
+    span = spans_named(tracing, "nats.publish")[0]
+    assert dict(span.attributes or {})["jhin.outcome"] == "ok"
+    assert js.publish_span_ids == [span.context.span_id]
+    _assert_empty_contexts()
 
 
 async def test_transport_failure_remains_authoritative_and_is_not_duplicated(

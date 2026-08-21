@@ -11,7 +11,8 @@ import math
 import signal
 import sys
 from contextlib import suppress
-from typing import cast
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, cast
 
 import nats
 from nats.aio.client import Client as NatsClient
@@ -42,6 +43,9 @@ from jhin_observability import (
 )
 from jhin_observability.healthfile import clear_heartbeat, run_heartbeat
 from jhin_secrets.redaction import redact_event_dict
+
+if TYPE_CHECKING:
+    from jhin_observability import ObservabilityRuntime
 
 logger = get_logger(__name__)
 
@@ -84,14 +88,17 @@ async def temporal_with_retry(settings: Settings) -> TemporalClient:
 
 
 def _positive_finite_seconds(value: object, *, field: str) -> float:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or value <= 0
-    ):
-        raise ValueError(f"{field} must be a finite positive number")
-    return float(value)
+    message = f"{field} must be a finite positive number"
+    if type(value) is int:
+        if value <= 0:
+            raise ValueError(message)
+        try:
+            return float(value)
+        except OverflowError:
+            raise ValueError(message) from None
+    if type(value) is float and math.isfinite(value) and value > 0:
+        return value
+    raise ValueError(message)
 
 
 async def sample_nats_consumer_lag_once(
@@ -172,6 +179,99 @@ async def poll_nats_consumer_lag(
             continue
 
 
+@dataclass
+class _CleanupOutcome:
+    cancellation: asyncio.CancelledError | None = None
+    error: BaseException | None = None
+
+    def capture(self, error: BaseException) -> None:
+        if isinstance(error, asyncio.CancelledError):
+            if self.cancellation is None:
+                self.cancellation = error
+        elif self.error is None:
+            self.error = error
+
+
+async def _cleanup_owned_resources(
+    *,
+    runtime: ObservabilityRuntime,
+    client: NatsClient | None,
+    engine: AsyncEngine | None,
+    heartbeat_task: asyncio.Task[None] | None,
+    lag_task: asyncio.Task[None] | None,
+    stop: asyncio.Event,
+    registered_signals: list[signal.Signals],
+) -> _CleanupOutcome:
+    outcome = _CleanupOutcome()
+    stop.set()
+    background_tasks = [task for task in (heartbeat_task, lag_task) if task is not None]
+    for task in background_tasks:
+        if not task.done():
+            task.cancel()
+    if background_tasks:
+        try:
+            results = await asyncio.gather(*background_tasks, return_exceptions=True)
+        except BaseException as exc:
+            outcome.capture(exc)
+        else:
+            for result in results:
+                if isinstance(result, BaseException) and not isinstance(
+                    result, asyncio.CancelledError
+                ):
+                    outcome.capture(result)
+
+    try:
+        loop = asyncio.get_running_loop()
+        for registered_signal in registered_signals:
+            try:
+                loop.remove_signal_handler(registered_signal)
+            except BaseException as exc:
+                outcome.capture(exc)
+    except BaseException as exc:
+        outcome.capture(exc)
+
+    try:
+        clear_heartbeat()
+    except BaseException as exc:
+        outcome.capture(exc)
+    if client is not None:
+        try:
+            await client.close()
+        except BaseException as exc:
+            outcome.capture(exc)
+    if engine is not None:
+        try:
+            await engine.dispose()
+        except BaseException as exc:
+            outcome.capture(exc)
+    try:
+        runtime.shutdown(timeout_millis=5_000)
+    except BaseException as exc:
+        outcome.capture(exc)
+    return outcome
+
+
+async def _reawait_cleanup_through_cancellation(
+    cleanup_task: asyncio.Task[_CleanupOutcome],
+) -> tuple[_CleanupOutcome, asyncio.CancelledError | None]:
+    outer_cancellation: asyncio.CancelledError | None = None
+    while not cleanup_task.done():
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError as exc:
+            if outer_cancellation is None:
+                outer_cancellation = exc
+        except BaseException:
+            break
+
+    try:
+        outcome = cleanup_task.result()
+    except BaseException as exc:
+        outcome = _CleanupOutcome()
+        outcome.capture(exc)
+    return outcome, outer_cancellation
+
+
 async def main() -> None:
     settings = Settings()
     runtime = initialize_observability(
@@ -181,19 +281,19 @@ async def main() -> None:
             extra_log_processors=(redact_event_dict,),
         )
     )
-    configure_json_logging(
-        service="event-worker",
-        environment=normalize_environment(settings.app_env),
-        level=settings.log_level,
-        extra_processors=(redact_event_dict,),
-    )
-    client: NatsClient | None = None
-    engine: AsyncEngine | None = None
-    heartbeat_task: asyncio.Task[None] | None = None
-    lag_task: asyncio.Task[None] | None = None
-    stop = asyncio.Event()
-    registered_signals: list[signal.Signals] = []
     try:
+        client: NatsClient | None = None
+        engine: AsyncEngine | None = None
+        heartbeat_task: asyncio.Task[None] | None = None
+        lag_task: asyncio.Task[None] | None = None
+        stop = asyncio.Event()
+        registered_signals: list[signal.Signals] = []
+        configure_json_logging(
+            service="event-worker",
+            environment=normalize_environment(settings.app_env),
+            level=settings.log_level,
+            extra_processors=(redact_event_dict,),
+        )
         client = await connect_with_retry(settings)
         js = client.jetstream()
         publish_js = cast(JetStreamPublisher, js)
@@ -262,42 +362,29 @@ async def main() -> None:
             )
         logger.info("worker.stopping")
     finally:
-        active_error = sys.exc_info()[1]
-        cleanup_error: BaseException | None = None
-        stop.set()
-        for task in (heartbeat_task, lag_task):
-            if task is not None and not task.done():
-                task.cancel()
-        background_tasks = [task for task in (heartbeat_task, lag_task) if task is not None]
-        if background_tasks:
-            await asyncio.gather(*background_tasks, return_exceptions=True)
-        loop = asyncio.get_running_loop()
-        for sig in registered_signals:
-            with suppress(Exception):
-                loop.remove_signal_handler(sig)
-        try:
-            clear_heartbeat()
-        except BaseException as exc:
-            cleanup_error = exc
-        if client is not None:
-            try:
-                await client.close()
-            except BaseException as exc:
-                if cleanup_error is None:
-                    cleanup_error = exc
-        if engine is not None:
-            try:
-                await engine.dispose()
-            except BaseException as exc:
-                if cleanup_error is None:
-                    cleanup_error = exc
-        try:
-            runtime.shutdown(timeout_millis=5_000)
-        except BaseException as exc:
-            if cleanup_error is None:
-                cleanup_error = exc
-        if active_error is None and cleanup_error is not None:
-            raise cleanup_error
+        _active_type, active_error, active_traceback = sys.exc_info()
+        cleanup_task = asyncio.create_task(
+            _cleanup_owned_resources(
+                runtime=runtime,
+                client=client,
+                engine=engine,
+                heartbeat_task=heartbeat_task,
+                lag_task=lag_task,
+                stop=stop,
+                registered_signals=registered_signals,
+            ),
+            name="event-worker-cleanup",
+        )
+        cleanup, wait_cancellation = await _reawait_cleanup_through_cancellation(cleanup_task)
+        cleanup_cancellation = wait_cancellation or cleanup.cancellation
+        if isinstance(active_error, asyncio.CancelledError):
+            raise active_error.with_traceback(active_traceback) from None
+        if cleanup_cancellation is not None:
+            raise cleanup_cancellation from None
+        if active_error is not None:
+            raise active_error.with_traceback(active_traceback) from None
+        if cleanup.error is not None:
+            raise cleanup.error from None
 
 
 def run() -> None:

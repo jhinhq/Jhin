@@ -17,6 +17,7 @@ from opentelemetry.trace import Span, SpanKind, Tracer
 from jhin_events.subjects import EVENT_DOMAINS, event_subject, ingress_subject
 from jhin_observability import (
     SPAN_ATTRIBUTE_VALUES,
+    TRACE_CARRIER_KEYS,
     SafeErrorCode,
     extract_trace_context,
     get_logger,
@@ -37,7 +38,6 @@ MAX_NATS_HEADER_NAME_BYTES = 64
 MAX_NATS_HEADER_VALUE_BYTES = 1_024
 MAX_NATS_HEADER_TOTAL_BYTES = 8_192
 
-_TRACE_CARRIER_KEYS = frozenset({"traceparent", "tracestate", "baggage"})
 _NATS_HEADER_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*\Z", re.ASCII)
 _NATS_HEADER_PREFIX_BYTES = len(b"NATS/1.0\r\n")
 _NATS_HEADER_SUFFIX_BYTES = len(b"\r\n")
@@ -182,7 +182,7 @@ def _prepare_base_headers(
     seen_ordinary: set[str] = set()
     for raw_key, raw_value in copied.items():
         key, value, normalized = _validate_header_pair(raw_key, raw_value)
-        if normalized in _TRACE_CARRIER_KEYS or normalized == MSG_ID_HEADER.lower():
+        if normalized in TRACE_CARRIER_KEYS or normalized == MSG_ID_HEADER.lower():
             continue
         if normalized in seen_ordinary:
             raise UnsafeNatsHeaderError
