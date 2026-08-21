@@ -73,6 +73,7 @@ from jhin_observability import (
     record_span_error,
     safe_span,
     service_version,
+    set_span_attributes,
 )
 from jhin_observability.exporters import (
     DiagnosticMetricExporter,
@@ -113,6 +114,7 @@ PUBLIC_IMPORTS = (
     record_span_error,
     safe_span,
     service_version,
+    set_span_attributes,
 )
 
 

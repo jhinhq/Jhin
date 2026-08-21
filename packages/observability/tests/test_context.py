@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import math
 from collections.abc import Iterator
-from typing import Any, TypeGuard, get_type_hints
+from contextlib import suppress
+from contextvars import Token
+from types import TracebackType
+from typing import Any, TypeGuard, cast, get_type_hints
 
 import pytest
 import structlog
 from opentelemetry import baggage, trace
-from opentelemetry.context import Context, attach, detach
+from opentelemetry.context import Context, attach, detach, get_current
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -72,6 +76,18 @@ class PollutingTracePropagator:
                 "x-propagator-extra": "propagator-canary",
             }
         )
+
+
+def _traceback_tail(traceback: TracebackType | None) -> TracebackType | None:
+    while traceback is not None and traceback.tb_next is not None:
+        traceback = traceback.tb_next
+    return traceback
+
+
+def _restore_test_context(tokens: list[Token[Context]]) -> None:
+    for token in reversed(tokens):
+        with suppress(ValueError):
+            detach(token)
 
 
 @pytest.fixture
@@ -345,6 +361,25 @@ def test_subject_family_registry_is_exact_and_immutable() -> None:
     assert "run" not in actual
 
 
+def test_stream_is_an_exact_registered_model_operation() -> None:
+    assert SPAN_ATTRIBUTE_VALUES["jhin.operation"] == frozenset(
+        {
+            "generate",
+            "stream",
+            "verify",
+            "issue_comment_create",
+            "execute_read",
+            "execute_write",
+            "submit",
+            "cancel",
+            "status",
+            "cleanup",
+            "other",
+        }
+    )
+    assert normalize_span_attributes({"jhin.operation": "stream"}) == {"jhin.operation": "stream"}
+
+
 @pytest.mark.parametrize(
     ("key", "value", "expected"),
     [
@@ -443,3 +478,403 @@ def test_record_span_error_is_the_only_error_attribute_writer(
         "error.type": "TimeoutError",
         "error.code": "timeout",
     }
+
+
+def test_set_span_attributes_is_public_normalizes_then_contains_backend_failure() -> None:
+    setter = getattr(context_module, "set_span_attributes", None)
+    assert callable(setter)
+    assert getattr(jhin_observability, "set_span_attributes", None) is setter
+    assert "set_span_attributes" in context_module.__all__
+    assert "set_span_attributes" in jhin_observability.__all__
+
+    class HostileSpan:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, object]] = []
+
+        def set_attribute(self, key: str, value: object) -> None:
+            self.calls.append((key, value))
+            if key == "jhin.outcome":
+                raise RuntimeError("late-attribute-backend-private-canary")
+
+    span = HostileSpan()
+    cast(Any, setter)(
+        cast(Any, span),
+        {
+            "jhin.outcome": "attacker-selected-arbitrary-outcome",
+            "jhin.operation": "generate",
+        },
+    )
+    assert span.calls == [
+        ("jhin.outcome", "other"),
+        ("jhin.operation", "generate"),
+    ]
+
+    span.calls.clear()
+    with pytest.raises(ValueError, match="unregistered span attribute key"):
+        cast(Any, setter)(
+            cast(Any, span),
+            {
+                "jhin.operation": "generate",
+                "private.payload": "late-attribute-private-canary",
+            },
+        )
+    assert span.calls == []
+
+
+@pytest.mark.parametrize(
+    "failure_seam",
+    ["start", "enter", "end", "exit", "detach"],
+)
+def test_safe_span_contains_start_enter_exit_end_and_detach_failures(
+    failure_seam: str,
+) -> None:
+    entry_context = get_current()
+    owned_context = Context({"safe-span-owned": failure_seam})
+    foreign_context = Context({"safe-span-foreign": failure_seam})
+    telemetry_context = Context({"safe-span-telemetry": failure_seam})
+    active_tokens: list[Token[Context]] = []
+    product_result = object()
+    product_calls = 0
+
+    def attach_for_test(context: Context) -> Token[Context]:
+        token = attach(context)
+        active_tokens.append(token)
+        return token
+
+    class HostileSpan:
+        def is_recording(self) -> bool:
+            return True
+
+        def end(self) -> None:
+            if failure_seam == "end":
+                attach_for_test(telemetry_context)
+                raise RuntimeError("span-end-backend-private-canary")
+
+    class HostileManager:
+        def __init__(self) -> None:
+            self.token: Token[Context] | None = None
+            self.span = HostileSpan()
+
+        def __enter__(self) -> HostileSpan:
+            self.token = attach_for_test(owned_context)
+            if failure_seam == "enter":
+                raise RuntimeError("span-enter-backend-private-canary")
+            return self.span
+
+        def __exit__(self, *_args: object) -> None:
+            if failure_seam == "end":
+                self.span.end()
+            if failure_seam == "exit":
+                attach_for_test(telemetry_context)
+                raise RuntimeError("span-exit-backend-private-canary")
+            if failure_seam == "detach":
+                attach_for_test(telemetry_context)
+                raise RuntimeError("span-detach-backend-private-canary")
+            if self.token is not None:
+                detach(self.token)
+                active_tokens.remove(self.token)
+                self.token = None
+
+    manager = HostileManager()
+
+    class HostileTracer:
+        def start_as_current_span(self, *_args: object, **_kwargs: object) -> HostileManager:
+            if failure_seam == "start":
+                attach_for_test(telemetry_context)
+                raise RuntimeError("span-start-backend-private-canary")
+            return manager
+
+    foreign_token: Token[Context] | None = None
+
+    def invoke_product() -> object:
+        nonlocal foreign_token, product_calls
+        with safe_span("model.request", tracer=cast(Any, HostileTracer())) as span:
+            product_calls += 1
+            if failure_seam in {"start", "enter"}:
+                assert span.is_recording() is False
+                assert get_current() is entry_context
+            elif failure_seam == "exit":
+                foreign_token = attach_for_test(foreign_context)
+                assert get_current() is foreign_context
+            else:
+                assert cast(Any, span) is manager.span
+                assert get_current() is owned_context
+            return product_result
+
+    try:
+        assert invoke_product() is product_result
+        assert product_calls == 1
+        if failure_seam == "exit":
+            assert foreign_token is not None
+            assert get_current() is foreign_context
+        else:
+            assert get_current() is entry_context
+    finally:
+        _restore_test_context(active_tokens)
+
+    assert get_current() is entry_context
+
+
+@pytest.mark.parametrize("product_outcome", ["success", "ordinary", "cancelled"])
+def test_safe_span_preserves_result_exception_traceback_and_cancellation_exactly(
+    product_outcome: str,
+) -> None:
+    entry_context = get_current()
+    owned_context = Context({"safe-span-authority": product_outcome})
+    telemetry_context = Context({"safe-span-cleanup": product_outcome})
+    active_tokens: list[Token[Context]] = []
+    product_result = object()
+    product_error: BaseException
+    if product_outcome == "cancelled":
+        product_error = asyncio.CancelledError("product-cancellation-authority")
+    else:
+        product_error = RuntimeError("product-failure-authority")
+    product_traceback: TracebackType | None = None
+    product_calls = 0
+    exit_arguments: tuple[object, object, object] | None = None
+
+    def attach_for_test(context: Context) -> Token[Context]:
+        token = attach(context)
+        active_tokens.append(token)
+        return token
+
+    class HostileManager:
+        def __enter__(self) -> Any:
+            attach_for_test(owned_context)
+            return type("RecordingSpan", (), {"is_recording": lambda self: True})()
+
+        def __exit__(self, *args: object) -> None:
+            nonlocal exit_arguments
+            exit_arguments = cast(tuple[object, object, object], args)
+            attach_for_test(telemetry_context)
+            raise RuntimeError("span-cleanup-backend-private-canary")
+
+    class HostileTracer:
+        def start_as_current_span(self, *_args: object, **_kwargs: object) -> HostileManager:
+            return HostileManager()
+
+    def invoke_product() -> object:
+        nonlocal product_calls, product_traceback
+        with safe_span("model.request", tracer=cast(Any, HostileTracer())):
+            product_calls += 1
+            if product_outcome == "success":
+                return product_result
+            try:
+                raise product_error
+            except BaseException as error:
+                product_traceback = _traceback_tail(error.__traceback__)
+                raise
+
+    caught: BaseException | None = None
+    result: object | None = None
+    try:
+        try:
+            result = invoke_product()
+        except BaseException as error:
+            caught = error
+        assert product_calls == 1
+        assert get_current() is entry_context
+        if product_outcome == "success":
+            assert caught is None
+            assert result is product_result
+            assert exit_arguments == (None, None, None)
+        else:
+            assert caught is product_error
+            assert _traceback_tail(caught.__traceback__) is product_traceback
+            assert exit_arguments is not None
+            assert exit_arguments[1] is product_error
+            assert _traceback_tail(cast(TracebackType, exit_arguments[2])) is product_traceback
+    finally:
+        _restore_test_context(active_tokens)
+
+
+@pytest.mark.parametrize("product_outcome", ["success", "ordinary", "cancelled"])
+def test_safe_span_exit_cancellation_respects_active_product_authority(
+    product_outcome: str,
+) -> None:
+    cleanup_cancellation = asyncio.CancelledError("span-exit-cancellation")
+    product_error: BaseException
+    if product_outcome == "cancelled":
+        product_error = asyncio.CancelledError("product-cancellation-authority")
+    else:
+        product_error = RuntimeError("product-failure-authority")
+    product_traceback: TracebackType | None = None
+    exit_arguments: tuple[object, object, object] | None = None
+    product_result = object()
+    product_calls = 0
+
+    class CancellingManager:
+        def __enter__(self) -> Any:
+            return type("RecordingSpan", (), {"is_recording": lambda self: True})()
+
+        def __exit__(self, *args: object) -> None:
+            nonlocal exit_arguments
+            exit_arguments = cast(tuple[object, object, object], args)
+            raise cleanup_cancellation
+
+    class CancellingTracer:
+        def start_as_current_span(self, *_args: object, **_kwargs: object) -> CancellingManager:
+            return CancellingManager()
+
+    def invoke_product() -> object:
+        nonlocal product_calls, product_traceback
+        with safe_span("model.request", tracer=cast(Any, CancellingTracer())):
+            product_calls += 1
+            if product_outcome == "success":
+                return product_result
+            try:
+                raise product_error
+            except BaseException as error:
+                product_traceback = _traceback_tail(error.__traceback__)
+                raise
+
+    caught: BaseException | None = None
+    try:
+        invoke_product()
+    except BaseException as error:
+        caught = error
+
+    assert product_calls == 1
+    assert exit_arguments is not None
+    if product_outcome == "success":
+        assert caught is cleanup_cancellation
+        assert exit_arguments == (None, None, None)
+    else:
+        assert caught is product_error
+        assert _traceback_tail(caught.__traceback__) is product_traceback
+        assert exit_arguments[1] is product_error
+        assert _traceback_tail(cast(TracebackType, exit_arguments[2])) is product_traceback
+
+
+@pytest.mark.parametrize("failure_seam", ["start", "enter", "exit"])
+@pytest.mark.parametrize("signal_type", [KeyboardInterrupt, SystemExit])
+def test_safe_span_does_not_swallow_keyboard_interrupt_or_system_exit(
+    failure_seam: str,
+    signal_type: type[BaseException],
+) -> None:
+    entry_context = get_current()
+    signal = signal_type("backend-process-authority")
+    active_tokens: list[Token[Context]] = []
+    product_calls = 0
+
+    class Manager:
+        def __enter__(self) -> Any:
+            active_tokens.append(attach(Context({"base-exception": failure_seam})))
+            if failure_seam == "enter":
+                raise signal
+            return type("RecordingSpan", (), {"is_recording": lambda self: True})()
+
+        def __exit__(self, *_args: object) -> None:
+            if failure_seam == "exit":
+                raise signal
+
+    class Tracer:
+        def start_as_current_span(self, *_args: object, **_kwargs: object) -> Manager:
+            if failure_seam == "start":
+                raise signal
+            return Manager()
+
+    try:
+        with (
+            pytest.raises(signal_type) as caught,
+            safe_span("model.request", tracer=cast(Any, Tracer())),
+        ):
+            product_calls += 1
+        assert caught.value is signal
+        assert product_calls == (1 if failure_seam == "exit" else 0)
+        assert get_current() is entry_context
+    finally:
+        _restore_test_context(active_tokens)
+
+
+@pytest.mark.parametrize("failure_seam", ["status", "error.type", "error.code"])
+def test_record_span_error_contains_each_backend_failure_without_text(
+    failure_seam: str,
+) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class HostileSpan:
+        def set_status(self, status: object) -> None:
+            calls.append(("status", status))
+            if failure_seam == "status":
+                raise RuntimeError("error-status-backend-private-canary")
+
+        def set_attribute(self, key: str, value: object) -> None:
+            calls.append((key, value))
+            if failure_seam == key:
+                raise RuntimeError("error-attribute-backend-private-canary")
+
+    record_span_error(
+        cast(Any, HostileSpan()),
+        SafeError(type="TimeoutError", code=SafeErrorCode.TIMEOUT),
+    )
+    assert [name for name, _value in calls] == ["status", "error.type", "error.code"]
+    status = cast(Any, calls[0][1])
+    assert status.status_code.name == "ERROR"
+    assert status.description is None
+    assert calls[1:] == [("error.type", "TimeoutError"), ("error.code", "timeout")]
+    assert "private-canary" not in repr(calls)
+
+
+@pytest.mark.parametrize("product_outcome", ["success", "ordinary", "cancelled"])
+def test_bind_context_contains_span_failure_and_always_restores_tokens(
+    product_outcome: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, object]] = []
+    product_calls = 0
+    product_result = object()
+    product_error: BaseException
+    if product_outcome == "cancelled":
+        product_error = asyncio.CancelledError("bound-product-cancellation")
+    else:
+        product_error = RuntimeError("bound-product-failure")
+    product_traceback: TracebackType | None = None
+
+    class HostileSpan:
+        def is_recording(self) -> bool:
+            return True
+
+        def set_attribute(self, key: str, value: object) -> None:
+            calls.append((key, value))
+            raise RuntimeError("bound-span-backend-private-canary")
+
+    monkeypatch.setattr(trace, "get_current_span", lambda: HostileSpan())
+    before = structlog.contextvars.get_contextvars()
+
+    def invoke_product() -> object:
+        nonlocal product_calls, product_traceback
+        with bind_context(request_id="request-bound", task_id="task-bound"):
+            product_calls += 1
+            assert structlog.contextvars.get_contextvars() == {
+                **before,
+                "request_id": "request-bound",
+                "task_id": "task-bound",
+            }
+            if product_outcome == "success":
+                return product_result
+            try:
+                raise product_error
+            except BaseException as error:
+                product_traceback = _traceback_tail(error.__traceback__)
+                raise
+
+    caught: BaseException | None = None
+    result: object | None = None
+    try:
+        result = invoke_product()
+    except BaseException as error:
+        caught = error
+
+    assert product_calls == 1
+    assert calls == [
+        ("jhin.request_id", "request-bound"),
+        ("jhin.task_id", "task-bound"),
+    ]
+    assert structlog.contextvars.get_contextvars() == before
+    if product_outcome == "success":
+        assert caught is None
+        assert result is product_result
+    else:
+        assert caught is product_error
+        assert _traceback_tail(caught.__traceback__) is product_traceback

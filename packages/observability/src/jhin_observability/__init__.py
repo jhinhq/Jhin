@@ -25,6 +25,7 @@ from jhin_observability.context import (
     normalize_span_attributes,
     record_span_error,
     safe_span,
+    set_span_attributes,
 )
 from jhin_observability.errors import SafeError, SafeErrorCode, safe_error
 from jhin_observability.events import (
@@ -179,6 +180,7 @@ __all__ = [
     "safe_error",
     "safe_span",
     "service_version",
+    "set_span_attributes",
     "structural_redaction",
     "temporal_client_interceptors",
     "temporal_worker_interceptors",

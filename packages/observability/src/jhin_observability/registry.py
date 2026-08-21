@@ -176,6 +176,7 @@ _SPAN_ATTRIBUTE_VALUE_DATA: dict[str, frozenset[str]] = {
     "jhin.operation": frozenset(
         {
             "generate",
+            "stream",
             "verify",
             "issue_comment_create",
             "execute_read",

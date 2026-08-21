@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 import re
+import sys
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from typing import TypeGuard
 from uuid import UUID
 
 import structlog
+from opentelemetry import context as otel_context
 from opentelemetry import trace
 from opentelemetry.context import Context
 from opentelemetry.propagators.textmap import Getter
@@ -57,6 +60,7 @@ SAFE_SPAN_ATTRIBUTE_KEYS = frozenset(
 )
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _NOOP_TRACER = NoOpTracerProvider().get_tracer("jhin-observability.package-noop")
+_FALLBACK_SPAN = trace.NonRecordingSpan(trace.INVALID_SPAN_CONTEXT)
 
 
 class _CaseInsensitiveGetter(Getter[Mapping[str, str]]):
@@ -138,6 +142,32 @@ def normalize_span_attributes(
     return output
 
 
+def set_span_attributes(
+    span: Span,
+    attributes: Mapping[str, AttributeValue],
+) -> None:
+    """Best-effort set a fully validated, closed span attribute mapping."""
+    normalized = normalize_span_attributes(attributes)
+    for key, value in normalized.items():
+        with suppress(Exception):
+            span.set_attribute(key, value)
+
+
+def _current_otel_context() -> Context | None:
+    try:
+        return otel_context.get_current()
+    except Exception:
+        return None
+
+
+def _best_effort_restore_context(context: Context) -> None:
+    current = _current_otel_context()
+    if current is None or current is context:
+        return
+    with suppress(Exception):
+        otel_context.attach(context)
+
+
 @contextmanager
 def bind_context(
     *,
@@ -163,11 +193,13 @@ def bind_context(
             raise ValueError(f"invalid {key}")
         values[key] = rendered
     tokens = structlog.contextvars.bind_contextvars(**values)
-    span = trace.get_current_span()
-    for key, value in values.items():
-        if span.is_recording():
-            span.set_attribute(f"jhin.{key}", value)
     try:
+        try:
+            span = trace.get_current_span()
+            if span.is_recording():
+                set_span_attributes(span, {f"jhin.{key}": value for key, value in values.items()})
+        except Exception:
+            pass
         yield
     finally:
         structlog.contextvars.reset_contextvars(**tokens)
@@ -184,27 +216,78 @@ def safe_span(
 ) -> Iterator[Span]:
     if name not in SPAN_NAMES:
         raise ValueError("unregistered span name")
+    normalized_attributes = normalize_span_attributes(attributes)
     if tracer is None:
         from jhin_observability.bootstrap import get_runtime
 
         selected_tracer = get_runtime().tracer
     else:
         selected_tracer = tracer
-    with selected_tracer.start_as_current_span(
-        name,
-        context=context,
-        kind=kind,
-        attributes=normalize_span_attributes(attributes),
-        record_exception=False,
-        set_status_on_exception=False,
-    ) as span:
+    entry_context = _current_otel_context()
+    if entry_context is None:
+        yield _FALLBACK_SPAN
+        return
+
+    manager = None
+    span: Span = _FALLBACK_SPAN
+    owned_context: Context | None = None
+    try:
+        manager = selected_tracer.start_as_current_span(
+            name,
+            context=context,
+            kind=kind,
+            attributes=normalized_attributes,
+            record_exception=False,
+            set_status_on_exception=False,
+        )
+        span = manager.__enter__()
+        owned_context = _current_otel_context()
+        if owned_context is None:
+            raise RuntimeError("unavailable OTel context")
+    except BaseException as setup_error:
+        if not isinstance(setup_error, Exception):
+            _best_effort_restore_context(entry_context)
+            raise
+        try:
+            if manager is not None:
+                manager.__exit__(type(setup_error), setup_error, setup_error.__traceback__)
+        except Exception:
+            pass
+        finally:
+            _best_effort_restore_context(entry_context)
+        manager = None
+        span = _FALLBACK_SPAN
+        owned_context = None
+
+    try:
         yield span
+    finally:
+        if manager is not None:
+            error_type, error, error_traceback = sys.exc_info()
+            before_exit = _current_otel_context()
+            desired_context = (
+                entry_context
+                if before_exit is None or before_exit is owned_context
+                else before_exit
+            )
+            try:
+                manager.__exit__(error_type, error, error_traceback)
+            except asyncio.CancelledError:
+                if error is None:
+                    raise
+            except Exception:
+                pass
+            finally:
+                _best_effort_restore_context(desired_context)
 
 
 def record_span_error(span: Span, error: SafeError) -> None:
-    span.set_status(Status(StatusCode.ERROR))
-    span.set_attribute("error.type", error.type)
-    span.set_attribute("error.code", error.code.value)
+    with suppress(Exception):
+        span.set_status(Status(StatusCode.ERROR))
+    with suppress(Exception):
+        span.set_attribute("error.type", error.type)
+    with suppress(Exception):
+        span.set_attribute("error.code", error.code.value)
 
 
 __all__ = [
@@ -220,4 +303,5 @@ __all__ = [
     "normalize_span_attributes",
     "record_span_error",
     "safe_span",
+    "set_span_attributes",
 ]
