@@ -34,7 +34,14 @@ from jhin_observability.events import (
     normalize_sandbox_outcome,
 )
 from jhin_observability.logging import configure_json_logging, configure_logging, get_logger
-from jhin_observability.metrics import JhinMetrics, Observation, noop_metrics
+from jhin_observability.metrics import (
+    FORBIDDEN_IDENTIFIER_LABELS,
+    JhinMetrics,
+    MetricLabelError,
+    Observation,
+    instrument_contracts,
+    noop_metrics,
+)
 from jhin_observability.redaction import structural_redaction
 from jhin_observability.registry import (
     DB_TABLE_VALUES,
@@ -73,6 +80,7 @@ def __getattr__(name: str) -> Any:
 __all__ = [
     "DB_TABLE_VALUES",
     "EVENT_FIELD_RULES",
+    "FORBIDDEN_IDENTIFIER_LABELS",
     "MAX_EXPORT_TIMEOUT_MILLIS",
     "MAX_METRIC_EXPORT_INTERVAL_MILLIS",
     "MAX_SPAN_EXPORT_BATCH_SIZE",
@@ -84,6 +92,7 @@ __all__ = [
     "TEMPORAL_WORKFLOW_TYPE_VALUES",
     "AttributeValue",
     "JhinMetrics",
+    "MetricLabelError",
     "MetricName",
     "ObservabilityConfig",
     "ObservabilityConfigurationError",
@@ -104,6 +113,7 @@ __all__ = [
     "get_runtime",
     "initialize_observability",
     "inject_trace_headers",
+    "instrument_contracts",
     "noop_metrics",
     "noop_tracer",
     "normalize_connector_type",

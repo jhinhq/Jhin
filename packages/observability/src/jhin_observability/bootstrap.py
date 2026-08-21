@@ -46,7 +46,7 @@ from jhin_observability.exporters import (
     ExportDiagnosticsSnapshot,
 )
 from jhin_observability.logging import configure_json_logging
-from jhin_observability.metrics import JhinMetrics, noop_metrics
+from jhin_observability.metrics import JhinMetrics, build_jhin_metrics, noop_metrics
 
 
 class _Diagnostics(Protocol):
@@ -231,6 +231,11 @@ def _construct_configured_runtime(config: ObservabilityConfig) -> ObservabilityR
             metric_reader,
             remaining,
         )
+        meter = meter_provider.get_meter(
+            "jhin-observability",
+            version=config.service_version,
+        )
+        metrics = build_jhin_metrics(meter)
 
         return ObservabilityRuntime(
             config=config,
@@ -238,11 +243,8 @@ def _construct_configured_runtime(config: ObservabilityConfig) -> ObservabilityR
                 "jhin-observability",
                 instrumenting_library_version=config.service_version,
             ),
-            meter=meter_provider.get_meter(
-                "jhin-observability",
-                version=config.service_version,
-            ),
-            metrics=noop_metrics(),
+            meter=meter,
+            metrics=metrics,
             _diagnostics=diagnostics,
             _owns_providers=True,
             _shutdown_callbacks=tuple(cleanup_callbacks),

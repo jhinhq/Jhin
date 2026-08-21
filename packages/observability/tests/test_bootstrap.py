@@ -18,20 +18,24 @@ import pytest
 from _pytest.capture import CaptureFixture
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-from opentelemetry.metrics import NoOpMeterProvider
+from opentelemetry.metrics import Meter, NoOpMeterProvider
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import (
+    InMemoryMetricReader,
     MetricExporter,
     MetricExportResult,
+    MetricReader,
     MetricsData,
     PeriodicExportingMetricReader,
 )
+from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.trace import NoOpTracerProvider
 from structlog.types import EventDict, WrappedLogger
 
 import jhin_observability.bootstrap as bootstrap_module
+import jhin_observability.metrics as metrics_module
 from jhin_observability import (
     DB_TABLE_VALUES,
     MAX_EXPORT_TIMEOUT_MILLIS,
@@ -159,6 +163,20 @@ class ReleasableBlockingMetricExporter(NoopMetricExporter):
         return MetricExportResult.SUCCESS
 
 
+class RecordingMeterProvider(MeterProvider):
+    def __init__(self, reader: InMemoryMetricReader, resource: Resource) -> None:
+        super().__init__(
+            metric_readers=(reader,),
+            resource=resource,
+            shutdown_on_exit=False,
+        )
+        self.shutdown_calls = 0
+
+    def shutdown(self, timeout_millis: float = 30_000) -> None:
+        self.shutdown_calls += 1
+        super().shutdown(timeout_millis=timeout_millis)
+
+
 def configured_config(**changes: Any) -> ObservabilityConfig:
     values: dict[str, object] = {
         "service_name": "api",
@@ -187,6 +205,42 @@ def install_in_memory_exporters(
         lambda _config, _credentials: metric_exporter,
     )
     return span_exporter, metric_exporter
+
+
+def install_in_memory_metric_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[InMemoryMetricReader, list[RecordingMeterProvider]]:
+    reader = InMemoryMetricReader()
+    providers: list[RecordingMeterProvider] = []
+
+    def create_provider(
+        resource: Resource,
+        selected_reader: MetricReader,
+    ) -> RecordingMeterProvider:
+        assert selected_reader is reader
+        provider = RecordingMeterProvider(reader, resource)
+        providers.append(provider)
+        return provider
+
+    monkeypatch.setattr(
+        bootstrap_module,
+        "_create_metric_reader",
+        lambda _exporter, _config: reader,
+    )
+    monkeypatch.setattr(bootstrap_module, "_create_meter_provider", create_provider)
+    return reader, providers
+
+
+def metric_points(reader: InMemoryMetricReader, name: str) -> list[Any]:
+    metrics_data = reader.get_metrics_data()
+    if metrics_data is None:
+        return []
+    for resource_metrics in metrics_data.resource_metrics:
+        for scope_metrics in resource_metrics.scope_metrics:
+            for metric in scope_metrics.metrics:
+                if metric.name == name:
+                    return list(metric.data.data_points)
+    return []
 
 
 def runtime_with_callbacks(
@@ -222,6 +276,96 @@ def test_empty_endpoint_installs_noop_telemetry_but_json_logging(
     assert json.loads(capsys.readouterr().out)["schema_version"] == 1
     assert runtime.metrics is noop_metrics()
     assert runtime.status().configured is False
+
+
+def test_empty_endpoint_uses_validated_singleton_without_sdk_metric_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("no-endpoint bootstrap constructed metric SDK state")
+
+    monkeypatch.setattr(bootstrap_module, "_create_otlp_metric_exporter", unexpected)
+    monkeypatch.setattr(bootstrap_module, "_create_metric_reader", unexpected)
+    monkeypatch.setattr(bootstrap_module, "_create_meter_provider", unexpected)
+    monkeypatch.setattr(bootstrap_module, "build_jhin_metrics", unexpected)
+
+    runtime = initialize_observability(
+        ObservabilityConfig(service_name="api", service_version="0.1.0", environment="test")
+    )
+
+    assert runtime.metrics is metrics_module.noop_metrics()
+    assert runtime.metrics.is_noop is True
+    with pytest.raises(metrics_module.MetricLabelError, match="workspace_id"):
+        runtime.metrics.counter("agent_runs_total").add(
+            1,
+            service="api",
+            outcome="completed",
+            workspace_id="forbidden",
+        )
+
+
+def test_configured_runtime_records_real_metrics_with_exact_resource(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_in_memory_exporters(monkeypatch)
+    reader, providers = install_in_memory_metric_provider(monkeypatch)
+
+    runtime = initialize_observability(configured_config())
+    runtime.metrics.counter("agent_runs_total").add(
+        1,
+        service="api",
+        outcome="completed",
+    )
+    points = metric_points(reader, "agent_runs_total")
+
+    assert runtime.metrics.is_noop is False
+    assert len(points) == 1
+    assert points[0].value == 1
+    assert dict(points[0].attributes) == {"service": "api", "outcome": "completed"}
+    metrics_data = reader.get_metrics_data()
+    assert metrics_data is not None
+    assert len(metrics_data.resource_metrics) == 1
+    assert dict(metrics_data.resource_metrics[0].resource.attributes) == {
+        "service.name": "api",
+        "service.version": "0.1.0",
+        "deployment.environment.name": "test",
+    }
+    assert len(providers) == 1
+
+
+@pytest.mark.parametrize("cleanup", ["shutdown", "fixture_reset"])
+def test_configured_runtime_builds_one_facade_from_its_meter_and_releases_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    cleanup: str,
+) -> None:
+    install_in_memory_exporters(monkeypatch)
+    _reader, providers = install_in_memory_metric_provider(monkeypatch)
+    built: list[tuple[Meter, JhinMetrics]] = []
+    real_builder = metrics_module.build_jhin_metrics
+
+    def build(meter: Meter) -> JhinMetrics:
+        facade = real_builder(meter)
+        built.append((meter, facade))
+        return facade
+
+    monkeypatch.setattr(bootstrap_module, "build_jhin_metrics", build)
+    before = set(threading.enumerate())
+    runtime = initialize_observability(configured_config())
+
+    assert built == [(runtime.meter, runtime.metrics)]
+    assert len(providers) == 1
+    if cleanup == "shutdown":
+        runtime.shutdown()
+    else:
+        bootstrap_module._reset_observability_for_test()
+
+    assert providers[0].shutdown_calls == 1
+    with pytest.raises(ObservabilityNotInitializedError):
+        get_runtime()
+    survivors = [thread for thread in threading.enumerate() if thread not in before]
+    for thread in survivors:
+        thread.join(timeout=1.0)
+    assert [thread.name for thread in survivors if thread.is_alive()] == []
 
 
 @pytest.mark.parametrize(
@@ -744,6 +888,7 @@ def test_partial_cleanup_is_requested_after_shared_deadline_expires(
         "_create_metric_reader",
         "_create_tracer_provider",
         "_create_meter_provider",
+        "build_jhin_metrics",
     ],
 )
 def test_partial_bootstrap_failure_cleans_every_owned_worker(
