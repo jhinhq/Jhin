@@ -230,7 +230,6 @@ def safe_span(
 
     manager = None
     span: Span = _FALLBACK_SPAN
-    owned_context: Context | None = None
     try:
         manager = selected_tracer.start_as_current_span(
             name,
@@ -241,8 +240,7 @@ def safe_span(
             set_status_on_exception=False,
         )
         span = manager.__enter__()
-        owned_context = _current_otel_context()
-        if owned_context is None:
+        if _current_otel_context() is None:
             raise RuntimeError("unavailable OTel context")
     except BaseException as setup_error:
         if not isinstance(setup_error, Exception):
@@ -257,19 +255,12 @@ def safe_span(
             _best_effort_restore_context(entry_context)
         manager = None
         span = _FALLBACK_SPAN
-        owned_context = None
 
     try:
         yield span
     finally:
         if manager is not None:
             error_type, error, error_traceback = sys.exc_info()
-            before_exit = _current_otel_context()
-            desired_context = (
-                entry_context
-                if before_exit is None or before_exit is owned_context
-                else before_exit
-            )
             try:
                 manager.__exit__(error_type, error, error_traceback)
             except asyncio.CancelledError:
@@ -278,7 +269,7 @@ def safe_span(
             except Exception:
                 pass
             finally:
-                _best_effort_restore_context(desired_context)
+                _best_effort_restore_context(entry_context)
 
 
 def record_span_error(span: Span, error: SafeError) -> None:

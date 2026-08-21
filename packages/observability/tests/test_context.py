@@ -8,6 +8,7 @@ import json
 import math
 from collections.abc import Iterator
 from contextlib import suppress
+from contextvars import Context as ContextVarsContext
 from contextvars import Token
 from types import TracebackType
 from typing import Any, TypeGuard, cast, get_type_hints
@@ -530,7 +531,6 @@ def test_safe_span_contains_start_enter_exit_end_and_detach_failures(
 ) -> None:
     entry_context = get_current()
     owned_context = Context({"safe-span-owned": failure_seam})
-    foreign_context = Context({"safe-span-foreign": failure_seam})
     telemetry_context = Context({"safe-span-telemetry": failure_seam})
     active_tokens: list[Token[Context]] = []
     product_result = object()
@@ -584,18 +584,13 @@ def test_safe_span_contains_start_enter_exit_end_and_detach_failures(
                 raise RuntimeError("span-start-backend-private-canary")
             return manager
 
-    foreign_token: Token[Context] | None = None
-
     def invoke_product() -> object:
-        nonlocal foreign_token, product_calls
+        nonlocal product_calls
         with safe_span("model.request", tracer=cast(Any, HostileTracer())) as span:
             product_calls += 1
             if failure_seam in {"start", "enter"}:
                 assert span.is_recording() is False
                 assert get_current() is entry_context
-            elif failure_seam == "exit":
-                foreign_token = attach_for_test(foreign_context)
-                assert get_current() is foreign_context
             else:
                 assert cast(Any, span) is manager.span
                 assert get_current() is owned_context
@@ -604,15 +599,156 @@ def test_safe_span_contains_start_enter_exit_end_and_detach_failures(
     try:
         assert invoke_product() is product_result
         assert product_calls == 1
-        if failure_seam == "exit":
-            assert foreign_token is not None
-            assert get_current() is foreign_context
-        else:
-            assert get_current() is entry_context
+        assert get_current() is entry_context
     finally:
         _restore_test_context(active_tokens)
 
     assert get_current() is entry_context
+
+
+def test_safe_span_does_not_reattach_body_leaked_foreign_context() -> None:
+    isolated_context = ContextVarsContext()
+    observed_contexts: dict[str, Context] = {}
+
+    def invoke_product() -> None:
+        entry_context = get_current()
+        owned_context = Context({"safe-span-owned": "leaked-foreign"})
+        foreign_context = Context({"safe-span-foreign": "leaked-foreign"})
+
+        class Manager:
+            owned_token: Token[Context] | None = None
+
+            def __enter__(self) -> trace.NonRecordingSpan:
+                self.owned_token = attach(owned_context)
+                return trace.NonRecordingSpan(trace.INVALID_SPAN_CONTEXT)
+
+            def __exit__(self, *_args: object) -> None:
+                assert self.owned_token is not None
+                detach(self.owned_token)
+
+        class Tracer:
+            def start_as_current_span(self, *_args: object, **_kwargs: object) -> Manager:
+                return Manager()
+
+        with safe_span("model.request", tracer=cast(Any, Tracer())):
+            attach(foreign_context)
+            assert get_current() is foreign_context
+
+        observed_contexts["entry"] = entry_context
+        assert get_current() is entry_context
+
+    isolated_context.run(invoke_product)
+    assert isolated_context.run(get_current) is observed_contexts["entry"]
+
+
+def test_safe_span_real_tracer_restores_preexisting_foreign_entry_context(
+    exporting_tracer: tuple[Tracer, InMemorySpanExporter],
+) -> None:
+    tracer, exporter = exporting_tracer
+    entry_context = get_current()
+    foreign_context = extract_trace_context(
+        {"traceparent": "00-11111111111111111111111111111111-2222222222222222-01"}
+    )
+    foreign_span_context = trace.get_current_span(foreign_context).get_span_context()
+    foreign_token = attach(foreign_context)
+    telemetry_span_id: int | None = None
+    try:
+        with safe_span("model.request", tracer=tracer) as span:
+            telemetry_span_id = span.get_span_context().span_id
+            assert span.is_recording() is True
+            assert get_current() is not foreign_context
+        assert telemetry_span_id is not None
+        assert get_current() is foreign_context
+        assert trace.get_current_span().get_span_context() == foreign_span_context
+        assert trace.get_current_span().get_span_context().span_id != telemetry_span_id
+    finally:
+        detach(foreign_token)
+
+    assert get_current() is entry_context
+    assert trace.get_current_span().get_span_context().span_id != telemetry_span_id
+    finished = exporter.get_finished_spans()
+    assert len(finished) == 1
+    assert finished[0].context.span_id == telemetry_span_id
+
+
+def test_safe_span_real_tracer_restores_entry_after_body_local_foreign_context(
+    exporting_tracer: tuple[Tracer, InMemorySpanExporter],
+) -> None:
+    tracer, exporter = exporting_tracer
+    entry_context = get_current()
+    temporary_foreign = extract_trace_context(
+        {"traceparent": "00-33333333333333333333333333333333-4444444444444444-01"}
+    )
+    temporary_span_context = trace.get_current_span(temporary_foreign).get_span_context()
+    telemetry_span_id: int | None = None
+
+    with safe_span("model.request", tracer=tracer) as span:
+        telemetry_context = get_current()
+        telemetry_span_id = span.get_span_context().span_id
+        temporary_token = attach(temporary_foreign)
+        try:
+            assert get_current() is temporary_foreign
+            assert trace.get_current_span().get_span_context() == temporary_span_context
+        finally:
+            detach(temporary_token)
+        assert get_current() is telemetry_context
+        assert trace.get_current_span() is span
+        assert span.is_recording() is True
+
+    assert telemetry_span_id is not None
+    assert get_current() is entry_context
+    assert trace.get_current_span().get_span_context().span_id != telemetry_span_id
+    finished = exporter.get_finished_spans()
+    assert len(finished) == 1
+    assert finished[0].context.span_id == telemetry_span_id
+
+
+def test_safe_span_rejects_invalid_schema_before_tracer_manager_body_or_context_touch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    touches: list[str] = []
+
+    class CanaryManager:
+        def __enter__(self) -> Any:
+            touches.append("manager-enter")
+            return type("CanarySpan", (), {"is_recording": lambda self: True})()
+
+        def __exit__(self, *_args: object) -> None:
+            touches.append("manager-exit")
+
+    class CanaryTracer:
+        def start_as_current_span(self, *_args: object, **_kwargs: object) -> CanaryManager:
+            touches.append("tracer-start")
+            return CanaryManager()
+
+    def touch_context() -> Context:
+        touches.append("context")
+        return Context()
+
+    monkeypatch.setattr(context_module, "_current_otel_context", touch_context)
+    tracer = cast(Any, CanaryTracer())
+    cases = [
+        (
+            cast(Any, "private.unregistered.span"),
+            {"jhin.operation": "generate"},
+            "unregistered span name",
+        ),
+        (
+            "model.request",
+            {
+                "jhin.operation": "generate",
+                "private.payload": "invalid-schema-private-canary",
+            },
+            "unregistered span attribute key: private.payload",
+        ),
+    ]
+    for name, attributes, message in cases:
+        with (
+            pytest.raises(ValueError, match=message),
+            safe_span(name, tracer=tracer, attributes=cast(Any, attributes)),
+        ):
+            touches.append("body")
+        assert touches == []
 
 
 @pytest.mark.parametrize("product_outcome", ["success", "ordinary", "cancelled"])
