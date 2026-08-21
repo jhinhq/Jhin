@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from sqlalchemy import event as sqlalchemy_event
 
 import jhin_observability.sqlalchemy as sqlalchemy_observability
 from jhin_observability import SafeErrorCode, noop_tracer
@@ -238,6 +239,11 @@ class _Manager:
 
 
 class _UndeletableExecutionContext:
+    lifecycle: list[str]
+    delete_attempts: int
+    clear_attempts: int
+    reject_clear: bool
+
     def __init__(self, lifecycle: list[str], *, reject_clear: bool = False) -> None:
         object.__setattr__(self, "lifecycle", lifecycle)
         object.__setattr__(self, "delete_attempts", 0)
@@ -267,8 +273,7 @@ def _listeners(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         assert engine is _SYNC_ENGINE
         callbacks[event_name] = callback
 
-    event = sqlalchemy_observability.event
-    monkeypatch.setattr(event, "listen", listen)
+    monkeypatch.setattr(sqlalchemy_event, "listen", listen)
     install = sqlalchemy_observability.install_sqlalchemy_tracing
     install(_SYNC_ENGINE, KNOWN_TABLES, tracer=noop_tracer())
     assert set(callbacks) == {
@@ -316,9 +321,8 @@ def test_listener_registration_failure_is_contained_and_rolls_back(
         removals.append(event_name)
         del active[event_name]
 
-    event = sqlalchemy_observability.event
-    monkeypatch.setattr(event, "listen", listen)
-    monkeypatch.setattr(event, "remove", remove)
+    monkeypatch.setattr(sqlalchemy_event, "listen", listen)
+    monkeypatch.setattr(sqlalchemy_event, "remove", remove)
 
     sqlalchemy_observability.install_sqlalchemy_tracing(
         _SYNC_ENGINE,
@@ -354,9 +358,8 @@ def test_listener_registration_rollback_failure_leaves_callbacks_inert(
         span_starts.append("started")
         return _Manager()
 
-    event = sqlalchemy_observability.event
-    monkeypatch.setattr(event, "listen", listen)
-    monkeypatch.setattr(event, "remove", remove)
+    monkeypatch.setattr(sqlalchemy_event, "listen", listen)
+    monkeypatch.setattr(sqlalchemy_event, "remove", remove)
     monkeypatch.setattr(sqlalchemy_observability, "safe_span", start_span)
 
     sqlalchemy_observability.install_sqlalchemy_tracing(
