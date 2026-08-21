@@ -6,6 +6,7 @@ import math
 import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from typing import TypeGuard
 from uuid import UUID
 
 import structlog
@@ -24,8 +25,12 @@ from jhin_observability.registry import (
     SpanName,
 )
 
+_TRACEPARENT_HEADER = "traceparent"
+_TRACESTATE_HEADER = "tracestate"
+_BAGGAGE_HEADER = "baggage"
+_TRACE_CONTEXT_HEADERS = (_TRACEPARENT_HEADER, _TRACESTATE_HEADER)
+TRACE_CARRIER_KEYS = frozenset((*_TRACE_CONTEXT_HEADERS, _BAGGAGE_HEADER))
 TRACE_PROPAGATOR = TraceContextTextMapPropagator()
-TRACE_CARRIER_KEYS = frozenset({"traceparent", "tracestate", "baggage"})
 
 SPAN_ID_ATTRIBUTE_KEYS = frozenset(
     {
@@ -50,7 +55,7 @@ SPAN_NUMERIC_ATTRIBUTE_KEYS = frozenset(
 SAFE_SPAN_ATTRIBUTE_KEYS = frozenset(
     {*SPAN_ATTRIBUTE_VALUES, *SPAN_ID_ATTRIBUTE_KEYS, *SPAN_NUMERIC_ATTRIBUTE_KEYS}
 )
-_SAFE_SPAN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _NOOP_TRACER = NoOpTracerProvider().get_tracer("jhin-observability.package-noop")
 
 
@@ -71,24 +76,31 @@ def noop_tracer() -> Tracer:
     return _NOOP_TRACER
 
 
+def is_safe_context_id(value: object) -> TypeGuard[str]:
+    """Return whether an exact built-in string satisfies the context ID grammar."""
+    return type(value) is str and _ID_RE.fullmatch(value) is not None
+
+
 def extract_trace_context(headers: Mapping[str, str]) -> Context:
     carrier: dict[str, str] = {}
     for key, value in headers.items():
         normalized = key.lower()
-        if normalized in {"traceparent", "tracestate"} and normalized not in carrier:
+        if normalized in _TRACE_CONTEXT_HEADERS and normalized not in carrier:
             carrier[normalized] = value
     return TRACE_PROPAGATOR.extract(carrier=carrier, getter=_TRACE_GETTER)
 
 
 def inject_trace_headers(headers: Mapping[str, str] | None = None) -> dict[str, str]:
+    copied = {} if headers is None else dict(headers)
     preserved = {
-        key: value
-        for key, value in (headers or {}).items()
-        if key.lower() not in TRACE_CARRIER_KEYS
+        key: value for key, value in copied.items() if key.lower() not in TRACE_CARRIER_KEYS
     }
-    canonical: dict[str, str] = {}
-    TRACE_PROPAGATOR.inject(carrier=canonical)
-    return {**preserved, **canonical}
+    injected: dict[str, str] = {}
+    TRACE_PROPAGATOR.inject(carrier=injected)
+    for key in _TRACE_CONTEXT_HEADERS:
+        if key in injected:
+            preserved[key] = injected[key]
+    return preserved
 
 
 def _structurally_unchanged(key: str, value: object) -> bool:
@@ -104,11 +116,7 @@ def normalize_span_attributes(
         if key not in SAFE_SPAN_ATTRIBUTE_KEYS:
             raise ValueError(f"unregistered span attribute key: {key}")
         if key in SPAN_ID_ATTRIBUTE_KEYS:
-            if (
-                isinstance(value, str)
-                and _structurally_unchanged(key, value)
-                and _SAFE_SPAN_ID_RE.fullmatch(value)
-            ):
+            if is_safe_context_id(value) and _structurally_unchanged(key, value):
                 output[key] = value
             continue
         if key in SPAN_NUMERIC_ATTRIBUTE_KEYS:
@@ -150,8 +158,8 @@ def bind_context(
     for key, value in supplied.items():
         if value is None:
             continue
-        rendered = str(value)
-        if not _SAFE_SPAN_ID_RE.fullmatch(rendered):
+        rendered = str(value) if type(value) is UUID else value
+        if not is_safe_context_id(rendered):
             raise ValueError(f"invalid {key}")
         values[key] = rendered
     tokens = structlog.contextvars.bind_contextvars(**values)
@@ -206,6 +214,7 @@ __all__ = [
     "bind_context",
     "extract_trace_context",
     "inject_trace_headers",
+    "is_safe_context_id",
     "noop_tracer",
     "normalize_span_attributes",
     "record_span_error",

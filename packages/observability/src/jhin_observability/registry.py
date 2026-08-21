@@ -155,7 +155,19 @@ _SPAN_ATTRIBUTE_VALUE_DATA: dict[str, frozenset[str]] = {
     "jhin.stream": frozenset({"INGRESS", "EVENTS", "DLQ", "other"}),
     "jhin.consumer": frozenset({"event-worker", "event-worker-ingress", "other"}),
     "jhin.subject_family": frozenset(
-        {"connector", "task", "run", "tool", "approval", "dlq", "other"}
+        {
+            "ingress",
+            "task",
+            "agent",
+            "tool",
+            "approval",
+            "connector",
+            "trigger",
+            "workflow",
+            "system",
+            "dlq",
+            "other",
+        }
     ),
     "jhin.provider_type": frozenset(
         {"openai", "anthropic", "openrouter", "ollama", "openai_compatible", "other"}
