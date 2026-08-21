@@ -129,6 +129,25 @@ def test_database_url_is_only_a_constructor_argument(monkeypatch: pytest.MonkeyP
     assert database_url not in repr(listener_calls)
 
 
+def test_engine_creation_contains_instrumentation_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_engine = SimpleNamespace(sync_engine=object())
+
+    monkeypatch.setattr(
+        engine_module,
+        "create_async_engine",
+        lambda *args, **kwargs: fake_engine,
+    )
+
+    def fail_install(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("instrumentation-canary")
+
+    monkeypatch.setattr(engine_module, "install_sqlalchemy_tracing", fail_install)
+
+    assert create_engine("sqlite+aiosqlite:///:memory:") is fake_engine
+
+
 def test_echo_cannot_be_enabled_through_the_public_wrapper(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

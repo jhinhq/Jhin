@@ -27,6 +27,30 @@ _SYNC_ENGINE = object()
             {"db.system": "postgresql", "db.operation": "INSERT", "db.table": "workspace"},
         ),
         (
+            "UPDATE secret SET value = :value",
+            {"db.system": "postgresql", "db.operation": "UPDATE", "db.table": "secret"},
+        ),
+        (
+            "DELETE FROM workspace WHERE id = :id",
+            {"db.system": "postgresql", "db.operation": "DELETE", "db.table": "workspace"},
+        ),
+        (
+            "MERGE INTO secret USING workspace ON secret.id = workspace.id",
+            {"db.system": "postgresql", "db.operation": "MERGE", "db.table": "secret"},
+        ),
+        (
+            "CREATE TABLE workspace (id INTEGER)",
+            {"db.system": "postgresql", "db.operation": "CREATE", "db.table": "workspace"},
+        ),
+        (
+            "ALTER TABLE secret ADD COLUMN value TEXT",
+            {"db.system": "postgresql", "db.operation": "ALTER", "db.table": "secret"},
+        ),
+        (
+            "DROP TABLE workspace",
+            {"db.system": "postgresql", "db.operation": "DROP", "db.table": "workspace"},
+        ),
+        (
             "SELECT * FROM attacker_supplied",
             {"db.system": "postgresql", "db.operation": "SELECT", "db.table": "other"},
         ),
@@ -42,6 +66,49 @@ def test_normalized_sql_metadata_uses_a_closed_grammar(
     normalize = sqlalchemy_observability.normalized_sql_metadata
 
     assert normalize(statement, known_tables=KNOWN_TABLES) == expected
+
+
+@pytest.mark.parametrize(
+    ("statement", "operation"),
+    [
+        ("SELECT 'FROM secret'", "SELECT"),
+        ("SELECT 1 UPDATE secret", "SELECT"),
+        ("SELECT 1 /* FROM secret */", "SELECT"),
+        ("SELECT 1 -- FROM secret\n", "SELECT"),
+        ('SELECT value FROM "secret"', "SELECT"),
+        ("INSERT secret (id) VALUES (:id)", "INSERT"),
+        ("INSERT /* INTO secret */ INTO workspace (id) VALUES (:id)", "INSERT"),
+        ("UPDATE 'secret' SET value = :value", "UPDATE"),
+        ("DELETE secret WHERE id = :id", "DELETE"),
+        ("MERGE secret USING workspace ON secret.id = workspace.id", "MERGE"),
+        ("CREATE INDEX secret ON workspace (id)", "CREATE"),
+        ("ALTER secret ADD COLUMN value TEXT", "ALTER"),
+        ("DROP VIEW secret", "DROP"),
+    ],
+)
+def test_normalized_sql_metadata_rejects_non_positional_table_canaries(
+    statement: str, operation: str
+) -> None:
+    normalize = sqlalchemy_observability.normalized_sql_metadata
+
+    assert normalize(statement, known_tables=KNOWN_TABLES) == {
+        "db.system": "postgresql",
+        "db.operation": operation,
+        "db.table": "other",
+    }
+
+
+def test_normalized_sql_metadata_rejects_a_leading_comment() -> None:
+    normalize = sqlalchemy_observability.normalized_sql_metadata
+
+    assert normalize(
+        "/* SELECT value FROM secret */ SELECT value FROM workspace",
+        known_tables=KNOWN_TABLES,
+    ) == {
+        "db.system": "postgresql",
+        "db.operation": "other",
+        "db.table": "other",
+    }
 
 
 def test_unknown_table_is_other_even_when_supplied_by_the_caller() -> None:
@@ -82,10 +149,17 @@ def test_parser_inspects_only_the_bounded_prefix() -> None:
 
 
 class _Manager:
-    def __init__(self, *, fail_enter: bool = False, fail_exit: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_enter: bool = False,
+        fail_exit: bool = False,
+        lifecycle: list[str] | None = None,
+    ) -> None:
         self.span = object()
         self.fail_enter = fail_enter
         self.fail_exit = fail_exit
+        self.lifecycle = lifecycle
         self.exit_args: list[tuple[object | None, object | None, object | None]] = []
 
     def __enter__(self) -> object:
@@ -96,9 +170,34 @@ class _Manager:
     def __exit__(
         self, exc_type: object | None, exc: object | None, traceback: object | None
     ) -> None:
+        if self.lifecycle is not None:
+            self.lifecycle.append("exit")
         self.exit_args.append((exc_type, exc, traceback))
         if self.fail_exit:
             raise RuntimeError("end failure")
+
+
+class _UndeletableExecutionContext:
+    def __init__(self, lifecycle: list[str], *, reject_clear: bool = False) -> None:
+        object.__setattr__(self, "lifecycle", lifecycle)
+        object.__setattr__(self, "delete_attempts", 0)
+        object.__setattr__(self, "clear_attempts", 0)
+        object.__setattr__(self, "reject_clear", reject_clear)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == sqlalchemy_observability._SQL_STATE_ATTR and value is None:
+            object.__setattr__(self, "clear_attempts", self.clear_attempts + 1)
+            self.lifecycle.append("clear")
+            if self.reject_clear:
+                raise RuntimeError("clear-state-canary")
+        super().__setattr__(name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if name == sqlalchemy_observability._SQL_STATE_ATTR:
+            self.delete_attempts += 1
+            self.lifecycle.append("delete")
+            raise RuntimeError("delete-state-canary")
+        super().__delattr__(name)
 
 
 def _listeners(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
@@ -133,6 +232,88 @@ def _before(
         execution_context,
         False,
     )
+
+
+@pytest.mark.parametrize("failure_index", range(3))
+def test_listener_registration_failure_is_contained_and_rolls_back(
+    monkeypatch: pytest.MonkeyPatch, failure_index: int
+) -> None:
+    event_names = ["before_cursor_execute", "after_cursor_execute", "handle_error"]
+    attempts: list[str] = []
+    active: dict[str, Any] = {}
+    removals: list[str] = []
+
+    def listen(engine: object, event_name: str, callback: Any) -> None:
+        assert engine is _SYNC_ENGINE
+        attempts.append(event_name)
+        if len(attempts) - 1 == failure_index:
+            raise RuntimeError(f"registration-{failure_index}-canary")
+        active[event_name] = callback
+
+    def remove(engine: object, event_name: str, callback: Any) -> None:
+        assert engine is _SYNC_ENGINE
+        assert active[event_name] is callback
+        removals.append(event_name)
+        del active[event_name]
+
+    event = sqlalchemy_observability.event
+    monkeypatch.setattr(event, "listen", listen)
+    monkeypatch.setattr(event, "remove", remove)
+
+    sqlalchemy_observability.install_sqlalchemy_tracing(
+        _SYNC_ENGINE,
+        KNOWN_TABLES,
+        tracer=noop_tracer(),
+    )
+
+    assert attempts == event_names[: failure_index + 1]
+    assert removals == list(reversed(event_names[:failure_index]))
+    assert active == {}
+
+
+def test_listener_registration_rollback_failure_leaves_callbacks_inert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    callbacks: dict[str, Any] = {}
+    removals: list[str] = []
+    span_starts: list[str] = []
+
+    def listen(engine: object, event_name: str, callback: Any) -> None:
+        assert engine is _SYNC_ENGINE
+        if event_name == "handle_error":
+            raise RuntimeError("registration-canary")
+        callbacks[event_name] = callback
+
+    def remove(engine: object, event_name: str, callback: Any) -> None:
+        assert engine is _SYNC_ENGINE
+        assert callbacks[event_name] is callback
+        removals.append(event_name)
+        raise RuntimeError("rollback-canary")
+
+    def start_span(*args: object, **kwargs: object) -> _Manager:
+        span_starts.append("started")
+        return _Manager()
+
+    event = sqlalchemy_observability.event
+    monkeypatch.setattr(event, "listen", listen)
+    monkeypatch.setattr(event, "remove", remove)
+    monkeypatch.setattr(sqlalchemy_observability, "safe_span", start_span)
+
+    sqlalchemy_observability.install_sqlalchemy_tracing(
+        _SYNC_ENGINE,
+        KNOWN_TABLES,
+        tracer=noop_tracer(),
+    )
+
+    execution_context = SimpleNamespace()
+    _before(callbacks["before_cursor_execute"], execution_context)
+    callbacks["after_cursor_execute"](
+        object(), object(), "raw-sql-canary", {"bind": "bind-canary"}, execution_context, False
+    )
+
+    assert removals == ["after_cursor_execute", "before_cursor_execute"]
+    assert span_starts == []
+    assert not hasattr(execution_context, sqlalchemy_observability._SQL_STATE_ATTR)
 
 
 def test_listener_success_removes_closed_state_and_ends_exactly_once(
@@ -173,6 +354,51 @@ def test_listener_success_removes_closed_state_and_ends_exactly_once(
     assert manager.exit_args == [(None, None, None)]
 
 
+@pytest.mark.parametrize("reject_clear", [False, True])
+def test_listener_success_closes_exactly_once_when_state_deletion_fails(
+    monkeypatch: pytest.MonkeyPatch, reject_clear: bool
+) -> None:
+    lifecycle: list[str] = []
+    manager = _Manager(lifecycle=lifecycle)
+    monkeypatch.setattr(sqlalchemy_observability, "safe_span", lambda *args, **kwargs: manager)
+    callbacks = _listeners(monkeypatch)
+    execution_context = _UndeletableExecutionContext(
+        lifecycle,
+        reject_clear=reject_clear,
+    )
+
+    _before(
+        callbacks["before_cursor_execute"],
+        execution_context,
+        "SELECT value FROM secret /* raw-sql-canary */",
+    )
+    state_name = sqlalchemy_observability._SQL_STATE_ATTR
+    state = getattr(execution_context, state_name)
+    callbacks["after_cursor_execute"](
+        object(),
+        object(),
+        "raw-sql-canary",
+        {"bind": "bind-canary"},
+        execution_context,
+        False,
+    )
+    callbacks["after_cursor_execute"](
+        object(), object(), "raw-sql-canary", (), execution_context, False
+    )
+
+    assert lifecycle == ["delete", "clear", "exit", "delete", "clear"]
+    assert execution_context.delete_attempts == 2
+    assert execution_context.clear_attempts == 2
+    if reject_clear:
+        assert getattr(execution_context, state_name) is state
+    else:
+        assert getattr(execution_context, state_name) is None
+    assert state.closed is True
+    assert manager.exit_args == [(None, None, None)]
+    assert "raw-sql-canary" not in repr(vars(state))
+    assert "bind-canary" not in repr(vars(state))
+
+
 def test_listener_error_records_only_safe_error_and_ends_without_raw_exception(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -202,6 +428,69 @@ def test_listener_error_records_only_safe_error_and_ends_without_raw_exception(
     assert error.type == "RuntimeError"
     assert error.code is SafeErrorCode.INTERNAL_ERROR
     assert "raw-exception-canary" not in repr(vars(error))
+
+
+@pytest.mark.parametrize("record_fails", [False, True])
+@pytest.mark.parametrize("reject_clear", [False, True])
+def test_listener_error_closes_exactly_once_when_state_deletion_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    record_fails: bool,
+    reject_clear: bool,
+) -> None:
+    lifecycle: list[str] = []
+    manager = _Manager(lifecycle=lifecycle)
+    captured: list[tuple[object, object]] = []
+
+    def record(span: object, error: object) -> None:
+        lifecycle.append("record")
+        captured.append((span, error))
+        if record_fails:
+            raise RuntimeError("record-failure-canary")
+
+    monkeypatch.setattr(sqlalchemy_observability, "safe_span", lambda *args, **kwargs: manager)
+    monkeypatch.setattr(sqlalchemy_observability, "record_span_error", record)
+    callbacks = _listeners(monkeypatch)
+    execution_context = _UndeletableExecutionContext(
+        lifecycle,
+        reject_clear=reject_clear,
+    )
+    _before(
+        callbacks["before_cursor_execute"],
+        execution_context,
+        "SELECT value FROM secret /* raw-sql-canary */",
+    )
+    state = getattr(execution_context, sqlalchemy_observability._SQL_STATE_ATTR)
+    original = RuntimeError("raw-exception-canary")
+    exception_context = SimpleNamespace(
+        execution_context=execution_context,
+        original_exception=original,
+    )
+
+    assert callbacks["handle_error"](exception_context) is None
+    assert callbacks["handle_error"](exception_context) is None
+
+    assert exception_context.original_exception is original
+    assert lifecycle == [
+        "delete",
+        "clear",
+        "record",
+        "exit",
+        "delete",
+        "clear",
+    ]
+    assert execution_context.delete_attempts == 2
+    assert execution_context.clear_attempts == 2
+    state_name = sqlalchemy_observability._SQL_STATE_ATTR
+    if reject_clear:
+        assert getattr(execution_context, state_name) is state
+    else:
+        assert getattr(execution_context, state_name) is None
+    assert state.closed is True
+    assert manager.exit_args == [(None, None, None)]
+    assert len(captured) == 1
+    assert captured[0][0] is manager.span
+    assert "raw-sql-canary" not in repr(vars(state))
+    assert "raw-exception-canary" not in repr(vars(state))
 
 
 @pytest.mark.parametrize("failure", ["start", "publish", "record", "end"])

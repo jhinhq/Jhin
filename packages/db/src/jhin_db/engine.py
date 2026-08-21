@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
+
 from opentelemetry.trace import Tracer
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -23,11 +25,12 @@ def create_engine(
 ) -> AsyncEngine:
     engine = create_async_engine(database_url, echo=False, pool_pre_ping=True)
     if trace_sql:
-        install_sqlalchemy_tracing(
-            engine.sync_engine,
-            frozenset(Base.metadata.tables),
-            tracer=tracer if tracer is not None else noop_tracer(),
-        )
+        with suppress(Exception):
+            install_sqlalchemy_tracing(
+                engine.sync_engine,
+                frozenset(Base.metadata.tables),
+                tracer=tracer if tracer is not None else noop_tracer(),
+            )
     return engine
 
 
