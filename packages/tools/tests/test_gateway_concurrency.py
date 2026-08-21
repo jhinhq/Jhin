@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from uuid import UUID
 
+import pytest
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -27,7 +29,9 @@ class _Output(BaseModel):
     executed: bool
 
 
-async def test_two_resolvers_cannot_execute_one_approval_twice(tmp_path: Path) -> None:
+async def test_two_resolvers_cannot_execute_one_approval_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'approval-race.db'}")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -113,14 +117,29 @@ async def test_two_resolvers_cannot_execute_one_approval_twice(tmp_path: Path) -
             agent_id=agent_id,
             agent_name=agent_name,
         )
+        second_gateway = ToolGateway(second_context, catalog)
+        original_load_approval_pair = second_gateway._load_approval_pair
+        second_first_load_completed = asyncio.Event()
+        second_load_count = 0
+
+        async def observed_load_approval_pair(
+            requested_approval_id: UUID,
+        ) -> tuple[Approval, ToolCall]:
+            nonlocal second_load_count
+            pair = await original_load_approval_pair(requested_approval_id)
+            second_load_count += 1
+            if second_load_count == 1:
+                assert pair[1].status == ToolCallStatus.EXECUTING.value
+                second_first_load_completed.set()
+            return pair
+
+        monkeypatch.setattr(second_gateway, "_load_approval_pair", observed_load_approval_pair)
         first_task = asyncio.create_task(
             ToolGateway(first_context, catalog).resolve_approved(approval_id)
         )
         await asyncio.wait_for(executor_started.wait(), timeout=5)
-        second_task = asyncio.create_task(
-            ToolGateway(second_context, catalog).resolve_approved(approval_id)
-        )
-        await asyncio.sleep(0)
+        second_task = asyncio.create_task(second_gateway.resolve_approved(approval_id))
+        await asyncio.wait_for(second_first_load_completed.wait(), timeout=5)
         assert second_task.done() is False
         release_executor.set()
         results = await asyncio.gather(first_task, second_task)
@@ -152,5 +171,137 @@ async def test_two_resolvers_cannot_execute_one_approval_twice(tmp_path: Path) -
         assert replay.replayed is True
         assert replay.status == "executed"
         assert executions == 1
+
+    await engine.dispose()
+
+
+async def test_two_rejection_resolvers_replay_one_terminal_rejection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'rejection-race.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def executor(ctx: ToolExecutionContext, payload: BaseModel) -> _Output:
+        return _Output(executed=True)
+
+    catalog = ToolCatalog()
+    catalog.register(
+        ToolDefinition(
+            name="test.concurrent_rejection",
+            description="Concurrent rejection test",
+            risk=RiskLevel.ELEVATED,
+            input_model=_Input,
+            output_model=_Output,
+            required_capability="test.concurrent_rejection",
+            supports_approval=True,
+        ),
+        executor,
+    )
+
+    async with sessions() as setup:
+        workspace = Workspace(name="Rejection", slug=f"rejection-{new_uuid7().hex[:8]}")
+        setup.add(workspace)
+        await setup.flush()
+        agent = Agent(workspace_id=workspace.id, name="Rejector", slug="rejector")
+        setup.add(agent)
+        await setup.flush()
+        task_id = new_uuid7()
+        run_id = new_uuid7()
+        setup.add(
+            AgentCapabilityGrant(
+                workspace_id=workspace.id,
+                agent_id=agent.id,
+                capability="test.concurrent_rejection",
+                scope_json={},
+                effect="allow",
+            )
+        )
+        context = ToolExecutionContext(
+            session=setup,
+            workspace_id=workspace.id,
+            task_id=task_id,
+            run_id=run_id,
+            agent_id=agent.id,
+            agent_name=agent.name,
+        )
+        parked = await ToolGateway(context, catalog).request(
+            "test.concurrent_rejection",
+            '{"label": "reject"}',
+            provider_call_id="call-rejection-race",
+        )
+        assert parked.approval_id is not None
+        approval = await setup.get(Approval, parked.approval_id)
+        assert approval is not None
+        approval.status = ApprovalStatus.REJECTED.value
+        await setup.commit()
+        identity = (workspace.id, task_id, run_id, agent.id, agent.name, parked.approval_id)
+
+    workspace_id, task_id, run_id, agent_id, agent_name, approval_id = identity
+    async with sessions() as first_session, sessions() as second_session:
+        first_context = ToolExecutionContext(
+            session=first_session,
+            workspace_id=workspace_id,
+            task_id=task_id,
+            run_id=run_id,
+            agent_id=agent_id,
+            agent_name=agent_name,
+        )
+        second_context = ToolExecutionContext(
+            session=second_session,
+            workspace_id=workspace_id,
+            task_id=task_id,
+            run_id=run_id,
+            agent_id=agent_id,
+            agent_name=agent_name,
+        )
+        first_gateway = ToolGateway(first_context, catalog)
+        second_gateway = ToolGateway(second_context, catalog)
+        first_resolver_entered = asyncio.Event()
+        release_first_resolver = asyncio.Event()
+        original_resolve_rejected_once = first_gateway._resolve_rejected_once
+
+        async def paused_resolve_rejected_once(
+            requested_approval_id: UUID,
+        ) -> GatewayOutcome:
+            first_resolver_entered.set()
+            await release_first_resolver.wait()
+            return await original_resolve_rejected_once(requested_approval_id)
+
+        second_first_load_completed = asyncio.Event()
+        second_load_count = 0
+        original_load_approval_pair = second_gateway._load_approval_pair
+
+        async def observed_load_approval_pair(
+            requested_approval_id: UUID,
+        ) -> tuple[Approval, ToolCall]:
+            nonlocal second_load_count
+            pair = await original_load_approval_pair(requested_approval_id)
+            second_load_count += 1
+            if second_load_count == 1:
+                assert pair[1].status == ToolCallStatus.PENDING_APPROVAL.value
+                second_first_load_completed.set()
+            return pair
+
+        monkeypatch.setattr(first_gateway, "_resolve_rejected_once", paused_resolve_rejected_once)
+        monkeypatch.setattr(second_gateway, "_load_approval_pair", observed_load_approval_pair)
+
+        first_task = asyncio.create_task(first_gateway.resolve_rejected(approval_id))
+        await asyncio.wait_for(first_resolver_entered.wait(), timeout=5)
+        second_task = asyncio.create_task(second_gateway.resolve_rejected(approval_id))
+        await asyncio.wait_for(second_first_load_completed.wait(), timeout=5)
+        assert second_task.done() is False
+        release_first_resolver.set()
+        results = await asyncio.gather(first_task, second_task)
+
+    assert [result.status for result in results] == ["rejected", "rejected"]
+    assert [result.replayed for result in results] == [False, True]
+
+    async with sessions() as verification:
+        rejected = await verification.scalar(
+            select(func.count(AuditEvent.id)).where(AuditEvent.action == "tool.call.rejected")
+        )
+        assert rejected == 1
 
     await engine.dispose()

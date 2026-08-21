@@ -165,7 +165,12 @@ class ToolGateway:
         return self._ctx.session_factory
 
     @asynccontextmanager
-    async def _invocation_lifecycle_lock(self, invocation_id: UUID) -> AsyncIterator[ToolGateway]:
+    async def _invocation_lifecycle_lock(
+        self,
+        invocation_id: UUID,
+        *,
+        refresh_if_contended: bool = False,
+    ) -> AsyncIterator[ToolGateway]:
         """Serialize claim through terminal persistence for one invocation.
 
         PostgreSQL session-level advisory locks survive the transaction
@@ -197,6 +202,12 @@ class ToolGateway:
         # tests; PostgreSQL integration remains the multi-process authority.
         async with _PROCESS_INVOCATION_LOCKS_GUARD:
             lock = _PROCESS_INVOCATION_LOCKS.setdefault(invocation_id, asyncio.Lock())
+            contended = lock.locked()
+        # Approval resolution loads the invocation id before taking this
+        # portable lock. Discard that snapshot only when it will wait behind
+        # another resolver, so the post-lock query observes its committed row.
+        if refresh_if_contended and contended:
+            self._ctx.session.expire_all()
         async with lock:
             yield self
 
@@ -1643,7 +1654,9 @@ class ToolGateway:
         bind = self._ctx.session.bind
         if isinstance(bind, AsyncEngine) and bind.dialect.name == "postgresql":
             await self._ctx.session.rollback()
-        async with self._invocation_lifecycle_lock(invocation_id) as gateway:
+        async with self._invocation_lifecycle_lock(
+            invocation_id, refresh_if_contended=True
+        ) as gateway:
             try:
                 if gateway._ctx.test_barrier is not None:
                     await gateway._ctx.test_barrier.arrive_and_wait(
@@ -1760,7 +1773,9 @@ class ToolGateway:
         bind = self._ctx.session.bind
         if isinstance(bind, AsyncEngine) and bind.dialect.name == "postgresql":
             await self._ctx.session.rollback()
-        async with self._invocation_lifecycle_lock(invocation_id) as gateway:
+        async with self._invocation_lifecycle_lock(
+            invocation_id, refresh_if_contended=True
+        ) as gateway:
             try:
                 outcome = await gateway._resolve_rejected_once(approval_id)
                 await gateway._ctx.session.commit()
