@@ -872,8 +872,10 @@ dependencies = [
     { name = "jhin-triggers" },
     { name = "jhin-workflows" },
     { name = "nats-py" },
+    { name = "opentelemetry-api" },
     { name = "pydantic", extra = ["email"] },
     { name = "pydantic-settings" },
+    { name = "starlette" },
     { name = "temporalio" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -894,8 +896,10 @@ requires-dist = [
     { name = "jhin-triggers", editable = "packages/triggers" },
     { name = "jhin-workflows", editable = "packages/workflows" },
     { name = "nats-py", specifier = ">=2.13" },
+    { name = "opentelemetry-api", specifier = ">=1.38,<2" },
     { name = "pydantic", extras = ["email"], specifier = ">=2.10" },
     { name = "pydantic-settings", specifier = ">=2.7" },
+    { name = "starlette", specifier = ">=1.6,<2" },
     { name = "temporalio", specifier = ">=1.31" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34" },
 ]
@@ -943,6 +947,8 @@ dependencies = [
     { name = "alembic" },
     { name = "asyncpg" },
     { name = "jhin-domain" },
+    { name = "jhin-observability" },
+    { name = "opentelemetry-api" },
     { name = "sqlalchemy", extra = ["asyncio"] },
 ]
 
@@ -951,7 +957,9 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.14" },
     { name = "asyncpg", specifier = ">=0.30" },
     { name = "jhin-domain", editable = "packages/domain" },
-    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.36" },
+    { name = "jhin-observability", editable = "packages/observability" },
+    { name = "opentelemetry-api", specifier = ">=1.38,<2" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.36,<3" },
 ]
 
 [[package]]
@@ -1046,6 +1054,7 @@ dependencies = [
     { name = "opentelemetry-exporter-otlp-proto-grpc" },
     { name = "opentelemetry-sdk" },
     { name = "pydantic-settings" },
+    { name = "sqlalchemy" },
     { name = "structlog" },
 ]
 
@@ -1056,6 +1065,7 @@ requires-dist = [
     { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.38,<2" },
     { name = "opentelemetry-sdk", specifier = ">=1.38,<2" },
     { name = "pydantic-settings", specifier = ">=2.7" },
+    { name = "sqlalchemy", specifier = ">=2.0.36,<3" },
     { name = "structlog", specifier = ">=25.1" },
 ]
 

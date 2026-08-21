@@ -54,6 +54,10 @@ from jhin_observability.registry import (
     MetricName,
     SpanName,
 )
+from jhin_observability.sqlalchemy import (
+    install_sqlalchemy_tracing,
+    normalized_sql_metadata,
+)
 
 if TYPE_CHECKING:
     from jhin_observability.bootstrap import (
@@ -113,6 +117,7 @@ __all__ = [
     "get_runtime",
     "initialize_observability",
     "inject_trace_headers",
+    "install_sqlalchemy_tracing",
     "instrument_contracts",
     "noop_metrics",
     "noop_tracer",
@@ -121,6 +126,7 @@ __all__ = [
     "normalize_event_family",
     "normalize_sandbox_outcome",
     "normalize_span_attributes",
+    "normalized_sql_metadata",
     "record_span_error",
     "safe_error",
     "safe_span",

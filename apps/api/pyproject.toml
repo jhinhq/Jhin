@@ -11,6 +11,8 @@ dependencies = [
     "nats-py>=2.13",
     "temporalio>=1.31",
     "argon2-cffi>=23.1",
+    "opentelemetry-api>=1.38,<2",
+    "starlette>=1.6,<2",
     "jhin-connectors",
     "jhin-db",
     "jhin-domain",

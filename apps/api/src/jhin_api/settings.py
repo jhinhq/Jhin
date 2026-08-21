@@ -2,14 +2,15 @@
 
 from functools import lru_cache
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import SettingsConfigDict
+
+from jhin_observability import ObservabilitySettings
 
 
-class Settings(BaseSettings):
+class Settings(ObservabilitySettings):
     model_config = SettingsConfigDict(extra="ignore")
 
     app_name: str = "Jhin"
-    app_env: str = "dev"
     app_url: str = "http://localhost:3000"
     log_level: str = "INFO"
 

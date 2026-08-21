@@ -1,11 +1,16 @@
 """FastAPI application factory."""
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.routing import APIRoute
+from opentelemetry.trace import Span, SpanKind
+from starlette.datastructures import Headers
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from jhin_api import __version__
 from jhin_api.agents.router import router as agents_router
@@ -30,15 +35,156 @@ from jhin_db import create_engine, create_session_factory
 from jhin_domain import new_uuid7
 from jhin_observability import (
     SafeErrorCode,
+    bind_context,
     configure_json_logging,
+    extract_trace_context,
     get_logger,
+    initialize_observability,
     normalize_environment,
+    normalize_span_attributes,
+    record_span_error,
+    safe_error,
+    safe_span,
+    service_version,
 )
 from jhin_secrets import SecretCrypto, load_master_key
 from jhin_secrets.crypto import MasterKeyError
 from jhin_secrets.redaction import redact_event_dict
 
 logger = get_logger(__name__)
+
+
+def normalize_http_method(method: str) -> str:
+    normalized = method.upper()
+    return (
+        normalized
+        if normalized
+        in {
+            "GET",
+            "POST",
+            "PUT",
+            "PATCH",
+            "DELETE",
+            "HEAD",
+            "OPTIONS",
+        }
+        else "other"
+    )
+
+
+def normalize_http_route(scope: Scope) -> str:
+    route = scope.get("route")
+    if not isinstance(route, APIRoute):
+        return "other"
+    template = route.path
+    if not isinstance(template, str) or not 1 <= len(template) <= 200:
+        return "other"
+    return "/api/:path*" if template.startswith("/api/") else "other"
+
+
+def set_http_span_result(
+    span: Span,
+    *,
+    method: str,
+    route: str,
+    status_code: int,
+) -> None:
+    status = status_code if 100 <= status_code <= 599 else 500
+    normalized_method = normalize_http_method(method)
+    status_class = f"{status // 100}xx"
+    attributes = normalize_span_attributes(
+        {
+            "http.request.method": normalized_method,
+            "http.route": route,
+            "http.response.status_code": status,
+            "http.response.status_class": status_class,
+        }
+    )
+    for key, value in attributes.items():
+        span.set_attribute(key, value)
+
+
+class HttpObservabilityMiddleware:
+    """Own the complete HTTP request telemetry and request-ID lifecycle."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request_id = new_uuid7()
+        scope.setdefault("state", {})["request_id"] = request_id
+        parent = extract_trace_context(Headers(scope=scope))
+        tracer = scope["app"].state.observability.tracer
+        response_started = False
+        status_code = 500
+
+        async def send_with_request_id(message: Message) -> None:
+            nonlocal response_started, status_code
+            if message["type"] == "http.response.start" and not response_started:
+                candidate_status = message.get("status", 500)
+                status_code = candidate_status if isinstance(candidate_status, int) else 500
+                response_started = True
+                outgoing = dict(message)
+                headers = [
+                    (name, value)
+                    for name, value in message.get("headers", [])
+                    if name.lower() != b"x-request-id"
+                ]
+                headers.append((b"X-Request-ID", str(request_id).encode("ascii")))
+                outgoing["headers"] = headers
+                await send(outgoing)
+                return
+            await send(message)
+
+        with (
+            bind_context(request_id=request_id),
+            safe_span(
+                "http.server.request",
+                tracer=tracer,
+                kind=SpanKind.SERVER,
+                context=parent,
+            ) as span,
+        ):
+            try:
+                try:
+                    await self.app(scope, receive, send_with_request_id)
+                except Exception as exc:
+                    record_span_error(
+                        span,
+                        safe_error(exc, code=SafeErrorCode.INTERNAL_ERROR),
+                    )
+                    logger.error(
+                        "api.request_failed",
+                        error_code=SafeErrorCode.INTERNAL_ERROR.value,
+                    )
+                    if response_started:
+                        raise
+                    response = JSONResponse(
+                        status_code=500,
+                        content={"detail": "Internal server error"},
+                    )
+                    await response(scope, receive, send_with_request_id)
+            finally:
+                normalized_method = normalize_http_method(scope["method"])
+                normalized_route = normalize_http_route(scope)
+                normalized_status = status_code if 100 <= status_code <= 599 else 500
+                status_class = f"{normalized_status // 100}xx"
+                set_http_span_result(
+                    span,
+                    method=normalized_method,
+                    route=normalized_route,
+                    status_code=normalized_status,
+                )
+                logger.info(
+                    "api.request_finished",
+                    http_method=normalized_method,
+                    http_route=normalized_route,
+                    http_status_class=status_class,
+                )
 
 
 def _load_secret_crypto() -> SecretCrypto | None:
@@ -54,7 +200,7 @@ def _load_secret_crypto() -> SecretCrypto | None:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
-    # Known secret values are scrubbed from every log record (plan 13.5).
+    # Preserve the JSON-v1 logging contract before the app starts serving.
     configure_json_logging(
         service="api",
         environment=normalize_environment(settings.app_env),
@@ -64,24 +210,46 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        # Engine construction is lazy: no connection is made until first use,
-        # and tables are never auto-created (migrations own the schema).
-        app.state.engine = create_engine(settings.database_url)
-        app.state.session_factory = create_session_factory(app.state.engine)
-        app.state.temporal_client = None
-        app.state.temporal_connect_lock = asyncio.Lock()
-        app.state.nats_client = None
-        app.state.nats_connect_lock = asyncio.Lock()
-        logger.info("api.started")
-        yield
-        if app.state.nats_client is not None and not app.state.nats_client.is_closed:
-            await app.state.nats_client.close()
-        await app.state.engine.dispose()
-        logger.info("api.stopped")
+        runtime = initialize_observability(
+            settings.observability_config(
+                service_name="api",
+                service_version=service_version("jhin-api"),
+                extra_log_processors=(redact_event_dict,),
+            )
+        )
+        app.state.observability = runtime
+        try:
+            app.state.secret_crypto = _load_secret_crypto()
+            # Engine construction is lazy: no connection is made until first use,
+            # and tables are never auto-created (migrations own the schema).
+            app.state.engine = create_engine(
+                settings.database_url, trace_sql=True, tracer=runtime.tracer
+            )
+            app.state.session_factory = create_session_factory(app.state.engine)
+            app.state.temporal_client = None
+            app.state.temporal_connect_lock = asyncio.Lock()
+            app.state.nats_client = None
+            app.state.nats_connect_lock = asyncio.Lock()
+            logger.info("api.started")
+            yield
+        finally:
+            try:
+                nats = getattr(app.state, "nats_client", None)
+                if nats is not None and not nats.is_closed:
+                    await nats.close()
+            finally:
+                try:
+                    engine = getattr(app.state, "engine", None)
+                    if engine is not None:
+                        await engine.dispose()
+                finally:
+                    try:
+                        logger.info("api.stopped")
+                    finally:
+                        runtime.shutdown(timeout_millis=5_000)
 
     app = FastAPI(title=settings.app_name, version=__version__, lifespan=lifespan)
     app.state.settings = settings
-    app.state.secret_crypto = _load_secret_crypto()
     app.state.login_limiter = LoginRateLimiter(
         settings.login_max_attempts, settings.login_window_seconds
     )
@@ -93,15 +261,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-
-    @app.middleware("http")
-    async def request_id_middleware(
-        request: Request, call_next: Callable[[Request], Awaitable[Response]]
-    ) -> Response:
-        request.state.request_id = new_uuid7()
-        response = await call_next(request)
-        response.headers["X-Request-ID"] = str(request.state.request_id)
-        return response
+    app.add_middleware(HttpObservabilityMiddleware)
 
     app.include_router(health_router)
     app.include_router(auth_router)
