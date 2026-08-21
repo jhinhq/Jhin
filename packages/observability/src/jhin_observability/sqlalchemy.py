@@ -20,24 +20,58 @@ _OPERATION_PATTERN = re.compile(
     r"^\s*(SELECT|INSERT|UPDATE|DELETE|MERGE|CREATE|ALTER|DROP)\b",
     re.IGNORECASE,
 )
-_TABLE_TOKEN = r"([A-Za-z_][A-Za-z0-9_]*)(?=\s|[;(]|$)"
+_TABLE_IDENTIFIER = r"([A-Za-z_][A-Za-z0-9_]*)"
 _SELECT_VALUE_TOKEN = (
     r"(?:\*|[0-9]+|[A-Za-z_][A-Za-z0-9_]*"
     r"(?:\.(?:\*|[A-Za-z_][A-Za-z0-9_]*))?)"
 )
+_SELECT_TABLE_END = (
+    r"(?=\s*(?:;|$)|\s+(?:WHERE|GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT|OFFSET|"
+    r"FETCH|FOR|UNION|INTERSECT|EXCEPT)\b)"
+)
+_INSERT_COLUMNS = r"[A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)*"
+_CREATE_DEFINITION = r"\(\s*[A-Za-z_][A-Za-z0-9_]*(?:[^()]|\([^()]*\))*\)"
+_DELETE_TABLE_END = r"(?=\s*(?:;|$)|\s+(?:WHERE|USING|RETURNING)\b)"
+_DROP_TABLE_END = r"(?=\s*(?:;|$)|\s+(?:CASCADE|RESTRICT)\b)"
 _TABLE_PATTERNS = {
     "SELECT": re.compile(
         rf"^\s*SELECT\s+{_SELECT_VALUE_TOKEN}"
-        rf"(?:\s*,\s*{_SELECT_VALUE_TOKEN})*\s+FROM\s+{_TABLE_TOKEN}",
+        rf"(?:\s*,\s*{_SELECT_VALUE_TOKEN})*\s+FROM\s+"
+        rf"{_TABLE_IDENTIFIER}{_SELECT_TABLE_END}",
         re.IGNORECASE,
     ),
-    "INSERT": re.compile(rf"^\s*INSERT\s+INTO\s+{_TABLE_TOKEN}", re.IGNORECASE),
-    "UPDATE": re.compile(rf"^\s*UPDATE\s+{_TABLE_TOKEN}", re.IGNORECASE),
-    "DELETE": re.compile(rf"^\s*DELETE\s+FROM\s+{_TABLE_TOKEN}", re.IGNORECASE),
-    "MERGE": re.compile(rf"^\s*MERGE\s+INTO\s+{_TABLE_TOKEN}", re.IGNORECASE),
-    "CREATE": re.compile(rf"^\s*CREATE\s+TABLE\s+{_TABLE_TOKEN}", re.IGNORECASE),
-    "ALTER": re.compile(rf"^\s*ALTER\s+TABLE\s+{_TABLE_TOKEN}", re.IGNORECASE),
-    "DROP": re.compile(rf"^\s*DROP\s+TABLE\s+{_TABLE_TOKEN}", re.IGNORECASE),
+    "INSERT": re.compile(
+        rf"^\s*INSERT\s+INTO\s+{_TABLE_IDENTIFIER}"
+        rf"(?:\s*\(\s*{_INSERT_COLUMNS}\s*\))?\s+"
+        rf"(?:VALUES|SELECT|DEFAULT\s+VALUES)\b",
+        re.IGNORECASE,
+    ),
+    "UPDATE": re.compile(
+        rf"^\s*UPDATE\s+{_TABLE_IDENTIFIER}\s+SET\b",
+        re.IGNORECASE,
+    ),
+    "DELETE": re.compile(
+        rf"^\s*DELETE\s+FROM\s+{_TABLE_IDENTIFIER}{_DELETE_TABLE_END}",
+        re.IGNORECASE,
+    ),
+    "MERGE": re.compile(
+        rf"^\s*MERGE\s+INTO\s+{_TABLE_IDENTIFIER}\s+USING\b",
+        re.IGNORECASE,
+    ),
+    "CREATE": re.compile(
+        rf"^\s*CREATE\s+TABLE\s+{_TABLE_IDENTIFIER}\s*"
+        rf"{_CREATE_DEFINITION}\s*(?:;|$)",
+        re.IGNORECASE,
+    ),
+    "ALTER": re.compile(
+        rf"^\s*ALTER\s+TABLE\s+{_TABLE_IDENTIFIER}\s+"
+        rf"(?:ADD|DROP|ALTER|RENAME|SET|RESET|ATTACH|DETACH|VALIDATE|ENABLE|DISABLE|OWNER)\b",
+        re.IGNORECASE,
+    ),
+    "DROP": re.compile(
+        rf"^\s*DROP\s+TABLE\s+{_TABLE_IDENTIFIER}{_DROP_TABLE_END}",
+        re.IGNORECASE,
+    ),
 }
 
 

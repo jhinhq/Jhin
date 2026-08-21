@@ -69,6 +69,66 @@ def test_normalized_sql_metadata_uses_a_closed_grammar(
 
 
 @pytest.mark.parametrize(
+    ("statement", "operation", "expected_table"),
+    [
+        ("SELECT value FROM secret", "SELECT", "secret"),
+        ("SELECT value FROM secret;", "SELECT", "secret"),
+        ("SELECT * FROM secret()", "SELECT", "other"),
+        ("SELECT value FROM secret(", "SELECT", "other"),
+        ("SELECT value FROM secret (", "SELECT", "other"),
+        ("SELECT value FROM secret,", "SELECT", "other"),
+        ("INSERT INTO secret(id) VALUES (:id)", "INSERT", "secret"),
+        ("INSERT INTO secret (id) VALUES (:id)", "INSERT", "secret"),
+        ("INSERT INTO secret VALUES (:id)", "INSERT", "secret"),
+        ("INSERT INTO secret(", "INSERT", "other"),
+        ("INSERT INTO secret (", "INSERT", "other"),
+        ("INSERT INTO secret() VALUES (:id)", "INSERT", "other"),
+        ("UPDATE secret SET value = :value", "UPDATE", "secret"),
+        ("UPDATE secret(", "UPDATE", "other"),
+        ("UPDATE secret (", "UPDATE", "other"),
+        ("UPDATE secret, SET value = :value", "UPDATE", "other"),
+        ("DELETE FROM secret WHERE id = :id", "DELETE", "secret"),
+        ("DELETE FROM secret(", "DELETE", "other"),
+        ("DELETE FROM secret (", "DELETE", "other"),
+        ("DELETE FROM secret,", "DELETE", "other"),
+        (
+            "MERGE INTO secret USING workspace ON secret.id = workspace.id",
+            "MERGE",
+            "secret",
+        ),
+        ("MERGE INTO secret(", "MERGE", "other"),
+        ("MERGE INTO secret (", "MERGE", "other"),
+        ("MERGE INTO secret, USING workspace", "MERGE", "other"),
+        ("CREATE TABLE secret(id INTEGER)", "CREATE", "secret"),
+        ("CREATE TABLE secret (id INTEGER)", "CREATE", "secret"),
+        ("CREATE TABLE secret(", "CREATE", "other"),
+        ("CREATE TABLE secret (", "CREATE", "other"),
+        ("CREATE TABLE secret()", "CREATE", "other"),
+        ("ALTER TABLE secret ADD COLUMN value TEXT", "ALTER", "secret"),
+        ("ALTER TABLE secret(", "ALTER", "other"),
+        ("ALTER TABLE secret (", "ALTER", "other"),
+        ("ALTER TABLE secret, ADD COLUMN value TEXT", "ALTER", "other"),
+        ("DROP TABLE secret;", "DROP", "secret"),
+        ("DROP TABLE secret(", "DROP", "other"),
+        ("DROP TABLE secret (", "DROP", "other"),
+        ("DROP TABLE secret,", "DROP", "other"),
+    ],
+)
+def test_normalized_sql_metadata_enforces_operation_specific_table_boundaries(
+    statement: str,
+    operation: str,
+    expected_table: str,
+) -> None:
+    normalize = sqlalchemy_observability.normalized_sql_metadata
+
+    assert normalize(statement, known_tables=KNOWN_TABLES) == {
+        "db.system": "postgresql",
+        "db.operation": operation,
+        "db.table": expected_table,
+    }
+
+
+@pytest.mark.parametrize(
     ("statement", "operation"),
     [
         ("SELECT 'FROM secret'", "SELECT"),
