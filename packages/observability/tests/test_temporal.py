@@ -11,6 +11,7 @@ import logging
 import tomllib
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager, suppress
+from contextvars import Context as ContextVarsContext
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -2116,6 +2117,203 @@ async def test_entry_context_failure_still_sanitizes_temporal_and_nexus_inputs(
     assert canary not in rendered + captured.out + captured.err + downstream
 
 
+@pytest.mark.parametrize("boundary", ["span-shell", "workflow"])
+def test_temporal_context_boundaries_do_not_reattach_body_leaked_foreign_context(
+    boundary: str,
+) -> None:
+    module = _temporal()
+    isolated_context = ContextVarsContext()
+    outer_entry = module.otel_context.get_current()
+    observed: dict[str, Context] = {}
+
+    async def exercise() -> None:
+        entry_context = module.otel_context.get_current()
+        span_owned_context = Context({"temporal-context-owner": boundary})
+        foreign_context = Context({"temporal-context-foreign": boundary})
+        product_result = object()
+        calls = 0
+
+        class Terminal:
+            async def _call(self) -> object:
+                nonlocal calls
+                calls += 1
+                observed["owned"] = module.otel_context.get_current()
+                module.otel_context.attach(foreign_context)
+                assert module.otel_context.get_current() is foreign_context
+                return product_result
+
+            async def signal_workflow(self, _input: object) -> object:
+                return await self._call()
+
+            async def handle_signal(self, _input: object) -> object:
+                return await self._call()
+
+        terminal = Terminal()
+        if boundary == "span-shell":
+
+            class Manager:
+                token: object | None = None
+
+                def __enter__(self) -> SimpleNamespace:
+                    self.token = module.otel_context.attach(span_owned_context)
+                    return SimpleNamespace()
+
+                def __exit__(self, *_args: object) -> None:
+                    assert self.token is not None
+                    module.otel_context.detach(self.token)
+
+            class Tracer:
+                def start_as_current_span(self, *_args: object, **_kwargs: object) -> Manager:
+                    return Manager()
+
+            wrapper = module.SafeTemporalTracingInterceptor(
+                cast(Any, Tracer()), role="client"
+            ).intercept_client(cast(Any, terminal))
+            result = await wrapper.signal_workflow(_client_input("signal_workflow"))
+        else:
+            incoming_context = _span_context({"traceparent": TRACEPARENT})
+            headers = module.encode_temporal_trace_headers({}, context=incoming_context)
+            workflow = object.__new__(module.TracingWorkflowInboundInterceptor)
+            temporalio.worker.WorkflowInboundInterceptor.__init__(workflow, cast(Any, terminal))
+            workflow.header_key = "_tracer-data"
+            workflow.text_map_propagator = TraceContextTextMapPropagator()
+            workflow.payload_converter = PayloadConverter.default
+            workflow._workflow_context_carrier = None
+            result = await workflow.handle_signal(HandleSignalInput("signal", (), headers))
+
+        assert result is product_result
+        assert calls == 1
+        assert observed["owned"] is not entry_context
+        assert module.otel_context.get_current() is entry_context
+        observed["entry"] = entry_context
+
+    isolated_context.run(asyncio.run, exercise())
+    assert isolated_context.run(module.otel_context.get_current) is observed["entry"]
+    assert module.otel_context.get_current() is outer_entry
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["span-shell", "workflow"])
+async def test_temporal_context_boundaries_preserve_ambient_entry_through_owner_detach(
+    boundary: str,
+) -> None:
+    module = _temporal()
+    prior_entry = module.otel_context.get_current()
+    ambient_context = Context({"temporal-context-ambient": boundary})
+    ambient_token = module.otel_context.attach(ambient_context)
+    product_result = object()
+    calls = 0
+    observed: dict[str, Context] = {}
+    finished_span_id: int | None = None
+
+    class Terminal:
+        async def _call(self) -> object:
+            nonlocal calls
+            calls += 1
+            observed["owned"] = module.otel_context.get_current()
+            return product_result
+
+        async def signal_workflow(self, _input: object) -> object:
+            return await self._call()
+
+        async def handle_signal(self, _input: object) -> object:
+            return await self._call()
+
+    terminal = Terminal()
+    try:
+        if boundary == "span-shell":
+            with _recording_tracer() as (tracer, exporter):
+                wrapper = module.SafeTemporalTracingInterceptor(
+                    tracer, role="client"
+                ).intercept_client(cast(Any, terminal))
+                result = await wrapper.signal_workflow(_client_input("signal_workflow"))
+                finished = exporter.get_finished_spans()
+                assert len(finished) == 1
+                assert finished[0].end_time is not None
+                finished_span_id = finished[0].context.span_id
+        else:
+            incoming_context = _span_context({"traceparent": SECOND_TRACEPARENT})
+            headers = module.encode_temporal_trace_headers({}, context=incoming_context)
+            workflow = object.__new__(module.TracingWorkflowInboundInterceptor)
+            temporalio.worker.WorkflowInboundInterceptor.__init__(workflow, cast(Any, terminal))
+            workflow.header_key = "_tracer-data"
+            workflow.text_map_propagator = TraceContextTextMapPropagator()
+            workflow.payload_converter = PayloadConverter.default
+            workflow._workflow_context_carrier = None
+            result = await workflow.handle_signal(HandleSignalInput("signal", (), headers))
+
+        assert result is product_result
+        assert calls == 1
+        assert observed["owned"] is not ambient_context
+        assert module.otel_context.get_current() is ambient_context
+        if finished_span_id is not None:
+            assert get_current_span().get_span_context().span_id != finished_span_id
+    finally:
+        module.otel_context.detach(ambient_token)
+
+    assert module.otel_context.get_current() is prior_entry
+    if finished_span_id is not None:
+        assert get_current_span().get_span_context().span_id != finished_span_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["span-shell", "workflow"])
+async def test_temporal_context_boundaries_support_body_local_foreign_scope_when_detached_before_return(  # noqa: E501
+    boundary: str,
+) -> None:
+    module = _temporal()
+    entry_context = module.otel_context.get_current()
+    temporary_foreign = Context({"temporal-context-temporary": boundary})
+    product_result = object()
+    calls = 0
+    observed: dict[str, Context] = {}
+
+    class Terminal:
+        async def _call(self) -> object:
+            nonlocal calls
+            calls += 1
+            owned_context = module.otel_context.get_current()
+            observed["owned"] = owned_context
+            temporary_token = module.otel_context.attach(temporary_foreign)
+            try:
+                assert module.otel_context.get_current() is temporary_foreign
+            finally:
+                module.otel_context.detach(temporary_token)
+            assert module.otel_context.get_current() is owned_context
+            observed["after-detach"] = module.otel_context.get_current()
+            return product_result
+
+        async def signal_workflow(self, _input: object) -> object:
+            return await self._call()
+
+        async def handle_signal(self, _input: object) -> object:
+            return await self._call()
+
+    terminal = Terminal()
+    if boundary == "span-shell":
+        with _recording_tracer() as (tracer, _exporter):
+            wrapper = module.SafeTemporalTracingInterceptor(tracer, role="client").intercept_client(
+                cast(Any, terminal)
+            )
+            result = await wrapper.signal_workflow(_client_input("signal_workflow"))
+    else:
+        incoming_context = _span_context({"traceparent": SECOND_TRACEPARENT})
+        headers = module.encode_temporal_trace_headers({}, context=incoming_context)
+        workflow = object.__new__(module.TracingWorkflowInboundInterceptor)
+        temporalio.worker.WorkflowInboundInterceptor.__init__(workflow, cast(Any, terminal))
+        workflow.header_key = "_tracer-data"
+        workflow.text_map_propagator = TraceContextTextMapPropagator()
+        workflow.payload_converter = PayloadConverter.default
+        workflow._workflow_context_carrier = None
+        result = await workflow.handle_signal(HandleSignalInput("signal", (), headers))
+
+    assert result is product_result
+    assert calls == 1
+    assert observed["owned"] is not entry_context
+    assert observed["after-detach"] is observed["owned"]
+    assert module.otel_context.get_current() is entry_context
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("boundary", ["span-shell", "workflow"])
 @pytest.mark.parametrize("business_fails", [False, True])
@@ -2142,19 +2340,21 @@ async def test_fail_open_cleanup_never_clobbers_foreign_downstream_context(
     class Terminal:
         def __init__(self) -> None:
             self.calls = 0
-            self.foreign_token: object | None = None
             self.failure_traceback: Any = None
 
         async def _call(self) -> object:
             self.calls += 1
-            self.foreign_token = original_attach(foreign_context)
-            if business_fails:
-                try:
-                    raise business_error
-                except BaseException as error:
-                    self.failure_traceback = _traceback_tail(error.__traceback__)
-                    raise
-            return business_result
+            foreign_token = original_attach(foreign_context)
+            try:
+                if business_fails:
+                    try:
+                        raise business_error
+                    except BaseException as error:
+                        self.failure_traceback = _traceback_tail(error.__traceback__)
+                        raise
+                return business_result
+            finally:
+                original_detach(foreign_token)
 
         async def signal_workflow(self, _input: object) -> object:
             return await self._call()
@@ -2221,7 +2421,7 @@ async def test_fail_open_cleanup_never_clobbers_foreign_downstream_context(
             caught = error
         assert terminal.calls == 1
         assert teardown_calls == 1
-        assert module.otel_context.get_current() is foreign_context
+        assert module.otel_context.get_current() is ambient_context
         if business_fails:
             assert caught is business_error
             assert _traceback_tail(caught.__traceback__) is terminal.failure_traceback
@@ -2229,9 +2429,6 @@ async def test_fail_open_cleanup_never_clobbers_foreign_downstream_context(
             assert caught is None
             assert result is business_result
     finally:
-        if terminal.foreign_token is not None:
-            with suppress(BaseException):
-                original_detach(terminal.foreign_token)
         if manager_token is not None:
             with suppress(BaseException):
                 original_detach(manager_token)

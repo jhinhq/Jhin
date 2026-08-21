@@ -476,8 +476,6 @@ class SafeTemporalTracingInterceptor(TracingInterceptor):
                     _best_effort_restore_context(before_error_telemetry)
         finally:
             if manager is not None:
-                before_exit = _current_otel_context()
-                desired_context = entry_context if before_exit is owned_context else before_exit
                 try:
                     if authoritative is None:
                         manager.__exit__(None, None, None)
@@ -485,8 +483,7 @@ class SafeTemporalTracingInterceptor(TracingInterceptor):
                         manager.__exit__(type(authoritative), authoritative, traceback)
                 except BaseException:
                     pass
-                if desired_context is not None:
-                    _best_effort_restore_context(desired_context)
+                _best_effort_restore_context(entry_context)
         if authoritative is not None:
             raise authoritative.with_traceback(traceback)
 
@@ -684,12 +681,9 @@ def _workflow_attached(
     try:
         yield None
     finally:
-        before_detach = _current_otel_context()
-        desired_context = entry_context if before_detach is owned_context else before_detach
         with suppress(BaseException):
             otel_context.detach(token)
-        if desired_context is not None:
-            _best_effort_restore_context(desired_context)
+        _best_effort_restore_context(entry_context)
 
 
 class TracingWorkflowInboundInterceptor(_SdkWorkflowInboundInterceptor):
