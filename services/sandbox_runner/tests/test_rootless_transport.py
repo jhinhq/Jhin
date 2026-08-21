@@ -218,7 +218,7 @@ async def test_upstream_connect_failure_after_readiness_terminates_server(
             connection_limit=4,
         )
     )
-    await wait_for_tcp("127.0.0.1", unused_tcp_port)
+    assert await ping_transport("127.0.0.1", unused_tcp_port) == RESPONSE
     path.unlink()
     _reader, writer = await asyncio.open_connection("127.0.0.1", unused_tcp_port)
     writer.write(PING)
