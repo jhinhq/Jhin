@@ -134,6 +134,7 @@ disallow_untyped_calls = false
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+pythonpath = [".", "services/agent_worker/tests"]
 testpaths = [
     "apps/api/tests",
     "packages/domain/tests",
@@ -157,4 +158,4 @@ testpaths = [
 markers = [
     "integration: requires the running Docker Compose stack (deselected by default)",
 ]
-addopts = "-m 'not integration'"
+addopts = "-m 'not integration' --import-mode=importlib"
