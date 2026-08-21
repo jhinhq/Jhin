@@ -145,6 +145,20 @@ class NoopMetricExporter(MetricExporter):
         return None
 
 
+class ReleasableBlockingMetricExporter(NoopMetricExporter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def export(
+        self, metrics_data: MetricsData, timeout_millis: float = 10_000, **kwargs: object
+    ) -> MetricExportResult:
+        self.entered.set()
+        self.release.wait()
+        return MetricExportResult.SUCCESS
+
+
 def configured_config(**changes: Any) -> ObservabilityConfig:
     values: dict[str, object] = {
         "service_name": "api",
@@ -644,6 +658,57 @@ def test_expired_shutdown_deadline_still_requests_every_cleanup(
     runtime.shutdown(timeout_millis=0)
     assert calls == [("second", 0), ("first", 0)]
     assert vars(runtime)["_shutdown_complete"] is True
+
+
+def test_zero_deadline_requests_real_periodic_reader_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    span_exporter = RecordingSpanExporter()
+    metric_exporter = ReleasableBlockingMetricExporter()
+    monkeypatch.setattr(
+        bootstrap_module,
+        "_create_otlp_span_exporter",
+        lambda _config, _credentials: span_exporter,
+    )
+    monkeypatch.setattr(
+        bootstrap_module,
+        "_create_otlp_metric_exporter",
+        lambda _config, _credentials: metric_exporter,
+    )
+    readers: list[PeriodicExportingMetricReader] = []
+    create_reader = bootstrap_module._create_metric_reader
+
+    def capture_reader(
+        exporter: MetricExporter, config: ObservabilityConfig
+    ) -> PeriodicExportingMetricReader:
+        reader = create_reader(exporter, config)
+        assert isinstance(reader, PeriodicExportingMetricReader)
+        readers.append(reader)
+        return reader
+
+    monkeypatch.setattr(bootstrap_module, "_create_metric_reader", capture_reader)
+    runtime = initialize_observability(
+        configured_config(
+            export_timeout_millis=50,
+            metric_export_interval_millis=1,
+        )
+    )
+    runtime.meter.create_counter("test.zero_deadline").add(1)
+    assert metric_exporter.entered.wait(timeout=1.0)
+    reader = readers[0]
+    shutdown_event = vars(reader)["_shutdown_event"]
+    daemon_thread = vars(reader)["_daemon_thread"]
+    try:
+        started = time.monotonic()
+        runtime.shutdown(timeout_millis=0)
+        assert time.monotonic() - started < 0.1
+        assert shutdown_event.wait(timeout=1.0)
+    finally:
+        metric_exporter.release.set()
+        if not shutdown_event.is_set():
+            reader.shutdown(timeout_millis=1_000)
+        daemon_thread.join(timeout=1.0)
+    assert daemon_thread.is_alive() is False
 
 
 def test_partial_cleanup_is_requested_after_shared_deadline_expires(

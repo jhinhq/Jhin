@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import json
+import queue
 import threading
 import time
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from _pytest.capture import CaptureFixture
+from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import (
     MetricExporter,
     MetricExportResult,
     MetricsData,
+    PeriodicExportingMetricReader,
 )
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import ReadableSpan
@@ -93,6 +97,52 @@ class MutableMetricExporter(MetricExporter):
 
     def shutdown(self, timeout_millis: float = 30_000, **kwargs: object) -> None:
         return None
+
+
+class BlockingShutdownMetricExporter(MutableMetricExporter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.shutdown_calls: list[tuple[float, dict[str, object]]] = []
+
+    def shutdown(self, timeout_millis: float = 30_000, **kwargs: object) -> None:
+        self.shutdown_calls.append((timeout_millis, dict(kwargs)))
+        self.entered.set()
+        if timeout_millis > 100 or kwargs:
+            self.release.wait()
+
+
+class CoordinatedShutdownQueue(queue.Queue[ReadableSpan]):
+    """Expose whether a shutdown worker polls again for an admitted item."""
+
+    def __init__(self, maxsize: int = 0) -> None:
+        super().__init__(maxsize=maxsize)
+        self.processor: BoundedBatchSpanProcessor | None = None
+        self.ready = threading.Event()
+        self.submission_entered = threading.Event()
+        self.second_shutdown_poll = threading.Event()
+        self._shutdown_polls = 0
+
+    def get(self, block: bool = True, timeout: float | None = None) -> ReadableSpan:
+        if threading.current_thread().name == "jhin-otel-span-exporter":
+            assert self.ready.wait(timeout=1.0)
+            processor = self.processor
+            assert processor is not None
+            if processor._shutdown_requested.is_set():
+                self._shutdown_polls += 1
+                if self._shutdown_polls == 1:
+                    raise queue.Empty
+                self.second_shutdown_poll.set()
+        return super().get(block=block, timeout=timeout)
+
+    def put_nowait(self, item: ReadableSpan) -> None:
+        self.submission_entered.set()
+        processor = self.processor
+        assert processor is not None
+        while not processor.stopped.is_set() and not self.second_shutdown_poll.is_set():
+            self.second_shutdown_poll.wait(timeout=0.01)
+        super().put_nowait(item)
 
 
 def stop_processor(
@@ -185,6 +235,110 @@ def test_force_flush_and_shutdown_obey_deadline_when_exporter_is_blocked() -> No
     assert processor.stopped.wait(timeout=1.0)
     processor.worker_thread.join(timeout=1.0)
     assert processor.worker_thread.is_alive() is False
+
+
+def test_force_flush_observes_completion_when_export_finishes_before_put_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processor = BoundedBatchSpanProcessor(
+        MutableSpanExporter(),
+        diagnostics=ExportDiagnostics(frozenset({"traces"})),
+        max_queue_size=4,
+        max_export_batch_size=1,
+        export_timeout_millis=25,
+    )
+    worker_marked_complete = threading.Event()
+    original_set = processor._all_done.set
+    original_put_nowait = processor._queue.put_nowait
+
+    def observe_completion() -> None:
+        original_set()
+        worker_marked_complete.set()
+
+    def put_after_worker_completes(span: ReadableSpan) -> None:
+        completion_was_cleared = not processor._all_done.is_set()
+        original_put_nowait(span)
+        if not completion_was_cleared:
+            assert worker_marked_complete.wait(timeout=1.0)
+
+    monkeypatch.setattr(processor._all_done, "set", observe_completion)
+    monkeypatch.setattr(processor._queue, "put_nowait", put_after_worker_completes)
+    try:
+        processor.on_end(readable_span(1))
+        assert worker_marked_complete.wait(timeout=1.0)
+        assert processor._queue.unfinished_tasks == 0
+        assert processor.force_flush(timeout_millis=0) is True
+    finally:
+        stop_processor(processor)
+
+
+def test_shutdown_does_not_strand_submission_admitted_before_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinated_queue = CoordinatedShutdownQueue(maxsize=4)
+    queue_proxy = SimpleNamespace(
+        Queue=lambda maxsize=0: coordinated_queue,
+        Empty=queue.Empty,
+        Full=queue.Full,
+    )
+    monkeypatch.setattr("jhin_observability.exporters.queue", queue_proxy)
+    exporter = MutableSpanExporter()
+    diagnostics = ExportDiagnostics(frozenset({"traces"}))
+    processor = BoundedBatchSpanProcessor(
+        exporter,
+        diagnostics=diagnostics,
+        max_queue_size=4,
+        max_export_batch_size=1,
+        export_timeout_millis=25,
+    )
+    coordinated_queue.processor = processor
+    coordinated_queue.ready.set()
+    submission = threading.Thread(target=lambda: processor.on_end(readable_span(1)))
+    shutdown = threading.Thread(target=lambda: processor.shutdown(timeout_millis=500))
+    submission.start()
+    assert coordinated_queue.submission_entered.wait(timeout=1.0)
+    shutdown.start()
+    submission.join(timeout=1.0)
+    shutdown.join(timeout=1.0)
+    assert submission.is_alive() is False
+    assert shutdown.is_alive() is False
+    processor.worker_thread.join(timeout=1.0)
+    assert processor.worker_thread.is_alive() is False
+    assert coordinated_queue.unfinished_tasks == 0
+    assert diagnostics.snapshot().dropped_items == 0
+
+
+def test_periodic_reader_forwards_its_remaining_shutdown_budget_once() -> None:
+    delegate = BlockingShutdownMetricExporter()
+    wrapper = DiagnosticMetricExporter(
+        delegate,
+        ExportDiagnostics(frozenset({"metrics"})),
+    )
+    reader = PeriodicExportingMetricReader(
+        wrapper,
+        export_interval_millis=300_000,
+        export_timeout_millis=50,
+    )
+    provider = MeterProvider(metric_readers=(reader,), shutdown_on_exit=False)
+    completed = threading.Event()
+
+    def shutdown_provider() -> None:
+        provider.shutdown(timeout_millis=10)
+        completed.set()
+
+    shutdown = threading.Thread(target=shutdown_provider)
+    shutdown.start()
+    try:
+        assert delegate.entered.wait(timeout=1.0)
+        assert completed.wait(timeout=0.1)
+        assert len(delegate.shutdown_calls) == 1
+        timeout_millis, kwargs = delegate.shutdown_calls[0]
+        assert 0 < timeout_millis <= 10
+        assert kwargs == {}
+    finally:
+        delegate.release.set()
+        shutdown.join(timeout=1.0)
+    assert shutdown.is_alive() is False
 
 
 def test_shutdown_releases_blocked_exporter_within_deadline() -> None:

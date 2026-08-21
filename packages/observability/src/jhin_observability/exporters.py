@@ -193,8 +193,12 @@ class DiagnosticMetricExporter(MetricExporter):
             return False
 
     def shutdown(self, timeout_millis: float = 30_000, **kwargs: Any) -> None:
+        effective_timeout_millis = kwargs.pop("timeout", timeout_millis)
         try:
-            self._delegate.shutdown(timeout_millis=timeout_millis, **kwargs)
+            self._delegate.shutdown(
+                timeout_millis=effective_timeout_millis,
+                **kwargs,
+            )
         except Exception:
             return None
 
@@ -228,6 +232,8 @@ class BoundedBatchSpanProcessor(SpanProcessor):
         self._shutdown_requested = threading.Event()
         self._all_done = threading.Event()
         self._all_done.set()
+        self._state_lock = threading.Lock()
+        self._active_submissions = 0
         self._exporter_shutdown_lock = threading.Lock()
         self._exporter_shutdown_thread: threading.Thread | None = None
         self.stopped = threading.Event()
@@ -243,15 +249,28 @@ class BoundedBatchSpanProcessor(SpanProcessor):
         return None
 
     def on_end(self, span: ReadableSpan) -> None:
-        if self._shutdown_requested.is_set():
+        with self._state_lock:
+            if self._shutdown_requested.is_set():
+                accepted = False
+            else:
+                accepted = True
+                self._active_submissions += 1
+                self._all_done.clear()
+        if not accepted:
             self.diagnostics.increment_dropped_atomic()
             return
+        dropped = False
         try:
             self._queue.put_nowait(span)
         except queue.Full:
+            dropped = True
+        finally:
+            with self._state_lock:
+                self._active_submissions -= 1
+                if self._active_submissions == 0 and self._queue.unfinished_tasks == 0:
+                    self._all_done.set()
+        if dropped:
             self.diagnostics.increment_dropped_atomic()
-            return
-        self._all_done.clear()
 
     def force_flush(self, timeout_millis: int = 30_000) -> bool:
         if timeout_millis < 0:
@@ -262,7 +281,8 @@ class BoundedBatchSpanProcessor(SpanProcessor):
         if timeout_millis < 0:
             raise ValueError("timeout_millis must not be negative")
         deadline = time.monotonic() + timeout_millis / 1_000
-        self._shutdown_requested.set()
+        with self._state_lock:
+            self._shutdown_requested.set()
         self._all_done.wait(timeout=max(0.0, deadline - time.monotonic()))
         if not self.stopped.is_set():
             self._request_exporter_shutdown(max(0, int((deadline - time.monotonic()) * 1_000)))
@@ -287,7 +307,7 @@ class BoundedBatchSpanProcessor(SpanProcessor):
 
     def _run(self) -> None:
         try:
-            while not self._shutdown_requested.is_set() or not self._queue.empty():
+            while not self._should_stop():
                 try:
                     first = self._queue.get(timeout=0.05)
                 except queue.Empty:
@@ -316,14 +336,25 @@ class BoundedBatchSpanProcessor(SpanProcessor):
                 finally:
                     for _span in batch:
                         self._queue.task_done()
-                    if self._queue.unfinished_tasks == 0:
-                        self._all_done.set()
+                    with self._state_lock:
+                        if self._active_submissions == 0 and self._queue.unfinished_tasks == 0:
+                            self._all_done.set()
                 self._report_drops_from_exporter_thread()
         finally:
             self._report_drops_from_exporter_thread()
             self._request_exporter_shutdown(self._export_timeout_millis)
-            self._all_done.set()
+            with self._state_lock:
+                if self._active_submissions == 0 and self._queue.unfinished_tasks == 0:
+                    self._all_done.set()
             self.stopped.set()
+
+    def _should_stop(self) -> bool:
+        with self._state_lock:
+            return (
+                self._shutdown_requested.is_set()
+                and self._active_submissions == 0
+                and self._queue.empty()
+            )
 
     def _report_drops_from_exporter_thread(self) -> None:
         now = time.monotonic()

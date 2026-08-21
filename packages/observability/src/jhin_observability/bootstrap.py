@@ -7,6 +7,7 @@ import stat
 import threading
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -206,11 +207,14 @@ def _construct_configured_runtime(config: ObservabilityConfig) -> ObservabilityR
 
         raw_metric_exporter = _create_otlp_metric_exporter(config, credentials)
         cleanup_callbacks.append(
-            lambda remaining: raw_metric_exporter.shutdown(timeout_millis=remaining)
+            lambda remaining: _shutdown_metric_exporter(raw_metric_exporter, remaining)
         )
         metric_exporter = DiagnosticMetricExporter(raw_metric_exporter, diagnostics)
         metric_reader = _create_metric_reader(metric_exporter, config)
-        cleanup_callbacks[-1] = lambda remaining: metric_reader.shutdown(timeout_millis=remaining)
+        cleanup_callbacks[-1] = lambda remaining: _shutdown_metric_reader(
+            metric_reader,
+            remaining,
+        )
 
         resource = Resource(
             {
@@ -222,7 +226,11 @@ def _construct_configured_runtime(config: ObservabilityConfig) -> ObservabilityR
         tracer_provider = _create_tracer_provider(resource, config)
         tracer_provider.add_span_processor(span_processor)
         meter_provider = _create_meter_provider(resource, metric_reader)
-        cleanup_callbacks[-1] = lambda remaining: meter_provider.shutdown(timeout_millis=remaining)
+        cleanup_callbacks[-1] = lambda remaining: _shutdown_meter_provider(
+            meter_provider,
+            metric_reader,
+            remaining,
+        )
 
         return ObservabilityRuntime(
             config=config,
@@ -267,6 +275,67 @@ def _shutdown_span_exporter(exporter: SpanExporter, timeout_millis: int) -> None
     )
     worker.start()
     worker.join(timeout=max(0, timeout_millis) / 1_000)
+
+
+def _request_bounded_shutdown(
+    shutdown: Callable[[], None],
+    *,
+    thread_name: str,
+    timeout_millis: int,
+) -> None:
+    worker = threading.Thread(
+        target=shutdown,
+        name=thread_name,
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout=max(0, timeout_millis) / 1_000)
+
+
+def _shutdown_metric_exporter(exporter: MetricExporter, timeout_millis: int) -> None:
+    def shutdown() -> None:
+        with suppress(Exception):
+            exporter.shutdown(timeout_millis=timeout_millis)
+
+    _request_bounded_shutdown(
+        shutdown,
+        thread_name="jhin-otel-partial-metric-exporter-shutdown",
+        timeout_millis=timeout_millis,
+    )
+
+
+def _shutdown_metric_reader(reader: MetricReader, timeout_millis: int) -> None:
+    def shutdown() -> None:
+        with suppress(Exception):
+            reader.shutdown(timeout_millis=timeout_millis)
+
+    _request_bounded_shutdown(
+        shutdown,
+        thread_name="jhin-otel-partial-metric-reader-shutdown",
+        timeout_millis=timeout_millis,
+    )
+
+
+def _shutdown_meter_provider(
+    provider: MeterProvider,
+    reader: MetricReader,
+    timeout_millis: int,
+) -> None:
+    def shutdown() -> None:
+        if timeout_millis == 0:
+            with suppress(Exception):
+                provider.shutdown(timeout_millis=0)
+            with suppress(Exception):
+                reader.shutdown(timeout_millis=0)
+            return
+        with suppress(Exception):
+            provider.shutdown(timeout_millis=timeout_millis)
+
+    _request_bounded_shutdown(
+        shutdown,
+        thread_name="jhin-otel-meter-provider-shutdown",
+        timeout_millis=timeout_millis,
+    )
 
 
 def _read_tls_file(path: Path | None) -> bytes | None:
