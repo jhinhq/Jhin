@@ -11,7 +11,7 @@ import math
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import ModuleType, SimpleNamespace
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 from uuid import UUID
 
 import pytest
@@ -688,10 +688,15 @@ async def test_runtime_is_owned_when_logging_configuration_fails(
     logging_error = RuntimeError("logging-config-canary")
     monkeypatch.setattr(main, "Settings", lambda: FakeSettings(events))
     monkeypatch.setattr(main, "service_version", lambda _: "test-version", raising=False)
+
+    def initialize(_config: object) -> FakeRuntime:
+        events.append("runtime.initialize")
+        return runtime
+
     monkeypatch.setattr(
         main,
         "initialize_observability",
-        lambda _config: (events.append("runtime.initialize"), runtime)[1],
+        initialize,
         raising=False,
     )
 
@@ -711,6 +716,42 @@ async def test_runtime_is_owned_when_logging_configuration_fails(
         "logging.configure",
         "runtime.shutdown",
     ]
+
+
+async def test_runtime_is_owned_when_stop_event_construction_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    main = worker_main()
+    events: list[str] = []
+    runtime = FakeRuntime(events)
+    stop_error = RuntimeError("stop-event-construction-canary")
+    monkeypatch.setattr(main, "Settings", lambda: FakeSettings(events))
+    monkeypatch.setattr(main, "service_version", lambda _: "test-version", raising=False)
+
+    def initialize(_config: object) -> FakeRuntime:
+        events.append("runtime.initialize")
+        return runtime
+
+    def fail_stop_event() -> NoReturn:
+        events.append("stop.construct")
+        raise stop_error
+
+    monkeypatch.setattr(main, "initialize_observability", initialize, raising=False)
+    monkeypatch.setattr(main.asyncio, "Event", fail_stop_event)
+    monkeypatch.setattr(main, "clear_heartbeat", lambda: events.append("heartbeat.clear"))
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await main.main()
+    assert excinfo.value is stop_error
+    assert events == [
+        "settings",
+        "settings.observability_config",
+        "runtime.initialize",
+        "stop.construct",
+        "heartbeat.clear",
+        "runtime.shutdown",
+    ]
+    assert events.count("runtime.shutdown") == 1
 
 
 class CleanupTrackingClient(FakeClient):
@@ -1198,6 +1239,27 @@ def test_main_source_initializes_runtime_before_every_resource_owner() -> None:
     main_node = next(
         node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "main"
     )
+    settings_statement_index = next(
+        index
+        for index, statement in enumerate(main_node.body)
+        if isinstance(statement, ast.Assign)
+        and isinstance(statement.value, ast.Call)
+        and isinstance(statement.value.func, ast.Name)
+        and statement.value.func.id == "Settings"
+    )
+    prebound_names = {
+        statement.target.id
+        for statement in main_node.body[:settings_statement_index]
+        if isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name)
+    }
+    assert prebound_names == {
+        "client",
+        "engine",
+        "heartbeat_task",
+        "lag_task",
+        "stop",
+        "registered_signals",
+    }
     runtime_statement_index = next(
         index
         for index, statement in enumerate(main_node.body)

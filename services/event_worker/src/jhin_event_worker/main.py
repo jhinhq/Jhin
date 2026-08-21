@@ -199,11 +199,12 @@ async def _cleanup_owned_resources(
     engine: AsyncEngine | None,
     heartbeat_task: asyncio.Task[None] | None,
     lag_task: asyncio.Task[None] | None,
-    stop: asyncio.Event,
+    stop: asyncio.Event | None,
     registered_signals: list[signal.Signals],
 ) -> _CleanupOutcome:
     outcome = _CleanupOutcome()
-    stop.set()
+    if stop is not None:
+        stop.set()
     background_tasks = [task for task in (heartbeat_task, lag_task) if task is not None]
     for task in background_tasks:
         if not task.done():
@@ -273,6 +274,12 @@ async def _reawait_cleanup_through_cancellation(
 
 
 async def main() -> None:
+    client: NatsClient | None = None
+    engine: AsyncEngine | None = None
+    heartbeat_task: asyncio.Task[None] | None = None
+    lag_task: asyncio.Task[None] | None = None
+    stop: asyncio.Event | None = None
+    registered_signals: list[signal.Signals] = []
     settings = Settings()
     runtime = initialize_observability(
         settings.observability_config(
@@ -282,12 +289,7 @@ async def main() -> None:
         )
     )
     try:
-        client: NatsClient | None = None
-        engine: AsyncEngine | None = None
-        heartbeat_task: asyncio.Task[None] | None = None
-        lag_task: asyncio.Task[None] | None = None
         stop = asyncio.Event()
-        registered_signals: list[signal.Signals] = []
         configure_json_logging(
             service="event-worker",
             environment=normalize_environment(settings.app_env),

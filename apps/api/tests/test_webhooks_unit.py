@@ -3,7 +3,9 @@ rejection, delivery-id dedupe, ping handling, and 404-not-leaking — with a
 recording JetStream stub instead of NATS."""
 
 import json
-from collections.abc import AsyncIterator, Mapping
+import sys
+from collections.abc import AsyncIterator, Iterator, Mapping
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, ClassVar
@@ -18,7 +20,7 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from opentelemetry.trace import SpanKind, TraceFlags, Tracer
+from opentelemetry.trace import SpanContext, SpanKind, TraceFlags, Tracer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -164,7 +166,8 @@ class TraceService:
     exporter: InMemorySpanExporter
 
 
-def trace_service(service_name: str) -> TraceService:
+@contextmanager
+def trace_service(service_name: str) -> Iterator[TraceService]:
     provider = TracerProvider(
         resource=Resource(
             {
@@ -174,9 +177,77 @@ def trace_service(service_name: str) -> TraceService:
             }
         )
     )
-    exporter = InMemorySpanExporter()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    return TraceService(provider, provider.get_tracer(f"{service_name}-test"), exporter)
+    try:
+        exporter = InMemorySpanExporter()
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+        yield TraceService(
+            provider,
+            provider.get_tracer(f"{service_name}-test"),
+            exporter,
+        )
+    finally:
+        provider.shutdown()
+
+
+def track_provider_shutdowns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[int]:
+    shutdown_ids: list[int] = []
+    original_shutdown = TracerProvider.shutdown
+
+    def tracked_shutdown(provider: TracerProvider) -> None:
+        shutdown_ids.append(id(provider))
+        original_shutdown(provider)
+
+    monkeypatch.setattr(TracerProvider, "shutdown", tracked_shutdown)
+    return shutdown_ids
+
+
+def test_trace_services_close_every_provider_when_second_setup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shutdown_ids = track_provider_shutdowns(monkeypatch)
+    real_exporter = InMemorySpanExporter
+    exporter_calls = 0
+    setup_error = RuntimeError("second-provider-setup-canary")
+
+    def exporter_factory() -> InMemorySpanExporter:
+        nonlocal exporter_calls
+        exporter_calls += 1
+        if exporter_calls == 2:
+            raise setup_error
+        return real_exporter()
+
+    monkeypatch.setattr(sys.modules[__name__], "InMemorySpanExporter", exporter_factory)
+
+    with pytest.raises(RuntimeError) as excinfo, ExitStack() as stack:
+        stack.enter_context(trace_service("api"))
+        stack.enter_context(trace_service("event-worker"))
+    assert excinfo.value is setup_error
+    assert len(shutdown_ids) == 2
+    assert len(set(shutdown_ids)) == 2
+
+
+def test_trace_services_close_after_post_acquisition_fastapi_setup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shutdown_ids = track_provider_shutdowns(monkeypatch)
+    setup_error = RuntimeError("fastapi-setup-canary")
+
+    def fail_add_middleware(self: FastAPI, *_args: Any, **_kwargs: Any) -> None:
+        del self
+        raise setup_error
+
+    monkeypatch.setattr(FastAPI, "add_middleware", fail_add_middleware)
+
+    with pytest.raises(RuntimeError) as excinfo, ExitStack() as stack:
+        stack.enter_context(trace_service("api"))
+        stack.enter_context(trace_service("event-worker"))
+        app = FastAPI()
+        app.add_middleware(HttpObservabilityMiddleware)
+    assert excinfo.value is setup_error
+    assert len(shutdown_ids) == 2
+    assert len(set(shutdown_ids)) == 2
 
 
 def serialized_trace_span(span: ReadableSpan) -> str:
@@ -197,6 +268,10 @@ def serialized_trace_span(span: ReadableSpan) -> str:
                 {"name": event.name, "attributes": dict(event.attributes or {})}
                 for event in span.events
             ],
+            "status": {
+                "code": span.status.status_code.name,
+                "description": span.status.description,
+            },
         },
         default=str,
         sort_keys=True,
@@ -205,6 +280,12 @@ def serialized_trace_span(span: ReadableSpan) -> str:
 
 def span_id_from_traceparent(value: str) -> int:
     return int(value.split("-")[2], 16)
+
+
+def require_parent(span: ReadableSpan) -> SpanContext:
+    parent = span.parent
+    assert parent is not None
+    return parent
 
 
 def assert_telemetry_context_empty() -> None:
@@ -355,62 +436,63 @@ async def test_real_webhook_to_worker_path_has_exact_five_span_parent_graph(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     connection, secret = github_connection
-    api_trace = trace_service("api")
-    worker_trace = trace_service("event-worker")
-    timeline: list[str] = []
-    ingress_js = RecordingJetStream(
-        timeline=timeline,
-        publish_event="INGRESS publish",
-    )
-    events_js = RecordingJetStream(
-        timeline=timeline,
-        publish_event="EVENTS publish",
-    )
-    matched: list[EventEnvelope] = []
-    matched_span_ids: list[int] = []
-
-    class RecordingMatcher:
-        async def handle_event(self, envelope: EventEnvelope) -> None:
-            matched.append(envelope)
-            matched_span_ids.append(trace.get_current_span().get_span_context().span_id)
-            timeline.append("matcher")
-
-    app = FastAPI()
-    app.state.secret_crypto = crypto
-    app.state.observability = SimpleNamespace(tracer=api_trace.tracer)
-    app.add_middleware(HttpObservabilityMiddleware)
-    app.include_router(webhooks_router)
-
-    async def override_db() -> AsyncIterator[AsyncSession]:
-        yield session
-
-    async def override_jetstream() -> RecordingJetStream:
-        return ingress_js
-
-    app.dependency_overrides[get_db] = override_db
-    app.dependency_overrides[get_jetstream] = override_jetstream
-    body = json.dumps(ISSUE_PAYLOAD, separators=(",", ":")).encode()
-    request_headers = dict(
-        github_headers(
-            secret,
-            body,
-            event="issues",
-            delivery="five-span-delivery",
-        )
-    )
-    request_headers.update(
-        {
-            "traceparent": REMOTE_TRACEPARENT,
-            "tracestate": REMOTE_TRACESTATE,
-            "baggage": "private-baggage-canary=do-not-propagate",
-            "authorization": "Bearer private-authorization-canary",
-            "cookie": "session=private-cookie-canary",
-            "x-private-canary": "private-header-value-canary",
-        }
-    )
-    capsys.readouterr()
-
+    trace_stack = ExitStack()
+    api_trace = trace_stack.enter_context(trace_service("api"))
     try:
+        worker_trace = trace_stack.enter_context(trace_service("event-worker"))
+        timeline: list[str] = []
+        ingress_js = RecordingJetStream(
+            timeline=timeline,
+            publish_event="INGRESS publish",
+        )
+        events_js = RecordingJetStream(
+            timeline=timeline,
+            publish_event="EVENTS publish",
+        )
+        matched: list[EventEnvelope] = []
+        matched_span_ids: list[int] = []
+
+        class RecordingMatcher:
+            async def handle_event(self, envelope: EventEnvelope) -> None:
+                matched.append(envelope)
+                matched_span_ids.append(trace.get_current_span().get_span_context().span_id)
+                timeline.append("matcher")
+
+        app = FastAPI()
+        app.state.secret_crypto = crypto
+        app.state.observability = SimpleNamespace(tracer=api_trace.tracer)
+        app.add_middleware(HttpObservabilityMiddleware)
+        app.include_router(webhooks_router)
+
+        async def override_db() -> AsyncIterator[AsyncSession]:
+            yield session
+
+        async def override_jetstream() -> RecordingJetStream:
+            return ingress_js
+
+        app.dependency_overrides[get_db] = override_db
+        app.dependency_overrides[get_jetstream] = override_jetstream
+        body = json.dumps(ISSUE_PAYLOAD, separators=(",", ":")).encode()
+        request_headers = dict(
+            github_headers(
+                secret,
+                body,
+                event="issues",
+                delivery="five-span-delivery",
+            )
+        )
+        request_headers.update(
+            {
+                "traceparent": REMOTE_TRACEPARENT,
+                "tracestate": REMOTE_TRACESTATE,
+                "baggage": "private-baggage-canary=do-not-propagate",
+                "authorization": "Bearer private-authorization-canary",
+                "cookie": "session=private-cookie-canary",
+                "x-private-canary": "private-header-value-canary",
+            }
+        )
+        capsys.readouterr()
+
         with structlog.testing.capture_logs() as captured_logs:
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(
@@ -519,9 +601,15 @@ async def test_real_webhook_to_worker_path_has_exact_five_span_parent_graph(
             events_consumer,
         ):
             assert span.context is not None
-            assert span.parent is not None
             assert span.context.trace_flags == TraceFlags.SAMPLED
             assert span.context.trace_state.to_header() == REMOTE_TRACESTATE
+            assert span.status.status_code.name == "UNSET"
+            assert span.status.description is None
+        server_parent = require_parent(server)
+        ingress_producer_parent = require_parent(ingress_producer)
+        ingress_consumer_parent = require_parent(ingress_consumer)
+        events_producer_parent = require_parent(events_producer)
+        events_consumer_parent = require_parent(events_consumer)
         assert server.kind is SpanKind.SERVER
         assert ingress_producer.kind is SpanKind.PRODUCER
         assert ingress_consumer.kind is SpanKind.CONSUMER
@@ -564,27 +652,27 @@ async def test_real_webhook_to_worker_path_has_exact_five_span_parent_graph(
             "jhin.workspace_id": event_envelope.workspace_id,
         }
         remote_trace_id = int(REMOTE_TRACEPARENT.split("-")[1], 16)
-        assert server.parent.span_id == span_id_from_traceparent(REMOTE_TRACEPARENT)
-        assert server.parent.trace_id == remote_trace_id
-        assert server.parent.trace_flags == TraceFlags.SAMPLED
-        assert server.parent.trace_state.to_header() == REMOTE_TRACESTATE
-        assert server.parent.is_remote is True
-        assert ingress_producer.parent.span_id == server.context.span_id
-        assert ingress_producer.parent.trace_id == server.context.trace_id
-        assert ingress_producer.parent.is_remote is False
-        assert ingress_consumer.parent.span_id == ingress_producer.context.span_id
-        assert ingress_consumer.parent.trace_id == ingress_producer.context.trace_id
-        assert ingress_consumer.parent.trace_flags == ingress_producer.context.trace_flags
-        assert ingress_consumer.parent.trace_state == ingress_producer.context.trace_state
-        assert ingress_consumer.parent.is_remote is True
-        assert events_producer.parent.span_id == ingress_consumer.context.span_id
-        assert events_producer.parent.trace_id == ingress_consumer.context.trace_id
-        assert events_producer.parent.is_remote is False
-        assert events_consumer.parent.span_id == events_producer.context.span_id
-        assert events_consumer.parent.trace_id == events_producer.context.trace_id
-        assert events_consumer.parent.trace_flags == events_producer.context.trace_flags
-        assert events_consumer.parent.trace_state == events_producer.context.trace_state
-        assert events_consumer.parent.is_remote is True
+        assert server_parent.span_id == span_id_from_traceparent(REMOTE_TRACEPARENT)
+        assert server_parent.trace_id == remote_trace_id
+        assert server_parent.trace_flags == TraceFlags.SAMPLED
+        assert server_parent.trace_state.to_header() == REMOTE_TRACESTATE
+        assert server_parent.is_remote is True
+        assert ingress_producer_parent.span_id == server.context.span_id
+        assert ingress_producer_parent.trace_id == server.context.trace_id
+        assert ingress_producer_parent.is_remote is False
+        assert ingress_consumer_parent.span_id == ingress_producer.context.span_id
+        assert ingress_consumer_parent.trace_id == ingress_producer.context.trace_id
+        assert ingress_consumer_parent.trace_flags == ingress_producer.context.trace_flags
+        assert ingress_consumer_parent.trace_state == ingress_producer.context.trace_state
+        assert ingress_consumer_parent.is_remote is True
+        assert events_producer_parent.span_id == ingress_consumer.context.span_id
+        assert events_producer_parent.trace_id == ingress_consumer.context.trace_id
+        assert events_producer_parent.is_remote is False
+        assert events_consumer_parent.span_id == events_producer.context.span_id
+        assert events_consumer_parent.trace_id == events_producer.context.trace_id
+        assert events_consumer_parent.trace_flags == events_producer.context.trace_flags
+        assert events_consumer_parent.trace_state == events_producer.context.trace_state
+        assert events_consumer_parent.is_remote is True
         assert {span.context.trace_id for span in (*api_spans, *worker_spans)} == {remote_trace_id}
 
         assert matched == [event_envelope]
@@ -645,6 +733,7 @@ async def test_real_webhook_to_worker_path_has_exact_five_span_parent_graph(
             "private-baggage-canary",
             "private-authorization-canary",
             "private-cookie-canary",
+            "private-description-canary",
             "x-private-canary",
             "private-header-value-canary",
             secret,
@@ -654,8 +743,7 @@ async def test_real_webhook_to_worker_path_has_exact_five_span_parent_graph(
         ):
             assert canary not in rendered_telemetry
     finally:
-        api_trace.provider.shutdown()
-        worker_trace.provider.shutdown()
+        trace_stack.close()
 
 
 async def deliver(
