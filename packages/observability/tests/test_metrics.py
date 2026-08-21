@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import math
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -309,6 +311,57 @@ class _RecordingMeter:
         return object()
 
 
+@dataclass(frozen=True)
+class _FailingAddInstrument:
+    name: str
+    backend: _FailingMetricBackend
+
+    def add(
+        self,
+        amount: int | float,
+        attributes: Mapping[str, str] | None = None,
+    ) -> None:
+        self.backend.calls.append(("add", self.name, amount, attributes))
+        raise self.backend.error
+
+
+@dataclass(frozen=True)
+class _FailingRecordInstrument:
+    name: str
+    backend: _FailingMetricBackend
+
+    def record(
+        self,
+        amount: int | float,
+        attributes: Mapping[str, str] | None = None,
+    ) -> None:
+        self.backend.calls.append(("record", self.name, amount, attributes))
+        raise self.backend.error
+
+
+@dataclass
+class _FailingMetricBackend:
+    error: BaseException
+    calls: list[tuple[str, str, int | float, Mapping[str, str] | None]] = field(
+        default_factory=list
+    )
+
+    def create_counter(self, name: str, *, unit: str) -> _FailingAddInstrument:
+        return _FailingAddInstrument(name, self)
+
+    def create_histogram(self, name: str, *, unit: str) -> _FailingRecordInstrument:
+        return _FailingRecordInstrument(name, self)
+
+    def create_observable_gauge(
+        self,
+        name: str,
+        *,
+        callbacks: Sequence[Callable[[object], list[OTelObservation]]],
+        unit: str,
+    ) -> object:
+        return object()
+
+
 @pytest.fixture
 def in_memory_metrics() -> Iterator[tuple[JhinMetrics, InMemoryMetricReader]]:
     reader = InMemoryMetricReader()
@@ -376,6 +429,11 @@ def _facade(kind: str) -> tuple[JhinMetrics, _RecordingMeter | None]:
         return metrics_module.noop_metrics(), None
     meter = _RecordingMeter()
     return metrics_module.build_jhin_metrics(cast(Meter, meter)), meter
+
+
+def _failing_facade(error: BaseException) -> tuple[JhinMetrics, _FailingMetricBackend]:
+    backend = _FailingMetricBackend(error)
+    return metrics_module.build_jhin_metrics(cast(Meter, backend)), backend
 
 
 def _state_snapshot(
@@ -612,6 +670,179 @@ def test_each_instrument_rejects_every_wrong_requested_kind(
             wrong_call()
 
     _assert_no_recorder_calls(meter)
+
+
+def test_bound_counter_contains_backend_add_after_strict_validation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    backend_error = Exception("counter-backend-secret-canary")
+    metrics, backend = _failing_facade(backend_error)
+    name = _metric_name("model_requests_total")
+    counter = metrics.counter(name)
+    valid_labels = {"provider_type": "openai", "outcome": "ok"}
+
+    with pytest.raises(
+        metrics_module.MetricLabelError,
+        match="counter requested for non-counter metric",
+    ):
+        metrics.counter(_metric_name("agent_run_duration_seconds"))
+    with pytest.raises(
+        metrics_module.MetricLabelError,
+        match="counter requested for non-counter metric",
+    ):
+        metrics.counter(_metric_name("unregistered_metric"))
+    with pytest.raises(ValueError, match="must be numeric"):
+        counter.add(cast(Any, True), **valid_labels)
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        counter.add(-1, **valid_labels)
+    with pytest.raises(metrics_module.MetricLabelError, match=r"missing=.*outcome"):
+        counter.add(1, provider_type="openai")
+    with pytest.raises(metrics_module.MetricLabelError, match=r"extra=.*service"):
+        counter.add(1, provider_type="openai", outcome="ok", service="api")
+    with pytest.raises(metrics_module.MetricLabelError, match="workspace_id"):
+        counter.add(1, provider_type="openai", outcome="ok", workspace_id="secret")
+    with pytest.raises(metrics_module.MetricLabelError, match="provider_type must be a string"):
+        counter.add(1, provider_type=cast(Any, 7), outcome="ok")
+    assert backend.calls == []
+
+    noop_counter = metrics_module.noop_metrics().counter(name)
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        noop_counter.add(-1, **valid_labels)
+    assert noop_counter.add(1, **valid_labels) is None
+
+    caller_labels = {
+        "provider_type": "counter-label-secret-canary",
+        "outcome": "ok",
+    }
+    caplog.set_level(logging.DEBUG)
+    result = counter.add(73.125, **caller_labels)
+
+    assert result is None
+    assert caller_labels == {
+        "provider_type": "counter-label-secret-canary",
+        "outcome": "ok",
+    }
+    assert backend.calls == [
+        (
+            "add",
+            "model_requests_total",
+            73.125,
+            {"outcome": "ok", "provider_type": "other"},
+        )
+    ]
+    assert "73.125" not in caplog.text
+    assert "counter-label-secret-canary" not in caplog.text
+    assert "counter-backend-secret-canary" not in caplog.text
+
+
+def test_bound_histogram_contains_backend_record_after_strict_validation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    backend_error = Exception("histogram-backend-secret-canary")
+    metrics, backend = _failing_facade(backend_error)
+    name = _metric_name("agent_run_duration_seconds")
+    histogram = metrics.histogram(name)
+    valid_labels = {"outcome": "ok"}
+
+    with pytest.raises(
+        metrics_module.MetricLabelError,
+        match="histogram requested for non-histogram metric",
+    ):
+        metrics.histogram(_metric_name("agent_runs_total"))
+    with pytest.raises(
+        metrics_module.MetricLabelError,
+        match="histogram requested for non-histogram metric",
+    ):
+        metrics.histogram(_metric_name("unregistered_metric"))
+    with pytest.raises(ValueError, match="must be numeric"):
+        histogram.record(cast(Any, True), **valid_labels)
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        histogram.record(-1, **valid_labels)
+    with pytest.raises(metrics_module.MetricLabelError, match=r"missing=.*outcome"):
+        histogram.record(1)
+    with pytest.raises(metrics_module.MetricLabelError, match=r"extra=.*service"):
+        histogram.record(1, outcome="ok", service="api")
+    with pytest.raises(metrics_module.MetricLabelError, match="workspace_id"):
+        histogram.record(1, outcome="ok", workspace_id="secret")
+    with pytest.raises(metrics_module.MetricLabelError, match="outcome must be a string"):
+        histogram.record(1, outcome=cast(Any, 7))
+    assert backend.calls == []
+
+    noop_histogram = metrics_module.noop_metrics().histogram(name)
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        noop_histogram.record(-1, **valid_labels)
+    assert noop_histogram.record(1, **valid_labels) is None
+
+    caller_labels = {"outcome": "histogram-label-secret-canary"}
+    caplog.set_level(logging.DEBUG)
+    result = histogram.record(91.625, **caller_labels)
+
+    assert result is None
+    assert caller_labels == {"outcome": "histogram-label-secret-canary"}
+    assert backend.calls == [
+        (
+            "record",
+            "agent_run_duration_seconds",
+            91.625,
+            {"outcome": "other"},
+        )
+    ]
+    assert "91.625" not in caplog.text
+    assert "histogram-label-secret-canary" not in caplog.text
+    assert "histogram-backend-secret-canary" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("kind", "name", "amount", "labels", "expected_attributes"),
+    [
+        pytest.param(
+            "counter",
+            "model_requests_total",
+            37.5,
+            {"provider_type": "authority-provider", "outcome": "ok"},
+            {"outcome": "ok", "provider_type": "other"},
+            id="counter",
+        ),
+        pytest.param(
+            "histogram",
+            "agent_run_duration_seconds",
+            41.5,
+            {"outcome": "authority-outcome"},
+            {"outcome": "other"},
+            id="histogram",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "exception_type",
+    [
+        pytest.param(asyncio.CancelledError, id="cancelled-error"),
+        pytest.param(KeyboardInterrupt, id="keyboard-interrupt"),
+        pytest.param(SystemExit, id="system-exit"),
+    ],
+)
+def test_bound_metrics_never_contain_nonordinary_base_exceptions(
+    kind: str,
+    name: str,
+    amount: float,
+    labels: dict[str, str],
+    expected_attributes: dict[str, str],
+    exception_type: type[BaseException],
+) -> None:
+    authority = exception_type("metric authority")
+    metrics, backend = _failing_facade(authority)
+    original_labels = dict(labels)
+    operation = "add" if kind == "counter" else "record"
+
+    with pytest.raises(exception_type) as caught:
+        if kind == "counter":
+            metrics.counter(_metric_name(name)).add(amount, **labels)
+        else:
+            metrics.histogram(_metric_name(name)).record(amount, **labels)
+
+    assert caught.value is authority
+    assert labels == original_labels
+    assert backend.calls == [(operation, name, amount, expected_attributes)]
 
 
 @pytest.mark.parametrize("facade_kind", ["configured", "noop"])

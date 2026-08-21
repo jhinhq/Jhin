@@ -272,7 +272,11 @@ class _BoundCounter:
 
     def add(self, amount: int | float, **labels: str) -> None:
         numeric = _finite_nonnegative(amount, instrument=self.name)
-        self.instrument.add(numeric, normalize_labels(self.name, labels))
+        attributes = normalize_labels(self.name, labels)
+        try:  # noqa: SIM105 - keep the backend-only exception boundary explicit
+            self.instrument.add(numeric, attributes)
+        except Exception:
+            pass
 
 
 @dataclass(frozen=True)
@@ -282,7 +286,11 @@ class _BoundHistogram:
 
     def record(self, amount: int | float, **labels: str) -> None:
         numeric = _finite_nonnegative(amount, instrument=self.name)
-        self.instrument.record(numeric, normalize_labels(self.name, labels))
+        attributes = normalize_labels(self.name, labels)
+        try:  # noqa: SIM105 - keep the backend-only exception boundary explicit
+            self.instrument.record(numeric, attributes)
+        except Exception:
+            pass
 
 
 class _ObservableState:
