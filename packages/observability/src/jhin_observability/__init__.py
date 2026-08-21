@@ -16,6 +16,7 @@ from jhin_observability.config import (
     service_version,
 )
 from jhin_observability.context import (
+    TRACE_CARRIER_KEYS,
     bind_context,
     extract_trace_context,
     inject_trace_headers,
@@ -95,6 +96,7 @@ __all__ = [
     "TEMPORAL_ACTIVITY_NAMES",
     "TEMPORAL_ACTIVITY_TYPE_VALUES",
     "TEMPORAL_WORKFLOW_TYPE_VALUES",
+    "TRACE_CARRIER_KEYS",
     "AttributeValue",
     "JhinMetrics",
     "MetricLabelError",

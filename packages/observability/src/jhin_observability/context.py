@@ -211,6 +211,7 @@ __all__ = [
     "SAFE_SPAN_ATTRIBUTE_KEYS",
     "SPAN_ID_ATTRIBUTE_KEYS",
     "SPAN_NUMERIC_ATTRIBUTE_KEYS",
+    "TRACE_CARRIER_KEYS",
     "bind_context",
     "extract_trace_context",
     "inject_trace_headers",

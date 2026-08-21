@@ -103,6 +103,18 @@ def test_invalid_traceparent_produces_no_remote_parent() -> None:
     assert trace.get_current_span(ctx).get_span_context().is_valid is False
 
 
+def test_trace_carrier_keys_are_context_public_exact_and_immutable() -> None:
+    assert "TRACE_CARRIER_KEYS" in context_module.__all__
+    assert type(context_module.TRACE_CARRIER_KEYS) is frozenset
+    assert frozenset({"traceparent", "tracestate", "baggage"}) == context_module.TRACE_CARRIER_KEYS
+
+
+def test_trace_carrier_keys_package_export_is_the_context_authority() -> None:
+    package_export = getattr(jhin_observability, "TRACE_CARRIER_KEYS", None)
+    assert package_export is context_module.TRACE_CARRIER_KEYS
+    assert "TRACE_CARRIER_KEYS" in jhin_observability.__all__
+
+
 def test_bind_context_clears_all_values_after_exit() -> None:
     with bind_context(request_id="r", correlation_id="c", task_id="t", run_id="run"):
         assert structlog.contextvars.get_contextvars()["request_id"] == "r"
