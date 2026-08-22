@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import asyncpg
@@ -38,6 +39,7 @@ from jhin_domain import (
     ToolCallStatus,
     new_uuid7,
 )
+from jhin_observability import noop_metrics, noop_tracer
 from jhin_policy import RiskLevel, ToolDefinition
 from jhin_tool_worker.activities import ToolActivities
 from jhin_tools import ToolCatalog, ToolExecutionContext
@@ -67,6 +69,9 @@ class _Effect:
 @dataclass
 class _Resources:
     session_factory: async_sessionmaker[AsyncSession]
+    runtime: object = field(
+        default_factory=lambda: SimpleNamespace(metrics=noop_metrics(), tracer=noop_tracer())
+    )
     crypto: None = None
     test_barrier: None = None
 

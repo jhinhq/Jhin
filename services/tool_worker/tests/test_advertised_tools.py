@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -17,7 +17,7 @@ import jhin_tool_worker.resources as resources_module
 from jhin_db.base import Base
 from jhin_db.models import Agent, AgentCapabilityGrant, Workspace
 from jhin_domain import new_uuid7
-from jhin_observability import ObservabilityRuntime
+from jhin_observability import ObservabilityRuntime, noop_metrics, noop_tracer
 from jhin_policy import RiskLevel, ToolDefinition
 from jhin_tool_worker.activities import ToolActivities
 from jhin_tool_worker.resources import ToolWorkerResources
@@ -54,6 +54,9 @@ def _definition(name: str) -> ToolDefinition:
 @dataclass
 class _Resources:
     session_factory: async_sessionmaker[AsyncSession]
+    runtime: object = field(
+        default_factory=lambda: SimpleNamespace(metrics=noop_metrics(), tracer=noop_tracer())
+    )
     crypto: None = None
     test_barrier: None = None
 
@@ -96,6 +99,7 @@ class _DrainableNats:
 
 @dataclass
 class _ClosableResources:
+    runtime: ObservabilityRuntime
     close_count: int = 0
 
     async def close(self) -> None:
@@ -388,17 +392,21 @@ async def test_main_closes_resources_after_post_acquisition_construction_failure
     failure_stage: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    resources = _ClosableResources()
     settings = ToolWorkerSettings()
     shutdowns: list[int] = []
+    tracer = object()
+    metrics = object()
     runtime = cast(
         ObservabilityRuntime,
         SimpleNamespace(
-            tracer=object(),
-            metrics=object(),
+            tracer=tracer,
+            metrics=metrics,
             shutdown=lambda timeout_millis: shutdowns.append(timeout_millis),
         ),
     )
+    resources = _ClosableResources(runtime=runtime)
+    construction_calls: list[str] = []
+    construction_error = RuntimeError(f"{failure_stage} failed")
 
     async def connect_with_retry(_settings: ToolWorkerSettings, received_runtime: object) -> object:
         assert received_runtime is runtime
@@ -408,15 +416,20 @@ async def test_main_closes_resources_after_post_acquisition_construction_failure
         _settings: ToolWorkerSettings, received_runtime: object
     ) -> _ClosableResources:
         assert received_runtime is runtime
+        assert resources.runtime is runtime
+        assert resources.runtime.metrics is metrics
+        assert resources.runtime.tracer is tracer
         return resources
 
     def build_catalog() -> ToolCatalog:
+        construction_calls.append("catalog")
         if failure_stage == "catalog":
-            raise RuntimeError("catalog failed")
+            raise construction_error
         return ToolCatalog()
 
     def construct_worker(*_args: object, **_kwargs: object) -> object:
-        raise RuntimeError("worker failed")
+        construction_calls.append("worker")
+        raise construction_error
 
     class _SignalLoop:
         def add_signal_handler(self, *_args: object) -> None:
@@ -433,9 +446,16 @@ async def test_main_closes_resources_after_post_acquisition_construction_failure
     monkeypatch.setattr(main_module, "build_temporal_worker", construct_worker)
     monkeypatch.setattr(asyncio, "get_running_loop", lambda: _SignalLoop())
 
-    with pytest.raises(RuntimeError, match=f"{failure_stage} failed"):
+    with pytest.raises(RuntimeError, match=f"{failure_stage} failed") as caught:
         await main_module.main()
 
+    assert caught.value is construction_error
+    assert construction_calls == (
+        ["catalog"] if failure_stage == "catalog" else ["catalog", "worker"]
+    )
+    assert resources.runtime is runtime
+    assert resources.runtime.metrics is metrics
+    assert resources.runtime.tracer is tracer
     assert resources.close_count == 1
     assert shutdowns == [5_000]
 

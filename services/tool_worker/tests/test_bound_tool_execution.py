@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
@@ -30,6 +31,7 @@ from jhin_db.models import (
     Workspace,
 )
 from jhin_domain import ConnectionStatus, RunStatus, new_uuid7
+from jhin_observability import noop_metrics, noop_tracer
 from jhin_policy import RiskLevel, ToolDefinition
 from jhin_tool_worker.activities import ToolActivities, bound_manifest_entry_statement
 from jhin_tools import (
@@ -67,6 +69,9 @@ class _Effect:
 @dataclass
 class _Resources:
     session_factory: async_sessionmaker[AsyncSession]
+    runtime: object = field(
+        default_factory=lambda: SimpleNamespace(metrics=noop_metrics(), tracer=noop_tracer())
+    )
     crypto: None = None
     test_barrier: None = None
 
@@ -380,6 +385,50 @@ def test_manifest_statement_projects_only_requested_call_scalars(world: ToolWorl
     assert all(column is not RunEvent.payload_json for column in statement.selected_columns)
 
 
+def _assert_exact_manifest_reads(
+    observed_sql: list[tuple[str, Any]],
+    *,
+    marker: str,
+) -> None:
+    assert len(observed_sql) == 2
+    for statement, parameters in observed_sql:
+        assert "run_event" in statement
+        rendered_parameters = repr(parameters)
+        assert "agent.step.tool_manifest" in rendered_parameters
+        rendered_read = repr((statement, parameters))
+        assert "agent.step.reasoning" not in rendered_read
+        assert marker not in rendered_read
+
+
+@pytest.mark.parametrize(
+    "observed_sql",
+    [
+        [("SELECT run_event", ("agent.step.tool_manifest",))],
+        [("SELECT run_event", ("agent.step.tool_manifest",))] * 3,
+        [
+            ("SELECT run_event", ("agent.step.tool_manifest",)),
+            ("SELECT run_event", ("agent.step.other",)),
+        ],
+        [
+            ("SELECT run_event", ("agent.step.tool_manifest",)),
+            ("SELECT run_event", ("agent.step.reasoning",)),
+        ],
+        [
+            (
+                "SELECT run_event WHERE event_type IN ('agent.step.reasoning', ?)",
+                ("agent.step.tool_manifest",),
+            ),
+            ("SELECT run_event", ("agent.step.tool_manifest",)),
+        ],
+    ],
+)
+def test_manifest_read_oracle_rejects_missing_extra_or_wrong_event_reads(
+    observed_sql: list[tuple[str, Any]],
+) -> None:
+    with pytest.raises(AssertionError):
+        _assert_exact_manifest_reads(observed_sql, marker="must-not-enter-tool-process")
+
+
 async def test_execution_never_reads_agent_reasoning_event(world: ToolWorld) -> None:
     marker = "must-not-enter-tool-process"
     await world.seed_private_reasoning_event(
@@ -409,8 +458,5 @@ async def test_execution_never_reads_agent_reasoning_event(world: ToolWorld) -> 
     finally:
         event.remove(world.engine.sync_engine, "before_cursor_execute", observe_sql)
 
-    assert len(observed_sql) == 1
-    assert "agent.step.tool_manifest" in repr(observed_sql[0][1])
-    assert "agent.step.reasoning" not in repr(observed_sql)
-    assert marker not in repr(observed_sql)
+    _assert_exact_manifest_reads(observed_sql, marker=marker)
     assert world.effect.values == ["ordinary"]

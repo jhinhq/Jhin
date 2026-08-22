@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from contextlib import suppress
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -87,7 +88,8 @@ AGENT_ACTIVITY_ORDER = [
 
 
 class _Resources:
-    def __init__(self) -> None:
+    def __init__(self, runtime: object) -> None:
+        self.runtime = runtime
         self.close_count = 0
 
     async def close(self) -> None:
@@ -115,6 +117,28 @@ class _SignalLoop:
         return True
 
 
+async def _wait_for_event_or_early_task_failure(
+    event: asyncio.Event,
+    task: asyncio.Task[None],
+) -> None:
+    event_waiter = asyncio.create_task(event.wait())
+    try:
+        done, _pending = await asyncio.wait(
+            {event_waiter, task},
+            timeout=1,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        assert done, "worker lifecycle event timed out"
+        if task in done:
+            await task
+        assert event_waiter in done
+    finally:
+        if not event_waiter.done():
+            event_waiter.cancel()
+            with suppress(asyncio.CancelledError):
+                await event_waiter
+
+
 def _activity_map(activities: list[Callable[..., Any]]) -> dict[str, Any]:
     registered: dict[str, Any] = {}
     for registered_activity in activities:
@@ -125,17 +149,24 @@ def _activity_map(activities: list[Callable[..., Any]]) -> dict[str, Any]:
     return registered
 
 
+def _assert_resource_runtime_identity(resources: object, runtime: object) -> None:
+    assert cast(Any, resources).runtime is runtime
+    assert cast(Any, resources).runtime.metrics is cast(Any, runtime).metrics
+    assert cast(Any, resources).runtime.tracer is cast(Any, runtime).tracer
+
+
 async def _capture_agent_registration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[dict[str, Any], _Resources]:
     captured: dict[str, Any] = {}
-    resources = _Resources()
     shutdowns: list[int] = []
     runtime = SimpleNamespace(
         tracer=object(),
         metrics=object(),
         shutdown=lambda timeout_millis: shutdowns.append(timeout_millis),
     )
+    resources = _Resources(runtime)
+    _assert_resource_runtime_identity(resources, runtime)
 
     class _Worker:
         async def __aenter__(self) -> _Worker:
@@ -201,13 +232,14 @@ async def _capture_tool_registration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[dict[str, Any], _Resources]:
     captured: dict[str, Any] = {}
-    resources = _Resources()
     shutdowns: list[int] = []
     runtime = SimpleNamespace(
         tracer=object(),
         metrics=object(),
         shutdown=lambda timeout_millis: shutdowns.append(timeout_millis),
     )
+    resources = _Resources(runtime)
+    _assert_resource_runtime_identity(resources, runtime)
 
     class _Worker:
         async def __aenter__(self) -> _Worker:
@@ -291,6 +323,7 @@ async def test_agent_worker_registration_uses_only_agent_and_legacy_coordinators
         TriggerCompatibilityActivities,
     )
     assert resources.close_count == 1
+    _assert_resource_runtime_identity(resources, captured["runtime"])
     assert captured["client"] is not None
     assert captured["runtime"] is not None
     assert captured["config"].service_name == "agent-worker"
@@ -332,6 +365,7 @@ async def test_tool_worker_registration_is_exactly_the_effect_boundary(
     assert isinstance(registered["sync_external_tool"].__self__, TriggerToolActivities)
     assert isinstance(registered["cleanup_run_workspace"].__self__, CleanupActivities)
     assert resources.close_count == 1
+    _assert_resource_runtime_identity(resources, captured["runtime"])
     assert captured["config"].service_name == "tool-worker"
     assert captured["config"].environment == "dev"
     assert captured["config"].extra_log_processors == (tool_main.redact_event_dict,)
@@ -419,6 +453,9 @@ async def test_worker_cleanup_is_reawaited_through_repeated_cancellation(
     )
 
     class Resources:
+        def __init__(self, received_runtime: object) -> None:
+            self.runtime = received_runtime
+
         async def close(self) -> None:
             task = asyncio.current_task()
             assert task is not None
@@ -438,9 +475,12 @@ async def test_worker_cleanup_is_reawaited_through_repeated_cancellation(
         assert received_runtime is runtime
         return object()
 
+    acquired_resources = Resources(runtime)
+    _assert_resource_runtime_identity(acquired_resources, runtime)
+
     async def resources(_settings: object, received_runtime: object) -> Resources:
         assert received_runtime is runtime
-        return Resources()
+        return acquired_resources
 
     def build(*_args: object, **_kwargs: object) -> Worker:
         return Worker()
@@ -459,9 +499,9 @@ async def test_worker_cleanup_is_reawaited_through_repeated_cancellation(
         monkeypatch.setattr(module, "build_default_catalog", ToolCatalog)
 
     task = asyncio.create_task(module.main(), name=f"{kind}-main-test")
-    await worker_entered.wait()
+    await _wait_for_event_or_early_task_failure(worker_entered, task)
     task.cancel("body-cancellation")
-    await cleanup_started.wait()
+    await _wait_for_event_or_early_task_failure(cleanup_started, task)
     task.cancel("cleanup-cancellation-one")
     await asyncio.sleep(0)
     task.cancel("cleanup-cancellation-two")
@@ -469,6 +509,7 @@ async def test_worker_cleanup_is_reawaited_through_repeated_cancellation(
     with pytest.raises(asyncio.CancelledError) as raised:
         await task
     assert raised.value.args == ("body-cancellation",)
+    _assert_resource_runtime_identity(acquired_resources, runtime)
     assert len(cleanup_task_names) == 1
     assert cleanup_task_names[0].endswith("worker-cleanup")
     assert shutdowns == [5_000]
@@ -519,7 +560,6 @@ async def test_worker_enter_failure_never_calls_exit_and_still_cleans_up(
         if kind == "agent"
         else ToolWorkerSettings(app_env="test")
     )
-    resources = _Resources()
     enter_error = RuntimeError(f"{kind}-enter-error")
     enter_count = 0
     exit_count = 0
@@ -529,6 +569,8 @@ async def test_worker_enter_failure_never_calls_exit_and_still_cleans_up(
         metrics=object(),
         shutdown=lambda timeout_millis: shutdowns.append(timeout_millis),
     )
+    resources = _Resources(runtime)
+    _assert_resource_runtime_identity(resources, runtime)
 
     class Worker:
         async def __aenter__(self) -> Worker:
@@ -570,6 +612,7 @@ async def test_worker_enter_failure_never_calls_exit_and_still_cleans_up(
     assert enter_count == 1
     assert exit_count == 0
     assert resources.close_count == 1
+    _assert_resource_runtime_identity(resources, runtime)
     assert shutdowns == [5_000]
 
 
@@ -589,13 +632,14 @@ async def test_cleanup_wait_cancellation_outranks_active_business_error(
     cleanup_started = asyncio.Event()
     release_cleanup = asyncio.Event()
     business_error = RuntimeError(f"{kind}-body-error")
-    resources = _Resources()
     shutdowns: list[int] = []
     runtime = SimpleNamespace(
         tracer=object(),
         metrics=object(),
         shutdown=lambda timeout_millis: shutdowns.append(timeout_millis),
     )
+    resources = _Resources(runtime)
+    _assert_resource_runtime_identity(resources, runtime)
 
     class Stop:
         def set(self) -> None:
@@ -639,8 +683,8 @@ async def test_cleanup_wait_cancellation_outranks_active_business_error(
         monkeypatch.setattr(module, "build_default_catalog", ToolCatalog)
 
     task = asyncio.create_task(module.main(), name=f"{kind}-business-cleanup-test")
-    await worker_entered.wait()
-    await cleanup_started.wait()
+    await _wait_for_event_or_early_task_failure(worker_entered, task)
+    await _wait_for_event_or_early_task_failure(cleanup_started, task)
     task.cancel("cleanup-cancellation")
     await asyncio.sleep(0)
     release_cleanup.set()
@@ -648,6 +692,7 @@ async def test_cleanup_wait_cancellation_outranks_active_business_error(
         await task
     assert raised.value.args == ("cleanup-cancellation",)
     assert resources.close_count == 1
+    _assert_resource_runtime_identity(resources, runtime)
     assert shutdowns == [5_000]
 
 
@@ -830,8 +875,14 @@ async def test_active_business_error_outranks_inner_cleanup_cancellation(
             return None
 
     class Resources:
+        def __init__(self, received_runtime: object) -> None:
+            self.runtime = received_runtime
+
         async def close(self) -> None:
             raise cleanup_cancellation
+
+    acquired_resources = Resources(runtime)
+    _assert_resource_runtime_identity(acquired_resources, runtime)
 
     async def connect(_settings: object, received_runtime: object) -> object:
         assert received_runtime is runtime
@@ -839,7 +890,7 @@ async def test_active_business_error_outranks_inner_cleanup_cancellation(
 
     async def resources(_settings: object, received_runtime: object) -> Resources:
         assert received_runtime is runtime
-        return Resources()
+        return acquired_resources
 
     monkeypatch.setattr(module, "initialize_observability", lambda _config: runtime)
     monkeypatch.setattr(module, "connect_with_retry", connect)
@@ -865,6 +916,7 @@ async def test_active_business_error_outranks_inner_cleanup_cancellation(
     except BaseException as error:
         caught = error
     assert caught is business_error
+    _assert_resource_runtime_identity(acquired_resources, runtime)
     traceback = caught.__traceback__
     while traceback is not None and traceback.tb_next is not None:
         traceback = traceback.tb_next
@@ -927,12 +979,16 @@ async def test_worker_failure_matrix_attempts_every_owned_cleanup_step(
     runtime = Runtime()
 
     class Resources:
+        def __init__(self, received_runtime: object) -> None:
+            self.runtime = received_runtime
+
         async def close(self) -> None:
             events.append("resources.close")
             if failure_stage == "resources_close":
                 raise failure
 
-    resources = Resources()
+    resources = Resources(runtime)
+    _assert_resource_runtime_identity(resources, runtime)
 
     class Loop:
         def add_signal_handler(self, handled_signal: object, *_args: object) -> None:
@@ -1015,6 +1071,7 @@ async def test_worker_failure_matrix_attempts_every_owned_cleanup_step(
     except BaseException as error:
         caught = error
     assert caught is failure
+    _assert_resource_runtime_identity(resources, runtime)
     assert shutdown_count == 1
     if failure_stage not in {"connect", "resources"}:
         assert events.count("resources.close") == 1
