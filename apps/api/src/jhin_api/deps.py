@@ -30,12 +30,26 @@ from jhin_api.settings import Settings
 from jhin_api.temporal import TemporalClientProvider
 from jhin_db.models import User, UserSession, WorkspaceMembership
 from jhin_domain import UserStatus, WorkspaceRole, role_satisfies
+from jhin_observability import ObservabilityRuntime
 from jhin_secrets import SecretCrypto
 
 
 def get_settings_dep(request: Request) -> Settings:
     settings: Settings = request.app.state.settings
     return settings
+
+
+def get_observability_runtime(request: Request) -> ObservabilityRuntime:
+    runtime = getattr(request.app.state, "observability", None)
+    if not isinstance(runtime, ObservabilityRuntime):
+        raise RuntimeError("API observability runtime is unavailable")
+    return runtime
+
+
+ObservabilityRuntimeDep = Annotated[
+    ObservabilityRuntime,
+    Depends(get_observability_runtime),
+]
 
 
 async def get_db(request: Request) -> AsyncIterator[AsyncSession]:

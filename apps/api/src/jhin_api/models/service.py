@@ -13,6 +13,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException, status
+from opentelemetry.trace import Tracer
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,8 +21,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from jhin_api.audit import service as audit
 from jhin_api.deps import WorkspaceContext
 from jhin_db.models import Agent, ModelProfile, ModelProvider, Secret, Workspace
-from jhin_models import ModelProviderError, build_model_client
+from jhin_models import ModelClient, ModelProviderError, build_model_client
 from jhin_models.factory import ProviderConfigError
+from jhin_observability import JhinMetrics
 from jhin_secrets import SecretCrypto, SecretStore
 from jhin_secrets.redaction import redact_text
 
@@ -32,6 +34,21 @@ def _provider_not_found() -> HTTPException:
 
 def _profile_not_found() -> HTTPException:
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model profile not found")
+
+
+def _build_verification_client(
+    provider: ModelProvider,
+    api_key: str | None,
+    metrics: JhinMetrics,
+    tracer: Tracer,
+) -> ModelClient:
+    return build_model_client(
+        provider.type,
+        base_url=provider.base_url,
+        api_key=api_key,
+        metrics=metrics,
+        tracer=tracer,
+    )
 
 
 async def _validate_secret(db: AsyncSession, workspace_id: UUID, secret_id: UUID | None) -> None:
@@ -182,6 +199,8 @@ async def verify_provider(
     crypto: SecretCrypto,
     ctx: WorkspaceContext,
     provider_id: UUID,
+    metrics: JhinMetrics,
+    tracer: Tracer,
     *,
     request_id: UUID,
     ip_hash: str,
@@ -195,7 +214,7 @@ async def verify_provider(
 
     ok, detail = True, ""
     try:
-        client = build_model_client(provider.type, base_url=provider.base_url, api_key=api_key)
+        client = _build_verification_client(provider, api_key, metrics, tracer)
     except ProviderConfigError as exc:
         ok, detail = False, str(exc)
     else:
