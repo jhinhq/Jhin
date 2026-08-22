@@ -1,0 +1,439 @@
+"""Memory management service (experience design, "User controls").
+
+RBAC: any workspace member (viewer+) may read records in the workspace;
+members may write agent-scope records; team and workspace scope mutations
+and promotion approval require admin. Every mutation is audited without
+content; forgetting leaves a content-free tombstone.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import Any
+from uuid import UUID
+
+from fastapi import HTTPException, status
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from jhin_api.audit import service as audit
+from jhin_api.deps import WorkspaceContext
+from jhin_api.memory.schemas import MemoryCreate, MemoryUpdate
+from jhin_db.models import Agent, MemoryRecord, Team
+from jhin_domain import (
+    ActorType,
+    MemoryScope,
+    MemoryStatus,
+    WorkspaceRole,
+    role_satisfies,
+)
+from jhin_memory import (
+    ActorFacts,
+    MemoryCandidate,
+    SourceFacts,
+    apply_candidates,
+    contains_secret,
+    create_version,
+    derive_source_facts,
+    forget_record,
+)
+
+MAX_PAGE_SIZE = 100
+TARGET_TYPE = "memory_record"
+
+
+def authority_for(role: WorkspaceRole) -> MemoryScope | None:
+    """Widest scope a human may activate/mutate directly; None = read-only."""
+    if role_satisfies(role, WorkspaceRole.ADMIN):
+        return MemoryScope.WORKSPACE
+    if role_satisfies(role, WorkspaceRole.MEMBER):
+        return MemoryScope.AGENT
+    return None
+
+
+def _require_scope_authority(ctx: WorkspaceContext, scope: MemoryScope) -> None:
+    authority = authority_for(ctx.role)
+    if authority is None:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Viewers cannot change memory")
+    if scope is not MemoryScope.AGENT and authority is not MemoryScope.WORKSPACE:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail=f"Changing {scope.value} memory requires an admin",
+        )
+
+
+def _actor(ctx: WorkspaceContext, *, explicit: bool = False) -> ActorFacts:
+    return ActorFacts(
+        actor_type=ActorType.USER,
+        actor_id=ctx.user.id,
+        explicit=explicit,
+        authority=authority_for(ctx.role) or MemoryScope.AGENT,
+    )
+
+
+def _audit(
+    session: AsyncSession,
+    ctx: WorkspaceContext,
+    action: str,
+    record_id: UUID,
+    *,
+    request_id: UUID | None,
+    ip_hash: str | None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    audit.record(
+        session,
+        action=action,
+        target_type=TARGET_TYPE,
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user.id,
+        target_id=record_id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        metadata=metadata or {},
+    )
+
+
+async def get_memory(session: AsyncSession, workspace_id: UUID, memory_id: UUID) -> MemoryRecord:
+    record = await session.scalar(
+        select(MemoryRecord).where(
+            MemoryRecord.id == memory_id, MemoryRecord.workspace_id == workspace_id
+        )
+    )
+    if record is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Memory not found")
+    return record
+
+
+async def list_memories(
+    session: AsyncSession,
+    workspace_id: UUID,
+    *,
+    scope: MemoryScope | None = None,
+    agent_id: UUID | None = None,
+    team_id: UUID | None = None,
+    status_filter: MemoryStatus | None = None,
+    q: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[MemoryRecord], int]:
+    limit = max(1, min(limit, MAX_PAGE_SIZE))
+    query = select(MemoryRecord).where(MemoryRecord.workspace_id == workspace_id)
+    if scope is not None:
+        query = query.where(MemoryRecord.scope == scope.value)
+    if agent_id is not None:
+        query = query.where(
+            MemoryRecord.scope == MemoryScope.AGENT.value, MemoryRecord.scope_id == agent_id
+        )
+    if team_id is not None:
+        query = query.where(
+            MemoryRecord.scope == MemoryScope.TEAM.value, MemoryRecord.scope_id == team_id
+        )
+    if status_filter is not None:
+        query = query.where(MemoryRecord.status == status_filter.value)
+    else:
+        query = query.where(MemoryRecord.status != MemoryStatus.FORGOTTEN.value)
+    if q:
+        query = query.where(MemoryRecord.content.ilike(f"%{q.strip()}%"))
+    total = await session.scalar(select(func.count()).select_from(query.subquery())) or 0
+    rows = await session.scalars(
+        query.order_by(
+            MemoryRecord.pinned_at.desc().nulls_last(),
+            MemoryRecord.created_at.desc(),
+            MemoryRecord.id.desc(),
+        )
+        .limit(limit)
+        .offset(max(0, offset))
+    )
+    return list(rows), total
+
+
+async def create_memory(
+    session: AsyncSession,
+    ctx: WorkspaceContext,
+    payload: MemoryCreate,
+    *,
+    request_id: UUID | None = None,
+    ip_hash: str | None = None,
+) -> MemoryRecord:
+    _require_scope_authority(ctx, payload.scope)
+    agent_id = payload.agent_id
+    team_id = payload.team_id
+    if payload.scope is MemoryScope.AGENT and agent_id is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail="agent_id is required")
+    if payload.scope is MemoryScope.TEAM and team_id is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail="team_id is required")
+    if agent_id is not None:
+        agent = await session.scalar(
+            select(Agent).where(Agent.id == agent_id, Agent.workspace_id == ctx.workspace_id)
+        )
+        if agent is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Agent not found")
+        if team_id is None:
+            team_id = agent.team_id
+    if payload.team_id is not None:
+        team = await session.scalar(
+            select(Team).where(Team.id == payload.team_id, Team.workspace_id == ctx.workspace_id)
+        )
+        if team is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Team not found")
+
+    source: SourceFacts | None
+    if payload.source_conversation_id or payload.source_message_id or payload.source_task_id:
+        source = await derive_source_facts(
+            session,
+            workspace_id=ctx.workspace_id,
+            agent_id=agent_id if agent_id is not None else ctx.user.id,
+            conversation_id=payload.source_conversation_id,
+            message_id=payload.source_message_id,
+            task_id=payload.source_task_id,
+        )
+        if source is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Source not found")
+        source = source.model_copy(update={"agent_id": agent_id, "team_id": team_id})
+    else:
+        source = SourceFacts(workspace_id=ctx.workspace_id, agent_id=agent_id, team_id=team_id)
+
+    candidate = MemoryCandidate(
+        content=payload.content,
+        kind=payload.kind,
+        subject=payload.subject,
+        tags=tuple(payload.tags),
+        confidence=payload.confidence,
+        importance=payload.importance,
+        requested_scope=payload.scope,
+        expires_in_days=payload.expires_in_days,
+    )
+    result = await apply_candidates(
+        session, candidates=[candidate], source=source, actor=_actor(ctx, explicit=True)
+    )
+    decision = result.decisions[0]
+    if decision.outcome == "duplicate":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "message": "This is already remembered",
+                "memory_id": str(decision.duplicate_of),
+            },
+        )
+    if decision.outcome == "reject":
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"message": "Memory rejected by policy", "reasons": list(decision.reasons)},
+        )
+    record = result.created[0]
+    _audit(
+        session,
+        ctx,
+        "memory.created",
+        record.id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        metadata={"scope": record.scope, "status": record.status, **decision.evidence()},
+    )
+    await session.commit()
+    return record
+
+
+async def update_memory(
+    session: AsyncSession,
+    ctx: WorkspaceContext,
+    memory_id: UUID,
+    payload: MemoryUpdate,
+    *,
+    request_id: UUID | None = None,
+    ip_hash: str | None = None,
+) -> MemoryRecord:
+    previous = await get_memory(session, ctx.workspace_id, memory_id)
+    _require_scope_authority(ctx, MemoryScope(previous.scope))
+    if previous.status in (MemoryStatus.FORGOTTEN.value, MemoryStatus.SUPERSEDED.value):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, detail=f"Cannot edit a {previous.status} memory"
+        )
+    values = payload.model_dump(exclude_unset=True)
+    if not values:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Nothing to update")
+    content = payload.content if payload.content is not None else previous.content
+    if contains_secret(content):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"message": "Memory rejected by policy", "reasons": ["secret"]},
+        )
+    new = await create_version(
+        session,
+        previous,
+        content=content,
+        actor=_actor(ctx),
+        kind=payload.kind.value if payload.kind is not None else None,
+        subject=payload.subject if "subject" in values else None,
+        tags=payload.tags,
+        confidence=payload.confidence,
+        importance=payload.importance,
+        expires_at=payload.expires_at if "expires_at" in values else None,
+    )
+    _audit(
+        session,
+        ctx,
+        "memory.edited",
+        new.id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        metadata={
+            "supersedes_id": str(previous.id),
+            "version": new.version,
+            "fields": sorted(values.keys()),
+        },
+    )
+    await session.commit()
+    return new
+
+
+async def pin_memory(
+    session: AsyncSession,
+    ctx: WorkspaceContext,
+    memory_id: UUID,
+    *,
+    pinned: bool,
+    request_id: UUID | None = None,
+    ip_hash: str | None = None,
+) -> MemoryRecord:
+    record = await get_memory(session, ctx.workspace_id, memory_id)
+    _require_scope_authority(ctx, MemoryScope(record.scope))
+    if record.status == MemoryStatus.FORGOTTEN.value:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="Cannot pin a forgotten memory")
+    record.pinned_at = datetime.now(UTC) if pinned else None
+    _audit(
+        session,
+        ctx,
+        "memory.pinned" if pinned else "memory.unpinned",
+        record.id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+    )
+    await session.commit()
+    return record
+
+
+async def contest_memory(
+    session: AsyncSession,
+    ctx: WorkspaceContext,
+    memory_id: UUID,
+    *,
+    reason: str = "",
+    request_id: UUID | None = None,
+    ip_hash: str | None = None,
+) -> MemoryRecord:
+    record = await get_memory(session, ctx.workspace_id, memory_id)
+    _require_scope_authority(ctx, MemoryScope(record.scope))
+    if record.status not in (MemoryStatus.ACTIVE.value, MemoryStatus.CONTESTED.value):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, detail=f"Cannot contest a {record.status} memory"
+        )
+    record.status = MemoryStatus.CONTESTED.value
+    record.policy_json = {
+        **record.policy_json,
+        "contested_by_user": str(ctx.user.id),
+        "contest_reason": reason[:500],
+    }
+    _audit(
+        session,
+        ctx,
+        "memory.contested",
+        record.id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        metadata={"reason": reason[:500]},
+    )
+    await session.commit()
+    return record
+
+
+async def forget_memory(
+    session: AsyncSession,
+    ctx: WorkspaceContext,
+    memory_id: UUID,
+    *,
+    request_id: UUID | None = None,
+    ip_hash: str | None = None,
+) -> MemoryRecord:
+    """Remove live content + embedding for the whole version chain; keep a
+    content-free tombstone and audit ``memory.forgotten``."""
+    record = await get_memory(session, ctx.workspace_id, memory_id)
+    _require_scope_authority(ctx, MemoryScope(record.scope))
+    forgotten_ids = await forget_record(session, record)
+    _audit(
+        session,
+        ctx,
+        "memory.forgotten",
+        record.id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        metadata={"forgotten_ids": [str(i) for i in forgotten_ids], "scope": record.scope},
+    )
+    await session.commit()
+    return record
+
+
+async def approve_memory(
+    session: AsyncSession,
+    ctx: WorkspaceContext,
+    memory_id: UUID,
+    *,
+    request_id: UUID | None = None,
+    ip_hash: str | None = None,
+) -> MemoryRecord:
+    """Admin promotion review: proposed → active."""
+    if not role_satisfies(ctx.role, WorkspaceRole.ADMIN):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Approving memory requires an admin")
+    record = await get_memory(session, ctx.workspace_id, memory_id)
+    if record.status != MemoryStatus.PROPOSED.value:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=f"Only proposed memory can be approved (is {record.status})",
+        )
+    record.status = MemoryStatus.ACTIVE.value
+    record.valid_from = record.valid_from or datetime.now(UTC)
+    record.policy_json = {**record.policy_json, "approved_by_user": str(ctx.user.id)}
+    _audit(
+        session,
+        ctx,
+        "memory.approved",
+        record.id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        metadata={"scope": record.scope},
+    )
+    await session.commit()
+    return record
+
+
+async def reject_memory(
+    session: AsyncSession,
+    ctx: WorkspaceContext,
+    memory_id: UUID,
+    *,
+    request_id: UUID | None = None,
+    ip_hash: str | None = None,
+) -> MemoryRecord:
+    """Admin promotion review: proposed → rejected."""
+    if not role_satisfies(ctx.role, WorkspaceRole.ADMIN):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Rejecting memory requires an admin")
+    record = await get_memory(session, ctx.workspace_id, memory_id)
+    if record.status != MemoryStatus.PROPOSED.value:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=f"Only proposed memory can be rejected (is {record.status})",
+        )
+    record.status = MemoryStatus.REJECTED.value
+    record.policy_json = {**record.policy_json, "rejected_by_user": str(ctx.user.id)}
+    _audit(
+        session,
+        ctx,
+        "memory.rejected",
+        record.id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        metadata={"scope": record.scope},
+    )
+    await session.commit()
+    return record
