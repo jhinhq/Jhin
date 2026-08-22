@@ -30,7 +30,7 @@ function Timestamp({ iso, className = "" }: { iso: string; className?: string })
   );
 }
 
-export function UserBubble({ message, name }: { message: ConversationMessage; name: string }) {
+function UserBubble({ message, name }: { message: ConversationMessage; name: string }) {
   const text = messageText(message);
   const instruction = message.message_type === "instruction";
   return (
@@ -51,7 +51,7 @@ export function UserBubble({ message, name }: { message: ConversationMessage; na
   );
 }
 
-export function AgentBubble({
+function AgentBubble({
   message,
   name,
   avatarUrl,
@@ -77,7 +77,7 @@ export function AgentBubble({
   );
 }
 
-export function WorkCard({
+function WorkCard({
   message,
   name,
   avatarUrl,
@@ -137,7 +137,7 @@ const CHIP_TONES: Partial<Record<ActivityCard["kind"], string>> = {
   paused: "border-warn/30 bg-warn/10 text-warn",
 };
 
-export function ActivityChip({ card }: { card: ActivityCard }) {
+function ActivityChip({ card }: { card: ActivityCard }) {
   const tone = CHIP_TONES[card.kind] ?? "border-line bg-raised text-dim";
   const showSummary = (card.kind === "failed" || card.kind === "needs_review") && card.summary;
   return (
@@ -155,7 +155,7 @@ export function ActivityChip({ card }: { card: ActivityCard }) {
   );
 }
 
-export function SystemChip({ message }: { message: ConversationMessage }) {
+function SystemChip({ message }: { message: ConversationMessage }) {
   const text = messageText(message);
   if (!text) return null;
   return (
@@ -168,7 +168,7 @@ export function SystemChip({ message }: { message: ConversationMessage }) {
   );
 }
 
-export function WorkingIndicator({
+function WorkingIndicator({
   status,
   name,
   avatarUrl,

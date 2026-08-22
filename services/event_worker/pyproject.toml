@@ -6,7 +6,6 @@ requires-python = ">=3.13"
 dependencies = [
     "nats-py>=2.13",
     "pydantic>=2.10",
-    "pydantic-settings>=2.7",
     "temporalio>=1.9",
     "jhin-connectors",
     "jhin-db",

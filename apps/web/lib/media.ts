@@ -3,8 +3,8 @@
 
 import type { AvatarVariantSize } from "@/lib/types";
 
-export const AVATAR_MAX_BYTES = 8 * 1024 * 1024;
-export const AVATAR_ACCEPTED_TYPES = ["image/png", "image/jpeg", "image/webp"] as const;
+const AVATAR_MAX_BYTES = 8 * 1024 * 1024;
+const AVATAR_ACCEPTED_TYPES = ["image/png", "image/jpeg", "image/webp"] as const;
 
 /** Pixel variant to request for each `Avatar` size (devicePixelRatio-safe). */
 export const AVATAR_VARIANT_FOR_SIZE: Record<"xs" | "sm" | "md" | "lg" | "xl", AvatarVariantSize> = {

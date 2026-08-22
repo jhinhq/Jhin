@@ -28,7 +28,6 @@ from jhin_connectors.endpoints import (
 )
 from jhin_connectors.execution import (
     ConnectionResolutionError,
-    ResolvedConnection,
     resolve_connection,
 )
 from jhin_connectors.http_client import (
@@ -69,7 +68,6 @@ __all__ = [
     "NormalizedEvent",
     "ProviderHTTPError",
     "RawWebhookEvent",
-    "ResolvedConnection",
     "SecretFieldSpec",
     "VerifyContext",
     "WebhookSecretMode",

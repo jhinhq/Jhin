@@ -20,7 +20,7 @@ import type { Attention, MemoryRecord, ReviewVerdict, WorkRequest, WorkReview } 
 
 export type WorkRequestAction = "accept" | "decline" | "clarify";
 
-export function AttentionAllClear() {
+function AttentionAllClear() {
   return (
     <div
       data-testid="attention-all-clear"
@@ -37,7 +37,7 @@ export function AttentionAllClear() {
 }
 
 /** Approve / request changes with feedback. */
-export function ReviewDecisionDialog({
+function ReviewDecisionDialog({
   review,
   onClose,
   onSubmit,
@@ -98,7 +98,7 @@ export function ReviewDecisionDialog({
 }
 
 /** Decline with a reason or ask the requester to clarify. */
-export function WorkRequestReplyDialog({
+function WorkRequestReplyDialog({
   request,
   action,
   onClose,

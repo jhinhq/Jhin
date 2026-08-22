@@ -10,7 +10,6 @@ from jhin_workflows.engineering_ticket.shared import (
     EngineeringPlan,
     EngineeringPlanInput,
     EngineeringTicketInput,
-    EngineeringTicketResult,
     FinalizeEngineeringTicketInput,
 )
 from jhin_workflows.engineering_ticket.workflows import EngineeringTicketWorkflow
@@ -25,7 +24,6 @@ __all__ = [
     "EngineeringPlan",
     "EngineeringPlanInput",
     "EngineeringTicketInput",
-    "EngineeringTicketResult",
     "EngineeringTicketWorkflow",
     "FinalizeEngineeringTicketInput",
 ]

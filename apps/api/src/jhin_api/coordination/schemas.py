@@ -4,12 +4,12 @@ and manager rollups."""
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from jhin_domain import ReviewMode, ReviewScopeKind, ReviewVerdict, WorkRequestStatus
+from jhin_domain import ReviewMode, ReviewScopeKind, ReviewVerdict
 from jhin_policy import ReviewCondition, ReviewerSelector
 
 
@@ -60,10 +60,6 @@ class WorkRequestCreate(BaseModel):
 
 class WorkRequestResponseIn(BaseModel):
     response: str = Field(default="", max_length=4_000)
-
-
-class WorkRequestStatusFilter(BaseModel):
-    status: WorkRequestStatus | None = None
 
 
 class ReviewPolicyIn(BaseModel):
@@ -169,6 +165,3 @@ class WorkReviewListOut(BaseModel):
 class ReviewDecisionIn(BaseModel):
     verdict: ReviewVerdict
     feedback: str = Field(default="", max_length=4_000)
-
-
-ReviewStatusFilter = Literal["pending", "approved", "changes_requested", "skipped", "escalated"]

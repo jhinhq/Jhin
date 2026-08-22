@@ -7,13 +7,11 @@ dependencies = [
     "pydantic>=2.10",
     "sqlalchemy[asyncio]>=2.0.36",
     "jhin-db",
-    "jhin-domain",
     "jhin-models",
 ]
 
 [tool.uv.sources]
 jhin-db = { workspace = true }
-jhin-domain = { workspace = true }
 jhin-models = { workspace = true }
 
 [build-system]

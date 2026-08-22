@@ -263,11 +263,6 @@ class ApprovalStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
-APPROVAL_DECIDED_STATUSES = frozenset(
-    {ApprovalStatus.APPROVED, ApprovalStatus.REJECTED, ApprovalStatus.CANCELLED}
-)
-
-
 class SandboxJobStatus(StrEnum):
     """Lifecycle of one ephemeral sandbox job (plan 14).
 
@@ -282,16 +277,6 @@ class SandboxJobStatus(StrEnum):
     FAILED = "failed"
     TIMEOUT = "timeout"
     CANCELLED = "cancelled"
-
-
-SANDBOX_JOB_TERMINAL_STATUSES = frozenset(
-    {
-        SandboxJobStatus.COMPLETED,
-        SandboxJobStatus.FAILED,
-        SandboxJobStatus.TIMEOUT,
-        SandboxJobStatus.CANCELLED,
-    }
-)
 
 
 class TriggerType(StrEnum):
@@ -492,13 +477,3 @@ class ReviewVerdict(StrEnum):
     APPROVE = "approve"
     CHANGES_REQUESTED = "changes_requested"
     ESCALATE = "escalate"
-
-
-WORK_REVIEW_DECIDED_STATUSES = frozenset(
-    {
-        WorkReviewStatus.APPROVED,
-        WorkReviewStatus.CHANGES_REQUESTED,
-        WorkReviewStatus.SKIPPED,
-        WorkReviewStatus.ESCALATED,
-    }
-)

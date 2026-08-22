@@ -36,7 +36,6 @@ LogSource = Literal[
     "function_edge_logs",
     "function_logs",
 ]
-ShortText = Annotated[str, Field(max_length=256)]
 StrictFiniteFloat = Annotated[float, Field(strict=True, allow_inf_nan=False)]
 DatabaseScalar = None | StrictBool | StrictInt | StrictFiniteFloat | StrictStr
 

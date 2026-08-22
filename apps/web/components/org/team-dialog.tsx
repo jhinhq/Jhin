@@ -10,7 +10,7 @@ import { useInvalidateOrg } from "@/lib/hooks";
 import type { OrgAgentNode, OrgTeamNode, Team } from "@/lib/types";
 import { useWorkspace } from "@/lib/workspace-context";
 
-export const TEAM_COLORS = [
+const TEAM_COLORS = [
   "slate",
   "indigo",
   "violet",

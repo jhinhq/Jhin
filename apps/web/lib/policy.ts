@@ -5,9 +5,7 @@
 
 import type { ApprovalPreset, Grant, PolicyRule, RiskLevel, RuleAction } from "@/lib/types";
 
-export const RISK_ORDER: RiskLevel[] = ["read", "write", "elevated", "destructive"];
-
-export const RISK_TONES: Record<RiskLevel, "neutral" | "ok" | "warn" | "danger" | "accent"> = {
+const RISK_TONES: Record<RiskLevel, "neutral" | "ok" | "warn" | "danger" | "accent"> = {
   read: "ok",
   write: "accent",
   elevated: "warn",

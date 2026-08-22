@@ -103,7 +103,7 @@ export function relationshipOtherId(relationship: AgentRelationship, agentId: st
     : relationship.source_agent_id;
 }
 
-export const PRESET_FRIENDLY: Record<string, string> = {
+const PRESET_FRIENDLY: Record<string, string> = {
   autonomous: "Acts on its own; only destructive actions wait for you",
   balanced: "Asks before risky actions",
   restricted: "Asks before changing anything; never runs destructive actions",
@@ -198,7 +198,7 @@ export function describeGrant(
   return `${appLabel}: ${body}`;
 }
 
-export const APP_LABELS: Record<string, string> = {
+const APP_LABELS: Record<string, string> = {
   github: "GitHub",
   linear: "Linear",
   cli: "Command line",
@@ -209,7 +209,7 @@ export const APP_LABELS: Record<string, string> = {
   slack: "Slack",
 };
 
-export const TRIGGER_FRIENDLY_EVENTS: Record<string, string> = {
+const TRIGGER_FRIENDLY_EVENTS: Record<string, string> = {
   "connector.linear.issue.created": "a Linear issue is created",
   "connector.linear.issue.updated": "a Linear issue changes",
   "connector.github.pull_request.opened": "a GitHub pull request opens",

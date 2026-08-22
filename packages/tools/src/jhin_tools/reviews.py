@@ -33,7 +33,6 @@ from jhin_db.models import (
     WorkReview,
 )
 from jhin_domain import (
-    REVIEW_BLOCKING_MODES,
     ActorType,
     AgentStatus,
     ReviewerType,
@@ -782,20 +781,12 @@ REVIEW_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor, ToolValidator | None], .
 )
 
 
-def blocking_mode(mode: str) -> bool:
-    try:
-        return ReviewMode(mode) in REVIEW_BLOCKING_MODES
-    except ValueError:
-        return False
-
-
 __all__ = [
     "REVIEW_TOOLS",
     "GateResult",
     "ReviewError",
     "ReviewRequirement",
     "ToolCallIntent",
-    "blocking_mode",
     "check_review_gate",
     "decide_review",
     "evaluate_review_event",

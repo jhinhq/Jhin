@@ -59,8 +59,8 @@ export interface Team {
   updated_at: string;
 }
 
-export type Availability = "available" | "unavailable";
-export type RelationshipKind = "close_collaborator" | "advisor" | "preferred_reviewer";
+type Availability = "available" | "unavailable";
+type RelationshipKind = "close_collaborator" | "advisor" | "preferred_reviewer";
 
 /** Directed/symmetric link between two agents (company identity, plan 2026-08-17). */
 export interface AgentRelationship {
@@ -88,7 +88,7 @@ export interface AgentIdentity {
   avatar_url?: string | null;
 }
 
-export type AvatarKind = "initials" | "upload" | "generated";
+type AvatarKind = "initials" | "upload" | "generated";
 
 export interface Agent extends AgentIdentity {
   id: string;
@@ -142,7 +142,7 @@ export interface OrgGraph {
   agents: OrgAgentNode[];
 }
 
-export interface AuditEvent {
+interface AuditEvent {
   id: string;
   workspace_id: string | null;
   actor_type: string;
@@ -256,7 +256,7 @@ export interface TaskTree {
   focus_task_id: string;
 }
 
-export interface Run {
+interface Run {
   id: string;
   task_id: string | null;
   agent_id: string;
@@ -319,7 +319,7 @@ export type RiskLevel = "read" | "write" | "elevated" | "destructive";
 export type RuleAction = "auto" | "approval" | "forbid";
 export type GrantEffect = "allow" | "deny";
 export type ApprovalPreset = "autonomous" | "balanced" | "restricted";
-export type ApprovalStatus = "pending" | "approved" | "rejected" | "cancelled";
+type ApprovalStatus = "pending" | "approved" | "rejected" | "cancelled";
 
 export interface ToolInfo {
   name: string;
@@ -377,7 +377,7 @@ export interface ApprovalList {
 
 // --- Phase 5: connectors and connections ---
 
-export interface SecretFieldSpec {
+interface SecretFieldSpec {
   name: string;
   label: string;
   placeholder: string;
@@ -422,7 +422,7 @@ export interface ConnectorInfo {
   docs_url: string;
 }
 
-export type ConnectionStatus = "active" | "error" | "disabled";
+type ConnectionStatus = "active" | "error" | "disabled";
 
 export interface ConnectionInfo {
   id: string;
@@ -447,7 +447,7 @@ export interface WebhookSetup {
   help: string;
 }
 
-export interface ConnectionGrantSummaryOut {
+interface ConnectionGrantSummaryOut {
   grant_id: string;
   capability: string;
   effect: GrantEffect;
@@ -456,7 +456,7 @@ export interface ConnectionGrantSummaryOut {
   eligibility_reason: string | null;
 }
 
-export interface ConnectionAgentAccessOut {
+interface ConnectionAgentAccessOut {
   agent_id: string;
   agent_name: string;
   authorized: boolean;
@@ -499,7 +499,7 @@ export interface ToolCallRecord {
 
 // --- Phase 7: triggers ---
 
-export type TriggerInvocationStatus = "started" | "duplicate" | "failed";
+type TriggerInvocationStatus = "started" | "duplicate" | "failed";
 
 export interface TriggerCondition {
   path: string;
@@ -507,7 +507,7 @@ export interface TriggerCondition {
   value?: unknown;
 }
 
-export interface TriggerFilter {
+interface TriggerFilter {
   all?: (TriggerCondition | TriggerFilter)[];
   any?: (TriggerCondition | TriggerFilter)[];
 }
@@ -573,7 +573,7 @@ export interface LinearTeamMetadata {
 
 // --- Conversations, activity, attention (docs/architecture/conversations.md) ---
 
-export type ConversationStatus = "active" | "archived";
+type ConversationStatus = "active" | "archived";
 
 export interface Conversation {
   id: string;
@@ -601,22 +601,10 @@ export interface ConversationList {
   total: number;
 }
 
-export interface ConversationCreate {
-  agent_id: string;
-  title?: string | null;
-  text?: string | null;
-  client_turn_id?: string | null;
-}
-
 export interface ConversationUpdate {
   title?: string;
   pinned?: boolean;
   status?: ConversationStatus;
-}
-
-export interface TurnIn {
-  text: string;
-  client_turn_id?: string | null;
 }
 
 export interface ConversationMessage extends TaskMessage {
@@ -711,7 +699,7 @@ export type MemoryStatus =
   | "superseded"
   | "rejected"
   | "forgotten";
-export type MemorySensitivity = "normal" | "sensitive" | "redacted";
+type MemorySensitivity = "normal" | "sensitive" | "redacted";
 
 export interface MemoryRecord {
   id: string;
@@ -751,32 +739,6 @@ export interface MemoryList {
   total: number;
 }
 
-export interface MemoryCreate {
-  content: string;
-  scope?: MemoryScope;
-  agent_id?: string | null;
-  team_id?: string | null;
-  kind?: MemoryKind;
-  subject?: string | null;
-  tags?: string[];
-  confidence?: number;
-  importance?: number;
-  expires_in_days?: number | null;
-  source_conversation_id?: string | null;
-  source_message_id?: string | null;
-  source_task_id?: string | null;
-}
-
-export interface MemoryUpdate {
-  content?: string;
-  kind?: MemoryKind;
-  subject?: string | null;
-  tags?: string[];
-  confidence?: number;
-  importance?: number;
-  expires_at?: string | null;
-}
-
 // --- Media / avatars (docs/architecture/media.md) ---
 
 export type AvatarVariantSize = 64 | 128 | 256;
@@ -801,7 +763,7 @@ export interface ProviderDisclosure {
   sends_public_identity: boolean;
 }
 
-export type AvatarGenerationStatus = "queued" | "running" | "succeeded" | "failed";
+type AvatarGenerationStatus = "queued" | "running" | "succeeded" | "failed";
 
 export interface AvatarGenerationOut {
   id: string;
@@ -943,7 +905,7 @@ export interface ReviewPolicyIn {
   period_seconds?: number | null;
 }
 
-export type WorkReviewStatus = "pending" | "approved" | "changes_requested" | "skipped" | "escalated";
+type WorkReviewStatus = "pending" | "approved" | "changes_requested" | "skipped" | "escalated";
 export type ReviewVerdict = "approve" | "changes_requested" | "escalate";
 
 export interface WorkReview {
@@ -974,13 +936,7 @@ export interface WorkReview {
   task_title?: string | null;
 }
 
-export interface WorkReviewList {
-  items: WorkReview[];
-  total: number;
-  pending_count: number;
-}
-
-export interface RollupReport {
+interface RollupReport {
   agent_id: string;
   name: string;
   role_title: string;
@@ -1008,7 +964,7 @@ export interface RollupItem {
   risks: string[];
 }
 
-export interface RollupQueue {
+interface RollupQueue {
   active_runs: number;
   queued_tasks: number;
   waiting_approval: number;

@@ -17,14 +17,13 @@ import type {
   RollupItem,
   WorkRequestStatus,
   WorkReview,
-  WorkReviewStatus,
 } from "@/lib/types";
 
 /* ------------------------------------------------------------------ */
 /* Work requests                                                       */
 /* ------------------------------------------------------------------ */
 
-export const WORK_REQUEST_STATUS: Record<
+const WORK_REQUEST_STATUS: Record<
   WorkRequestStatus,
   { label: string; tone: "ok" | "warn" | "neutral" | "danger" | "accent" }
 > = {
@@ -93,21 +92,6 @@ export const REVIEW_MODE_HELP: Record<ReviewMode, string> = {
   periodic: "Checks in on a regular interval regardless of what the agent is doing.",
 };
 
-export const REVIEW_STATUS: Record<
-  WorkReviewStatus,
-  { label: string; tone: "ok" | "warn" | "neutral" | "danger" | "accent" }
-> = {
-  pending: { label: "Waiting for a decision", tone: "warn" },
-  approved: { label: "Looks good", tone: "ok" },
-  changes_requested: { label: "Needs changes", tone: "danger" },
-  skipped: { label: "Skipped", tone: "neutral" },
-  escalated: { label: "Escalated", tone: "warn" },
-};
-
-export function reviewStatus(status: string) {
-  return REVIEW_STATUS[status as WorkReviewStatus] ?? { label: status.replace(/_/g, " "), tone: "neutral" as const };
-}
-
 /** Verdict wording shared by transcript cards and activity summaries. */
 export function reviewVerdictLabel(verdict: string): string | null {
   switch (verdict) {
@@ -138,7 +122,7 @@ export function reviewSubject(review: Pick<WorkReview, "subject_agent_name" | "t
   return `${who}'s work needs a check`;
 }
 
-export function humanizeToolName(tool: string): string {
+function humanizeToolName(tool: string): string {
   return tool.replace(/[._]/g, " ");
 }
 
@@ -197,7 +181,7 @@ export function describeCondition(condition: ReviewCondition): string {
   return `${spec.label} (${formatThreshold(spec.unit, condition.threshold)})`;
 }
 
-export function formatThreshold(unit: NonNullable<ConditionSpec["unit"]>, raw: number): string {
+function formatThreshold(unit: NonNullable<ConditionSpec["unit"]>, raw: number): string {
   switch (unit) {
     case "dollars":
       return `over $${(raw / 1_000_000).toFixed(2)}`;

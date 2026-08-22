@@ -18,7 +18,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from jhin_db.models import Agent, AgentTeamMembership, Conversation, MemoryRecord, Message, Task
 from jhin_domain import (
-    ActorType,
     MemoryScope,
     MemorySensitivity,
     MemoryStatus,
@@ -385,7 +384,3 @@ async def forget_record(
         )
     await session.flush()
     return forgotten
-
-
-def system_actor() -> ActorFacts:
-    return ActorFacts(actor_type=ActorType.SYSTEM)

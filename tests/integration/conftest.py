@@ -20,7 +20,6 @@ from .phase10_upgrade_harness import (
     EXPECTED_ROOTFUL_SERVICES,
     EXPECTED_ROOTLESS_SERVICES,
     ComposeAuthority,
-    compose_files_for,
     read_authority_lease,
 )
 from .phase10_upgrade_harness import (
@@ -47,10 +46,6 @@ PHASE9_DB_READER_DSN = os.environ.get(
     "JHIN_PHASE9_DB_READER_DSN",
     "postgresql://jhin_reader:reader-pass@127.0.0.1:55433/supabase_fixture",
 )
-PHASE9_DB_WRITER_DSN = os.environ.get(
-    "JHIN_PHASE9_DB_WRITER_DSN",
-    "postgresql://jhin_writer:writer-pass@127.0.0.1:55433/supabase_fixture",
-)
 PHASE9_DB_ADMIN_DSN = os.environ.get(
     "JHIN_PHASE9_DB_ADMIN_DSN",
     "postgresql://postgres:phase9-fixture-admin-only@127.0.0.1:55433/supabase_fixture",
@@ -70,11 +65,6 @@ def selected_compose_mode(value: str | None = None) -> ComposeMode:
     if selected not in _COMPOSE_MODES:
         raise ValueError("PHASE10_SOCKET_MODE must be exactly rootful, rootless, or desktop")
     return cast(ComposeMode, selected)
-
-
-def compose_files_for_mode(mode: ComposeMode) -> tuple[str, ...]:
-    """Build the one-authority integration vector for a selected mode."""
-    return compose_files_for(mode)
 
 
 def required_services_for_mode(mode: str) -> set[str]:

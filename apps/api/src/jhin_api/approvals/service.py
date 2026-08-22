@@ -71,15 +71,6 @@ async def list_approvals(
     return items, int(total), int(pending_count)
 
 
-async def get_approval(db: AsyncSession, workspace_id: UUID, approval_id: UUID) -> Approval:
-    approval = await db.scalar(
-        select(Approval).where(Approval.id == approval_id, Approval.workspace_id == workspace_id)
-    )
-    if approval is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Approval not found")
-    return approval
-
-
 async def decide(
     db: AsyncSession,
     ctx: WorkspaceContext,

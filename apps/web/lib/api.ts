@@ -24,7 +24,7 @@ export class ApiError extends Error {
   }
 }
 
-export function readCookie(name: string): string | null {
+function readCookie(name: string): string | null {
   if (typeof document === "undefined") return null;
   for (const part of document.cookie.split("; ")) {
     const eq = part.indexOf("=");

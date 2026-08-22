@@ -122,9 +122,9 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
   },
 ];
 
-export const NAME_MAX = 200;
-export const ROLE_TITLE_MAX = 200;
-export const PROMPT_MAX = 100_000;
+const NAME_MAX = 200;
+const ROLE_TITLE_MAX = 200;
+const PROMPT_MAX = 100_000;
 
 export function validateIdentity(state: WizardState): string[] {
   const errors: string[] = [];
@@ -136,7 +136,7 @@ export function validateIdentity(state: WizardState): string[] {
   return errors;
 }
 
-export function validateInstructions(state: WizardState): string[] {
+function validateInstructions(state: WizardState): string[] {
   const errors: string[] = [];
   if (state.systemPrompt.length > PROMPT_MAX) {
     errors.push("Instructions are too long.");

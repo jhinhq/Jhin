@@ -20,7 +20,3 @@ def verify_password(password_hash: str, candidate: str) -> bool:
         return _hasher.verify(password_hash, candidate)
     except (VerifyMismatchError, VerificationError, InvalidHashError):
         return False
-
-
-def needs_rehash(password_hash: str) -> bool:
-    return _hasher.check_needs_rehash(password_hash)

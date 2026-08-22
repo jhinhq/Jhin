@@ -51,7 +51,7 @@ export function Button({
 
 /** Square icon-only button. Requires an `aria-label`; the label doubles as a
  * native tooltip via `title`. */
-export function IconButton({
+function IconButton({
   label,
   size = "md",
   variant = "ghost",
@@ -244,59 +244,6 @@ export function Card({
     >
       {children}
     </Tag>
-  );
-}
-
-export function SectionTitle({
-  children,
-  description,
-  actions,
-  as: Tag = "h2",
-  className = "",
-}: {
-  children: React.ReactNode;
-  description?: React.ReactNode;
-  actions?: React.ReactNode;
-  as?: "h2" | "h3";
-  className?: string;
-}) {
-  return (
-    <div className={`flex flex-wrap items-start justify-between gap-3 ${className}`}>
-      <div className="min-w-0">
-        <Tag className="font-display text-base font-semibold tracking-tight text-ink">
-          {children}
-        </Tag>
-        {description ? <p className="mt-0.5 text-sm text-dim">{description}</p> : null}
-      </div>
-      {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
-    </div>
-  );
-}
-
-export function Kbd({ children, className = "" }: { children: React.ReactNode; className?: string }) {
-  return (
-    <kbd
-      className={`inline-flex h-5 min-w-5 items-center justify-center rounded-md border border-line bg-raised px-1.5 font-mono text-[11px] font-medium text-dim ${className}`}
-    >
-      {children}
-    </kbd>
-  );
-}
-
-export function Skeleton({
-  className = "",
-  label,
-}: {
-  className?: string;
-  label?: string;
-}) {
-  return (
-    <span
-      role={label ? "status" : undefined}
-      aria-label={label}
-      aria-hidden={label ? undefined : true}
-      className={`block animate-pulse rounded-lg bg-raised ${className || "h-4 w-full"}`}
-    />
   );
 }
 
@@ -553,7 +500,7 @@ export function EmptyState({
 /* Theme                                                               */
 /* ------------------------------------------------------------------ */
 
-export const THEME_STORAGE_KEY = "jhin-theme";
+const THEME_STORAGE_KEY = "jhin-theme";
 
 function subscribeTheme(onChange: () => void) {
   const observer = new MutationObserver(onChange);
@@ -565,7 +512,7 @@ const readServerTheme = () => false;
 
 /** True when `<html>` carries the `.dark` class (set by the no-flash script in
  * app/layout.tsx). Safe to call during SSR (returns false). */
-export function useIsDark(): boolean {
+function useIsDark(): boolean {
   return useSyncExternalStore(subscribeTheme, readTheme, readServerTheme);
 }
 

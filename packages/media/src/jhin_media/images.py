@@ -35,7 +35,6 @@ ACCEPTED_FORMATS: dict[str, str] = {
     "JPEG": "image/jpeg",
     "WEBP": "image/webp",
 }
-ACCEPTED_CONTENT_TYPES = frozenset(ACCEPTED_FORMATS.values())
 
 
 class ImageRejected(ValueError):

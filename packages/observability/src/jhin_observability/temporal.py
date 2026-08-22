@@ -379,9 +379,6 @@ class SafeTemporalTracingInterceptor(TracingInterceptor):
     def _context_to_headers(self, headers: Mapping[str, Payload]) -> Mapping[str, Payload]:
         return encode_temporal_trace_headers(headers)
 
-    def _context_from_headers(self, headers: Mapping[str, Payload]) -> Context:
-        return decode_temporal_trace_carrier(headers)[1]
-
     def _completed_workflow_span(
         self, params: _CompletedWorkflowSpanParams
     ) -> _SdkCarrierDict | None:
@@ -692,26 +689,8 @@ class TracingWorkflowInboundInterceptor(_SdkWorkflowInboundInterceptor):
             self, _SafeWorkflowOutboundInterceptor(outbound, self)
         )
 
-    def _load_workflow_context_carrier(self) -> _SdkCarrierDict | None:
-        if self._workflow_context_carrier:
-            return self._workflow_context_carrier
-        try:
-            carrier, _ = decode_temporal_trace_carrier(_workflow_info().headers)
-            self._workflow_context_carrier = cast(Any, carrier)
-            return cast(_SdkCarrierDict | None, carrier)
-        except BaseException:
-            return None
-
     def _context_to_headers(self, headers: Mapping[str, Payload]) -> Mapping[str, Payload]:
         return encode_temporal_trace_headers(headers)
-
-    def _context_carrier_to_headers(
-        self,
-        carrier: _SdkCarrierDict,
-        headers: Mapping[str, Payload],
-    ) -> Mapping[str, Payload]:
-        _, context = _validated_carrier_context(carrier)
-        return encode_temporal_trace_headers(headers, context=context)
 
     async def execute_workflow(self, input: temporalio.worker.ExecuteWorkflowInput) -> Any:
         workflow_type = "other"

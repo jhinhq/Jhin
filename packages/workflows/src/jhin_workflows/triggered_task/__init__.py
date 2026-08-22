@@ -5,7 +5,6 @@ from jhin_workflows.triggered_task.shared import (
     SyncExternalInput,
     SyncExternalResult,
     TriggeredTaskInput,
-    TriggeredTaskResult,
 )
 from jhin_workflows.triggered_task.workflows import TriggeredTaskWorkflow
 
@@ -16,6 +15,5 @@ __all__ = [
     "SyncExternalInput",
     "SyncExternalResult",
     "TriggeredTaskInput",
-    "TriggeredTaskResult",
     "TriggeredTaskWorkflow",
 ]

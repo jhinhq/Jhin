@@ -808,7 +808,6 @@ dependencies = [
     { name = "jhin-memory" },
     { name = "jhin-models" },
     { name = "jhin-observability" },
-    { name = "jhin-policy" },
     { name = "jhin-secrets" },
     { name = "jhin-tools" },
     { name = "jhin-workflows" },
@@ -828,7 +827,6 @@ requires-dist = [
     { name = "jhin-memory", editable = "packages/memory" },
     { name = "jhin-models", editable = "packages/models" },
     { name = "jhin-observability", editable = "packages/observability" },
-    { name = "jhin-policy", editable = "packages/policy" },
     { name = "jhin-secrets", editable = "packages/secrets" },
     { name = "jhin-tools", editable = "packages/tools" },
     { name = "jhin-workflows", editable = "packages/workflows" },
@@ -844,7 +842,6 @@ version = "0.1.0"
 source = { editable = "packages/agents" }
 dependencies = [
     { name = "jhin-db" },
-    { name = "jhin-domain" },
     { name = "jhin-models" },
     { name = "pydantic" },
     { name = "sqlalchemy", extra = ["asyncio"] },
@@ -853,7 +850,6 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "jhin-db", editable = "packages/db" },
-    { name = "jhin-domain", editable = "packages/domain" },
     { name = "jhin-models", editable = "packages/models" },
     { name = "pydantic", specifier = ">=2.10" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.36" },
@@ -1002,7 +998,6 @@ dependencies = [
     { name = "jhin-workflows" },
     { name = "nats-py" },
     { name = "pydantic" },
-    { name = "pydantic-settings" },
     { name = "temporalio" },
 ]
 
@@ -1018,7 +1013,6 @@ requires-dist = [
     { name = "jhin-workflows", editable = "packages/workflows" },
     { name = "nats-py", specifier = ">=2.13" },
     { name = "pydantic", specifier = ">=2.10" },
-    { name = "pydantic-settings", specifier = ">=2.7" },
     { name = "temporalio", specifier = ">=1.9" },
 ]
 

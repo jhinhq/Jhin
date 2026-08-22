@@ -26,7 +26,6 @@ from jhin_api.media.schemas import (
 from jhin_api.media.urls import avatar_url_for
 from jhin_db.models import Agent, AvatarGeneration, ModelProfile, ModelProvider, Workspace
 from jhin_domain import (
-    AVATAR_GENERATION_TERMINAL_STATUSES,
     AvatarGenerationStatus,
     AvatarKind,
 )
@@ -44,12 +43,6 @@ from jhin_workflows import AGENT_TASK_QUEUE
 from jhin_workflows.avatar_generation import (
     AvatarGenerationInput,
     avatar_generation_workflow_id,
-)
-
-GENERATION_DISCLOSURE = (
-    "Avatar generation sends the agent's public identity (name, role, purpose, "
-    "expertise) and your hint to the selected provider. The result is a stylized "
-    "illustration and is never proof of identity."
 )
 
 
@@ -345,7 +338,3 @@ async def latest_generation(
             status_code=status.HTTP_404_NOT_FOUND, detail="No avatar generation for this agent"
         )
     return generation
-
-
-def is_terminal(generation: AvatarGeneration) -> bool:
-    return AvatarGenerationStatus(generation.status) in AVATAR_GENERATION_TERMINAL_STATUSES

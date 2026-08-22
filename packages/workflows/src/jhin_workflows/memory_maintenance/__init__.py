@@ -3,10 +3,8 @@
 from jhin_workflows.memory_maintenance.shared import (
     ACTIVITY_APPLY_MEMORY_CANDIDATES,
     ACTIVITY_EXTRACT_MEMORY_CANDIDATES,
-    MEMORY_MAINTENANCE_WORKFLOW,
     SOURCE_KIND_MESSAGE,
     SOURCE_KIND_TASK_OUTCOME,
-    SOURCE_KINDS,
     ApplyMemoryCandidatesInput,
     ApplyMemoryCandidatesResult,
     ExtractMemoryCandidatesInput,
@@ -21,8 +19,6 @@ from jhin_workflows.memory_maintenance.workflows import MemoryMaintenanceWorkflo
 __all__ = [
     "ACTIVITY_APPLY_MEMORY_CANDIDATES",
     "ACTIVITY_EXTRACT_MEMORY_CANDIDATES",
-    "MEMORY_MAINTENANCE_WORKFLOW",
-    "SOURCE_KINDS",
     "SOURCE_KIND_MESSAGE",
     "SOURCE_KIND_TASK_OUTCOME",
     "ApplyMemoryCandidatesInput",

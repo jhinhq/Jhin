@@ -17,7 +17,6 @@ from jhin_tools.gateway import (
     ToolGateway,
 )
 from jhin_tools.invocation import (
-    INVOCATION_FORMAT_VERSION,
     MAX_TOOL_CALLS_PER_STEP,
     MAX_TOOL_STEP_INDEX,
     SYNC_INVOCATION_FORMAT_VERSION,
@@ -49,7 +48,6 @@ from jhin_tools.test_barriers import (
 __all__ = [
     "AGENT_BEFORE_BIND",
     "BUILTIN_TOOLS",
-    "INVOCATION_FORMAT_VERSION",
     "MAX_DOCUMENT_BYTES",
     "MAX_STRING_CHARS",
     "MAX_TOOL_CALLS_PER_STEP",

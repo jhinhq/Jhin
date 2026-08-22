@@ -7,7 +7,7 @@
 import type { MemoryKind, MemoryRecord, MemoryScope, MemoryStatus } from "@/lib/types";
 
 export const MEMORY_MAX_CHARS = 2000;
-export const MEMORY_MAX_TAGS = 10;
+const MEMORY_MAX_TAGS = 10;
 
 export const SCOPE_LABELS: Record<MemoryScope, string> = {
   agent: "Agent",

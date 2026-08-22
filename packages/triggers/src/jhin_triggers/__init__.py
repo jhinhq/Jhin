@@ -8,8 +8,6 @@ normalization into the ``changed_from`` convention this DSL understands.
 """
 
 from jhin_triggers.filters import (
-    ConditionResult,
-    EvaluationResult,
     FilterError,
     evaluate_filter,
     validate_filter,
@@ -21,8 +19,6 @@ from jhin_triggers.idempotency import (
 )
 
 __all__ = [
-    "ConditionResult",
-    "EvaluationResult",
     "FilterError",
     "build_idempotency_key",
     "evaluate_filter",

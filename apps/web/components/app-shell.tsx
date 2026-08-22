@@ -44,7 +44,7 @@ export interface NavItem {
   description?: string;
 }
 
-export const PRIMARY_NAV: readonly NavItem[] = [
+const PRIMARY_NAV: readonly NavItem[] = [
   { href: "/chats", label: "Chats", icon: MessageSquare },
   { href: "/agents", label: "Agents", icon: Bot },
   { href: "/company", label: "Company", icon: Building2 },
@@ -114,7 +114,7 @@ export const ADVANCED_NAV: readonly NavItem[] = [
 /** Mobile bottom tab bar shows the first four primary items + "More". */
 const MOBILE_TABS = PRIMARY_NAV.slice(0, 4);
 
-export const ADVANCED_STORAGE_KEY = "jhin-advanced-open";
+const ADVANCED_STORAGE_KEY = "jhin-advanced-open";
 
 function isActive(pathname: string, href: string): boolean {
   if (href === "/") return pathname === "/";

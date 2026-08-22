@@ -224,9 +224,6 @@ class TriggerMatcher:
                 continue
             await self._invoke(spec, envelope, result)
 
-    def invalidate_cache(self) -> None:
-        self._cache.clear()
-
     async def _triggers_for(self, workspace_id: str) -> list[TriggerSpec]:
         now = time.monotonic()
         cached = self._cache.get(workspace_id)

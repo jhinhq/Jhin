@@ -10,7 +10,7 @@ import type { ActivityCard, ActivityKind, Conversation, ConversationMessage } fr
 export const LAST_AGENT_STORAGE_KEY = "jhin-last-agent";
 
 /** Structured agent message types that render as compact "work cards". */
-export const WORK_CARD_TYPES = new Set([
+const WORK_CARD_TYPES = new Set([
   "delegation",
   "review_request",
   "result",
@@ -41,7 +41,7 @@ export function relativeTime(iso: string, now: Date = new Date()): string {
   });
 }
 
-export type LiveStatusTone = "accent" | "neutral" | "warn";
+type LiveStatusTone = "accent" | "neutral" | "warn";
 
 export interface LiveStatus {
   label: string;
@@ -77,7 +77,7 @@ function str(value: unknown): string {
 }
 
 /** Who a structured message was aimed at, when the backend recorded it. */
-export function messageTarget(message: Pick<ConversationMessage, "content_json">): string {
+function messageTarget(message: Pick<ConversationMessage, "content_json">): string {
   const content = message.content_json;
   return (
     str(content.target_agent_name) || str(content.to_agent_name) || str(content.agent_name) || ""
@@ -148,7 +148,7 @@ export function isWorkCard(
 
 /** Activity kinds that show as system chips in the transcript. The other
  * kinds are projections of structured messages the transcript already shows. */
-export const TRANSCRIPT_ACTIVITY_KINDS: ReadonlySet<ActivityKind> = new Set<ActivityKind>([
+const TRANSCRIPT_ACTIVITY_KINDS: ReadonlySet<ActivityKind> = new Set<ActivityKind>([
   "started",
   "queued",
   "finished",

@@ -71,11 +71,6 @@ def decode_string_secret_map(plaintext: str) -> dict[str, str]:
     return decoded
 
 
-def decode_secret_mapping(plaintext: str) -> dict[str, str]:
-    """Compatibility alias; new code should use :func:`decode_string_secret_map`."""
-    return decode_string_secret_map(plaintext)
-
-
 def register_secret_material(plaintext: str) -> None:
     """Register a bounded secret blob and every independently leakable piece.
 

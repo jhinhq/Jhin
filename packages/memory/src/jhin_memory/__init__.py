@@ -9,9 +9,6 @@ Deterministic policy (:mod:`jhin_memory.policy`), persistence
 from jhin_memory.embedding import (
     DEFAULT_BACKFILL_LIMIT,
     MAX_BACKFILL_LIMIT,
-    MEMORY_EMBEDDED_EVENT,
-    MEMORY_EMBEDDING_FAILED_EVENT,
-    EmbeddingProfile,
     MemoryEmbedder,
     resolve_memory_embedder,
     select_embedding_profile,
@@ -25,21 +22,17 @@ from jhin_memory.extraction import (
     parse_candidates,
 )
 from jhin_memory.persistence import (
-    ApplyResult,
     agent_team_ids,
     apply_candidates,
     create_version,
     derive_source_facts,
     forget_record,
     set_embedding,
-    system_actor,
 )
 from jhin_memory.policy import (
     content_hash,
     evaluate_candidate,
     normalize_content,
-    normalize_subject,
-    scope_exceeds,
 )
 from jhin_memory.retrieval import (
     DEFAULT_MAX_CHARS,
@@ -48,10 +41,9 @@ from jhin_memory.retrieval import (
     authorization_filter,
     build_memory_context,
     record_retrieval_provenance,
-    render_context,
     unavailable_context,
 )
-from jhin_memory.screening import REDACTION_MARKER, contains_secret, screen_content
+from jhin_memory.screening import contains_secret, screen_content
 from jhin_memory.types import (
     ActorFacts,
     ExistingRecord,
@@ -60,7 +52,6 @@ from jhin_memory.types import (
     MemoryContextItem,
     MemoryDecision,
     MemoryProvenance,
-    ScreeningResult,
     SourceFacts,
     SourceRef,
 )
@@ -71,14 +62,9 @@ __all__ = [
     "DEFAULT_MAX_RECORDS",
     "EXTRACTION_SYSTEM_PROMPT",
     "MAX_BACKFILL_LIMIT",
-    "MEMORY_EMBEDDED_EVENT",
-    "MEMORY_EMBEDDING_FAILED_EVENT",
     "MEMORY_RETRIEVED_EVENT",
-    "REDACTION_MARKER",
     "ActorFacts",
-    "ApplyResult",
     "CandidateParseError",
-    "EmbeddingProfile",
     "ExistingRecord",
     "ExtractionResult",
     "MemoryCandidate",
@@ -87,7 +73,6 @@ __all__ = [
     "MemoryDecision",
     "MemoryEmbedder",
     "MemoryProvenance",
-    "ScreeningResult",
     "SourceFacts",
     "SourceRef",
     "agent_team_ids",
@@ -103,15 +88,11 @@ __all__ = [
     "extract_candidates",
     "forget_record",
     "normalize_content",
-    "normalize_subject",
     "parse_candidates",
     "record_retrieval_provenance",
-    "render_context",
     "resolve_memory_embedder",
-    "scope_exceeds",
     "screen_content",
     "select_embedding_profile",
     "set_embedding",
-    "system_actor",
     "unavailable_context",
 ]

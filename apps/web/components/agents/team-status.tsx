@@ -86,7 +86,7 @@ function ItemSection({
   );
 }
 
-export function TeamStatusView({
+function TeamStatusView({
   rollup,
   now,
   avatars,

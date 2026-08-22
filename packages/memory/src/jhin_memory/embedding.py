@@ -37,8 +37,6 @@ from jhin_secrets import SecretCrypto, SecretStore
 
 logger = get_logger(__name__)
 
-MEMORY_EMBEDDED_EVENT = "memory.embedded"
-MEMORY_EMBEDDING_FAILED_EVENT = "memory.embedding_failed"
 DEFAULT_BACKFILL_LIMIT = 100
 MAX_BACKFILL_LIMIT = 500
 _EMBEDDABLE_STATUSES = (MemoryStatus.ACTIVE.value, MemoryStatus.CONTESTED.value)

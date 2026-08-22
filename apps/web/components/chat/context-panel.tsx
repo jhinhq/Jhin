@@ -27,7 +27,7 @@ const TASK_STATE_TONES: Record<string, string> = {
   cancelled: "text-dim",
 };
 
-export function taskStateLabel(task: Pick<Task, "state">): string {
+function taskStateLabel(task: Pick<Task, "state">): string {
   return TASK_STATE_LABELS[task.state] ?? task.state;
 }
 

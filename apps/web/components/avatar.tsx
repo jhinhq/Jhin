@@ -27,7 +27,7 @@ export function initialsOf(name: string): string {
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
-export function hueIndex(name: string): number {
+function hueIndex(name: string): number {
   let hash = 0;
   for (const ch of name) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
   return hash % HUES.length;

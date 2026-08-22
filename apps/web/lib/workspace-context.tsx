@@ -20,7 +20,7 @@ const ROLE_ORDER: Record<WorkspaceRole, number> = {
   owner: 3,
 };
 
-export function roleSatisfies(actual: WorkspaceRole, required: WorkspaceRole): boolean {
+function roleSatisfies(actual: WorkspaceRole, required: WorkspaceRole): boolean {
   return ROLE_ORDER[actual] >= ROLE_ORDER[required];
 }
 

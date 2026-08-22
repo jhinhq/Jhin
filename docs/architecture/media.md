@@ -14,7 +14,6 @@ avatar is deliberately stylized and is never proof of identity.
 | Normalizer | `packages/media/src/jhin_media/images.py` | Decode, validate, strip, crop, re-encode. |
 | `MediaStore` | `packages/media/src/jhin_media/base.py` | Narrow storage boundary (`put_avatar`, `get_variant`, `retire`). |
 | `PostgresMediaStore` | `packages/media/src/jhin_media/postgres.py` | V1 store: variants inline in `media_asset` (`bytea`), backup-safe for single-node installs. |
-| `S3MediaStore` | `packages/media/src/jhin_media/s3.py` | Adapter boundary only; every operation raises `NotImplementedError`. |
 | Activation | `packages/media/src/jhin_media/avatars.py` | `activate_avatar` / `clear_avatar`: lock agent, stage asset, swap pointer, retire previous, flush (caller commits). |
 | Prompt builder | `packages/media/src/jhin_media/prompts.py` | Builds generation prompts from public identity + explicit hint only. |
 | Image capability | `packages/models/src/jhin_models/images.py` | Optional `ImageGenerationClient` protocol; `as_image_generation_client` raises `ImageGenerationUnsupported` for chat-only adapters. OpenAI-compatible adapters implement `POST /images/generations` with inline `b64_json`. |
