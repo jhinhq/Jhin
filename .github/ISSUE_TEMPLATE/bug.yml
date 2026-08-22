@@ -1,0 +1,75 @@
+name: Bug report
+description: Something is broken or behaves differently from the documentation.
+labels: [bug, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. **Do not include credentials, master keys, session
+        cookies, webhook secrets, API keys, or full `.env` contents.** Redact
+        hostnames and IDs you consider private. Security-sensitive problems go
+        through the private advisory form linked in SECURITY.md, not here.
+  - type: input
+    id: version
+    attributes:
+      label: Jhin version
+      description: Output of `cat VERSION`, the image tag/digest you run, or the commit SHA.
+      placeholder: "0.1.0 / sha-abc123def456"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How is Jhin running?
+      options:
+        - Release Compose bundle (GHCR images)
+        - Source checkout, `compose.yaml` + rootful socket overlay
+        - Source checkout, `compose.yaml` + rootless socket overlay
+        - Source checkout with `compose.dev.yaml` (dev fakes)
+        - Other (describe below)
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: Host platform
+      description: OS and version, Docker Engine / Compose versions, CPU architecture.
+      placeholder: "Ubuntu 24.04, Docker 27.x, Compose v2.29, linux/amd64"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: Include redacted logs (`docker compose logs <service>`) and the relevant UI route (for example `/chats`, `/advanced`).
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: health
+    attributes:
+      label: Health output
+      description: Output of `curl -s http://localhost:8000/api/v1/health/ready` and `docker compose ps --all`, redacted.
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Confirmation
+      options:
+        - label: I have removed all secrets and credentials from this report.
+          required: true
+        - label: This is not a security vulnerability (those go through SECURITY.md).
+          required: true

@@ -1,0 +1,17 @@
+# Rootful Docker-socket overlay for the release manifest. Identical contract
+# to the repository's compose.rootful.yaml: the runner stays UID 10001 and
+# receives only the socket's exact numeric group as a supplementary group.
+services:
+  sandbox-runner:
+    group_add:
+      - "${SANDBOX_DOCKER_GID:?set SANDBOX_DOCKER_GID to the mounted socket numeric group}"
+    environment:
+      SANDBOX_DOCKER_MODE: rootful
+      SANDBOX_DOCKER_GID: "${SANDBOX_DOCKER_GID:?set SANDBOX_DOCKER_GID}"
+      SANDBOX_DOCKER_SOCKET: /run/jhin/docker.sock
+    volumes:
+      - type: bind
+        source: ${SANDBOX_DOCKER_SOCKET_HOST:?set verified absolute Docker socket}
+        target: /run/jhin/docker.sock
+        bind:
+          create_host_path: false

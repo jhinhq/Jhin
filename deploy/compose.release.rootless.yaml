@@ -1,0 +1,50 @@
+# Rootless Docker-socket overlay for the release manifest. Identical contract
+# to the repository's compose.rootless.yaml, except the transport sidecar is
+# pulled from the same published sandbox-runner image instead of a local
+# build (the bundle pins SANDBOX_RUNNER_IMAGE by digest).
+services:
+  rootless-docker-transport:
+    image: ${SANDBOX_RUNNER_IMAGE:?set SANDBOX_RUNNER_IMAGE}
+    command: ["python", "-m", "jhin_sandbox_runner.rootless_transport"]
+    user: "0:0"
+    privileged: false
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: [/tmp]
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - type: bind
+        source: ${PHASE10_ROOTLESS_DOCKER_SOCKET:?set the verified rootless socket}
+        target: /run/host/docker.sock
+        bind:
+          create_host_path: false
+    networks: [engine]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;response=urllib.request.urlopen('http://127.0.0.1:2375/_ping',timeout=2);body=response.read();raise SystemExit(0 if response.status == 200 and body == b'OK' else 1)
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    restart: unless-stopped
+
+  sandbox-runner:
+    depends_on:
+      rootless-docker-transport:
+        condition: service_healthy
+        restart: true
+    environment:
+      SANDBOX_DOCKER_MODE: rootless
+      SANDBOX_DOCKER_TRANSPORT_URL: http://rootless-docker-transport:2375
+    networks: [runner, engine]
+
+networks:
+  engine:
+    driver: bridge
+    internal: true

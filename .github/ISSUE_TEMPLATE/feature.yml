@@ -1,0 +1,57 @@
+name: Feature request
+description: Propose an improvement or new capability.
+labels: [enhancement, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Jhin follows an authoritative plan (`docs/implementation-plan.md`) and
+        per-feature specs under `docs/superpowers/specs`. Proposals that fit an
+        existing phase or architecture boundary are easiest to accept.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can't you do today, and who is affected (operator, agent author, contributor)?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the behaviour, UI route, API, or connector change you have in mind.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Chats / Activity / Attention (web UI)
+        - Agents, teams, delegation
+        - Connectors (GitHub, Linear, Vercel, Supabase, CLI sandbox)
+        - Triggers and events
+        - Tool gateway, policy, approvals
+        - Sandboxing / sandbox-runner
+        - Models and providers
+        - Memory / avatars
+        - Deployment, Compose, release
+        - Documentation
+        - Other
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: security
+    attributes:
+      label: Security or isolation considerations
+      description: Does this touch secrets, grants, workspace isolation, webhooks, or the Docker socket boundary?
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Confirmation
+      options:
+        - label: I searched existing issues and the implementation plan for this request.
+          required: true

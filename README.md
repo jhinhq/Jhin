@@ -1,5 +1,10 @@
 # Jhin
 
+[![CI](https://github.com/Teachmetech/Jhin/actions/workflows/ci.yml/badge.svg)](https://github.com/Teachmetech/Jhin/actions/workflows/ci.yml)
+[![Security](https://github.com/Teachmetech/Jhin/actions/workflows/security.yml/badge.svg)](https://github.com/Teachmetech/Jhin/actions/workflows/security.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.1.0--rc-orange.svg)](CHANGELOG.md)
+
 Jhin is a self-hosted, open-source platform for creating hierarchical teams of
 autonomous AI agents that can securely use external systems, react to triggers,
 delegate work, execute long-running workflows, and expose all activity through
@@ -11,49 +16,86 @@ backbone, and PostgreSQL is the system of record. A FastAPI control-plane API
 owns configuration and authorization, and a Next.js frontend provides the
 operations UI.
 
-> Status: Phases 1–9 of the implementation plan are complete and verified
-> with compose-stack integration tests. On top of that, Jhin has a
-> chat-first experience: named, persistent conversations with every agent,
-> a company activity feed that shows agents handing work to each other, an
-> Attention inbox, friendly Agents/Company/Automations/Apps pages, and an
-> **Advanced** area that keeps every operational screen (work queue, runs,
-> approvals, connectors, triggers, models, audit). The UI follows the Jhin
-> landing-page design. See [Conversations and Company Activity](docs/architecture/conversations.md).
+> **Status: 0.1.0 release candidate.** Phases 1–9 of the implementation
+> plan are complete and verified with compose-stack integration tests.
 > Phase 10 (production operations) is in progress: deterministic connector,
 > tool, trigger-sync, and sandbox effects now run on an isolated tool worker;
 > model reasoning and its private durable record remain on the agent worker.
 > See [Deterministic tool-worker boundary](docs/architecture/tool-worker-boundary.md)
 > and [Sandboxing architecture](docs/architecture/sandboxing.md) for the
 > ownership, compatibility, and Docker-authority contracts. Phase 11
-> (open-source release) is designed under `docs/superpowers` but not started.
+> (open-source release) artifacts are in place: community files, CI/E2E/
+> Security/Release workflows, the release Compose bundle under `deploy/`,
+> the documentation set under `docs/`, and `scripts/release_preflight.py`.
+> The first tagged release (`v0.1.0`) and public image publication remain
+> owner-gated; do not treat an installation as production-ready until the
+> section 49 criteria in `docs/implementation-plan.md` have evidence for
+> your environment.
+
+## Features
+
+- **Chat-first operation.** Named, persistent conversations with every agent
+  (`/chats`); each turn that needs work becomes a durable task behind the
+  scenes. See [Conversations and Company Activity](docs/architecture/conversations.md).
+- **A company, not a bot.** Teams, managers, and reporting lines
+  (`/company`, `/agents`); grant-scoped delegation with implementer/QA
+  routing, bounded fix-retest loops, and visible queues
+  ([Delegation and Teams](docs/architecture/delegation-and-teams.md)).
+- **Activity and Attention.** A plain-language feed of who asked whom for
+  what and how it went (`/activity`), plus an inbox for approvals, failed
+  work, and chats waiting on you (`/attention`).
+- **Secure tool use.** Deny-by-default capability grants, approval policies,
+  sanitized and audited tool calls, executed only on an isolated tool worker;
+  credentials live in an envelope-encrypted secret store and are never shown
+  again.
+- **Connectors.** GitHub, Linear, Vercel, Supabase, and a CLI sandbox that runs
+  jobs in ephemeral non-root containers, with fake services for
+  credential-free development (`/apps`,
+  [connector SDK](docs/architecture/connectors.md)).
+- **Automations.** Signed webhooks in, WHEN/IF/THEN triggers with dry-run
+  explanations, durable task creation out (`/automations`,
+  [Events and triggers](docs/architecture/events.md)).
+- **Durable by construction.** Temporal workflows survive worker restarts,
+  NATS JetStream redelivery is idempotent, PostgreSQL is the single system
+  of record, and every operational screen stays available under `/advanced`.
+- **Memory and identity.** Curated long-term memory with secret redaction and
+  agent avatars ([memory](docs/architecture/memory.md),
+  [media](docs/architecture/media.md)).
+- **Observable.** Structured JSON logs with redaction, OpenTelemetry traces
+  and metrics, protected health endpoints.
 
 ## Quick start
 
-> **macOS / Docker Desktop note.** The Phase 10 sandbox contract needs a Linux
-> Docker socket in `rootful` (root-owned, positive docker GID) or `rootless`
-> (UID 10001 daemon) mode. Docker Desktop exposes a `uid 0 / gid 0` socket
-> behind a symlink, which satisfies neither, so on a Mac the plain
-> `docker compose -f compose.yaml -f compose.dev.yaml up -d --build` starts
-> every service except `sandbox-runner` (CLI sandbox jobs are unavailable;
-> chats, agents, memory, connectors, triggers, and approvals all work). The
-> leased integration harness and `make test-integration` require Linux.
+> **macOS / Docker Desktop note.** The server-grade sandbox contract needs a
+> Linux Docker socket in `rootful` (root-owned, positive docker GID) or
+> `rootless` (UID 10001 daemon) mode. Docker Desktop exposes a `uid 0 / gid 0`
+> socket behind a symlink, which satisfies neither, so on a Mac or Windows
+> machine use the explicit, development-only third mode described under
+> [Docker Desktop (macOS/Windows, local development only)](#docker-desktop-macoswindows-local-development-only):
+> `compose.desktop.yaml` lets `sandbox-runner` reach the Desktop VM daemon
+> through root-group membership, and the leased integration harness runs with
+> `make test-integration PHASE10_MODE=desktop`. A base-only
+> `docker compose -f compose.yaml -f compose.dev.yaml up` still starts every
+> service except `sandbox-runner`. Never use `desktop` mode on a server.
 
 
-Requirements: Linux Docker with Compose v2, Python 3.13, `uv`, and `make`.
+Requirements: Docker with Compose v2 (Linux for servers; Docker Desktop on
+macOS/Windows for local development only), Python 3.13, `uv`, and `make`.
 
 ```bash
-git clone <this repo>
-cd jhin
+git clone https://github.com/Teachmetech/Jhin.git
+cd Jhin
 cp .env.example .env
 make master-key          # one-time: generate the secret-store master key
 ```
 
-On Linux, choose exactly one Docker socket mode below. The commands disable
-implicit `.env` loading, scrub inherited Compose and Docker targeting controls,
-and pin the Compose project to `jhin`: export any reviewed infrastructure
-values in the operator environment, but do not put credentials or tokens on
-the command line. A base-only start and a start containing both overlays are
-invalid. Both modes build the sandbox job image before starting the stack.
+Choose exactly one Docker socket mode below (`rootless` or `rootful` on Linux;
+`desktop` on Docker Desktop). The commands disable implicit `.env` loading,
+scrub inherited Compose and Docker targeting controls, and pin the Compose
+project to `jhin`: export any reviewed infrastructure values in the operator
+environment, but do not put credentials or tokens on the command line. A
+base-only start and a start containing more than one overlay are invalid. All
+modes build the sandbox job image before starting the stack.
 
 ### Rootless Docker socket (Linux)
 
@@ -230,6 +272,111 @@ The final `ps --all` must contain exactly `api`, `web`, `workflow-worker`,
 health-bearing service must be healthy. Rootful mode has no daemon sidecar and
 therefore no daemon-service dependency.
 
+### Docker Desktop (macOS/Windows, local development only)
+
+Docker Desktop runs the daemon in a Linux VM. Its host socket is a user-owned
+symlink target, and inside a container it is a `uid 0 / gid 0` Unix socket, so
+the only way for the unprivileged `10001:10001` runner to use it is membership
+in the root group (`group_add: ["0"]`). That is a weaker boundary than the two
+Linux modes and is acceptable **only on a developer's own machine** — never on
+a shared host, a server, or CI. The runner still drops every capability, keeps
+`no-new-privileges`, and refuses to start unless the mounted socket is a
+root-owned, root-group, non-symlink Unix socket and the daemon behind it
+reports `OperatingSystem: Docker Desktop`.
+
+Preflight resolves the compatibility symlink (the one mode where a symlink is
+accepted on the host) and binds the real socket:
+
+```bash
+set -euo pipefail
+unset \
+  APP_ENV \
+  COMPOSE_FILE \
+  COMPOSE_PROFILES \
+  COMPOSE_PROJECT_NAME \
+  COMPOSE_REMOVE_ORPHANS \
+  COMPOSE_IGNORE_ORPHANS \
+  COMPOSE_ENV_FILES \
+  BUILDX_BUILDER \
+  BUILDKIT_HOST \
+  DOCKER_HOST \
+  DOCKER_CONTEXT \
+  DOCKER_TLS \
+  DOCKER_TLS_VERIFY \
+  DOCKER_CERT_PATH \
+  DOCKER_API_VERSION \
+  DOCKER_DEFAULT_PLATFORM \
+  SANDBOX_DOCKER_GID
+export COMPOSE_DISABLE_ENV_FILE=1
+export COMPOSE_PROJECT_NAME=jhin
+export PHASE10_SOCKET_MODE=desktop
+SANDBOX_DOCKER_SOCKET_HOST="$(python - /var/run/docker.sock <<'PY'
+import stat
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.is_absolute():
+    raise SystemExit("desktop Docker socket path must be absolute")
+try:
+    resolved = path.resolve(strict=True)
+except OSError as error:
+    raise SystemExit(f"cannot resolve desktop Docker socket: {error}") from error
+if not stat.S_ISSOCK(resolved.lstat().st_mode):
+    raise SystemExit("desktop Docker socket must resolve to a Unix socket")
+print(resolved)
+PY
+)"
+export SANDBOX_DOCKER_SOCKET_HOST
+desktop_os="$(docker --host "unix://$SANDBOX_DOCKER_SOCKET_HOST" info --format '{{.OperatingSystem}}')"
+case "$desktop_os" in
+  *"Docker Desktop"*) ;;
+  *) echo "desktop mode requires a Docker Desktop daemon (got: $desktop_os)" >&2; exit 1 ;;
+esac
+export DOCKER_HOST="unix://$SANDBOX_DOCKER_SOCKET_HOST"
+export BUILDX_BUILDER=default
+uv run python scripts/assert_phase10_tool_worker_compose.py --mode desktop --dev
+docker compose \
+  -f compose.yaml \
+  -f compose.dev.yaml \
+  -f compose.desktop.yaml \
+  --profile build \
+  build sandbox-image
+docker compose \
+  -f compose.yaml \
+  -f compose.dev.yaml \
+  -f compose.desktop.yaml \
+  up -d --build --wait --wait-timeout 300
+docker compose \
+  -f compose.yaml \
+  -f compose.dev.yaml \
+  -f compose.desktop.yaml \
+  exec -T sandbox-runner python -c "import urllib.request; raise SystemExit(0 if urllib.request.urlopen('http://127.0.0.1:8085/health', timeout=3).status == 200 else 1)"
+docker compose \
+  -f compose.yaml \
+  -f compose.dev.yaml \
+  -f compose.desktop.yaml \
+  run --rm --no-deps api jhin-db-migrate
+docker compose \
+  -f compose.yaml \
+  -f compose.dev.yaml \
+  -f compose.desktop.yaml \
+  ps --all
+```
+
+The commands above include the dev overlay (fake connectors, loopback ports,
+Temporal UI) because desktop mode is for development; drop
+`-f compose.dev.yaml` for a production-shaped local stack. The final `ps --all`
+has the same service set as rootful mode (no `rootless-docker-transport`).
+The leased integration harness works the same way:
+
+```bash
+make test-integration PHASE10_MODE=desktop      # frozen live regression set
+make test-sandbox-socket-desktop                # live desktop socket boundary
+make compose-up PHASE10_MODE=desktop            # persistent isolated stack
+make compose-down
+```
+
 The master key file (`secrets/dev/jhin_master_key` by default) encrypts every
 stored credential. Back it up; losing it makes stored secrets unreadable.
 
@@ -243,6 +390,62 @@ Then open:
 
 Internal infrastructure ports (Postgres, NATS, Temporal) are **not** published
 publicly. The dev overlay (`compose.dev.yaml`) binds them to `127.0.0.1` only.
+
+## Screenshots and demo
+
+The seeded, credential-free demo (fake model provider, fake Linear, fake
+GitHub) walks through chats, the company map, an automation firing on a
+Linear ticket, delegation to QA, and the approval surface. The step-by-step
+flow, expected output, and the reviewed screenshot set are in
+[docs/demo.md](docs/demo.md).
+
+## Production deployment
+
+Production installs use the pull-based release bundle
+(`deploy/compose.release.yaml`, rendered per release with digest-pinned
+images from `ghcr.io/teachmetech/jhin-<component>`), a TLS reverse proxy in
+front of the web entry point, and exactly one Docker-socket overlay for the
+sandbox runner. The full contract (configuration classes, secrets and the
+master key, backups and restore, upgrades, sizing, health, telemetry,
+troubleshooting) is in [docs/deployment.md](docs/deployment.md).
+
+Connector credentials are stored encrypted under a master key that Jhin never
+backs up for you: **back up the master key separately from the database**.
+Losing it makes every stored credential unreadable.
+
+Verify a released image before running it:
+
+```bash
+cosign verify \
+  --certificate-identity-regexp '^https://github.com/Teachmetech/Jhin/.github/workflows/release.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/teachmetech/jhin-api@<digest-from-image-lock.json>
+```
+
+The self-hosted core (PostgreSQL, NATS, Temporal, all Jhin services) runs
+entirely on your host. Model providers and external connectors (GitHub,
+Linear, Vercel, Supabase) are optional managed services you connect with
+your own credentials.
+
+## Documentation
+
+- [Documentation index](docs/README.md)
+- [Architecture index](docs/architecture/README.md) — every service and
+  trust boundary mapped to its authoritative document
+- [Deployment guide](docs/deployment.md)
+- [Demo and screenshots](docs/demo.md)
+- [Starter templates](docs/templates.md)
+- [Implementation plan](docs/implementation-plan.md)
+
+## Community and security
+
+- [Contributing](CONTRIBUTING.md) — setup, gates, conventions, boundaries,
+  adding a connector
+- [Support](SUPPORT.md) — where to ask and what to include
+- [Security policy](SECURITY.md) — private vulnerability reporting, supported
+  versions, hardening notes
+- [Code of conduct](CODE_OF_CONDUCT.md)
+- [Changelog](CHANGELOG.md)
 
 ## Repository layout
 

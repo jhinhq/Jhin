@@ -1,186 +1,45 @@
-# Fast repository gates for every push and pull request: Python lint, type
-# check, and unit tests; web lint, type check, Vitest, and production build;
-# all eight first-party container images build (no push); the release
-# preflight (scripts/release_preflight.py); and the two Phase 10 live
-# Compose-stack jobs (rootful and rootless socket modes) that gate merges.
-# e2e.yml reruns the same live jobs on demand and nightly; security scanning
-# runs in security.yml.
-name: CI
+# Live Compose-stack verification through the Phase 10 harness
+# (tests/integration/phase10_upgrade_harness.py): builds the sandbox job image
+# and the full stack on a GitHub-hosted ubuntu-24.04 runner in the rootful and
+# rootless socket modes. The merge-gating copies of these jobs live in ci.yml
+# (`phase10-rootful-live`, `phase10-rootless-live`); this workflow reruns them
+# nightly and on demand so a flaky host can be re-exercised without a commit.
+#
+# Runner preconditions (satisfied by GitHub-hosted Ubuntu images):
+#   * rootful job  - /var/run/docker.sock exists, is root-owned, and has a
+#     positive numeric group; the job exports that GID as SANDBOX_DOCKER_GID
+#     without changing the socket.
+#   * rootless job - the runner can provision host UID 10001 with systemd
+#     user lingering and docker-ce-rootless-extras from download.docker.com.
+#     If provisioning fails, the job fails; it never falls back to a fake pass.
+#
+# Docker Desktop and macOS hosts cannot satisfy either precondition (see the
+# README quick start); these jobs are Linux-only by design.
+name: E2E
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  schedule:
+    # Nightly rerun of both live modes against main.
+    - cron: "23 3 * * *"
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Socket mode to exercise
+        type: choice
+        default: both
+        options: [both, rootful, rootless]
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: e2e-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  PYTHON_VERSION: "3.13"
-  NODE_VERSION: "22"
-
 jobs:
-  python:
-    name: Python lint / typecheck / tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          enable-cache: true
-          cache-dependency-glob: |
-            uv.lock
-            pyproject.toml
-            **/pyproject.toml
-
-      - name: Sync workspace
-        run: uv sync --frozen --all-packages
-
-      - name: Ruff lint
-        run: uv run ruff check .
-
-      - name: Ruff format check
-        run: uv run ruff format --check .
-
-      - name: mypy
-        run: uv run mypy
-
-      - name: Unit tests
-        run: uv run pytest -q
-
-      - name: Phase 10 focused boundary
-        run: make test-tool-worker-boundary
-
-  web:
-    name: Web lint / typecheck / tests / build
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: pnpm/action-setup@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: pnpm
-
-      - name: Install
-        run: pnpm install --frozen-lockfile
-
-      - name: Lint
-        run: pnpm --filter jhin-web lint
-
-      - name: Typecheck
-        run: pnpm --filter jhin-web typecheck
-
-      - name: Vitest
-        run: pnpm --filter jhin-web test
-
-      - name: Build
-        env:
-          NEXT_TELEMETRY_DISABLED: "1"
-        run: pnpm --filter jhin-web build
-
-  release-preflight:
-    name: Release preflight (repository gate)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          enable-cache: true
-
-      - name: Sync workspace
-        run: uv sync --frozen --all-packages
-
-      - name: Validate release artifacts, versions, links, and tracked content
-        run: uv run python scripts/release_preflight.py
-
-      - name: Render the release Compose bundle (dry run, unpinned)
-        run: |
-          uv run python scripts/render_release_bundle.py \
-            --version "$(cat VERSION)" \
-            --output "$RUNNER_TEMP/bundle" \
-            --allow-unpinned
-          ls -R "$RUNNER_TEMP/bundle"
-
-  docker:
-    name: Image build (${{ matrix.name }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: api
-            dockerfile: docker/python.Dockerfile
-            build_args: SERVICE_PACKAGE=jhin-api
-          - name: workflow-worker
-            dockerfile: docker/python.Dockerfile
-            build_args: SERVICE_PACKAGE=jhin-workflow-worker
-          - name: event-worker
-            dockerfile: docker/python.Dockerfile
-            build_args: SERVICE_PACKAGE=jhin-event-worker
-          - name: agent-worker
-            dockerfile: docker/python.Dockerfile
-            build_args: SERVICE_PACKAGE=jhin-agent-worker
-          - name: tool-worker
-            dockerfile: docker/python.Dockerfile
-            build_args: SERVICE_PACKAGE=jhin-tool-worker
-          - name: sandbox-runner
-            dockerfile: docker/python.Dockerfile
-            build_args: SERVICE_PACKAGE=jhin-sandbox-runner
-          - name: sandbox
-            dockerfile: docker/sandbox.Dockerfile
-            build_args: ""
-          - name: web
-            dockerfile: apps/web/Dockerfile
-            build_args: ""
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Build ${{ matrix.name }}
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ${{ matrix.dockerfile }}
-          build-args: ${{ matrix.build_args }}
-          push: false
-          load: true
-          tags: jhin-${{ matrix.name }}:ci
-          cache-from: type=gha,scope=${{ matrix.name }}
-          cache-to: type=gha,scope=${{ matrix.name }},mode=max
-
-      - name: Image runs as a non-root user
-        run: |
-          user="$(docker image inspect --format '{{.Config.User}}' "jhin-${{ matrix.name }}:ci")"
-          echo "configured user: ${user:-<empty>}"
-          case "$user" in
-            ""|0|root|0:0|root:root) echo "image must not run as root" >&2; exit 1 ;;
-          esac
-
-  phase10-rootful-live:
-    name: Phase 10 rootful live boundary
+  rootful-live:
+    name: Rootful socket live stack
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.mode != 'rootless' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
@@ -194,6 +53,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
+          python-version: "3.13"
           enable-cache: true
 
       - name: Sync workspace
@@ -226,8 +86,9 @@ jobs:
       - name: Phase 9 to Phase 10 in-flight upgrade
         run: make test-tool-worker-live-upgrade
 
-  phase10-rootless-live:
-    name: Phase 10 rootless live boundary
+  rootless-live:
+    name: Rootless socket live stack
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.mode != 'rootful' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
@@ -239,6 +100,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
+          python-version: "3.13"
           enable-cache: true
 
       - name: Provision UID-10001 rootless Docker prerequisites

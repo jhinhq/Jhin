@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability (private)
+    url: https://github.com/Teachmetech/Jhin/security/advisories/new
+    about: Secret exposure, sandbox escape, auth bypass, cross-workspace access, webhook authenticity, or supply-chain issues. Never open a public issue for these. See SECURITY.md.
+  - name: Questions and support
+    url: https://github.com/Teachmetech/Jhin/blob/main/SUPPORT.md
+    about: How to get help, what to include, and where discussions happen.

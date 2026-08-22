@@ -1,0 +1,433 @@
+# Release automation (Phase 11, spec section 6).
+#
+#   * Tag push `v*`            -> validate, build + push multi-arch images to
+#                                 GHCR, SBOM, provenance attestation, keyless
+#                                 Cosign signatures, Trivy image scan, render
+#                                 the digest-pinned Compose bundle, and create
+#                                 the GitHub Release.
+#   * workflow_dispatch        -> candidate run: same build and verification,
+#                                 no registry push, no tag, no release.
+#
+# Publication jobs run in the protected `release` environment and use only
+# GITHUB_TOKEN (contents/packages/id-token/attestations). No PyPI or npm
+# credentials exist anywhere in this workflow (spec section 2.1).
+#
+# Owner-gated steps that are deliberately NOT automated here (spec section
+# 7.2): making GHCR packages public, the anonymous-pull clean-room gate,
+# moving `latest`/major/minor aliases, and signed-tag signer allowlisting.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Candidate version to validate against VERSION (no publish)
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAMESPACE: ghcr.io/${{ github.repository_owner }}
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  validate:
+    name: Validate version and repository gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.version.outputs.publish }}
+      short_sha: ${{ steps.version.outputs.short_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+
+      - run: uv sync --frozen --all-packages
+
+      - name: Resolve version and publication mode
+        id: version
+        run: |
+          file_version="$(tr -d '[:space:]' < VERSION)"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            tag="${GITHUB_REF_NAME}"
+            case "$tag" in
+              v[0-9]*.[0-9]*.[0-9]*) ;;
+              *) echo "tag '$tag' is not vMAJOR.MINOR.PATCH[-rc.N]" >&2; exit 1 ;;
+            esac
+            tag_version="${tag#v}"
+            if [ "$tag_version" != "$file_version" ]; then
+              echo "tag version $tag_version != VERSION $file_version" >&2
+              exit 1
+            fi
+            if [ "$(git cat-file -t "$tag")" != "tag" ]; then
+              echo "release tags must be annotated tag objects" >&2
+              exit 1
+            fi
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            requested="${{ inputs.version }}"
+            if [ -n "$requested" ] && [ "$requested" != "$file_version" ]; then
+              echo "requested $requested != VERSION $file_version" >&2
+              exit 1
+            fi
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$file_version" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Release preflight
+        run: uv run python scripts/release_preflight.py --version "${{ steps.version.outputs.version }}"
+
+      - name: Changelog excerpt for this version
+        run: |
+          uv run python scripts/release_preflight.py changelog-excerpt \
+            --version "${{ steps.version.outputs.version }}" > "$RUNNER_TEMP/release-notes.md"
+          cat "$RUNNER_TEMP/release-notes.md"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/release-notes.md
+
+  images:
+    name: Image ${{ matrix.component }}
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: ${{ needs.validate.outputs.publish == 'true' && 'release' || '' }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: api
+            dockerfile: docker/python.Dockerfile
+            build_args: SERVICE_PACKAGE=jhin-api
+            description: Jhin FastAPI control plane
+          - component: web
+            dockerfile: apps/web/Dockerfile
+            build_args: ""
+            description: Jhin Next.js web UI
+          - component: workflow-worker
+            dockerfile: docker/python.Dockerfile
+            build_args: SERVICE_PACKAGE=jhin-workflow-worker
+            description: Jhin Temporal worker for general workflows
+          - component: agent-worker
+            dockerfile: docker/python.Dockerfile
+            build_args: SERVICE_PACKAGE=jhin-agent-worker
+            description: Jhin Temporal worker for model reasoning and agent runs
+          - component: tool-worker
+            dockerfile: docker/python.Dockerfile
+            build_args: SERVICE_PACKAGE=jhin-tool-worker
+            description: Jhin deterministic tool gateway and connector execution worker
+          - component: event-worker
+            dockerfile: docker/python.Dockerfile
+            build_args: SERVICE_PACKAGE=jhin-event-worker
+            description: Jhin NATS JetStream event normalization and trigger matching worker
+          - component: sandbox-runner
+            dockerfile: docker/python.Dockerfile
+            build_args: SERVICE_PACKAGE=jhin-sandbox-runner
+            description: Jhin isolated sandbox job lifecycle service
+          - component: sandbox
+            dockerfile: docker/sandbox.Dockerfile
+            build_args: ""
+            description: Jhin default ephemeral CLI sandbox job image
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/jhin-${{ matrix.component }}
+      VERSION: ${{ needs.validate.outputs.version }}
+      PUBLISH: ${{ needs.validate.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: OCI metadata and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          # Immutable tags only. Moving aliases (MAJOR.MINOR, MAJOR, latest)
+          # are an owner-gated post-verification action (spec 6.2 / 7.2).
+          tags: |
+            type=raw,value=${{ env.VERSION }}
+            type=raw,value=sha-${{ needs.validate.outputs.short_sha }}
+          labels: |
+            org.opencontainers.image.title=jhin-${{ matrix.component }}
+            org.opencontainers.image.description=${{ matrix.description }}
+            org.opencontainers.image.vendor=Jhin contributors
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.documentation=https://github.com/${{ github.repository }}/blob/main/docs/deployment.md
+
+      - name: Build (and push on tag) multi-arch image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          build-args: ${{ matrix.build_args }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ env.PUBLISH == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=release-${{ matrix.component }}
+          cache-to: type=gha,scope=release-${{ matrix.component }},mode=max
+          outputs: ${{ env.PUBLISH == 'true' && 'type=image' || format('type=oci,dest={0}/jhin-{1}-{2}.oci.tar', runner.temp, matrix.component, needs.validate.outputs.version) }}
+
+      - name: Record image digest
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          printf '%s\n' "${{ steps.build.outputs.digest }}" > "$RUNNER_TEMP/digests/jhin-${{ matrix.component }}.digest"
+          cat "$RUNNER_TEMP/digests/jhin-${{ matrix.component }}.digest"
+
+      - name: SBOM (SPDX 2.3 JSON via Syft)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.PUBLISH == 'true' && format('{0}@{1}', env.IMAGE, steps.build.outputs.digest) || '' }}
+          file: ${{ env.PUBLISH != 'true' && format('{0}/jhin-{1}-{2}.oci.tar', runner.temp, matrix.component, needs.validate.outputs.version) || '' }}
+          format: spdx-json
+          output-file: ${{ runner.temp }}/jhin-${{ matrix.component }}-${{ env.VERSION }}.spdx.json
+          upload-artifact: false
+
+      - name: Trivy image scan (critical findings fail the release)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.PUBLISH == 'true' && format('{0}@{1}', env.IMAGE, steps.build.outputs.digest) || '' }}
+          input: ${{ env.PUBLISH != 'true' && format('{0}/jhin-{1}-{2}.oci.tar', runner.temp, matrix.component, needs.validate.outputs.version) || '' }}
+          scan-type: image
+          severity: CRITICAL
+          exit-code: "1"
+          ignore-unfixed: false
+
+      - name: Trivy image report (high, SARIF)
+        if: env.PUBLISH == 'true'
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          scan-type: image
+          severity: CRITICAL,HIGH
+          format: sarif
+          output: trivy-${{ matrix.component }}.sarif
+          exit-code: "0"
+
+      - name: Upload image scan SARIF
+        if: env.PUBLISH == 'true'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-${{ matrix.component }}.sarif
+          category: trivy-image-${{ matrix.component }}
+
+      - name: Install Cosign
+        if: env.PUBLISH == 'true'
+        uses: sigstore/cosign-installer@v3
+
+      - name: Keyless sign the image index and attach the SPDX attestation
+        if: env.PUBLISH == 'true'
+        env:
+          COSIGN_YES: "true"
+        run: |
+          cosign sign "${IMAGE}@${{ steps.build.outputs.digest }}"
+          cosign attest --type spdxjson \
+            --predicate "$RUNNER_TEMP/jhin-${{ matrix.component }}-${VERSION}.spdx.json" \
+            "${IMAGE}@${{ steps.build.outputs.digest }}"
+
+      - name: Build provenance attestation (GitHub)
+        if: env.PUBLISH == 'true'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-${{ matrix.component }}
+          path: |
+            ${{ runner.temp }}/digests/jhin-${{ matrix.component }}.digest
+            ${{ runner.temp }}/jhin-${{ matrix.component }}-${{ env.VERSION }}.spdx.json
+          if-no-files-found: error
+
+  source-sbom:
+    name: Source SBOM
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: ${{ runner.temp }}/jhin-${{ needs.validate.outputs.version }}-source.spdx.json
+          upload-artifact: false
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-sbom
+          path: ${{ runner.temp }}/jhin-${{ needs.validate.outputs.version }}-source.spdx.json
+          if-no-files-found: error
+
+  bundle:
+    name: Release Compose bundle and GitHub Release
+    needs: [validate, images, source-sbom]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: ${{ needs.validate.outputs.publish == 'true' && 'release' || '' }}
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+      PUBLISH: ${{ needs.validate.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/artifacts
+
+      - name: Assemble image-lock.json from per-image digests
+        run: |
+          mkdir -p "$RUNNER_TEMP/release"
+          python3 - "$RUNNER_TEMP/artifacts" "$RUNNER_TEMP/release/image-lock.json" <<'PY'
+          import json, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          images = {}
+          for digest_file in sorted(root.glob("image-*/**/*.digest")):
+              component = digest_file.stem
+              images[component] = {
+                  "repository": f"${{ env.IMAGE_NAMESPACE }}/{component}",
+                  "digest": digest_file.read_text().strip(),
+              }
+          lock = {
+              "schema_version": 1,
+              "version": "${{ env.VERSION }}",
+              "commit": "${{ github.sha }}",
+              "platforms": ["linux/amd64", "linux/arm64"],
+              "images": images,
+          }
+          pathlib.Path(sys.argv[2]).write_text(json.dumps(lock, indent=2) + "\n")
+          print(json.dumps(lock, indent=2))
+          assert len(images) == 8, f"expected 8 images, found {sorted(images)}"
+          PY
+
+      - name: Render the digest-pinned Compose bundle
+        run: |
+          uv run --no-project --with pyyaml python scripts/render_release_bundle.py \
+            --version "$VERSION" \
+            --image-lock "$RUNNER_TEMP/release/image-lock.json" \
+            --output "$RUNNER_TEMP/release/jhin-$VERSION-compose"
+          tar -C "$RUNNER_TEMP/release" -czf "$RUNNER_TEMP/release/jhin-$VERSION-compose.tar.gz" "jhin-$VERSION-compose"
+          rm -rf "$RUNNER_TEMP/release/jhin-$VERSION-compose"
+
+      - name: Collect SBOM assets and checksums
+        run: |
+          cp "$RUNNER_TEMP"/artifacts/image-*/*.spdx.json "$RUNNER_TEMP/release/"
+          cp "$RUNNER_TEMP"/artifacts/source-sbom/*.spdx.json "$RUNNER_TEMP/release/"
+          cd "$RUNNER_TEMP/release"
+          find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.spdx.json' -o -name 'image-lock.json' \) \
+            -printf '%P\n' | LC_ALL=C sort | xargs sha256sum > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Install Cosign
+        if: env.PUBLISH == 'true'
+        uses: sigstore/cosign-installer@v3
+
+      - name: Keyless blob signatures for the bundle and checksums
+        if: env.PUBLISH == 'true'
+        env:
+          COSIGN_YES: "true"
+        run: |
+          cd "$RUNNER_TEMP/release"
+          cosign sign-blob --bundle "jhin-$VERSION-compose.tar.gz.sigstore.json" "jhin-$VERSION-compose.tar.gz"
+          cosign sign-blob --bundle "SHA256SUMS.sigstore.json" SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/release
+          if-no-files-found: error
+
+      - name: Compose release notes
+        run: |
+          {
+            cat "$RUNNER_TEMP/artifacts/release-notes/release-notes.md"
+            echo
+            echo "## Images"
+            echo
+            echo '```'
+            python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); [print(f"{v[\"repository\"]}@{v[\"digest\"]}") for v in d["images"].values()]' "$RUNNER_TEMP/release/image-lock.json"
+            echo '```'
+            echo
+            echo "## Verify"
+            echo
+            echo 'Each image index is signed with Cosign (keyless, GitHub Actions OIDC):'
+            echo
+            echo '```bash'
+            echo "cosign verify \\"
+            echo "  --certificate-identity-regexp '^https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/v' \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\"
+            echo "  ${{ env.IMAGE_NAMESPACE }}/jhin-api@<digest-from-image-lock.json>"
+            echo '```'
+            echo
+            echo 'See docs/deployment.md for the full install and verification walkthrough.'
+          } > "$RUNNER_TEMP/release-body.md"
+          cat "$RUNNER_TEMP/release-body.md"
+
+      - name: Create GitHub Release
+        if: env.PUBLISH == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Jhin v${{ env.VERSION }}
+          body_path: ${{ runner.temp }}/release-body.md
+          prerelease: ${{ contains(env.VERSION, '-rc.') }}
+          draft: false
+          fail_on_unmatched_files: true
+          files: |
+            ${{ runner.temp }}/release/jhin-${{ env.VERSION }}-compose.tar.gz
+            ${{ runner.temp }}/release/jhin-${{ env.VERSION }}-compose.tar.gz.sigstore.json
+            ${{ runner.temp }}/release/image-lock.json
+            ${{ runner.temp }}/release/SHA256SUMS
+            ${{ runner.temp }}/release/SHA256SUMS.sigstore.json
+            ${{ runner.temp }}/release/*.spdx.json

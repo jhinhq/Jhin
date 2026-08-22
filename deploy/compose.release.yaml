@@ -1,0 +1,336 @@
+# Jhin release manifest: pull-based, production-only (Phase 11 spec 6.3).
+#
+#   * No `build` keys; every first-party image comes from ${JHIN_IMAGE_NAMESPACE}
+#     (default ghcr.io/teachmetech) at ${JHIN_VERSION}. The bundle rendered by
+#     .github/workflows/release.yml replaces each tag with an exact digest.
+#   * No fake or development services; no development credentials.
+#   * Only `web` is published by default. Uncomment the `api` port mapping for
+#     loopback administration only.
+#   * Add exactly one Docker-socket overlay for sandbox-runner:
+#       docker compose -f compose.yaml -f compose.rootful.yaml up -d --wait
+#       docker compose -f compose.yaml -f compose.rootless.yaml up -d --wait
+#
+# Required environment (see .env.release.example): JHIN_VERSION, APP_URL,
+# POSTGRES_PASSWORD, MASTER_KEY_FILE_HOST, SANDBOX_RUNNER_TOKEN, and the
+# socket-mode variables for the chosen overlay.
+
+name: jhin
+
+services:
+  web:
+    image: ${JHIN_IMAGE_NAMESPACE:-ghcr.io/teachmetech}/jhin-web:${JHIN_VERSION:?set JHIN_VERSION}
+    environment:
+      APP_NAME: ${APP_NAME:-Jhin}
+      API_INTERNAL_URL: http://api:8000
+    ports:
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks: [edge]
+    restart: unless-stopped
+
+  api:
+    image: ${JHIN_IMAGE_NAMESPACE:-ghcr.io/teachmetech}/jhin-api:${JHIN_VERSION:?set JHIN_VERSION}
+    command: ["uvicorn", "jhin_api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      APP_NAME: ${APP_NAME:-Jhin}
+      APP_ENV: ${APP_ENV:-production}
+      APP_URL: ${APP_URL:?set APP_URL to the public https origin}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-jhin}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-jhin}
+      NATS_URL: nats://nats:4222
+      TEMPORAL_ADDRESS: ${TEMPORAL_ADDRESS:-temporal:7233}
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      MASTER_KEY_FILE: /run/secrets/jhin_master_key
+      JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS: ${JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS:-}
+      JHIN_CONNECTOR_ALLOWED_DB_HOSTS: ${JHIN_CONNECTOR_ALLOWED_DB_HOSTS:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-0.10}
+    secrets:
+      - jhin_master_key
+    # Direct API publication is opt-in for loopback administration only.
+    # ports:
+    #   - "127.0.0.1:${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import urllib.request, sys
+          sys.exit(0 if urllib.request.urlopen("http://127.0.0.1:8000/api/v1/health", timeout=3).status == 200 else 1)
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [edge, control, data]
+    restart: unless-stopped
+
+  workflow-worker:
+    image: ${JHIN_IMAGE_NAMESPACE:-ghcr.io/teachmetech}/jhin-workflow-worker:${JHIN_VERSION:?set JHIN_VERSION}
+    command: ["jhin-workflow-worker"]
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      TEMPORAL_ADDRESS: ${TEMPORAL_ADDRESS:-temporal:7233}
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-0.10}
+    depends_on:
+      temporal:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "jhin-health-check"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks: [control]
+    restart: unless-stopped
+
+  agent-worker:
+    image: ${JHIN_IMAGE_NAMESPACE:-ghcr.io/teachmetech}/jhin-agent-worker:${JHIN_VERSION:?set JHIN_VERSION}
+    command: ["jhin-agent-worker"]
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-jhin}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-jhin}
+      NATS_URL: nats://nats:4222
+      TEMPORAL_ADDRESS: ${TEMPORAL_ADDRESS:-temporal:7233}
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      MASTER_KEY_FILE: /run/secrets/jhin_master_key
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-0.10}
+    secrets:
+      - jhin_master_key
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "jhin-temporal-poller-check", "jhin-agent-queue"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks: [control, data]
+    restart: unless-stopped
+
+  tool-worker:
+    image: ${JHIN_IMAGE_NAMESPACE:-ghcr.io/teachmetech}/jhin-tool-worker:${JHIN_VERSION:?set JHIN_VERSION}
+    command: ["jhin-tool-worker"]
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-jhin}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-jhin}
+      NATS_URL: nats://nats:4222
+      TEMPORAL_ADDRESS: ${TEMPORAL_ADDRESS:-temporal:7233}
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      MASTER_KEY_FILE: /run/secrets/jhin_master_key
+      SANDBOX_RUNNER_URL: http://sandbox-runner:8085
+      SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:?set SANDBOX_RUNNER_TOKEN}
+      SANDBOX_DEFAULT_IMAGE: ${SANDBOX_DEFAULT_IMAGE:?set SANDBOX_DEFAULT_IMAGE}
+      JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS: ${JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS:-}
+      JHIN_CONNECTOR_ALLOWED_DB_HOSTS: ${JHIN_CONNECTOR_ALLOWED_DB_HOSTS:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-0.10}
+    secrets:
+      - jhin_master_key
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "jhin-temporal-poller-check", "jhin-tool-queue"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks: [control, data, runner]
+    restart: unless-stopped
+
+  # The only service allowed to create sandbox jobs. Docker authority comes
+  # exclusively from one rootful/rootless overlay; the runner is always
+  # UID/GID 10001 and never privileged.
+  sandbox-runner:
+    image: ${JHIN_IMAGE_NAMESPACE:-ghcr.io/teachmetech}/jhin-sandbox-runner:${JHIN_VERSION:?set JHIN_VERSION}
+    command: ["jhin-sandbox-runner"]
+    user: "10001:10001"
+    privileged: false
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:?set SANDBOX_RUNNER_TOKEN}
+      SANDBOX_DEFAULT_IMAGE: ${SANDBOX_DEFAULT_IMAGE:?set SANDBOX_DEFAULT_IMAGE}
+      SANDBOX_NETWORK: ${SANDBOX_NETWORK:-jhin_sandbox}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-0.10}
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import urllib.request, sys
+          sys.exit(0 if urllib.request.urlopen("http://127.0.0.1:8085/health", timeout=3).status == 200 else 1)
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks: [runner]
+    restart: unless-stopped
+
+  event-worker:
+    image: ${JHIN_IMAGE_NAMESPACE:-ghcr.io/teachmetech}/jhin-event-worker:${JHIN_VERSION:?set JHIN_VERSION}
+    command: ["jhin-event-worker"]
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      NATS_URL: nats://nats:4222
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-jhin}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-jhin}
+      TEMPORAL_ADDRESS: ${TEMPORAL_ADDRESS:-temporal:7233}
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-0.10}
+    depends_on:
+      nats:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "jhin-health-check"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks: [control, data]
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-jhin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-jhin}
+    volumes:
+      - type: volume
+        source: postgres_data
+        target: /var/lib/postgresql/data
+        volume:
+          nocopy: true
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-jhin} -d ${POSTGRES_DB:-jhin}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [data]
+    restart: unless-stopped
+
+  nats:
+    image: nats:2.12-alpine
+    command: ["--config", "/etc/nats/nats.conf"]
+    volumes:
+      - type: volume
+        source: nats_data
+        target: /data
+        volume:
+          nocopy: true
+      - ./config/nats.conf:/etc/nats/nats.conf:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8222/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [control]
+    restart: unless-stopped
+
+  temporal:
+    image: temporalio/auto-setup:1.29.7
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-jhin}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_SEEDS: postgres
+      BIND_ON_IP: 0.0.0.0
+      TEMPORAL_ADDRESS: temporal:7233
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "tctl --address temporal:7233 cluster health | grep -q SERVING"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+    networks: [control, data]
+    restart: unless-stopped
+
+  # Optional administrative UI. Not published; reach it through an SSH
+  # tunnel or an authenticated proxy if you need it.
+  temporal-ui:
+    image: temporalio/ui:2.53.3
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    depends_on:
+      temporal:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q --spider http://127.0.0.1:8080/ || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks: [control]
+    restart: unless-stopped
+
+networks:
+  edge:
+    driver: bridge
+  control:
+    driver: bridge
+  data:
+    driver: bridge
+  # tool-worker <-> sandbox-runner only. Job containers are never attached.
+  runner:
+    driver: bridge
+  # Dedicated bridge for network_policy=internet jobs; no control-plane
+  # service may attach to it.
+  sandbox:
+    name: ${SANDBOX_NETWORK:-jhin_sandbox}
+    driver: bridge
+
+volumes:
+  postgres_data:
+  nats_data:
+
+secrets:
+  jhin_master_key:
+    file: ${MASTER_KEY_FILE_HOST:?set MASTER_KEY_FILE_HOST to the 0600 master key file}
