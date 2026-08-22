@@ -46,8 +46,13 @@ x-phase10-agent-environment: &phase10-agent-environment
   JHIN_TEST_CRASH_BARRIER_NAME: ""
   JHIN_TEST_CRASH_BARRIER_MATCH: ""
 
+# Every current worker of one kind must run the exact same image. The four
+# services therefore share one explicit tag that the harness builds once;
+# untagged per-service builds may yield distinct image IDs for identical
+# sources when BuildKit runs them in parallel (observed on Docker Desktop).
 x-phase10-agent: &phase10-agent
   profiles: [phase10-upgrade]
+  image: ${PHASE10_AGENT_WORKER_IMAGE:?required}
   build:
     context: .
     dockerfile: docker/python.Dockerfile
@@ -89,6 +94,7 @@ x-phase10-tool-environment: &phase10-tool-environment
 
 x-phase10-tool: &phase10-tool
   profiles: [phase10-upgrade]
+  image: ${PHASE10_TOOL_WORKER_IMAGE:?required}
   build:
     context: .
     dockerfile: docker/python.Dockerfile

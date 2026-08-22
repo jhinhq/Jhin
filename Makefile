@@ -10,7 +10,7 @@ SANDBOX_DOCKER_SOCKET_HOST ?= /var/run/docker.sock
 .PHONY: help dev test test-unit test-integration lint typecheck migrate seed \
 	compose-up compose-down sample-workflow master-key sandbox-image \
 	test-tool-worker-boundary test-tool-worker-boundary-integration \
-	test-phase10-regressions test-tool-worker-live-upgrade \
+	test-phase10-regressions test-phase10-extended test-tool-worker-live-upgrade \
 	test-sandbox-socket-rootful test-sandbox-socket-rootless \
 	test-sandbox-socket-desktop test-sandbox-socket-wrong-gid
 
@@ -31,7 +31,7 @@ test-unit: ## Run Python unit tests and frontend Vitest
 	$(PYTEST)
 	pnpm --filter jhin-web test
 
-test-integration: test-phase10-regressions ## Run the frozen live regression set in isolation
+test-integration: test-phase10-regressions test-phase10-extended ## Run the frozen live regression set and the extended live files in isolation
 
 test-tool-worker-boundary: ## Run focused Phase 10 unit, replay, dependency, and render gates
 	$(PYTEST) \
@@ -57,6 +57,9 @@ test-tool-worker-boundary-integration: ## Run the exact live boundary and crash 
 
 test-phase10-regressions: ## Run the exact Phase 3/6/7/9 live regression files
 	$(PHASE10_HARNESS) run --mode $(PHASE10_MODE) --scenario regressions
+
+test-phase10-extended: ## Run the remaining live exit, durability, seed, and health files
+	$(PHASE10_HARNESS) run --mode $(PHASE10_MODE) --scenario extended
 
 test-tool-worker-live-upgrade: ## Run the frozen Phase 9 to current in-flight upgrade
 	$(PHASE10_HARNESS) run --mode $(PHASE10_MODE) --scenario upgrade

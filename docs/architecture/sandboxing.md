@@ -129,6 +129,16 @@ resolved to its real socket target, that target becomes the immutable
 snapshotted authority and the bind-mount source, and `docker info` must report
 Docker Desktop and no `name=rootless` option.
 
+**Desktop harness caveats.** Two behaviours of the Docker Desktop daemon
+differ from a Linux daemon and are handled explicitly rather than skipped:
+the runner container reports `GroupAdd: ["0"]` (the root group, because no
+socket GID exists), which the live boundary assertions expect only in
+`desktop` mode; and BuildKit may assign distinct image IDs to identical
+per-service builds that run in parallel, so the upgrade overlay gives every
+current worker of one kind one explicit `image` tag
+(`jhin-phase10-{agent,tool}-worker:<token>`) that the harness builds exactly
+once before recreating the four services with `--no-build`.
+
 **Threat-model caveat.** Root-group membership inside the runner container is
 strictly weaker than the rootful exact-GID or the rootless user-namespace
 boundary: any file in the runner image that is group-`0` writable becomes

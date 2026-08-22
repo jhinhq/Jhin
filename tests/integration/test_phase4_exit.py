@@ -193,12 +193,17 @@ async def test_same_tool_granted_succeeds_ungranted_denied(
         client, ws, ungranted["id"], f"Echo (ungranted) {tag}", f"Use the echo tool: {marker}"
     )
 
-    # Both tasks complete: authorized calls execute; unauthorized calls are
-    # denied and the agent finalizes with the denial as its observation.
+    # The granted task completes. Since the Phase 10 tool-worker boundary a
+    # denied ordinary call is a non-retryable activity failure ("do not
+    # blindly retry: permission denied"): the denial is persisted on the
+    # ToolCall row and in the audit log, the step is never committed, and the
+    # run stops with `step_failed` instead of observing the denial.
     granted_detail = await _wait_for_task(client, ws, granted_task["id"])
     ungranted_detail = await _wait_for_task(client, ws, ungranted_task["id"])
     assert granted_detail["task"]["state"] == "completed", granted_detail
-    assert ungranted_detail["task"]["state"] == "completed", ungranted_detail
+    assert ungranted_detail["task"]["state"] == "failed", ungranted_detail
+    assert ungranted_detail["runs"][0]["status"] == "failed"
+    assert ungranted_detail["runs"][0]["error_code"] == "step_failed"
 
     # Granted: tool_call row executed with the sanitized input/output persisted.
     granted_calls = await _tool_calls(client, ws, granted_detail["runs"][0]["id"])
@@ -219,7 +224,9 @@ async def test_same_tool_granted_succeeds_ungranted_denied(
         assert expected in events, events
     assert "node.request_approval" not in events
 
-    # Ungranted: deterministic denial, recorded on the same endpoint.
+    # Ungranted: deterministic denial, recorded on the same endpoint. The
+    # uncommitted step projects no node.* or tool.call events; the timeline
+    # carries the bound manifest and the run failure, never an execution.
     denied_calls = await _tool_calls(client, ws, ungranted_detail["runs"][0]["id"])
     assert len(denied_calls) == 1
     assert denied_calls[0]["status"] == "denied"
@@ -230,9 +237,9 @@ async def test_same_tool_granted_succeeds_ungranted_denied(
             client, f"/api/v1/workspaces/{ws}/tasks/{ungranted_task['id']}/timeline"
         )
     ]
-    assert "node.policy_check" in denied_events
+    assert "agent.step.tool_manifest" in denied_events
+    assert "run.failed" in denied_events
     assert "node.execute_tool" not in denied_events
-    assert "tool.call" in denied_events
 
     # Audited: the denial is in the append-only audit log with the agent actor.
     audit = await _get(

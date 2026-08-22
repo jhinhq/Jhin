@@ -106,8 +106,17 @@ def validate_compose_arguments(args: tuple[str, ...]) -> tuple[str, ...]:
     ):
         raise ValueError("not an allowed leased Compose operation")
 
+    # Worker restart/stop/start vectors are the only lifecycle operations a
+    # leased test may perform: they recycle one named service container in
+    # place and cannot republish ports, images, files, or the project.
     allowed = (
-        args == ("restart", "agent-worker")
+        args
+        in {
+            ("restart", "agent-worker"),
+            ("restart", "workflow-worker"),
+            ("stop", "event-worker"),
+            ("start", "event-worker"),
+        }
         or args
         in {
             ("ps",),

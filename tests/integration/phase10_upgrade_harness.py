@@ -218,7 +218,7 @@ _BASE_COMPOSE_AUTO_IMAGE_SERVICES = (
     "fake-vercel",
     "fake-supabase",
 )
-_UPGRADE_COMPOSE_AUTO_IMAGE_SERVICES = tuple(
+_UPGRADE_CURRENT_WORKER_SERVICES = tuple(
     f"phase10-{kind}-worker-{scenario}"
     for kind in ("agent", "tool")
     for scenario in _UPGRADE_SCENARIOS
@@ -313,7 +313,12 @@ class Handler(BaseHTTPRequestHandler):
             isinstance(message, dict) and message.get("role") == "tool"
             for message in raw_messages
         )
-        if marker in messages and not has_tool_result:
+        # Only agent reasoning steps advertise a tool manifest. The detached
+        # memory-maintenance extraction call that follows a completed task
+        # replays the marker-bearing transcript without any tools, so it is
+        # deliberately not counted as a model step.
+        is_reasoning_step = isinstance(body.get("tools"), list) and bool(body["tools"])
+        if marker in messages and not has_tool_result and is_reasoning_step:
             names = []
             for tool in body.get("tools", []):
                 function = tool.get("function", {}) if isinstance(tool, dict) else {}
@@ -536,6 +541,22 @@ LIVE_SCENARIOS = {
             "tests/integration/test_phase9_exit.py",
         ),
         expected_tests=18,
+    ),
+    "extended": LiveScenario(
+        nodes=(
+            "tests/integration/test_phase2_api.py",
+            "tests/integration/test_phase4_exit.py",
+            "tests/integration/test_phase5_exit.py",
+            "tests/integration/test_phase6_security.py",
+            "tests/integration/test_phase8_exit.py",
+            "tests/integration/test_phase9_authorization.py",
+            "tests/integration/test_seed.py",
+            "tests/integration/test_stack_health.py",
+            "tests/integration/test_temporal_durability.py",
+            "tests/integration/test_nats_durability.py",
+            "tests/integration/test_company_topology_concurrency.py",
+        ),
+        expected_tests=53,
     ),
     "socket-rootful": LiveScenario(
         nodes=(
@@ -2030,11 +2051,14 @@ class ComposeAuthority:
         ):
             raise ValueError("frozen Phase 9 image identity is invalid")
         environment = self.environment
+        agent_image, tool_image = self.upgrade_worker_image_tags()
         environment.update(
             {
                 "PHASE9_AGENT_IMAGE": frozen.image_id,
                 "PHASE10_UPGRADE_PHASE9_TAG": frozen.tag,
                 "PHASE10_UPGRADE_SOURCE_REF": frozen.source_ref,
+                "PHASE10_AGENT_WORKER_IMAGE": agent_image,
+                "PHASE10_TOOL_WORKER_IMAGE": tool_image,
             }
         )
         created: list[BarrierRoot] = []
@@ -2088,11 +2112,20 @@ class ComposeAuthority:
         return (self.docker_executable, "--host", self.docker_host, *args)
 
     def compose_auto_image_tags(self, *, upgrade: bool = False) -> tuple[str, ...]:
-        """Return every unique-project tag Compose assigns to an untagged build."""
-        services: tuple[str, ...] = _BASE_COMPOSE_AUTO_IMAGE_SERVICES
+        """Return every image tag the selected Compose vectors build.
+
+        Base services are untagged builds that Compose names after the unique
+        project. The upgrade overlay's current workers instead share one
+        explicit per-kind tag (see ``upgrade_worker_image_tags``).
+        """
+        tags = tuple(f"{self.project}-{service}" for service in _BASE_COMPOSE_AUTO_IMAGE_SERVICES)
         if upgrade:
-            services = (*services, *_UPGRADE_COMPOSE_AUTO_IMAGE_SERVICES)
-        return tuple(f"{self.project}-{service}" for service in services)
+            tags = (*tags, *self.upgrade_worker_image_tags())
+        return tags
+
+    def upgrade_worker_image_tags(self) -> tuple[str, ...]:
+        """One immutable-by-token tag per current worker kind in the upgrade overlay."""
+        return tuple(f"jhin-phase10-{kind}-worker:{self.token}" for kind in ("agent", "tool"))
 
     def phase9_image_tag(self, source_ref: str) -> str:
         if _HEX_REF.fullmatch(source_ref) is None:
@@ -4848,6 +4881,25 @@ class UpgradeHarness:
         arguments.extend(("--wait", "--wait-timeout", "300", service))
         return self.authority.compose_command(*arguments, upgrade=True)
 
+    def phase10_worker_build_commands(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """Build each current worker kind exactly once under its shared tag.
+
+        The four services of one kind declare the same explicit ``image`` tag,
+        so building one representative service publishes the single image
+        every container of that kind must run; ``up`` then never rebuilds.
+        """
+        tool_build, agent_build = (
+            self.authority.compose_command(
+                "--profile",
+                "phase10-upgrade",
+                "build",
+                f"phase10-{kind}-worker-normal",
+                upgrade=True,
+            )
+            for kind in ("tool", "agent")
+        )
+        return tool_build, agent_build
+
     def phase10_worker_up_commands(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
         """Return two nonoverlapping mutations: every tool worker, then every agent."""
         commands: list[tuple[str, ...]] = []
@@ -4861,7 +4913,7 @@ class UpgradeHarness:
                     "-d",
                     "--no-deps",
                     "--force-recreate",
-                    "--build",
+                    "--no-build",
                     "--wait",
                     "--wait-timeout",
                     "300",
@@ -5055,7 +5107,7 @@ class UpgradeHarness:
         if stage == "parked-phase9":
             expected.update(f"phase9-agent-worker-{scenario}" for scenario in _UPGRADE_SCENARIOS)
         elif stage == "current-phase10":
-            expected.update(_UPGRADE_COMPOSE_AUTO_IMAGE_SERVICES)
+            expected.update(_UPGRADE_CURRENT_WORKER_SERVICES)
         elif stage != "base-only":
             raise ValueError("unknown Phase 10 upgrade stage")
         result = self.authority._run(
@@ -5388,7 +5440,13 @@ class UpgradeHarness:
         runner: CommandRunner = run_command,
     ) -> dict[str, dict[str, Any]]:
         workers: dict[str, dict[str, Any]] = {}
-        for kind, command in zip(("tool", "agent"), self.phase10_worker_up_commands(), strict=True):
+        for kind, build, command in zip(
+            ("tool", "agent"),
+            self.phase10_worker_build_commands(),
+            self.phase10_worker_up_commands(),
+            strict=True,
+        ):
+            self.authority._run(build, runner=runner, timeout=1200.0)
             self.authority._run(command, runner=runner, timeout=1200.0)
             image_ids: set[str] = set()
             for scenario in _UPGRADE_SCENARIOS:

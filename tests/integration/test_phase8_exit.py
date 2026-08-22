@@ -599,8 +599,18 @@ async def test_engineering_template_failure_fix_retest_loop(
     qa_prompt = "You are QA. For any review task, do exactly this: " + _qa_review_markers(
         cli["id"], branch, f"qa/p8b-{tag}", f"Suite verdict for {branch} from exit code. {fix_blob}"
     )
+    # The retest instructions echo the cycle-1 failure summary, so in cycle 2
+    # the scripted provider also replays the smuggled fix script after QA's
+    # own verdict. Since the Phase 10 tool-worker boundary a denied call stops
+    # the run, hence QA additionally holds the implementer grants: the replayed
+    # script then re-applies an already-pushed fix (a no-op) instead of
+    # failing the passing review with `no_grant`.
     qa = await _make_agent(
-        client, ws, f"P8b QA {tag}", system_prompt=qa_prompt, grants=_qa_grants(cli["id"])
+        client,
+        ws,
+        f"P8b QA {tag}",
+        system_prompt=qa_prompt,
+        grants={**_swe_grants(cli["id"], github["id"]), **_qa_grants(cli["id"])},
     )
     swe = await _make_agent(
         client, ws, f"P8b SWE {tag}", grants=_swe_grants(cli["id"], github["id"])

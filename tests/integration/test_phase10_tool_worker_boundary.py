@@ -141,6 +141,9 @@ def test_upgrade_overlay_has_four_distinct_frozen_and_current_worker_pairs() -> 
         for generation in ("agent", "tool"):
             current = services[f"phase10-{generation}-worker-{scenario}"]
             assert current["build"]["context"] == "."
+            # One explicit tag per kind: every current worker of a kind runs
+            # the single image the harness builds once under that tag.
+            assert current["image"] == (f"${{PHASE10_{generation.upper()}_WORKER_IMAGE:?required}}")
             assert current["environment"]["APP_ENV"] == "test"
             assert "ports" not in current
         for worker in (
@@ -805,7 +808,16 @@ def test_upgrade_harness_uses_profiled_distinct_services_and_verified_image() ->
             f"phase10-agent-worker-{scenario}"
             for scenario in ("normal", "approval", "sync", "cleanup")
         )
-        assert "--build" in tool_group and "--build" in agent_group
+        assert "--build" not in tool_group and "--build" not in agent_group
+        assert "--no-build" in tool_group and "--no-build" in agent_group
+        tool_build, agent_build = harness.phase10_worker_build_commands()
+        assert tool_build[-2:] == ("build", "phase10-tool-worker-normal")
+        assert agent_build[-2:] == ("build", "phase10-agent-worker-normal")
+        assert "--profile" in tool_build and "phase10-upgrade" in agent_build
+        agent_tag, tool_tag = upgraded.upgrade_worker_image_tags()
+        assert upgraded.environment["PHASE10_AGENT_WORKER_IMAGE"] == agent_tag
+        assert upgraded.environment["PHASE10_TOOL_WORKER_IMAGE"] == tool_tag
+        assert agent_tag.endswith(f":{upgraded.token}") and tool_tag != agent_tag
         assert upgraded.compose_command("down", upgrade=True)[-1:] == ("down",)
     finally:
         upgraded.remove_runtime_paths()
@@ -2516,15 +2528,9 @@ def test_cleanup_exhausts_every_base_and_upgrade_compose_auto_image(upgrade: boo
         "fake-vercel",
         "fake-supabase",
     }
-    upgrade_services = {
-        f"phase10-{kind}-worker-{scenario}"
-        for kind in ("agent", "tool")
-        for scenario in ("normal", "approval", "sync", "cleanup")
-    }
-    expected = {
-        f"{authority.project}-{service}"
-        for service in base_services | (upgrade_services if upgrade else set())
-    }
+    expected = {f"{authority.project}-{service}" for service in base_services}
+    if upgrade:
+        expected |= {f"jhin-phase10-{kind}-worker:{authority.token}" for kind in ("agent", "tool")}
     try:
         assert set(authority.compose_auto_image_tags(upgrade=upgrade)) == expected
         authority.down_and_cleanup(runner=recorder, upgrade=upgrade)
@@ -2565,8 +2571,9 @@ def test_cleanup_reports_a_surviving_base_or_upgrade_compose_auto_image(upgrade:
         "",
         "not found",
     )
-    service = "phase10-agent-worker-normal" if upgrade else "api"
-    survivor = f"{authority.project}-{service}"
+    survivor = (
+        f"jhin-phase10-agent-worker:{authority.token}" if upgrade else f"{authority.project}-api"
+    )
     inspect = authority.docker_command("image", "inspect", survivor)
     recorder.responses[inspect] = (0, "", "")
     try:
@@ -8314,6 +8321,9 @@ def test_shared_compose_helper_rejects_authority_selectors_and_publication(
 ) -> None:
     allowed = (
         ("restart", "agent-worker"),
+        ("restart", "workflow-worker"),
+        ("stop", "event-worker"),
+        ("start", "event-worker"),
         ("ps",),
         ("ps", "--all"),
         ("ps", "--all", "--format", "json"),
@@ -9990,6 +10000,10 @@ async def test_tool_queue_loss_blocks_effect_and_live_networks_are_isolated() ->
             runner_groups = runner["HostConfig"].get("GroupAdd")
             if authority.mode == "rootless":
                 assert runner_groups is None or runner_groups == []
+            elif authority.mode == "desktop":
+                # compose.desktop.yaml adds exactly the root group: the Docker
+                # Desktop VM socket is uid 0 / gid 0 and no socket GID exists.
+                assert runner_groups == ["0"]
             else:
                 assert runner_groups == [str(authority.socket_gid)]
             assert authority.service_dns_probe("agent-worker", "sandbox-runner") != 0
