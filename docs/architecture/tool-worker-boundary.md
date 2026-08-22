@@ -54,9 +54,13 @@ sanitized projection; they do not rerun policy or execute a connector.
 The following paths all cross `jhin-tool-queue`:
 
 - **Ordinary calls:** tool-worker reloads the one canonical call, current run
-  context, live grants, connection state, and executable definition. The
-  gateway inserts or reloads the stable `ToolCall` claim before dispatch and
-  commits its sanitized terminal result. Agent-worker only projects that row.
+  context, live grants, connection state, and executable definition. After
+  grant, scope, and validator authorization the gateway evaluates the
+  pre-action review gate (`docs/architecture/coordination.md`): a pending or
+  blocking review is a recorded denial, persisted before any approval row or
+  execution claim exists. Otherwise the gateway inserts or reloads the stable
+  `ToolCall` claim before dispatch and commits its sanitized terminal result.
+  Agent-worker only projects that row.
 - **Approval:** `AgentTaskWorkflow` owns the durable wait and signal. After a
   decision, tool-worker reloads the current PostgreSQL `Approval`, tool call,
   manifest binding, and authorization context, then resolves the existing

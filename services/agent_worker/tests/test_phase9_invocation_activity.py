@@ -71,7 +71,14 @@ class _World:
             return [
                 event.payload_json
                 for event in await session.scalars(
-                    select(RunEvent).where(RunEvent.run_id == self.run_id).order_by(RunEvent.seq)
+                    select(RunEvent)
+                    .where(
+                        RunEvent.run_id == self.run_id,
+                        RunEvent.event_type.in_(
+                            ("agent.step.tool_manifest", "agent.step.reasoning")
+                        ),
+                    )
+                    .order_by(RunEvent.seq)
                 )
             ]
 

@@ -59,6 +59,7 @@ from jhin_policy import (
 from jhin_tools.builtin import ToolCatalog, ToolExecutionContext, ToolExecutor
 from jhin_tools.errors import ToolExecutionError
 from jhin_tools.invocation import TOOL_INVOCATION_FORMAT_VERSION
+from jhin_tools.reviews import ReviewError, ToolCallIntent, check_review_gate
 from jhin_tools.sanitize import (
     MAX_DOCUMENT_BYTES,
     StrictJSONError,
@@ -1364,6 +1365,26 @@ class ToolGateway:
                     connection_id=connection_id,
                 )
 
+        # Coordination review gate (docs/architecture/coordination.md):
+        # capability/scope/validator -> review gate -> human approval ->
+        # execute. It runs here, on the tool worker, before an approval row
+        # or the stable execution claim exists, so a pending or blocking
+        # review can never race an effect. Both outcomes are recorded
+        # denials carrying the review id; a retried invocation replays the
+        # same denial instead of re-evaluating.
+        review_denial = await self._review_gate(definition, invocation_id=invocation_id)
+        if review_denial is not None:
+            code, reason = review_denial
+            return await self._persist_denial(
+                invocation_id=invocation_id,
+                tool_name=definition.name,
+                code=code,
+                reason=reason,
+                sanitized_input=sanitized_input,
+                risk=definition.risk.value,
+                connection_id=connection_id,
+            )
+
         if decision.decision is DecisionType.REQUIRE_APPROVAL:
             # An approval must replay the exact arguments a human inspected.
             # Redaction or truncation is safe for storage but changes the
@@ -1513,6 +1534,43 @@ class ToolGateway:
             self._ctx.session.add(row)
             self._audit("tool.call.requested", row.id, {"tool_name": definition.name})
         return await self._execute(definition, row, validated)
+
+    async def _review_gate(
+        self,
+        definition: ToolDefinition,
+        *,
+        invocation_id: UUID | None,
+    ) -> tuple[str, str] | None:
+        """Pre-action review policies for one authorized call.
+
+        Returns ``None`` to proceed, otherwise the ``(code, reason)`` of the
+        recorded denial. ``wait_review`` cannot park the run (there is no
+        review signal on the workflow yet), so the model is told the call is
+        awaiting review and must finish without it; a decided review lets a
+        later call through (approved) or returns its feedback (blocked).
+        """
+        run = await self._ctx.session.get(AgentRun, self._ctx.run_id)
+        if run is None or run.workspace_id != self._ctx.workspace_id:
+            return None
+        intent = ToolCallIntent(
+            tool_name=definition.name,
+            risk=definition.risk.value,
+            tool_call_id=invocation_id,
+        )
+        try:
+            gate = await check_review_gate(self._ctx.session, run, intent)
+        except ReviewError as error:
+            return error.code, error.message
+        if gate.status == "proceed":
+            return None
+        if gate.status == "wait_review":
+            reviewer = gate.reviewer_type or "a reviewer"
+            return (
+                "review_pending",
+                f"this call is awaiting review {gate.review_id} by {reviewer}; "
+                f"do not retry it and continue without it ({gate.reason})",
+            )
+        return gate.code, gate.feedback or gate.reason
 
     async def _validate_parked_approval_binding(
         self,

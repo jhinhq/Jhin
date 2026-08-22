@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from jhin_agent_worker.coordination_activities import manager_context, organization_context
 from jhin_agent_worker.resources import Resources
 from jhin_agents import AgentExecutionSnapshot
 from jhin_agents.context import ConversationTurn, TaskContext
@@ -36,6 +37,13 @@ from jhin_domain import (
     RunStatus,
     SenderType,
 )
+from jhin_memory import (
+    MemoryContext,
+    build_memory_context,
+    record_retrieval_provenance,
+    unavailable_context,
+)
+from jhin_memory.retrieval import DEFAULT_MAX_CHARS, DEFAULT_MAX_RECORDS
 from jhin_models import (
     ModelClient,
     ModelProviderError,
@@ -751,6 +759,67 @@ class AgentReasoningActivities:
     ) -> tuple[ConversationTurn, ...]:
         return await _load_task_history(session, task)
 
+    async def _memory_context(
+        self,
+        *,
+        workspace_id: UUID,
+        agent_id: UUID,
+        task: Task,
+        history: tuple[ConversationTurn, ...],
+        user_instructions: tuple[str, ...],
+    ) -> MemoryContext:
+        """Authorized, bounded memory for this step (docs/architecture/memory.md).
+
+        Retrieval is best-effort and runs in its own session so a failure
+        can neither abort the bind transaction nor fail the step; the
+        provenance event then records the unavailable context instead.
+        """
+        latest_user_text = next(
+            (
+                turn.text
+                for turn in reversed(history)
+                if turn.role == "user" and turn.kind == "text"
+            ),
+            "",
+        )
+        query = "\n".join(
+            part
+            for part in (task.title, task.description, latest_user_text, *user_instructions)
+            if part
+        )
+        try:
+            async with self._resources.session_factory() as session:
+                return await build_memory_context(
+                    session,
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    query=query,
+                )
+        except Exception as error:
+            logger.warning("memory.retrieval_failed", error_type=type(error).__name__)
+            return unavailable_context(
+                type(error).__name__,
+                max_records=DEFAULT_MAX_RECORDS,
+                max_chars=DEFAULT_MAX_CHARS,
+            )
+
+    async def _coordination_context(
+        self,
+        *,
+        workspace_id: UUID,
+        agent_id: UUID,
+    ) -> tuple[str, str]:
+        """Roster and (managers only) rollup blocks; best-effort, own session."""
+        try:
+            async with self._resources.session_factory() as session:
+                return (
+                    await organization_context(session, workspace_id, agent_id),
+                    await manager_context(session, workspace_id, agent_id),
+                )
+        except Exception as error:
+            logger.warning("coordination.context_failed", error_type=type(error).__name__)
+            return "", ""
+
     async def _after_reasoning_bind_commit(self) -> None:
         """Compatibility hook for the frozen Phase 9 crash-barrier harness."""
         return None
@@ -1038,6 +1107,17 @@ class AgentReasoningActivities:
             if task is None:
                 raise ApplicationError("task not found", type="task_not_found", non_retryable=True)
             history = await _load_history(session, task)
+            memory = await self._memory_context(
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                task=task,
+                history=history,
+                user_instructions=tuple(params.user_instructions),
+            )
+            organization, manager = await self._coordination_context(
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+            )
 
             api_key: str | None = None
             if snapshot.model_profile.secret_id is not None:
@@ -1074,6 +1154,9 @@ class AgentReasoningActivities:
                         description=task.description,
                         history=history,
                         user_instructions=tuple(params.user_instructions),
+                        organization_context=organization,
+                        manager_context=manager,
+                        memory_context=memory.text,
                     ),
                     tools=to_model_tool_schemas(params.advertised_tools),
                 )
@@ -1266,12 +1349,22 @@ class AgentReasoningActivities:
                 )
 
             seq = await _next_seq(session, run_id)
+            # Memory provenance (ids/versions/hash only) is bound with the
+            # step it informed, in the same transaction as the manifest pair.
+            await record_retrieval_provenance(
+                session,
+                workspace_id=workspace_id,
+                run_id=run_id,
+                task_id=task_id,
+                context=memory,
+                seq=seq,
+            )
             _add_run_event(
                 session,
                 workspace_id=workspace_id,
                 task_id=task_id,
                 run_id=run_id,
-                seq=seq,
+                seq=seq + 1,
                 event_type="agent.step.tool_manifest",
                 payload={"step": params.step_index, "manifest": manifest},
             )
@@ -1280,7 +1373,7 @@ class AgentReasoningActivities:
                 workspace_id=workspace_id,
                 task_id=task_id,
                 run_id=run_id,
-                seq=seq + 1,
+                seq=seq + 2,
                 event_type="agent.step.reasoning",
                 payload=reasoning.to_payload(),
             )

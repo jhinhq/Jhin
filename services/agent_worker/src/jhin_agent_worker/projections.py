@@ -16,6 +16,7 @@ from temporalio import activity
 from temporalio.client import Client as TemporalClient
 from temporalio.exceptions import ApplicationError
 
+from jhin_agent_worker.coordination_activities import work_request_start_from_output
 from jhin_agent_worker.reasoning import (
     AgentStepReasoningRecord,
     ManifestCall,
@@ -54,6 +55,12 @@ from jhin_workflows.agent_task.shared import (
     DelegationRequest,
     FinalizeInput,
     StepResult,
+    WorkRequestStart,
+)
+from jhin_workflows.memory_maintenance import (
+    SOURCE_KIND_TASK_OUTCOME,
+    MemoryMaintenanceInput,
+    start_memory_maintenance,
 )
 
 _MAX_ARGUMENTS_CHARS = 8_192
@@ -473,6 +480,13 @@ class AgentProjectionActivities:
                 type="step_result_malformed",
                 non_retryable=True,
             )
+        raw_work_requests = raw_result.get("work_request_starts", [])
+        if not isinstance(raw_work_requests, list):
+            raise ApplicationError(
+                "committed step work request starts are malformed",
+                type="step_result_malformed",
+                non_retryable=True,
+            )
         try:
             result = StepResult(
                 done=bool(raw_result["done"]),
@@ -483,6 +497,9 @@ class AgentProjectionActivities:
                 waiting_approval_id=raw_result.get("waiting_approval_id"),
                 delegations=[
                     DelegationRequest(**item) for item in raw_delegations if isinstance(item, dict)
+                ],
+                work_request_starts=[
+                    WorkRequestStart(**item) for item in raw_work_requests if isinstance(item, dict)
                 ],
                 execution_unknown_tool_call_id=raw_result.get("execution_unknown_tool_call_id"),
             )
@@ -750,6 +767,17 @@ class AgentProjectionActivities:
             gateway_tool_call_id=str(result.row.id),
         )
 
+    @staticmethod
+    def _work_request_start(result: _ProjectedToolOutcome) -> WorkRequestStart | None:
+        """An executed ``organization.respond_work_request`` accept created
+        the task row; the workflow starts its WorkRequestTaskWorkflow."""
+        if (
+            result.status != "executed"
+            or result.manifest.tool_name != "organization.respond_work_request"
+        ):
+            return None
+        return work_request_start_from_output(result.row.sanitized_output_json)
+
     @activity.defn(name=ACTIVITY_COMMIT_AGENT_STEP)
     async def commit_agent_step_activity(self, params: CommitAgentStepInput) -> StepResult:
         workspace_id = UUID(params.workspace_id)
@@ -897,12 +925,16 @@ class AgentProjectionActivities:
                     )
 
             delegations: list[DelegationRequest] = []
+            work_request_starts: list[WorkRequestStart] = []
             for result in projected:
                 delegation = self._delegation_request(result)
                 if delegation is not None:
                     delegations.append(delegation)
                     if delegation.blocking:
                         blocking_delegation = delegation
+                work_request = self._work_request_start(result)
+                if work_request is not None:
+                    work_request_starts.append(work_request)
                 if result.status == "needs_approval" and result.approval is not None:
                     waiting_approval_id = str(result.approval.id)
 
@@ -922,6 +954,7 @@ class AgentProjectionActivities:
                 cost_micros=reasoning.usage.cost_micros,
                 waiting_approval_id=waiting_approval_id,
                 delegations=delegations,
+                work_request_starts=work_request_starts,
                 execution_unknown_tool_call_id=execution_unknown_tool_call_id,
             )
 
@@ -1487,6 +1520,7 @@ class AgentProjectionActivities:
         persisted_completed_at: object = None
         persisted_status = params.status
         persisted_error_code: str | None = None
+        task_conversation_id: UUID | None = None
 
         async with self._resources.session_factory() as session:
             if params.run_id is not None:
@@ -1555,6 +1589,7 @@ class AgentProjectionActivities:
             )
             if task is not None:
                 task.state = params.status
+                task_conversation_id = task.conversation_id
                 if effective_error_message:
                     session.add(
                         Message(
@@ -1623,5 +1658,51 @@ class AgentProjectionActivities:
             f"task.{params.status}",
             {"task_id": params.task_id, "run_id": params.run_id},
         )
+        if (
+            params.run_id is not None
+            and owns_run_metrics
+            and freed_agent_id is not None
+            and persisted_status == RunStatus.COMPLETED.value
+        ):
+            await self._start_memory_maintenance(
+                workspace_id=workspace_id,
+                agent_id=freed_agent_id,
+                task_id=task_id,
+                run_id=params.run_id,
+                conversation_id=task_conversation_id,
+            )
         if params.run_id is not None:
             await self._kick_queued(workspace_id, freed_agent_id)
+
+    async def _start_memory_maintenance(
+        self,
+        *,
+        workspace_id: UUID,
+        agent_id: UUID,
+        task_id: UUID,
+        run_id: str,
+        conversation_id: UUID | None,
+    ) -> None:
+        """Detached memory maintenance for a completed task
+        (docs/architecture/memory.md). Best-effort by contract: the terminal
+        projection is already committed, and no failure here may surface."""
+        client = self._temporal_client
+        if client is None:
+            return
+        try:
+            status, _handle = await start_memory_maintenance(
+                client,
+                MemoryMaintenanceInput(
+                    workspace_id=str(workspace_id),
+                    agent_id=str(agent_id),
+                    source_kind=SOURCE_KIND_TASK_OUTCOME,
+                    source_id=str(task_id),
+                    turn_marker=run_id,
+                    task_id=str(task_id),
+                    conversation_id=str(conversation_id) if conversation_id else "",
+                ),
+            )
+        except Exception as error:
+            logger.warning("memory.maintenance_start_failed", error_type=type(error).__name__)
+            return
+        logger.info("memory.maintenance_start", status=status, task_id=str(task_id))

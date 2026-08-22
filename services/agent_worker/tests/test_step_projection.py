@@ -6,10 +6,10 @@ import asyncio
 import os
 from collections.abc import AsyncIterator
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import asyncpg
@@ -57,6 +57,7 @@ from jhin_workflows.agent_task.shared import (
     ReasonAgentStepResult,
     ResolveAdvertisedToolsInput,
     SnapshotResult,
+    WorkRequestStart,
 )
 
 
@@ -875,3 +876,107 @@ async def test_concurrent_finalize_projection_serializes_one_terminal_event() ->
             await admin.execute(f'DROP DATABASE IF EXISTS "{database_name}"')
         finally:
             await admin.close()
+
+
+# --- coordination and memory wiring ---
+
+
+async def test_accepted_work_request_is_lifted_and_replayed_from_the_commit(
+    world: ProjectionWorld,
+) -> None:
+    created_task_id = str(new_uuid7())
+    request_id = str(new_uuid7())
+    await world.seed_step(
+        statuses=[ToolCallStatus.COMPLETED.value, ToolCallStatus.COMPLETED.value],
+        tool_names=["organization.respond_work_request", "organization.respond_work_request"],
+        outputs=[
+            {
+                "work_request_id": request_id,
+                "created_task_id": created_task_id,
+                "agent_id": str(world.agent_id),
+                "status": "accepted",
+            },
+            # A decline creates no task and therefore starts nothing.
+            {"work_request_id": str(new_uuid7()), "status": "declined"},
+        ],
+    )
+    ids = [str(stable_tool_invocation_id(world.run_id, 0, ordinal)) for ordinal in range(2)]
+
+    first = await world.projections.commit_agent_step_activity(world.commit_params(ids=ids))
+    replay = await world.projections.commit_agent_step_activity(world.commit_params(ids=ids))
+
+    expected = [
+        WorkRequestStart(
+            work_request_id=request_id, task_id=created_task_id, agent_id=str(world.agent_id)
+        )
+    ]
+    assert first.work_request_starts == expected
+    assert replay.work_request_starts == expected
+    payload = await world.load_commit_payload()
+    assert payload["result"]["work_request_starts"] == [asdict(expected[0])]
+    assert await world.count_events("agent.step.committed") == 1
+
+
+class _StartRecorder:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        self.error = error
+
+    async def start_workflow(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls.append((args, kwargs))
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace(id=kwargs.get("id"))
+
+
+async def _finalize(world: ProjectionWorld, status: str) -> None:
+    await world.projections.finalize_run_projection_activity(
+        FinalizeInput(
+            workspace_id=str(world.workspace_id),
+            task_id=str(world.task_id),
+            run_id=str(world.run_id),
+            status=status,
+            steps_used=1,
+        )
+    )
+
+
+async def test_completed_run_starts_detached_memory_maintenance(world: ProjectionWorld) -> None:
+    recorder = _StartRecorder()
+    world.projections._temporal_client = cast(Any, recorder)
+
+    await _finalize(world, RunStatus.COMPLETED.value)
+
+    assert len(recorder.calls) == 1
+    args, kwargs = recorder.calls[0]
+    params = args[1]
+    assert params.source_kind == "task_outcome"
+    assert params.source_id == str(world.task_id)
+    assert params.turn_marker == str(world.run_id)
+    assert params.agent_id == str(world.agent_id)
+    assert params.remember_enabled is False
+    assert kwargs["id"] == f"memory-maintenance-task_outcome-{world.task_id}-{world.run_id}"
+    assert (await world.load_run()).status == RunStatus.COMPLETED.value
+    # A repeated finalization (retry) owns nothing and starts nothing more.
+    await _finalize(world, RunStatus.COMPLETED.value)
+    assert len(recorder.calls) == 1
+
+
+async def test_memory_maintenance_is_best_effort(world: ProjectionWorld) -> None:
+    recorder = _StartRecorder(error=RuntimeError("temporal unavailable"))
+    world.projections._temporal_client = cast(Any, recorder)
+
+    await _finalize(world, RunStatus.COMPLETED.value)
+
+    assert len(recorder.calls) == 1
+    assert (await world.load_run()).status == RunStatus.COMPLETED.value
+    assert await world.count_events("run.completed") == 1
+
+
+async def test_failed_run_does_not_start_memory_maintenance(world: ProjectionWorld) -> None:
+    recorder = _StartRecorder()
+    world.projections._temporal_client = cast(Any, recorder)
+
+    await _finalize(world, RunStatus.FAILED.value)
+
+    assert recorder.calls == []

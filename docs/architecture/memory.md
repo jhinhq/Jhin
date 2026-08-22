@@ -177,63 +177,50 @@ Best-effort by contract: never raises.
 
 ## Worker integration points
 
-`services/agent_worker/.../activities.py` is owned by the Phase 10 merge; the
-memory subsystem exposes clean functions for it:
+Wired on top of the Phase 10 tool-worker boundary; model-facing memory work
+stays on the agent worker (`jhin-agent-queue`), never on the tool worker:
 
-1. **Before each model step** (in `run_agent_step_activity`, after history
-   is loaded):
-
-   ```python
-   from jhin_memory import build_memory_context, record_retrieval_provenance, unavailable_context
-
-   try:
-       memory = await build_memory_context(
-           session,
-           workspace_id=workspace_id,
-           agent_id=agent_id,
-           query=f"{task.title}\n{task.description}\n{latest_user_text}",
-       )
-   except Exception as exc:
-       memory = unavailable_context(str(exc), max_records=12, max_chars=3000)
-   await record_retrieval_provenance(
-       session,
-       workspace_id=workspace_id,
-       run_id=run_id,
-       task_id=task_id,
-       context=memory,
-   )
-   system_prompt = compose_system_prompt(snapshot, has_tools=bool(tools))
-   if memory.text:
-       system_prompt += "\n\n" + memory.text
-   ```
-
-   Re-run this on every step (live authorization, forget/revoke between
-   steps). Include `memory.provenance.context_hash` in the step's event
-   payload if the snapshot hash participates in audit.
-2. **After a visible agent reply or task completion** (in
-   `finalize_run_activity` or the conversation turn service):
+1. **Before each model step** — `AgentReasoningActivities.reason_agent_step`
+   (`services/agent_worker/src/jhin_agent_worker/reasoning.py`) calls
+   `build_memory_context(...)` in a dedicated session with the query
+   `title + description + latest visible user turn + pending instructions`,
+   falling back to `unavailable_context(...)` on any failure, and passes
+   `memory.text` as `TaskContext(memory_context=…)`; `build_messages` appends
+   it to the system prompt after the roster and rollup blocks. Retrieval is
+   re-run on every step (live authorization, forget/revoke between steps).
+   A replayed step (manifest pair already bound) does not retrieve again.
+2. **Provenance** — `record_retrieval_provenance(...)` appends the
+   `memory.retrieved` run event in the same locked transaction as the
+   step's `agent.step.tool_manifest` / `agent.step.reasoning` pair, directly
+   before them, so the provenance is bound to exactly the step it informed
+   (ids/versions/hash only; never the text).
+3. **After task completion** — `finalize_run_projection_activity`
+   (`projections.py`) starts the detached maintenance workflow once per
+   completed run, after the terminal projection commits:
 
    ```python
-   from jhin_workflows.memory_maintenance import MemoryMaintenanceInput, start_memory_maintenance
-
    await start_memory_maintenance(
        temporal_client,
        MemoryMaintenanceInput(
            workspace_id=...,
            agent_id=...,
-           source_kind="message",
-           source_id=str(reply_message_id),
+           source_kind="task_outcome",
+           source_id=str(task_id),
            turn_marker=str(run_id),
            task_id=str(task_id),
-           conversation_id=str(conversation_id),
+           conversation_id=str(conversation_id or ""),
        ),
    )
    ```
 
-   For an explicit "remember this" turn, pass the *user* message as the
-   source with `remember_enabled=True`, the validated `requested_scope`,
-   `actor_user_id`, and `actor_authority` (`agent` for members, `workspace`
-   for admins — see `jhin_api.memory.service.authority_for`).
+   Failed and cancelled runs start nothing; a repeated finalization (retry)
+   owns no terminal transition and starts nothing more. Any failure is
+   logged and swallowed — the terminal projection never depends on it.
+
+   For an explicit "remember this" turn, the API passes the *user* message
+   as the source with `remember_enabled=True`, the validated
+   `requested_scope`, `actor_user_id`, and `actor_authority` (`agent` for
+   members, `workspace` for admins — see `jhin_api.memory.service.authority_for`).
 
 Run / audit event names: `memory.retrieved` (run event), `memory.maintained`
 (audit, system actor), and the API audit actions below.

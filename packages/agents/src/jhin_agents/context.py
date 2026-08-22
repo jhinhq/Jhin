@@ -62,6 +62,9 @@ class TaskContext(BaseModel):
     # context appended to the system prompt; neither changes authority.
     organization_context: str = ""
     manager_context: str = ""
+    # Memory release (docs/architecture/memory.md): the bounded, authorized
+    # memory block retrieved for this step ("" when nothing was selected).
+    memory_context: str = ""
 
 
 def compose_system_prompt(snapshot: AgentExecutionSnapshot, *, has_tools: bool = False) -> str:
@@ -124,7 +127,7 @@ def build_messages(
 ) -> tuple[ModelMessage, ...]:
     """Full message list for one reasoning step."""
     system_prompt = compose_system_prompt(snapshot, has_tools=has_tools)
-    for section in (task.organization_context, task.manager_context):
+    for section in (task.organization_context, task.manager_context, task.memory_context):
         if section:
             system_prompt += "\n\n" + section
     messages: list[ModelMessage] = [ModelMessage(role="system", content=system_prompt)]

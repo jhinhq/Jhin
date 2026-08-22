@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
+from uuid import UUID
 
 import pytest
 from sqlalchemy import func, select
@@ -16,8 +18,8 @@ import jhin_agent_worker.reasoning as reasoning_module
 from jhin_agent_worker.reasoning import AgentReasoningActivities
 from jhin_agents.snapshot import AgentExecutionSnapshot, ModelProfileSnapshot, RunLimits
 from jhin_db.base import Base
-from jhin_db.models import Agent, AgentRun, RunEvent, Task, ToolCall, Workspace
-from jhin_domain import RunStatus, new_uuid7
+from jhin_db.models import Agent, AgentRun, MemoryRecord, RunEvent, Task, ToolCall, Workspace
+from jhin_domain import MemoryScope, MemoryStatus, RunStatus, new_uuid7
 from jhin_models import ModelRequest, ModelResponse, ModelToolCall, ModelUsage
 from jhin_observability import noop_metrics, noop_tracer
 from jhin_workflows.agent_task.shared import (
@@ -350,3 +352,111 @@ async def test_manifest_without_reasoning_fails_closed_for_new_activity(
     assert error.value.type == "reasoning_sidecar_missing"
     assert error.value.non_retryable is True
     assert world.model.requests == []
+
+
+# --- step context wiring: memory, roster, manager rollup ---
+
+
+def _done_response() -> ModelResponse:
+    return ModelResponse(
+        text="All done.",
+        finish_reason="stop",
+        model="reasoning-test",
+        usage=ModelUsage(input_tokens=5, output_tokens=1),
+        latency_ms=1,
+    )
+
+
+async def _seed_memory(world: ReasoningWorld, content: str) -> None:
+    async with world.sessions() as session:
+        session.add(
+            MemoryRecord(
+                workspace_id=world.workspace_id,
+                scope=MemoryScope.AGENT.value,
+                scope_id=UUID(world.params.agent_id),
+                kind="fact",
+                content=content,
+                content_hash=new_uuid7().hex,
+                visibility=MemoryScope.AGENT.value,
+                status=MemoryStatus.ACTIVE.value,
+                created_by_type="agent",
+            )
+        )
+        await session.commit()
+
+
+async def test_step_prompt_carries_memory_and_records_retrieval_provenance(
+    world: ReasoningWorld,
+) -> None:
+    await _seed_memory(world, "Bind calls against the staging endpoint first.")
+    world.model.responses.append(_done_response())
+
+    await world.reasoning.reason_agent_step_activity(world.params)
+
+    system = world.model.requests[0].messages[0].content
+    assert "Recalled memory" in system
+    assert "Bind calls against the staging endpoint first." in system
+    # Provenance is bound with the step, before the manifest pair, and holds
+    # ids/versions/hash only — never the memory text.
+    async with world.sessions() as session:
+        events = list(
+            await session.scalars(
+                select(RunEvent).where(RunEvent.run_id == world.run_id).order_by(RunEvent.seq)
+            )
+        )
+    assert [event.event_type for event in events] == [
+        "memory.retrieved",
+        "agent.step.tool_manifest",
+        "agent.step.reasoning",
+    ]
+    retrieved = events[0].payload_json
+    assert len(retrieved["record_ids"]) == 1
+    assert retrieved["mode"] != "unavailable"
+    assert "staging" not in json.dumps(retrieved)
+
+
+async def test_memory_retrieval_failure_never_fails_the_step(
+    world: ReasoningWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def explode(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("memory index offline")
+
+    monkeypatch.setattr(reasoning_module, "build_memory_context", explode)
+    world.model.responses.append(_done_response())
+
+    result = await world.reasoning.reason_agent_step_activity(world.params)
+
+    assert result == ReasonAgentStepResult(call_count=0)
+    assert "Recalled memory" not in world.model.requests[0].messages[0].content
+    assert await world.count_events("memory.retrieved") == 1
+    async with world.sessions() as session:
+        event = await session.scalar(
+            select(RunEvent).where(
+                RunEvent.run_id == world.run_id, RunEvent.event_type == "memory.retrieved"
+            )
+        )
+    assert event is not None
+    assert event.payload_json["mode"] == "unavailable"
+    assert event.payload_json["record_ids"] == []
+    assert "offline" not in json.dumps(event.payload_json)
+
+
+async def test_step_prompt_carries_roster_and_manager_rollup(world: ReasoningWorld) -> None:
+    async with world.sessions() as session:
+        session.add(
+            Agent(
+                workspace_id=world.workspace_id,
+                name="Junior",
+                slug="junior",
+                manager_agent_id=UUID(world.params.agent_id),
+            )
+        )
+        await session.commit()
+    world.model.responses.append(_done_response())
+
+    await world.reasoning.reason_agent_step_activity(world.params)
+
+    system = world.model.requests[0].messages[0].content
+    assert "Company directory" in system
+    assert "Junior" in system
+    assert "Team status rollup" in system

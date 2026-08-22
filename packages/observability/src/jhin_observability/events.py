@@ -67,6 +67,8 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
     },
     "concurrency.kick_failed": {"error_type": FieldKind.ERROR_TYPE},
     # Memory release (docs/architecture/memory.md).
+    "memory.retrieval_failed": {"error_type": FieldKind.ERROR_TYPE},
+    "memory.maintenance_start": {"status": FieldKind.ENUM, "task_id": FieldKind.ID},
     "memory.maintenance_start_failed": {"error_type": FieldKind.ERROR_TYPE},
     "memory.maintained": {
         "workspace_id": FieldKind.ID,
@@ -77,6 +79,7 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
         "rejected": FieldKind.COUNT,
     },
     # Coordination release (docs/architecture/coordination.md).
+    "coordination.context_failed": {"error_type": FieldKind.ERROR_TYPE},
     "work_request.finalized": {
         "work_request_id": FieldKind.ID,
         "task_id": FieldKind.ID,

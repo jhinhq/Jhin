@@ -188,24 +188,36 @@ appended to the system prompt when set. Both blocks state that they are
 routing/status context and grant nothing. `render_roster` caps 40 entries /
 3 000 chars; `render_manager_rollup` caps 4 000 chars.
 
-## Worker integration points (not yet wired into `activities.py`)
+## Worker integration points
 
-`services/agent_worker/src/jhin_agent_worker/coordination_activities.py`
-exposes:
+Wired on top of the Phase 10 tool-worker boundary
+(`docs/architecture/tool-worker-boundary.md`):
 
 - `organization_context(session, workspace_id, agent_id)` and
-  `manager_context(session, workspace_id, agent_id)` — call in
-  `run_agent_step_activity` when building `TaskContext`. The manager block
-  is empty for agents without reports, so it is safe to call for everyone.
+  `manager_context(session, workspace_id, agent_id)` — the agent worker's
+  `reason_agent_step` (`jhin_agent_worker.reasoning`) builds both in a
+  dedicated session before each model call and passes them as
+  `TaskContext(organization_context=…, manager_context=…)`. The manager
+  block is empty for agents without reports. Failures are logged and
+  yield empty blocks; they never fail the step.
 - `jhin_tools.reviews.check_review_gate(session, run, ToolCallIntent)` —
-  call after the gateway authorized a call and before execution; on
-  `wait_review` persist a waiting state (suggested `StepResult.waiting_review_id`
-  and a `review_decision` signal delivered by `decide_review`), on `blocked`
-  return the feedback as the observation.
-- `work_request_start_from_output(outcome.sanitized_output)` — for executed
-  `organization.respond_work_request` calls, append the result to
-  `StepResult.work_request_starts` and include it in the committed
-  step-result bundle so `_committed_step_result` replays it.
+  evaluated inside `ToolGateway._request_once` (on the tool worker, the
+  only place tools execute) after grant/scope/validator authorization and
+  before approval staging or the stable execution claim, so no effect
+  identity exists when the gate decides. `blocked` is a recorded denial
+  whose reason is the reviewer's feedback; `wait_review` is a recorded
+  denial with code `review_pending` naming the review id (the workflow has
+  no review signal yet, so the run is not parked — the model is told to
+  finish without the call, and a later call finds the decided review:
+  approved proceeds, changes requested returns the feedback). A retried
+  invocation replays the persisted denial rather than re-evaluating.
+- `work_request_start_from_output(row.sanitized_output_json)` — the agent
+  worker's `commit_agent_step` lifts every executed
+  `organization.respond_work_request` row into
+  `StepResult.work_request_starts`, stores it in the `agent.step.committed`
+  bundle so a projection retry replays it, and `AgentTaskWorkflow` starts
+  one abandoned `WorkRequestTaskWorkflow` per entry (duplicate starts are
+  no-ops).
 - `CoordinationActivities.finalize_work_request_activity` — registered in
   `main.py` together with `WorkRequestTaskWorkflow`.
 

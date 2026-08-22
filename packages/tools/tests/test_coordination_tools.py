@@ -6,6 +6,7 @@ gate, and the manager rollup."""
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any
 from uuid import UUID
 
@@ -33,7 +34,7 @@ from jhin_domain import MessageType, RunStatus, TaskState, WorkRequestStatus, ne
 from jhin_tools.builtin import ToolExecutionContext, build_builtin_catalog
 from jhin_tools.directory import DirectoryEntry, build_roster, render_roster, search_directory
 from jhin_tools.gateway import GatewayOutcome, ToolGateway
-from jhin_tools.reviews import ToolCallIntent, check_review_gate
+from jhin_tools.reviews import ToolCallIntent, check_review_gate, decide_review
 from jhin_tools.rollups import build_manager_rollup, render_manager_rollup
 from jhin_tools.work_requests import finalize_work_request
 
@@ -602,3 +603,78 @@ async def test_manager_rollup_is_source_linked_and_private(session: AsyncSession
     # Blogger's work is not the CTO's to see.
     assert all(i.agent_name != "Blogger" for i in rollup.active_work + rollup.recent_work)
     assert render_manager_rollup(await build_manager_rollup(session, org.blogger)) == ""
+
+
+async def test_gateway_review_gate_runs_after_authorization_and_before_execution(
+    session: AsyncSession, org: Org
+) -> None:
+    """The tool worker's gateway evaluates pre-action review policies after
+    grant/scope/validator authorization and before approval staging or the
+    execution claim: a pending review is a recorded denial carrying the
+    review id, a changes-requested review returns its feedback, and an
+    approved review lets the call through."""
+    run = await run_for(session, org, org.swe, org.task)
+    await grant(session, org, org.swe, "system.demo.destructive")
+    session.add(
+        ReviewPolicy(
+            workspace_id=org.workspace.id,
+            name="destructive needs manager",
+            mode="pre_action",
+            conditions_json=[{"kind": "destructive_action"}],
+            reviewer_selector_json={"kind": "reporting_manager"},
+            fail_closed=True,
+        )
+    )
+    await session.flush()
+    ctx = ToolExecutionContext(
+        session=session,
+        workspace_id=org.workspace.id,
+        task_id=org.task.id,
+        run_id=run.id,
+        agent_id=org.swe.id,
+        agent_name=org.swe.name,
+    )
+    gateway = ToolGateway(ctx, build_builtin_catalog())
+    arguments = json.dumps({"label": "drop it"})
+
+    pending = await gateway.request("system.demo.destructive", arguments)
+    assert pending.status == "denied"
+    assert pending.decision_code == "review_pending"
+    review = await session.scalar(select(WorkReview))
+    assert review is not None and review.status == "pending"
+    assert str(review.id) in pending.decision_reason
+    assert review.reviewer_agent_id == org.cto.id
+    assert "tool.call.executed" not in list(await session.scalars(select(AuditEvent.action)))
+
+    # An ungated tool is unaffected.
+    await grant(session, org, org.swe, "system.note.append")
+    note = await gateway.request("system.note.append", json.dumps({"text": "routine"}))
+    assert note.status == "executed", note.decision_reason
+
+    await decide_review(
+        session,
+        review,
+        verdict="changes_requested",
+        feedback="Back up the table first.",
+        decided_by_agent_id=org.cto.id,
+    )
+    blocked = await gateway.request("system.demo.destructive", arguments)
+    assert blocked.status == "denied"
+    assert blocked.decision_code == "review_changes_requested"
+    assert blocked.decision_reason == "Back up the table first."
+
+    # Another run opens its own review; approved, the call executes.
+    later_run = await run_for(session, org, org.swe, org.task)
+    later_gateway = ToolGateway(replace(ctx, run_id=later_run.id), build_builtin_catalog())
+    later = await later_gateway.request("system.demo.destructive", arguments)
+    assert later.decision_code == "review_pending"
+    reviews = list(await session.scalars(select(WorkReview).order_by(WorkReview.created_at)))
+    assert len(reviews) == 2 and reviews[-1].run_id == later_run.id
+    await decide_review(
+        session, reviews[-1], verdict="approve", feedback="ok", decided_by_agent_id=org.cto.id
+    )
+    # The gate passed; the destructive call advances to human approval
+    # staging (review gate -> human approval -> execute).
+    staged = await later_gateway.request("system.demo.destructive", arguments)
+    assert staged.status == "needs_approval", staged.decision_reason
+    assert staged.approval_id is not None
