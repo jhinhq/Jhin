@@ -1,0 +1,161 @@
+"""WorkRequestTaskWorkflow orchestration with a stub child + activity, and
+AgentTaskWorkflow starting it for accepted requests (idempotently)."""
+
+from __future__ import annotations
+
+import uuid
+from typing import Any
+
+from temporalio import activity, workflow
+from temporalio.testing import WorkflowEnvironment
+from temporalio.worker import Worker
+
+from jhin_workflows.agent_task import (
+    ACTIVITY_FINALIZE_RUN,
+    ACTIVITY_RESOLVE_SNAPSHOT,
+    ACTIVITY_RUN_AGENT_STEP,
+    AgentTaskInput,
+    AgentTaskResult,
+    AgentTaskWorkflow,
+    FinalizeInput,
+    RunStepInput,
+    SnapshotResult,
+    StepResult,
+)
+from jhin_workflows.agent_task.shared import WorkRequestStart
+from jhin_workflows.work_request_task import (
+    ACTIVITY_FINALIZE_WORK_REQUEST,
+    FinalizeWorkRequestInput,
+    WorkRequestTaskInput,
+    WorkRequestTaskResult,
+    WorkRequestTaskWorkflow,
+    work_request_workflow_id,
+)
+
+
+@workflow.defn(name="AgentTaskWorkflow")
+class StubAgentTaskWorkflow:
+    @workflow.run
+    async def run(self, params: AgentTaskInput) -> AgentTaskResult:
+        status = "failed" if params.task_id.startswith("f") else "completed"
+        return AgentTaskResult(run_id=f"run-{params.task_id}", status=status, steps_used=1)
+
+
+class Stubs:
+    def __init__(self) -> None:
+        self.finalized: list[FinalizeWorkRequestInput] = []
+
+    @activity.defn(name=ACTIVITY_FINALIZE_WORK_REQUEST)
+    async def finalize(self, params: FinalizeWorkRequestInput) -> str:
+        self.finalized.append(params)
+        return "completed" if params.run_status == "completed" else "failed"
+
+
+async def run_workflow(stubs: Stubs, params: WorkRequestTaskInput) -> Any:
+    env = await WorkflowEnvironment.start_time_skipping()
+    try:
+        task_queue = f"test-{uuid.uuid4()}"
+        async with Worker(
+            env.client,
+            task_queue=task_queue,
+            workflows=[WorkRequestTaskWorkflow, StubAgentTaskWorkflow],
+            activities=[stubs.finalize],
+        ):
+            return await env.client.execute_workflow(
+                WorkRequestTaskWorkflow.run,
+                params,
+                id=work_request_workflow_id(params.work_request_id),
+                task_queue=task_queue,
+            )
+    finally:
+        await env.shutdown()
+
+
+async def test_completed_task_finalizes_request() -> None:
+    stubs = Stubs()
+    params = WorkRequestTaskInput(
+        workspace_id=str(uuid.uuid4()),
+        work_request_id=str(uuid.uuid4()),
+        task_id="c" + str(uuid.uuid4()),
+        agent_id=str(uuid.uuid4()),
+    )
+    result: WorkRequestTaskResult = await run_workflow(stubs, params)
+    assert result.run_status == "completed" and result.request_status == "completed"
+    assert [f.work_request_id for f in stubs.finalized] == [params.work_request_id]
+
+
+async def test_failed_task_still_finalizes() -> None:
+    stubs = Stubs()
+    params = WorkRequestTaskInput(
+        workspace_id=str(uuid.uuid4()),
+        work_request_id=str(uuid.uuid4()),
+        task_id="f" + str(uuid.uuid4()),
+        agent_id=str(uuid.uuid4()),
+    )
+    result: WorkRequestTaskResult = await run_workflow(stubs, params)
+    assert result.run_status == "failed" and result.request_status == "failed"
+
+
+# --- AgentTaskWorkflow starts the child for accepted requests ---
+
+
+@workflow.defn(name="WorkRequestTaskWorkflow")
+class StubWorkRequestTaskWorkflow:
+    @workflow.run
+    async def run(self, params: WorkRequestTaskInput) -> WorkRequestTaskResult:
+        return WorkRequestTaskResult(
+            work_request_id=params.work_request_id,
+            task_id=params.task_id,
+            run_status="completed",
+            request_status="completed",
+        )
+
+
+class AgentStubs:
+    def __init__(self, starts: list[WorkRequestStart]) -> None:
+        self.starts = starts
+        self.steps = 0
+
+    @activity.defn(name=ACTIVITY_RESOLVE_SNAPSHOT)
+    async def resolve(self, params: AgentTaskInput) -> SnapshotResult:
+        return SnapshotResult(run_id="run-1", snapshot_json="{}", snapshot_hash="h", max_steps=5)
+
+    @activity.defn(name=ACTIVITY_RUN_AGENT_STEP)
+    async def step(self, params: RunStepInput) -> StepResult:
+        self.steps += 1
+        # Two steps report the same accepted request (a retried tool call):
+        # the second start must be a no-op, not a failure.
+        return StepResult(done=self.steps >= 2, work_request_starts=list(self.starts))
+
+    @activity.defn(name=ACTIVITY_FINALIZE_RUN)
+    async def finalize(self, params: FinalizeInput) -> None:
+        return None
+
+
+async def test_agent_task_workflow_starts_work_request_child_once() -> None:
+    request_id = str(uuid.uuid4())
+    starts = [WorkRequestStart(work_request_id=request_id, task_id="t1", agent_id="a2")]
+    stubs = AgentStubs(starts)
+    env = await WorkflowEnvironment.start_time_skipping()
+    try:
+        task_queue = f"test-{uuid.uuid4()}"
+        async with Worker(
+            env.client,
+            task_queue=task_queue,
+            workflows=[AgentTaskWorkflow, StubWorkRequestTaskWorkflow],
+            activities=[stubs.resolve, stubs.step, stubs.finalize],
+        ):
+            result: AgentTaskResult = await env.client.execute_workflow(
+                AgentTaskWorkflow.run,
+                AgentTaskInput(workspace_id="ws", task_id="parent", agent_id="a1"),
+                id=f"task-{uuid.uuid4()}",
+                task_queue=task_queue,
+            )
+            assert result.status == "completed"
+            handle = env.client.get_workflow_handle(
+                work_request_workflow_id(request_id), result_type=WorkRequestTaskResult
+            )
+            child: WorkRequestTaskResult = await handle.result()
+            assert child.work_request_id == request_id and child.task_id == "t1"
+    finally:
+        await env.shutdown()
