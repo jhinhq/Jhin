@@ -10,6 +10,7 @@ explicitly reported "pass" passes.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
@@ -23,6 +24,7 @@ from jhin_agent_worker.activities import AgentActivities
 from jhin_db.base import Base
 from jhin_db.models import Agent, AgentRun, AuditEvent, Message, RunEvent, Task, Workspace
 from jhin_domain import MessageType, RunStatus, TaskState, new_uuid7
+from jhin_observability import noop_metrics, noop_tracer
 from jhin_workflows.agent_task import AgentTaskInput
 from jhin_workflows.delegated_task import (
     DelegationSummary,
@@ -41,6 +43,7 @@ class StubPublisher:
 
 class StubResources:
     def __init__(self, session_factory: Any) -> None:
+        self.runtime = SimpleNamespace(metrics=noop_metrics(), tracer=noop_tracer())
         self.session_factory = session_factory
         self.publisher = StubPublisher()
         self.crypto = None

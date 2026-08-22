@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID
 
@@ -19,6 +20,7 @@ from jhin_db.base import Base
 from jhin_db.models import Agent, AgentRun, Task, Workspace
 from jhin_domain import RunStatus, new_uuid7
 from jhin_models import ModelRequest, ModelResponse, ModelToolCall, ModelUsage
+from jhin_observability import noop_metrics, noop_tracer
 from jhin_tools import (
     AGENT_BEFORE_BIND,
     PHASE9_AFTER_MANIFEST,
@@ -133,6 +135,9 @@ class _Resources:
     session_factory: async_sessionmaker[AsyncSession]
     test_barrier: Any
     publisher: _Publisher
+    runtime: Any = field(
+        default_factory=lambda: SimpleNamespace(metrics=noop_metrics(), tracer=noop_tracer())
+    )
     crypto: None = None
 
 

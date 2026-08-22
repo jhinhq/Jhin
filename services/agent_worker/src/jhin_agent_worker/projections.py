@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import math
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -32,7 +34,15 @@ from jhin_domain import (
     ToolCallStatus,
 )
 from jhin_events import EventEnvelope, EventSource
-from jhin_observability import get_logger, normalize_event_family
+from jhin_observability import (
+    AttributeValue,
+    JhinMetrics,
+    MetricName,
+    get_logger,
+    noop_metrics,
+    normalize_event_family,
+    normalize_span_attributes,
+)
 from jhin_secrets.redaction import redact_text
 from jhin_tools import stable_tool_invocation_id
 from jhin_workflows.agent_task.shared import (
@@ -84,6 +94,20 @@ _PRESERVED_FINAL_ERRORS = frozenset(
         "tool_step_manifest_not_lossless",
     }
 )
+_AGENT_RUNS_METRIC = "agent_runs_total"
+_AGENT_DURATION_METRIC = "agent_run_duration_seconds"
+_AGENT_FAILURES_METRIC = "agent_run_failures_total"
+_AGENT_SERVICE_LABEL = "service"
+_AGENT_OUTCOME_LABEL = "outcome"
+_AGENT_FAILURE_LABEL = "failure_class"
+_AGENT_SERVICE_VALUE = "agent-worker"
+_AGENT_COMPLETED_VALUE = "completed"
+_AGENT_FAILED_VALUE = "failed"
+_AGENT_CANCELLED_VALUE = "cancelled"
+_AGENT_EXECUTION_UNKNOWN_VALUE = "execution_unknown"
+_AGENT_BUDGET_VALUE = "budget"
+_AGENT_INTERNAL_VALUE = "internal"
+_FINALIZATION_VALIDATION_MEASUREMENT = 0
 
 logger = get_logger(__name__)
 
@@ -154,6 +178,138 @@ async def _cancel_pending_run_approvals(
     return len(pending)
 
 
+def _prevalidate_finalization_telemetry(status: object) -> str:
+    for value, expected, field in (
+        (_AGENT_RUNS_METRIC, "agent_runs_total", "run metric"),
+        (_AGENT_DURATION_METRIC, "agent_run_duration_seconds", "duration metric"),
+        (_AGENT_FAILURES_METRIC, "agent_run_failures_total", "failure metric"),
+        (_AGENT_SERVICE_LABEL, "service", "service label"),
+        (_AGENT_OUTCOME_LABEL, "outcome", "outcome label"),
+        (_AGENT_FAILURE_LABEL, "failure_class", "failure label"),
+        (_AGENT_SERVICE_VALUE, "agent-worker", "service value"),
+        (_AGENT_COMPLETED_VALUE, "completed", "completed outcome"),
+        (_AGENT_FAILED_VALUE, "failed", "failed outcome"),
+        (_AGENT_CANCELLED_VALUE, "cancelled", "cancelled outcome"),
+        (
+            _AGENT_EXECUTION_UNKNOWN_VALUE,
+            "execution_unknown",
+            "execution-unknown failure",
+        ),
+        (_AGENT_BUDGET_VALUE, "budget", "budget failure"),
+        (_AGENT_INTERNAL_VALUE, "internal", "internal failure"),
+        (_FINALIZATION_VALIDATION_MEASUREMENT, 0, "validation measurement"),
+    ):
+        if type(value) is not type(expected) or value != expected:
+            raise ValueError(f"invalid fixed telemetry schema: {field}")
+    normalized_outcome = cast(
+        str,
+        normalize_span_attributes({"jhin.outcome": cast(AttributeValue, status)})["jhin.outcome"],
+    )
+    validator = noop_metrics()
+    for outcome in (
+        _AGENT_COMPLETED_VALUE,
+        _AGENT_FAILED_VALUE,
+        _AGENT_CANCELLED_VALUE,
+        normalized_outcome,
+    ):
+        validator.counter(cast(MetricName, _AGENT_RUNS_METRIC)).add(
+            _FINALIZATION_VALIDATION_MEASUREMENT,
+            **{
+                _AGENT_SERVICE_LABEL: _AGENT_SERVICE_VALUE,
+                _AGENT_OUTCOME_LABEL: outcome,
+            },
+        )
+        validator.histogram(cast(MetricName, _AGENT_DURATION_METRIC)).record(
+            _FINALIZATION_VALIDATION_MEASUREMENT,
+            **{_AGENT_OUTCOME_LABEL: outcome},
+        )
+    for failure_class in (
+        _AGENT_EXECUTION_UNKNOWN_VALUE,
+        _AGENT_BUDGET_VALUE,
+        _AGENT_INTERNAL_VALUE,
+    ):
+        validator.counter(cast(MetricName, _AGENT_FAILURES_METRIC)).add(
+            _FINALIZATION_VALIDATION_MEASUREMENT,
+            **{_AGENT_FAILURE_LABEL: failure_class},
+        )
+    return normalized_outcome
+
+
+def _run_agent_metric(action: Callable[[], None]) -> None:
+    try:
+        action()
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:
+        pass
+
+
+def _record_agent_counter(
+    metrics: JhinMetrics,
+    *,
+    name: str,
+    amount: int | float,
+    labels: Mapping[str, str],
+) -> None:
+    _run_agent_metric(
+        lambda: metrics.counter(cast(MetricName, name)).add(
+            amount,
+            **dict(labels),
+        )
+    )
+
+
+def _record_agent_histogram(
+    metrics: JhinMetrics,
+    *,
+    name: str,
+    amount: int | float,
+    labels: Mapping[str, str],
+) -> None:
+    _run_agent_metric(
+        lambda: metrics.histogram(cast(MetricName, name)).record(
+            amount,
+            **dict(labels),
+        )
+    )
+
+
+def _persisted_duration_seconds(
+    started_at: object,
+    completed_at: object,
+) -> float | None:
+    if type(started_at) is not datetime or type(completed_at) is not datetime:
+        return None
+    started = started_at
+    completed = completed_at
+    try:
+        if (
+            started.tzinfo is None
+            or completed.tzinfo is None
+            or started.utcoffset() is None
+            or completed.utcoffset() is None
+        ):
+            return None
+        duration = (completed - started).total_seconds()
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:
+        return None
+    if not math.isfinite(duration) or duration < 0:
+        return None
+    return duration
+
+
+def _final_failure_class(status: str, error_code: str | None) -> str | None:
+    if status != RunStatus.FAILED.value:
+        return None
+    if error_code == "tool_execution_unknown":
+        return _AGENT_EXECUTION_UNKNOWN_VALUE
+    if error_code == "max_steps_exceeded":
+        return _AGENT_BUDGET_VALUE
+    return _AGENT_INTERNAL_VALUE
+
+
 class AgentProjectionActivities:
     def __init__(
         self,
@@ -161,6 +317,8 @@ class AgentProjectionActivities:
         temporal_client: TemporalClient | None = None,
     ) -> None:
         self._resources = resources
+        self._metrics = resources.runtime.metrics
+        self._tracer = resources.runtime.tracer
         self._temporal_client = temporal_client
 
     async def _publish(
@@ -1316,6 +1474,7 @@ class AgentProjectionActivities:
 
     @activity.defn(name=ACTIVITY_FINALIZE_RUN_PROJECTION)
     async def finalize_run_projection_activity(self, params: FinalizeInput) -> None:
+        normalized_outcome = _prevalidate_finalization_telemetry(params.status)
         workspace_id = UUID(params.workspace_id)
         task_id = UUID(params.task_id)
         error_message = redact_text(params.error_message) if params.error_message else None
@@ -1323,6 +1482,11 @@ class AgentProjectionActivities:
         effective_error_message = error_message
         run_totals: dict[str, Any] = {}
         freed_agent_id: UUID | None = None
+        owns_run_metrics = False
+        persisted_started_at: object = None
+        persisted_completed_at: object = None
+        persisted_status = params.status
+        persisted_error_code: str | None = None
 
         async with self._resources.session_factory() as session:
             if params.run_id is not None:
@@ -1354,11 +1518,17 @@ class AgentProjectionActivities:
                 if run.error_code in _PRESERVED_FINAL_ERRORS:
                     effective_error_code = run.error_code
                     effective_error_message = run.error_message
+                persisted_started_at = run.started_at
                 run.status = params.status
-                run.completed_at = datetime.now(UTC)
+                completed_at = datetime.now(UTC)
+                run.completed_at = completed_at
                 run.steps_used = max(run.steps_used, params.steps_used)
                 run.error_code = effective_error_code
                 run.error_message = effective_error_message
+                owns_run_metrics = True
+                persisted_completed_at = completed_at
+                persisted_status = run.status
+                persisted_error_code = run.error_code
                 run_totals = {
                     "input_tokens": run.input_tokens,
                     "output_tokens": run.output_tokens,
@@ -1404,6 +1574,39 @@ class AgentProjectionActivities:
                         )
                     )
             await session.commit()
+
+        if owns_run_metrics:
+            _record_agent_counter(
+                self._metrics,
+                name=_AGENT_RUNS_METRIC,
+                amount=1,
+                labels={
+                    _AGENT_SERVICE_LABEL: _AGENT_SERVICE_VALUE,
+                    _AGENT_OUTCOME_LABEL: normalized_outcome,
+                },
+            )
+            duration = _persisted_duration_seconds(
+                persisted_started_at,
+                persisted_completed_at,
+            )
+            if duration is not None:
+                _record_agent_histogram(
+                    self._metrics,
+                    name=_AGENT_DURATION_METRIC,
+                    amount=duration,
+                    labels={_AGENT_OUTCOME_LABEL: normalized_outcome},
+                )
+            failure_class = _final_failure_class(
+                persisted_status,
+                persisted_error_code,
+            )
+            if failure_class is not None:
+                _record_agent_counter(
+                    self._metrics,
+                    name=_AGENT_FAILURES_METRIC,
+                    amount=1,
+                    labels={_AGENT_FAILURE_LABEL: failure_class},
+                )
 
         await self._publish(
             workspace_id,

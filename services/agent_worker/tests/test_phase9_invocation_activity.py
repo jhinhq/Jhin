@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -19,6 +20,7 @@ from jhin_db.base import Base
 from jhin_db.models import Agent, AgentRun, AuditEvent, Message, RunEvent, Task, ToolCall, Workspace
 from jhin_domain import RunStatus, new_uuid7
 from jhin_models import ModelRequest, ModelResponse, ModelToolCall, ModelUsage
+from jhin_observability import noop_metrics, noop_tracer
 from jhin_secrets import get_redactor
 from jhin_tools import MAX_TOOL_CALLS_PER_STEP
 from jhin_workflows.agent_task.shared import AdvertisedTool, ReasonAgentStepInput
@@ -49,6 +51,7 @@ class _Publisher:
 
 class _Resources:
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+        self.runtime = SimpleNamespace(metrics=noop_metrics(), tracer=noop_tracer())
         self.session_factory = sessions
         self.publisher = _Publisher()
         self.crypto = None

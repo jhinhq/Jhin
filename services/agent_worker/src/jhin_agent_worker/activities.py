@@ -77,10 +77,12 @@ def _workspace_run_limit(workspace: Workspace | None) -> int | None:
 
 class AgentActivities(AgentReasoningActivities, AgentProjectionActivities):
     def __init__(self, resources: Resources, temporal_client: TemporalClient | None = None) -> None:
-        self._resources = resources
-        # Used only to nudge queued workflows when a slot frees (plan 30);
-        # the poll timer in AgentTaskWorkflow is the correctness backstop.
-        self._temporal_client = temporal_client
+        AgentReasoningActivities.__init__(self, resources)
+        AgentProjectionActivities.__init__(
+            self,
+            resources,
+            temporal_client=temporal_client,
+        )
 
     @activity.defn(name=ACTIVITY_RESOLVE_SNAPSHOT)
     async def resolve_snapshot_activity(self, params: AgentTaskInput) -> SnapshotResult:

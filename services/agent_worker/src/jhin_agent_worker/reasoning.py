@@ -7,8 +7,13 @@ remain in a separate agent-only event committed in the same transaction.
 
 from __future__ import annotations
 
+import asyncio
 import json
-from typing import Annotated, Any, Literal
+import math
+import sys
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from typing import Annotated, Any, Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
@@ -22,11 +27,12 @@ from jhin_agents import AgentExecutionSnapshot
 from jhin_agents.context import ConversationTurn, TaskContext
 from jhin_agents.graph import NodeTransition
 from jhin_agents.runtime import estimate_cost_micros, execute_step
-from jhin_db.models import AgentRun, AuditEvent, Message, RunEvent, Task
+from jhin_db.models import Agent, AgentRun, AuditEvent, Message, RunEvent, Task, Workspace
 from jhin_domain import (
     AGENT_MESSAGE_TYPES,
     ActorType,
     MessageVisibility,
+    ModelProviderType,
     RunStatus,
     SenderType,
 )
@@ -38,7 +44,20 @@ from jhin_models import (
     build_model_client,
 )
 from jhin_models.factory import ProviderConfigError
-from jhin_observability import get_logger
+from jhin_observability import (
+    AttributeValue,
+    JhinMetrics,
+    MetricName,
+    SafeErrorCode,
+    SpanName,
+    get_logger,
+    noop_metrics,
+    normalize_span_attributes,
+    record_span_error,
+    safe_error,
+    safe_span,
+    set_span_attributes,
+)
 from jhin_secrets import SecretStore
 from jhin_secrets.redaction import redact_text
 from jhin_tools import AGENT_BEFORE_BIND, MAX_TOOL_CALLS_PER_STEP, PHASE9_AFTER_MANIFEST
@@ -57,6 +76,24 @@ _MAX_TRANSITIONS = 128
 _MAX_TRANSITION_DETAIL_CHARS = 2_000
 _MAX_STRUCTURED_TURN_CHARS = 6_000
 _STRUCTURED_MESSAGE_TYPES = frozenset(item.value for item in AGENT_MESSAGE_TYPES)
+_REASON_SPAN_NAME = "agent.reason_step"
+_REASON_WORKSPACE_ATTRIBUTE = "jhin.workspace_id"
+_REASON_TASK_ATTRIBUTE = "jhin.task_id"
+_REASON_RUN_ATTRIBUTE = "jhin.run_id"
+_REASON_CORRELATION_ATTRIBUTE = "jhin.correlation_id"
+_REASON_OUTCOME_KEY = "jhin.outcome"
+_REASON_COMPLETED_VALUE = "completed"
+_REASON_FAILED_VALUE = "failed"
+_REASON_CANCELLED_VALUE = "cancelled"
+_TOKEN_METRIC = "model_tokens_total"
+_COST_METRIC = "model_cost_estimate"
+_TOKEN_PROVIDER_LABEL = "provider_type"
+_TOKEN_DIRECTION_LABEL = "direction"
+_TOKEN_INPUT_VALUE = "input"
+_TOKEN_OUTPUT_VALUE = "output"
+_TOKEN_CACHED_VALUE = "cached"
+_COST_PROVIDER_LABEL = "provider_type"
+_USAGE_VALIDATION_MEASUREMENT = 0
 
 logger = get_logger(__name__)
 
@@ -433,9 +470,195 @@ async def _load_history(session: AsyncSession, task: Task) -> tuple[Conversation
     return tuple(turns)
 
 
+def _normalize_provider_type(value: object) -> str:
+    if type(value) is ModelProviderType:
+        return value.value
+    if type(value) is not str:
+        return "other"
+    try:
+        return ModelProviderType(value).value
+    except ValueError:
+        return "other"
+
+
+def _require_fixed_schema(value: object, expected: object, *, field: str) -> None:
+    if type(value) is not type(expected) or value != expected:
+        raise ValueError(f"invalid fixed telemetry schema: {field}")
+
+
+def _prevalidate_reason_telemetry(
+    *,
+    workspace_id: UUID,
+    task_id: UUID,
+    run_id: UUID,
+    correlation_id: UUID,
+    provider_type: object,
+) -> tuple[dict[str, AttributeValue], dict[str, str], str]:
+    for value, expected, field in (
+        (_REASON_SPAN_NAME, "agent.reason_step", "span name"),
+        (_REASON_WORKSPACE_ATTRIBUTE, "jhin.workspace_id", "workspace attribute"),
+        (_REASON_TASK_ATTRIBUTE, "jhin.task_id", "task attribute"),
+        (_REASON_RUN_ATTRIBUTE, "jhin.run_id", "run attribute"),
+        (
+            _REASON_CORRELATION_ATTRIBUTE,
+            "jhin.correlation_id",
+            "correlation attribute",
+        ),
+        (_REASON_OUTCOME_KEY, "jhin.outcome", "outcome attribute"),
+        (_REASON_COMPLETED_VALUE, "completed", "completed outcome"),
+        (_REASON_FAILED_VALUE, "failed", "failed outcome"),
+        (_REASON_CANCELLED_VALUE, "cancelled", "cancelled outcome"),
+        (_TOKEN_METRIC, "model_tokens_total", "token metric"),
+        (_COST_METRIC, "model_cost_estimate", "cost metric"),
+        (_TOKEN_PROVIDER_LABEL, "provider_type", "token provider label"),
+        (_TOKEN_DIRECTION_LABEL, "direction", "token direction label"),
+        (_TOKEN_INPUT_VALUE, "input", "input direction"),
+        (_TOKEN_OUTPUT_VALUE, "output", "output direction"),
+        (_TOKEN_CACHED_VALUE, "cached", "cached direction"),
+        (_COST_PROVIDER_LABEL, "provider_type", "cost provider label"),
+        (_USAGE_VALIDATION_MEASUREMENT, 0, "validation measurement"),
+    ):
+        _require_fixed_schema(value, expected, field=field)
+    attributes = normalize_span_attributes(
+        {
+            _REASON_WORKSPACE_ATTRIBUTE: str(workspace_id),
+            _REASON_TASK_ATTRIBUTE: str(task_id),
+            _REASON_RUN_ATTRIBUTE: str(run_id),
+            _REASON_CORRELATION_ATTRIBUTE: str(correlation_id),
+        }
+    )
+    if _REASON_SPAN_NAME != "agent.reason_step":
+        raise ValueError("invalid fixed telemetry schema: span name")
+    outcomes = {
+        key: cast(
+            str,
+            normalize_span_attributes({_REASON_OUTCOME_KEY: value})[_REASON_OUTCOME_KEY],
+        )
+        for key, value in (
+            ("completed", _REASON_COMPLETED_VALUE),
+            ("failed", _REASON_FAILED_VALUE),
+            ("cancelled", _REASON_CANCELLED_VALUE),
+        )
+    }
+    normalized_provider = _normalize_provider_type(provider_type)
+    validator = noop_metrics()
+    for direction in (
+        _TOKEN_INPUT_VALUE,
+        _TOKEN_OUTPUT_VALUE,
+        _TOKEN_CACHED_VALUE,
+    ):
+        validator.counter(cast(MetricName, _TOKEN_METRIC)).add(
+            _USAGE_VALIDATION_MEASUREMENT,
+            **{
+                _TOKEN_PROVIDER_LABEL: normalized_provider,
+                _TOKEN_DIRECTION_LABEL: direction,
+            },
+        )
+    validator.counter(cast(MetricName, _COST_METRIC)).add(
+        _USAGE_VALIDATION_MEASUREMENT,
+        **{_COST_PROVIDER_LABEL: normalized_provider},
+    )
+    return attributes, outcomes, normalized_provider
+
+
+def _prevalidate_reason_telemetry_schema() -> None:
+    schema_id = UUID(int=0)
+    _prevalidate_reason_telemetry(
+        workspace_id=schema_id,
+        task_id=schema_id,
+        run_id=schema_id,
+        correlation_id=schema_id,
+        provider_type="other",
+    )
+
+
+def _run_agent_diagnostic(action: Callable[[], Any]) -> Any | None:
+    try:
+        return action()
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:
+        return None
+
+
+@contextmanager
+def _reason_span(tracer: Any, attributes: Mapping[str, AttributeValue]) -> Iterator[Any]:
+    manager = safe_span(
+        cast(SpanName, _REASON_SPAN_NAME),
+        tracer=tracer,
+        attributes=attributes,
+    )
+    try:
+        span = manager.__enter__()
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:
+        yield None
+        return
+    try:
+        yield span
+    finally:
+        error_type, error, error_traceback = sys.exc_info()
+        try:
+            manager.__exit__(error_type, error, error_traceback)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            pass
+
+
+def _finish_reason_span(
+    span: Any,
+    *,
+    normalized_outcome: str,
+    error: Exception | None = None,
+) -> None:
+    _run_agent_diagnostic(
+        lambda: set_span_attributes(
+            span,
+            {_REASON_OUTCOME_KEY: normalized_outcome},
+        )
+    )
+    if error is not None:
+        _run_agent_diagnostic(
+            lambda: record_span_error(
+                span,
+                safe_error(error, code=SafeErrorCode.INTERNAL_ERROR),
+            )
+        )
+
+
+def _positive_finite_int(value: object) -> tuple[int, float] | None:
+    if type(value) is not int or value <= 0:
+        return None
+    exact = cast(int, value)  # type: ignore[redundant-cast]
+    try:
+        numeric = float(exact)
+    except (OverflowError, ValueError):
+        return None
+    if not math.isfinite(numeric):
+        return None
+    return exact, numeric
+
+
+def _record_usage_counter(
+    metrics: JhinMetrics,
+    *,
+    name: str,
+    amount: int | float,
+    labels: Mapping[str, str],
+) -> None:
+    def record() -> None:
+        metrics.counter(cast(MetricName, name)).add(amount, **dict(labels))
+
+    _run_agent_diagnostic(record)
+
+
 class AgentReasoningActivities:
     def __init__(self, resources: Resources) -> None:
         self._resources = resources
+        self._metrics = resources.runtime.metrics
+        self._tracer = resources.runtime.tracer
 
     def _build_model_client(
         self,
@@ -444,11 +667,75 @@ class AgentReasoningActivities:
         base_url: str | None,
         api_key: str | None,
     ) -> ModelClient:
-        return build_model_client(provider_type, base_url=base_url, api_key=api_key)
+        return build_model_client(
+            provider_type,
+            base_url=base_url,
+            api_key=api_key,
+            metrics=self._metrics,
+            tracer=self._tracer,
+        )
 
     async def _after_reasoning_bind_commit(self) -> None:
         """Compatibility hook for the frozen Phase 9 crash-barrier harness."""
         return None
+
+    async def _record_committed_usage(
+        self,
+        *,
+        workspace_id: UUID,
+        task_id: UUID,
+        run_id: UUID,
+        step_index: int,
+        provider_type: str,
+    ) -> None:
+        try:
+            async with self._resources.session_factory() as session:
+                event = await load_step_event(
+                    session,
+                    workspace_id=workspace_id,
+                    task_id=task_id,
+                    run_id=run_id,
+                    step_index=step_index,
+                    event_type="agent.step.reasoning",
+                )
+                if event is None or type(event.payload_json) is not dict:
+                    return
+                usage = event.payload_json.get("usage")
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            return
+        if type(usage) is not dict:
+            return
+
+        for field, direction in (
+            ("input_tokens", _TOKEN_INPUT_VALUE),
+            ("output_tokens", _TOKEN_OUTPUT_VALUE),
+            ("cached_tokens", _TOKEN_CACHED_VALUE),
+        ):
+            bounded = _positive_finite_int(usage.get(field))
+            if bounded is None:
+                continue
+            amount, _numeric = bounded
+            _record_usage_counter(
+                self._metrics,
+                name=_TOKEN_METRIC,
+                amount=amount,
+                labels={
+                    _TOKEN_PROVIDER_LABEL: provider_type,
+                    _TOKEN_DIRECTION_LABEL: direction,
+                },
+            )
+
+        bounded_cost = _positive_finite_int(usage.get("cost_micros"))
+        if bounded_cost is not None:
+            _amount, numeric_cost = bounded_cost
+            _record_usage_counter(
+                self._metrics,
+                name=_COST_METRIC,
+                amount=numeric_cost / 1_000_000,
+                labels={_COST_PROVIDER_LABEL: provider_type},
+            )
 
     @activity.defn(name=ACTIVITY_REASON_AGENT_STEP)
     async def reason_agent_step_activity(
@@ -462,6 +749,151 @@ class AgentReasoningActivities:
         params: ReasonAgentStepInput,
         *,
         legacy_sidecar_repair: bool = False,
+    ) -> ReasonAgentStepResult:
+        _prevalidate_reason_telemetry_schema()
+        workspace_id = UUID(params.workspace_id)
+        task_id = UUID(params.task_id)
+        run_id = UUID(params.run_id)
+        agent_id = UUID(params.agent_id)
+        snapshot = AgentExecutionSnapshot.model_validate_json(params.snapshot_json)
+
+        async with self._resources.session_factory() as session:
+            manifest_event, reasoning_event = await _load_step_pair(
+                session,
+                workspace_id=workspace_id,
+                task_id=task_id,
+                run_id=run_id,
+                step_index=params.step_index,
+            )
+            if manifest_event is not None and reasoning_event is not None:
+                calls, _record = _validate_complete_pair(
+                    manifest_event,
+                    reasoning_event,
+                    step_index=params.step_index,
+                )
+                return ReasonAgentStepResult(call_count=len(calls))
+            if reasoning_event is not None:
+                raise ApplicationError(
+                    "agent step reasoning binding is incomplete",
+                    type="reasoning_bind_incomplete",
+                    non_retryable=True,
+                )
+            if manifest_event is not None:
+                manifest_calls_from_payload(
+                    manifest_event.payload_json,
+                    expected_step=params.step_index,
+                )
+                if not legacy_sidecar_repair:
+                    raise ApplicationError(
+                        "agent step reasoning sidecar is missing",
+                        type="reasoning_sidecar_missing",
+                        non_retryable=True,
+                    )
+
+            workspace = await session.scalar(select(Workspace).where(Workspace.id == workspace_id))
+            if workspace is None:
+                raise ApplicationError(
+                    "workspace not found for reasoning",
+                    type="workspace_not_found",
+                    non_retryable=True,
+                )
+            agent = await session.scalar(
+                select(Agent).where(
+                    Agent.id == agent_id,
+                    Agent.workspace_id == workspace_id,
+                )
+            )
+            if agent is None:
+                raise ApplicationError(
+                    "agent not found for reasoning",
+                    type="agent_not_found",
+                    non_retryable=True,
+                )
+            run = await session.scalar(
+                select(AgentRun).where(
+                    AgentRun.id == run_id,
+                    AgentRun.workspace_id == workspace_id,
+                    AgentRun.agent_id == agent_id,
+                    AgentRun.task_id == task_id,
+                )
+            )
+            if run is None:
+                raise ApplicationError(
+                    "agent run not found for reasoning",
+                    type="run_not_found",
+                    non_retryable=True,
+                )
+            task = await session.scalar(
+                select(Task).where(
+                    Task.id == task_id,
+                    Task.workspace_id == workspace_id,
+                )
+            )
+            if task is None:
+                raise ApplicationError(
+                    "task not found",
+                    type="task_not_found",
+                    non_retryable=True,
+                )
+            if task.assigned_agent_id != agent_id:
+                raise ApplicationError(
+                    "task assignment does not match reasoning agent",
+                    type="reasoning_identity_mismatch",
+                    non_retryable=True,
+                )
+            if snapshot.workspace_id != workspace_id or snapshot.agent_id != agent_id:
+                raise ApplicationError(
+                    "agent snapshot identity does not match reasoning input",
+                    type="reasoning_identity_mismatch",
+                    non_retryable=True,
+                )
+            correlation_id = task.correlation_id
+            if type(correlation_id) is not UUID:
+                raise ApplicationError(
+                    "task correlation identity is invalid",
+                    type="reasoning_identity_mismatch",
+                    non_retryable=True,
+                )
+
+        attributes, outcomes, provider_type = _prevalidate_reason_telemetry(
+            workspace_id=workspace_id,
+            task_id=task_id,
+            run_id=run_id,
+            correlation_id=correlation_id,
+            provider_type=snapshot.model_profile.provider_type,
+        )
+        with _reason_span(self._tracer, attributes) as span:
+            try:
+                result = await self._reason_agent_step_core(
+                    params,
+                    legacy_sidecar_repair=legacy_sidecar_repair,
+                    telemetry_provider_type=provider_type,
+                )
+            except asyncio.CancelledError:
+                _finish_reason_span(
+                    span,
+                    normalized_outcome=outcomes["cancelled"],
+                )
+                raise
+            except Exception as error:
+                _finish_reason_span(
+                    span,
+                    normalized_outcome=outcomes["failed"],
+                    error=error,
+                )
+                raise
+            _finish_reason_span(
+                span,
+                normalized_outcome=outcomes["completed"],
+            )
+            return result
+
+    async def _reason_agent_step_core(
+        self,
+        params: ReasonAgentStepInput,
+        *,
+        legacy_sidecar_repair: bool = False,
+        telemetry_provider_type: str,
     ) -> ReasonAgentStepResult:
         workspace_id = UUID(params.workspace_id)
         task_id = UUID(params.task_id)
@@ -718,6 +1150,13 @@ class AgentReasoningActivities:
                 await self._after_reasoning_bind_commit()
                 if test_barrier is not None:
                     await test_barrier.arrive_and_wait(PHASE9_AFTER_MANIFEST, run_id)
+                await self._record_committed_usage(
+                    workspace_id=workspace_id,
+                    task_id=task_id,
+                    run_id=run_id,
+                    step_index=params.step_index,
+                    provider_type=telemetry_provider_type,
+                )
                 return ReasonAgentStepResult(call_count=len(existing_calls))
 
             manifest_is_lossless = all(bool(entry.get("lossless")) for entry in manifest["calls"])
@@ -773,4 +1212,11 @@ class AgentReasoningActivities:
             await self._after_reasoning_bind_commit()
             if test_barrier is not None:
                 await test_barrier.arrive_and_wait(PHASE9_AFTER_MANIFEST, run_id)
+            await self._record_committed_usage(
+                workspace_id=workspace_id,
+                task_id=task_id,
+                run_id=run_id,
+                step_index=params.step_index,
+                provider_type=telemetry_provider_type,
+            )
             return ReasonAgentStepResult(call_count=int(manifest["count"]))

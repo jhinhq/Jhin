@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -35,6 +36,7 @@ from jhin_db.models import (
     Workspace,
 )
 from jhin_domain import ApprovalStatus, RunStatus, TaskState, ToolCallStatus, new_uuid7
+from jhin_observability import noop_metrics, noop_tracer
 from jhin_tools import stable_tool_invocation_id
 from jhin_workflows import AGENT_TASK_QUEUE, TOOL_TASK_QUEUE
 from jhin_workflows.agent_task import AgentTaskInput, AgentTaskWorkflow
@@ -68,6 +70,7 @@ class _Publisher:
 
 class _Resources:
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+        self.runtime = SimpleNamespace(metrics=noop_metrics(), tracer=noop_tracer())
         self.session_factory = sessions
         self.publisher = _Publisher()
         self.crypto = None
