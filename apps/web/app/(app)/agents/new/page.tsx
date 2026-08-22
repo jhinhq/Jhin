@@ -8,7 +8,7 @@ import { useMutation } from "@tanstack/react-query";
 import { Check, ChevronLeft, ChevronRight, Lock } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
-import { PageHeader } from "@/components/app-shell";
+import { PageBody, PageHeader } from "@/components/app-shell";
 import { ScopeEditor } from "@/components/scope-editor";
 import {
   Badge,
@@ -17,6 +17,7 @@ import {
   Field,
   Input,
   Select,
+  focusRing,
   Spinner,
   Textarea,
 } from "@/components/ui";
@@ -56,14 +57,14 @@ function StepRail({ current, onSelect }: { current: number; onSelect: (id: numbe
             <button
               onClick={() => onSelect(step.id)}
               aria-current={active ? "step" : undefined}
-              className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px] transition-colors ${
+              className={`flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left text-[13px] transition-colors ${focusRing} ${
                 active
                   ? "bg-accent-soft font-medium text-accent-strong"
                   : "text-dim hover:bg-hover hover:text-ink"
               }`}
             >
               <span
-                className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-[10px] tabular-nums ${
+                className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-xs tabular-nums ${
                   active ? "border-accent text-accent-strong" : "border-line-strong text-faint"
                 }`}
               >
@@ -81,7 +82,7 @@ function StepRail({ current, onSelect }: { current: number; onSelect: (id: numbe
 
 function DisabledStep({ title, phase }: { title: string; phase: string }) {
   return (
-    <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-line-strong px-6 py-16 text-center">
+    <div className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-line-strong bg-surface/60 px-6 py-16 text-center">
       <Lock size={18} className="text-faint" />
       <div className="flex items-center gap-2">
         <p className="text-sm font-medium">{title}</p>
@@ -152,9 +153,9 @@ function WizardInner() {
 
   if (graph.isPending || !graph.data) {
     return (
-      <div className="px-8 py-6">
+      <PageBody>
         <Spinner />
-      </div>
+      </PageBody>
     );
   }
 
@@ -181,8 +182,8 @@ function WizardInner() {
   };
 
   return (
-    <div className="flex gap-8 px-8 py-6">
-      <aside className="w-56 shrink-0">
+    <PageBody className="flex flex-col gap-6 md:flex-row md:gap-8">
+      <aside className="w-full shrink-0 md:w-56">
         <StepRail current={step} onSelect={setStep} />
       </aside>
       <div className="max-w-2xl flex-1 space-y-5">
@@ -232,7 +233,7 @@ function WizardInner() {
                         name: state.name || template.name,
                       })
                     }
-                    className="rounded-lg border border-line bg-raised px-2 py-2 text-xs text-dim transition-colors hover:border-accent/50 hover:text-ink"
+                    className={`rounded-xl border border-line bg-raised px-2 py-2 text-xs text-dim transition-colors hover:border-accent/50 hover:text-ink ${focusRing}`}
                   >
                     {template.name}
                   </button>
@@ -305,7 +306,7 @@ function WizardInner() {
               </Select>
             </Field>
             {profileList.length === 0 ? (
-              <p className="rounded-md border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-warn">
+              <p className="rounded-xl border border-warn/30 bg-warn-soft px-3.5 py-2.5 text-sm text-warn">
                 No model profiles exist yet. The agent can be created, but it cannot run tasks
                 until a profile is assigned or a workspace default is set (Models page).
               </p>
@@ -323,7 +324,7 @@ function WizardInner() {
                   return (
                     <label
                       key={tool.name}
-                      className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2.5 transition-colors ${
+                      className={`flex cursor-pointer items-start gap-3 rounded-xl border px-3 py-2.5 transition-colors ${
                         checked ? "border-accent bg-accent-soft" : "border-line bg-raised"
                       }`}
                     >
@@ -335,11 +336,11 @@ function WizardInner() {
                       />
                       <span className="min-w-0 flex-1">
                         <span className="flex items-center gap-2">
-                          <code className="text-[13px] font-medium">{tool.name}</code>
+                          <code className="font-mono text-[13px] font-medium">{tool.name}</code>
                           <Badge tone={riskTone(tool.risk)}>{tool.risk}</Badge>
                         </span>
                         <span className="mt-0.5 block text-xs text-dim">{tool.description}</span>
-                        <code className="mt-1 block text-[11px] text-faint">
+                        <code className="mt-1 block font-mono text-xs text-faint">
                           {tool.required_capability}
                         </code>
                       </span>
@@ -351,7 +352,7 @@ function WizardInner() {
             </Field>
             {(tools.data ?? []).filter((tool) => state.grantToolNames.includes(tool.name)).map((tool) => (
               tool.scope_keys.length > 0 ? (
-                <div key={tool.name} className="space-y-2 rounded-lg border border-line bg-surface px-4 py-3">
+                <div key={tool.name} className="space-y-2 rounded-2xl border border-line bg-surface px-4 py-3 shadow-card">
                   <p className="text-xs font-medium">
                     <code>{tool.name}</code> scope
                   </p>
@@ -394,14 +395,14 @@ function WizardInner() {
                       type="button"
                       onClick={() => patch({ approvalPreset: preset })}
                       aria-pressed={active}
-                      className={`rounded-lg border px-3 py-2.5 text-left transition-colors ${
+                      className={`rounded-xl border px-3 py-2.5 text-left transition-colors ${focusRing} ${
                         active
                           ? "border-accent bg-accent-soft"
                           : "border-line bg-raised hover:border-line-strong"
                       }`}
                     >
                       <p className="text-[13px] font-medium capitalize">{preset}</p>
-                      <p className="mt-1 text-[11px] leading-snug text-dim">
+                      <p className="mt-1 text-xs leading-snug text-dim">
                         {PRESET_DESCRIPTIONS[preset]}
                       </p>
                     </button>
@@ -409,8 +410,8 @@ function WizardInner() {
                 })}
               </div>
             </Field>
-            <div className="rounded-lg border border-line bg-surface px-4 py-3">
-              <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-dim">
+            <div className="rounded-2xl border border-line bg-surface px-4 py-3 shadow-card">
+              <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-faint">
                 Rules this preset sets
               </p>
               <ul className="space-y-1">
@@ -425,7 +426,7 @@ function WizardInner() {
           </div>
         ) : (
           <div className="space-y-4">
-            <div className="rounded-xl border border-line bg-surface px-5 py-2">
+            <div className="rounded-2xl border border-line bg-surface px-5 py-2 shadow-card">
               <ReviewRow label="Name" value={state.name || "—"} />
               <ReviewRow label="Role title" value={state.roleTitle || "—"} />
               <ReviewRow label="Team" value={team?.name ?? "No team"} />
@@ -458,7 +459,7 @@ function WizardInner() {
                   state.grantToolNames.length > 0 ? (
                     <span className="text-xs">
                       {state.grantToolNames.map((toolName) => (
-                        <code key={toolName} className="ml-1.5 text-[12px]">
+                        <code key={toolName} className="ml-1.5 font-mono text-xs">
                           {toolName}
                         </code>
                       ))}
@@ -518,19 +519,19 @@ function WizardInner() {
           )}
         </footer>
       </div>
-    </div>
+    </PageBody>
   );
 }
 
 export default function NewAgentPage() {
   return (
     <>
-      <PageHeader title="New agent" description="Create an agent and place it in the organization" />
+      <PageHeader title="New agent" description="Set up a new agent and choose where it sits in your organization." />
       <Suspense
         fallback={
-          <div className="px-8 py-6">
+          <PageBody>
             <Spinner />
-          </div>
+          </PageBody>
         }
       >
         <WizardInner />

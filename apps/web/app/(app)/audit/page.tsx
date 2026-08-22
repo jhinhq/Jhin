@@ -3,7 +3,7 @@
 /** Audit log (plan 17.12): filterable, append-only, admin-only. */
 
 import { useState } from "react";
-import { PageHeader } from "@/components/app-shell";
+import { PageBody, PageHeader } from "@/components/app-shell";
 import { Badge, Button, EmptyState, Field, Input, Select, Spinner } from "@/components/ui";
 import { formatDateTime, shortId } from "@/lib/format";
 import { useAuditEvents } from "@/lib/hooks";
@@ -45,12 +45,12 @@ export default function AuditPage() {
     return (
       <>
         <PageHeader title="Audit" />
-        <div className="px-8 py-6">
+        <PageBody>
           <EmptyState
             title="Admins only"
             description="The audit log is visible to workspace admins and owners."
           />
-        </div>
+        </PageBody>
       </>
     );
   }
@@ -62,9 +62,9 @@ export default function AuditPage() {
     <>
       <PageHeader
         title="Audit"
-        description="Append-only record of configuration and auth events"
+        description="A permanent record of who changed what, and when."
       />
-      <div className="space-y-4 px-8 py-6">
+      <PageBody className="space-y-4">
         <form
           className="grid grid-cols-2 items-end gap-3 lg:grid-cols-5"
           onSubmit={(event) => {
@@ -137,34 +137,34 @@ export default function AuditPage() {
           <Spinner label="Loading audit log…" />
         ) : page && page.events.length > 0 ? (
           <>
-            <div className="overflow-hidden rounded-xl border border-line">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-line bg-surface text-left text-xs uppercase tracking-wider text-dim">
-                    <th className="px-4 py-2.5 font-medium">Time</th>
-                    <th className="px-4 py-2.5 font-medium">Actor</th>
-                    <th className="px-4 py-2.5 font-medium">Action</th>
-                    <th className="px-4 py-2.5 font-medium">Target</th>
-                    <th className="px-4 py-2.5 font-medium">Request</th>
+            <div className="overflow-x-auto rounded-2xl border border-line bg-surface shadow-card">
+              <table className="w-full min-w-[640px] text-sm">
+                <thead className="text-left text-xs font-medium uppercase tracking-wider text-faint">
+                  <tr>
+                    <th className="px-4 py-3">Time</th>
+                    <th className="px-4 py-3">Actor</th>
+                    <th className="px-4 py-3">Action</th>
+                    <th className="px-4 py-3">Target</th>
+                    <th className="px-4 py-3">Request</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-line">
+                <tbody>
                   {page.events.map((event) => (
-                    <tr key={event.id} className="hover:bg-surface">
-                      <td className="whitespace-nowrap px-4 py-2.5 text-xs tabular-nums text-dim">
+                    <tr key={event.id} className="border-t border-line hover:bg-hover">
+                      <td className="whitespace-nowrap px-4 py-3 text-xs tabular-nums text-dim">
                         {formatDateTime(event.created_at)}
                       </td>
-                      <td className="px-4 py-2.5">
+                      <td className="px-4 py-3">
                         <Badge tone={actorTone(event.actor_type)}>{event.actor_type}</Badge>
                       </td>
-                      <td className="px-4 py-2.5">
-                        <code className="text-[13px]">{event.action}</code>
+                      <td className="px-4 py-3">
+                        <code className="font-mono text-[13px]">{event.action}</code>
                       </td>
-                      <td className="px-4 py-2.5 text-xs text-dim">
+                      <td className="px-4 py-3 text-xs text-dim">
                         {event.target_type}
                         <span className="text-faint"> · {shortId(event.target_id)}</span>
                       </td>
-                      <td className="px-4 py-2.5 text-xs text-faint">
+                      <td className="px-4 py-3 font-mono text-xs text-faint">
                         {shortId(event.request_id)}
                       </td>
                     </tr>
@@ -172,7 +172,7 @@ export default function AuditPage() {
                 </tbody>
               </table>
             </div>
-            <div className="flex items-center justify-between text-xs text-dim">
+            <div className="flex items-center justify-between text-sm text-dim">
               <span className="tabular-nums">
                 {offset + 1}–{Math.min(offset + PAGE_SIZE, total)} of {total}
               </span>
@@ -200,7 +200,7 @@ export default function AuditPage() {
             description="Try widening the filters. Every configuration and auth change is recorded here."
           />
         )}
-      </div>
+      </PageBody>
     </>
   );
 }

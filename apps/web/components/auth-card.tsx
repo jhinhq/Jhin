@@ -1,29 +1,38 @@
 "use client";
 
-/** Shared centered card layout for the login / first-run pages. */
+/** Shared centered card layout for the login / first-run pages, with the
+ * landing page's soft aurora backdrop. */
+
+import { Wordmark } from "@/components/brand/logo-mark";
+import { ThemeToggle } from "@/components/ui";
 
 export function AuthCard({
   title,
   subtitle,
   children,
+  footer,
 }: {
   title: string;
   subtitle: string;
   children: React.ReactNode;
+  footer?: React.ReactNode;
 }) {
   return (
-    <main className="flex min-h-screen items-center justify-center px-4">
-      <div className="w-full max-w-sm">
-        <div className="mb-8 text-center">
-          <div className="mx-auto mb-4 flex h-11 w-11 items-center justify-center rounded-xl border border-accent/40 bg-accent-soft text-lg font-bold text-accent-strong">
-            J
-          </div>
-          <h1 className="text-xl font-semibold tracking-tight">{title}</h1>
-          <p className="mt-1 text-sm text-dim">{subtitle}</p>
+    <main className="relative flex min-h-screen items-center justify-center overflow-hidden px-4 py-12">
+      <div className="aurora" aria-hidden />
+      <div className="absolute right-4 top-4 z-10">
+        <ThemeToggle />
+      </div>
+      <div className="relative w-full max-w-[26rem]">
+        <div className="mb-8 flex flex-col items-center text-center">
+          <Wordmark className="mb-6 [&>svg]:h-12" />
+          <h1 className="font-display text-2xl font-semibold tracking-tight">{title}</h1>
+          <p className="mt-1.5 text-[15px] text-dim">{subtitle}</p>
         </div>
-        <div className="rounded-xl border border-line bg-surface p-6 shadow-xl shadow-black/30">
+        <div className="rounded-2xl border border-line bg-surface p-6 shadow-card sm:p-8">
           {children}
         </div>
+        {footer ? <div className="mt-6 text-center text-sm text-dim">{footer}</div> : null}
       </div>
     </main>
   );

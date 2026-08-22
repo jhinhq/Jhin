@@ -5,8 +5,13 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import type {
+  ActivityList,
   Agent,
   AgentPolicy,
+  Attention,
+  ConversationDetail,
+  ConversationList,
+  ConversationMessage,
   ApprovalList,
   AuditEventPage,
   BootstrapStatus,
@@ -406,5 +411,97 @@ export function useInvalidateOrg(workspaceId: string) {
     void queryClient.invalidateQueries({ queryKey: ["teams", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["agents", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["agent", workspaceId] });
+  };
+}
+
+// --- Conversations, activity, attention (docs/architecture/conversations.md) ---
+
+export function useConversations(
+  workspaceId: string,
+  params: Record<string, string | number | undefined> = {},
+) {
+  return useQuery({
+    queryKey: ["conversations", workspaceId, params],
+    queryFn: () =>
+      api<ConversationList>(`/api/v1/workspaces/${workspaceId}/conversations`, { params }),
+    placeholderData: (previous) => previous,
+    refetchInterval: 5_000,
+  });
+}
+
+export function useConversation(workspaceId: string, conversationId: string | null, live = true) {
+  return useQuery({
+    queryKey: ["conversation", workspaceId, conversationId],
+    queryFn: () =>
+      api<ConversationDetail>(
+        `/api/v1/workspaces/${workspaceId}/conversations/${conversationId}`,
+      ),
+    enabled: conversationId !== null,
+    refetchInterval: live ? LIVE_POLL_MS : false,
+  });
+}
+
+export function useConversationMessages(
+  workspaceId: string,
+  conversationId: string | null,
+  live = true,
+) {
+  return useQuery({
+    queryKey: ["conversation-messages", workspaceId, conversationId],
+    queryFn: () =>
+      api<ConversationMessage[]>(
+        `/api/v1/workspaces/${workspaceId}/conversations/${conversationId}/messages`,
+      ),
+    enabled: conversationId !== null,
+    refetchInterval: live ? LIVE_POLL_MS : false,
+  });
+}
+
+export function useConversationActivity(
+  workspaceId: string,
+  conversationId: string | null,
+  live = true,
+) {
+  return useQuery({
+    queryKey: ["conversation-activity", workspaceId, conversationId],
+    queryFn: () =>
+      api<ActivityList>(
+        `/api/v1/workspaces/${workspaceId}/conversations/${conversationId}/activity`,
+      ),
+    enabled: conversationId !== null,
+    refetchInterval: live ? LIVE_POLL_MS : false,
+  });
+}
+
+export function useActivity(
+  workspaceId: string,
+  params: Record<string, string | number | undefined> = {},
+) {
+  return useQuery({
+    queryKey: ["activity", workspaceId, params],
+    queryFn: () => api<ActivityList>(`/api/v1/workspaces/${workspaceId}/activity`, { params }),
+    placeholderData: (previous) => previous,
+    refetchInterval: 5_000,
+  });
+}
+
+export function useAttention(workspaceId: string) {
+  return useQuery({
+    queryKey: ["attention", workspaceId],
+    queryFn: () => api<Attention>(`/api/v1/workspaces/${workspaceId}/attention`),
+    refetchInterval: 10_000,
+  });
+}
+
+export function useInvalidateConversations(workspaceId: string) {
+  const queryClient = useQueryClient();
+  return () => {
+    void queryClient.invalidateQueries({ queryKey: ["conversations", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["conversation", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["conversation-messages", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["conversation-activity", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["activity", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["attention", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["tasks", workspaceId] });
   };
 }

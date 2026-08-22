@@ -4,7 +4,7 @@
 
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
-import { Button, Dialog, ErrorNote, Field, Input, Select, Textarea } from "@/components/ui";
+import { Button, Dialog, ErrorNote, Field, focusRing, Input, Select, Textarea } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import { useInvalidateOrg } from "@/lib/hooks";
 import type { OrgAgentNode, OrgTeamNode, Team } from "@/lib/types";
@@ -145,7 +145,7 @@ function TeamDialogForm({
                 aria-label={`color ${color}`}
                 aria-pressed={colorToken === color}
                 onClick={() => setColorToken(color)}
-                className={`team-accent-${color} h-6 w-6 rounded-full border-2 transition-transform ${
+                className={`team-accent-${color} h-7 w-7 rounded-full border-2 transition-transform ${focusRing} ${
                   colorToken === color
                     ? "scale-110 border-ink"
                     : "border-transparent opacity-70 hover:opacity-100"

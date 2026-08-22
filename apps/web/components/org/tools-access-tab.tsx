@@ -6,7 +6,7 @@
 import { useMutation } from "@tanstack/react-query";
 import { Plus, ShieldCheck, ShieldOff, Trash2 } from "lucide-react";
 import { useState } from "react";
-import { Badge, Button, ErrorNote, Field, Select, Spinner } from "@/components/ui";
+import { Badge, Button, ErrorNote, Field, focusRing, Select, Spinner, StatusLabel } from "@/components/ui";
 import { ScopeEditor } from "@/components/scope-editor";
 import { api, ApiError } from "@/lib/api";
 import { buildToolScope, missingRequiredScopeKeys, type ToolScopeValues } from "@/lib/connectors";
@@ -118,15 +118,15 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
       <ErrorNote message={error} />
 
       <section>
-        <h3 className="mb-1 text-sm font-semibold">Capability grants</h3>
-        <p className="mb-3 text-xs text-dim">
+        <h3 className="mb-1 font-display text-base font-semibold">Capability grants</h3>
+        <p className="mb-3 text-sm text-dim">
           Deny-by-default: this agent can only call tools matching an allow grant, and an
           explicit deny always wins. Changes apply immediately, even mid-run.
         </p>
         {grantList.length === 0 ? (
           <p
             data-testid="no-grants"
-            className="rounded-lg border border-dashed border-line-strong px-4 py-5 text-center text-xs text-dim"
+            className="rounded-2xl border border-dashed border-line-strong bg-surface/60 px-4 py-5 text-center text-sm text-dim"
           >
             No grants — this agent cannot call any tool.
           </p>
@@ -135,14 +135,14 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
             {grantList.map((grant) => (
               <li
                 key={grant.id}
-                className="flex items-center gap-3 rounded-lg border border-line bg-raised px-3 py-2 text-sm"
+                className="flex items-center gap-3 rounded-xl border border-line bg-raised px-3 py-2 text-sm"
               >
                 {grant.effect === "allow" ? (
                   <ShieldCheck size={15} className="shrink-0 text-ok" />
                 ) : (
                   <ShieldOff size={15} className="shrink-0 text-danger" />
                 )}
-                <code className="min-w-0 flex-1 truncate text-[13px]">{grant.capability}</code>
+                <code className="min-w-0 flex-1 truncate font-mono text-[13px]">{grant.capability}</code>
                 <span className="text-xs text-faint">{formatScope(grant.scope_json)}</span>
                 <Badge tone={grant.effect === "allow" ? "ok" : "danger"}>{grant.effect}</Badge>
                 {canEdit ? (
@@ -210,7 +210,7 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
             {isDelegate ? (
               <div
                 data-testid="delegation-scope"
-                className="rounded-lg border border-line bg-surface px-3 py-2.5"
+                className="rounded-xl border border-line bg-surface px-3 py-2.5"
               >
                 <Field
                   label="Delegation targets"
@@ -231,7 +231,7 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
             ) : selectedTool && selectedTool.scope_keys.length > 0 ? (
               <div
                 data-testid={selectedTool.name.startsWith("cli.") ? "cli-scope" : "connector-scope"}
-                className="rounded-lg border border-line bg-surface px-3 py-2.5"
+                className="rounded-xl border border-line bg-surface px-3 py-2.5"
               >
                 <ScopeEditor
                   tool={selectedTool}
@@ -243,13 +243,13 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
             ) : null}
           </form>
         ) : (
-          <p className="mt-2 text-xs text-dim">Grants can be changed by workspace admins.</p>
+          <p className="mt-2 text-sm text-dim">Grants can be changed by workspace admins.</p>
         )}
       </section>
 
       <section>
-        <h3 className="mb-1 text-sm font-semibold">Available tools</h3>
-        <p className="mb-3 text-xs text-dim">
+        <h3 className="mb-1 font-display text-base font-semibold">Available tools</h3>
+        <p className="mb-3 text-sm text-dim">
           The registered catalog. A tool is callable only when its capability is granted above.
         </p>
         <ul className="space-y-2">
@@ -259,17 +259,17 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
               <li
                 key={tool.name}
                 data-testid={`tool-${tool.name}`}
-                className="rounded-lg border border-line bg-surface px-3 py-2"
+                className="rounded-xl border border-line bg-surface px-3 py-2"
               >
                 <div className="flex items-center gap-2">
-                  <code className="text-[13px] font-medium">{tool.name}</code>
+                  <code className="font-mono text-[13px] font-medium">{tool.name}</code>
                   <Badge tone={riskTone(tool.risk)}>{tool.risk}</Badge>
                   {tool.supports_approval ? <Badge tone="neutral">approvable</Badge> : null}
-                  <span className="ml-auto text-xs">
+                  <span className="ml-auto">
                     {granted ? (
-                      <span className="text-ok">granted</span>
+                      <StatusLabel tone="ok" className="!text-xs">granted</StatusLabel>
                     ) : (
-                      <span className="text-faint">not granted</span>
+                      <StatusLabel tone="neutral" className="!text-xs text-faint">not granted</StatusLabel>
                     )}
                   </span>
                 </div>
@@ -281,8 +281,8 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
       </section>
 
       <section>
-        <h3 className="mb-1 text-sm font-semibold">Approval policy</h3>
-        <p className="mb-3 text-xs text-dim">
+        <h3 className="mb-1 font-display text-base font-semibold">Approval policy</h3>
+        <p className="mb-3 text-sm text-dim">
           Presets are shortcuts — the explicit rules below are what is persisted and enforced
           (plan 42). Autonomy: <Badge tone="neutral">{agent.autonomy_level}</Badge>
         </p>
@@ -297,22 +297,22 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
                 onClick={() => setPreset.mutate(preset)}
                 data-testid={`preset-${preset}`}
                 aria-pressed={active}
-                className={`rounded-lg border px-3 py-2.5 text-left transition-colors ${
+                className={`rounded-xl border px-3 py-2.5 text-left transition-colors ${focusRing} ${
                   active
                     ? "border-accent bg-accent-soft"
                     : "border-line bg-raised hover:border-line-strong"
                 } ${canEdit ? "" : "cursor-not-allowed opacity-60"}`}
               >
                 <p className="text-[13px] font-medium capitalize">{preset}</p>
-                <p className="mt-1 text-[11px] leading-snug text-dim">
+                <p className="mt-1 text-xs leading-snug text-dim">
                   {PRESET_DESCRIPTIONS[preset]}
                 </p>
               </button>
             );
           })}
         </div>
-        <div className="mt-3 rounded-lg border border-line bg-surface px-4 py-3">
-          <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-dim">
+        <div className="mt-3 rounded-2xl border border-line bg-surface px-4 py-3 shadow-card">
+          <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-faint">
             {currentPreset
               ? `Rules set by “${currentPreset}”`
               : rules.length > 0

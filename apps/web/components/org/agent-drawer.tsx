@@ -16,6 +16,7 @@ import {
   Field,
   Input,
   Select,
+  focusRing,
   Spinner,
   StatusDot,
   Textarea,
@@ -107,8 +108,12 @@ export function AgentDrawer({
 
   return (
     <div className="fixed inset-0 z-40">
-      <button aria-label="Close drawer" className="absolute inset-0 bg-black/50" onClick={onClose} />
-      <aside className="absolute inset-y-0 right-0 flex w-full max-w-xl flex-col border-l border-line bg-surface shadow-2xl shadow-black/60">
+      <button
+        aria-label="Close drawer"
+        className="absolute inset-0 cursor-default bg-[#221e38]/40 backdrop-blur-sm dark:bg-black/60"
+        onClick={onClose}
+      />
+      <aside className="absolute inset-y-0 right-0 flex w-full max-w-xl flex-col border-l border-line bg-surface shadow-card">
         {agentQuery.isPending || !agent ? (
           <div className="flex flex-1 items-center justify-center">
             <Spinner label="Loading agent…" />
@@ -118,7 +123,7 @@ export function AgentDrawer({
             <header className="border-b border-line px-6 pb-0 pt-5">
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <h2 className="text-lg font-semibold tracking-tight">{agent.name}</h2>
+                  <h2 className="font-display text-lg font-semibold tracking-tight">{agent.name}</h2>
                   <p className="mt-0.5 text-sm text-dim">
                     {agent.role_title || "No role title"}
                     {team ? ` · ${team.name}` : " · No team"}
@@ -172,7 +177,7 @@ export function AgentDrawer({
                       disabled={disabled}
                       title={disabled ? `Arrives in ${entry.phase}` : undefined}
                       onClick={() => setTab(entry.id)}
-                      className={`whitespace-nowrap border-b-2 px-2.5 pb-2 text-[13px] transition-colors ${
+                      className={`whitespace-nowrap rounded-t-lg border-b-2 px-2.5 pb-2 text-[13px] transition-colors ${focusRing} ${
                         tab === entry.id
                           ? "border-accent font-medium text-ink"
                           : disabled
@@ -181,7 +186,7 @@ export function AgentDrawer({
                       }`}
                     >
                       {entry.label}
-                      {disabled ? <span className="ml-1 text-[10px]">({entry.phase})</span> : null}
+                      {disabled ? <span className="ml-1 text-xs">({entry.phase})</span> : null}
                     </button>
                   );
                 })}
@@ -226,7 +231,7 @@ export function AgentDrawer({
                         : "Workspace default (none set)";
                     })()}
                   />
-                  <OverviewRow label="Slug" value={<code className="text-xs">{agent.slug}</code>} />
+                  <OverviewRow label="Slug" value={<code className="font-mono text-xs">{agent.slug}</code>} />
                   <div className="mt-4 flex gap-2">
                     <Link href={`/tasks?agent=${agent.id}`}>
                       <Button size="sm" variant="ghost">
@@ -659,9 +664,9 @@ function SettingsTab({
         </Button>
       </div>
 
-      <div className="mt-6 rounded-lg border border-danger/25 bg-danger/5 p-4">
-        <p className="text-sm font-medium text-danger">Danger zone</p>
-        <p className="mb-3 mt-1 text-xs text-dim">
+      <div className="mt-6 rounded-2xl border border-danger/30 bg-danger-soft p-4">
+        <p className="font-display text-sm font-semibold text-danger">Danger zone</p>
+        <p className="mb-3 mt-1 text-sm text-dim">
           Deleting an agent detaches its reports and managed teams (they are not deleted).
         </p>
         <ErrorNote message={deleteError} />

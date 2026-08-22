@@ -5,9 +5,9 @@
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
-import { PageHeader } from "@/components/app-shell";
+import { PageBody, PageHeader } from "@/components/app-shell";
 import { StateBadge } from "@/components/task-bits";
-import { EmptyState, Select, Spinner } from "@/components/ui";
+import { EmptyState, Select, Spinner, focusRing } from "@/components/ui";
 import { formatCostMicros, formatDateTime, formatTokens, shortId } from "@/lib/format";
 import { useAgents, useRuns } from "@/lib/hooks";
 import { useWorkspace } from "@/lib/workspace-context";
@@ -18,9 +18,9 @@ export default function RunsPage() {
   return (
     <Suspense
       fallback={
-        <div className="px-8 py-6">
+        <PageBody>
           <Spinner />
-        </div>
+        </PageBody>
       }
     >
       <RunsPageInner />
@@ -44,9 +44,12 @@ function RunsPageInner() {
 
   return (
     <>
-      <PageHeader title="Runs" description="Agent executions with token usage and cost" />
-      <div className="space-y-4 px-8 py-6">
-        <div className="flex items-center gap-2">
+      <PageHeader
+        title="Runs"
+        description="Each time an agent did some work, with the tokens it used and what it cost"
+      />
+      <PageBody className="space-y-4">
+        <div className="flex items-center gap-3">
           <Select
             className="w-44"
             value={statusFilter}
@@ -70,45 +73,45 @@ function RunsPageInner() {
             description="Runs appear when agents execute tasks. Assign a task or message an agent to start one."
           />
         ) : (
-          <div className="overflow-hidden rounded-xl border border-line">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-line bg-raised text-left text-xs uppercase tracking-wider text-dim">
-                  <th className="px-4 py-2.5 font-medium">Run</th>
-                  <th className="px-4 py-2.5 font-medium">Agent</th>
-                  <th className="px-4 py-2.5 font-medium">Status</th>
-                  <th className="px-4 py-2.5 font-medium">Tokens (in · out)</th>
-                  <th className="px-4 py-2.5 font-medium">Cost</th>
-                  <th className="px-4 py-2.5 font-medium">Steps</th>
-                  <th className="px-4 py-2.5 font-medium">Started</th>
-                  <th className="px-4 py-2.5 font-medium">Task</th>
+          <div className="overflow-x-auto rounded-2xl border border-line bg-surface shadow-card">
+            <table className="w-full min-w-[640px] text-sm">
+              <thead className="text-left text-xs font-medium uppercase tracking-wider text-faint">
+                <tr>
+                  <th className="px-4 py-3">Run</th>
+                  <th className="px-4 py-3">Agent</th>
+                  <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3">Tokens (in · out)</th>
+                  <th className="px-4 py-3">Cost</th>
+                  <th className="px-4 py-3">Steps</th>
+                  <th className="px-4 py-3">Started</th>
+                  <th className="px-4 py-3">Task</th>
                 </tr>
               </thead>
               <tbody>
                 {(runs.data?.items ?? []).map((run) => (
-                  <tr key={run.id} className="border-b border-line last:border-0 hover:bg-hover/50">
-                    <td className="px-4 py-2.5">
-                      <code className="text-xs">{shortId(run.id)}</code>
+                  <tr key={run.id} className="border-t border-line hover:bg-hover">
+                    <td className="px-4 py-3">
+                      <code className="font-mono text-xs text-dim">{shortId(run.id)}</code>
                     </td>
-                    <td className="px-4 py-2.5">{agentName(run.agent_id)}</td>
-                    <td className="px-4 py-2.5">
+                    <td className="px-4 py-3 text-ink">{agentName(run.agent_id)}</td>
+                    <td className="px-4 py-3">
                       <StateBadge state={run.status} />
                     </td>
-                    <td className="px-4 py-2.5 tabular-nums text-dim">
+                    <td className="px-4 py-3 tabular-nums text-dim">
                       {formatTokens(run.input_tokens)} · {formatTokens(run.output_tokens)}
                     </td>
-                    <td className="px-4 py-2.5 tabular-nums text-dim">
+                    <td className="px-4 py-3 tabular-nums text-dim">
                       {formatCostMicros(run.estimated_cost_micros)}
                     </td>
-                    <td className="px-4 py-2.5 tabular-nums text-dim">{run.steps_used}</td>
-                    <td className="px-4 py-2.5 text-dim">
+                    <td className="px-4 py-3 tabular-nums text-dim">{run.steps_used}</td>
+                    <td className="px-4 py-3 text-dim">
                       {run.started_at ? formatDateTime(run.started_at) : "—"}
                     </td>
-                    <td className="px-4 py-2.5">
+                    <td className="px-4 py-3">
                       {run.task_id ? (
                         <Link
                           href={`/tasks/${run.task_id}`}
-                          className="text-accent-strong hover:underline"
+                          className={`rounded-lg font-medium text-accent-strong hover:underline ${focusRing}`}
                         >
                           view task
                         </Link>
@@ -122,7 +125,7 @@ function RunsPageInner() {
             </table>
           </div>
         )}
-      </div>
+      </PageBody>
     </>
   );
 }

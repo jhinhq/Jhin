@@ -15,7 +15,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { useState } from "react";
-import { PageHeader } from "@/components/app-shell";
+import { PageBody, PageHeader } from "@/components/app-shell";
 import { ConnectorsGallery } from "@/components/connectors-gallery";
 import { ConnectionAccessSummary } from "@/components/connection-access-summary";
 import {
@@ -25,6 +25,7 @@ import {
   EmptyState,
   ErrorNote,
   Field,
+  focusRing,
   Input,
   Select,
   Spinner,
@@ -86,9 +87,9 @@ export default function ConnectorsPage() {
     return (
       <>
         <PageHeader title="Connectors" />
-        <div className="px-8 py-6">
+        <PageBody>
           <Spinner label="Loading connectors…" />
-        </div>
+        </PageBody>
       </>
     );
   }
@@ -106,11 +107,11 @@ export default function ConnectorsPage() {
     <>
       <PageHeader
         title="Connectors"
-        description="Authenticated integrations with per-connection scoping and webhooks"
+        description="Connect outside services, choose what each connection can reach, and set up webhooks."
       />
-      <div className="space-y-8 px-8 py-6">
+      <PageBody className="space-y-8">
         <section>
-          <h2 className="mb-3 text-sm font-semibold text-dim">Available connectors</h2>
+          <h2 className="mb-3 font-display text-base font-semibold tracking-tight text-ink">Available connectors</h2>
           <ConnectorsGallery
             connectors={connectorList}
             canManage={isAdmin}
@@ -120,7 +121,7 @@ export default function ConnectorsPage() {
 
         {isAdmin ? (
           <section>
-            <h2 className="mb-3 text-sm font-semibold text-dim">Connections</h2>
+            <h2 className="mb-3 font-display text-base font-semibold tracking-tight text-ink">Connections</h2>
             {connections.isPending ? (
               <Spinner label="Loading connections…" />
             ) : connectionList.length === 0 ? (
@@ -136,10 +137,10 @@ export default function ConnectorsPage() {
                     type="button"
                     data-testid={`connection-${connection.name}`}
                     onClick={() => setDetailId(connection.id)}
-                    className="flex flex-col gap-2 rounded-xl border border-line bg-surface px-5 py-4 text-left transition-colors hover:border-line-strong"
+                    className={`flex flex-col gap-2 rounded-2xl border border-line bg-surface px-5 py-4 text-left shadow-card transition-colors hover:border-accent ${focusRing}`}
                   >
                     <header className="flex items-center justify-between gap-2">
-                      <h3 className="min-w-0 truncate text-sm font-semibold">
+                      <h3 className="min-w-0 truncate font-display text-sm font-semibold text-ink">
                         {connection.name}
                       </h3>
                       <Badge tone={statusTone(connection.status)}>{connection.status}</Badge>
@@ -154,7 +155,7 @@ export default function ConnectorsPage() {
                         : "never"}
                     </p>
                     {connection.last_error ? (
-                      <p className="truncate rounded-md bg-danger/10 px-2 py-1 text-xs text-danger">
+                      <p className="truncate rounded-xl bg-danger-soft px-2.5 py-1 text-xs text-danger">
                         {connection.last_error}
                       </p>
                     ) : null}
@@ -166,7 +167,7 @@ export default function ConnectorsPage() {
         ) : (
           <p className="text-sm text-dim">Connections are managed by workspace admins.</p>
         )}
-      </div>
+      </PageBody>
 
       {createFor ? (
         <CreateConnectionDialog
@@ -318,7 +319,7 @@ function CreateConnectionDialog({
                 }
                 placeholder={field.placeholder}
                 required={field.required}
-                className="font-mono text-[12px]"
+                className="font-mono text-xs"
               />
             ) : (
               <Input
@@ -369,8 +370,8 @@ function CreateConnectionDialog({
           ))}
 
         {configFieldsForAuth(connector, authType).some((field) => field.name === "allow_writes") ? (
-          <details className="rounded-lg border border-warn/30 bg-warn/5 px-3 py-2.5">
-            <summary className="cursor-pointer text-xs font-semibold">Advanced database access</summary>
+          <details className="rounded-xl border border-warn/30 bg-warn-soft px-3.5 py-2.5">
+            <summary className={`cursor-pointer rounded-md text-sm font-semibold text-ink ${focusRing}`}>Advanced database access</summary>
             <label className="mt-3 flex items-start gap-2 text-sm">
               <input
                 aria-label="Allow database writes"
@@ -407,7 +408,7 @@ function CopyRow({ label, value }: { label: string; value: string }) {
     <div className="space-y-1">
       <p className="text-xs font-medium uppercase tracking-wider text-dim">{label}</p>
       <div className="flex items-center gap-2">
-        <code className="min-w-0 flex-1 truncate rounded-md border border-line bg-raised px-2.5 py-1.5 text-xs">
+        <code className="min-w-0 flex-1 truncate rounded-xl border border-line bg-raised px-3 py-2 font-mono text-xs text-ink">
           {value}
         </code>
         <Button
@@ -467,7 +468,7 @@ function WebhookSecretDialog({
         />
         {providerSupplied ? (
           <form className="space-y-3" onSubmit={(event) => { event.preventDefault(); storeSecret.mutate(); }}>
-            <p className="rounded-md border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-warn">
+            <p className="rounded-xl border border-warn/30 bg-warn-soft px-3.5 py-2.5 text-xs text-warn">
               Create the webhook in Vercel. Jhin verifies the x-vercel-signature header with HMAC SHA1.
             </p>
             <Field label="Provider-generated signing secret" hint="Write-only: the stored value is never displayed.">
@@ -488,7 +489,7 @@ function WebhookSecretDialog({
         ) : webhook.secret ? (
           <>
             <CopyRow label="Signing secret" value={webhook.secret} />
-            <p className="rounded-md border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-warn">
+            <p className="rounded-xl border border-warn/30 bg-warn-soft px-3.5 py-2.5 text-xs text-warn">
               This generated secret is shown once and cannot be retrieved later.
             </p>
           </>
@@ -605,7 +606,7 @@ function ConnectionDetailDialog({
         </div>
 
         {Object.keys(connection.config_json).length > 0 ? (
-          <dl className="space-y-1 rounded-lg border border-line bg-raised px-3 py-2 text-xs">
+          <dl className="space-y-1 rounded-xl border border-line bg-raised px-3.5 py-2.5 text-xs">
             {Object.entries(connection.config_json).map(([key, value]) => (
               <div key={key} className="flex gap-2">
                 <dt className="shrink-0 text-faint">{key}:</dt>
@@ -617,8 +618,8 @@ function ConnectionDetailDialog({
 
         {verifyResult ? (
           <p
-            className={`flex items-start gap-1.5 rounded-md px-2.5 py-1.5 text-xs ${
-              verifyResult.ok ? "bg-ok/10 text-ok" : "bg-danger/10 text-danger"
+            className={`flex items-start gap-1.5 rounded-xl px-3 py-2 text-xs ${
+              verifyResult.ok ? "bg-ok-soft text-ok" : "bg-danger-soft text-danger"
             }`}
           >
             {verifyResult.ok ? (
@@ -629,14 +630,14 @@ function ConnectionDetailDialog({
             <span className="min-w-0 break-words">{verifyResult.message}</span>
           </p>
         ) : connection.last_error ? (
-          <p className="rounded-md bg-danger/10 px-2.5 py-1.5 text-xs text-danger">
+          <p className="rounded-xl bg-danger-soft px-3 py-2 text-xs text-danger">
             {connection.last_error}
           </p>
         ) : null}
 
         {connector?.supports_webhooks ? (
-          <div className="space-y-2 rounded-lg border border-line bg-surface px-3 py-2.5">
-            <p className="flex items-center gap-1.5 text-xs font-medium">
+          <div className="space-y-2 rounded-xl border border-line bg-raised px-3.5 py-3">
+            <p className="flex items-center gap-1.5 text-sm font-medium text-ink">
               <Webhook size={13} /> Webhook
             </p>
             <CopyRow
@@ -646,7 +647,7 @@ function ConnectionDetailDialog({
                 origin,
               )}
             />
-            <p className="text-[11px] text-faint">
+            <p className="text-xs text-faint">
               {connection.webhook_secret_configured
                 ? "Webhook secret configured"
                 : connector.webhook_secret_mode === "provider_supplied"
@@ -688,13 +689,13 @@ function ConnectionDetailDialog({
 
         {rotating ? (
           <form
-            className="space-y-3 rounded-lg border border-accent/40 bg-accent-soft/30 px-3 py-3"
+            className="space-y-3 rounded-xl border border-accent/40 bg-accent-soft px-3.5 py-3"
             onSubmit={(event) => {
               event.preventDefault();
               rotate.mutate();
             }}
           >
-            <p className="text-xs font-medium">Re-enter credentials ({scheme?.label})</p>
+            <p className="text-sm font-medium text-ink">Re-enter credentials ({scheme?.label})</p>
             {(scheme?.secret_fields ?? []).map((field) => (
               <Field key={field.name} label={field.label}>
                 {field.multiline ? (
@@ -706,7 +707,7 @@ function ConnectionDetailDialog({
                     }
                     placeholder={field.placeholder}
                     required={field.required}
-                    className="font-mono text-[12px]"
+                    className="font-mono text-xs"
                   />
                 ) : (
                   <Input
@@ -757,9 +758,9 @@ function ConnectionDetailDialog({
               {calls.map((call) => (
                 <li
                   key={call.id}
-                  className="flex items-center gap-2 rounded-md border border-line bg-raised px-2.5 py-1.5 text-xs"
+                  className="flex items-center gap-2 rounded-xl border border-line bg-raised px-3 py-2 text-xs"
                 >
-                  <code className="min-w-0 flex-1 truncate">{call.tool_name}</code>
+                  <code className="min-w-0 flex-1 truncate font-mono">{call.tool_name}</code>
                   <Badge tone={call.status === "completed" ? "ok" : "danger"}>
                     {call.status}
                   </Badge>
@@ -770,7 +771,7 @@ function ConnectionDetailDialog({
           )}
         </section>
 
-        <footer className="flex items-center gap-2 border-t border-line pt-3">
+        <footer className="flex flex-wrap items-center gap-2 border-t border-line pt-4">
           <Button size="sm" onClick={() => verify.mutate()} disabled={verify.isPending}>
             <ShieldCheck size={13} /> {verify.isPending ? "Verifying…" : "Verify"}
           </Button>

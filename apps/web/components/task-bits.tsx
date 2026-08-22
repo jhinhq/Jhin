@@ -2,7 +2,7 @@
 
 /** Small shared pieces for task/run views. */
 
-import { Badge } from "@/components/ui";
+import { Badge, focusRing } from "@/components/ui";
 import type { TaskState } from "@/lib/types";
 
 const STATE_TONES: Record<string, "neutral" | "ok" | "warn" | "danger" | "accent"> = {
@@ -117,13 +117,13 @@ export function StructuredMessageBody({ content }: { content: Record<string, unk
                   href={artifact.url_ref}
                   target="_blank"
                   rel="noreferrer"
-                  className="inline-flex items-center gap-1 rounded-md border border-line bg-raised px-2 py-0.5 text-xs text-accent hover:underline"
+                  className={`inline-flex items-center gap-1 rounded-lg border border-line bg-raised px-2 py-0.5 text-xs font-medium text-accent-strong hover:border-accent hover:underline ${focusRing}`}
                 >
                   {artifact.type}
                   {artifact.id ? ` ${artifact.id}` : ""}
                 </a>
               ) : (
-                <span className="inline-flex items-center gap-1 rounded-md border border-line bg-raised px-2 py-0.5 text-xs text-dim">
+                <span className="inline-flex items-center gap-1 rounded-lg border border-line bg-raised px-2 py-0.5 text-xs text-dim">
                   {artifact.type}
                   {artifact.id ? ` ${artifact.id}` : ""}
                 </span>

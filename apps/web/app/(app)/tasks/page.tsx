@@ -7,7 +7,7 @@ import { GitFork, Plus } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
-import { PageHeader } from "@/components/app-shell";
+import { PageBody, PageHeader } from "@/components/app-shell";
 import { isActiveState, StateBadge } from "@/components/task-bits";
 import {
   Button,
@@ -19,6 +19,7 @@ import {
   Select,
   Spinner,
   Textarea,
+  focusRing,
 } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import { formatDateTime } from "@/lib/format";
@@ -32,9 +33,9 @@ export default function TasksPage() {
   return (
     <Suspense
       fallback={
-        <div className="px-8 py-6">
+        <PageBody>
           <Spinner />
-        </div>
+        </PageBody>
       }
     >
       <TasksPageInner />
@@ -62,7 +63,7 @@ function TasksPageInner() {
     <>
       <PageHeader
         title="Tasks"
-        description="Work assigned to agents, executed durably through Temporal"
+        description="Work you have handed to agents, tracked from start to finish"
         actions={
           can("member") ? (
             <Button variant="primary" onClick={() => setDialogOpen(true)}>
@@ -71,8 +72,8 @@ function TasksPageInner() {
           ) : null
         }
       />
-      <div className="space-y-4 px-8 py-6">
-        <div className="flex items-center gap-2">
+      <PageBody className="space-y-4">
+        <div className="flex items-center gap-3">
           <Select
             className="w-44"
             value={stateFilter}
@@ -105,24 +106,24 @@ function TasksPageInner() {
             }
           />
         ) : (
-          <div className="overflow-hidden rounded-xl border border-line">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-line bg-raised text-left text-xs uppercase tracking-wider text-dim">
-                  <th className="px-4 py-2.5 font-medium">Task</th>
-                  <th className="px-4 py-2.5 font-medium">State</th>
-                  <th className="px-4 py-2.5 font-medium">Agent</th>
-                  <th className="px-4 py-2.5 font-medium">Priority</th>
-                  <th className="px-4 py-2.5 font-medium">Created</th>
+          <div className="overflow-x-auto rounded-2xl border border-line bg-surface shadow-card">
+            <table className="w-full min-w-[640px] text-sm">
+              <thead className="text-left text-xs font-medium uppercase tracking-wider text-faint">
+                <tr>
+                  <th className="px-4 py-3">Task</th>
+                  <th className="px-4 py-3">State</th>
+                  <th className="px-4 py-3">Agent</th>
+                  <th className="px-4 py-3">Priority</th>
+                  <th className="px-4 py-3">Created</th>
                 </tr>
               </thead>
               <tbody>
                 {(tasks.data?.items ?? []).map((task: Task) => (
-                  <tr key={task.id} className="border-b border-line last:border-0 hover:bg-hover/50">
-                    <td className="max-w-md px-4 py-2.5">
+                  <tr key={task.id} className="border-t border-line hover:bg-hover">
+                    <td className="max-w-md px-4 py-3">
                       <Link
                         href={`/tasks/${task.id}`}
-                        className="flex items-center gap-1.5 truncate font-medium hover:text-accent-strong"
+                        className={`flex items-center gap-1.5 truncate rounded-lg font-medium text-ink hover:text-accent-strong ${focusRing}`}
                       >
                         {task.parent_task_id ? (
                           <GitFork
@@ -134,31 +135,34 @@ function TasksPageInner() {
                         <span className="truncate">{task.title}</span>
                       </Link>
                     </td>
-                    <td className="px-4 py-2.5">
+                    <td className="px-4 py-3">
                       <StateBadge state={task.state} />
                       {isActiveState(task.state) ? (
-                        <span className="ml-2 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent align-middle" />
+                        <span
+                          aria-hidden
+                          className="ml-2 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent align-middle"
+                        />
                       ) : null}
                       {task.state === "queued" &&
                       typeof task.metadata_json.queue === "object" &&
                       task.metadata_json.queue !== null ? (
-                        <span className="ml-2 text-[11px] text-faint">
+                        <span className="ml-2 text-xs text-faint">
                           {String(
                             (task.metadata_json.queue as Record<string, unknown>).reason ?? "",
                           ).replace("_", " ")}
                         </span>
                       ) : null}
                     </td>
-                    <td className="px-4 py-2.5 text-dim">{agentName(task.assigned_agent_id)}</td>
-                    <td className="px-4 py-2.5 text-dim">{task.priority}</td>
-                    <td className="px-4 py-2.5 text-dim">{formatDateTime(task.created_at)}</td>
+                    <td className="px-4 py-3 text-dim">{agentName(task.assigned_agent_id)}</td>
+                    <td className="px-4 py-3 text-dim">{task.priority}</td>
+                    <td className="px-4 py-3 text-dim">{formatDateTime(task.created_at)}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         )}
-      </div>
+      </PageBody>
 
       {dialogOpen ? (
         <CreateTaskDialog workspaceId={workspaceId} onClose={() => setDialogOpen(false)} />

@@ -7,7 +7,7 @@
 import { useMutation } from "@tanstack/react-query";
 import { CheckCircle2, Cpu, KeyRound, Plus, ShieldCheck, XCircle } from "lucide-react";
 import { useState } from "react";
-import { PageHeader } from "@/components/app-shell";
+import { PageBody, PageHeader } from "@/components/app-shell";
 import {
   Badge,
   Button,
@@ -62,9 +62,9 @@ export default function ModelsPage() {
     return (
       <>
         <PageHeader title="Models" />
-        <div className="px-8 py-6">
+        <PageBody>
           <Spinner label="Loading model configuration…" />
-        </div>
+        </PageBody>
       </>
     );
   }
@@ -77,7 +77,7 @@ export default function ModelsPage() {
     <>
       <PageHeader
         title="Models"
-        description="Providers, model profiles, and the workspace default"
+        description="Connect AI providers, name the models your agents can use, and pick a workspace default."
         actions={
           isAdmin ? (
             <>
@@ -95,11 +95,11 @@ export default function ModelsPage() {
           ) : null
         }
       />
-      <div className="space-y-8 px-8 py-6">
+      <PageBody className="space-y-8">
         <ErrorNote message={pageError} />
 
         <section>
-          <h2 className="mb-3 text-sm font-semibold text-dim">Providers</h2>
+          <h2 className="mb-3 font-display text-base font-semibold tracking-tight text-ink">Providers</h2>
           {providerList.length === 0 ? (
             <EmptyState
               title="No model providers yet"
@@ -130,22 +130,22 @@ export default function ModelsPage() {
         </section>
 
         <section>
-          <h2 className="mb-3 text-sm font-semibold text-dim">Model profiles</h2>
+          <h2 className="mb-3 font-display text-base font-semibold tracking-tight text-ink">Model profiles</h2>
           {profileList.length === 0 ? (
             <EmptyState
               title="No model profiles yet"
               description="A profile is a named model on a provider with pricing — agents reference profiles, never raw providers."
             />
           ) : (
-            <div className="overflow-hidden rounded-xl border border-line">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-line bg-raised text-left text-xs uppercase tracking-wider text-dim">
-                    <th className="px-4 py-2.5 font-medium">Profile</th>
-                    <th className="px-4 py-2.5 font-medium">Model</th>
-                    <th className="px-4 py-2.5 font-medium">Provider</th>
-                    <th className="px-4 py-2.5 font-medium">Cost / 1M in · out</th>
-                    <th className="px-4 py-2.5 font-medium">Default</th>
+            <div className="overflow-x-auto rounded-2xl border border-line bg-surface shadow-card">
+              <table className="w-full min-w-[640px] text-sm">
+                <thead className="text-left text-xs font-medium uppercase tracking-wider text-faint">
+                  <tr>
+                    <th className="px-4 py-3">Profile</th>
+                    <th className="px-4 py-3">Model</th>
+                    <th className="px-4 py-3">Provider</th>
+                    <th className="px-4 py-3">Cost / 1M in · out</th>
+                    <th className="px-4 py-3">Default</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -166,7 +166,7 @@ export default function ModelsPage() {
             </div>
           )}
         </section>
-      </div>
+      </PageBody>
 
       {providerDialog ? (
         <ProviderDialog
@@ -233,11 +233,11 @@ function ProviderCard({
     PROVIDER_TYPES.find((t) => t.value === provider.type)?.label ?? provider.type;
 
   return (
-    <article className="flex flex-col gap-3 rounded-xl border border-line bg-surface px-5 py-4">
+    <article className="flex flex-col gap-3 rounded-2xl border border-line bg-surface px-5 py-4 shadow-card">
       <header className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <h3 className="flex items-center gap-2 truncate text-sm font-semibold">
-            <Cpu size={14} className="shrink-0 text-accent" /> {provider.display_name}
+          <h3 className="flex items-center gap-2 truncate font-display text-sm font-semibold text-ink">
+            <Cpu size={14} className="shrink-0 text-accent-strong" aria-hidden /> {provider.display_name}
           </h3>
           <p className="mt-0.5 text-xs text-dim">{typeLabel}</p>
         </div>
@@ -279,10 +279,10 @@ function ProviderCard({
 
       {verifyResult ? (
         <p
-          className={`flex items-start gap-1.5 rounded-md px-2.5 py-1.5 text-xs ${
+          className={`flex items-start gap-1.5 rounded-xl px-3 py-2 text-xs ${
             verifyResult.ok
-              ? "bg-ok/10 text-ok"
-              : "bg-danger/10 text-danger"
+              ? "bg-ok-soft text-ok"
+              : "bg-danger-soft text-danger"
           }`}
         >
           {verifyResult.ok ? (
@@ -293,7 +293,7 @@ function ProviderCard({
           <span className="min-w-0 break-words">{verifyResult.detail}</span>
         </p>
       ) : provider.last_error ? (
-        <p className="rounded-md bg-danger/10 px-2.5 py-1.5 text-xs text-danger">
+        <p className="rounded-xl bg-danger-soft px-3 py-2 text-xs text-danger">
           {provider.last_error}
         </p>
       ) : null}
@@ -368,17 +368,17 @@ function ProfileRow({
     micros === null ? "—" : `$${(micros / 1_000_000).toFixed(2)}`;
 
   return (
-    <tr className="border-b border-line last:border-0 hover:bg-hover/50">
-      <td className="px-4 py-2.5 font-medium">{profile.display_name}</td>
-      <td className="px-4 py-2.5">
-        <code className="text-xs">{profile.model_name}</code>
+    <tr className="border-t border-line hover:bg-hover">
+      <td className="px-4 py-3 font-medium text-ink">{profile.display_name}</td>
+      <td className="px-4 py-3">
+        <code className="font-mono text-xs">{profile.model_name}</code>
       </td>
-      <td className="px-4 py-2.5 text-dim">{provider?.display_name ?? "—"}</td>
-      <td className="px-4 py-2.5 tabular-nums text-dim">
+      <td className="px-4 py-3 text-dim">{provider?.display_name ?? "—"}</td>
+      <td className="px-4 py-3 tabular-nums text-dim">
         {cost(profile.input_cost_micros_per_million)} ·{" "}
         {cost(profile.output_cost_micros_per_million)}
       </td>
-      <td className="px-4 py-2.5">
+      <td className="px-4 py-3">
         {isDefault ? (
           <Badge tone="accent">workspace default</Badge>
         ) : isAdmin ? (

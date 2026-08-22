@@ -5,8 +5,8 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Trash2, UserPlus } from "lucide-react";
 import { useState } from "react";
-import { PageHeader } from "@/components/app-shell";
-import { Badge, Button, ErrorNote, Field, Input, Select, Spinner } from "@/components/ui";
+import { PageBody, PageHeader } from "@/components/app-shell";
+import { Badge, Button, Card, ErrorNote, Field, Input, Select, Spinner } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import { useMembers } from "@/lib/hooks";
 import type { Member, Workspace, WorkspaceRole } from "@/lib/types";
@@ -84,10 +84,10 @@ export default function SettingsPage() {
 
   return (
     <>
-      <PageHeader title="Settings" description="Workspace configuration and members" />
-      <div className="max-w-3xl space-y-8 px-8 py-6">
-        <section className="rounded-xl border border-line bg-surface p-5">
-          <h2 className="mb-4 text-sm font-semibold">Workspace</h2>
+      <PageHeader title="Settings" description="Name your workspace and manage who has access." />
+      <PageBody className="max-w-3xl space-y-8">
+        <Card as="section">
+          <h2 className="mb-4 font-display text-base font-semibold">Workspace</h2>
           <form
             className="flex items-end gap-3"
             onSubmit={(event) => {
@@ -116,14 +116,14 @@ export default function SettingsPage() {
             ) : null}
           </form>
           <p className="mt-3 text-xs text-faint">
-            Slug: <code>{workspaceQuery.data?.slug ?? workspace.workspace_slug}</code> · Default
+            Slug: <code className="font-mono">{workspaceQuery.data?.slug ?? workspace.workspace_slug}</code> · Default
             model, timezone, and other settings arrive with later phases.
           </p>
-        </section>
+        </Card>
 
-        <section className="rounded-xl border border-line bg-surface p-5">
-          <h2 className="mb-1 text-sm font-semibold">Members</h2>
-          <p className="mb-4 text-xs text-dim">
+        <Card as="section">
+          <h2 className="mb-1 font-display text-base font-semibold">Members</h2>
+          <p className="mb-4 text-sm text-dim">
             Roles: owner &gt; admin &gt; member &gt; viewer. Only owners may grant or modify the
             owner role.
           </p>
@@ -171,7 +171,7 @@ export default function SettingsPage() {
           ) : (
             <ul className="mt-2 divide-y divide-line">
               {(members.data ?? []).map((member) => (
-                <li key={member.id} className="flex items-center justify-between gap-3 py-2.5">
+                <li key={member.id} className="flex items-center justify-between gap-3 py-3">
                   <div className="min-w-0">
                     <p className="truncate text-sm font-medium">
                       {member.display_name}
@@ -186,7 +186,7 @@ export default function SettingsPage() {
                       <>
                         <Select
                           value={member.role}
-                          className="!h-7 w-28 text-xs"
+                          className="!h-8 w-28 !text-[13px]"
                           onChange={(event) =>
                             changeRole.mutate({
                               membershipId: member.id,
@@ -223,8 +223,8 @@ export default function SettingsPage() {
               ))}
             </ul>
           )}
-        </section>
-      </div>
+        </Card>
+      </PageBody>
     </>
   );
 }

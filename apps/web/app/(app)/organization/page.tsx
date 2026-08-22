@@ -9,7 +9,7 @@ import { Plus } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { PageHeader } from "@/components/app-shell";
+import { PageBody, PageHeader } from "@/components/app-shell";
 import { AgentDrawer } from "@/components/org/agent-drawer";
 import { TeamDialog } from "@/components/org/team-dialog";
 import { AgentCard, TeamCard } from "@/components/org/tree";
@@ -47,9 +47,9 @@ export default function OrganizationPage() {
     return (
       <>
         <PageHeader title="Organization" />
-        <div className="px-8 py-6">
+        <PageBody wide>
           <Spinner label="Loading organization…" />
-        </div>
+        </PageBody>
       </>
     );
   }
@@ -57,9 +57,9 @@ export default function OrganizationPage() {
     return (
       <>
         <PageHeader title="Organization" />
-        <div className="px-8 py-6">
+        <PageBody wide>
           <ErrorNote message="Could not load the organization graph." />
-        </div>
+        </PageBody>
       </>
     );
   }
@@ -75,7 +75,7 @@ export default function OrganizationPage() {
     <>
       <PageHeader
         title="Organization"
-        description="Teams, agents, and reporting lines"
+        description="Your teams, the agents on them, and who reports to whom."
         actions={
           isAdmin ? (
             <>
@@ -96,7 +96,7 @@ export default function OrganizationPage() {
           ) : null
         }
       />
-      <div className="space-y-4 px-8 py-6">
+      <PageBody wide className="space-y-4">
         <ErrorNote message={pageError} />
         {isEmpty ? (
           <EmptyState
@@ -149,8 +149,8 @@ export default function OrganizationPage() {
               />
             ))}
             {tree.unassigned.length > 0 ? (
-              <section className="rounded-xl border border-dashed border-line-strong bg-surface/50 px-5 py-4">
-                <h3 className="mb-3 text-sm font-semibold text-dim">Unassigned agents</h3>
+              <section className="rounded-2xl border border-dashed border-line-strong bg-surface/60 px-5 py-4">
+                <h3 className="mb-3 font-display text-sm font-semibold text-dim">Unassigned agents</h3>
                 <div className="space-y-2">
                   {tree.unassigned.map((agentNode) => (
                     <AgentCard
@@ -165,7 +165,7 @@ export default function OrganizationPage() {
             ) : null}
           </div>
         )}
-      </div>
+      </PageBody>
 
       <TeamDialog
         open={teamDialogOpen}

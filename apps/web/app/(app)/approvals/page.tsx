@@ -6,9 +6,9 @@
 import { useMutation } from "@tanstack/react-query";
 import { Inbox } from "lucide-react";
 import { useState } from "react";
-import { PageHeader } from "@/components/app-shell";
+import { PageBody, PageHeader } from "@/components/app-shell";
 import { ApprovalCard } from "@/components/approval-card";
-import { Badge, ErrorNote, Spinner } from "@/components/ui";
+import { Badge, EmptyState, ErrorNote, Spinner, Tabs } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import { useApprovals, useInvalidateApprovals } from "@/lib/hooks";
 import { useWorkspace } from "@/lib/workspace-context";
@@ -48,43 +48,29 @@ export default function ApprovalsPage() {
     <>
       <PageHeader
         title="Approvals"
-        description="High-risk agent actions awaiting human sign-off"
+        description="Risky actions that need a person to say yes before an agent goes ahead"
         actions={
           pendingCount > 0 ? <Badge tone="warn">{pendingCount} pending</Badge> : undefined
         }
       />
-      <div className="space-y-4 px-8 py-6">
-        <nav className="flex gap-1">
-          {FILTERS.map((entry) => (
-            <button
-              key={entry.id}
-              onClick={() => setFilter(entry.id)}
-              className={`rounded-md px-3 py-1.5 text-[13px] transition-colors ${
-                filter === entry.id
-                  ? "bg-accent-soft font-medium text-accent-strong"
-                  : "text-dim hover:bg-hover hover:text-ink"
-              }`}
-            >
-              {entry.label}
-            </button>
-          ))}
-        </nav>
+      <PageBody className="space-y-4">
+        <Tabs
+          label="Approval filter"
+          tabs={FILTERS.map((entry) => ({ id: entry.id, label: entry.label }))}
+          value={filter}
+          onChange={(id) => setFilter(id as (typeof FILTERS)[number]["id"])}
+        />
 
         <ErrorNote message={error} />
 
         {approvals.isPending ? (
           <Spinner label="Loading approvals…" />
         ) : items.length === 0 ? (
-          <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-line-strong px-6 py-16 text-center">
-            <Inbox size={20} className="text-faint" />
-            <p className="text-sm font-medium">
-              {filter === "pending" ? "No pending approvals" : "No approvals yet"}
-            </p>
-            <p className="max-w-sm text-sm text-dim">
-              When an agent&apos;s tool call needs sign-off, it appears here and the run waits
-              durably until someone decides.
-            </p>
-          </div>
+          <EmptyState
+            icon={<Inbox size={20} aria-hidden />}
+            title={filter === "pending" ? "No pending approvals" : "No approvals yet"}
+            description="When an agent's tool call needs sign-off, it appears here and the run waits until someone decides."
+          />
         ) : (
           <ul className="space-y-3">
             {items.map((approval) => (
@@ -99,7 +85,7 @@ export default function ApprovalsPage() {
             ))}
           </ul>
         )}
-      </div>
+      </PageBody>
     </>
   );
 }

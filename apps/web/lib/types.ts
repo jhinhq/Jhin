@@ -59,7 +59,33 @@ export interface Team {
   updated_at: string;
 }
 
-export interface Agent {
+export type Availability = "available" | "unavailable";
+export type RelationshipKind = "close_collaborator" | "advisor" | "preferred_reviewer";
+
+/** Directed/symmetric link between two agents (company identity, plan 2026-08-17). */
+export interface AgentRelationship {
+  id: string;
+  workspace_id: string;
+  source_agent_id: string;
+  target_agent_id: string;
+  kind: RelationshipKind;
+  purpose: string;
+  status: "active" | "inactive";
+  created_at: string;
+  updated_at: string;
+}
+
+/** Public identity fields shared by Agent and OrgAgentNode. Optional on the
+ * client so older payloads (and fixtures) keep type-checking. */
+export interface AgentIdentity {
+  public_purpose?: string;
+  expertise_json?: string[];
+  discoverability?: "discoverable" | "hidden";
+  availability?: Availability;
+  relationships?: AgentRelationship[];
+}
+
+export interface Agent extends AgentIdentity {
   id: string;
   workspace_id: string;
   team_id: string | null;
@@ -93,7 +119,7 @@ export interface OrgTeamNode {
   icon: string;
 }
 
-export interface OrgAgentNode {
+export interface OrgAgentNode extends AgentIdentity {
   id: string;
   name: string;
   slug: string;
@@ -536,4 +562,128 @@ export interface LinearTeamMetadata {
   key: string;
   name: string;
   states: { id: string; name: string; type: string }[];
+}
+
+// --- Conversations, activity, attention (docs/architecture/conversations.md) ---
+
+export type ConversationStatus = "active" | "archived";
+
+export interface Conversation {
+  id: string;
+  workspace_id: string;
+  title: string;
+  status: ConversationStatus;
+  pinned: boolean;
+  primary_agent_id: string | null;
+  created_by_user_id: string | null;
+  last_activity_at: string;
+  created_at: string;
+  updated_at: string;
+  active_task_id: string | null;
+  active_task_state: TaskState | null;
+  active_run_status: string | null;
+  last_message_preview: string | null;
+  last_message_sender_type: string | null;
+  agent_name: string | null;
+  agent_role_title: string | null;
+  task_count: number;
+}
+
+export interface ConversationList {
+  items: Conversation[];
+  total: number;
+}
+
+export interface ConversationCreate {
+  agent_id: string;
+  title?: string | null;
+  text?: string | null;
+  client_turn_id?: string | null;
+}
+
+export interface ConversationUpdate {
+  title?: string;
+  pinned?: boolean;
+  status?: ConversationStatus;
+}
+
+export interface TurnIn {
+  text: string;
+  client_turn_id?: string | null;
+}
+
+export interface ConversationMessage extends TaskMessage {
+  conversation_id: string | null;
+  sender_name: string | null;
+  agent_id: string | null;
+}
+
+export interface TurnOut {
+  conversation: Conversation;
+  message: ConversationMessage;
+  task_id: string;
+  mode: "new_task" | "instruction";
+}
+
+export interface ConversationAgentSummary {
+  id: string;
+  name: string;
+  role_title: string;
+  status: AgentStatus;
+  availability: Availability;
+  public_purpose: string;
+}
+
+export interface ConversationDetail {
+  conversation: Conversation;
+  agent: ConversationAgentSummary | null;
+  tasks: Task[];
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_cost_micros: number;
+  pending_approvals: Approval[];
+}
+
+export type ActivityKind =
+  | "started"
+  | "asked_agent"
+  | "reported"
+  | "escalated"
+  | "status_update"
+  | "needs_review"
+  | "finished"
+  | "failed"
+  | "paused"
+  | "stopped"
+  | "queued";
+
+export interface ActivityCard {
+  id: string;
+  kind: ActivityKind;
+  label: string;
+  actor_type: "agent" | "user" | "system";
+  actor_agent_id: string | null;
+  actor_agent_name: string | null;
+  target_agent_id: string | null;
+  target_agent_name: string | null;
+  task_id: string | null;
+  task_title: string | null;
+  root_task_id: string | null;
+  conversation_id: string | null;
+  approval_id: string | null;
+  summary: string;
+  detail_json: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface ActivityList {
+  items: ActivityCard[];
+  next_before: string | null;
+}
+
+export interface Attention {
+  pending_approvals: Approval[];
+  failed_tasks: Task[];
+  waiting_conversations: Conversation[];
+  counts: { approvals: number; failures: number; total: number };
 }

@@ -51,7 +51,7 @@ export default function SetupPage() {
   return (
     <AuthCard
       title="Welcome to Jhin"
-      subtitle="First run: create the owner account and your workspace"
+      subtitle="Let's set up your account and name your workspace. Takes about a minute."
     >
       <form
         className="space-y-4"

@@ -25,7 +25,7 @@ import {
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useState } from "react";
-import { PageHeader } from "@/components/app-shell";
+import { PageBody, PageHeader } from "@/components/app-shell";
 import {
   AGENT_MESSAGE_TYPES,
   isActiveState,
@@ -33,7 +33,7 @@ import {
   StateBadge,
   StructuredMessageBody,
 } from "@/components/task-bits";
-import { Badge, Button, ErrorNote, Input, Spinner } from "@/components/ui";
+import { Badge, Button, ErrorNote, Input, Spinner, focusRing } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import { riskTone } from "@/lib/policy";
 import { formatCostMicros, formatDateTime, formatTokens, shortId } from "@/lib/format";
@@ -78,9 +78,9 @@ export default function TaskDetailPage() {
     return (
       <>
         <PageHeader title="Task" />
-        <div className="px-8 py-6">
+        <PageBody>
           <Spinner label="Loading task…" />
-        </div>
+        </PageBody>
       </>
     );
   }
@@ -88,9 +88,9 @@ export default function TaskDetailPage() {
     return (
       <>
         <PageHeader title="Task" />
-        <div className="px-8 py-6">
+        <PageBody>
           <ErrorNote message="Could not load this task." />
-        </div>
+        </PageBody>
       </>
     );
   }
@@ -143,19 +143,22 @@ export default function TaskDetailPage() {
           ) : null
         }
       />
-      <div className="grid gap-6 px-8 py-6 xl:grid-cols-[1fr_380px]">
+      <PageBody className="grid gap-6 xl:grid-cols-[1fr_380px]">
         <div className="min-w-0 space-y-6">
           <ErrorNote message={actionError} />
 
           {task.trigger_id ? (
             <section
               data-testid="trigger-origin-banner"
-              className="flex items-center gap-3 rounded-xl border border-accent/30 bg-accent-soft px-5 py-3.5"
+              className="flex items-center gap-3 rounded-2xl border border-accent/30 bg-accent-soft px-5 py-3.5"
             >
-              <Zap size={16} className="shrink-0 text-accent" />
+              <Zap size={16} className="shrink-0 text-accent-strong" aria-hidden />
               <p className="min-w-0 flex-1 text-sm text-dim">
                 Started by trigger{" "}
-                <Link href="/triggers" className="font-medium text-accent hover:underline">
+                <Link
+                  href="/triggers"
+                  className={`rounded-md font-medium text-accent-strong hover:underline ${focusRing}`}
+                >
                   {String(task.metadata_json.trigger_name ?? shortId(task.trigger_id))}
                 </Link>
                 {task.external_source ? (
@@ -167,7 +170,7 @@ export default function TaskDetailPage() {
                         href={task.metadata_json.external_url}
                         target="_blank"
                         rel="noreferrer"
-                        className="font-medium text-accent hover:underline"
+                        className={`rounded-md font-medium text-accent-strong hover:underline ${focusRing}`}
                       >
                         {task.external_id}
                       </a>
@@ -183,9 +186,9 @@ export default function TaskDetailPage() {
           {queueInfo ? (
             <section
               data-testid="queued-banner"
-              className="flex items-center gap-3 rounded-xl border border-line-strong bg-raised px-5 py-3.5"
+              className="flex items-center gap-3 rounded-2xl border border-line-strong bg-raised px-5 py-3.5"
             >
-              <Hourglass size={16} className="shrink-0 text-dim" />
+              <Hourglass size={16} className="shrink-0 text-dim" aria-hidden />
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-medium text-ink">Queued — waiting for a free slot</p>
                 <p className="text-xs text-dim">
@@ -202,9 +205,9 @@ export default function TaskDetailPage() {
           {waitingDelegation ? (
             <section
               data-testid="waiting-delegation-banner"
-              className="flex items-center gap-3 rounded-xl border border-accent/30 bg-accent-soft px-5 py-3.5"
+              className="flex items-center gap-3 rounded-2xl border border-accent/30 bg-accent-soft px-5 py-3.5"
             >
-              <GitFork size={16} className="shrink-0 text-accent" />
+              <GitFork size={16} className="shrink-0 text-accent-strong" aria-hidden />
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-medium text-ink">Waiting on a delegated subtask</p>
                 <p className="text-xs text-dim">
@@ -218,9 +221,9 @@ export default function TaskDetailPage() {
           {waitingApproval ? (
             <section
               data-testid="waiting-approval-banner"
-              className="flex items-center gap-3 rounded-xl border border-warn/40 bg-warn/10 px-5 py-3.5"
+              className="flex items-center gap-3 rounded-2xl border border-warn/30 bg-warn-soft px-5 py-3.5"
             >
-              <ShieldQuestion size={18} className="shrink-0 text-warn" />
+              <ShieldQuestion size={18} className="shrink-0 text-warn" aria-hidden />
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-medium text-warn">Waiting for approval</p>
                 <p className="text-xs text-dim">
@@ -236,10 +239,14 @@ export default function TaskDetailPage() {
             </section>
           ) : null}
 
-          <section className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-xl border border-line bg-surface px-5 py-3.5 text-sm">
+          <section className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-2xl border border-line bg-surface px-5 py-3.5 text-sm shadow-card">
             <StateBadge state={task.state} />
             <span className="text-dim">
-              <CircleDollarSign size={13} className="mr-1 inline align-[-2px] text-accent" />
+              <CircleDollarSign
+                size={13}
+                className="mr-1 inline align-[-2px] text-accent-strong"
+                aria-hidden
+              />
               {formatCostMicros(total_cost_micros)}
             </span>
             <span className="text-dim">
@@ -254,10 +261,8 @@ export default function TaskDetailPage() {
           </section>
 
           {task.description ? (
-            <section className="rounded-xl border border-line bg-surface px-5 py-4">
-              <h2 className="mb-2 text-xs font-semibold uppercase tracking-wider text-dim">
-                Instruction
-              </h2>
+            <section className="rounded-2xl border border-line bg-surface px-5 py-4 shadow-card">
+              <h2 className="mb-2 font-display text-base font-semibold text-ink">Instruction</h2>
               <p className="whitespace-pre-wrap text-sm text-ink">{task.description}</p>
             </section>
           ) : null}
@@ -275,30 +280,30 @@ export default function TaskDetailPage() {
         <aside className="space-y-6">
           {hasLineage && treeRoot ? (
             <section data-testid="delegation-chain">
-              <h2 className="mb-3 flex items-center gap-1.5 text-sm font-semibold text-dim">
-                <GitFork size={14} /> Delegation chain
+              <h2 className="mb-3 flex items-center gap-1.5 font-display text-base font-semibold text-ink">
+                <GitFork size={14} className="text-accent-strong" aria-hidden /> Delegation chain
               </h2>
               <TreeNode node={treeRoot} focusId={taskId} depth={0} />
             </section>
           ) : null}
 
           <section>
-            <h2 className="mb-3 text-sm font-semibold text-dim">Timeline</h2>
+            <h2 className="mb-3 font-display text-base font-semibold text-ink">Timeline</h2>
             <Timeline events={timeline.data ?? []} live={active} />
           </section>
 
           {runs.length > 0 ? (
             <section>
-              <h2 className="mb-3 text-sm font-semibold text-dim">Runs</h2>
+              <h2 className="mb-3 font-display text-base font-semibold text-ink">Runs</h2>
               <div className="space-y-2">
                 {runs.map((run) => (
                   <Link
                     key={run.id}
                     href="/runs"
-                    className="block rounded-lg border border-line bg-surface px-4 py-3 text-sm transition-colors hover:border-accent/40"
+                    className={`block rounded-xl border border-line bg-surface px-4 py-3 text-sm shadow-card transition-colors hover:border-accent ${focusRing}`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <code className="text-xs text-dim">{shortId(run.id)}</code>
+                      <code className="font-mono text-xs text-dim">{shortId(run.id)}</code>
                       <StateBadge state={run.status} />
                     </div>
                     <p className="mt-1.5 text-xs text-dim">
@@ -316,7 +321,7 @@ export default function TaskDetailPage() {
             </section>
           ) : null}
         </aside>
-      </div>
+      </PageBody>
     </>
   );
 }
@@ -336,10 +341,10 @@ function TreeNode({
     <div className={depth > 0 ? "mt-1.5 border-l border-line pl-3" : ""}>
       <Link
         href={`/tasks/${node.task.id}`}
-        className={`block rounded-lg border px-3 py-2 text-sm transition-colors ${
+        className={`block rounded-xl border px-3 py-2 text-sm transition-colors ${focusRing} ${
           isFocus
             ? "border-accent/50 bg-accent-soft"
-            : "border-line bg-surface hover:border-accent/40"
+            : "border-line bg-surface shadow-card hover:border-accent"
         }`}
       >
         <div className="flex items-center justify-between gap-2">
@@ -401,29 +406,33 @@ function SandboxJobEvent({ payload }: { payload: Record<string, unknown> }) {
   return (
     <div
       data-testid="sandbox-job-event"
-      className="mt-1.5 space-y-1 rounded-md border border-line bg-raised px-2.5 py-2"
+      className="mt-1.5 space-y-1 rounded-xl border border-line bg-raised px-3 py-2"
     >
       <div className="flex items-center gap-2 text-xs">
-        <code className="min-w-0 flex-1 truncate text-[11px]">{command || "(command)"}</code>
+        <code className="min-w-0 flex-1 truncate font-mono text-xs text-ink">
+          {command || "(command)"}
+        </code>
         <Badge tone={jobStatus === "completed" && exitCode === 0 ? "ok" : "danger"}>
           {jobStatus === "completed" && exitCode !== null ? `exit ${exitCode}` : jobStatus}
         </Badge>
       </div>
-      <p className="text-[11px] text-faint">
+      <p className="text-xs text-faint">
         sandbox container{durationMs !== null ? ` · ${durationMs}ms` : ""}
       </p>
       {stdout || stderr ? (
         <details className="group">
-          <summary className="cursor-pointer select-none text-[11px] text-dim hover:text-ink">
+          <summary
+            className={`cursor-pointer select-none rounded-md text-xs text-dim hover:text-ink ${focusRing}`}
+          >
             Show output
           </summary>
           {stdout ? (
-            <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded bg-surface px-2 py-1.5 text-[11px] leading-relaxed text-ink">
+            <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-surface px-2.5 py-1.5 font-mono text-xs leading-relaxed text-ink">
               {stdout}
             </pre>
           ) : null}
           {stderr ? (
-            <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-all rounded bg-danger/5 px-2 py-1.5 text-[11px] leading-relaxed text-danger">
+            <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-danger-soft px-2.5 py-1.5 font-mono text-xs leading-relaxed text-danger">
               {stderr}
             </pre>
           ) : null}
@@ -436,7 +445,7 @@ function SandboxJobEvent({ payload }: { payload: Record<string, unknown> }) {
 function Timeline({ events, live }: { events: RunEvent[]; live: boolean }) {
   if (events.length === 0) {
     return (
-      <p className="rounded-lg border border-dashed border-line-strong px-4 py-6 text-center text-xs text-dim">
+      <p className="rounded-xl border border-dashed border-line-strong bg-surface/60 px-4 py-6 text-center text-sm text-dim">
         {live ? "Waiting for the first run event…" : "No run events recorded."}
       </p>
     );
@@ -452,9 +461,10 @@ function Timeline({ events, live }: { events: RunEvent[]; live: boolean }) {
         return (
           <li key={event.id} className="relative pb-4 last:pb-0">
             <span
+              aria-hidden
               className={`absolute -left-[21px] top-1.5 h-2.5 w-2.5 rounded-full border-2 border-surface ${dot}`}
             />
-            <p className="flex items-center gap-1.5 text-[13px] font-medium">
+            <p className="flex items-center gap-1.5 text-[13px] font-medium text-ink">
               {icon}
               {event.event_type}
               {event.event_type === "tool.call" && risk ? (
@@ -493,7 +503,10 @@ function Timeline({ events, live }: { events: RunEvent[]; live: boolean }) {
       })}
       {live ? (
         <li className="relative">
-          <span className="absolute -left-[21px] top-1 h-2.5 w-2.5 animate-pulse rounded-full border-2 border-surface bg-accent/60" />
+          <span
+            aria-hidden
+            className="absolute -left-[21px] top-1 h-2.5 w-2.5 animate-pulse rounded-full border-2 border-surface bg-accent"
+          />
           <p className="text-xs text-faint">live — updating…</p>
         </li>
       ) : null}
@@ -531,13 +544,13 @@ function Conversation({
   });
 
   return (
-    <section className="rounded-xl border border-line bg-surface">
-      <h2 className="border-b border-line px-5 py-3 text-xs font-semibold uppercase tracking-wider text-dim">
+    <section className="rounded-2xl border border-line bg-surface shadow-card">
+      <h2 className="border-b border-line px-5 py-4 font-display text-base font-semibold text-ink">
         Conversation
       </h2>
       <div className="max-h-[32rem] space-y-4 overflow-y-auto px-5 py-4">
         {messages.length === 0 ? (
-          <p className="py-4 text-center text-xs text-dim">No messages yet.</p>
+          <p className="py-4 text-center text-sm text-dim">No messages yet.</p>
         ) : (
           messages.map((message) => {
             const fromAgent = message.sender_type === "agent";
@@ -565,9 +578,10 @@ function Conversation({
                     fromAgent
                       ? "bg-accent-soft text-accent-strong"
                       : fromSystem
-                        ? "bg-danger/10 text-danger"
+                        ? "bg-danger-soft text-danger"
                         : "bg-hover text-dim"
                   }`}
+                  aria-hidden
                 >
                   {fromAgent ? <Bot size={14} /> : <User size={14} />}
                 </span>
@@ -603,7 +617,7 @@ function Conversation({
       </div>
       {canInstruct ? (
         <form
-          className="flex gap-2 border-t border-line px-5 py-3"
+          className="flex gap-2 border-t border-line px-5 py-4"
           onSubmit={(event) => {
             event.preventDefault();
             if (text.trim()) send.mutate();
@@ -621,7 +635,9 @@ function Conversation({
         </form>
       ) : null}
       {send.error instanceof ApiError ? (
-        <p className="px-5 pb-3 text-xs text-danger">{send.error.detail}</p>
+        <p role="alert" className="px-5 pb-4 text-xs text-danger">
+          {send.error.detail}
+        </p>
       ) : null}
     </section>
   );

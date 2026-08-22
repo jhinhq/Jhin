@@ -1,22 +1,71 @@
 @import "tailwindcss";
 
-/* Jhin visual system (plan 17.1): calm, dense, dark-first. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Jhin visual system (2026-08-21 redesign brief): "Pastel Skies", light-first
+ * with a dark theme. Token names are stable so every page inherits the look. */
 :root {
-  --bg: #0b0c0f;
-  --surface: #111318;
-  --surface-raised: #16181f;
-  --surface-hover: #1b1e27;
-  --line: #23262f;
-  --line-strong: #2e323d;
-  --text: #e7e9ee;
-  --text-dim: #9aa0ae;
-  --text-faint: #616774;
-  --accent: #6d7cff;
-  --accent-strong: #8b96ff;
-  --accent-soft: rgba(109, 124, 255, 0.12);
-  --ok: #3ecf8e;
+  --font-sans: "Inter Variable";
+  --font-display: "Space Grotesk Variable";
+  --font-mono: "JetBrains Mono Variable";
+
+  --bg: #faf7ff;
+  --surface: #ffffff;
+  --surface-raised: #f5efff;
+  --surface-hover: #efe9ff;
+  --line: rgba(115, 113, 252, 0.16);
+  --line-strong: rgba(115, 113, 252, 0.32);
+  --text: #221e38;
+  --text-dim: #5f5a85;
+  --text-faint: #8f89b3;
+  --accent: #7371fc;
+  --accent-strong: #5a58e8;
+  --accent-2: #a594f9;
+  --accent-soft: rgba(115, 113, 252, 0.12);
+  --glow: rgba(165, 148, 249, 0.35);
+  --ok: #2e7558;
+  --ok-soft: #e7f4ec;
+  --warn: #985b08;
+  --warn-soft: #fff2d8;
+  --danger: #b44351;
+  --danger-soft: #fce9eb;
+  --info: #316f98;
+  --info-soft: #e8f4fa;
+  --card-shadow:
+    0 1px 2px rgba(34, 30, 56, 0.04), 0 12px 40px -12px rgba(115, 113, 252, 0.18);
+  --peri: #cdc1ff;
+  --peri-soft: #a594f9;
+
+  color-scheme: light;
+}
+
+.dark {
+  --bg: #0c0a17;
+  --surface: #161226;
+  --surface-raised: #1c1730;
+  --surface-hover: #241d3d;
+  --line: rgba(205, 193, 255, 0.13);
+  --line-strong: rgba(205, 193, 255, 0.3);
+  --text: #f5efff;
+  --text-dim: #b9b1dc;
+  --text-faint: #8a83ad;
+  --accent: #a594f9;
+  --accent-strong: #cdc1ff;
+  --accent-2: #cdc1ff;
+  --accent-soft: rgba(165, 148, 249, 0.16);
+  --glow: rgba(115, 113, 252, 0.4);
+  --ok: #5fd3a0;
+  --ok-soft: rgba(62, 207, 142, 0.14);
   --warn: #f5b453;
+  --warn-soft: rgba(245, 180, 83, 0.14);
   --danger: #f0596b;
+  --danger-soft: rgba(240, 89, 107, 0.14);
+  --info: #7cc0ea;
+  --info-soft: rgba(49, 111, 152, 0.2);
+  --card-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.3), 0 16px 48px -16px rgba(115, 113, 252, 0.25);
+
+  color-scheme: dark;
 }
 
 @theme inline {
@@ -31,27 +80,124 @@
   --color-faint: var(--text-faint);
   --color-accent: var(--accent);
   --color-accent-strong: var(--accent-strong);
+  --color-accent-2: var(--accent-2);
   --color-accent-soft: var(--accent-soft);
+  --color-glow: var(--glow);
   --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
   --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
   --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --font-sans: var(--font-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-display: var(--font-display), var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-mono), ui-monospace, "SF Mono", Menlo, monospace;
+  --shadow-card: var(--card-shadow);
+  --shadow-glow: 0 8px 28px -8px var(--glow);
+}
+
+html {
+  background: var(--bg);
 }
 
 body {
   background: var(--bg);
   color: var(--text);
-  font-family:
-    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  font-family: var(--font-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 15px;
   font-feature-settings: "tnum", "cv02";
+  transition: background-color 0.3s ease, color 0.3s ease;
 }
 
 ::selection {
-  background: var(--accent-soft);
+  background: var(--peri);
+  color: #221e38;
+}
+
+code,
+kbd,
+pre,
+samp {
+  font-family: var(--font-mono), ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+/* Card surface shared by primitives and pages. */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  box-shadow: var(--card-shadow);
+}
+
+/* Primary gradient button (landing .btn-primary, squared for product UI). */
+.btn-gradient {
+  color: #fff;
+  /* Fixed brand hues in both themes so white text keeps its contrast. */
+  background: linear-gradient(120deg, #7371fc, #a594f9);
+  box-shadow: 0 8px 28px -8px var(--glow), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+  transition: transform 0.2s ease, box-shadow 0.2s ease, opacity 0.2s ease;
+}
+.btn-gradient:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 14px 36px -8px var(--glow), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+
+/* Soft aurora backdrop for auth screens (subtler than the landing page). */
+.aurora {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.aurora::before,
+.aurora::after {
+  content: "";
+  position: absolute;
+  border-radius: 9999px;
+  filter: blur(90px);
+  opacity: 0.4;
+}
+.aurora::before {
+  width: 55vw;
+  height: 55vw;
+  left: -12vw;
+  top: -18vw;
+  background: radial-gradient(circle at 30% 30%, var(--peri), transparent 65%);
+  animation: drift 26s ease-in-out infinite alternate;
+}
+.aurora::after {
+  width: 48vw;
+  height: 48vw;
+  right: -14vw;
+  top: 4vw;
+  background: radial-gradient(circle at 60% 40%, var(--peri-soft), transparent 65%);
+  animation: drift 32s ease-in-out infinite alternate-reverse;
+}
+.dark .aurora::before,
+.dark .aurora::after {
+  opacity: 0.2;
+}
+@keyframes drift {
+  from { transform: translate3d(0, 0, 0) scale(1); }
+  to { transform: translate3d(6vw, 4vw, 0) scale(1.12); }
+}
+
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent-strong);
 }
 
 /* Team accent tokens (team.color_token) */
 .team-accent-slate { --team: #8b95a7; }
-.team-accent-indigo { --team: #6d7cff; }
+.team-accent-indigo { --team: #7371fc; }
 .team-accent-violet { --team: #a78bfa; }
 .team-accent-cyan { --team: #22d3ee; }
 .team-accent-emerald { --team: #34d399; }
@@ -62,4 +208,14 @@ body {
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--line-strong) transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

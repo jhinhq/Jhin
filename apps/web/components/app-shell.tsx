@@ -1,94 +1,394 @@
 "use client";
 
-/** Authenticated application shell: sidebar navigation (plan 17.2) + guard.
- * Unauthenticated visitors are redirected to /login (or /setup on first run).
- */
+/** Authenticated application shell (2026-08-21 redesign brief): responsive
+ * sidebar / icon rail / mobile tab bar, plus the auth guard. Unauthenticated
+ * visitors are redirected to /login (or /setup on first run). */
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
+  BellRing,
+  Bot,
   Building2,
   CheckSquare,
-  ClipboardList,
+  ChevronDown,
   Cpu,
-  LayoutDashboard,
   ListTodo,
   LogOut,
+  MessageSquare,
+  MoreHorizontal,
   Plug,
+  Radio,
   ScrollText,
   Settings,
+  SlidersHorizontal,
+  Wrench,
   Zap,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect } from "react";
-import { Spinner } from "@/components/ui";
+import { useEffect, useState, useSyncExternalStore } from "react";
+import type { LucideIcon } from "lucide-react";
+import { Wordmark } from "@/components/brand/logo-mark";
+import { Dialog, focusRing, Spinner, ThemeToggle } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
-import { useBootstrapStatus, useMe, usePendingApprovalCount } from "@/lib/hooks";
+import { useAttention, useBootstrapStatus, useMe } from "@/lib/hooks";
 import { useWorkspace, WorkspaceProvider } from "@/lib/workspace-context";
 
-const NAV = [
-  { href: "/", label: "Overview", icon: LayoutDashboard },
-  { href: "/organization", label: "Organization", icon: Building2 },
-  { href: "/tasks", label: "Tasks", icon: ListTodo },
-  { href: "/runs", label: "Runs", icon: Activity },
-  { href: "/approvals", label: "Approvals", icon: CheckSquare },
-  { href: "/connectors", label: "Connectors", icon: Plug },
-  { href: "/triggers", label: "Triggers", icon: Zap },
-  { href: "/models", label: "Models", icon: Cpu },
-  { href: "/audit", label: "Audit", icon: ScrollText },
-  { href: "/settings", label: "Settings", icon: Settings },
-] as const;
-
-function NavLink({
-  href,
-  label,
-  icon: Icon,
-  active,
-  badge,
-}: {
+export interface NavItem {
   href: string;
   label: string;
-  icon: typeof ClipboardList;
+  icon: LucideIcon;
+  /** One-line description shown on /advanced and the mobile "More" sheet. */
+  description?: string;
+}
+
+export const PRIMARY_NAV: readonly NavItem[] = [
+  { href: "/chats", label: "Chats", icon: MessageSquare },
+  { href: "/agents", label: "Agents", icon: Bot },
+  { href: "/company", label: "Company", icon: Building2 },
+  { href: "/activity", label: "Activity", icon: Radio },
+  { href: "/attention", label: "Attention", icon: BellRing },
+  { href: "/automations", label: "Automations", icon: Zap },
+  { href: "/apps", label: "Apps", icon: Plug },
+] as const;
+
+export const ADVANCED_NAV: readonly NavItem[] = [
+  {
+    href: "/tasks",
+    label: "Work queue",
+    icon: ListTodo,
+    description: "Every task your agents have been given, with its current state.",
+  },
+  {
+    href: "/runs",
+    label: "Runs",
+    icon: Activity,
+    description: "Individual agent executions, their steps, and what they cost.",
+  },
+  {
+    href: "/approvals",
+    label: "Approvals",
+    icon: CheckSquare,
+    description: "Actions that paused to wait for a person to say yes or no.",
+  },
+  {
+    href: "/connectors",
+    label: "Connectors",
+    icon: Plug,
+    description: "Raw connections to outside services and the access they grant.",
+  },
+  {
+    href: "/triggers",
+    label: "Triggers",
+    icon: Zap,
+    description: "The schedules and events that start work automatically.",
+  },
+  {
+    href: "/models",
+    label: "Models",
+    icon: Cpu,
+    description: "Which AI models are available and how they are configured.",
+  },
+  {
+    href: "/audit",
+    label: "Audit",
+    icon: ScrollText,
+    description: "A permanent record of who changed what, and when.",
+  },
+  {
+    href: "/settings",
+    label: "Settings",
+    icon: Settings,
+    description: "Workspace members, roles, and general preferences.",
+  },
+] as const;
+
+/** Mobile bottom tab bar shows the first four primary items + "More". */
+const MOBILE_TABS = PRIMARY_NAV.slice(0, 4);
+
+export const ADVANCED_STORAGE_KEY = "jhin-advanced-open";
+
+function isActive(pathname: string, href: string): boolean {
+  if (href === "/") return pathname === "/";
+  return pathname === href || pathname.startsWith(`${href}/`);
+}
+
+function CountBadge({ count, tone = "warn" }: { count: number; tone?: "warn" | "accent" }) {
+  if (count <= 0) return null;
+  const colors =
+    tone === "warn" ? "bg-warn-soft text-warn" : "bg-accent-soft text-accent-strong";
+  return (
+    <span
+      data-testid="nav-badge"
+      className={`inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[11px] font-semibold tabular-nums ${colors}`}
+    >
+      {count > 99 ? "99+" : count}
+    </span>
+  );
+}
+
+function NavLink({
+  item,
+  active,
+  badge,
+  rail = false,
+}: {
+  item: NavItem;
   active: boolean;
   badge?: number;
+  rail?: boolean;
 }) {
+  const Icon = item.icon;
   return (
     <Link
-      href={href}
+      href={item.href}
+      title={item.label}
       aria-current={active ? "page" : undefined}
-      className={`flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-[13px] transition-colors ${
+      className={`relative flex min-h-10 items-center gap-3 rounded-xl text-sm transition-colors ${focusRing} ${
+        rail ? "justify-center px-0" : "px-3"
+      } ${
         active
-          ? "bg-accent-soft font-medium text-accent-strong"
+          ? "bg-accent-soft font-semibold text-accent-strong"
           : "text-dim hover:bg-hover hover:text-ink"
       }`}
     >
-      <Icon size={15} strokeWidth={1.8} />
-      <span className="flex-1">{label}</span>
+      <Icon size={18} strokeWidth={1.8} className="shrink-0" aria-hidden />
+      <span className={`flex-1 truncate ${rail ? "sr-only" : ""}`}>{item.label}</span>
       {badge !== undefined && badge > 0 ? (
-        <span className="rounded-full bg-warn/15 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-warn">
-          {badge}
-        </span>
+        rail ? (
+          <span
+            aria-label={`${badge} items need attention`}
+            className="absolute right-2 top-1.5 h-2 w-2 rounded-full bg-warn"
+          />
+        ) : (
+          <CountBadge count={badge} />
+        )
       ) : null}
     </Link>
   );
 }
 
-/** Sidebar nav; lives inside WorkspaceProvider so the approvals badge can poll. */
-function SidebarNav({ pathname }: { pathname: string }) {
+const ADVANCED_EVENT = "jhin-advanced-change";
+
+function readAdvancedOpen(): boolean {
+  try {
+    return localStorage.getItem(ADVANCED_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+function subscribeAdvanced(onChange: () => void) {
+  window.addEventListener(ADVANCED_EVENT, onChange);
+  window.addEventListener("storage", onChange);
+  return () => {
+    window.removeEventListener(ADVANCED_EVENT, onChange);
+    window.removeEventListener("storage", onChange);
+  };
+}
+function useAdvancedOpen(): [boolean, (next: boolean) => void] {
+  const open = useSyncExternalStore(subscribeAdvanced, readAdvancedOpen, () => false);
+  const update = (next: boolean) => {
+    try {
+      localStorage.setItem(ADVANCED_STORAGE_KEY, String(next));
+    } catch {
+      /* storage unavailable */
+    }
+    window.dispatchEvent(new Event(ADVANCED_EVENT));
+  };
+  return [open, update];
+}
+
+/** Sidebar / rail nav; lives inside WorkspaceProvider so the attention badge
+ * can poll. `rail` renders icon-only links with native title tooltips. */
+export function SidebarNav({ pathname, rail = false }: { pathname: string; rail?: boolean }) {
   const { workspace } = useWorkspace();
-  const pendingApprovals = usePendingApprovalCount(workspace.workspace_id);
+  const attention = useAttention(workspace.workspace_id);
+  const attentionCount = attention.data?.counts.total ?? 0;
+  const [advancedOpen, setAdvancedOpen] = useAdvancedOpen();
+  const advancedActive = ADVANCED_NAV.some((item) => isActive(pathname, item.href));
+
   return (
-    <nav className="flex-1 space-y-0.5 overflow-y-auto px-2 py-2">
-      {NAV.map((item) => (
-        <NavLink
-          key={item.href}
-          {...item}
-          badge={item.href === "/approvals" ? pendingApprovals.data : undefined}
-          active={item.href === "/" ? pathname === "/" : pathname.startsWith(item.href)}
-        />
-      ))}
+    <nav aria-label="Main" className={`flex-1 overflow-y-auto py-2 ${rail ? "px-3" : "px-3"}`}>
+      <ul className="space-y-0.5">
+        {PRIMARY_NAV.map((item) => (
+          <li key={item.href}>
+            <NavLink
+              item={item}
+              rail={rail}
+              active={isActive(pathname, item.href)}
+              badge={item.href === "/attention" ? attentionCount : undefined}
+            />
+          </li>
+        ))}
+      </ul>
+
+      <div className="my-3 border-t border-line" role="presentation" />
+
+      {rail ? (
+        <ul className="space-y-0.5">
+          <li>
+            <NavLink
+              item={{ href: "/advanced", label: "Advanced", icon: Wrench }}
+              rail
+              active={advancedActive || isActive(pathname, "/advanced")}
+            />
+          </li>
+        </ul>
+      ) : (
+        <div>
+          <button
+            type="button"
+            aria-expanded={advancedOpen}
+            aria-controls="advanced-nav"
+            onClick={() => setAdvancedOpen(!advancedOpen)}
+            className={`flex min-h-10 w-full items-center gap-3 rounded-xl px-3 text-[13px] font-semibold uppercase tracking-wider transition-colors hover:bg-hover ${focusRing} ${
+              advancedActive ? "text-accent-strong" : "text-faint hover:text-ink"
+            }`}
+          >
+            <Wrench size={16} strokeWidth={1.8} aria-hidden />
+            <span className="flex-1 text-left">Advanced</span>
+            <ChevronDown
+              size={16}
+              aria-hidden
+              className={`transition-transform ${advancedOpen ? "rotate-180" : ""}`}
+            />
+          </button>
+          {advancedOpen ? (
+            <ul id="advanced-nav" className="mt-0.5 space-y-0.5">
+              {ADVANCED_NAV.map((item) => (
+                <li key={item.href}>
+                  <NavLink item={item} active={isActive(pathname, item.href)} />
+                </li>
+              ))}
+              <li>
+                <NavLink
+                  item={{ href: "/advanced", label: "All advanced tools", icon: SlidersHorizontal }}
+                  active={isActive(pathname, "/advanced")}
+                />
+              </li>
+            </ul>
+          ) : null}
+        </div>
+      )}
     </nav>
+  );
+}
+
+function MobileBars({ pathname }: { pathname: string }) {
+  const { workspace } = useWorkspace();
+  const attention = useAttention(workspace.workspace_id);
+  const attentionCount = attention.data?.counts.total ?? 0;
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreItems = [...PRIMARY_NAV.slice(4), ...ADVANCED_NAV];
+  const moreActive = moreItems.some((item) => isActive(pathname, item.href));
+
+  const closeMore = () => setMoreOpen(false);
+
+  return (
+    <>
+      <header className="sticky top-0 z-30 flex h-14 items-center justify-between border-b border-line bg-bg/85 px-4 backdrop-blur md:hidden">
+        <Link href="/chats" className={`rounded-lg ${focusRing}`} aria-label="Jhin home">
+          <Wordmark />
+        </Link>
+        <div className="flex items-center gap-2">
+          <Link
+            href="/attention"
+            aria-label={
+              attentionCount > 0 ? `Attention: ${attentionCount} items` : "Attention"
+            }
+            className={`relative inline-flex h-10 w-10 items-center justify-center rounded-xl text-dim hover:bg-hover hover:text-ink ${focusRing}`}
+          >
+            <BellRing size={18} strokeWidth={1.8} aria-hidden />
+            {attentionCount > 0 ? (
+              <span className="absolute -right-0.5 -top-0.5">
+                <CountBadge count={attentionCount} />
+              </span>
+            ) : null}
+          </Link>
+        </div>
+      </header>
+
+      <nav
+        aria-label="Primary"
+        className="fixed inset-x-0 bottom-0 z-30 border-t border-line bg-surface/95 pb-[env(safe-area-inset-bottom)] backdrop-blur md:hidden"
+      >
+        <ul className="grid grid-cols-5">
+          {MOBILE_TABS.map((item) => {
+            const Icon = item.icon;
+            const active = isActive(pathname, item.href);
+            return (
+              <li key={item.href}>
+                <Link
+                  href={item.href}
+                  aria-current={active ? "page" : undefined}
+                  className={`flex min-h-14 flex-col items-center justify-center gap-1 text-[11px] font-medium ${focusRing} ${
+                    active ? "text-accent-strong" : "text-dim"
+                  }`}
+                >
+                  <Icon size={20} strokeWidth={1.8} aria-hidden />
+                  {item.label}
+                </Link>
+              </li>
+            );
+          })}
+          <li>
+            <button
+              type="button"
+              onClick={() => setMoreOpen(true)}
+              aria-haspopup="dialog"
+              aria-expanded={moreOpen}
+              className={`flex min-h-14 w-full flex-col items-center justify-center gap-1 text-[11px] font-medium ${focusRing} ${
+                moreActive ? "text-accent-strong" : "text-dim"
+              }`}
+            >
+              <MoreHorizontal size={20} strokeWidth={1.8} aria-hidden />
+              More
+            </button>
+          </li>
+        </ul>
+      </nav>
+
+      <Dialog title="More" open={moreOpen} onClose={closeMore}>
+        <ul className="grid grid-cols-2 gap-2">
+          {moreItems.map((item) => {
+            const Icon = item.icon;
+            const active = isActive(pathname, item.href);
+            return (
+              <li key={item.href}>
+                <Link
+                  href={item.href}
+                  onClick={closeMore}
+                  aria-current={active ? "page" : undefined}
+                  className={`flex min-h-11 items-center gap-3 rounded-xl border px-3 text-sm ${focusRing} ${
+                    active
+                      ? "border-accent/40 bg-accent-soft font-semibold text-accent-strong"
+                      : "border-line text-ink hover:bg-hover"
+                  }`}
+                >
+                  <Icon size={18} strokeWidth={1.8} aria-hidden />
+                  <span className="truncate">{item.label}</span>
+                  {item.href === "/attention" ? <CountBadge count={attentionCount} /> : null}
+                </Link>
+              </li>
+            );
+          })}
+          <li className="col-span-2">
+            <Link
+              href="/advanced"
+              onClick={closeMore}
+              className={`flex min-h-11 items-center justify-center gap-2 rounded-xl border border-dashed border-line-strong px-3 text-sm text-dim hover:text-ink ${focusRing}`}
+            >
+              <SlidersHorizontal size={16} aria-hidden /> All advanced tools
+            </Link>
+          </li>
+        </ul>
+        <div className="mt-4 flex items-center justify-between border-t border-line pt-4">
+          <span className="text-sm text-dim">Theme</span>
+          <ThemeToggle showLabel />
+        </div>
+      </Dialog>
+    </>
   );
 }
 
@@ -124,7 +424,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center gap-2 text-sm text-dim">
         <p>The API is unreachable.</p>
-        <button className="text-accent-strong underline" onClick={() => me.refetch()}>
+        <button
+          className={`rounded-md text-accent-strong underline ${focusRing}`}
+          onClick={() => me.refetch()}
+        >
           Retry
         </button>
       </div>
@@ -140,38 +443,72 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     );
   }
 
+  const user = me.data.user;
+
   return (
-    <WorkspaceProvider user={me.data.user} workspace={workspace}>
+    <WorkspaceProvider user={user} workspace={workspace}>
       <div className="flex min-h-screen">
-        <aside className="fixed inset-y-0 left-0 flex w-56 flex-col border-r border-line bg-surface">
-          <div className="flex items-center gap-2.5 px-4 py-4">
-            <div className="flex h-7 w-7 items-center justify-center rounded-lg border border-accent/40 bg-accent-soft text-sm font-bold text-accent-strong">
-              J
-            </div>
-            <div className="min-w-0">
-              <p className="truncate text-sm font-semibold leading-tight">Jhin</p>
-              <p className="truncate text-[11px] text-faint">{workspace.workspace_name}</p>
-            </div>
+        {/* Desktop sidebar (lg+) */}
+        <aside className="fixed inset-y-0 left-0 z-20 hidden w-[260px] flex-col border-r border-line bg-surface lg:flex">
+          <div className="px-5 pb-3 pt-5">
+            <Link href="/chats" className={`inline-flex rounded-lg ${focusRing}`} aria-label="Jhin home">
+              <Wordmark />
+            </Link>
+            <p className="mt-2 truncate text-[13px] text-dim" title={workspace.workspace_name}>
+              {workspace.workspace_name}
+            </p>
           </div>
           <SidebarNav pathname={pathname} />
-          <div className="border-t border-line px-3 py-3">
+          <div className="border-t border-line px-4 py-3">
             <div className="flex items-center justify-between gap-2">
               <div className="min-w-0">
-                <p className="truncate text-[13px] font-medium">{me.data.user.display_name}</p>
-                <p className="truncate text-[11px] capitalize text-faint">{workspace.role}</p>
+                <p className="truncate text-sm font-medium">{user.display_name}</p>
+                <p className="truncate text-xs capitalize text-faint">{workspace.role}</p>
               </div>
-              <button
-                title="Sign out"
-                aria-label="Sign out"
-                onClick={() => logout.mutate()}
-                className="rounded-md p-1.5 text-dim hover:bg-hover hover:text-ink"
-              >
-                <LogOut size={15} />
-              </button>
+              <div className="flex shrink-0 items-center gap-1">
+                <ThemeToggle />
+                <button
+                  type="button"
+                  title="Sign out"
+                  aria-label="Sign out"
+                  onClick={() => logout.mutate()}
+                  className={`inline-flex h-10 w-10 items-center justify-center rounded-xl text-dim hover:bg-hover hover:text-ink ${focusRing}`}
+                >
+                  <LogOut size={16} aria-hidden />
+                </button>
+              </div>
             </div>
           </div>
         </aside>
-        <main className="ml-56 min-h-screen flex-1">{children}</main>
+
+        {/* Tablet icon rail (md to lg) */}
+        <aside className="fixed inset-y-0 left-0 z-20 hidden w-[72px] flex-col items-stretch border-r border-line bg-surface md:flex lg:hidden">
+          <div className="flex justify-center py-4">
+            <Link href="/chats" className={`rounded-lg ${focusRing}`} aria-label="Jhin home">
+              <Wordmark className="[&>span]:sr-only" />
+            </Link>
+          </div>
+          <SidebarNav pathname={pathname} rail />
+          <div className="flex flex-col items-center gap-1 border-t border-line py-3">
+            <ThemeToggle />
+            <button
+              type="button"
+              title="Sign out"
+              aria-label="Sign out"
+              onClick={() => logout.mutate()}
+              className={`inline-flex h-10 w-10 items-center justify-center rounded-xl text-dim hover:bg-hover hover:text-ink ${focusRing}`}
+            >
+              <LogOut size={16} aria-hidden />
+            </button>
+          </div>
+        </aside>
+
+        <div className="flex min-h-screen min-w-0 flex-1 flex-col md:ml-[72px] lg:ml-[260px]">
+          <MobileBars pathname={pathname} />
+          <main id="main" className="flex min-w-0 flex-1 flex-col pb-16 md:pb-0">
+            {children}
+          </main>
+        </div>
       </div>
     </WorkspaceProvider>
   );
@@ -181,18 +518,52 @@ export function PageHeader({
   title,
   description,
   actions,
+  eyebrow,
+  compact = false,
 }: {
   title: string;
   description?: string;
   actions?: React.ReactNode;
+  eyebrow?: string;
+  compact?: boolean;
 }) {
   return (
-    <header className="sticky top-0 z-10 flex items-center justify-between gap-4 border-b border-line bg-bg/90 px-8 py-4 backdrop-blur">
-      <div>
-        <h1 className="text-base font-semibold tracking-tight">{title}</h1>
-        {description ? <p className="mt-0.5 text-[13px] text-dim">{description}</p> : null}
+    <header className="sticky top-0 z-10 border-b border-line bg-bg/85 backdrop-blur md:top-0">
+      <div
+        className={`mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-x-6 gap-y-3 px-5 md:px-8 ${
+          compact ? "py-3" : "py-5"
+        }`}
+      >
+        <div className="min-w-0">
+          {eyebrow ? <p className="eyebrow mb-1">{eyebrow}</p> : null}
+          <h1
+            className={`font-display font-semibold tracking-tight ${compact ? "text-lg" : "text-2xl"}`}
+          >
+            {title}
+          </h1>
+          {description ? <p className="mt-1 text-sm text-dim">{description}</p> : null}
+        </div>
+        {actions ? <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div> : null}
       </div>
-      {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
     </header>
+  );
+}
+
+/** Constrained page body used by the operational pages. */
+export function PageBody({
+  children,
+  className = "",
+  wide = false,
+}: {
+  children: React.ReactNode;
+  className?: string;
+  wide?: boolean;
+}) {
+  return (
+    <div
+      className={`mx-auto w-full px-5 py-6 md:px-8 md:py-8 ${wide ? "max-w-7xl" : "max-w-6xl"} ${className}`}
+    >
+      {children}
+    </div>
   );
 }

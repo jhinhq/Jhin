@@ -23,7 +23,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
-import { PageHeader } from "@/components/app-shell";
+import { PageBody, PageHeader } from "@/components/app-shell";
 import {
   Badge,
   Button,
@@ -31,9 +31,11 @@ import {
   EmptyState,
   ErrorNote,
   Field,
+  focusRing,
   Input,
   Select,
   Spinner,
+  StatusLabel,
   Textarea,
 } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
@@ -85,7 +87,7 @@ export default function TriggersPage() {
     <>
       <PageHeader
         title="Triggers"
-        description="WHEN / IF / THEN automation: connector events start agent work."
+        description="Start agent work automatically when something happens in a connected service."
         actions={
           isAdmin ? (
             <Button
@@ -101,7 +103,7 @@ export default function TriggersPage() {
           ) : null
         }
       />
-      <div className="space-y-4 px-8 py-6">
+      <PageBody className="space-y-4">
         {triggers.isPending ? <Spinner label="Loading triggers…" /> : null}
         {triggers.isError ? <ErrorNote message="Could not load triggers." /> : null}
         {triggers.data && triggers.data.length === 0 ? (
@@ -129,7 +131,7 @@ export default function TriggersPage() {
             }}
           />
         ))}
-      </div>
+      </PageBody>
       {builderOpen ? (
         <TriggerBuilder
           existing={editing}
@@ -184,13 +186,19 @@ function TriggerCard({
 
   const last = trigger.last_invocation;
   return (
-    <section className="rounded-xl border border-line bg-surface">
+    <section className="rounded-2xl border border-line bg-surface shadow-card">
       <div className="flex items-center gap-4 px-5 py-4">
-        <Zap size={16} className={trigger.enabled ? "text-accent" : "text-faint"} />
+        <span
+          className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${
+            trigger.enabled ? "bg-accent-soft text-accent-strong" : "bg-raised text-faint"
+          }`}
+        >
+          <Zap size={16} aria-hidden />
+        </span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <p className="truncate text-sm font-medium">{trigger.name}</p>
-            {!trigger.enabled ? <Badge>disabled</Badge> : null}
+            <p className="truncate font-display text-sm font-semibold text-ink">{trigger.name}</p>
+            {!trigger.enabled ? <Badge tone="neutral">disabled</Badge> : null}
           </div>
           <p className="mt-0.5 truncate text-xs text-dim">
             {trigger.event_type ?? "any event"}
@@ -207,7 +215,7 @@ function TriggerCard({
             <span className="text-xs text-faint">{formatDateTime(last.created_at)}</span>
           </div>
         ) : (
-          <span className="hidden text-xs text-faint sm:inline">never fired</span>
+          <StatusLabel tone="neutral" className="hidden text-xs text-faint sm:inline-flex">never fired</StatusLabel>
         )}
         {isAdmin ? (
           <div className="flex shrink-0 items-center gap-1.5">
@@ -245,7 +253,7 @@ function TriggerCard({
       ) : null}
       {expanded ? (
         <div className="border-t border-line px-5 py-4">
-          <p className="mb-2 text-xs font-medium uppercase tracking-wider text-dim">
+          <p className="mb-2 text-xs font-medium uppercase tracking-wider text-faint">
             Recent invocations
           </p>
           {invocations.isPending ? <Spinner label="Loading…" /> : null}
@@ -264,7 +272,7 @@ function TriggerCard({
                 {invocation.task_id ? (
                   <Link
                     href={`/tasks/${invocation.task_id}`}
-                    className="text-xs text-accent hover:underline"
+                    className={`rounded-md text-xs font-medium text-accent-strong hover:underline ${focusRing}`}
                   >
                     task {shortId(invocation.task_id)}
                   </Link>
@@ -383,8 +391,8 @@ function TriggerBuilder({
           />
         </Field>
 
-        <section className="space-y-3 rounded-lg border border-line p-4">
-          <p className="text-xs font-semibold uppercase tracking-wider text-accent">When</p>
+        <section className="space-y-3 rounded-xl border border-line bg-raised/60 p-4">
+          <p className="text-xs font-semibold uppercase tracking-wider text-accent-strong">When</p>
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Connection">
               <Select
@@ -423,10 +431,10 @@ function TriggerBuilder({
           </div>
         </section>
 
-        <section className="space-y-3 rounded-lg border border-line p-4">
-          <div className="flex items-center justify-between">
-            <p className="text-xs font-semibold uppercase tracking-wider text-accent">If</p>
-            <div className="flex gap-2">
+        <section className="space-y-3 rounded-xl border border-line bg-raised/60 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs font-semibold uppercase tracking-wider text-accent-strong">If</p>
+            <div className="flex flex-wrap gap-2">
               <Button size="sm" onClick={applyTodoPreset}>
                 Preset: state changes to Todo
               </Button>
@@ -510,8 +518,8 @@ function TriggerBuilder({
           ))}
         </section>
 
-        <section className="space-y-3 rounded-lg border border-line p-4">
-          <p className="text-xs font-semibold uppercase tracking-wider text-accent">Then</p>
+        <section className="space-y-3 rounded-xl border border-line bg-raised/60 p-4">
+          <p className="text-xs font-semibold uppercase tracking-wider text-accent-strong">Then</p>
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Assign to agent">
               <Select value={agentId} onChange={(event) => setAgentId(event.target.value)}>
@@ -536,7 +544,7 @@ function TriggerBuilder({
               type="checkbox"
               checked={commentBack}
               onChange={(event) => setCommentBack(event.target.checked)}
-              className="h-4 w-4 accent-[var(--accent,#7aa2f7)]"
+              className={`h-4 w-4 rounded accent-accent ${focusRing}`}
             />
             Comment the outcome back on the source issue when the task finishes
           </label>
@@ -586,7 +594,7 @@ function TriggerBuilder({
                     type="checkbox"
                     checked={managerReview}
                     onChange={(event) => setManagerReview(event.target.checked)}
-                    className="h-4 w-4 accent-[var(--accent,#7aa2f7)]"
+                    className={`h-4 w-4 rounded accent-accent ${focusRing}`}
                   />
                   Ask the implementer&apos;s manager for a review before QA
                 </label>
@@ -595,7 +603,7 @@ function TriggerBuilder({
           </div>
         </section>
 
-        <p className="rounded-md bg-raised px-3 py-2 text-sm text-dim">
+        <p className="rounded-xl border border-line bg-raised px-3.5 py-2.5 text-sm text-dim">
           {summarySentence(eventType, rows, agent, connection)}
         </p>
 
@@ -661,17 +669,17 @@ function TestPanel({
 
   if (!trigger) {
     return (
-      <p className="text-xs text-faint">
+      <p className="text-sm text-faint">
         Save the trigger first, then reopen it to dry-run sample events against its filter.
       </p>
     );
   }
 
   return (
-    <section className="space-y-3 rounded-lg border border-dashed border-line-strong p-4">
+    <section className="space-y-3 rounded-xl border border-dashed border-line-strong p-4">
       <div className="flex items-center justify-between">
-        <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-dim">
-          <FlaskConical size={13} /> Test against a sample event
+        <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-faint">
+          <FlaskConical size={13} aria-hidden /> Test against a sample event
         </p>
         <Button size="sm" onClick={() => run.mutate()} disabled={run.isPending}>
           Run test

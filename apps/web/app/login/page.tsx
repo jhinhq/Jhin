@@ -41,7 +41,7 @@ export default function LoginPage() {
         : null;
 
   return (
-    <AuthCard title="Sign in to Jhin" subtitle="Operate your AI organization">
+    <AuthCard title="Welcome back" subtitle="Sign in to catch up with your AI team.">
       <form
         className="space-y-4"
         onSubmit={(event) => {

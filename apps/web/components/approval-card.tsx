@@ -5,7 +5,7 @@
 
 import { Check, X } from "lucide-react";
 import Link from "next/link";
-import { Badge, Button } from "@/components/ui";
+import { Badge, Button, focusRing } from "@/components/ui";
 import { formatDateTime } from "@/lib/format";
 import { riskTone } from "@/lib/policy";
 import type { Approval } from "@/lib/types";
@@ -38,14 +38,16 @@ export function ApprovalCard({
   return (
     <li
       data-testid={`approval-${approval.id}`}
-      className="rounded-xl border border-line bg-surface p-4"
+      className="rounded-2xl border border-line bg-surface p-5 shadow-card"
     >
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-sm font-medium">{approval.agent_name ?? "Unknown agent"}</span>
+            <span className="text-sm font-medium text-ink">
+              {approval.agent_name ?? "Unknown agent"}
+            </span>
             <span className="text-xs text-dim">wants to run</span>
-            <code className="text-[13px]">{approval.action_type}</code>
+            <code className="font-mono text-[13px] text-ink">{approval.action_type}</code>
             {risk ? <Badge tone={riskTone(risk)}>{risk}</Badge> : null}
             <Badge tone={STATUS_TONES[approval.status] ?? "neutral"}>{approval.status}</Badge>
           </div>
@@ -56,28 +58,28 @@ export function ApprovalCard({
         {pending && canDecide ? (
           <div className="flex shrink-0 gap-2">
             <Button size="sm" variant="primary" disabled={deciding} onClick={onApprove}>
-              <Check size={13} /> Approve
+              <Check size={13} aria-hidden /> Approve
             </Button>
             <Button size="sm" variant="danger" disabled={deciding} onClick={onReject}>
-              <X size={13} /> Reject
+              <X size={13} aria-hidden /> Reject
             </Button>
           </div>
         ) : null}
       </div>
 
       {input !== undefined && input !== null ? (
-        <pre className="mt-3 overflow-x-auto rounded-md border border-line bg-raised px-3 py-2 text-[12px] leading-relaxed text-dim">
+        <pre className="mt-3 overflow-x-auto rounded-xl border border-line bg-raised px-3.5 py-2.5 font-mono text-xs leading-relaxed text-dim">
           {JSON.stringify(input, null, 2)}
         </pre>
       ) : null}
 
-      <footer className="mt-3 flex items-center gap-4 text-xs text-faint">
+      <footer className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-faint">
         <span>Requested {formatDateTime(approval.requested_at)}</span>
         {approval.decided_at ? <span>Decided {formatDateTime(approval.decided_at)}</span> : null}
         {approval.task_id ? (
           <Link
             href={`/tasks/${approval.task_id}`}
-            className="ml-auto text-accent-strong hover:underline"
+            className={`ml-auto rounded-md font-medium text-accent-strong hover:underline ${focusRing}`}
           >
             {approval.task_title ? `Task: ${approval.task_title}` : "View task"}
           </Link>
