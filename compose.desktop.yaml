@@ -1,0 +1,21 @@
+# Docker Desktop (macOS/Windows) overlay: LOCAL DEVELOPMENT ONLY.
+#
+# Docker Desktop runs the daemon inside a Linux VM. Its host socket is a
+# user-owned symlink target on the host, but it appears inside a container as
+# a Unix socket owned by uid 0 / gid 0. The only way for the unprivileged
+# 10001:10001 runner to reach it is membership in the root group, which is a
+# strictly weaker boundary than the rootful (exact docker GID) or rootless
+# (UID 10001 daemon) modes. Never use this overlay on a server.
+services:
+  sandbox-runner:
+    group_add:
+      - "0"
+    environment:
+      SANDBOX_DOCKER_MODE: desktop
+      SANDBOX_DOCKER_SOCKET: /run/jhin/docker.sock
+    volumes:
+      - type: bind
+        source: ${SANDBOX_DOCKER_SOCKET_HOST:-/var/run/docker.sock}
+        target: /run/jhin/docker.sock
+        bind:
+          create_host_path: false

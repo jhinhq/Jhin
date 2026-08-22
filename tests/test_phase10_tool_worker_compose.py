@@ -22,6 +22,11 @@ SCRIPT_PATH = ROOT / "scripts" / "assert_phase10_tool_worker_compose.py"
 ROOTLESS_SOCKET = "/run/user/10001/docker.sock"
 ROOTLESS_GID_CANARY = "phase10-rootless-gid-canary-73191"
 ROOTFUL_TEST_GID = 10001
+DESKTOP_SOCKET_SOURCE = "${SANDBOX_DOCKER_SOCKET_HOST:-/var/run/docker.sock}"
+DESKTOP_INFO = {
+    "OperatingSystem": "Docker Desktop",
+    "SecurityOptions": ["name=seccomp,profile=builtin", "name=cgroupns"],
+}
 DEFAULT_SANDBOX_NETWORK = "jhin_sandbox"
 UNIQUE_SANDBOX_NETWORK = "jhin-phase10-contract-sandbox"
 MAX_SANDBOX_NETWORK_LENGTH = 63
@@ -69,6 +74,14 @@ class ComposeContractModule(Protocol):
     ) -> tuple[str, int]: ...
 
     @staticmethod
+    def validate_desktop_socket(
+        socket_path: str, *, _lstat: Any = ..., _resolve: Any = ...
+    ) -> str: ...
+
+    @staticmethod
+    def validate_desktop_daemon_info(info: dict[str, Any]) -> None: ...
+
+    @staticmethod
     def main(argv: list[str] | None = None) -> int: ...
 
 
@@ -104,7 +117,7 @@ def _raw_render(*files: str, env: dict[str, str] | None = None) -> dict[str, Any
     return cast(dict[str, Any], json.loads(completed.stdout))
 
 
-@pytest.mark.parametrize("mode", ["rootful", "rootless"])
+@pytest.mark.parametrize("mode", ["rootful", "rootless", "desktop"])
 @pytest.mark.parametrize(
     ("dev", "app_env_override", "expected_app_env"),
     [
@@ -151,9 +164,24 @@ def test_shared_contract_accepts_every_supported_render(
                 "SANDBOX_DOCKER_SOCKET_HOST": str(socket_path),
                 "SANDBOX_NETWORK": UNIQUE_SANDBOX_NETWORK,
             }
+            if mode == "desktop":
+                # A GID must be inert for desktop: the overlay never reads it.
+                env["SANDBOX_DOCKER_GID"] = ROOTLESS_GID_CANARY
             if app_env_override is not None:
                 env["APP_ENV"] = app_env_override
             rendered = contract.render_compose(mode, dev=dev, env=env)
+    if mode == "desktop":
+        contract.assert_rendered_contract(
+            rendered,
+            mode=mode,
+            dev=dev,
+            expected_app_env=expected_app_env,
+            expected_sandbox_network=UNIQUE_SANDBOX_NETWORK,
+            expected_socket_source=str(socket_path),
+        )
+        assert ROOTLESS_GID_CANARY not in json.dumps(rendered, sort_keys=True)
+        assert rendered["services"]["sandbox-runner"]["group_add"] == ["0"]
+        return
     contract.assert_rendered_contract(
         rendered,
         mode=mode,
@@ -598,13 +626,21 @@ def test_shared_contract_rejects_every_reviewed_security_mutation(
 
 
 def _copy_source_contract(tmp_path: Path) -> None:
-    for source_name in ("compose.yaml", "compose.rootful.yaml", "compose.rootless.yaml"):
+    for source_name in (
+        "compose.yaml",
+        "compose.rootful.yaml",
+        "compose.rootless.yaml",
+        "compose.desktop.yaml",
+    ):
         shutil.copy2(ROOT / source_name, tmp_path / source_name)
 
 
 def _safe_bind_fragment(filename: str) -> str:
     if filename == "compose.rootful.yaml":
         source = "${SANDBOX_DOCKER_SOCKET_HOST:?set verified absolute Docker socket}"
+        target = "/run/jhin/docker.sock"
+    elif filename == "compose.desktop.yaml":
+        source = DESKTOP_SOCKET_SOURCE
         target = "/run/jhin/docker.sock"
     else:
         source = "${PHASE10_ROOTLESS_DOCKER_SOCKET:?set the verified rootless socket}"
@@ -618,7 +654,9 @@ def _safe_bind_fragment(filename: str) -> str:
     )
 
 
-@pytest.mark.parametrize("filename", ["compose.rootful.yaml", "compose.rootless.yaml"])
+@pytest.mark.parametrize(
+    "filename", ["compose.rootful.yaml", "compose.rootless.yaml", "compose.desktop.yaml"]
+)
 def test_semantic_source_contract_ignores_safe_text_decoys(
     filename: str,
     tmp_path: Path,
@@ -641,7 +679,9 @@ def test_semantic_source_contract_ignores_safe_text_decoys(
         contract.assert_source_contract()
 
 
-@pytest.mark.parametrize("filename", ["compose.rootful.yaml", "compose.rootless.yaml"])
+@pytest.mark.parametrize(
+    "filename", ["compose.rootful.yaml", "compose.rootless.yaml", "compose.desktop.yaml"]
+)
 @pytest.mark.parametrize("duplicate", ["top-level services", "bind key"])
 def test_semantic_source_contract_rejects_duplicate_mapping_keys(
     filename: str,
@@ -668,7 +708,9 @@ def test_semantic_source_contract_rejects_duplicate_mapping_keys(
         contract.assert_source_contract()
 
 
-@pytest.mark.parametrize("filename", ["compose.rootful.yaml", "compose.rootless.yaml"])
+@pytest.mark.parametrize(
+    "filename", ["compose.rootful.yaml", "compose.rootless.yaml", "compose.desktop.yaml"]
+)
 def test_semantic_source_contract_rejects_duplicate_socket_volume_nodes(
     filename: str,
     tmp_path: Path,
@@ -733,6 +775,22 @@ def test_semantic_source_contract_accepts_unambiguous_safe_anchors(
             "    driver: bridge\n"
             "    external: false\n"
             "    internal: true\n"
+        ),
+        "compose.desktop.yaml": (
+            "x-phase10-safe-bind: &phase10-safe-bind\n"
+            "  type: bind\n"
+            f"  source: {DESKTOP_SOCKET_SOURCE}\n"
+            "  target: /run/jhin/docker.sock\n"
+            "  bind:\n"
+            "    create_host_path: false\n"
+            "services:\n"
+            "  sandbox-runner:\n"
+            '    group_add: ["0"]\n'
+            "    environment:\n"
+            "      SANDBOX_DOCKER_MODE: desktop\n"
+            "      SANDBOX_DOCKER_SOCKET: /run/jhin/docker.sock\n"
+            "    volumes:\n"
+            f"      - {volume_reference}\n"
         ),
     }
     for filename, source in overlays.items():
@@ -854,7 +912,13 @@ def test_renderer_disables_dotenv_and_scrubs_inherited_mode_values(
     tmp_path: Path,
 ) -> None:
     contract = _load_contract()
-    for filename in ("compose.yaml", "compose.dev.yaml", "compose.rootless.yaml"):
+    for filename in (
+        "compose.yaml",
+        "compose.dev.yaml",
+        "compose.rootless.yaml",
+        "compose.rootful.yaml",
+        "compose.desktop.yaml",
+    ):
         shutil.copy2(ROOT / filename, tmp_path / filename)
     (tmp_path / ".env").write_text(
         "APP_ENV=poisoned-from-dotenv\nSANDBOX_DOCKER_GID=poisoned-gid\n",
@@ -897,6 +961,28 @@ def test_renderer_disables_dotenv_and_scrubs_inherited_mode_values(
                 "SANDBOX_DOCKER_SOCKET_HOST": "/var/run/docker.sock",
             },
         ),
+        (("compose.yaml",), "desktop", {}),
+        (
+            ("compose.yaml", "compose.rootless.yaml", "compose.desktop.yaml"),
+            "desktop",
+            {
+                "PHASE10_ROOTLESS_DOCKER_SOCKET": ROOTLESS_SOCKET,
+                "SANDBOX_DOCKER_SOCKET_HOST": "/var/run/docker.sock",
+            },
+        ),
+        (
+            ("compose.yaml", "compose.rootful.yaml", "compose.desktop.yaml"),
+            "desktop",
+            {
+                "SANDBOX_DOCKER_GID": "10001",
+                "SANDBOX_DOCKER_SOCKET_HOST": "/var/run/docker.sock",
+            },
+        ),
+        (
+            ("compose.yaml", "compose.desktop.yaml"),
+            "rootful",
+            {"SANDBOX_DOCKER_SOCKET_HOST": "/var/run/docker.sock"},
+        ),
     ],
 )
 def test_shared_contract_rejects_missing_or_merged_authority_vectors(
@@ -915,7 +1001,7 @@ def test_shared_contract_rejects_missing_or_merged_authority_vectors(
             expected_sandbox_network=DEFAULT_SANDBOX_NETWORK,
             expected_rootful_gid=10001 if mode == "rootful" else None,
             expected_socket_source=(
-                "/var/run/docker.sock" if mode == "rootful" else ROOTLESS_SOCKET
+                ROOTLESS_SOCKET if mode == "rootless" else "/var/run/docker.sock"
             ),
         )
 
@@ -1023,11 +1109,19 @@ def test_cli_owns_the_exact_mode_file_vector_and_no_file_injection() -> None:
         "compose.dev.yaml",
         "compose.rootful.yaml",
     )
+    assert contract.compose_files("desktop") == ("compose.yaml", "compose.desktop.yaml")
+    assert contract.compose_files("desktop", dev=True) == (
+        "compose.yaml",
+        "compose.dev.yaml",
+        "compose.desktop.yaml",
+    )
+    with pytest.raises(ValueError, match="mode must be"):
+        contract.compose_files("macos")
     with pytest.raises(SystemExit):
         contract.main(["--mode", "rootless", "-f", "compose.rootful.yaml"])
 
 
-@pytest.mark.parametrize("mode", ["rootful", "rootless"])
+@pytest.mark.parametrize("mode", ["rootful", "rootless", "desktop"])
 @pytest.mark.parametrize(
     ("dev", "inherited_app_env", "expected_app_env"),
     [
@@ -1060,6 +1154,11 @@ def test_cli_passes_the_explicit_expected_app_env_for_every_vector(
         "validate_rootful_socket",
         lambda _path, _gid: ("/verified/docker.sock", ROOTFUL_TEST_GID),
     )
+    monkeypatch.setattr(
+        contract,
+        "validate_desktop_socket",
+        lambda _path: "/resolved/desktop/docker.sock",
+    )
 
     def fake_render(
         selected_mode: str,
@@ -1081,14 +1180,14 @@ def test_cli_passes_the_explicit_expected_app_env_for_every_vector(
         argv.append("--dev")
     assert contract.main(argv) == 0
 
-    expected_env = (
-        {
+    expected_env = {
+        "rootful": {
             "SANDBOX_DOCKER_SOCKET_HOST": "/verified/docker.sock",
             "SANDBOX_DOCKER_GID": str(ROOTFUL_TEST_GID),
-        }
-        if mode == "rootful"
-        else {"PHASE10_ROOTLESS_DOCKER_SOCKET": ROOTLESS_SOCKET}
-    )
+        },
+        "rootless": {"PHASE10_ROOTLESS_DOCKER_SOCKET": ROOTLESS_SOCKET},
+        "desktop": {"SANDBOX_DOCKER_SOCKET_HOST": "/resolved/desktop/docker.sock"},
+    }[mode]
     expected_env["SANDBOX_NETWORK"] = UNIQUE_SANDBOX_NETWORK
     if dev and inherited_app_env is not None:
         expected_env["APP_ENV"] = inherited_app_env
@@ -1101,9 +1200,11 @@ def test_cli_passes_the_explicit_expected_app_env_for_every_vector(
             "expected_app_env": expected_app_env,
             "expected_sandbox_network": UNIQUE_SANDBOX_NETWORK,
             "expected_rootful_gid": ROOTFUL_TEST_GID if mode == "rootful" else None,
-            "expected_socket_source": (
-                "/verified/docker.sock" if mode == "rootful" else ROOTLESS_SOCKET
-            ),
+            "expected_socket_source": {
+                "rootful": "/verified/docker.sock",
+                "rootless": ROOTLESS_SOCKET,
+                "desktop": "/resolved/desktop/docker.sock",
+            }[mode],
         },
     )
 
@@ -1215,7 +1316,14 @@ def test_integration_required_services_follow_selected_mode(
     assert required_services_for_mode(mode) == expected
 
 
-@pytest.mark.parametrize("mode", ["rootful", "rootless"])
+def test_integration_required_services_for_desktop_match_rootful() -> None:
+    from tests.integration.conftest import required_services_for_mode
+
+    assert required_services_for_mode("desktop") == required_services_for_mode("rootful")
+    assert "rootless-docker-transport" not in required_services_for_mode("desktop")
+
+
+@pytest.mark.parametrize("mode", ["rootful", "rootless", "desktop"])
 def test_integration_compose_command_uses_base_dev_and_one_mode_overlay(
     mode: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -1237,12 +1345,17 @@ def test_integration_compose_command_uses_base_dev_and_one_mode_overlay(
         repo=ROOT,
         mode=mode,
         socket_path=Path(
-            "/var/run/docker.sock" if mode == "rootful" else "/run/user/10001/docker.sock"
+            "/run/user/10001/docker.sock" if mode == "rootless" else "/var/run/docker.sock"
         ),
         socket_gid=10001 if mode == "rootful" else None,
         token="a10b20c30d40",
         source_environment={"PATH": os.environ.get("PATH", "")},
     )
+    if mode == "desktop":
+        assert authority.environment["SANDBOX_DOCKER_SOCKET_HOST"] == "/var/run/docker.sock"
+        assert "SANDBOX_DOCKER_GID" not in authority.environment
+        assert "PHASE10_ROOTLESS_DOCKER_SOCKET" not in authority.environment
+        assert authority.files == ("compose.yaml", "compose.dev.yaml", "compose.desktop.yaml")
     lease = Path("/tmp") / f"jhin-p10-contract-{os.getpid()}-{mode}.json"
     lease.unlink(missing_ok=True)
     try:
@@ -1931,3 +2044,167 @@ async def test_live_job_cleanup_retains_nested_emergency_failure_group(
         "job phase10-outer-group-job survived emergency force removal: ['phase10-first']",
     ]
     assert state["identifiers"] == ["phase10-first"]
+
+
+def test_desktop_preflight_resolves_the_compatibility_symlink_to_a_real_socket() -> None:
+    contract = _load_contract()
+    with tempfile.TemporaryDirectory(prefix="p10-", dir="/tmp") as short_directory:
+        short_root = Path(short_directory)
+        socket_path = short_root / "docker.sock"
+        link = short_root / "link.sock"
+        with socket.socket(socket.AF_UNIX) as listener:
+            listener.bind(str(socket_path))
+            link.symlink_to(socket_path)
+            before = socket_path.lstat()
+            resolved = contract.validate_desktop_socket(str(link))
+            direct = contract.validate_desktop_socket(str(socket_path))
+            after = socket_path.lstat()
+    assert Path(resolved) == socket_path.resolve()
+    assert direct == resolved
+    assert (after.st_mode, after.st_uid, after.st_gid) == (
+        before.st_mode,
+        before.st_uid,
+        before.st_gid,
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("relative", "absolute"),
+        ("missing", "resolve"),
+        ("regular", "Unix socket"),
+        ("dangling", "resolve"),
+    ],
+)
+def test_desktop_preflight_rejects_every_invalid_socket_shape(case: str, message: str) -> None:
+    contract = _load_contract()
+    with tempfile.TemporaryDirectory(prefix="p10-", dir="/tmp") as short_directory:
+        short_root = Path(short_directory)
+        regular_path = short_root / "regular"
+        regular_path.write_text("not a socket", encoding="utf-8")
+        target = {
+            "relative": "docker.sock",
+            "missing": str(short_root / "missing.sock"),
+            "regular": str(regular_path),
+            "dangling": str(short_root / "dangling.sock"),
+        }[case]
+        if case == "dangling":
+            Path(target).symlink_to(short_root / "missing-target.sock")
+        with pytest.raises(ValueError, match=message):
+            contract.validate_desktop_socket(target)
+
+
+@pytest.mark.parametrize(
+    ("info", "message"),
+    [
+        ({}, "Docker Desktop"),
+        ({"OperatingSystem": "Ubuntu 24.04"}, "Docker Desktop"),
+        ({"OperatingSystem": 42}, "Docker Desktop"),
+        (
+            {"OperatingSystem": "Docker Desktop", "SecurityOptions": ["name=rootless"]},
+            "rootless",
+        ),
+        ({"OperatingSystem": "Docker Desktop", "SecurityOptions": "name=seccomp"}, "malformed"),
+    ],
+)
+def test_desktop_daemon_identity_fails_closed(info: dict[str, Any], message: str) -> None:
+    contract = _load_contract()
+    contract.validate_desktop_daemon_info(DESKTOP_INFO)
+    with pytest.raises(ValueError, match=message):
+        contract.validate_desktop_daemon_info(info)
+
+
+def test_harness_desktop_selection_resolves_symlink_and_binds_real_socket() -> None:
+    from tests.integration.phase10_upgrade_harness import (
+        SocketMetadata,
+        resolve_desktop_socket,
+        select_live_authority,
+        validate_daemon_info,
+        validate_socket_metadata,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="p10-", dir="/tmp") as short_directory:
+        short_root = Path(short_directory)
+        socket_path = short_root / "docker.sock"
+        link = short_root / "var-run-docker.sock"
+        with socket.socket(socket.AF_UNIX) as listener:
+            listener.bind(str(socket_path))
+            link.symlink_to(socket_path)
+            resolved = resolve_desktop_socket(link)
+            assert resolved == socket_path.resolve()
+            metadata = validate_socket_metadata(SocketMetadata.capture(resolved), mode="desktop")
+            assert metadata.path == resolved
+            with pytest.raises(ValueError, match="GID"):
+                validate_socket_metadata(
+                    SocketMetadata.capture(resolved), mode="desktop", expected_gid=10001
+                )
+            with pytest.raises(ValueError, match="Unix socket"):
+                validate_socket_metadata(SocketMetadata.capture(link), mode="desktop")
+
+            authority = select_live_authority(
+                repo=ROOT,
+                mode="desktop",
+                source_environment={
+                    "PATH": os.environ.get("PATH", ""),
+                    "PHASE10_DESKTOP_DOCKER_SOCKET": str(link),
+                    "SANDBOX_DOCKER_GID": "10001",
+                },
+            )
+            try:
+                assert authority.mode == "desktop"
+                assert authority.socket_gid is None
+                assert authority.socket_path == resolved
+                assert authority.socket_snapshot == metadata
+                assert authority.environment["SANDBOX_DOCKER_SOCKET_HOST"] == str(resolved)
+                assert authority.environment["DOCKER_HOST"] == f"unix://{resolved}"
+                assert authority.environment["PHASE10_SOCKET_MODE"] == "desktop"
+                assert "SANDBOX_DOCKER_GID" not in authority.environment
+                assert authority.expected_services == authority.expected_services - {
+                    "rootless-docker-transport"
+                }
+            finally:
+                authority.remove_runtime_paths()
+
+        socket_path.unlink()
+        with pytest.raises(ValueError, match="resolve"):
+            resolve_desktop_socket(link)
+        regular = short_root / "regular"
+        regular.write_text("x", encoding="utf-8")
+        with pytest.raises(ValueError, match="Unix socket"):
+            resolve_desktop_socket(regular)
+    with pytest.raises(ValueError, match="absolute"):
+        resolve_desktop_socket(Path("docker.sock"))
+
+    validate_daemon_info(DESKTOP_INFO, mode="desktop")
+    with pytest.raises(ValueError, match="Docker Desktop"):
+        validate_daemon_info({"OperatingSystem": "Ubuntu", "SecurityOptions": []}, mode="desktop")
+    with pytest.raises(ValueError, match="rootless"):
+        validate_daemon_info(
+            {"OperatingSystem": "Docker Desktop", "SecurityOptions": ["name=rootless"]},
+            mode="desktop",
+        )
+    # A Docker Desktop daemon is still a valid rootful daemon from the info
+    # probe's point of view; the symlink rule is what keeps rootful honest.
+    validate_daemon_info(DESKTOP_INFO, mode="rootful")
+
+
+def test_harness_authority_rejects_a_desktop_gid_and_unknown_modes() -> None:
+    from tests.integration.phase10_upgrade_harness import ComposeAuthority, compose_files_for
+
+    with pytest.raises(ValueError, match="cannot carry a socket GID"):
+        ComposeAuthority.create(
+            repo=ROOT,
+            mode="desktop",
+            socket_path=Path("/var/run/docker.sock"),
+            socket_gid=0,
+            token="a10b20c30d40",
+            source_environment={},
+        )
+    with pytest.raises(ValueError, match="mode must be"):
+        compose_files_for("macos")
+    assert compose_files_for("desktop") == (
+        "compose.yaml",
+        "compose.dev.yaml",
+        "compose.desktop.yaml",
+    )

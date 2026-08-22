@@ -31,6 +31,7 @@ from aiodocker.exceptions import DockerError
 from jhin_observability import get_logger, normalize_sandbox_outcome
 from jhin_sandbox_runner.docker_socket import (
     DockerSocketConfigurationError,
+    daemon_is_docker_desktop,
     normalize_supplemental_groups,
     validate_docker_authority,
 )
@@ -252,8 +253,10 @@ class JobManager:
     async def start(self) -> None:
         effective_uid = os.geteuid()
         effective_gid = os.getegid()
-        if self._settings.sandbox_docker_mode == "rootless" and effective_gid != 10001:
-            raise DockerSocketConfigurationError("rootless runner requires UID/GID 10001:10001")
+        if self._settings.sandbox_docker_mode in {"rootless", "desktop"} and effective_gid != 10001:
+            raise DockerSocketConfigurationError(
+                f"{self._settings.sandbox_docker_mode} runner requires UID/GID 10001:10001"
+            )
         authority_groups = normalize_supplemental_groups(
             effective_gid=effective_gid,
             process_groups=os.getgroups(),
@@ -284,6 +287,13 @@ class JobManager:
             ):
                 raise DockerDaemonConfigurationError(
                     "configured rootless Docker daemon is not rootless"
+                )
+            if self._settings.sandbox_docker_mode == "desktop" and not daemon_is_docker_desktop(
+                info
+            ):
+                raise DockerDaemonConfigurationError(
+                    "desktop mode requires a Docker Desktop daemon; use rootful or rootless "
+                    "mode for a Linux host daemon"
                 )
             await self._ensure_sandbox_network()
             await self.reap_orphans()

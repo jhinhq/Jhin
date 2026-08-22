@@ -396,3 +396,142 @@ def test_settings_require_explicit_rootless_authority() -> None:
 def test_settings_reject_missing_or_cross_mode_authority(values: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
         Settings(**values)
+
+
+def _desktop_kwargs(socket_path: Path) -> dict[str, object]:
+    return {
+        "mode": "desktop",
+        "socket_path": socket_path,
+        "transport_url": None,
+        "configured_gid": None,
+        "effective_uid": 10001,
+        "supplemental_groups": {0},
+    }
+
+
+def test_desktop_accepts_only_the_root_owned_root_group_vm_socket(
+    unix_socket: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Path, "lstat", lambda _path: _root_owned_socket_stat(gid=0))
+    monkeypatch.setattr(os, "access", lambda _path, _mode, *, effective_ids: True)
+    assert validate_docker_authority(**_desktop_kwargs(unix_socket)) == f"unix://{unix_socket}"
+
+
+@pytest.mark.parametrize(
+    ("mutator", "message"),
+    [
+        (lambda values: values.update(effective_uid=0), "must not run as root"),
+        (lambda values: values.update(effective_uid=10002), "UID 10001"),
+        (lambda values: values.update(socket_path=None), "one Unix socket only"),
+        (
+            lambda values: values.update(transport_url=ROOTLESS_TRANSPORT_URL),
+            "one Unix socket only",
+        ),
+        (lambda values: values.update(socket_path=Path("docker.sock")), "absolute"),
+        (lambda values: values.update(configured_gid=0), "no SANDBOX_DOCKER_GID"),
+        (lambda values: values.update(configured_gid=12001), "no SANDBOX_DOCKER_GID"),
+        (lambda values: values.update(supplemental_groups=set()), "root group as its only"),
+        (lambda values: values.update(supplemental_groups={12001}), "root group as its only"),
+        (lambda values: values.update(supplemental_groups={0, 12001}), "root group as its only"),
+    ],
+)
+def test_desktop_rejects_invalid_shape(
+    unix_socket: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutator: Callable[[dict[str, object]], None],
+    message: str,
+) -> None:
+    monkeypatch.setattr(Path, "lstat", lambda _path: _root_owned_socket_stat(gid=0))
+    monkeypatch.setattr(os, "access", lambda _path, _mode, *, effective_ids: True)
+    values = _desktop_kwargs(unix_socket)
+    mutator(values)
+    with pytest.raises(DockerSocketConfigurationError, match=message):
+        validate_docker_authority(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("socket_stat", "access", "message"),
+    [
+        (_root_owned_socket_stat(gid=0, mode=stat.S_IFREG), True, "not a Unix socket"),
+        (
+            SimpleNamespace(st_mode=stat.S_IFSOCK, st_uid=501, st_gid=0),
+            True,
+            "owned by UID 0",
+        ),
+        (_root_owned_socket_stat(gid=12001), True, "owned by GID 0"),
+        (_root_owned_socket_stat(gid=0), False, "not readable and writable"),
+    ],
+)
+def test_desktop_rejects_socket_metadata_mismatch(
+    unix_socket: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    socket_stat: object,
+    access: bool,
+    message: str,
+) -> None:
+    monkeypatch.setattr(Path, "lstat", lambda _path: socket_stat)
+    monkeypatch.setattr(os, "access", lambda _path, _mode, *, effective_ids: access)
+    with pytest.raises(DockerSocketConfigurationError, match=message):
+        validate_docker_authority(**_desktop_kwargs(unix_socket))
+
+
+def test_desktop_rejects_symlink_inside_the_container(
+    unix_socket: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    link = tmp_path / "docker-link.sock"
+    link.symlink_to(unix_socket)
+    monkeypatch.setattr(os, "access", lambda _path, _mode, *, effective_ids: True)
+    with pytest.raises(DockerSocketConfigurationError, match="symlink"):
+        validate_docker_authority(**_desktop_kwargs(link))
+
+
+@pytest.mark.parametrize(
+    ("info", "expected"),
+    [
+        ({"OperatingSystem": "Docker Desktop"}, True),
+        ({"OperatingSystem": "Docker Desktop 4.x"}, True),
+        ({"OperatingSystem": "Ubuntu 24.04 LTS"}, False),
+        ({"OperatingSystem": 7}, False),
+        ({}, False),
+    ],
+)
+def test_daemon_desktop_identity_requires_the_exact_operating_system(
+    info: dict[str, object], expected: bool
+) -> None:
+    assert docker_socket_module.daemon_is_docker_desktop(info) is expected
+
+
+def test_settings_accept_explicit_desktop_authority() -> None:
+    settings = Settings(
+        sandbox_docker_mode="desktop",
+        sandbox_docker_socket="/run/jhin/docker.sock",
+    )
+    assert settings.sandbox_docker_mode == "desktop"
+    assert settings.sandbox_docker_socket == Path("/run/jhin/docker.sock")
+    assert settings.sandbox_docker_gid is None
+    assert settings.sandbox_docker_transport_url is None
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"sandbox_docker_mode": "desktop"},
+        {"sandbox_docker_mode": "desktop", "sandbox_docker_socket": "relative.sock"},
+        {
+            "sandbox_docker_mode": "desktop",
+            "sandbox_docker_socket": "/run/jhin/docker.sock",
+            "sandbox_docker_gid": 1,
+        },
+        {
+            "sandbox_docker_mode": "desktop",
+            "sandbox_docker_socket": "/run/jhin/docker.sock",
+            "sandbox_docker_transport_url": ROOTLESS_TRANSPORT_URL,
+        },
+        {"sandbox_docker_mode": "macos", "sandbox_docker_socket": "/run/jhin/docker.sock"},
+    ],
+)
+def test_settings_reject_incomplete_or_cross_mode_desktop_authority(
+    values: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        Settings(**values)

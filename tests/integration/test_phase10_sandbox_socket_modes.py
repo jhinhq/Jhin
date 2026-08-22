@@ -1,4 +1,4 @@
-"""Live Linux acceptance for the two sandbox Docker-socket authorities."""
+"""Live acceptance for the rootful, rootless, and Docker Desktop socket authorities."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def test_selected_socket_mode_live_boundary() -> None:
     mode = os.environ.get("PHASE10_SOCKET_MODE")
     if mode is None:
         pytest.skip("socket-mode acceptance was not requested")
-    assert mode in {"rootful", "rootless"}
+    assert mode in {"rootful", "rootless", "desktop"}
     authority = compose_authority()
     assert authority.mode == mode
     authority.assert_socket_unchanged()
@@ -47,6 +47,21 @@ def test_selected_socket_mode_live_boundary() -> None:
         mounts = _socket_mounts(runner, str(authority.socket_path))
         assert len(mounts) == 1
         assert mounts[0]["Destination"] == "/run/jhin/docker.sock"
+        assert _networks(runner) == {f"{authority.project}_runner"}
+    elif mode == "desktop":
+        # Docker Desktop: the VM socket is uid 0 / gid 0 inside the container,
+        # so the runner carries exactly the root group and nothing else.
+        assert authority.socket_gid is None
+        assert not authority.socket_path.is_symlink()
+        assert runner["HostConfig"]["GroupAdd"] == ["0"]
+        mounts = _socket_mounts(runner, str(authority.socket_path))
+        assert len(mounts) == 1
+        assert mounts[0]["Destination"] == "/run/jhin/docker.sock"
+        assert _networks(runner) == {f"{authority.project}_runner"}
+        environment = runner["Config"].get("Env", [])
+        assert "SANDBOX_DOCKER_MODE=desktop" in environment
+        assert not any(item.startswith("SANDBOX_DOCKER_GID=") for item in environment)
+        assert not any(item.startswith("SANDBOX_DOCKER_TRANSPORT_URL=") for item in environment)
     else:
         authority.probe_rootless_capabilities()
         assert runner["HostConfig"].get("GroupAdd") in (None, [])

@@ -29,7 +29,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, cast
 
-ComposeMode = Literal["rootful", "rootless"]
+ComposeMode = Literal["rootful", "rootless", "desktop"]
+_COMPOSE_MODES: tuple[ComposeMode, ...] = ("rootful", "rootless", "desktop")
 UpgradeStage = Literal["parked-phase9", "base-only", "current-phase10"]
 
 EXPECTED_ROOTFUL_SERVICES = {
@@ -52,6 +53,12 @@ EXPECTED_ROOTFUL_SERVICES = {
     "workflow-worker",
 }
 EXPECTED_ROOTLESS_SERVICES = EXPECTED_ROOTFUL_SERVICES | {"rootless-docker-transport"}
+# Docker Desktop mounts the VM socket straight into the runner: no adapter.
+EXPECTED_DESKTOP_SERVICES = set(EXPECTED_ROOTFUL_SERVICES)
+# Docker Desktop (macOS/Windows) is accepted only for local development; its
+# daemon lives in a Linux VM and identifies itself through ``docker info``.
+DESKTOP_DAEMON_OPERATING_SYSTEM = "Docker Desktop"
+DEFAULT_DESKTOP_DOCKER_SOCKET = "/var/run/docker.sock"
 
 # (Compose interpolation variable, service, container port).  Docker owns all
 # host-port allocation; no user-space reserve/close race is permitted.
@@ -72,7 +79,7 @@ PUBLISHED_ENDPOINTS = (
     ("TEMPORAL_UI_DEV_PORT", "temporal-ui", 8080),
 )
 
-_MODE_ERROR = "mode must be exactly rootful or rootless"
+_MODE_ERROR = "mode must be exactly rootful or rootless (Linux) or desktop (Docker Desktop)"
 _PERSISTENT_COMPOSE_TIMEOUT_SECONDS = 1200.0
 _TARGET_ENVIRONMENT = {
     "APP_ENV",
@@ -537,6 +544,12 @@ LIVE_SCENARIOS = {
         expected_tests=1,
     ),
     "socket-rootless": LiveScenario(
+        nodes=(
+            "tests/integration/test_phase10_sandbox_socket_modes.py::test_selected_socket_mode_live_boundary",
+        ),
+        expected_tests=1,
+    ),
+    "socket-desktop": LiveScenario(
         nodes=(
             "tests/integration/test_phase10_sandbox_socket_modes.py::test_selected_socket_mode_live_boundary",
         ),
@@ -1100,12 +1113,21 @@ def validate_socket_metadata(
     mode: str,
     expected_gid: int | None = None,
 ) -> SocketMetadata:
-    """Fail closed on a mismatched rootful/rootless Unix-socket authority."""
+    """Fail closed on a mismatched rootful/rootless/desktop Unix-socket authority."""
     selected = _mode(mode)
     if not metadata.path.is_absolute() or not stat.S_ISSOCK(metadata.mode):
         raise ValueError("selected Docker authority is not an absolute Unix socket")
     permissions = stat.S_IMODE(metadata.mode)
-    if selected == "rootful":
+    if selected == "desktop":
+        # The resolved Docker Desktop socket is owned by the desktop user (or
+        # root on some installs); a UID-10001 rootless daemon is never Desktop.
+        if metadata.uid not in {0, os.getuid()}:
+            raise ValueError("desktop Docker socket must be owned by the current user or root")
+        if expected_gid is not None:
+            raise ValueError("desktop Docker authority cannot carry a rootful GID")
+        if permissions & 0o600 != 0o600:
+            raise ValueError("desktop Docker socket owner must have read/write access")
+    elif selected == "rootful":
         if metadata.uid != 0:
             raise ValueError("rootful Docker socket must be root-owned")
         if expected_gid is None or expected_gid <= 0 or metadata.gid != expected_gid:
@@ -1127,8 +1149,17 @@ def validate_daemon_info(info: Mapping[str, Any], *, mode: str) -> None:
     if not isinstance(raw_options, list) or any(not isinstance(item, str) for item in raw_options):
         raise ValueError("Docker daemon security options are malformed")
     is_rootless = any(item.split(",", 1)[0] == "name=rootless" for item in raw_options)
+    operating_system = info.get("OperatingSystem")
+    is_desktop = (
+        isinstance(operating_system, str) and DESKTOP_DAEMON_OPERATING_SYSTEM in operating_system
+    )
     if selected == "rootful" and is_rootless:
         raise ValueError("rootful mode selected a rootless daemon")
+    if selected == "desktop":
+        if is_rootless:
+            raise ValueError("desktop mode selected a rootless daemon")
+        if not is_desktop:
+            raise ValueError("desktop mode requires a Docker Desktop daemon")
     if selected == "rootless":
         if not is_rootless:
             raise ValueError("rootless mode requires a rootless daemon")
@@ -1153,6 +1184,12 @@ def select_live_authority(
         if raw_gid is None or not raw_gid.isdecimal() or int(raw_gid) <= 0:
             raise ValueError("rootful selection requires a positive SANDBOX_DOCKER_GID")
         socket_gid: int | None = int(raw_gid)
+    elif selected == "desktop":
+        configured = Path(
+            source.get("PHASE10_DESKTOP_DOCKER_SOCKET", DEFAULT_DESKTOP_DOCKER_SOCKET)
+        )
+        socket_path = resolve_desktop_socket(configured)
+        socket_gid = None
     else:
         raw_socket = source.get("PHASE10_ROOTLESS_DOCKER_SOCKET")
         if not raw_socket:
@@ -1175,9 +1212,28 @@ def select_live_authority(
 
 
 def _mode(value: str) -> ComposeMode:
-    if value not in {"rootful", "rootless"}:
-        raise ValueError(_MODE_ERROR)
-    return cast(ComposeMode, value)
+    for candidate in _COMPOSE_MODES:
+        if value == candidate:
+            return candidate
+    raise ValueError(_MODE_ERROR)
+
+
+def resolve_desktop_socket(configured: Path) -> Path:
+    """Follow the Docker Desktop compatibility symlink to the real Unix socket.
+
+    Desktop is the only mode that accepts a symlink on the host; the resolved
+    target becomes the immutable, snapshotted authority so every later
+    ``lstat`` comparison sees a real socket rather than the link.
+    """
+    if not configured.is_absolute():
+        raise ValueError("desktop Docker socket path must be absolute")
+    try:
+        resolved = configured.resolve(strict=True)
+    except OSError as error:
+        raise ValueError("cannot resolve desktop Docker socket") from error
+    if not stat.S_ISSOCK(resolved.lstat().st_mode):
+        raise ValueError("desktop Docker socket must resolve to a Unix socket")
+    return resolved
 
 
 def compose_files_for(mode: str, *, upgrade: bool = False) -> tuple[str, ...]:
@@ -1794,8 +1850,8 @@ class ComposeAuthority:
             raise ValueError("Docker socket path must be absolute")
         if selected == "rootful" and (socket_gid is None or socket_gid <= 0):
             raise ValueError("rootful authority requires a positive socket GID")
-        if selected == "rootless" and socket_gid is not None:
-            raise ValueError("rootless authority cannot carry a socket GID")
+        if selected != "rootful" and socket_gid is not None:
+            raise ValueError(f"{selected} authority cannot carry a socket GID")
 
         runtime_dir = _new_direct_tmp(f"jhin-p10-runtime-{identifier}-")
         barrier_root: Path | None = None
@@ -1831,6 +1887,8 @@ class ComposeAuthority:
                         "SANDBOX_DOCKER_GID": str(socket_gid),
                     }
                 )
+            elif selected == "desktop":
+                values["SANDBOX_DOCKER_SOCKET_HOST"] = str(socket_path)
             else:
                 values["PHASE10_ROOTLESS_DOCKER_SOCKET"] = str(socket_path)
             environment = sanitized_external_environment(
@@ -2018,6 +2076,8 @@ class ComposeAuthority:
     def expected_services(self) -> set[str]:
         if self.mode == "rootless":
             return set(EXPECTED_ROOTLESS_SERVICES)
+        if self.mode == "desktop":
+            return set(EXPECTED_DESKTOP_SERVICES)
         return set(EXPECTED_ROOTFUL_SERVICES)
 
     @property
@@ -3934,8 +3994,15 @@ class ComposeAuthority:
         services: Iterable[str] = ("api", "agent-worker", "tool-worker"),
         upgrade: bool = False,
     ) -> None:
-        """Check only UID/owner/mode/decoded length; never print key bytes."""
-        expected = {"decoded": 32, "mode": 0o400, "owner": 10001, "uid": 10001}
+        """Check only UID/owner/mode/decoded length; never print key bytes.
+
+        Docker Desktop's shared-file layer presents every bind-mounted host
+        file as ``uid 0 / gid 0`` inside the VM regardless of the ``chown``
+        performed by the installer, so desktop mode accepts owner ``0`` as
+        well as the exact ``10001`` that Linux daemons preserve.
+        """
+        expected = {"decoded": 32, "mode": 0o400, "uid": 10001}
+        accepted_owners = {10001, 0} if self.mode == "desktop" else {10001}
         for service in services:
             result = self._run(
                 self.master_key_readability_command(service, upgrade=upgrade),
@@ -3946,7 +4013,10 @@ class ComposeAuthority:
                 observed = json.loads(_text(result.stdout))
             except json.JSONDecodeError as error:
                 raise RuntimeError(f"{service} returned malformed key metadata") from error
-            if observed != expected:
+            if not isinstance(observed, dict):
+                raise RuntimeError(f"{service} returned malformed key metadata")
+            owner = observed.pop("owner", None)
+            if observed != expected or owner not in accepted_owners:
                 raise RuntimeError(f"{service} cannot read the exact UID-10001 master key")
 
     def probe_rootless_capabilities(
@@ -4054,12 +4124,18 @@ class ComposeAuthority:
         *,
         runner: CommandRunner = run_command,
     ) -> None:
-        """Refuse a daemon where runner startup could reap another deployment."""
+        """Refuse a daemon where runner startup could reap another deployment.
+
+        Ordinary ``jhin`` containers and networks are refused because sandbox
+        reaping labels are project-agnostic and a live ordinary runner would
+        reap this invocation's jobs (and vice versa). Ordinary ``jhin`` data
+        volumes at rest (``postgres_data``, ``nats_data``, ...) are deliberately
+        tolerated: neither runner touches them, this harness removes only its
+        own exact project vector, and a developer must be able to keep a
+        persistent local database while running the leased suite.
+        """
         probes = (
             self.docker_command("ps", "-aq", "--filter", "label=com.docker.compose.project=jhin"),
-            self.docker_command(
-                "volume", "ls", "-q", "--filter", "label=com.docker.compose.project=jhin"
-            ),
             self.docker_command(
                 "network", "ls", "-q", "--filter", "label=com.docker.compose.project=jhin"
             ),
@@ -5797,7 +5873,7 @@ def read_authority_lease(
         if type(socket_gid) is not int or socket_gid <= 0:
             raise ValueError("authority lease rootful socket GID is invalid")
     elif socket_gid is not None:
-        raise ValueError("authority lease rootless socket GID is invalid")
+        raise ValueError(f"authority lease {mode} socket GID is invalid")
     executable = payload["docker_executable"]
     if not isinstance(executable, str) or not Path(executable).is_absolute():
         raise ValueError("authority lease Docker executable is invalid")
@@ -6673,11 +6749,11 @@ def _parser() -> argparse.ArgumentParser:
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     run = subcommands.add_parser("run", help="start, test, and clean one live scenario")
-    run.add_argument("--mode", choices=("rootful", "rootless"), required=True)
+    run.add_argument("--mode", choices=_COMPOSE_MODES, required=True)
     run.add_argument("--scenario", choices=tuple(LIVE_SCENARIOS), required=True)
 
     up = subcommands.add_parser("up", help="start one persistent isolated stack")
-    up.add_argument("--mode", choices=("rootful", "rootless"), required=True)
+    up.add_argument("--mode", choices=_COMPOSE_MODES, required=True)
 
     subcommands.add_parser("down", help="stop the persistent isolated stack")
     compose = subcommands.add_parser("compose", help="run against the persistent exact vector")

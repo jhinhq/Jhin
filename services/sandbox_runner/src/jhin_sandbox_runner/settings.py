@@ -61,6 +61,17 @@ class Settings(ObservabilitySettings):
                 raise ValueError("rootless mode requires the exact private transport URL")
             return self
 
+        if self.sandbox_docker_mode == "desktop":
+            if self.sandbox_docker_socket is None:
+                raise ValueError("desktop mode requires a Docker socket path")
+            if not self.sandbox_docker_socket.is_absolute():
+                raise ValueError("desktop Docker socket path must be absolute")
+            if self.sandbox_docker_gid is not None:
+                raise ValueError("desktop mode accepts no socket GID")
+            if self.sandbox_docker_transport_url is not None:
+                raise ValueError("desktop mode accepts no transport URL")
+            return self
+
         if self.sandbox_docker_socket is None:
             raise ValueError("rootful mode requires a Docker socket path")
         if not self.sandbox_docker_socket.is_absolute():

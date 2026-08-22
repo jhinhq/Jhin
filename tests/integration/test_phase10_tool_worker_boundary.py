@@ -2399,6 +2399,11 @@ def test_clean_daemon_preflight_checks_only_exact_reserved_authorities() -> None
         assert any("label=jhin.sandbox.workspace" in command for command in joined)
         assert any(command.endswith("network inspect jhin_sandbox") for command in joined)
         assert not any("jhin*" in command for command in joined)
+        # Persistent ordinary data volumes are tolerated: nothing reaps them.
+        assert not any(
+            "volume ls" in command and "com.docker.compose.project=jhin" in command
+            for command in joined
+        )
     finally:
         authority.remove_runtime_paths()
 
@@ -2407,7 +2412,6 @@ def test_clean_daemon_preflight_checks_only_exact_reserved_authorities() -> None
     "resource",
     [
         "project",
-        "project-volume",
         "project-network",
         "job",
         "initializer",
@@ -2420,9 +2424,6 @@ def test_clean_daemon_preflight_fails_closed_on_any_reserved_resource(resource: 
     recorder = _ScriptedRecorder(authority)
     project = authority.docker_command(
         "ps", "-aq", "--filter", "label=com.docker.compose.project=jhin"
-    )
-    project_volume = authority.docker_command(
-        "volume", "ls", "-q", "--filter", "label=com.docker.compose.project=jhin"
     )
     project_network = authority.docker_command(
         "network", "ls", "-q", "--filter", "label=com.docker.compose.project=jhin"
@@ -2438,8 +2439,6 @@ def test_clean_daemon_preflight_fails_closed_on_any_reserved_resource(resource: 
     recorder.responses[network] = (1, "", "not found")
     if resource == "project":
         recorder.responses[project] = (0, "foreign-container\n", "")
-    elif resource == "project-volume":
-        recorder.responses[project_volume] = (0, "foreign-project-volume\n", "")
     elif resource == "project-network":
         recorder.responses[project_network] = (0, "foreign-project-network\n", "")
     elif resource == "job":

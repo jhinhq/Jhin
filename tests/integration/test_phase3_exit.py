@@ -175,6 +175,9 @@ async def test_two_agents_two_profiles_run_through_temporal(
         events = [e["event_type"] for e in timeline]
         assert events == [
             "run.started",
+            # Memory retrieval provenance is recorded inside the locked bind
+            # transaction, immediately before the manifest/reasoning pair.
+            "memory.retrieved",
             "agent.step.tool_manifest",
             "agent.step.reasoning",
             "node.load_context",

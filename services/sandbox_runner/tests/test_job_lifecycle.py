@@ -207,7 +207,11 @@ class _StartupSystem:
     async def info(self) -> dict[str, object]:
         self.owner.calls.append("system.info")
         self.owner.fail_if("system.info")
-        return {"SecurityOptions": self.owner.security_options}
+        info: dict[str, object] = {"SecurityOptions": self.owner.security_options}
+        operating_system = type(self.owner).operating_system
+        if operating_system is not _UNSET:
+            info["OperatingSystem"] = operating_system
+        return info
 
 
 class _StartupNetworks:
@@ -255,11 +259,15 @@ class _StartupVolumes:
         return {"Volumes": []}
 
 
+_UNSET: object = object()
+
+
 class _StartupDocker:
     instances: ClassVar[list[_StartupDocker]] = []
     fail_stage: ClassVar[str | None] = None
     orphan: ClassVar[_FailingOrphan | None] = None
     security_options: ClassVar[list[str]] = ["name=rootless"]
+    operating_system: ClassVar[object] = _UNSET
 
     def __init__(self, *, url: str) -> None:
         self.url = url
@@ -294,6 +302,7 @@ def startup_docker(monkeypatch: pytest.MonkeyPatch) -> type[_StartupDocker]:
     _StartupDocker.fail_stage = None
     _StartupDocker.orphan = None
     _StartupDocker.security_options = ["name=rootless"]
+    _StartupDocker.operating_system = _UNSET
     monkeypatch.setattr(jobs_module.aiodocker, "Docker", _StartupDocker)
     monkeypatch.setattr(jobs_module.os, "geteuid", lambda: 10001)
     monkeypatch.setattr(jobs_module.os, "getegid", lambda: 10001)
@@ -606,3 +615,92 @@ async def test_rootful_start_does_not_require_rootless_security_option(
     )
     await manager.start()
     assert startup_docker.instances[0].calls[:2] == ["version", "system.info"]
+
+
+def _desktop_manager(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    process_groups: list[int],
+) -> JobManager:
+    socket_path = tmp_path / "docker.sock"
+    socket_path.touch()
+    fake_stat = type("SocketStat", (), {"st_mode": 0o140000, "st_uid": 0, "st_gid": 0})()
+    monkeypatch.setattr(type(socket_path), "lstat", lambda _path: fake_stat)
+    monkeypatch.setattr(jobs_module.os, "access", lambda _path, _mode, *, effective_ids: True)
+    monkeypatch.setattr(jobs_module.os, "getgroups", lambda: process_groups)
+    return JobManager(
+        runner_settings(
+            sandbox_docker_mode="desktop",
+            sandbox_docker_socket=socket_path,
+            sandbox_docker_transport_url=None,
+            sandbox_docker_gid=None,
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_desktop_start_accepts_a_docker_desktop_daemon_through_the_root_group(
+    startup_docker: type[_StartupDocker],
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    startup_docker.security_options = ["name=seccomp,profile=builtin", "name=cgroupns"]
+    startup_docker.operating_system = "Docker Desktop"
+    manager = _desktop_manager(tmp_path, monkeypatch, process_groups=[10001, 0])
+    await manager.start()
+    docker = startup_docker.instances[0]
+    assert docker.url == f"unix://{tmp_path / 'docker.sock'}"
+    assert docker.calls[:2] == ["version", "system.info"]
+    assert manager._docker is docker
+
+
+@pytest.mark.parametrize(
+    "process_groups",
+    [[], [10001], [12001], [10001, 12001], [0, 12001]],
+)
+@pytest.mark.asyncio
+async def test_desktop_start_requires_exactly_the_root_group(
+    startup_docker: type[_StartupDocker],
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    process_groups: list[int],
+) -> None:
+    startup_docker.operating_system = "Docker Desktop"
+    manager = _desktop_manager(tmp_path, monkeypatch, process_groups=process_groups)
+    with pytest.raises(DockerSocketConfigurationError, match="root group as its only"):
+        await manager.start()
+    assert startup_docker.instances == []
+
+
+@pytest.mark.parametrize("operating_system", ["Ubuntu 24.04 LTS", "", None, 3])
+@pytest.mark.asyncio
+async def test_desktop_start_rejects_a_non_desktop_daemon_before_any_mutation(
+    startup_docker: type[_StartupDocker],
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    operating_system: object,
+) -> None:
+    startup_docker.security_options = []
+    startup_docker.operating_system = operating_system
+    manager = _desktop_manager(tmp_path, monkeypatch, process_groups=[0])
+    with pytest.raises(DockerDaemonConfigurationError, match="Docker Desktop"):
+        await manager.start()
+    docker = startup_docker.instances[0]
+    assert docker.calls == ["version", "system.info", "close"]
+    assert docker.closed is True
+    assert manager._docker is None
+
+
+@pytest.mark.asyncio
+async def test_desktop_start_requires_runner_gid_10001(
+    startup_docker: type[_StartupDocker],
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    startup_docker.operating_system = "Docker Desktop"
+    manager = _desktop_manager(tmp_path, monkeypatch, process_groups=[0])
+    monkeypatch.setattr(jobs_module.os, "getegid", lambda: 0)
+    with pytest.raises(DockerSocketConfigurationError, match="10001:10001"):
+        await manager.start()
+    assert startup_docker.instances == []

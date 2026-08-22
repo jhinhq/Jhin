@@ -16,6 +16,7 @@ from typing import Literal, cast
 import pytest
 
 from .phase10_upgrade_harness import (
+    EXPECTED_DESKTOP_SERVICES,
     EXPECTED_ROOTFUL_SERVICES,
     EXPECTED_ROOTLESS_SERVICES,
     ComposeAuthority,
@@ -28,7 +29,8 @@ from .phase10_upgrade_harness import (
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_BASE = ("compose.yaml", "compose.dev.yaml")
-ComposeMode = Literal["rootful", "rootless"]
+ComposeMode = Literal["rootful", "rootless", "desktop"]
+_COMPOSE_MODES = ("rootful", "rootless", "desktop")
 
 API_URL = os.environ.get("JHIN_API_URL", "http://localhost:8000")
 WEB_URL = os.environ.get("JHIN_WEB_URL", "http://localhost:3000")
@@ -62,9 +64,11 @@ def selected_compose_mode(value: str | None = None) -> ComposeMode:
     """Return the explicitly selected socket mode, failing closed when absent."""
     selected = value if value is not None else os.environ.get("PHASE10_SOCKET_MODE")
     if selected is None:
-        raise ValueError("PHASE10_SOCKET_MODE is required and must be rootful or rootless")
-    if selected not in {"rootful", "rootless"}:
-        raise ValueError("PHASE10_SOCKET_MODE must be exactly rootful or rootless")
+        raise ValueError(
+            "PHASE10_SOCKET_MODE is required and must be rootful, rootless, or desktop"
+        )
+    if selected not in _COMPOSE_MODES:
+        raise ValueError("PHASE10_SOCKET_MODE must be exactly rootful, rootless, or desktop")
     return cast(ComposeMode, selected)
 
 
@@ -78,6 +82,8 @@ def required_services_for_mode(mode: str) -> set[str]:
     selected = selected_compose_mode(mode)
     if selected == "rootless":
         return set(EXPECTED_ROOTLESS_SERVICES)
+    if selected == "desktop":
+        return set(EXPECTED_DESKTOP_SERVICES)
     return set(EXPECTED_ROOTFUL_SERVICES)
 
 

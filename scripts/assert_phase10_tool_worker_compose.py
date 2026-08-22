@@ -16,7 +16,11 @@ from typing import Any, Literal, Protocol, cast
 import yaml  # type: ignore[import-untyped]
 
 ROOT = Path(__file__).resolve().parents[1]
-ComposeMode = Literal["rootful", "rootless"]
+ComposeMode = Literal["rootful", "rootless", "desktop"]
+_COMPOSE_MODES: tuple[ComposeMode, ...] = ("rootful", "rootless", "desktop")
+_MODE_ERROR = "mode must be rootful, rootless, or desktop"
+_DESKTOP_SOCKET_SOURCE = "${SANDBOX_DOCKER_SOCKET_HOST:-/var/run/docker.sock}"
+_DESKTOP_OPERATING_SYSTEM = "Docker Desktop"
 _ROOTLESS_TRANSPORT_URL = "http://rootless-docker-transport:2375"
 _RUNNER_IMAGE = "jhin-sandbox-runner:local"
 _DEFAULT_SANDBOX_NETWORK = "jhin_sandbox"
@@ -161,7 +165,7 @@ def _require_mapping(value: object, message: str) -> dict[str, Any]:
 
 def compose_files(mode: str, *, dev: bool = False) -> tuple[str, ...]:
     """Return the only file vector accepted by this assertion authority."""
-    _require(mode in {"rootful", "rootless"}, "mode must be rootful or rootless")
+    _require(mode in _COMPOSE_MODES, _MODE_ERROR)
     selected = cast(ComposeMode, mode)
     if dev:
         return ("compose.yaml", "compose.dev.yaml", f"compose.{selected}.yaml")
@@ -234,6 +238,56 @@ def validate_rootful_socket(
     if info.st_gid != gid:
         raise ValueError("rootful Docker socket group does not match SANDBOX_DOCKER_GID")
     return str(path), gid
+
+
+def validate_desktop_socket(
+    socket_path: str,
+    *,
+    _lstat: Callable[[Path], StatResult] = _path_lstat,
+    _resolve: Callable[[Path], Path] = lambda path: path.resolve(strict=True),
+) -> str:
+    """Resolve the Docker Desktop compatibility symlink to its real Unix socket.
+
+    Docker Desktop is the one mode in which a symlink is accepted on the host:
+    ``/var/run/docker.sock`` points at a user-owned socket below ``~/.docker``.
+    The daemon identity itself is verified separately through ``docker info``.
+    """
+    path = Path(socket_path)
+    if not path.is_absolute():
+        raise ValueError("desktop Docker socket path must be absolute")
+    try:
+        resolved = _resolve(path)
+    except OSError as exc:
+        raise ValueError("cannot resolve desktop Docker socket") from exc
+    if not resolved.is_absolute():
+        raise ValueError("desktop Docker socket must resolve to an absolute path")
+    try:
+        info = _lstat(resolved)
+    except OSError as exc:
+        raise ValueError("cannot inspect desktop Docker socket") from exc
+    if stat.S_ISLNK(info.st_mode):
+        raise ValueError("desktop Docker socket resolution must end at a real path")
+    if not stat.S_ISSOCK(info.st_mode):
+        raise ValueError("desktop Docker authority must be a Unix socket")
+    return str(resolved)
+
+
+def validate_desktop_daemon_info(info: Mapping[str, Any]) -> None:
+    """Require the selected daemon to identify itself as Docker Desktop."""
+    operating_system = info.get("OperatingSystem")
+    _require(
+        isinstance(operating_system, str) and _DESKTOP_OPERATING_SYSTEM in operating_system,
+        "desktop mode requires a Docker Desktop daemon",
+    )
+    raw_options = info.get("SecurityOptions", [])
+    _require(
+        isinstance(raw_options, list) and all(isinstance(item, str) for item in raw_options),
+        "Docker daemon security options are malformed",
+    )
+    _require(
+        not any(item.split(",", 1)[0] == "name=rootless" for item in raw_options),
+        "desktop mode selected a rootless daemon",
+    )
 
 
 def validate_sandbox_network(value: str) -> str:
@@ -334,6 +388,7 @@ def assert_source_contract() -> None:
     base = _load_yaml_mapping("compose.yaml")
     rootful = _load_yaml_mapping("compose.rootful.yaml")
     rootless = _load_yaml_mapping("compose.rootless.yaml")
+    desktop = _load_yaml_mapping("compose.desktop.yaml")
 
     services = _require_mapping(base.get("services"), "compose.yaml services must be a mapping")
     runner = _require_mapping(
@@ -392,6 +447,35 @@ def assert_source_contract() -> None:
         source="${PHASE10_ROOTLESS_DOCKER_SOCKET:?set the verified rootless socket}",
         target="/run/host/docker.sock",
     )
+    _require_source_socket_bind(
+        desktop,
+        filename="compose.desktop.yaml",
+        service_name="sandbox-runner",
+        source=_DESKTOP_SOCKET_SOURCE,
+        target="/run/jhin/docker.sock",
+    )
+    desktop_services = _require_mapping(
+        desktop.get("services"), "compose.desktop.yaml services must be a mapping"
+    )
+    _require(
+        set(desktop_services) == {"sandbox-runner"},
+        "compose.desktop.yaml may only touch sandbox-runner",
+    )
+    desktop_runner = _require_mapping(
+        desktop_services.get("sandbox-runner"),
+        "compose.desktop.yaml sandbox-runner must be a mapping",
+    )
+    _require(
+        set(desktop_runner) == {"environment", "group_add", "volumes"},
+        "compose.desktop.yaml sandbox-runner keys drifted",
+    )
+    _require(desktop_runner.get("group_add") == ["0"], "compose.desktop.yaml group_add drifted")
+    _require(
+        desktop_runner.get("environment")
+        == {"SANDBOX_DOCKER_MODE": "desktop", "SANDBOX_DOCKER_SOCKET": "/run/jhin/docker.sock"},
+        "compose.desktop.yaml runner environment drifted",
+    )
+    _require("networks" not in desktop, "compose.desktop.yaml must not declare networks")
 
 
 def _assert_common_workers(
@@ -803,6 +887,48 @@ def _assert_rootful(
     )
 
 
+def _assert_desktop(
+    services: Mapping[str, Any],
+    *,
+    expected_socket_source: str | None,
+) -> None:
+    _require("rootless-docker-transport" not in services, "rootless adapter leaked to desktop")
+    _require(expected_socket_source is not None, "desktop socket source is required")
+    runner = cast(dict[str, Any], services["sandbox-runner"])
+    environment = cast(dict[str, Any], runner["environment"])
+    expected_runner_keys = _RUNNER_BASE_ENVIRONMENT_KEYS | {
+        "SANDBOX_DOCKER_MODE",
+        "SANDBOX_DOCKER_SOCKET",
+    }
+    _require(
+        set(environment) == expected_runner_keys,
+        "desktop runner environment key set drifted",
+    )
+    _require(_network_names(runner) == {"runner"}, "desktop runner networks drifted")
+    _require(runner.get("group_add") == ["0"], "desktop runner must add exactly the root group")
+    _require(runner.get("depends_on", {}) == {}, "desktop runner has a daemon dependency")
+    _require(environment.get("SANDBOX_DOCKER_MODE") == "desktop", "mode drifted")
+    _require(
+        environment.get("SANDBOX_DOCKER_SOCKET") == "/run/jhin/docker.sock",
+        "desktop container socket drifted",
+    )
+    for key in ("SANDBOX_DOCKER_GID", "SANDBOX_DOCKER_TRANSPORT_URL"):
+        _require(key not in environment, f"desktop runner received {key}")
+    _require(
+        runner.get("volumes")
+        == [
+            {
+                "type": "bind",
+                "source": expected_socket_source,
+                "target": "/run/jhin/docker.sock",
+                "bind": {},
+            }
+        ]
+        and str(expected_socket_source).startswith("/"),
+        "desktop socket bind must be canonical long syntax",
+    )
+
+
 def assert_rendered_contract(
     config: dict[str, Any],
     *,
@@ -815,7 +941,7 @@ def assert_rendered_contract(
 ) -> None:
     """Assert the one exhaustive production/dev x rootful/rootless contract."""
     assert_source_contract()
-    _require(mode in {"rootful", "rootless"}, "mode must be rootful or rootless")
+    _require(mode in _COMPOSE_MODES, _MODE_ERROR)
     expected_sandbox_network = validate_sandbox_network(expected_sandbox_network)
     _require(
         expected_app_env in ({"dev", "test"} if dev else {"production"}),
@@ -829,18 +955,25 @@ def assert_rendered_contract(
     runner = cast(dict[str, Any], services["sandbox-runner"])
     runner_environment = cast(dict[str, Any], runner.get("environment", {}))
     has_adapter = "rootless-docker-transport" in services
-    has_rootful_authority = any(
+    has_socket_authority = any(
         key in runner_environment for key in ("SANDBOX_DOCKER_GID", "SANDBOX_DOCKER_SOCKET")
     ) or bool(runner.get("group_add"))
     if selected == "rootless":
         _require(has_adapter, "rootless authority overlay is missing")
-        _require(not has_rootful_authority, "merged authority overlays are forbidden")
+        _require(not has_socket_authority, "merged authority overlays are forbidden")
     else:
         _require(not has_adapter, "merged authority overlays are forbidden")
         _require(
-            runner_environment.get("SANDBOX_DOCKER_MODE") == "rootful",
-            "rootful authority overlay is missing",
+            runner_environment.get("SANDBOX_DOCKER_MODE") == selected,
+            f"{selected} authority overlay is missing",
         )
+        group_add = runner.get("group_add") or []
+        merged_socket_overlays = (
+            "SANDBOX_DOCKER_GID" in runner_environment or len(group_add) != 1
+            if selected == "desktop"
+            else "0" in [str(group) for group in group_add]
+        )
+        _require(not merged_socket_overlays, "merged authority overlays are forbidden")
 
     _assert_common_workers(
         services,
@@ -863,6 +996,9 @@ def assert_rendered_contract(
             expected_app_env=expected_app_env,
             expected_socket_source=expected_socket_source,
         )
+    elif selected == "desktop":
+        _require(expected_rootful_gid is None, "desktop mode accepts no socket GID")
+        _assert_desktop(services, expected_socket_source=expected_socket_source)
     else:
         _assert_rootful(
             services,
@@ -906,7 +1042,7 @@ def assert_rendered_contract(
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("rootful", "rootless"), required=True)
+    parser.add_argument("--mode", choices=_COMPOSE_MODES, required=True)
     parser.add_argument("--dev", action="store_true")
     return parser.parse_args(argv)
 
@@ -932,6 +1068,10 @@ def main(argv: list[str] | None = None) -> int:
                 "SANDBOX_DOCKER_GID": str(expected_gid),
             }
         )
+    elif mode == "desktop":
+        socket_value = os.environ.get("SANDBOX_DOCKER_SOCKET_HOST", "/var/run/docker.sock")
+        expected_socket = validate_desktop_socket(socket_value)
+        explicit_env["SANDBOX_DOCKER_SOCKET_HOST"] = expected_socket
     else:
         rootless_socket = os.environ.get("PHASE10_ROOTLESS_DOCKER_SOCKET", "")
         if not rootless_socket:

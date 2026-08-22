@@ -2,6 +2,8 @@
 
 PYTEST := uv run pytest
 PHASE10_HARNESS := uv run python -m tests.integration.phase10_upgrade_harness
+# rootful | rootless (Linux servers) | desktop (Docker Desktop on macOS/Windows,
+# local development only).
 PHASE10_MODE ?= rootful
 SANDBOX_DOCKER_SOCKET_HOST ?= /var/run/docker.sock
 
@@ -10,7 +12,7 @@ SANDBOX_DOCKER_SOCKET_HOST ?= /var/run/docker.sock
 	test-tool-worker-boundary test-tool-worker-boundary-integration \
 	test-phase10-regressions test-tool-worker-live-upgrade \
 	test-sandbox-socket-rootful test-sandbox-socket-rootless \
-	test-sandbox-socket-wrong-gid
+	test-sandbox-socket-desktop test-sandbox-socket-wrong-gid
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-38s\033[0m %s\n", $$1, $$2}'
@@ -70,6 +72,9 @@ test-sandbox-socket-rootless: ## Verify an existing host-UID-10001 rootless daem
 	env -u SANDBOX_DOCKER_GID \
 		PHASE10_ROOTLESS_DOCKER_SOCKET="$(PHASE10_ROOTLESS_DOCKER_SOCKET)" \
 		$(PHASE10_HARNESS) run --mode rootless --scenario socket-rootless
+
+test-sandbox-socket-desktop: ## Verify the Docker Desktop (macOS/Windows, dev-only) socket and live sandbox path
+	env -u SANDBOX_DOCKER_GID $(PHASE10_HARNESS) run --mode desktop --scenario socket-desktop
 
 test-sandbox-socket-wrong-gid: ## Prove rootful runner startup fails closed on a false GID
 	test -n "$(SANDBOX_DOCKER_GID)"

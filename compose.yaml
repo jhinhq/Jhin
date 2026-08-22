@@ -243,7 +243,10 @@ services:
     restart: unless-stopped
 
   postgres:
-    image: postgres:17-alpine
+    # pgvector ships in this image (postgres:17-alpine does not); migration
+    # 0016 only creates memory_record.embedding_vec when the extension exists
+    # (docs/architecture/memory.md, "pgvector / full-text").
+    image: pgvector/pgvector:pg17
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-jhin}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-jhin}
