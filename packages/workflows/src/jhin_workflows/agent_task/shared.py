@@ -62,6 +62,17 @@ class DelegationRequest:
 
 
 @dataclass
+class WorkRequestStart:
+    """One accepted work request surfaced by the step activity (the
+    ``organization.respond_work_request`` executor created the task row);
+    the workflow starts the durable, non-blocking WorkRequestTaskWorkflow."""
+
+    work_request_id: str
+    task_id: str
+    agent_id: str
+
+
+@dataclass
 class RunStepInput:
     workspace_id: str
     task_id: str
@@ -87,6 +98,9 @@ class StepResult:
     # DelegatedTaskWorkflow per entry and awaits the blocking one (at most
     # one — the step parks immediately after a blocking delegation).
     delegations: list[DelegationRequest] = field(default_factory=list)
+    # Work requests this agent accepted during the step (coordination
+    # release): each starts one abandoned WorkRequestTaskWorkflow child.
+    work_request_starts: list[WorkRequestStart] = field(default_factory=list)
     # A claimed mutation whose terminal outcome cannot be proven. The
     # activity persists this before failing non-retryably so the workflow
     # cannot advance to another model step and repeat the effect.

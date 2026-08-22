@@ -57,6 +57,11 @@ class TaskContext(BaseModel):
     description: str
     history: tuple[ConversationTurn, ...] = ()
     user_instructions: tuple[str, ...] = ()
+    # Coordination release: bounded, public-identity roster block and (for
+    # managers only) the deterministic team rollup. Both are routing/status
+    # context appended to the system prompt; neither changes authority.
+    organization_context: str = ""
+    manager_context: str = ""
 
 
 def compose_system_prompt(snapshot: AgentExecutionSnapshot, *, has_tools: bool = False) -> str:
@@ -118,9 +123,11 @@ def build_messages(
     snapshot: AgentExecutionSnapshot, task: TaskContext, *, has_tools: bool = False
 ) -> tuple[ModelMessage, ...]:
     """Full message list for one reasoning step."""
-    messages: list[ModelMessage] = [
-        ModelMessage(role="system", content=compose_system_prompt(snapshot, has_tools=has_tools))
-    ]
+    system_prompt = compose_system_prompt(snapshot, has_tools=has_tools)
+    for section in (task.organization_context, task.manager_context):
+        if section:
+            system_prompt += "\n\n" + section
+    messages: list[ModelMessage] = [ModelMessage(role="system", content=system_prompt)]
 
     task_text = f"Task: {task.title}"
     if task.description:

@@ -9,6 +9,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from jhin_api.approvals.schemas import ApprovalOut
+from jhin_api.coordination.schemas import WorkReviewOut
 from jhin_api.tasks.schemas import MessageOut, TaskOut
 from jhin_domain import ActivityKind, ConversationStatus
 
@@ -101,7 +102,8 @@ class ConversationDetailOut(BaseModel):
 
 
 class ActivityCardOut(BaseModel):
-    # Stable: "msg:<uuid>" | "task:<uuid>:<state>" | "approval:<uuid>"
+    # Stable: "msg:<uuid>" | "task:<uuid>:<state>" | "approval:<uuid>" |
+    # "work_request:<uuid>:<asked|reported>" | "review:<uuid>"
     id: str
     kind: ActivityKind
     label: str
@@ -115,6 +117,8 @@ class ActivityCardOut(BaseModel):
     root_task_id: UUID | None = None
     conversation_id: UUID | None = None
     approval_id: UUID | None = None
+    work_request_id: UUID | None = None
+    review_id: UUID | None = None
     summary: str
     detail_json: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
@@ -128,6 +132,7 @@ class ActivityListOut(BaseModel):
 class AttentionCounts(BaseModel):
     approvals: int
     failures: int
+    reviews: int = 0
     total: int
 
 
@@ -135,4 +140,6 @@ class AttentionOut(BaseModel):
     pending_approvals: list[ApprovalOut]
     failed_tasks: list[TaskOut]
     waiting_conversations: list[ConversationOut]
+    # Work reviews waiting on a human decision (coordination release).
+    pending_reviews: list[WorkReviewOut] = Field(default_factory=list)
     counts: AttentionCounts

@@ -289,12 +289,24 @@ def build_builtin_catalog() -> ToolCatalog:
     definitions and executors."""
     # Local import: jhin_tools.organization imports ToolExecutionContext
     # from this module.
+    from jhin_tools.directory import DIRECTORY_TOOLS
+    from jhin_tools.memory import MEMORY_TOOLS
     from jhin_tools.organization import ORGANIZATION_TOOLS
+    from jhin_tools.reviews import REVIEW_TOOLS
+    from jhin_tools.work_requests import WORK_REQUEST_TOOLS
 
     catalog = ToolCatalog()
     for definition, executor in BUILTIN_TOOLS:
         catalog.register(definition, executor)
-    for definition, org_executor, validator in ORGANIZATION_TOOLS:
+    # Coordination tools (directory search, peer work requests, reviews)
+    # register exactly like the Phase 8 organization tools.
+    for definition, org_executor, validator in (
+        *ORGANIZATION_TOOLS,
+        *DIRECTORY_TOOLS,
+        *WORK_REQUEST_TOOLS,
+        *REVIEW_TOOLS,
+        *MEMORY_TOOLS,
+    ):
         catalog.register(definition, org_executor, validator)
     return catalog
 

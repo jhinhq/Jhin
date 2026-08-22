@@ -48,9 +48,12 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import re
+import struct
 import threading
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -197,6 +200,52 @@ def build_completion(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     return 200, envelope
 
 
+def _png_chunk(kind: bytes, body: bytes) -> bytes:
+    return (
+        struct.pack(">I", len(body))
+        + kind
+        + body
+        + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF)
+    )
+
+
+def deterministic_png(prompt: str, *, side: int = 64) -> bytes:
+    """A tiny solid-colour PNG whose colour is derived from ``prompt``.
+
+    Stdlib only (no Pillow) so the fake provider stays dependency-free; the
+    result decodes as a real PNG so downstream image pipelines can be tested
+    end to end.
+    """
+    digest = hashlib.sha256(prompt.encode()).digest()
+    red, green, blue = digest[0], digest[1], digest[2]
+    row = b"\x00" + bytes((red, green, blue)) * side
+    raw = row * side
+    ihdr = struct.pack(">IIBBBBB", side, side, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"IDAT", zlib.compress(raw, 9))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+def build_image_generation(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """``POST /v1/images/generations``: deterministic inline PNG.
+
+    ``model == "always-fails"`` returns HTTP 500 like the chat endpoint.
+    """
+    model = str(body.get("model", "fake-image-model"))
+    if model == "always-fails":
+        return 500, {"error": {"message": "simulated provider failure"}}
+    prompt = str(body.get("prompt", ""))
+    png = deterministic_png(prompt)
+    return 200, {
+        "created": 0,
+        "model": model,
+        "data": [{"b64_json": base64.b64encode(png).decode()}],
+    }
+
+
 class _Handler(BaseHTTPRequestHandler):
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
         data = json.dumps(payload).encode()
@@ -216,7 +265,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": {"message": f"no route {self.path}"}})
 
     def do_POST(self) -> None:
-        if not self.path.rstrip("/").endswith("/chat/completions"):
+        path = self.path.rstrip("/")
+        if not (path.endswith("/chat/completions") or path.endswith("/images/generations")):
             self._send_json(404, {"error": {"message": f"no route {self.path}"}})
             return
         length = int(self.headers.get("Content-Length", "0"))
@@ -225,7 +275,10 @@ class _Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self._send_json(400, {"error": {"message": "invalid JSON body"}})
             return
-        status, payload = build_completion(body)
+        if path.endswith("/images/generations"):
+            status, payload = build_image_generation(body)
+        else:
+            status, payload = build_completion(body)
         self._send_json(status, payload)
 
     def log_message(self, format: str, *args: Any) -> None:

@@ -15,7 +15,11 @@ from jhin_api.auth.router import router as auth_router
 from jhin_api.connections.router import catalog_router as connectors_catalog_router
 from jhin_api.connections.router import router as connections_router
 from jhin_api.conversations.router import conversations_router, workspace_feed_router
+from jhin_api.coordination.router import router as coordination_router
+from jhin_api.directory.router import router as directory_router
 from jhin_api.health.router import router as health_router
+from jhin_api.media.router import router as media_router
+from jhin_api.memory.router import router as memory_router
 from jhin_api.models.router import profiles_router, providers_router
 from jhin_api.org.router import router as org_router
 from jhin_api.policy.router import router as policy_router
@@ -106,12 +110,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(agent_actions_router)
     app.include_router(conversations_router)
     app.include_router(workspace_feed_router)
+    app.include_router(directory_router)
+    app.include_router(coordination_router)
+    app.include_router(memory_router)
     app.include_router(policy_router)
     app.include_router(approvals_router)
     app.include_router(connectors_catalog_router)
     app.include_router(connections_router)
     app.include_router(triggers_router)
     app.include_router(webhooks_router)
+    app.include_router(media_router)
     return app
 
 

@@ -163,6 +163,21 @@ class Agent(Base, UuidPkMixin, TimestampMixin):
     # empty list means the plan 12.2 risk defaults apply.
     approval_policy_json: Mapped[list[Any]] = mapped_column(JsonList, default=list)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JsonDict, default=dict)
+    # Avatar (experience design: media). ``initials`` needs no asset; the
+    # pointer is only set after every variant of a replacement validated.
+    avatar_kind: Mapped[str] = mapped_column(
+        String(16), default="initials", server_default=text("'initials'")
+    )
+    active_avatar_asset_id: Mapped[UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey(
+            "media_asset.id",
+            ondelete="SET NULL",
+            use_alter=True,
+            name="fk_agent_active_avatar_asset",
+        ),
+        default=None,
+    )
 
     @validates("expertise_json")
     def _validate_expertise_json(self, _key: str, value: list[str]) -> list[str]:

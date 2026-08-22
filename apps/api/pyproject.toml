@@ -11,10 +11,15 @@ dependencies = [
     "nats-py>=2.13",
     "temporalio>=1.31",
     "argon2-cffi>=23.1",
+    # Multipart avatar uploads and the image pipeline (via jhin-media).
+    "python-multipart>=0.0.20",
+    "pillow>=11.0",
     "jhin-connectors",
     "jhin-db",
     "jhin-domain",
     "jhin-events",
+    "jhin-media",
+    "jhin-memory",
     "jhin-models",
     "jhin-observability",
     "jhin-policy",
@@ -32,6 +37,8 @@ jhin-connectors = { workspace = true }
 jhin-db = { workspace = true }
 jhin-domain = { workspace = true }
 jhin-events = { workspace = true }
+jhin-media = { workspace = true }
+jhin-memory = { workspace = true }
 jhin-models = { workspace = true }
 jhin-observability = { workspace = true }
 jhin-policy = { workspace = true }

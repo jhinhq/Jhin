@@ -14,6 +14,7 @@ from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.workflow import ParentClosePolicy
 
 from jhin_workflows.agent_task.shared import (
@@ -30,12 +31,17 @@ from jhin_workflows.agent_task.shared import (
     RunStepInput,
     SnapshotResult,
     StepResult,
+    WorkRequestStart,
 )
 from jhin_workflows.delegated_task.shared import (
     ACTIVITY_DELIVER_DELEGATION_RESULT,
     DelegatedTaskInput,
     DelegatedTaskResult,
     DeliverDelegationResultInput,
+)
+from jhin_workflows.work_request_task.shared import (
+    WorkRequestTaskInput,
+    work_request_workflow_id,
 )
 
 # Queue-admission poll cadence (plan 30). finalize_run signals queued
@@ -237,6 +243,12 @@ class AgentTaskWorkflow:
             if delegation_failed:
                 break
 
+            # Accepted work requests (coordination release) run as
+            # abandoned, non-blocking children; a duplicate start (retry)
+            # is a no-op.
+            for accepted in step.work_request_starts:
+                await self._start_work_request_task(params, accepted)
+
             if step.waiting_approval_id is not None:
                 # Durable approval wait (plan 8.2, 12.5): the tool call and
                 # approval rows are already persisted; park until a human
@@ -354,6 +366,24 @@ class AgentTaskWorkflow:
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=_FINALIZE_RETRY,
         )
+
+    async def _start_work_request_task(
+        self, params: AgentTaskInput, accepted: WorkRequestStart
+    ) -> None:
+        try:
+            await workflow.start_child_workflow(
+                "WorkRequestTaskWorkflow",
+                WorkRequestTaskInput(
+                    workspace_id=params.workspace_id,
+                    work_request_id=accepted.work_request_id,
+                    task_id=accepted.task_id,
+                    agent_id=accepted.agent_id,
+                ),
+                id=work_request_workflow_id(accepted.work_request_id),
+                parent_close_policy=ParentClosePolicy.ABANDON,
+            )
+        except WorkflowAlreadyStartedError:
+            return
 
     async def _finalize(
         self,

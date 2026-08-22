@@ -3,7 +3,10 @@
 from jhin_db.models.audit import AuditEvent
 from jhin_db.models.connection import Connection, WebhookDelivery
 from jhin_db.models.conversation import Conversation
+from jhin_db.models.coordination import ReviewPolicy, WorkRequest, WorkReview
 from jhin_db.models.identity import User, UserSession
+from jhin_db.models.media import AvatarGeneration, MediaAsset
+from jhin_db.models.memory import MemoryRecord
 from jhin_db.models.models import ModelProfile, ModelProvider
 from jhin_db.models.org import (
     Agent,
@@ -27,11 +30,15 @@ __all__ = [
     "AgentTeamMembership",
     "Approval",
     "AuditEvent",
+    "AvatarGeneration",
     "Connection",
     "Conversation",
+    "MediaAsset",
+    "MemoryRecord",
     "Message",
     "ModelProfile",
     "ModelProvider",
+    "ReviewPolicy",
     "RunEvent",
     "SandboxJob",
     "Secret",
@@ -43,6 +50,8 @@ __all__ = [
     "User",
     "UserSession",
     "WebhookDelivery",
+    "WorkRequest",
+    "WorkReview",
     "Workspace",
     "WorkspaceMembership",
 ]

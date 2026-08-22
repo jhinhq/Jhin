@@ -8,6 +8,8 @@ field name.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import time
 from collections.abc import AsyncIterator
@@ -25,8 +27,20 @@ from jhin_models.base import (
     ModelUsage,
     classify_retryable,
 )
+from jhin_models.images import DEFAULT_IMAGE_SIZE, GeneratedImage
 
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0)
+
+
+def _sniff_image_content_type(data: bytes) -> str:
+    """Magic-number sniff for the three formats the normalizer accepts."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "application/octet-stream"
 
 
 class OpenAICompatibleClient(ModelClient):
@@ -194,6 +208,52 @@ class OpenAICompatibleClient(ModelClient):
         body = response.json()
         count = len(body.get("data") or []) if isinstance(body, dict) else 0
         return f"ok: {count} models visible"
+
+    async def generate_image(
+        self, prompt: str, *, model: str, size: str = DEFAULT_IMAGE_SIZE
+    ) -> GeneratedImage:
+        """OpenAI Images API (``POST /images/generations``), base64 response.
+
+        ``b64_json`` is requested explicitly so the adapter never follows a
+        provider-supplied URL; the bytes come back inline and are handed to
+        the caller for safe normalization.
+        """
+        started = time.perf_counter()
+        response = await self._post(
+            "/images/generations",
+            {
+                "model": model,
+                "prompt": prompt,
+                "n": 1,
+                "size": size,
+                "response_format": "b64_json",
+            },
+        )
+        body = response.json()
+        entries = body.get("data") or []
+        encoded = entries[0].get("b64_json") if entries else None
+        if not isinstance(encoded, str) or not encoded:
+            raise ModelProviderError(
+                f"{self.provider_name}: image response carried no inline image data"
+            )
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ModelProviderError(
+                f"{self.provider_name}: image response was not valid base64"
+            ) from exc
+        content_type = (
+            entries[0].get("content_type")
+            or entries[0].get("mime_type")
+            or _sniff_image_content_type(data)
+        )
+        return GeneratedImage(
+            data=data,
+            content_type=str(content_type),
+            model=str(body.get("model") or model),
+            provider_request_id=response.headers.get("x-request-id"),
+            latency_ms=int((time.perf_counter() - started) * 1000),
+        )
 
     async def close(self) -> None:
         await self._client.aclose()

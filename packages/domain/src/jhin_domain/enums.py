@@ -330,3 +330,167 @@ class ToolCallStatus(StrEnum):
     FAILED = "failed"
     DENIED = "denied"
     REJECTED = "rejected"
+
+
+class AvatarKind(StrEnum):
+    """Which avatar an agent currently presents (experience design: media)."""
+
+    INITIALS = "initials"
+    UPLOAD = "upload"
+    GENERATED = "generated"
+
+
+class MediaAssetStatus(StrEnum):
+    """Lifecycle of a stored media asset.
+
+    ``pending`` rows exist only inside the transaction that validates their
+    variants; ``active`` assets are servable; ``rejected`` records a failed
+    validation; ``retired`` is a replaced avatar kept for audit until pruned.
+    """
+
+    PENDING = "pending"
+    ACTIVE = "active"
+    REJECTED = "rejected"
+    RETIRED = "retired"
+
+
+class AvatarGenerationStatus(StrEnum):
+    """Lifecycle of one asynchronous avatar generation request."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
+AVATAR_GENERATION_TERMINAL_STATUSES = frozenset(
+    {AvatarGenerationStatus.SUCCEEDED, AvatarGenerationStatus.FAILED}
+)
+
+
+class MemoryScope(StrEnum):
+    """Who a curated memory record belongs to (experience design, Memory)."""
+
+    AGENT = "agent"
+    TEAM = "team"
+    WORKSPACE = "workspace"
+
+
+# Visibility ordering used by non-amplification checks: a memory may never be
+# more visible than the source it was derived from.
+MEMORY_SCOPE_ORDER: dict[MemoryScope, int] = {
+    MemoryScope.AGENT: 0,
+    MemoryScope.TEAM: 1,
+    MemoryScope.WORKSPACE: 2,
+}
+
+
+class MemoryKind(StrEnum):
+    FACT = "fact"
+    PREFERENCE = "preference"
+    DECISION = "decision"
+    PROCEDURE = "procedure"
+    CONTEXT = "context"
+    OTHER = "other"
+
+
+class MemoryStatus(StrEnum):
+    """Lifecycle of one memory record version."""
+
+    PROPOSED = "proposed"
+    ACTIVE = "active"
+    CONTESTED = "contested"
+    SUPERSEDED = "superseded"
+    REJECTED = "rejected"
+    FORGOTTEN = "forgotten"
+
+
+# Statuses retrieval may ever inject into a prompt.
+MEMORY_RETRIEVABLE_STATUSES = frozenset({MemoryStatus.ACTIVE, MemoryStatus.CONTESTED})
+
+
+class MemorySensitivity(StrEnum):
+    NORMAL = "normal"
+    SENSITIVE = "sensitive"
+    REDACTED = "redacted"
+
+
+# --- Coordination and oversight (work requests, review policies, reviews) ---
+
+
+class WorkRequestStatus(StrEnum):
+    """Lifecycle of a peer/cross-team work request (distinct from delegation)."""
+
+    PENDING = "pending"
+    CLARIFICATION_REQUESTED = "clarification_requested"
+    ACCEPTED = "accepted"
+    DECLINED = "declined"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+# Requests still awaiting the target's decision.
+WORK_REQUEST_OPEN_STATUSES = frozenset(
+    {WorkRequestStatus.PENDING, WorkRequestStatus.CLARIFICATION_REQUESTED}
+)
+# Requests that occupy the target (awaiting decision or running as a task).
+WORK_REQUEST_ACTIVE_STATUSES = frozenset(
+    {
+        WorkRequestStatus.PENDING,
+        WorkRequestStatus.CLARIFICATION_REQUESTED,
+        WorkRequestStatus.ACCEPTED,
+    }
+)
+
+
+class ReviewScopeKind(StrEnum):
+    """What a review policy applies to."""
+
+    WORKSPACE = "workspace"
+    TEAM = "team"
+    AGENT = "agent"
+    TASK_TYPE = "task_type"
+
+
+class ReviewMode(StrEnum):
+    """When a review policy triggers."""
+
+    PRE_ACTION = "pre_action"
+    BEFORE_CLOSE = "before_close"
+    POST_ACTION = "post_action"
+    PERIODIC = "periodic"
+
+
+# Modes whose unresolved review blocks the source run.
+REVIEW_BLOCKING_MODES = frozenset({ReviewMode.PRE_ACTION, ReviewMode.BEFORE_CLOSE})
+
+
+class ReviewerType(StrEnum):
+    AGENT = "agent"
+    HUMAN = "human"
+
+
+class WorkReviewStatus(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    CHANGES_REQUESTED = "changes_requested"
+    SKIPPED = "skipped"
+    ESCALATED = "escalated"
+
+
+class ReviewVerdict(StrEnum):
+    """The decision a reviewer submits; mapped onto WorkReviewStatus."""
+
+    APPROVE = "approve"
+    CHANGES_REQUESTED = "changes_requested"
+    ESCALATE = "escalate"
+
+
+WORK_REVIEW_DECIDED_STATUSES = frozenset(
+    {
+        WorkReviewStatus.APPROVED,
+        WorkReviewStatus.CHANGES_REQUESTED,
+        WorkReviewStatus.SKIPPED,
+        WorkReviewStatus.ESCALATED,
+    }
+)

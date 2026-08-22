@@ -26,6 +26,8 @@ members = [
     "packages/tools",
     "packages/connectors",
     "packages/triggers",
+    "packages/media",
+    "packages/memory",
 ]
 
 [dependency-groups]
@@ -60,6 +62,8 @@ src = [
     "packages/tools/src",
     "packages/connectors/src",
     "packages/triggers/src",
+    "packages/media/src",
+    "packages/memory/src",
 ]
 
 [tool.ruff.lint]
@@ -99,6 +103,8 @@ files = [
     "packages/tools/src",
     "packages/connectors/src",
     "packages/triggers/src",
+    "packages/media/src",
+    "packages/memory/src",
     "scripts",
     "tests",
 ]
@@ -127,6 +133,8 @@ testpaths = [
     "packages/tools/tests",
     "packages/connectors/tests",
     "packages/triggers/tests",
+    "packages/memory/tests",
+    "packages/media/tests",
     "services/agent_worker/tests",
     "services/event_worker/tests",
     "services/sandbox_runner/tests",

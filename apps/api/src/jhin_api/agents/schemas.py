@@ -1,12 +1,13 @@
 """Request/response contracts for agents (plan 6.5)."""
 
 from datetime import datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Self
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-from jhin_domain import AgentStatus, AutonomyLevel
+from jhin_api.media.urls import avatar_url_for
+from jhin_domain import AgentStatus, AutonomyLevel, AvatarKind
 
 Discoverability = Literal["discoverable", "hidden"]
 Availability = Literal["available", "unavailable"]
@@ -143,5 +144,16 @@ class AgentOut(BaseModel):
     metadata_json: dict[str, Any]
     memberships: list[AgentMembershipOut] = Field(default_factory=list)
     relationships: list[AgentRelationshipOut] = Field(default_factory=list)
+    # Avatar (experience design: media). ``avatar_url`` is a relative,
+    # authenticated path (append ``?size=64|128|256``) or null for initials.
+    avatar_kind: AvatarKind = AvatarKind.INITIALS
+    active_avatar_asset_id: UUID | None = None
+    avatar_url: str | None = None
     created_at: datetime
     updated_at: datetime
+
+    @model_validator(mode="after")
+    def derive_avatar_url(self) -> Self:
+        if self.avatar_url is None and self.active_avatar_asset_id is not None:
+            self.avatar_url = avatar_url_for(self.workspace_id, self.active_avatar_asset_id)
+        return self

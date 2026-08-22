@@ -16,8 +16,19 @@ from jhin_models.base import (
     ToolSchema,
 )
 from jhin_models.factory import build_model_client
+from jhin_models.images import (
+    GeneratedImage,
+    ImageGenerationClient,
+    ImageGenerationConfig,
+    ImageGenerationUnsupported,
+    as_image_generation_client,
+)
 
 __all__ = [
+    "GeneratedImage",
+    "ImageGenerationClient",
+    "ImageGenerationConfig",
+    "ImageGenerationUnsupported",
     "ModelClient",
     "ModelMessage",
     "ModelProviderError",
@@ -26,5 +37,6 @@ __all__ = [
     "ModelToolCall",
     "ModelUsage",
     "ToolSchema",
+    "as_image_generation_client",
     "build_model_client",
 ]

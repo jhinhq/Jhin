@@ -31,6 +31,7 @@ from jhin_api.conversations.schemas import (
     ConversationMessageOut,
     ConversationOut,
 )
+from jhin_api.coordination import service as coordination
 from jhin_api.deps import WorkspaceContext
 from jhin_api.public_payloads import public_tool_payload
 from jhin_api.tasks import service as tasks_service
@@ -44,6 +45,8 @@ from jhin_db.models import (
     Message,
     Task,
     User,
+    WorkRequest,
+    WorkReview,
 )
 from jhin_domain import (
     ACTIVITY_LABELS,
@@ -55,9 +58,12 @@ from jhin_domain import (
     MessageType,
     MessageVisibility,
     RecipientType,
+    ReviewerType,
     RunStatus,
     SenderType,
     TaskState,
+    WorkRequestStatus,
+    WorkReviewStatus,
     new_uuid7,
 )
 from jhin_events import EventEnvelope, EventPublisher, EventSource
@@ -114,6 +120,11 @@ def _not_found() -> HTTPException:
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _aware(value: datetime) -> datetime:
+    """SQLite hands back naive timestamps; treat them as UTC for ordering."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -860,7 +871,103 @@ class _CardDraft:
     target_agent_name: str | None = None
     task_id: UUID | None = None
     approval_id: UUID | None = None
+    work_request_id: UUID | None = None
+    review_id: UUID | None = None
     detail_json: dict[str, Any] | None = None
+
+
+def _is_work_request_message(message: Message) -> bool:
+    """Work-request traffic is projected from the authoritative
+    ``work_request`` row instead of its mirror messages (no duplicate cards)."""
+    return message.content_json.get("kind") == "work_request"
+
+
+def _work_request_cards(request: WorkRequest) -> list[_CardDraft]:
+    names = request.metadata_json
+    target_name = str(names.get("target_agent_name", "") or "") or None
+    detail = {
+        "status": request.status,
+        "title": request.title,
+        "expected_output": request.expected_output[:2_000],
+        "response": request.response[:2_000],
+        "created_task_id": str(request.created_task_id) if request.created_task_id else None,
+        "depth": request.depth,
+    }
+    cards = [
+        _CardDraft(
+            id=f"work_request:{request.id}:asked",
+            kind=ActivityKind.ASKED_AGENT,
+            actor_type="agent",
+            actor_agent_id=request.requester_agent_id,
+            target_agent_id=request.target_agent_id,
+            target_agent_name=target_name,
+            task_id=request.requester_task_id,
+            work_request_id=request.id,
+            created_at=request.created_at,
+            summary=_truncate(
+                f"Asked {target_name or 'another agent'}: {request.title}", SUMMARY_CHARS
+            ),
+            detail_json=detail,
+        )
+    ]
+    if request.status in (
+        WorkRequestStatus.COMPLETED.value,
+        WorkRequestStatus.FAILED.value,
+        WorkRequestStatus.DECLINED.value,
+    ):
+        requester_name = str(names.get("requester_agent_name", "") or "") or None
+        verb = {
+            WorkRequestStatus.COMPLETED.value: "finished",
+            WorkRequestStatus.FAILED.value: "could not complete",
+            WorkRequestStatus.DECLINED.value: "declined",
+        }[request.status]
+        cards.append(
+            _CardDraft(
+                id=f"work_request:{request.id}:reported",
+                kind=ActivityKind.REPORTED,
+                actor_type="agent",
+                actor_agent_id=request.target_agent_id,
+                target_agent_id=request.requester_agent_id,
+                target_agent_name=requester_name,
+                task_id=request.requester_task_id,
+                work_request_id=request.id,
+                created_at=request.completed_at or request.updated_at,
+                summary=_truncate(
+                    f"{target_name or 'An agent'} {verb} the request “{request.title}”"
+                    + (f": {request.response}" if request.response else "."),
+                    SUMMARY_CHARS,
+                ),
+                detail_json=detail,
+            )
+        )
+    return cards
+
+
+def _review_card(review: WorkReview) -> _CardDraft:
+    summary = str(review.evidence_json.get("summary", "") or "")
+    return _CardDraft(
+        id=f"review:{review.id}",
+        kind=ActivityKind.NEEDS_REVIEW,
+        actor_type="agent",
+        actor_agent_id=review.subject_agent_id,
+        target_agent_id=review.reviewer_agent_id,
+        task_id=review.task_id,
+        review_id=review.id,
+        created_at=review.requested_at,
+        summary=_truncate(
+            summary
+            or f"Review needed ({review.mode.replace('_', ' ')}, {review.reviewer_type} reviewer)",
+            SUMMARY_CHARS,
+        ),
+        detail_json={
+            "mode": review.mode,
+            "status": review.status,
+            "reviewer_type": review.reviewer_type,
+            "matched_conditions": review.evidence_json.get("matched_conditions", []),
+            "tool_name": review.evidence_json.get("tool_name"),
+            "risk": review.evidence_json.get("risk"),
+        },
+    )
 
 
 def _message_card(message: Message) -> _CardDraft:
@@ -1005,7 +1112,25 @@ async def list_activity(
         rows = await db.scalars(
             query.order_by(Message.created_at.desc(), Message.id.desc()).limit(fetch)
         )
-        drafts.extend(_message_card(m) for m in rows)
+        drafts.extend(_message_card(m) for m in rows if not _is_work_request_message(m))
+
+    request_kinds = frozenset({ActivityKind.ASKED_AGENT, ActivityKind.REPORTED})
+    if _wants(request_kinds) and not empty_scope and not empty_agents:
+        query_w = select(WorkRequest).where(WorkRequest.workspace_id == workspace_id)
+        if before is not None:
+            query_w = query_w.where(WorkRequest.created_at < before)
+        if scope is not None:
+            query_w = query_w.where(WorkRequest.requester_task_id.in_(scope))
+        if agent_filter is not None:
+            ids = list(agent_filter)
+            query_w = query_w.where(
+                or_(WorkRequest.requester_agent_id.in_(ids), WorkRequest.target_agent_id.in_(ids))
+            )
+        request_rows = await db.scalars(
+            query_w.order_by(WorkRequest.updated_at.desc(), WorkRequest.id.desc()).limit(fetch)
+        )
+        for request in request_rows:
+            drafts.extend(_work_request_cards(request))
 
     if _wants(_TASK_KINDS) and not empty_scope and not empty_agents:
         query_t = select(Task).where(
@@ -1039,19 +1164,37 @@ async def list_activity(
         )
         drafts.extend(_approval_card(a) for a in approval_rows)
 
+        query_r = select(WorkReview).where(
+            WorkReview.workspace_id == workspace_id,
+            WorkReview.status == WorkReviewStatus.PENDING.value,
+        )
+        if before is not None:
+            query_r = query_r.where(WorkReview.requested_at < before)
+        if scope is not None:
+            query_r = query_r.where(WorkReview.task_id.in_(scope))
+        if agent_filter is not None:
+            ids = list(agent_filter)
+            query_r = query_r.where(
+                or_(WorkReview.subject_agent_id.in_(ids), WorkReview.reviewer_agent_id.in_(ids))
+            )
+        review_rows = await db.scalars(
+            query_r.order_by(WorkReview.requested_at.desc(), WorkReview.id.desc()).limit(fetch)
+        )
+        drafts.extend(_review_card(r) for r in review_rows)
+
     # Post-filters that the SQL predicates cannot express exactly.
     drafts = [
         d
         for d in drafts
         if (kinds is None or d.kind in kinds)
-        and (before is None or d.created_at < before)
+        and (before is None or _aware(d.created_at) < _aware(before))
         and (
             agent_filter is None
             or d.actor_agent_id in agent_filter
             or d.target_agent_id in agent_filter
         )
     ]
-    drafts.sort(key=lambda d: (d.created_at, d.id), reverse=True)
+    drafts.sort(key=lambda d: (_aware(d.created_at), d.id), reverse=True)
     drafts = drafts[:limit]
 
     lineage = await _task_lineage(
@@ -1101,6 +1244,8 @@ async def list_activity(
                     or (root.conversation_id if root is not None else None)
                 ),
                 approval_id=draft.approval_id,
+                work_request_id=draft.work_request_id,
+                review_id=draft.review_id,
                 summary=summary,
                 detail_json=draft.detail_json or {},
                 created_at=draft.created_at,
@@ -1150,14 +1295,31 @@ async def attention(db: AsyncSession, workspace_id: UUID) -> AttentionOut:
     )
     projected = await project_conversations(db, workspace_id, active_conversations)
     waiting = [c for c in projected if c.active_run_status == RunStatus.WAITING_APPROVAL.value]
+    # Work reviews assigned to a human (including fail-closed mandatory
+    # reviews with no resolvable AI reviewer) need a person now.
+    review_rows = list(
+        await db.scalars(
+            select(WorkReview)
+            .where(
+                WorkReview.workspace_id == workspace_id,
+                WorkReview.status == WorkReviewStatus.PENDING.value,
+                WorkReview.reviewer_type == ReviewerType.HUMAN.value,
+            )
+            .order_by(WorkReview.requested_at.desc())
+            .limit(MAX_PAGE_SIZE)
+        )
+    )
+    pending_reviews = await coordination.project_reviews(db, workspace_id, review_rows)
     counts = AttentionCounts(
         approvals=len(approvals),
         failures=len(failed),
-        total=len(approvals) + len(failed) + len(waiting),
+        reviews=len(pending_reviews),
+        total=len(approvals) + len(failed) + len(waiting) + len(pending_reviews),
     )
     return AttentionOut(
         pending_approvals=[ApprovalOut.model_validate(a) for a in approvals],
         failed_tasks=[TaskOut.model_validate(t) for t in failed],
         waiting_conversations=waiting,
+        pending_reviews=pending_reviews,
         counts=counts,
     )
