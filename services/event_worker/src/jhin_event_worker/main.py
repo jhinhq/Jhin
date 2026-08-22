@@ -323,6 +323,8 @@ async def main() -> None:
         matcher = TriggerMatcher(
             session_factory,
             temporal,
+            metrics=runtime.metrics,
+            tracer=runtime.tracer,
             cache_ttl_seconds=settings.trigger_cache_ttl_seconds,
         )
         processor = EventProcessor(

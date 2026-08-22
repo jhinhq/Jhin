@@ -16,6 +16,7 @@ from jhin_db.models import Agent, AuditEvent, Team, Trigger, TriggerInvocation, 
 from jhin_domain import AgentStatus, new_uuid7
 from jhin_event_worker.matcher import TriggerMatcher
 from jhin_events.envelope import EventEnvelope, EventSource
+from jhin_observability import noop_metrics, noop_tracer
 
 TODO_FILTER = {
     "all": [
@@ -34,7 +35,8 @@ class FakeTemporal:
     async def start_workflow(self, name: str, params: Any, *, id: str, task_queue: str) -> None:
         if self.raise_error is not None:
             raise self.raise_error
-        if self.raise_already_started:
+        if self.raise_already_started or any(call["id"] == id for call in self.calls):
+            # Temporal owns duplicate-start idempotency for a deterministic id.
             raise WorkflowAlreadyStartedError(id, name)
         self.calls.append({"name": name, "params": params, "id": id, "task_queue": task_queue})
 
@@ -109,7 +111,13 @@ def issue_event(
 def make_matcher(
     session_factory: async_sessionmaker[AsyncSession], temporal: FakeTemporal
 ) -> TriggerMatcher:
-    return TriggerMatcher(session_factory, cast(Any, temporal), cache_ttl_seconds=0.0)
+    return TriggerMatcher(
+        session_factory,
+        cast(Any, temporal),
+        metrics=noop_metrics(),
+        tracer=noop_tracer(),
+        cache_ttl_seconds=0.0,
+    )
 
 
 async def invocations(
@@ -306,7 +314,8 @@ async def test_temporal_failure_marks_failed_and_raises(
         await matcher.handle_event(issue_event(ids["workspace"]))
     rows = await invocations(session_factory)
     assert [row.status for row in rows] == ["failed"]
-    assert rows[0].error is not None and "temporal down" in rows[0].error
+    # Only the closed safe code is persisted; never the provider message.
+    assert rows[0].error == "upstream_unavailable"
 
     # Redelivery after the failure starts cleanly: the partial unique index
     # only guards *started* rows.
@@ -332,7 +341,7 @@ async def test_missing_agent_marks_invocation_failed(
     assert temporal.calls == []
     rows = await invocations(session_factory)
     assert [row.status for row in rows] == ["failed"]
-    assert rows[0].error is not None and "no active agent" in rows[0].error
+    assert rows[0].error == "invalid_request"
 
 
 async def test_team_target_resolves_to_active_member(

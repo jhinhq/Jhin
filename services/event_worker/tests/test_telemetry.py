@@ -8,7 +8,7 @@ import importlib
 import inspect
 import json
 import math
-from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import ModuleType, SimpleNamespace
 from typing import Any, NoReturn, cast
@@ -18,16 +18,26 @@ import pytest
 import structlog
 from nats.js.api import PubAck
 from opentelemetry import trace
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import Tracer
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from temporalio.exceptions import WorkflowAlreadyStartedError
 
+from jhin_db.base import Base
+from jhin_db.models import Agent, Trigger, TriggerInvocation, Workspace
+from jhin_domain import AgentStatus, new_uuid7
+from jhin_event_worker.matcher import TriggerMatcher
 from jhin_event_worker.normalizer import IngressNormalizer
 from jhin_event_worker.processor import EventProcessor
 from jhin_events.envelope import EventEnvelope, EventSource
 from jhin_observability import JhinMetrics, MetricName, Observation, noop_metrics
+from jhin_observability.metrics import build_jhin_metrics
 from jhin_secrets.redaction import redact_event_dict
 
 KNOWN_CORRELATION = UUID("018f0000-0000-7000-8000-000000000001")
@@ -812,7 +822,11 @@ async def test_main_initializes_first_wires_exact_runtime_and_owns_all_tasks(
     monkeypatch.setattr(main, "create_session_factory", lambda value: ("sessions", value))
 
     def matcher(*args: object, **kwargs: object) -> object:
-        del args, kwargs
+        assert len(args) == 2
+        assert args[0] == ("sessions", engine)
+        assert kwargs["metrics"] is runtime.metrics
+        assert kwargs["tracer"] is runtime.tracer
+        assert kwargs["cache_ttl_seconds"] == 5.0
         events.append("matcher.create")
         return object()
 
@@ -1288,3 +1302,772 @@ def test_main_source_initializes_runtime_before_every_resource_owner() -> None:
         "runtime",
     ]
     assert "configure_json_logging" not in source
+
+
+# --- Task 7: durable trigger transitions own their diagnostics -------------
+
+
+@dataclass(frozen=True)
+class TriggerTelemetryCase:
+    workspace_id: UUID
+    valid_trigger_id: UUID
+    missing_agent_trigger_id: UUID
+
+    def _event(self, connector_type: str, external_id: str, trigger_id: UUID) -> EventEnvelope:
+        return EventEnvelope(
+            event_id=new_uuid7(),
+            event_type=f"connector.{connector_type}.issue.updated",
+            workspace_id=str(self.workspace_id),
+            correlation_id=new_uuid7(),
+            source=EventSource(type=connector_type),
+            data={
+                "external_id": external_id,
+                "trigger_test_id": str(trigger_id),
+                "title": "private-trigger-title-canary",
+                "description": "private-trigger-description-canary",
+                "url": "https://private-trigger-url-canary.invalid/issue",
+                "state": {"name": "Todo"},
+                "changed_from": {"state": {"name": "Backlog"}},
+            },
+        )
+
+    def event_for(self, connector_type: str, *, external_id: str) -> EventEnvelope:
+        return self._event(connector_type, external_id, self.valid_trigger_id)
+
+    def event_for_missing_agent(self, connector_type: str, *, external_id: str) -> EventEnvelope:
+        return self._event(connector_type, external_id, self.missing_agent_trigger_id)
+
+
+class FailingTemporalClient:
+    """Identity-preserving fake: Temporal owns duplicate-start idempotency."""
+
+    def __init__(self) -> None:
+        self.fail_with: BaseException | None = None
+        self.calls: list[dict[str, Any]] = []
+        self.before_start: Callable[[], None] | None = None
+
+    async def start_workflow(self, name: str, params: Any, *, id: str, task_queue: str) -> object:
+        if self.before_start is not None:
+            self.before_start()
+        if self.fail_with is not None:
+            raise self.fail_with
+        if any(call["id"] == id for call in self.calls):
+            raise WorkflowAlreadyStartedError(id, name)
+        self.calls.append({"name": name, "params": params, "id": id, "task_queue": task_queue})
+        return object()
+
+
+@dataclass
+class TriggerMetrics:
+    metrics: JhinMetrics
+    reader: InMemoryMetricReader
+    provider: MeterProvider
+
+
+@pytest.fixture
+def trigger_metrics() -> Iterator[TriggerMetrics]:
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+    owned = TriggerMetrics(
+        metrics=build_jhin_metrics(provider.get_meter("trigger-test-meter")),
+        reader=reader,
+        provider=provider,
+    )
+    try:
+        yield owned
+    finally:
+        provider.shutdown()
+
+
+@pytest.fixture
+async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    engine = create_async_engine("sqlite+aiosqlite://")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    try:
+        yield async_sessionmaker(engine, expire_on_commit=False)
+    finally:
+        await engine.dispose()
+
+
+def _trigger_filter(trigger_test_id: UUID) -> dict[str, Any]:
+    return {
+        "all": [
+            {"path": "data.trigger_test_id", "op": "eq", "value": str(trigger_test_id)},
+            {"path": "data.state.name", "op": "transitioned_to", "value": "Todo"},
+        ]
+    }
+
+
+@pytest.fixture
+async def trigger_case(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> TriggerTelemetryCase:
+    async with session_factory() as session:
+        workspace = Workspace(name="Private trigger workspace", slug=f"trg-{new_uuid7().hex[:8]}")
+        session.add(workspace)
+        await session.flush()
+        agent = Agent(
+            workspace_id=workspace.id,
+            name="Private trigger agent",
+            slug="trigger-agent",
+            status=AgentStatus.ACTIVE.value,
+        )
+        session.add(agent)
+        await session.flush()
+        valid_id = new_uuid7()
+        missing_id = new_uuid7()
+        session.add(
+            Trigger(
+                id=valid_id,
+                workspace_id=workspace.id,
+                name="private-valid-trigger-name-canary",
+                enabled=True,
+                connection_id=None,
+                event_type=None,
+                filter_json=_trigger_filter(valid_id),
+                target_agent_id=agent.id,
+                dedupe_window_seconds=300,
+            )
+        )
+        session.add(
+            Trigger(
+                id=missing_id,
+                workspace_id=workspace.id,
+                name="private-missing-trigger-name-canary",
+                enabled=True,
+                connection_id=None,
+                event_type=None,
+                filter_json=_trigger_filter(missing_id),
+                target_agent_id=new_uuid7(),
+                dedupe_window_seconds=300,
+            )
+        )
+        await session.commit()
+        return TriggerTelemetryCase(
+            workspace_id=workspace.id,
+            valid_trigger_id=valid_id,
+            missing_agent_trigger_id=missing_id,
+        )
+
+
+@pytest.fixture
+def temporal() -> FailingTemporalClient:
+    return FailingTemporalClient()
+
+
+@pytest.fixture
+def matcher(
+    session_factory: async_sessionmaker[AsyncSession],
+    temporal: FailingTemporalClient,
+    trigger_metrics: TriggerMetrics,
+    tracing: TraceHarness,
+    trigger_case: TriggerTelemetryCase,
+) -> TriggerMatcher:
+    del trigger_case
+    return TriggerMatcher(
+        session_factory,
+        cast(Any, temporal),
+        metrics=trigger_metrics.metrics,
+        tracer=tracing.tracer,
+        cache_ttl_seconds=0.0,
+    )
+
+
+def metric_sum(owned: TriggerMetrics, name: str, **labels: str) -> float:
+    data = owned.reader.get_metrics_data()
+    if data is None:
+        return 0.0
+    return sum(
+        float(point.value)
+        for resource_metrics in data.resource_metrics
+        for scope_metrics in resource_metrics.scope_metrics
+        for metric in scope_metrics.metrics
+        if metric.name == name
+        for point in metric.data.data_points
+        if dict(point.attributes) == labels
+    )
+
+
+def serialized_metrics(owned: TriggerMetrics) -> str:
+    data = owned.reader.get_metrics_data()
+    if data is None:
+        return "[]"
+    return json.dumps(
+        [
+            {
+                "name": metric.name,
+                "description": metric.description,
+                "unit": metric.unit,
+                "resource": dict(resource_metrics.resource.attributes),
+                "points": [
+                    {"attributes": dict(point.attributes), "value": point.value}
+                    for point in metric.data.data_points
+                ],
+            }
+            for resource_metrics in data.resource_metrics
+            for scope_metrics in resource_metrics.scope_metrics
+            for metric in scope_metrics.metrics
+        ],
+        default=str,
+        sort_keys=True,
+    )
+
+
+async def invocation_rows(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> list[TriggerInvocation]:
+    async with session_factory() as session:
+        return list(
+            await session.scalars(
+                select(TriggerInvocation).order_by(
+                    TriggerInvocation.created_at, TriggerInvocation.id
+                )
+            )
+        )
+
+
+def dispatch_spans(tracing: TraceHarness) -> list[ReadableSpan]:
+    return [
+        span for span in tracing.exporter.get_finished_spans() if span.name == "trigger.dispatch"
+    ]
+
+
+def test_matcher_requires_explicit_metrics_and_tracer(
+    session_factory: async_sessionmaker[AsyncSession],
+    temporal: FailingTemporalClient,
+    tracing: TraceHarness,
+) -> None:
+    with pytest.raises(TypeError):
+        TriggerMatcher(session_factory, cast(Any, temporal))  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        TriggerMatcher(session_factory, cast(Any, temporal), tracer=tracing.tracer)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        TriggerMatcher(session_factory, cast(Any, temporal), metrics=noop_metrics())  # type: ignore[call-arg]
+
+
+async def test_handle_event_counts_started_duplicate_and_failed_after_commits(
+    matcher: TriggerMatcher,
+    trigger_case: TriggerTelemetryCase,
+    temporal: FailingTemporalClient,
+    trigger_metrics: TriggerMetrics,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    started_event = trigger_case.event_for("github", external_id="issue-1")
+    await matcher.handle_event(started_event)
+    await matcher.handle_event(started_event)
+    await matcher.handle_event(
+        trigger_case.event_for_missing_agent("github", external_id="issue-2")
+    )
+
+    rows = await invocation_rows(session_factory)
+    assert [row.status for row in rows] == ["started", "duplicate", "failed"]
+    assert rows[2].error == "invalid_request"
+    assert len(temporal.calls) == 1
+    assert (
+        metric_sum(
+            trigger_metrics, "trigger_invocations_total", connector_type="github", outcome="started"
+        )
+        == 1
+    )
+    assert (
+        metric_sum(
+            trigger_metrics,
+            "trigger_invocations_total",
+            connector_type="github",
+            outcome="duplicate",
+        )
+        == 1
+    )
+    assert (
+        metric_sum(
+            trigger_metrics, "trigger_invocations_total", connector_type="github", outcome="failed"
+        )
+        == 1
+    )
+    assert (
+        metric_sum(
+            trigger_metrics,
+            "trigger_failures_total",
+            connector_type="github",
+            failure_class="target",
+        )
+        == 1
+    )
+    assert (
+        metric_sum(
+            trigger_metrics,
+            "trigger_failures_total",
+            connector_type="github",
+            failure_class="dispatch",
+        )
+        == 0
+    )
+
+
+async def test_two_failed_deliveries_create_and_count_two_fresh_invocations(
+    matcher: TriggerMatcher,
+    trigger_case: TriggerTelemetryCase,
+    temporal: FailingTemporalClient,
+    trigger_metrics: TriggerMetrics,
+    tracing: TraceHarness,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    temporal.fail_with = ConnectionError("provider-body-canary")
+    for _delivery in range(2):
+        with pytest.raises(ConnectionError) as caught:
+            await matcher.handle_event(trigger_case.event_for("linear", external_id="issue-3"))
+        assert caught.value is temporal.fail_with
+
+    rows = await invocation_rows(session_factory)
+    assert [row.status for row in rows] == ["failed", "failed"]
+    assert [row.error for row in rows] == ["upstream_unavailable", "upstream_unavailable"]
+    assert (
+        metric_sum(
+            trigger_metrics, "trigger_invocations_total", connector_type="linear", outcome="started"
+        )
+        == 2
+    )
+    assert (
+        metric_sum(
+            trigger_metrics, "trigger_invocations_total", connector_type="linear", outcome="failed"
+        )
+        == 2
+    )
+    assert (
+        metric_sum(
+            trigger_metrics,
+            "trigger_failures_total",
+            connector_type="linear",
+            failure_class="dispatch",
+        )
+        == 2
+    )
+    spans = dispatch_spans(tracing)
+    assert len(spans) == 2
+    for span in spans:
+        assert span.kind.name == "CLIENT"
+        assert dict(span.attributes or {}) == {
+            "jhin.connector_type": "linear",
+            "jhin.outcome": "failed",
+            "error.type": "ConnectionError",
+            "error.code": "upstream_unavailable",
+        }
+        assert span.status.status_code.name == "ERROR"
+        assert span.status.description is None
+        assert span.events == ()
+    payload = "\n".join(
+        (*(serialized_span(span) for span in spans), serialized_metrics(trigger_metrics))
+    )
+    assert "provider-body-canary" not in payload
+
+
+async def test_trigger_dispatch_span_is_a_consumer_child_without_product_material(
+    matcher: TriggerMatcher,
+    trigger_case: TriggerTelemetryCase,
+    temporal: FailingTemporalClient,
+    trigger_metrics: TriggerMetrics,
+    tracing: TraceHarness,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event = trigger_case.event_for("github", external_id="private-external-id-canary")
+    with tracing.tracer.start_as_current_span("nats.consume") as parent:
+        await matcher.handle_event(event)
+
+    rows = await invocation_rows(session_factory)
+    assert [row.status for row in rows] == ["started"]
+    spans = dispatch_spans(tracing)
+    assert len(spans) == 1
+    span = spans[0]
+    assert span.parent is not None
+    assert span.parent.span_id == parent.get_span_context().span_id
+    assert span.kind.name == "CLIENT"
+    assert dict(span.attributes or {}) == {
+        "jhin.connector_type": "github",
+        "jhin.outcome": "started",
+    }
+    assert span.status.status_code.name == "UNSET"
+    payload = "\n".join((serialized_span(span), serialized_metrics(trigger_metrics)))
+    canaries = {
+        str(trigger_case.valid_trigger_id),
+        str(trigger_case.workspace_id),
+        str(event.event_id),
+        str(event.correlation_id),
+        rows[0].idempotency_key,
+        str(rows[0].id),
+        rows[0].workflow_id or "<workflow-id>",
+        temporal.calls[0]["id"],
+        "private-external-id-canary",
+        "private-trigger-title-canary",
+        "private-trigger-description-canary",
+        "private-trigger-url-canary",
+        "private-valid-trigger-name-canary",
+    }
+    for canary in canaries:
+        assert canary not in payload
+
+
+async def test_crash_after_started_commit_is_reconciled_without_a_second_start(
+    session_factory: async_sessionmaker[AsyncSession],
+    temporal: FailingTemporalClient,
+    trigger_metrics: TriggerMetrics,
+    tracing: TraceHarness,
+    trigger_case: TriggerTelemetryCase,
+) -> None:
+    crash = RuntimeError("crash-after-started-commit")
+    barrier_identities: list[UUID] = []
+    armed = True
+
+    async def barrier(invocation_id: UUID) -> None:
+        barrier_identities.append(invocation_id)
+        if armed:
+            raise crash
+
+    matcher = TriggerMatcher(
+        session_factory,
+        cast(Any, temporal),
+        metrics=trigger_metrics.metrics,
+        tracer=tracing.tracer,
+        cache_ttl_seconds=0.0,
+        pre_dispatch_barrier=barrier,
+    )
+    event = trigger_case.event_for("github", external_id="issue-crash")
+    with pytest.raises(RuntimeError) as caught:
+        await matcher.handle_event(event)
+    assert caught.value is crash
+    rows = await invocation_rows(session_factory)
+    assert [row.status for row in rows] == ["started"]
+    assert rows[0].task_id is None
+    assert temporal.calls == []
+    assert barrier_identities == [rows[0].id]
+
+    armed = False
+    # Two redeliveries: the first reconciles, the second finds the same
+    # deterministic workflow already started and treats that as success.
+    await matcher.handle_event(event)
+    await matcher.handle_event(event)
+
+    rows = await invocation_rows(session_factory)
+    assert [row.status for row in rows] == ["started", "duplicate", "duplicate"]
+    assert len(temporal.calls) == 1
+    assert temporal.calls[0]["id"] == rows[0].workflow_id
+    assert temporal.calls[0]["params"].invocation_id == str(rows[0].id)
+    assert barrier_identities == [rows[0].id, rows[0].id, rows[0].id]
+    assert (
+        metric_sum(
+            trigger_metrics, "trigger_invocations_total", connector_type="github", outcome="started"
+        )
+        == 1
+    )
+    assert (
+        metric_sum(
+            trigger_metrics,
+            "trigger_invocations_total",
+            connector_type="github",
+            outcome="duplicate",
+        )
+        == 2
+    )
+    assert (
+        metric_sum(
+            trigger_metrics, "trigger_invocations_total", connector_type="github", outcome="failed"
+        )
+        == 0
+    )
+    assert [dict(span.attributes or {})["jhin.outcome"] for span in dispatch_spans(tracing)] == [
+        "started",
+        "started",
+    ]
+
+
+async def test_started_row_with_linked_task_suppresses_redelivery(
+    matcher: TriggerMatcher,
+    trigger_case: TriggerTelemetryCase,
+    temporal: FailingTemporalClient,
+    trigger_metrics: TriggerMetrics,
+    tracing: TraceHarness,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event = trigger_case.event_for("github", external_id="issue-linked")
+    await matcher.handle_event(event)
+    async with session_factory() as session:
+        row = (await invocation_rows(session_factory))[0]
+        linked = await session.get(TriggerInvocation, row.id)
+        assert linked is not None
+        linked.task_id = new_uuid7()
+        await session.commit()
+    temporal.calls.clear()
+    tracing.exporter.clear()
+
+    await matcher.handle_event(event)
+
+    rows = await invocation_rows(session_factory)
+    assert [row.status for row in rows] == ["started", "duplicate"]
+    assert temporal.calls == []
+    assert dispatch_spans(tracing) == []
+    assert (
+        metric_sum(
+            trigger_metrics,
+            "trigger_invocations_total",
+            connector_type="github",
+            outcome="duplicate",
+        )
+        == 1
+    )
+    assert (
+        metric_sum(
+            trigger_metrics, "trigger_invocations_total", connector_type="github", outcome="started"
+        )
+        == 1
+    )
+
+
+async def test_dispatch_failure_after_a_fresh_authority_follows_a_prior_failure(
+    matcher: TriggerMatcher,
+    trigger_case: TriggerTelemetryCase,
+    temporal: FailingTemporalClient,
+    trigger_metrics: TriggerMetrics,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event = trigger_case.event_for("vercel", external_id="issue-recover")
+    temporal.fail_with = TimeoutError("temporal-timeout-canary")
+    with pytest.raises(TimeoutError):
+        await matcher.handle_event(event)
+    temporal.fail_with = None
+
+    await matcher.handle_event(event)
+
+    rows = await invocation_rows(session_factory)
+    assert [row.status for row in rows] == ["failed", "started"]
+    assert len(temporal.calls) == 1
+    assert temporal.calls[0]["params"].invocation_id == str(rows[1].id)
+    assert (
+        metric_sum(
+            trigger_metrics, "trigger_invocations_total", connector_type="vercel", outcome="started"
+        )
+        == 2
+    )
+    assert (
+        metric_sum(
+            trigger_metrics, "trigger_invocations_total", connector_type="vercel", outcome="failed"
+        )
+        == 1
+    )
+    assert (
+        metric_sum(
+            trigger_metrics,
+            "trigger_failures_total",
+            connector_type="vercel",
+            failure_class="dispatch",
+        )
+        == 1
+    )
+
+
+async def test_secondary_failure_update_errors_reraise_the_exact_temporal_error(
+    matcher: TriggerMatcher,
+    trigger_case: TriggerTelemetryCase,
+    temporal: FailingTemporalClient,
+    trigger_metrics: TriggerMetrics,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    original = ConnectionError("temporal-down-canary")
+    temporal.fail_with = original
+    real_factory = matcher._session_factory
+
+    def broken_factory(*_args: object, **_kwargs: object) -> NoReturn:
+        raise RuntimeError("secondary-update-failure")
+
+    def poison_sessions() -> None:
+        matcher._session_factory = cast(Any, broken_factory)
+
+    temporal.before_start = poison_sessions
+    with pytest.raises(ConnectionError) as caught:
+        await matcher.handle_event(trigger_case.event_for("github", external_id="issue-secondary"))
+    assert caught.value is original
+    assert caught.value.__context__ is None
+
+    matcher._session_factory = real_factory
+    rows = await invocation_rows(session_factory)
+    assert [row.status for row in rows] == ["started"]
+    assert (
+        metric_sum(
+            trigger_metrics, "trigger_invocations_total", connector_type="github", outcome="failed"
+        )
+        == 0
+    )
+    assert (
+        metric_sum(
+            trigger_metrics,
+            "trigger_failures_total",
+            connector_type="github",
+            failure_class="dispatch",
+        )
+        == 0
+    )
+
+
+class HostileTriggerMetrics:
+    is_noop = False
+
+    def __init__(self, failure: BaseException) -> None:
+        self.failure = failure
+        self.counters: list[str] = []
+
+    def counter(self, name: str) -> NoReturn:
+        self.counters.append(name)
+        raise self.failure
+
+    def histogram(self, name: str) -> NoReturn:
+        raise AssertionError(name)
+
+    def set_observable(self, name: str, observations: object) -> NoReturn:
+        raise AssertionError((name, observations))
+
+
+class HostileTracer:
+    def __init__(self, failure: BaseException) -> None:
+        self.failure = failure
+        self.calls = 0
+
+    def start_as_current_span(self, *_args: object, **_kwargs: object) -> NoReturn:
+        self.calls += 1
+        raise self.failure
+
+
+@pytest.mark.parametrize("failure_type", [RuntimeError, ValueError, KeyError])
+async def test_hostile_metrics_and_tracer_are_diagnostic_only(
+    session_factory: async_sessionmaker[AsyncSession],
+    temporal: FailingTemporalClient,
+    trigger_case: TriggerTelemetryCase,
+    failure_type: type[Exception],
+) -> None:
+    metrics = HostileTriggerMetrics(failure_type("hostile-metrics"))
+    tracer = HostileTracer(failure_type("hostile-tracer"))
+    matcher = TriggerMatcher(
+        session_factory,
+        cast(Any, temporal),
+        metrics=cast(JhinMetrics, metrics),
+        tracer=cast(Tracer, tracer),
+        cache_ttl_seconds=0.0,
+    )
+    event = trigger_case.event_for("github", external_id="issue-hostile")
+    await matcher.handle_event(event)
+    await matcher.handle_event(event)
+    await matcher.handle_event(trigger_case.event_for_missing_agent("github", external_id="x"))
+    temporal.fail_with = ConnectionError("temporal-down")
+    with pytest.raises(ConnectionError):
+        await matcher.handle_event(trigger_case.event_for("linear", external_id="issue-hostile-2"))
+
+    rows = await invocation_rows(session_factory)
+    assert [row.status for row in rows] == ["started", "duplicate", "failed", "failed"]
+    assert [row.error for row in rows[2:]] == ["invalid_request", "upstream_unavailable"]
+    assert len(temporal.calls) == 1
+    # started, reconciled duplicate (Temporal rejects the duplicate id), failed
+    assert tracer.calls == 3
+    assert metrics.counters == [
+        "trigger_invocations_total",  # started
+        "trigger_invocations_total",  # duplicate
+        "trigger_invocations_total",  # failed (target)
+        "trigger_failures_total",
+        "trigger_invocations_total",  # started
+        "trigger_invocations_total",  # failed (dispatch)
+        "trigger_failures_total",
+    ]
+
+
+async def test_primary_metric_cancellation_propagates_after_started_commit_and_reconciles(
+    session_factory: async_sessionmaker[AsyncSession],
+    temporal: FailingTemporalClient,
+    trigger_metrics: TriggerMetrics,
+    tracing: TraceHarness,
+    trigger_case: TriggerTelemetryCase,
+) -> None:
+    cancellation = asyncio.CancelledError("owned-metric-cancellation")
+    hostile = TriggerMatcher(
+        session_factory,
+        cast(Any, temporal),
+        metrics=cast(JhinMetrics, HostileTriggerMetrics(cancellation)),
+        tracer=tracing.tracer,
+        cache_ttl_seconds=0.0,
+    )
+    event = trigger_case.event_for("github", external_id="issue-cancel")
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await hostile.handle_event(event)
+    assert caught.value is cancellation
+    rows = await invocation_rows(session_factory)
+    assert [row.status for row in rows] == ["started"]
+    assert temporal.calls == []
+
+    healthy = TriggerMatcher(
+        session_factory,
+        cast(Any, temporal),
+        metrics=trigger_metrics.metrics,
+        tracer=tracing.tracer,
+        cache_ttl_seconds=0.0,
+    )
+    await healthy.handle_event(event)
+    rows = await invocation_rows(session_factory)
+    assert [row.status for row in rows] == ["started", "duplicate"]
+    assert len(temporal.calls) == 1
+    assert temporal.calls[0]["id"] == rows[0].workflow_id
+    assert (
+        metric_sum(
+            trigger_metrics, "trigger_invocations_total", connector_type="github", outcome="started"
+        )
+        == 0
+    )
+    assert (
+        metric_sum(
+            trigger_metrics,
+            "trigger_invocations_total",
+            connector_type="github",
+            outcome="duplicate",
+        )
+        == 1
+    )
+
+
+async def test_secondary_metric_cancellation_never_replaces_the_temporal_error(
+    session_factory: async_sessionmaker[AsyncSession],
+    temporal: FailingTemporalClient,
+    tracing: TraceHarness,
+    trigger_case: TriggerTelemetryCase,
+) -> None:
+    class StartedThenCancelMetrics(HostileTriggerMetrics):
+        def __init__(self) -> None:
+            super().__init__(asyncio.CancelledError("secondary-metric-cancellation"))
+            self.armed = False
+
+        def counter(self, name: str) -> Any:
+            self.counters.append(name)
+            if self.armed:
+                raise self.failure
+            return SimpleNamespace(add=lambda *_args, **_kwargs: None)
+
+    metrics = StartedThenCancelMetrics()
+    matcher = TriggerMatcher(
+        session_factory,
+        cast(Any, temporal),
+        metrics=cast(JhinMetrics, metrics),
+        tracer=tracing.tracer,
+        cache_ttl_seconds=0.0,
+    )
+    original = ConnectionError("temporal-down")
+    temporal.fail_with = original
+
+    def arm() -> None:
+        metrics.armed = True
+
+    temporal.before_start = arm
+    with pytest.raises(ConnectionError) as caught:
+        await matcher.handle_event(trigger_case.event_for("github", external_id="issue-sec"))
+    assert caught.value is original
+    rows = await invocation_rows(session_factory)
+    assert [row.status for row in rows] == ["failed"]
+    assert rows[0].error == "upstream_unavailable"
+    assert metrics.counters == [
+        "trigger_invocations_total",
+        "trigger_invocations_total",
+        "trigger_failures_total",
+    ]

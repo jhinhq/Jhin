@@ -12,9 +12,21 @@ and for each match run the idempotent start sequence:
    key — Temporal's duplicate-start policy is the second defense, closing
    the race against a crash between commit and start (plan 48.6).
 
-A Temporal outage marks the invocation ``failed`` and raises, so the
-consumer naks for redelivery: the failed row remains as history and the
-retry inserts a fresh ``started`` row.
+A Temporal outage marks the invocation ``failed`` (persisting only the
+closed ``upstream_unavailable`` code) and raises, so the consumer naks for
+redelivery: the failed row remains as history and the retry inserts a fresh
+``started`` row.
+
+A crash between the ``started`` commit and the Temporal start leaves an
+authoritative started row with no linked task. A later delivery still
+records its ``duplicate`` history row, then reconciles by reissuing the same
+deterministic workflow id; Temporal's duplicate-start policy makes concurrent
+reconcilers safe. A started row that already links a task is suppressed.
+
+Telemetry (plan 10, Task 7) is diagnostic-only and records each
+started/duplicate/failed transition once, only after its row commit. Labels
+carry the central connector type and closed outcome/failure classes; never an
+identifier, URL, event payload, or exception text.
 
 The matcher knows nothing about Linear: normalized events follow the
 connector-agnostic conventions ``data.external_id/title/description/url``
@@ -24,10 +36,12 @@ and ``data.changed_from`` (plan 52).
 from __future__ import annotations
 
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
+from opentelemetry.trace import SpanKind, Tracer
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -37,7 +51,18 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from jhin_db.models import Agent, AuditEvent, Team, Trigger, TriggerInvocation
 from jhin_domain import AgentStatus, TriggerInvocationStatus, TriggerType
 from jhin_events.envelope import EventEnvelope
-from jhin_observability import get_logger, normalize_connector_type
+from jhin_observability import (
+    JhinMetrics,
+    MetricName,
+    SafeErrorCode,
+    SpanName,
+    get_logger,
+    normalize_connector_type,
+    record_span_error,
+    safe_error,
+    safe_span,
+    set_span_attributes,
+)
 from jhin_triggers import (
     build_idempotency_key,
     evaluate_filter,
@@ -53,6 +78,31 @@ logger = get_logger(__name__)
 _CACHE_TTL_SECONDS = 5.0
 _MAX_TITLE = 500
 _MAX_DESCRIPTION = 10_000
+
+_INVOCATIONS_METRIC: MetricName = "trigger_invocations_total"
+_FAILURES_METRIC: MetricName = "trigger_failures_total"
+_DISPATCH_SPAN_NAME: SpanName = "trigger.dispatch"
+_FATAL_AUTHORITY_TYPES = (KeyboardInterrupt, SystemExit)
+
+TriggerOutcome = Literal["started", "duplicate", "failed"]
+TriggerFailureClass = Literal["target", "dispatch"]
+PreDispatchBarrier = Callable[[UUID], Awaitable[None]]
+
+
+def _run_trigger_diagnostic(operation: Callable[[], None], *, secondary: bool = False) -> None:
+    """Telemetry is diagnostic-only: ordinary failures never escape.
+
+    Fatal authority always escapes. Cancellation escapes only while it is the
+    primary authority; while product work is already unwinding (``secondary``)
+    a telemetry cancellation may not replace the active product exception.
+    """
+    try:
+        operation()
+    except BaseException as error:
+        if isinstance(error, _FATAL_AUTHORITY_TYPES):
+            raise
+        if not secondary and not isinstance(error, Exception):
+            raise
 
 
 @dataclass(frozen=True)
@@ -79,18 +129,82 @@ class _CacheEntry:
     specs: list[TriggerSpec] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class _DispatchAuthority:
+    """The exact started row a dispatch is allowed to fail."""
+
+    invocation_id: UUID
+    workflow_id: str
+    params: TriggeredTaskInput
+
+
 class TriggerMatcher:
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         temporal: TemporalClient,
         *,
+        metrics: JhinMetrics,
+        tracer: Tracer,
         cache_ttl_seconds: float = _CACHE_TTL_SECONDS,
+        pre_dispatch_barrier: PreDispatchBarrier | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._temporal = temporal
+        self._metrics = metrics
+        self._tracer = tracer
         self._cache_ttl = cache_ttl_seconds
+        self._pre_dispatch_barrier = pre_dispatch_barrier
         self._cache: dict[str, _CacheEntry] = {}
+
+    def _record_invocation(
+        self, connector_type: str, outcome: TriggerOutcome, *, secondary: bool = False
+    ) -> None:
+        _run_trigger_diagnostic(
+            lambda: self._metrics.counter(_INVOCATIONS_METRIC).add(
+                1,
+                connector_type=normalize_connector_type(connector_type),
+                outcome=outcome,
+            ),
+            secondary=secondary,
+        )
+
+    def _record_failure(
+        self,
+        connector_type: str,
+        failure_class: TriggerFailureClass,
+        *,
+        secondary: bool = False,
+    ) -> None:
+        _run_trigger_diagnostic(
+            lambda: self._metrics.counter(_FAILURES_METRIC).add(
+                1,
+                connector_type=normalize_connector_type(connector_type),
+                failure_class=failure_class,
+            ),
+            secondary=secondary,
+        )
+
+    async def _commit_invocation_transition(
+        self,
+        session: AsyncSession,
+        *,
+        connector_type: str,
+        outcome: TriggerOutcome,
+        failure_class: TriggerFailureClass | None = None,
+        secondary: bool = False,
+    ) -> None:
+        """Commit one durable transition, then count it exactly once.
+
+        Durability precedes diagnostics: a crash after the commit may lose the
+        metric, but a redelivery can never double count a committed row.
+        """
+        if failure_class is not None and outcome != "failed":
+            raise ValueError("failure_class requires failed outcome")
+        await session.commit()
+        self._record_invocation(connector_type, outcome, secondary=secondary)
+        if failure_class is not None:
+            self._record_failure(connector_type, failure_class, secondary=secondary)
 
     async def handle_event(self, envelope: EventEnvelope) -> None:
         """Evaluate one canonical event against the workspace's triggers."""
@@ -156,58 +270,152 @@ class TriggerMatcher:
             occurred_at=envelope.occurred_at,
         )
         workflow_id = workflow_id_for_key(key)
+        connector_type = envelope.source.type
 
         async with self._session_factory() as session:
             invocation = await self._record_started(session, spec, envelope, key, workflow_id)
             if invocation is None:
-                return  # duplicate — recorded and audited inside
-
-            agent_id = await self._resolve_agent(session, workspace_id, spec)
-            if agent_id is None:
-                invocation.status = TriggerInvocationStatus.FAILED.value
-                invocation.error = "no active agent to assign (trigger target missing)"
-                self._audit(session, spec, envelope, key, "failed", workflow_id)
-                await session.commit()
-                logger.warning(
-                    "trigger.no_agent",
-                    connector_type=normalize_connector_type(envelope.source.type),
+                # Duplicate: recorded, audited, and counted inside. Reconcile an
+                # authoritative started row that never reached Temporal.
+                unfinished = await self._unfinished_started_authority(session, spec, key)
+                if unfinished is None:
+                    return
+                agent_id = await self._resolve_agent(session, workspace_id, spec)
+                if agent_id is None:
+                    return
+                authority = _DispatchAuthority(
+                    invocation_id=unfinished.id,
+                    workflow_id=unfinished.workflow_id or workflow_id,
+                    params=self._workflow_input(
+                        spec, envelope, unfinished.id, external_id, agent_id
+                    ),
                 )
-                return
+            else:
+                agent_id = await self._resolve_agent(session, workspace_id, spec)
+                if agent_id is None:
+                    invocation.status = TriggerInvocationStatus.FAILED.value
+                    invocation.error = SafeErrorCode.INVALID_REQUEST.value
+                    self._audit(session, spec, envelope, key, "failed", workflow_id)
+                    await self._commit_invocation_transition(
+                        session,
+                        connector_type=connector_type,
+                        outcome="failed",
+                        failure_class="target",
+                    )
+                    logger.warning(
+                        "trigger.no_agent",
+                        connector_type=normalize_connector_type(connector_type),
+                    )
+                    return
 
-            params = self._workflow_input(spec, envelope, invocation.id, external_id, agent_id)
-            self._audit(session, spec, envelope, key, "started", workflow_id)
-            await session.commit()
-            invocation_id = invocation.id
+                params = self._workflow_input(spec, envelope, invocation.id, external_id, agent_id)
+                self._audit(session, spec, envelope, key, "started", workflow_id)
+                await self._commit_invocation_transition(
+                    session,
+                    connector_type=connector_type,
+                    outcome="started",
+                )
+                authority = _DispatchAuthority(
+                    invocation_id=invocation.id,
+                    workflow_id=workflow_id,
+                    params=params,
+                )
 
-        workflow_name, workflow_params = self._select_workflow(spec, params)
-        try:
-            await self._temporal.start_workflow(
-                workflow_name,
-                workflow_params,
-                id=workflow_id,
-                task_queue=AGENT_TASK_QUEUE,
+        if self._pre_dispatch_barrier is not None:
+            await self._pre_dispatch_barrier(authority.invocation_id)
+        await self._dispatch(spec, authority, connector_type)
+
+    async def _unfinished_started_authority(
+        self,
+        session: AsyncSession,
+        spec: TriggerSpec,
+        key: str,
+    ) -> TriggerInvocation | None:
+        """The one started row for this key that has not yet linked a task."""
+        started = await session.scalar(
+            select(TriggerInvocation).where(
+                TriggerInvocation.trigger_id == spec.id,
+                TriggerInvocation.idempotency_key == key,
+                TriggerInvocation.status == TriggerInvocationStatus.STARTED.value,
             )
-        except WorkflowAlreadyStartedError:
-            # The work already exists exactly once (e.g. crash after a prior
-            # start but before its invocation row committed). Not an error.
-            logger.info(
-                "trigger.workflow_already_started",
-                connector_type=normalize_connector_type(envelope.source.type),
+        )
+        if started is None or started.task_id is not None:
+            return None
+        return started
+
+    async def _dispatch(
+        self,
+        spec: TriggerSpec,
+        authority: _DispatchAuthority,
+        connector_type: str,
+    ) -> None:
+        normalized_connector = normalize_connector_type(connector_type)
+        workflow_name, workflow_params = self._select_workflow(spec, authority.params)
+        with safe_span(
+            _DISPATCH_SPAN_NAME,
+            tracer=self._tracer,
+            kind=SpanKind.CLIENT,
+            attributes={"jhin.connector_type": normalized_connector},
+        ) as span:
+            try:
+                await self._temporal.start_workflow(
+                    workflow_name,
+                    workflow_params,
+                    id=authority.workflow_id,
+                    task_queue=AGENT_TASK_QUEUE,
+                )
+            except WorkflowAlreadyStartedError:
+                # The work already exists exactly once (e.g. a reconciled
+                # delivery after a crash between commit and start). Not an
+                # error.
+                logger.info(
+                    "trigger.workflow_already_started",
+                    connector_type=normalized_connector,
+                )
+            except Exception as exc:
+                failure = safe_error(exc, code=SafeErrorCode.UPSTREAM_UNAVAILABLE)
+                _run_trigger_diagnostic(
+                    lambda: set_span_attributes(span, {"jhin.outcome": "failed"}),
+                    secondary=True,
+                )
+                _run_trigger_diagnostic(lambda: record_span_error(span, failure), secondary=True)
+                await self._fail_started_authority(authority, connector_type, failure.code)
+                raise  # nak -> redelivery retries the whole match
+            _run_trigger_diagnostic(
+                lambda: set_span_attributes(span, {"jhin.outcome": "started"}),
             )
-        except Exception as exc:
-            async with self._session_factory() as session:
-                row = await session.get(TriggerInvocation, invocation_id)
-                if row is not None:
-                    row.status = TriggerInvocationStatus.FAILED.value
-                    row.error = f"{type(exc).__name__}: {exc}"[:500]
-                    await session.commit()
-            raise  # nak → redelivery retries the whole match
 
         logger.info(
             "trigger.invoked",
-            connector_type=normalize_connector_type(envelope.source.type),
+            connector_type=normalized_connector,
             outcome="started",
         )
+
+    async def _fail_started_authority(
+        self,
+        authority: _DispatchAuthority,
+        connector_type: str,
+        code: SafeErrorCode,
+    ) -> None:
+        """Fail only the exact started row; contain every secondary failure."""
+        try:
+            async with self._session_factory() as session:
+                row = await session.get(TriggerInvocation, authority.invocation_id)
+                if row is None or row.status != TriggerInvocationStatus.STARTED.value:
+                    return
+                row.status = TriggerInvocationStatus.FAILED.value
+                row.error = code.value
+                await self._commit_invocation_transition(
+                    session,
+                    connector_type=connector_type,
+                    outcome="failed",
+                    failure_class="dispatch",
+                    secondary=True,
+                )
+        except Exception:
+            # Secondary failure: the original Temporal error remains the
+            # authority and the consumer's nak already reports the delivery.
+            return
 
     async def _record_started(
         self,
@@ -255,7 +463,11 @@ class TriggerMatcher:
         )
         session.add(duplicate)
         self._audit(session, spec, envelope, key, "duplicate", workflow_id)
-        await session.commit()
+        await self._commit_invocation_transition(
+            session,
+            connector_type=envelope.source.type,
+            outcome="duplicate",
+        )
         logger.info(
             "trigger.duplicate_suppressed",
             connector_type=normalize_connector_type(envelope.source.type),

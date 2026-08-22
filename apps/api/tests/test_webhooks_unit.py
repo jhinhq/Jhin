@@ -23,6 +23,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import SpanContext, SpanKind, TraceFlags, Tracer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from jhin_api.connections import service as connections_service
 from jhin_api.deps import WorkspaceContext, get_db, get_jetstream
@@ -48,6 +49,7 @@ from jhin_event_worker.normalizer import IngressNormalizer, derived_event_id
 from jhin_event_worker.processor import EventProcessor
 from jhin_events.envelope import EventEnvelope
 from jhin_events.telemetry import dispatch_or_nak
+from jhin_observability import noop_metrics, noop_tracer
 from jhin_secrets import SecretCrypto
 
 REQ = {"request_id": new_uuid7(), "ip_hash": "test"}
@@ -299,6 +301,9 @@ class RecordingTemporal:
         self.calls: list[dict[str, Any]] = []
 
     async def start_workflow(self, name: str, params: Any, *, id: str, task_queue: str) -> None:
+        if any(call["id"] == id for call in self.calls):
+            # Temporal owns duplicate-start idempotency for a deterministic id.
+            raise WorkflowAlreadyStartedError(id, name)
         self.calls.append({"name": name, "params": params, "id": id, "task_queue": task_queue})
 
 
@@ -1261,6 +1266,8 @@ async def test_vercel_post_publish_precommit_retry_keeps_one_canonical_event(
     matcher = TriggerMatcher(
         fresh_sessions,
         temporal,  # type: ignore[arg-type]
+        metrics=noop_metrics(),
+        tracer=noop_tracer(),
         cache_ttl_seconds=0.0,
     )
     await matcher.handle_event(canonical)
