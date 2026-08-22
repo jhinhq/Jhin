@@ -7,7 +7,7 @@ import Link from "next/link";
 import { Avatar } from "@/components/avatar";
 import { Chip, Disclosure } from "@/components/company/bits";
 import { Badge } from "@/components/ui";
-import { actorNameOf, detailText, timeAgo, toneForKind } from "@/lib/activity";
+import { actorNameOf, detailText, friendlyDetailLines, timeAgo, toneForKind } from "@/lib/activity";
 import { formatDateTime } from "@/lib/format";
 import type { ActivityCard as ActivityCardData } from "@/lib/types";
 
@@ -15,17 +15,26 @@ export function ActivityCard({
   card,
   now,
   showAdvanced = true,
+  avatars,
 }: {
   card: ActivityCardData;
   /** Injectable clock for deterministic tests. */
   now?: number;
   showAdvanced?: boolean;
+  /** Agent id → avatar url, when the caller has the agent list. */
+  avatars?: Record<string, string | null>;
 }) {
   const actor = actorNameOf(card);
   const details = detailText(card.detail_json);
+  const friendly = friendlyDetailLines(card);
   return (
     <li data-testid={`activity-${card.id}`} className="flex gap-3 rounded-2xl border border-line bg-surface p-4">
-      <Avatar name={actor} size="sm" kind={card.actor_type === "user" ? "user" : "agent"} />
+      <Avatar
+        name={actor}
+        size="sm"
+        kind={card.actor_type === "user" ? "user" : "agent"}
+        src={card.actor_agent_id ? avatars?.[card.actor_agent_id] : null}
+      />
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
           <span className="text-sm font-medium">
@@ -61,6 +70,13 @@ export function ActivityCard({
         </div>
         {card.summary ? <p className="mt-1.5 whitespace-pre-wrap text-sm text-ink/90">{card.summary}</p> : null}
         {card.task_title && !card.summary ? <p className="mt-1.5 text-sm text-dim">{card.task_title}</p> : null}
+        {friendly.length > 0 ? (
+          <ul data-testid="activity-friendly-detail" className="mt-1.5 space-y-0.5 text-[13px] text-dim">
+            {friendly.map((line) => (
+              <li key={line} className="whitespace-pre-wrap">{line}</li>
+            ))}
+          </ul>
+        ) : null}
         <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
           {card.conversation_id ? (
             <Chip href={`/chats/${card.conversation_id}`}>

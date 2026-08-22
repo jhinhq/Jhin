@@ -3,7 +3,8 @@
  * fully unit-tested (tests/activity-helpers.test.ts).
  */
 
-import type { ActivityCard, ActivityKind } from "@/lib/types";
+import { conditionLabel, REVIEW_MODE_LABELS, reviewVerdictLabel, workRequestStatus } from "@/lib/coordination";
+import type { ActivityCard, ActivityKind, ReviewMode } from "@/lib/types";
 
 export type ActivityGroup = "handoffs" | "progress" | "review";
 
@@ -124,6 +125,49 @@ export function timeAgo(iso: string, now: number = Date.now()): string {
   if (diff < DAY) return `${Math.floor(diff / HOUR)}h ago`;
   if (diff < 7 * DAY) return `${Math.floor(diff / DAY)}d ago`;
   return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function detailStr(detail: Record<string, unknown>, key: string): string {
+  const value = detail[key];
+  return typeof value === "string" ? value : "";
+}
+
+/** Plain-language lines for the structured `detail_json` of work-request
+ * and review cards (coordination release). Empty for other shapes so the
+ * caller falls back to the raw "Show details" disclosure. */
+export function friendlyDetailLines(card: Pick<ActivityCard, "kind" | "detail_json" | "work_request_id" | "review_id">): string[] {
+  const detail = card.detail_json ?? {};
+  const lines: string[] = [];
+  if (card.work_request_id || detailStr(detail, "expected_output") || detailStr(detail, "response")) {
+    const status = detailStr(detail, "status");
+    if (status) lines.push(`Status: ${workRequestStatus(status).label}`);
+    const expected = detailStr(detail, "expected_output");
+    if (expected) lines.push(`Expected: ${expected}`);
+    const response = detailStr(detail, "response");
+    if (response) lines.push(`Reply: ${response}`);
+    if (detail.created_task_id) lines.push("Accepted as a separate piece of work.");
+    return lines;
+  }
+  if (card.review_id || card.kind === "needs_review") {
+    const mode = detailStr(detail, "mode");
+    if (mode) lines.push(`When: ${REVIEW_MODE_LABELS[mode as ReviewMode] ?? mode.replace(/_/g, " ")}`);
+    const reviewer = detailStr(detail, "reviewer_type");
+    if (reviewer === "human") lines.push("Reviewer: a person");
+    else if (reviewer === "agent") lines.push("Reviewer: another agent");
+    const conditions = Array.isArray(detail.matched_conditions)
+      ? detail.matched_conditions
+          .map((item) => (typeof item === "string" ? item : typeof item === "object" && item !== null ? detailStr(item as Record<string, unknown>, "kind") : ""))
+          .filter(Boolean)
+          .map(conditionLabel)
+      : [];
+    if (conditions.length) lines.push(`Why: ${conditions.join(", ")}`);
+    const tool = detailStr(detail, "tool_name");
+    if (tool) lines.push(`Action: ${tool.replace(/[._]/g, " ")}`);
+    const verdict = reviewVerdictLabel(detailStr(detail, "verdict"));
+    if (verdict) lines.push(`Outcome: ${verdict}`);
+    return lines;
+  }
+  return lines;
 }
 
 /** Pretty JSON for the "Show details" disclosure. */

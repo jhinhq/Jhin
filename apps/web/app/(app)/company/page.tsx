@@ -74,7 +74,7 @@ function OutlineAgent({ node, working }: { node: AgentTreeNode; working: Set<str
         href={`/agents/${agent.id}`}
         className="flex items-center gap-3 rounded-xl px-2 py-2 transition-colors hover:bg-hover"
       >
-        <Avatar name={agent.name} size="sm" />
+        <Avatar name={agent.name} size="sm" src={agent.avatar_url} />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-medium">{agent.name}</span>
           <span className="block truncate text-xs text-dim">{agent.role_title || "Agent"}</span>

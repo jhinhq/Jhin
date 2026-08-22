@@ -5,11 +5,15 @@
  * (admins) and under an Advanced disclosure. */
 
 import { useMutation } from "@tanstack/react-query";
-import { ArrowLeft, MessageSquare, Pause, Pencil, Play } from "lucide-react";
+import { ArrowLeft, ImagePlus, MessageSquare, Pause, Pencil, Play } from "lucide-react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useMemo, useState } from "react";
 import { ActivityFeed } from "@/components/activity/activity-feed";
+import { AvatarDialog } from "@/components/agents/avatar-dialog";
+import { HelpDirectory } from "@/components/agents/help-directory";
+import { MemoryPanel } from "@/components/agents/memory-panel";
+import { TeamStatus } from "@/components/agents/team-status";
 import { PageHeader } from "@/components/app-shell";
 import { Avatar } from "@/components/avatar";
 import { chatHref } from "@/components/company/agent-directory-card";
@@ -31,6 +35,7 @@ import { timeAgo } from "@/lib/activity";
 import { formatDateTime } from "@/lib/format";
 import {
   useAgent,
+  useAgentAvatarMap,
   useAgentGrants,
   useAgentPolicy,
   useConnections,
@@ -43,24 +48,38 @@ import { formatScope } from "@/lib/policy";
 import type { Agent } from "@/lib/types";
 import { useWorkspace } from "@/lib/workspace-context";
 
-type TabId = "about" | "colleagues" | "access" | "activity" | "chats";
+type TabId = "about" | "colleagues" | "team" | "memory" | "access" | "activity" | "chats";
 
 const TABS: { id: TabId; label: string }[] = [
   { id: "about", label: "About" },
   { id: "colleagues", label: "Colleagues" },
+  { id: "team", label: "Team status" },
+  { id: "memory", label: "Memory" },
   { id: "access", label: "What it can use" },
   { id: "activity", label: "Recent activity" },
   { id: "chats", label: "Chats" },
 ];
 
-function PersonRow({ id, name, role, note }: { id: string; name: string; role: string; note?: string }) {
+function PersonRow({
+  id,
+  name,
+  role,
+  note,
+  avatarUrl,
+}: {
+  id: string;
+  name: string;
+  role: string;
+  note?: string;
+  avatarUrl?: string | null;
+}) {
   return (
     <li>
       <Link
         href={`/agents/${id}`}
         className="flex items-center gap-3 rounded-xl border border-line bg-raised px-3 py-2.5 transition-colors hover:border-line-strong"
       >
-        <Avatar name={name} size="sm" />
+        <Avatar name={name} size="sm" src={avatarUrl} />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-medium">{name}</span>
           <span className="block truncate text-xs text-dim">{role || "Agent"}</span>
@@ -80,10 +99,12 @@ export default function AgentProfilePage() {
 
   const agentQuery = useAgent(workspaceId, agentId);
   const graph = useOrgGraph(workspaceId);
+  const avatars = useAgentAvatarMap(workspaceId);
   const working = useWorkingAgentIds(workspaceId);
   const invalidate = useInvalidateOrg(workspaceId);
   const [tab, setTab] = useState<TabId>("about");
   const [editing, setEditing] = useState(false);
+  const [changingAvatar, setChangingAvatar] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
   const toggle = useMutation({
@@ -106,6 +127,8 @@ export default function AgentProfilePage() {
   const team = teams.find((entry) => entry.id === agent?.team_id);
   const manager = agent?.manager_agent_id ? byId.get(agent.manager_agent_id) : undefined;
   const reports = nodes.filter((node) => node.manager_agent_id === agentId);
+  const isManager = reports.length > 0;
+  const visibleTabs = isManager ? TABS : TABS.filter((entry) => entry.id !== "team");
 
   if (agentQuery.isPending) {
     return (
@@ -155,7 +178,7 @@ export default function AgentProfilePage() {
       <div className="space-y-5 px-4 py-5 sm:px-8 sm:py-6">
         <section className="rounded-2xl border border-line bg-surface p-5 sm:p-6">
           <div className="flex flex-col gap-5 sm:flex-row sm:items-start">
-            <Avatar name={agent.name} size="xl" label={`${agent.name} avatar`} />
+            <Avatar name={agent.name} size="xl" label={`${agent.name} avatar`} src={agent.avatar_url} />
             <div className="min-w-0 flex-1">
               <h2 className="font-display text-2xl font-semibold tracking-tight">{agent.name}</h2>
               <p className="text-base text-dim">{agent.role_title || "Agent"}</p>
@@ -186,6 +209,9 @@ export default function AgentProfilePage() {
                   <Button onClick={() => setEditing(true)}>
                     <Pencil size={14} /> Edit
                   </Button>
+                  <Button onClick={() => setChangingAvatar(true)}>
+                    <ImagePlus size={14} /> Change avatar
+                  </Button>
                   {agent.status !== "disabled" ? (
                     <Button
                       onClick={() => toggle.mutate(agent.status === "paused" ? "resume" : "pause")}
@@ -209,7 +235,7 @@ export default function AgentProfilePage() {
           <ErrorNote message={actionError} />
         </section>
 
-        <Tabs tabs={TABS} value={tab} onChange={setTab} label="Profile sections" />
+        <Tabs tabs={visibleTabs} value={tab} onChange={setTab} label="Profile sections" />
 
         {tab === "about" ? (
           <div className="grid gap-4 lg:grid-cols-3">
@@ -276,12 +302,12 @@ export default function AgentProfilePage() {
               ) : (
                 <ul className="space-y-2">
                   {manager ? (
-                    <PersonRow id={manager.id} name={manager.name} role={manager.role_title} note="Manager" />
+                    <PersonRow id={manager.id} name={manager.name} role={manager.role_title} note="Manager" avatarUrl={avatars[manager.id]} />
                   ) : (
                     <li className="text-sm text-dim">No manager — works independently.</li>
                   )}
                   {reports.map((report) => (
-                    <PersonRow key={report.id} id={report.id} name={report.name} role={report.role_title} note="Reports here" />
+                    <PersonRow key={report.id} id={report.id} name={report.name} role={report.role_title} note="Reports here" avatarUrl={avatars[report.id]} />
                   ))}
                 </ul>
               )}
@@ -312,13 +338,25 @@ export default function AgentProfilePage() {
                         name={other?.name ?? "Another agent"}
                         role={relationship.purpose || other?.role_title || ""}
                         note={relationshipLabel(relationship, agent.id)}
+                        avatarUrl={avatars[otherId]}
                       />
                     );
                   })}
                 </ul>
               )}
             </SectionCard>
+            <div className="lg:col-span-2">
+              <HelpDirectory workspaceId={workspaceId} agentId={agent.id} agentName={agent.name} avatars={avatars} />
+            </div>
           </div>
+        ) : null}
+
+        {tab === "team" && isManager ? (
+          <TeamStatus workspaceId={workspaceId} agentId={agent.id} avatars={avatars} showAdvanced={isAdmin} />
+        ) : null}
+
+        {tab === "memory" ? (
+          <MemoryPanel workspaceId={workspaceId} agent={agent} canWrite={can("member")} isAdmin={isAdmin} />
         ) : null}
 
         {tab === "access" ? <AccessSection workspaceId={workspaceId} agentId={agent.id} isAdmin={isAdmin} /> : null}
@@ -336,6 +374,8 @@ export default function AgentProfilePage() {
 
         {tab === "chats" ? <ChatsSection workspaceId={workspaceId} agent={agent} /> : null}
       </div>
+
+      <AvatarDialog workspaceId={workspaceId} agent={agent} open={changingAvatar} onClose={() => setChangingAvatar(false)} />
 
       {editing && graph.data ? (
         <AgentDrawer

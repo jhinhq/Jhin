@@ -5,7 +5,7 @@
  * locally; the first page stays live through the hook's polling. */
 
 import { useMutation } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { ActivityCard } from "@/components/activity/activity-card";
 import { LoadError, Segmented } from "@/components/company/bits";
 import { Button, EmptyState, Field, Select, Spinner } from "@/components/ui";
@@ -50,6 +50,10 @@ export function ActivityFeed({
     limit: compact ? 10 : PAGE_SIZE,
   };
   const agents = useAgents(workspaceId);
+  const avatarMap = useMemo(
+    () => Object.fromEntries((agents.data ?? []).map((agent) => [agent.id, agent.avatar_url ?? null])),
+    [agents.data],
+  );
   const first = useActivity(workspaceId, baseParams);
 
   return (
@@ -95,6 +99,7 @@ export function ActivityFeed({
           firstPage={first.data}
           params={baseParams}
           compact={compact}
+          avatars={avatarMap}
         />
       )}
     </div>
@@ -107,11 +112,13 @@ function PagedList({
   firstPage,
   params,
   compact,
+  avatars,
 }: {
   workspaceId: string;
   firstPage: ActivityList;
   params: Record<string, string | number | undefined>;
   compact: boolean;
+  avatars: Record<string, string | null>;
 }) {
   const [extra, setExtra] = useState<ActivityCardData[]>([]);
   const [nextBefore, setNextBefore] = useState<string | null | undefined>(undefined);
@@ -138,7 +145,7 @@ function PagedList({
     <>
       <ul className="space-y-3">
         {items.map((card) => (
-          <ActivityCard key={card.id} card={card} />
+          <ActivityCard key={card.id} card={card} avatars={avatars} />
         ))}
       </ul>
       {loadMore.isError ? (

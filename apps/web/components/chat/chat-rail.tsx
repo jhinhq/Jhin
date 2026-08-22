@@ -10,7 +10,7 @@ import { LiveStatusPill } from "@/components/chat/status-pill";
 import { ErrorNote, Spinner } from "@/components/ui";
 import { ApiError } from "@/lib/api";
 import { filterConversations, relativeTime, sortByActivity } from "@/lib/chat";
-import { useConversations } from "@/lib/hooks";
+import { useAgentAvatarMap, useConversations } from "@/lib/hooks";
 import type { Conversation } from "@/lib/types";
 import { useWorkspace } from "@/lib/workspace-context";
 
@@ -18,10 +18,13 @@ export function ConversationRailItem({
   conversation,
   selected,
   now,
+  avatarUrl,
 }: {
   conversation: Conversation;
   selected: boolean;
   now?: Date;
+  /** The primary agent's `avatar_url`, when known. */
+  avatarUrl?: string | null;
 }) {
   const agentName = conversation.agent_name ?? "Agent";
   const preview = conversation.last_message_preview?.trim();
@@ -35,7 +38,7 @@ export function ConversationRailItem({
           selected ? "bg-accent-soft" : "hover:bg-hover"
         }`}
       >
-        <Avatar name={agentName} size="sm" className="mt-0.5" />
+        <Avatar name={agentName} size="sm" className="mt-0.5" src={avatarUrl} />
         <span className="min-w-0 flex-1">
           <span className="flex items-baseline justify-between gap-2">
             <span className="truncate text-sm font-medium text-ink">{conversation.title}</span>
@@ -64,6 +67,7 @@ export function ChatRail({ selectedId }: { selectedId: string | null }) {
   const { workspace } = useWorkspace();
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query);
+  const avatars = useAgentAvatarMap(workspace.workspace_id);
   const conversations = useConversations(workspace.workspace_id, {
     q: deferredQuery.trim() || undefined,
     limit: 100,
@@ -138,6 +142,7 @@ export function ChatRail({ selectedId }: { selectedId: string | null }) {
                   key={conversation.id}
                   conversation={conversation}
                   selected={conversation.id === selectedId}
+                  avatarUrl={conversation.primary_agent_id ? avatars[conversation.primary_agent_id] : null}
                 />
               ))}
             </ul>
@@ -157,6 +162,7 @@ export function ChatRail({ selectedId }: { selectedId: string | null }) {
                   key={conversation.id}
                   conversation={conversation}
                   selected={conversation.id === selectedId}
+                  avatarUrl={conversation.primary_agent_id ? avatars[conversation.primary_agent_id] : null}
                 />
               ))}
             </ul>

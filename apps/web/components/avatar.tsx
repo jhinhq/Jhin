@@ -1,7 +1,13 @@
-/** Accessible initials avatar for agents and people. Always render next to a
- * visible name; the avatar itself is decorative (aria-hidden) unless a label
- * is passed. Color is derived from the name so an agent keeps the same hue
- * everywhere. */
+"use client";
+
+/** Accessible avatar for agents and people. Renders the agent's picture when
+ * `src` is given and falls back to initials when there is none or the image
+ * fails to load. Always render next to a visible name; the avatar itself is
+ * decorative (aria-hidden) unless a label is passed. Color is derived from
+ * the name so an agent keeps the same hue everywhere. */
+
+import { useState } from "react";
+import { avatarSrc, AVATAR_VARIANT_FOR_SIZE } from "@/lib/media";
 
 const HUES = [
   "bg-[#7371fc] text-white",
@@ -35,30 +41,54 @@ const SIZES = {
   xl: "h-20 w-20 text-2xl",
 } as const;
 
+export type AvatarSize = keyof typeof SIZES;
+
 export function Avatar({
   name,
   size = "md",
   kind = "agent",
   label,
   className = "",
+  src,
 }: {
   name: string;
-  size?: keyof typeof SIZES;
+  size?: AvatarSize;
   /** People get a neutral tint; agents get a brand hue. */
   kind?: "agent" | "user";
   label?: string;
   className?: string;
+  /** The agent's `avatar_url` (relative media path) or a full image URL.
+   * `?size=` is appended to match the rendered size. */
+  src?: string | null;
 }) {
+  const resolved = src && src.includes("size=") ? src : avatarSrc(src, AVATAR_VARIANT_FOR_SIZE[size]);
+  // Remember which source failed so a new source gets a fresh try.
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const failed = failedSrc !== null && failedSrc === resolved;
+
   const tone = kind === "user" ? "bg-raised text-dim border border-line" : HUES[hueIndex(name)];
   const shape = kind === "user" ? "rounded-full" : "rounded-xl";
+  const showImage = Boolean(resolved) && !failed;
   return (
     <span
       aria-hidden={label ? undefined : true}
       aria-label={label}
       role={label ? "img" : undefined}
-      className={`inline-flex shrink-0 select-none items-center justify-center font-display font-semibold ${shape} ${SIZES[size]} ${tone} ${className}`}
+      data-avatar={showImage ? "image" : "initials"}
+      className={`inline-flex shrink-0 select-none items-center justify-center overflow-hidden font-display font-semibold ${shape} ${SIZES[size]} ${showImage ? "bg-raised" : tone} ${className}`}
     >
-      {initialsOf(name)}
+      {showImage ? (
+        // eslint-disable-next-line @next/next/no-img-element -- authenticated same-origin media; next/image can't proxy cookies
+        <img
+          src={resolved ?? undefined}
+          alt=""
+          draggable={false}
+          className="h-full w-full object-cover"
+          onError={() => setFailedSrc(resolved)}
+        />
+      ) : (
+        initialsOf(name)
+      )}
     </span>
   );
 }

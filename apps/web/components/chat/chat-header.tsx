@@ -32,6 +32,7 @@ function IconButton({
 export function ChatHeader({
   conversation,
   agent,
+  avatarUrl,
   canEdit,
   detailsOpen,
   onToggleDetails,
@@ -42,6 +43,7 @@ export function ChatHeader({
 }: {
   conversation: Conversation;
   agent: ConversationAgentSummary | null;
+  avatarUrl?: string | null;
   canEdit: boolean;
   detailsOpen: boolean;
   onToggleDetails: () => void;
@@ -86,7 +88,7 @@ export function ChatHeader({
       >
         <ArrowLeft size={18} />
       </Link>
-      <Avatar name={agentName} size="md" />
+      <Avatar name={agentName} size="md" src={avatarUrl} />
       <div className="min-w-0 flex-1">
         {editing ? (
           <input

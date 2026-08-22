@@ -83,7 +83,12 @@ export interface AgentIdentity {
   discoverability?: "discoverable" | "hidden";
   availability?: Availability;
   relationships?: AgentRelationship[];
+  /** Relative authenticated media path (append `?size=64|128|256`) or null
+   * for initials. Optional so org-graph nodes and fixtures still type-check. */
+  avatar_url?: string | null;
 }
+
+export type AvatarKind = "initials" | "upload" | "generated";
 
 export interface Agent extends AgentIdentity {
   id: string;
@@ -105,6 +110,8 @@ export interface Agent extends AgentIdentity {
   max_concurrent_runs: number;
   monthly_budget_cents: number | null;
   metadata_json: Record<string, unknown>;
+  avatar_kind?: AvatarKind;
+  active_avatar_asset_id?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -671,6 +678,8 @@ export interface ActivityCard {
   root_task_id: string | null;
   conversation_id: string | null;
   approval_id: string | null;
+  work_request_id?: string | null;
+  review_id?: string | null;
   summary: string;
   detail_json: Record<string, unknown>;
   created_at: string;
@@ -685,5 +694,341 @@ export interface Attention {
   pending_approvals: Approval[];
   failed_tasks: Task[];
   waiting_conversations: Conversation[];
-  counts: { approvals: number; failures: number; total: number };
+  /** Work reviews assigned to a human (coordination release). Optional so
+   * older payloads keep working. */
+  pending_reviews?: WorkReview[];
+  counts: { approvals: number; failures: number; reviews?: number; total: number };
+}
+
+// --- Memory (docs/architecture/memory.md) ---
+
+export type MemoryScope = "agent" | "team" | "workspace";
+export type MemoryKind = "fact" | "preference" | "decision" | "procedure" | "context" | "other";
+export type MemoryStatus =
+  | "proposed"
+  | "active"
+  | "contested"
+  | "superseded"
+  | "rejected"
+  | "forgotten";
+export type MemorySensitivity = "normal" | "sensitive" | "redacted";
+
+export interface MemoryRecord {
+  id: string;
+  workspace_id: string;
+  scope: MemoryScope;
+  scope_id: string;
+  kind: MemoryKind;
+  subject: string | null;
+  content: string;
+  source_conversation_id: string | null;
+  source_message_id: string | null;
+  source_task_id: string | null;
+  source_event_id: string | null;
+  visibility: string;
+  sensitivity: MemorySensitivity;
+  confidence: number;
+  importance: number;
+  tags_json: string[];
+  status: MemoryStatus;
+  valid_from: string | null;
+  expires_at: string | null;
+  pinned_at: string | null;
+  forgotten_at: string | null;
+  version: number;
+  supersedes_id: string | null;
+  has_embedding: boolean;
+  embedding_model: string | null;
+  created_by_type: "user" | "agent" | "system" | string;
+  created_by_id: string | null;
+  policy_json: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MemoryList {
+  items: MemoryRecord[];
+  total: number;
+}
+
+export interface MemoryCreate {
+  content: string;
+  scope?: MemoryScope;
+  agent_id?: string | null;
+  team_id?: string | null;
+  kind?: MemoryKind;
+  subject?: string | null;
+  tags?: string[];
+  confidence?: number;
+  importance?: number;
+  expires_in_days?: number | null;
+  source_conversation_id?: string | null;
+  source_message_id?: string | null;
+  source_task_id?: string | null;
+}
+
+export interface MemoryUpdate {
+  content?: string;
+  kind?: MemoryKind;
+  subject?: string | null;
+  tags?: string[];
+  confidence?: number;
+  importance?: number;
+  expires_at?: string | null;
+}
+
+// --- Media / avatars (docs/architecture/media.md) ---
+
+export type AvatarVariantSize = 64 | 128 | 256;
+
+export interface AvatarOut {
+  agent_id: string;
+  workspace_id: string;
+  avatar_kind: AvatarKind;
+  active_avatar_asset_id: string | null;
+  avatar_url: string | null;
+  initials: string;
+}
+
+export interface ProviderDisclosure {
+  provider_type: string;
+  provider_display_name: string;
+  model_profile_id: string | null;
+  model_name: string;
+  image_size: string;
+  /** Micro-dollars per image; null = unknown. */
+  estimated_cost_micros: number | null;
+  sends_public_identity: boolean;
+}
+
+export type AvatarGenerationStatus = "queued" | "running" | "succeeded" | "failed";
+
+export interface AvatarGenerationOut {
+  id: string;
+  workspace_id: string;
+  agent_id: string;
+  status: AvatarGenerationStatus;
+  prompt: string;
+  prompt_hint: string;
+  disclosure: ProviderDisclosure;
+  error: string | null;
+  error_code: string | null;
+  result_asset_id: string | null;
+  result_avatar_url: string | null;
+  temporal_workflow_id: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  updated_at: string;
+}
+
+// --- Coordination (docs/architecture/coordination.md) ---
+
+/** Public identity allowlist returned by GET /directory. */
+export interface DirectoryEntry {
+  id: string;
+  name: string;
+  slug: string;
+  role_title: string;
+  public_purpose: string;
+  expertise: string[];
+  availability: Availability | string;
+  primary_team_id: string | null;
+  primary_team_name: string | null;
+  manager_agent_id: string | null;
+}
+
+export type WorkRequestStatus =
+  | "pending"
+  | "clarification_requested"
+  | "accepted"
+  | "declined"
+  | "completed"
+  | "failed";
+
+export interface WorkRequest {
+  id: string;
+  workspace_id: string;
+  conversation_id: string | null;
+  requester_agent_id: string;
+  requester_task_id: string | null;
+  requester_run_id: string | null;
+  root_task_id: string | null;
+  requested_by_user_id: string | null;
+  target_agent_id: string;
+  title: string;
+  description: string;
+  expected_output: string;
+  status: WorkRequestStatus;
+  idempotency_key: string;
+  depth: number;
+  created_task_id: string | null;
+  response: string;
+  responded_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+  requester_agent_name?: string | null;
+  target_agent_name?: string | null;
+}
+
+export interface WorkRequestList {
+  items: WorkRequest[];
+  total: number;
+}
+
+export type ReviewMode = "pre_action" | "before_close" | "post_action" | "periodic";
+export type ReviewScopeKind = "workspace" | "team" | "agent" | "task_type";
+export type ReviewConditionKind =
+  | "elevated_action"
+  | "destructive_action"
+  | "cost_threshold"
+  | "token_threshold"
+  | "time_threshold"
+  | "tool_failure"
+  | "test_failure"
+  | "approval_denied"
+  | "policy_denied"
+  | "blocked"
+  | "low_confidence"
+  | "cross_team_request"
+  | "explicit_request"
+  | "always";
+export type ReviewerKind = "reporting_manager" | "agent" | "team_role" | "human";
+
+export interface ReviewCondition {
+  kind: ReviewConditionKind;
+  /** cost: micro-dollars; tokens: count; time: seconds; confidence: 0..1. */
+  threshold?: number | null;
+}
+
+export interface ReviewerSelector {
+  kind: ReviewerKind;
+  agent_id?: string | null;
+  role_label?: string | null;
+  fallback_agent_id?: string | null;
+  fallback_to_human?: boolean;
+}
+
+export interface ReviewPolicy {
+  id: string;
+  workspace_id: string;
+  name: string;
+  scope_kind: ReviewScopeKind;
+  scope_id: string | null;
+  scope_key: string | null;
+  enabled: boolean;
+  mode: ReviewMode;
+  conditions_json: ReviewCondition[];
+  reviewer_selector_json: ReviewerSelector;
+  fail_closed: boolean;
+  priority: number;
+  period_seconds: number | null;
+  created_by_user_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReviewPolicyIn {
+  name: string;
+  scope_kind: ReviewScopeKind;
+  scope_id?: string | null;
+  scope_key?: string | null;
+  enabled: boolean;
+  mode: ReviewMode;
+  conditions: ReviewCondition[];
+  reviewer: ReviewerSelector;
+  fail_closed: boolean;
+  priority: number;
+  period_seconds?: number | null;
+}
+
+export type WorkReviewStatus = "pending" | "approved" | "changes_requested" | "skipped" | "escalated";
+export type ReviewVerdict = "approve" | "changes_requested" | "escalate";
+
+export interface WorkReview {
+  id: string;
+  workspace_id: string;
+  policy_id: string | null;
+  task_id: string | null;
+  run_id: string | null;
+  tool_call_id: string | null;
+  work_request_id: string | null;
+  subject_agent_id: string | null;
+  trigger_key: string;
+  mode: ReviewMode;
+  evidence_json: Record<string, unknown>;
+  reviewer_type: "agent" | "human" | "none";
+  reviewer_agent_id: string | null;
+  reviewer_user_id: string | null;
+  status: WorkReviewStatus;
+  verdict: ReviewVerdict | null;
+  feedback: string;
+  requested_at: string;
+  decided_at: string | null;
+  decided_by_user_id: string | null;
+  decided_by_agent_id: string | null;
+  created_at: string;
+  subject_agent_name?: string | null;
+  reviewer_agent_name?: string | null;
+  task_title?: string | null;
+}
+
+export interface WorkReviewList {
+  items: WorkReview[];
+  total: number;
+  pending_count: number;
+}
+
+export interface RollupReport {
+  agent_id: string;
+  name: string;
+  role_title: string;
+  depth: number;
+  status: AgentStatus | string;
+  availability: Availability | string;
+  active_tasks: number;
+  queued_tasks: number;
+  active_runs: number;
+  max_concurrent_runs: number;
+}
+
+export interface RollupItem {
+  kind: "task" | "run" | "approval" | "review" | "work_request" | string;
+  source_id: string;
+  agent_id: string | null;
+  agent_name: string | null;
+  title: string;
+  status: string;
+  summary: string;
+  occurred_at: string;
+  task_id: string | null;
+  conversation_id: string | null;
+  artifacts: Record<string, unknown>[];
+  risks: string[];
+}
+
+export interface RollupQueue {
+  active_runs: number;
+  queued_tasks: number;
+  waiting_approval: number;
+  waiting_delegation: number;
+  open_work_requests: number;
+}
+
+export interface ManagerRollup {
+  manager_agent_id: string;
+  generated_at: string;
+  window_start: string;
+  reports: RollupReport[];
+  active_work: RollupItem[];
+  recent_work: RollupItem[];
+  blocked_or_failed: RollupItem[];
+  pending_reviews: RollupItem[];
+  pending_approvals: RollupItem[];
+  outcomes: RollupItem[];
+  open_work_requests: RollupItem[];
+  queue: RollupQueue;
+  source_ids: string[];
+  truncated: boolean;
 }

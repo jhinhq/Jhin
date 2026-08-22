@@ -21,6 +21,7 @@ import {
   Radio,
   ScrollText,
   Settings,
+  ShieldCheck,
   SlidersHorizontal,
   Wrench,
   Zap,
@@ -65,6 +66,12 @@ export const ADVANCED_NAV: readonly NavItem[] = [
     label: "Runs",
     icon: Activity,
     description: "Individual agent executions, their steps, and what they cost.",
+  },
+  {
+    href: "/review-policies",
+    label: "Review policies",
+    icon: ShieldCheck,
+    description: "When an agent's work gets a second look before it goes further, and by whom.",
   },
   {
     href: "/approvals",

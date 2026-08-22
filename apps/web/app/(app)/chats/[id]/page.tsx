@@ -19,6 +19,7 @@ import {
   useConversationMessages,
   useInvalidateApprovals,
   useInvalidateConversations,
+  useAgentAvatarMap,
 } from "@/lib/hooks";
 import type {
   ConversationMessage,
@@ -51,6 +52,7 @@ export default function ChatThreadPage() {
   const conversationId = params.id;
   const { workspace, user, can } = useWorkspace();
   const workspaceId = workspace.workspace_id;
+  const avatars = useAgentAvatarMap(workspaceId);
   const queryClient = useQueryClient();
   const invalidate = useInvalidateConversations(workspaceId);
   const invalidateApprovals = useInvalidateApprovals(workspaceId);
@@ -247,6 +249,7 @@ export default function ChatThreadPage() {
         <ChatHeader
           conversation={conversation}
           agent={agent}
+          avatarUrl={agent ? avatars[agent.id] : null}
           canEdit={canWrite}
           detailsOpen={detailsOpen}
           onToggleDetails={() => setDetailsOpen((open) => !open)}
@@ -272,6 +275,8 @@ export default function ChatThreadPage() {
           onReject={(id) => decide.mutate({ id, decision: "reject" })}
           liveStatus={liveStatus}
           loading={messages.isPending}
+          agentAvatars={avatars}
+          agentAvatarUrl={agent ? avatars[agent.id] : null}
         />
 
         <div className="border-t border-line bg-bg px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3 sm:px-8">

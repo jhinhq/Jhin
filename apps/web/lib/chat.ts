@@ -4,6 +4,7 @@
  * labels, and the merged transcript timeline.
  */
 
+import { isWorkRequestMessage, reviewVerdictLabel, workRequestMessageLabel } from "@/lib/coordination";
 import type { ActivityCard, ActivityKind, Conversation, ConversationMessage } from "@/lib/types";
 
 export const LAST_AGENT_STORAGE_KEY = "jhin-last-agent";
@@ -84,6 +85,7 @@ export function friendlyMessageLabel(
   message: Pick<ConversationMessage, "message_type" | "content_json" | "sender_type">,
 ): string {
   const content = message.content_json;
+  if (isWorkRequestMessage(message)) return workRequestMessageLabel({ content_json: content, sender_id: null });
   const target = messageTarget(message);
   const from = str(content.from_agent_name);
   switch (message.message_type) {
@@ -94,11 +96,9 @@ export function friendlyMessageLabel(
     case "result":
       return from ? `${from} reported back` : "Reported back";
     case "review_result": {
-      const verdict = str(content.verdict);
+      const verdict = reviewVerdictLabel(str(content.verdict));
       const who = from ? `${from}'s review` : "Review";
-      if (verdict === "pass") return `${who}: looks good`;
-      if (verdict === "fail") return `${who}: needs changes`;
-      return `${who} came back`;
+      return verdict ? `${who}: ${verdict}` : `${who} came back`;
     }
     case "escalation":
       return "Needs help";
@@ -117,6 +117,23 @@ export function friendlyMessageLabel(
 export function messageText(message: Pick<ConversationMessage, "content_json">): string {
   const content = message.content_json;
   return str(content.text) || str(content.summary) || str(content.content) || "";
+}
+
+/** Extra lines a work-request card shows under its summary (what was asked
+ * for and what came back), without exposing ids. */
+export function workRequestDetailLines(message: Pick<ConversationMessage, "content_json">): string[] {
+  const content = message.content_json;
+  if (!isWorkRequestMessage(message)) return [];
+  const lines: string[] = [];
+  const instructions = str(content.instructions);
+  const expected = str(content.expected_output);
+  const response = str(content.response);
+  if (instructions && instructions !== messageText(message)) lines.push(instructions);
+  if (expected) lines.push(`Expected: ${expected}`);
+  if (response && response !== messageText(message)) lines.push(`Reply: ${response}`);
+  const risks = Array.isArray(content.risks) ? content.risks.filter((r): r is string => typeof r === "string") : [];
+  if (risks.length) lines.push(`Risks: ${risks.join("; ")}`);
+  return lines;
 }
 
 export function isWorkCard(

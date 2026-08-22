@@ -3,12 +3,20 @@
 /** Shared data hooks (TanStack Query) for the authenticated app. */
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import type {
   ActivityList,
   Agent,
   AgentPolicy,
   Attention,
+  AvatarGenerationOut,
+  AvatarOut,
+  DirectoryEntry,
+  ManagerRollup,
+  MemoryList,
+  ReviewPolicy,
+  WorkRequestList,
+  WorkReviewList,
   ConversationDetail,
   ConversationList,
   ConversationMessage,
@@ -502,6 +510,158 @@ export function useInvalidateConversations(workspaceId: string) {
     void queryClient.invalidateQueries({ queryKey: ["conversation-activity", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["activity", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["attention", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["tasks", workspaceId] });
+  };
+}
+
+// --- Memory (docs/architecture/memory.md) ---
+
+export type MemoryQuery = Record<string, string | number | undefined>;
+
+export function useMemories(workspaceId: string, params: MemoryQuery = {}, enabled = true) {
+  return useQuery({
+    queryKey: ["memories", workspaceId, params],
+    queryFn: () => api<MemoryList>(`/api/v1/workspaces/${workspaceId}/memories`, { params }),
+    placeholderData: (previous) => previous,
+    enabled,
+  });
+}
+
+export function useInvalidateMemories(workspaceId: string) {
+  const queryClient = useQueryClient();
+  return () => {
+    void queryClient.invalidateQueries({ queryKey: ["memories", workspaceId] });
+  };
+}
+
+// --- Avatars (docs/architecture/media.md) ---
+
+export function useAgentAvatar(workspaceId: string, agentId: string | null) {
+  return useQuery({
+    queryKey: ["agent-avatar", workspaceId, agentId],
+    queryFn: () => api<AvatarOut>(`/api/v1/workspaces/${workspaceId}/agents/${agentId}/avatar`),
+    enabled: agentId !== null,
+  });
+}
+
+/** Latest generation for an agent; polls while queued/running. 404 (never
+ * generated) is treated as "nothing" rather than an error. */
+export function useAvatarGeneration(workspaceId: string, agentId: string | null, enabled = true) {
+  return useQuery({
+    queryKey: ["avatar-generation", workspaceId, agentId],
+    queryFn: async () => {
+      try {
+        return await api<AvatarGenerationOut>(
+          `/api/v1/workspaces/${workspaceId}/agents/${agentId}/avatar/generation`,
+        );
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 404) return null;
+        throw error;
+      }
+    },
+    enabled: enabled && agentId !== null,
+    retry: false,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status === "queued" || status === "running" ? LIVE_POLL_MS : false;
+    },
+  });
+}
+
+/** Invalidate everything that shows an agent's picture. */
+export function useInvalidateAvatar(workspaceId: string, agentId: string) {
+  const queryClient = useQueryClient();
+  return () => {
+    void queryClient.invalidateQueries({ queryKey: ["agent-avatar", workspaceId, agentId] });
+    void queryClient.invalidateQueries({ queryKey: ["avatar-generation", workspaceId, agentId] });
+    void queryClient.invalidateQueries({ queryKey: ["agent", workspaceId, agentId] });
+    void queryClient.invalidateQueries({ queryKey: ["agents", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["org-graph", workspaceId] });
+  };
+}
+
+/** Agent id → avatar url for screens whose payloads only carry agent names
+ * (conversations, messages, activity cards). Backed by the cached agent list. */
+export function useAgentAvatarMap(workspaceId: string): Record<string, string | null> {
+  const agents = useAgents(workspaceId);
+  const map: Record<string, string | null> = {};
+  for (const agent of agents.data ?? []) map[agent.id] = agent.avatar_url ?? null;
+  return map;
+}
+
+// --- Coordination (docs/architecture/coordination.md) ---
+
+export function useDirectory(
+  workspaceId: string,
+  params: Record<string, string | number | undefined> = {},
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: ["directory", workspaceId, params],
+    queryFn: () =>
+      api<DirectoryEntry[]>(`/api/v1/workspaces/${workspaceId}/directory`, { params }),
+    placeholderData: (previous) => previous,
+    enabled,
+  });
+}
+
+export function useWorkRequests(
+  workspaceId: string,
+  params: Record<string, string | number | undefined> = {},
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: ["work-requests", workspaceId, params],
+    queryFn: () =>
+      api<WorkRequestList>(`/api/v1/workspaces/${workspaceId}/work-requests`, { params }),
+    placeholderData: (previous) => previous,
+    refetchInterval: 10_000,
+    enabled,
+  });
+}
+
+export function useReviewPolicies(workspaceId: string, enabled = true) {
+  return useQuery({
+    queryKey: ["review-policies", workspaceId],
+    queryFn: () => api<ReviewPolicy[]>(`/api/v1/workspaces/${workspaceId}/review-policies`),
+    enabled,
+  });
+}
+
+export function useReviews(
+  workspaceId: string,
+  params: Record<string, string | number | undefined> = {},
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: ["reviews", workspaceId, params],
+    queryFn: () => api<WorkReviewList>(`/api/v1/workspaces/${workspaceId}/reviews`, { params }),
+    placeholderData: (previous) => previous,
+    refetchInterval: 10_000,
+    enabled,
+  });
+}
+
+export function useAgentRollup(workspaceId: string, agentId: string | null, enabled = true) {
+  return useQuery({
+    queryKey: ["agent-rollup", workspaceId, agentId],
+    queryFn: () =>
+      api<ManagerRollup>(`/api/v1/workspaces/${workspaceId}/agents/${agentId}/rollup`),
+    enabled: enabled && agentId !== null,
+    refetchInterval: 10_000,
+  });
+}
+
+/** After deciding a review or answering a help request. */
+export function useInvalidateCoordination(workspaceId: string) {
+  const queryClient = useQueryClient();
+  return () => {
+    void queryClient.invalidateQueries({ queryKey: ["work-requests", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["reviews", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["review-policies", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["agent-rollup", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["attention", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["activity", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["tasks", workspaceId] });
   };
 }

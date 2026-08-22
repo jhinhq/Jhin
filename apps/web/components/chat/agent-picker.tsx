@@ -11,7 +11,7 @@ export function AgentPicker({
   selectedId,
   onSelect,
 }: {
-  agents: Pick<Agent, "id" | "name" | "role_title" | "status">[];
+  agents: Pick<Agent, "id" | "name" | "role_title" | "status" | "avatar_url">[];
   selectedId: string | null;
   onSelect: (id: string) => void;
 }) {
@@ -32,7 +32,7 @@ export function AgentPicker({
                 : "border-line bg-surface text-dim hover:border-line-strong hover:bg-hover"
             }`}
           >
-            <Avatar name={agent.name} size="sm" />
+            <Avatar name={agent.name} size="sm" src={agent.avatar_url} />
             <span className="min-w-0">
               <span className="block truncate text-sm font-medium text-ink">{agent.name}</span>
               {agent.role_title ? (
