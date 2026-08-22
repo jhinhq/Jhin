@@ -6,17 +6,20 @@ Pydantic, or NATS.
 """
 
 from jhin_domain.enums import (
+    ACTIVITY_LABELS,
     AGENT_MESSAGE_TYPES,
     APPROVAL_DECIDED_STATUSES,
     RUN_ACTIVE_STATUSES,
     RUN_TERMINAL_STATUSES,
     SANDBOX_JOB_TERMINAL_STATUSES,
     TASK_TERMINAL_STATES,
+    ActivityKind,
     ActorType,
     AgentStatus,
     ApprovalStatus,
     AutonomyLevel,
     ConnectionStatus,
+    ConversationStatus,
     MessageType,
     MessageVisibility,
     ModelProviderType,
@@ -40,17 +43,20 @@ from jhin_domain.ids import new_uuid7
 from jhin_domain.messages import artifact, structured_content
 
 __all__ = [
+    "ACTIVITY_LABELS",
     "AGENT_MESSAGE_TYPES",
     "APPROVAL_DECIDED_STATUSES",
     "RUN_ACTIVE_STATUSES",
     "RUN_TERMINAL_STATUSES",
     "SANDBOX_JOB_TERMINAL_STATUSES",
     "TASK_TERMINAL_STATES",
+    "ActivityKind",
     "ActorType",
     "AgentStatus",
     "ApprovalStatus",
     "AutonomyLevel",
     "ConnectionStatus",
+    "ConversationStatus",
     "MessageType",
     "MessageVisibility",
     "ModelProviderType",

@@ -20,6 +20,7 @@ EVENT_DOMAINS: tuple[str, ...] = (
     "agent",
     "tool",
     "approval",
+    "conversation",
     "connector",
     "trigger",
     "workflow",

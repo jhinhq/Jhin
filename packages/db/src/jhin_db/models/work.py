@@ -41,6 +41,10 @@ class Task(Base, UuidPkMixin, TimestampMixin):
         Uuid, ForeignKey("task.id", ondelete="SET NULL"), default=None
     )
     trigger_id: Mapped[UUID | None] = mapped_column(Uuid, default=None)
+    # First-class conversations: the chat thread this task episode belongs to.
+    conversation_id: Mapped[UUID | None] = mapped_column(
+        Uuid, ForeignKey("conversation.id", ondelete="SET NULL"), default=None, index=True
+    )
     temporal_workflow_id: Mapped[str | None] = mapped_column(String(200), default=None)
     correlation_id: Mapped[UUID] = mapped_column(Uuid)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JsonDict, default=dict)
@@ -93,6 +97,9 @@ class Message(Base, UuidPkMixin, CreatedAtMixin):
     )
     run_id: Mapped[UUID | None] = mapped_column(
         Uuid, ForeignKey("agent_run.id", ondelete="SET NULL"), default=None, index=True
+    )
+    conversation_id: Mapped[UUID | None] = mapped_column(
+        Uuid, ForeignKey("conversation.id", ondelete="SET NULL"), default=None, index=True
     )
     sender_type: Mapped[str] = mapped_column(String(16))
     sender_id: Mapped[UUID | None] = mapped_column(Uuid, default=None)

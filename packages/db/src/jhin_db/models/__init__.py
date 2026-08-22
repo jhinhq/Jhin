@@ -2,6 +2,7 @@
 
 from jhin_db.models.audit import AuditEvent
 from jhin_db.models.connection import Connection, WebhookDelivery
+from jhin_db.models.conversation import Conversation
 from jhin_db.models.identity import User, UserSession
 from jhin_db.models.models import ModelProfile, ModelProvider
 from jhin_db.models.org import (
@@ -27,6 +28,7 @@ __all__ = [
     "Approval",
     "AuditEvent",
     "Connection",
+    "Conversation",
     "Message",
     "ModelProfile",
     "ModelProvider",

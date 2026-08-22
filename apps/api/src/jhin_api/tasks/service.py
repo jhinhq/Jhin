@@ -11,6 +11,7 @@ committed *before* the workflow starts, so activities always find it.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -24,9 +25,10 @@ from temporalio.service import RPCError
 
 from jhin_api.audit import service as audit
 from jhin_api.deps import WorkspaceContext
-from jhin_db.models import Agent, AgentRun, Message, RunEvent, Task, ToolCall
+from jhin_db.models import Agent, AgentRun, Conversation, Message, RunEvent, Task, ToolCall
 from jhin_domain import (
     AgentStatus,
+    MessageType,
     MessageVisibility,
     RecipientType,
     SenderType,
@@ -62,7 +64,7 @@ async def _get_active_agent(db: AsyncSession, workspace_id: UUID, agent_id: UUID
     return agent
 
 
-async def _start_workflow(
+async def start_workflow(
     db: AsyncSession, temporal: TemporalClient, task: Task, agent_id: UUID, instruction: str
 ) -> None:
     """Start AgentTaskWorkflow for a committed task row.
@@ -131,7 +133,7 @@ async def create_task(
     await db.commit()
 
     if agent_id is not None:
-        await _start_workflow(db, temporal, task, agent_id, task.description)
+        await start_workflow(db, temporal, task, agent_id, task.description)
     return task
 
 
@@ -161,17 +163,32 @@ async def message_agent(
     request_id: UUID,
     ip_hash: str,
 ) -> Task:
-    """Conversational entry point (plan 17.5): message → task + run."""
+    """Conversational entry point (plan 17.5): message → task + run.
+
+    Legacy surface kept for compatibility: it now also opens a first-class
+    conversation and links the task and seed message to it.
+    """
     agent = await _get_active_agent(db, ctx.workspace_id, agent_id)
 
-    title = text.strip().splitlines()[0][:120] or f"Message to {agent.name}"
+    first_line = next((line for line in text.splitlines() if line.strip()), "")
+    title = first_line.strip()[:120] or f"Message to {agent.name}"
+    conversation = Conversation(
+        workspace_id=ctx.workspace_id,
+        title=title,
+        primary_agent_id=agent_id,
+        created_by_user_id=ctx.user.id,
+        last_activity_at=datetime.now(UTC),
+    )
+    db.add(conversation)
+    await db.flush()
     task = Task(
         workspace_id=ctx.workspace_id,
         title=title,
         description=text,
         assigned_agent_id=agent_id,
+        conversation_id=conversation.id,
         correlation_id=new_uuid7(),
-        metadata_json={"origin": "message"},
+        metadata_json={"origin": "message", "conversation_id": str(conversation.id)},
     )
     db.add(task)
     await db.flush()
@@ -179,6 +196,7 @@ async def message_agent(
         Message(
             workspace_id=ctx.workspace_id,
             task_id=task.id,
+            conversation_id=conversation.id,
             sender_type=SenderType.USER.value,
             sender_id=ctx.user.id,
             recipient_type=RecipientType.AGENT.value,
@@ -196,11 +214,22 @@ async def message_agent(
         actor_id=ctx.user.id,
         request_id=request_id,
         ip_hash=ip_hash,
-        metadata={"task_id": str(task.id)},
+        metadata={"task_id": str(task.id), "conversation_id": str(conversation.id)},
+    )
+    audit.record(
+        db,
+        action="conversation.created",
+        target_type="conversation",
+        target_id=conversation.id,
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user.id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        metadata={"agent_id": str(agent_id), "title": title, "origin": "message"},
     )
     await db.commit()
 
-    await _start_workflow(db, temporal, task, agent_id, text)
+    await start_workflow(db, temporal, task, agent_id, text)
     return task
 
 
@@ -470,7 +499,7 @@ async def send_instruction(
             sender_id=ctx.user.id,
             recipient_type=RecipientType.AGENT.value,
             recipient_id=task.assigned_agent_id,
-            message_type="instruction",
+            message_type=MessageType.INSTRUCTION.value,
             content_json={"text": text},
             visibility=MessageVisibility.VISIBLE.value,
         )

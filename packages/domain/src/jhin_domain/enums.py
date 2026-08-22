@@ -211,6 +211,44 @@ class MessageVisibility(StrEnum):
     INTERNAL = "internal"
 
 
+class ConversationStatus(StrEnum):
+    """Lifecycle of a human <-> agent conversation thread."""
+
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+
+
+class ActivityKind(StrEnum):
+    """Company activity feed card kinds (human-readable projections)."""
+
+    STARTED = "started"
+    ASKED_AGENT = "asked_agent"
+    REPORTED = "reported"
+    ESCALATED = "escalated"
+    STATUS_UPDATE = "status_update"
+    NEEDS_REVIEW = "needs_review"
+    FINISHED = "finished"
+    FAILED = "failed"
+    PAUSED = "paused"
+    STOPPED = "stopped"
+    QUEUED = "queued"
+
+
+ACTIVITY_LABELS: dict[ActivityKind, str] = {
+    ActivityKind.STARTED: "Started working",
+    ActivityKind.ASKED_AGENT: "Asked another agent",
+    ActivityKind.REPORTED: "Reported back",
+    ActivityKind.ESCALATED: "Needs help",
+    ActivityKind.STATUS_UPDATE: "Shared an update",
+    ActivityKind.NEEDS_REVIEW: "Needs your review",
+    ActivityKind.FINISHED: "Finished",
+    ActivityKind.FAILED: "Ran into a problem",
+    ActivityKind.PAUSED: "Paused",
+    ActivityKind.STOPPED: "Stopped",
+    ActivityKind.QUEUED: "Waiting for a free slot",
+}
+
+
 class ApprovalStatus(StrEnum):
     """Lifecycle of a human approval request (plan 6.16)."""
 

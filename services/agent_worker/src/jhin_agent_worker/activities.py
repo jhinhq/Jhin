@@ -99,6 +99,11 @@ _MAX_MODEL_TEXT_CHARS = 8_192
 # Structured agent-to-agent message types (plan 29) rendered into history.
 _STRUCTURED_MESSAGE_TYPES = frozenset(t.value for t in AGENT_MESSAGE_TYPES)
 _MAX_STRUCTURED_TURN_CHARS = 6_000
+# Conversation-aware history (docs/architecture/conversations.md): how much of
+# the earlier tasks in the same conversation reaches the prompt.
+CONVERSATION_HISTORY_MAX_MESSAGES = 40
+CONVERSATION_HISTORY_MAX_CHARS = 24_000
+CONVERSATION_HISTORY_OMITTED_MARKER = "[earlier messages omitted]"
 
 _ACTIVE_RUN_STATUSES = tuple(status.value for status in RUN_ACTIVE_STATUSES)
 
@@ -1239,6 +1244,62 @@ class AgentActivities:
         )
 
     async def _load_history(
+        self, session: AsyncSession, task: Task
+    ) -> tuple[ConversationTurn, ...]:
+        """Conversation context from earlier tasks in the same thread, then
+        this task's visible conversation plus its internal tool transcript,
+        in order, so each reasoning step rebuilds the exact provider message
+        sequence."""
+        prefix = await self._load_conversation_history(session, task)
+        return prefix + await self._load_task_history(session, task)
+
+    async def _load_conversation_history(
+        self, session: AsyncSession, task: Task
+    ) -> tuple[ConversationTurn, ...]:
+        """Plain user/agent turns from earlier tasks in ``task``'s conversation.
+
+        Internal rows (tool calls/results, hidden messages) never cross task
+        boundaries. The most recent ``CONVERSATION_HISTORY_MAX_MESSAGES`` and
+        ``CONVERSATION_HISTORY_MAX_CHARS`` are kept (oldest dropped first);
+        truncation is announced with one ``[earlier messages omitted]`` turn.
+        """
+        if task.conversation_id is None:
+            return ()
+        earlier_tasks = select(Task.id).where(
+            Task.workspace_id == task.workspace_id,
+            Task.conversation_id == task.conversation_id,
+            Task.created_at < task.created_at,
+        )
+        rows = await session.scalars(
+            select(Message)
+            .where(
+                Message.workspace_id == task.workspace_id,
+                Message.task_id.in_(earlier_tasks),
+                Message.visibility == MessageVisibility.VISIBLE.value,
+                Message.message_type.not_in(("tool_call", "tool_result")),
+            )
+            .order_by(Message.created_at, Message.id)
+        )
+        turns: list[ConversationTurn] = []
+        for message in rows:
+            content = message.content_json
+            text = str(content.get("text", "") or content.get("summary", "") or "")
+            if not text.strip():
+                continue
+            role = "agent" if message.sender_type == SenderType.AGENT.value else "user"
+            turns.append(ConversationTurn(role=role, text=text[:_MAX_STRUCTURED_TURN_CHARS]))
+        truncated = len(turns) > CONVERSATION_HISTORY_MAX_MESSAGES
+        turns = turns[-CONVERSATION_HISTORY_MAX_MESSAGES:]
+        total_chars = sum(len(turn.text) for turn in turns)
+        while turns and total_chars > CONVERSATION_HISTORY_MAX_CHARS:
+            dropped = turns.pop(0)
+            total_chars -= len(dropped.text)
+            truncated = True
+        if truncated:
+            turns.insert(0, ConversationTurn(role="user", text=CONVERSATION_HISTORY_OMITTED_MARKER))
+        return tuple(turns)
+
+    async def _load_task_history(
         self, session: AsyncSession, task: Task
     ) -> tuple[ConversationTurn, ...]:
         """Visible conversation plus the internal tool transcript, in order,
