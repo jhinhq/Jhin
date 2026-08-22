@@ -59,6 +59,7 @@ RATE_LIMIT_LOCK_TIMEOUT_MS = 5_000
 RATE_LIMIT_STATEMENT_TIMEOUT_MS = 30_000
 RATE_LIMIT_CLIENT_TIMEOUT_SECONDS = 35.0
 
+
 class RateLimitScope(StrEnum):
     LOGIN = "login"
     WEBHOOK = "webhook"
@@ -66,6 +67,7 @@ class RateLimitScope(StrEnum):
     MODEL = "model"
     TOOL = "tool"
     SANDBOX = "sandbox"
+
 
 @dataclass(frozen=True)
 class RateLimitRule:
@@ -77,6 +79,7 @@ class RateLimitRule:
             raise ValueError("rate-limit capacity must be in 1..1000000")
         if not 1 <= self.window_seconds <= 86_400:
             raise ValueError("rate-limit window must be in 1..86400")
+
 
 @dataclass(frozen=True)
 class RateLimitDecision:
@@ -90,11 +93,13 @@ class RateLimitDecision:
         if self.remaining_tokens_micros < 0:
             raise ValueError("remaining tokens cannot be negative")
 
+
 class RateLimitDeferred(Exception):
     def __init__(self, scope: RateLimitScope, retry_after_seconds: int) -> None:
         super().__init__("rate_limited")
         self.scope = scope
         self.retry_after_seconds = retry_after_seconds
+
 
 def digest_subject(scope: RateLimitScope, *normalized_parts: str) -> bytes:
     payload = bytearray(b"jhin-rate-limit-v1\0")
@@ -106,24 +111,23 @@ def digest_subject(scope: RateLimitScope, *normalized_parts: str) -> bytes:
         payload.extend(encoded)
     return hashlib.sha256(payload).digest()
 
+
 def login_subject(email: str, ip: str) -> bytes:
     raw_ip = ip.strip()
-    canonical_ip = (
-        "unknown" if raw_ip == "unknown" else ipaddress.ip_address(raw_ip).compressed
-    )
+    canonical_ip = "unknown" if raw_ip == "unknown" else ipaddress.ip_address(raw_ip).compressed
     return digest_subject(
         RateLimitScope.LOGIN,
         email.strip().casefold(),
         canonical_ip,
     )
 
+
 def workspace_subject(scope: RateLimitScope, workspace_id: UUID) -> bytes:
     return digest_subject(scope, str(workspace_id))
 
+
 def connection_subject(workspace_id: UUID, connection_id: UUID) -> bytes:
-    return digest_subject(
-        RateLimitScope.WEBHOOK, str(workspace_id), str(connection_id)
-    )
+    return digest_subject(RateLimitScope.WEBHOOK, str(workspace_id), str(connection_id))
 ```
 
 Task 1 includes the required `hashlib` and `ipaddress` imports and tests these concrete domain-separated, length-prefixed SHA-256 bodies.
@@ -138,6 +142,7 @@ DEFAULT_RULES: Final[dict[RateLimitScope, RateLimitRule]] = {
     RateLimitScope.TOOL: RateLimitRule(120, 60),
     RateLimitScope.SANDBOX: RateLimitRule(10, 60),
 }
+
 
 class RateLimitSettings(BaseModel):
     login_capacity: int = 10
@@ -164,12 +169,14 @@ class RateLimitSettings(BaseModel):
             RateLimitScope.LOGIN: (self.login_capacity, self.login_window_seconds),
             RateLimitScope.WEBHOOK: (self.webhook_capacity, self.webhook_window_seconds),
             RateLimitScope.MANUAL_TASK: (
-                self.manual_task_capacity, self.manual_task_window_seconds,
+                self.manual_task_capacity,
+                self.manual_task_window_seconds,
             ),
             RateLimitScope.MODEL: (self.model_capacity, self.model_window_seconds),
             RateLimitScope.TOOL: (self.tool_capacity, self.tool_window_seconds),
             RateLimitScope.SANDBOX: (
-                self.sandbox_capacity, self.sandbox_window_seconds,
+                self.sandbox_capacity,
+                self.sandbox_window_seconds,
             ),
         }
         capacity, window_seconds = values[scope]
@@ -229,12 +236,14 @@ BACKUP_RETENTION_DAILY = 7
 BACKUP_RETENTION_WEEKLY = 4
 BACKUP_RETENTION_MONTHLY = 12
 
+
 @dataclass(frozen=True)
 class EncryptedComponent:
     name: str
     ciphertext_sha256: str
     ciphertext_bytes: int
     recipient_class: Literal["state", "operator_config", "master_key"]
+
 
 @dataclass(frozen=True)
 class BackupManifest:
@@ -733,25 +742,27 @@ def test_subject_digest_is_normalized_domain_separated_and_value_free() -> None:
     assert b"owner" not in first and b"2001" not in first
 
 
-async def test_concurrent_consumers_share_exact_capacity(postgres_limiter: PostgresRateLimiter) -> None:
+async def test_concurrent_consumers_share_exact_capacity(
+    postgres_limiter: PostgresRateLimiter,
+) -> None:
     subject = digest_subject(RateLimitScope.TOOL, "shared-test-subject")
-    decisions = await asyncio.gather(*[
-        postgres_limiter.consume(
-            RateLimitScope.TOOL, subject, RateLimitRule(30, 60)
-        )
-        for _ in range(120)
-    ])
+    decisions = await asyncio.gather(
+        *[
+            postgres_limiter.consume(RateLimitScope.TOOL, subject, RateLimitRule(30, 60))
+            for _ in range(120)
+        ]
+    )
     assert sum(decision.allowed for decision in decisions) == 30
-    assert all(1 <= decision.retry_after_seconds <= 60 for decision in decisions if not decision.allowed)
+    assert all(
+        1 <= decision.retry_after_seconds <= 60 for decision in decisions if not decision.allowed
+    )
 
 
 async def test_bucket_does_not_hold_lock_across_caller_work(
     postgres_limiter: PostgresRateLimiter,
 ) -> None:
     subject = digest_subject(RateLimitScope.MODEL, "lock-release")
-    decision = await postgres_limiter.consume(
-        RateLimitScope.MODEL, subject, RateLimitRule(1, 60)
-    )
+    decision = await postgres_limiter.consume(RateLimitScope.MODEL, subject, RateLimitRule(1, 60))
     assert decision.allowed
     async with postgres_limiter.session_factory() as session:
         async with asyncio.timeout(1):
@@ -803,9 +814,7 @@ class RateLimitBucket(Base):
             name="ck_rate_limit_bucket_workspace_scope",
         ),
         Index("ix_rate_limit_bucket_workspace_id", "workspace_id"),
-        Index(
-            "ix_rate_limit_bucket_updated_at", "updated_at", "scope", "subject_hash"
-        ),
+        Index("ix_rate_limit_bucket_updated_at", "updated_at", "scope", "subject_hash"),
     )
 
     scope: Mapped[str] = mapped_column(String(32), primary_key=True)
@@ -851,11 +860,13 @@ def digest_subject(scope: RateLimitScope, *normalized_parts: str) -> bytes:
 
 
 def _refill(
-    *, tokens_micros: int, elapsed_micros: int, rule: RateLimitRule,
+    *,
+    tokens_micros: int,
+    elapsed_micros: int,
+    rule: RateLimitRule,
 ) -> int:
     earned = (
-        max(0, elapsed_micros) * rule.capacity * TOKEN_SCALE
-        // (rule.window_seconds * 1_000_000)
+        max(0, elapsed_micros) * rule.capacity * TOKEN_SCALE // (rule.window_seconds * 1_000_000)
     )
     return min(rule.capacity * TOKEN_SCALE, tokens_micros + earned)
 
@@ -959,7 +970,8 @@ Expected: commit 3 of 15; Alembic has one head, `0018`.
 
 ```python
 async def test_login_failure_limit_returns_retry_after_without_raw_subject(
-    api: ApiHarness, recording_limiter: RecordingRateLimiter,
+    api: ApiHarness,
+    recording_limiter: RecordingRateLimiter,
 ) -> None:
     await api.bootstrap_owner()
     recording_limiter.set_denied(RateLimitScope.LOGIN, retry_after_seconds=37)
@@ -977,7 +989,8 @@ async def test_login_failure_limit_returns_retry_after_without_raw_subject(
 
 
 async def test_successful_login_resets_only_after_bucket_allows(
-    api: ApiHarness, recording_limiter: RecordingRateLimiter,
+    api: ApiHarness,
+    recording_limiter: RecordingRateLimiter,
 ) -> None:
     await api.bootstrap_owner()
     response = await api.login_owner()
@@ -996,7 +1009,8 @@ async def test_webhook_denial_creates_no_delivery_event_or_publish(
 
 
 async def test_manual_task_and_retry_share_workspace_bucket(
-    api: ApiHarness, recording_limiter: RecordingRateLimiter,
+    api: ApiHarness,
+    recording_limiter: RecordingRateLimiter,
 ) -> None:
     workspace_id, task_id = await api.failed_retryable_task()
     recording_limiter.set_denied(RateLimitScope.MANUAL_TASK, retry_after_seconds=11)
@@ -1465,9 +1479,7 @@ The static validator must parse merged Compose models through `docker compose co
 def test_production_publishes_only_caddy(compose_model: dict[str, object]) -> None:
     services = compose_model["services"]
     published = {
-        name: service.get("ports", [])
-        for name, service in services.items()
-        if service.get("ports")
+        name: service.get("ports", []) for name, service in services.items() if service.get("ports")
     }
     assert set(published) == {"caddy"}
     assert {entry["target"] for entry in published["caddy"]} == {80, 443}
@@ -1688,7 +1700,10 @@ await wait_until(
     ),
     timeout_seconds=30,
 )
-assert await standby.scalar(text("SELECT to_regclass('public.rate_limit_bucket')")) == "rate_limit_bucket"
+assert (
+    await standby.scalar(text("SELECT to_regclass('public.rate_limit_bucket')"))
+    == "rate_limit_bucket"
+)
 ```
 
 Also assert primary and standby system identifiers match, standby writes fail with SQLSTATE `25006`, the application DSN resolves only to primary, and evidence rejects DSNs, IPs, container/volume names, raw digests, subject hashes, and absolute paths.
@@ -1794,9 +1809,10 @@ Use fake executables in unit tests to record argv/stdin/stdout wiring without re
 def test_public_manifest_is_canonical_and_value_free(sample_manifest: BackupManifest) -> None:
     encoded = sample_manifest.canonical_json()
     assert encoded.endswith(b"\n")
-    assert encoded == json.dumps(
-        json.loads(encoded), sort_keys=True, separators=(",", ":")
-    ).encode() + b"\n"
+    assert (
+        encoded
+        == json.dumps(json.loads(encoded), sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    )
     forbidden = (b"postgresql://", b"AGE-SECRET-KEY", b"password", b"/tmp/", b"workspace_id")
     assert all(value not in encoded for value in forbidden)
 
@@ -1816,7 +1832,9 @@ def test_retention_selects_minimum_generations() -> None:
     ],
 )
 def test_backup_aborts_before_artifact_acceptance_when_quiescence_breaks(
-    backup_fixture: BackupFixture, fault: str, code: str,
+    backup_fixture: BackupFixture,
+    fault: str,
+    code: str,
 ) -> None:
     result = backup_fixture.create_with_fault(fault)
     assert result.code == code
@@ -1951,7 +1969,9 @@ Tests build a synthetic complete backup through Task 7 rather than handcrafting 
     ],
 )
 def test_preflight_fails_closed_without_starting_services(
-    restore_fixture: RestoreFixture, fault: str, code: str,
+    restore_fixture: RestoreFixture,
+    fault: str,
+    code: str,
 ) -> None:
     result = restore_fixture.preflight_with_fault(fault)
     assert result.code == code
@@ -2450,8 +2470,11 @@ def test_public_storage_evidence_has_no_path_or_device(
     public = public_storage_evidence(passing_storage_inventory)
     encoded = json.dumps(public, sort_keys=True)
     assert set(public) == {
-        "backing_filesystem_count", "all_backings_resolved",
-        "minimum_free_percent", "maximum_used_percent", "maximum_growth_bytes",
+        "backing_filesystem_count",
+        "all_backings_resolved",
+        "minimum_free_percent",
+        "maximum_used_percent",
+        "maximum_growth_bytes",
     }
     assert "/" not in encoded
     assert "device" not in encoded
@@ -2589,14 +2612,16 @@ Pin the allowance schema with no wildcard behavior:
 
 ```python
 def test_allowance_requires_exact_unexpired_identity() -> None:
-    allowance = VulnerabilityAllowance.model_validate({
-        "finding_id": "CVE-2099-12345",
-        "component": "pkg:pypi/example@1.2.3",
-        "architecture": "linux/arm64",
-        "owner": "security@example.com",
-        "rationale": "Upstream fix is unavailable; the vulnerable path is unreachable.",
-        "expires_on": "2099-09-30",
-    })
+    allowance = VulnerabilityAllowance.model_validate(
+        {
+            "finding_id": "CVE-2099-12345",
+            "component": "pkg:pypi/example@1.2.3",
+            "architecture": "linux/arm64",
+            "owner": "security@example.com",
+            "rationale": "Upstream fix is unavailable; the vulnerable path is unreachable.",
+            "expires_on": "2099-09-30",
+        }
+    )
     assert allowance.matches(
         finding_id="CVE-2099-12345",
         component="pkg:pypi/example@1.2.3",
@@ -2760,8 +2785,13 @@ def test_readiness_covers_every_hardening_domain() -> None:
 def test_hardening_summary_rejects_sensitive_fields() -> None:
     summary = build_summary(load_validated_inputs())
     forbidden = (
-        "dsn", "password", "secret_value", "key_path",
-        "container_id", "volume_id", "raw_log",
+        "dsn",
+        "password",
+        "secret_value",
+        "key_path",
+        "container_id",
+        "volume_id",
+        "raw_log",
     )
     lowered = summary.lower()
     assert all(field not in lowered for field in forbidden)

@@ -99,7 +99,9 @@ def test_agent_rejects_test_barrier_configuration_in_production(
 ```
 
 ```python
-async def test_gateway_barriers_bracket_only_the_external_effect(gateway_world: GatewayWorld) -> None:
+async def test_gateway_barriers_bracket_only_the_external_effect(
+    gateway_world: GatewayWorld,
+) -> None:
     gateway_world.barrier.record_into(gateway_world.order)
     await gateway_world.gateway.request(
         "test.mutate", '{"value":"once"}', invocation_id=gateway_world.invocation_id
@@ -170,11 +172,13 @@ TOOL_BEFORE_CLAIM: CrashBarrierName = "phase10.tool.before_claim.v1"
 TOOL_AFTER_CLAIM: CrashBarrierName = "phase10.tool.after_claim.before_effect.v1"
 TOOL_AFTER_EFFECT: CrashBarrierName = "phase10.tool.after_effect.before_terminal_commit.v1"
 
+
 @dataclass(frozen=True)
 class CrashBarrierConfig:
     root: Path | None = None
     selected: CrashBarrierName | None = None
     match_identity: UUID | None = None
+
 
 class CrashBarrier:
     def __init__(self, config: CrashBarrierConfig) -> None:
@@ -207,6 +211,7 @@ class CrashBarrier:
         while not release.is_file():
             await asyncio.sleep(0.05)
 
+
 def release_barrier(root: Path, name: CrashBarrierName, identity: UUID) -> None:
     directory = root / name
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -223,6 +228,7 @@ def release_barrier(root: Path, name: CrashBarrierName, identity: UUID) -> None:
     finally:
         os.close(directory_fd)
 
+
 class BarrierSettingsMixin(BaseModel):
     app_env: str = Field(default="development", validation_alias="APP_ENV")
     test_crash_barrier_dir: Path | None = Field(
@@ -236,7 +242,9 @@ class BarrierSettingsMixin(BaseModel):
     )
 
     @field_validator(
-        "test_crash_barrier_dir", "test_crash_barrier_name", "test_crash_barrier_match",
+        "test_crash_barrier_dir",
+        "test_crash_barrier_name",
+        "test_crash_barrier_match",
         mode="before",
     )
     @classmethod
@@ -245,8 +253,13 @@ class BarrierSettingsMixin(BaseModel):
 
     @model_validator(mode="after")
     def reject_production_barrier(self) -> Self:
-        configured = any((self.test_crash_barrier_dir, self.test_crash_barrier_name,
-                          self.test_crash_barrier_match))
+        configured = any(
+            (
+                self.test_crash_barrier_dir,
+                self.test_crash_barrier_name,
+                self.test_crash_barrier_match,
+            )
+        )
         if self.app_env.lower() in {"prod", "production"} and configured:
             raise ValueError("test crash barriers are forbidden in production")
         return self
@@ -319,14 +332,16 @@ async def test_save_history_uses_real_event_sdk_json_and_caller_workflow_id(
 
     raw = json.loads(destination.read_text(encoding="utf-8"))
     assert set(raw) == {"events"}
-    assert raw["events"] == [{
-        "eventId": "1",
-        "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_STARTED",
-        "workflowExecutionStartedEventAttributes": {
-            "workflowType": {"name": "AgentTaskWorkflow"},
-            "taskQueue": {"name": "jhin-agent-queue"},
-        },
-    }]
+    assert raw["events"] == [
+        {
+            "eventId": "1",
+            "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_STARTED",
+            "workflowExecutionStartedEventAttributes": {
+                "workflowType": {"name": "AgentTaskWorkflow"},
+                "taskQueue": {"name": "jhin-agent-queue"},
+            },
+        }
+    ]
     reconstructed = WorkflowHistory.from_json("caller-supplied-workflow-id", raw)
     assert reconstructed.workflow_id == "caller-supplied-workflow-id"
     assert reconstructed.events[0] == event
@@ -339,7 +354,8 @@ def test_capture_defaults_to_the_development_database_port() -> None:
 
 
 async def test_generate_writes_exact_ref_and_reconstructs_each_caller_id(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     event = HistoryEvent(
         event_id=1,
@@ -349,9 +365,7 @@ async def test_generate_writes_exact_ref_and_reconstructs_each_caller_id(
         scenario: capture.CapturedWorkflow(
             workflow_id=f"phase9-{scenario}-workflow",
             handle=SimpleNamespace(
-                fetch_history=AsyncMock(
-                    return_value=WorkflowHistory("server-id", [event])
-                )
+                fetch_history=AsyncMock(return_value=WorkflowHistory("server-id", [event]))
             ),
         )
         for scenario in capture.SCENARIOS
@@ -377,17 +391,25 @@ def test_tool_queue_name_is_stable() -> None:
 def test_public_manifest_projection_never_exposes_bound_arguments() -> None:
     private = {
         "step": 2,
-        "manifest": {"count": 1, "calls": [{
-            "ordinal": 0, "lossless": True, "tool_name": "linear.issue.get",
-            "arguments_json": '{"connection_id":"secret-ref","issue":"ENG-7"}',
-        }]},
+        "manifest": {
+            "count": 1,
+            "calls": [
+                {
+                    "ordinal": 0,
+                    "lossless": True,
+                    "tool_name": "linear.issue.get",
+                    "arguments_json": '{"connection_id":"secret-ref","issue":"ENG-7"}',
+                }
+            ],
+        },
     }
     public = public_run_event_payload("agent.step.tool_manifest", private)
     assert public == {
         "step": 2,
-        "manifest": {"count": 1, "calls": [
-            {"ordinal": 0, "lossless": True, "tool_name": "linear.issue.get"}
-        ]},
+        "manifest": {
+            "count": 1,
+            "calls": [{"ordinal": 0, "lossless": True, "tool_name": "linear.issue.get"}],
+        },
     }
     assert "arguments_json" not in json.dumps(public)
 
@@ -402,14 +424,16 @@ def test_public_reasoning_projection_is_always_empty() -> None:
         "usage": {"input_tokens": 7, "output_tokens": 3},
         "unexpected_future_private_field": {"secret": "must fail closed"},
     }
-    event = RunEventOut.model_validate({
-        "id": new_uuid7(),
-        "run_id": new_uuid7(),
-        "seq": 3,
-        "event_type": "agent.step.reasoning",
-        "payload_json": private,
-        "created_at": datetime.now(UTC),
-    }).model_dump(mode="json")
+    event = RunEventOut.model_validate(
+        {
+            "id": new_uuid7(),
+            "run_id": new_uuid7(),
+            "seq": 3,
+            "event_type": "agent.step.reasoning",
+            "payload_json": private,
+            "created_at": datetime.now(UTC),
+        }
+    ).model_dump(mode="json")
     assert event["payload_json"] == {}
     assert "must fail closed" not in json.dumps(event)
 ```
@@ -436,19 +460,20 @@ SCENARIOS = (
     "engineering-sync",
 )
 
-DEFAULT_CAPTURE_DATABASE_URL = (
-    "postgresql+asyncpg://jhin:jhin@127.0.0.1:55432/jhin"
-)
+DEFAULT_CAPTURE_DATABASE_URL = "postgresql+asyncpg://jhin:jhin@127.0.0.1:55432/jhin"
+
 
 @dataclass(frozen=True)
 class CapturedWorkflow:
     workflow_id: str
     handle: Any
 
+
 async def save_history(handle: Any, destination: Path, *, workflow_id: str) -> None:
     fetched = await handle.fetch_history()
     reconstructed = WorkflowHistory(workflow_id, fetched.events)
     destination.write_text(reconstructed.to_json() + "\n", encoding="utf-8")
+
 
 async def generate(destination: Path, *, source_ref: str) -> None:
     captures: dict[str, CapturedWorkflow] = await capture_scenarios()
@@ -490,6 +515,7 @@ EXPECTED_OLD_ACTIVITIES = {
     "engineering-sync.json": {"prepare_triggered_task", "sync_external"},
 }
 
+
 def test_frozen_histories_have_only_phase9_commands() -> None:
     for filename, names in EXPECTED_OLD_ACTIVITIES.items():
         text = (FIXTURE_ROOT / filename).read_text(encoding="utf-8")
@@ -509,24 +535,29 @@ ACTIVITY_COMMIT_APPROVAL_PROJECTION = "commit_approval_projection"
 ACTIVITY_CLEANUP_RUN_WORKSPACE = "cleanup_run_workspace"
 ACTIVITY_FINALIZE_RUN_PROJECTION = "finalize_run_projection"
 
+
 @dataclass(frozen=True)
 class AdvertisedTool:
     name: str
     description: str
     parameters: dict[str, Any]
 
+
 @dataclass
 class ResolveAdvertisedToolsInput:
     workspace_id: str
     agent_id: str
 
+
 @dataclass
 class ReasonAgentStepInput(RunStepInput):
     advertised_tools: list[AdvertisedTool] = field(default_factory=list)
 
+
 @dataclass
 class ReasonAgentStepResult:
     call_count: int
+
 
 @dataclass
 class ExecuteBoundToolInput:
@@ -535,12 +566,14 @@ class ExecuteBoundToolInput:
     step_index: int
     ordinal: int
 
+
 @dataclass
 class BoundToolResult:
     tool_call_id: str
     status: str
     approval_id: str | None = None
     stop_reason: str | None = None
+
 
 @dataclass
 class CommitAgentStepInput:
@@ -551,6 +584,7 @@ class CommitAgentStepInput:
     step_index: int
     gateway_tool_call_ids: list[str] = field(default_factory=list)
 
+
 @dataclass
 class ResolveBoundToolApprovalInput:
     workspace_id: str
@@ -559,14 +593,17 @@ class ResolveBoundToolApprovalInput:
     agent_id: str
     approval_id: str
 
+
 @dataclass
 class CommitApprovalProjectionInput(ResolveBoundToolApprovalInput):
     tool_call_id: str = ""
+
 
 @dataclass
 class CleanupRunWorkspaceInput:
     workspace_id: str
     run_id: str
+
 
 @dataclass
 class CleanupRunWorkspaceResult:
@@ -689,7 +726,9 @@ The legacy-sidecar test uses the exact database shape documented by `agent-post-
 ```python
 async def test_phase9_manifest_without_reasoning_is_rebound_before_any_effect(world: World) -> None:
     await world.seed_manifest(step=0, calls=[("system.echo", '{"value":"same"}')])
-    world.model.responses.append(model_call("replacement-provider-id", "system.echo", {"value": "same"}))
+    world.model.responses.append(
+        model_call("replacement-provider-id", "system.echo", {"value": "same"})
+    )
     result = await world.reasoning.reason_agent_step(
         world.params,
         legacy_sidecar_repair=True,
@@ -740,12 +779,14 @@ After the call, reuse `_step_tool_manifest`: strict JSON object parsing, sorted 
 ```python
 BoundedProviderText = Annotated[str, StringConstraints(max_length=200)]
 
+
 class AgentStepUsage(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
     cached_tokens: int = Field(ge=0)
     cost_micros: int = Field(ge=0)
+
 
 class AgentStepReasoningRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -867,12 +908,16 @@ async def test_advertise_then_execute_only_the_bound_ordinal(world: ToolWorld) -
 
 @pytest.mark.parametrize(
     "case",
-    ["revoked_grant", "disabled_connection", "unknown_tool", "invalid_arguments",
-     "wrong_workspace", "wrong_ordinal"],
+    [
+        "revoked_grant",
+        "disabled_connection",
+        "unknown_tool",
+        "invalid_arguments",
+        "wrong_workspace",
+        "wrong_ordinal",
+    ],
 )
-async def test_invalid_live_or_bound_state_stops_before_effect(
-    world: ToolWorld, case: str
-) -> None:
+async def test_invalid_live_or_bound_state_stops_before_effect(world: ToolWorld, case: str) -> None:
     await world.arrange_invalid_case(case)
     with pytest.raises(ApplicationError):
         await world.activities.execute_bound_tool_activity(world.execute_params())
@@ -905,16 +950,21 @@ def test_manifest_statement_projects_only_requested_call_scalars(world: ToolWorl
 
 async def test_execution_never_reads_agent_reasoning_event(world: ToolWorld) -> None:
     await world.seed_manifest(step=2, ordinal=0, value="ordinary")
-    await world.seed_private_reasoning_event({
-        "completion_sanitized": "must-not-enter-tool-process",
-        "provider_call_ids": ["must-not-enter-tool-process"],
-        "transitions": [{"private": "must-not-enter-tool-process"}],
-        "usage": {"input_tokens": 99},
-    })
+    await world.seed_private_reasoning_event(
+        {
+            "completion_sanitized": "must-not-enter-tool-process",
+            "provider_call_ids": ["must-not-enter-tool-process"],
+            "transitions": [{"private": "must-not-enter-tool-process"}],
+            "usage": {"input_tokens": 99},
+        }
+    )
     await world.activities.execute_bound_tool_activity(world.execute_params())
     assert world.selected_run_event_types == ["agent.step.tool_manifest"]
     assert world.selected_run_event_columns == [
-        "ordinal", "lossless", "tool_name", "arguments_json"
+        "ordinal",
+        "lossless",
+        "tool_name",
+        "arguments_json",
     ]
     assert "must-not-enter-tool-process" not in world.process_observations
 ```
@@ -945,7 +995,9 @@ async def test_tools_endpoint_uses_definition_only_catalog(
     ],
 )
 def test_tool_worker_rejects_crash_barrier_in_production(
-    setting: str, value: str, monkeypatch: pytest.MonkeyPatch,
+    setting: str,
+    value: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.setenv(setting, value)
@@ -979,11 +1031,15 @@ async def test_ambiguous_approved_effect_returns_durable_unknown(world: ToolWorl
     second = await world.activities.resolve_bound_tool_approval_activity(
         world.approval_params(parked.approval_id)
     )
-    assert first == second == BoundToolResult(
-        tool_call_id=parked.tool_call_id,
-        status="execution_unknown",
-        approval_id=parked.approval_id,
-        stop_reason="execution_unknown",
+    assert (
+        first
+        == second
+        == BoundToolResult(
+            tool_call_id=parked.tool_call_id,
+            status="execution_unknown",
+            approval_id=parked.approval_id,
+            stop_reason="execution_unknown",
+        )
     )
     assert world.effect.count == 0
 ```
@@ -1011,6 +1067,7 @@ class ToolDefinitionCatalog:
     def definitions(self) -> tuple[ToolDefinition, ...]:
         return tuple(self._registry)
 
+
 def build_default_definition_catalog(
     registry: ConnectorRegistry | None = None,
 ) -> ToolDefinitionCatalog:
@@ -1022,8 +1079,10 @@ def build_default_definition_catalog(
             catalog.register(definition)
     return catalog
 
+
 def builtin_tool_definitions() -> tuple[ToolDefinition, ...]:
     from jhin_tools.organization import ORGANIZATION_TOOLS
+
     return tuple(definition for definition, _executor in BUILTIN_TOOLS) + tuple(
         definition for definition, _executor, _validator in ORGANIZATION_TOOLS
     )
@@ -1043,21 +1102,27 @@ class BoundManifestEntry:
     tool_name: str
     arguments_json: str
 
+
 def bound_manifest_entry_statement(
     params: ExecuteBoundToolInput,
 ) -> Select[tuple[int | None, bool | None, str | None, str | None]]:
     requested = RunEvent.payload_json["manifest"]["calls"][params.ordinal]
-    return select(
-        requested["ordinal"].as_integer().label("ordinal"),
-        requested["lossless"].as_boolean().label("lossless"),
-        requested["tool_name"].as_string().label("tool_name"),
-        requested["arguments_json"].as_string().label("arguments_json"),
-    ).where(
-        RunEvent.workspace_id == UUID(params.workspace_id),
-        RunEvent.run_id == UUID(params.run_id),
-        RunEvent.event_type == "agent.step.tool_manifest",
-        RunEvent.payload_json["step"].as_integer() == params.step_index,
-    ).limit(2)
+    return (
+        select(
+            requested["ordinal"].as_integer().label("ordinal"),
+            requested["lossless"].as_boolean().label("lossless"),
+            requested["tool_name"].as_string().label("tool_name"),
+            requested["arguments_json"].as_string().label("arguments_json"),
+        )
+        .where(
+            RunEvent.workspace_id == UUID(params.workspace_id),
+            RunEvent.run_id == UUID(params.run_id),
+            RunEvent.event_type == "agent.step.tool_manifest",
+            RunEvent.payload_json["step"].as_integer() == params.step_index,
+        )
+        .limit(2)
+    )
+
 
 async def _load_bound_call(
     session: AsyncSession,
@@ -1085,6 +1150,7 @@ async def _load_bound_call(
             non_retryable=True,
         )
     return BoundManifestEntry(ordinal, lossless, tool_name, arguments_json)
+
 
 entry = await _load_bound_call(session, params)
 invocation_id = stable_tool_invocation_id(UUID(params.run_id), params.step_index, params.ordinal)
@@ -1205,11 +1271,14 @@ async def test_new_history_routes_each_boundary_to_its_owner(two_queue_world: Wo
 ```python
 @pytest.mark.parametrize(
     ("scenario", "last_effect_activity"),
-    [("zero_calls", None), ("approval", "resolve_bound_tool_approval"),
-     ("blocking_delegation", "execute_bound_tool"),
-     ("execution_unknown", "execute_bound_tool"),
-     ("cancellation", "cleanup_run_workspace"),
-     ("cleanup_failure", "cleanup_run_workspace")],
+    [
+        ("zero_calls", None),
+        ("approval", "resolve_bound_tool_approval"),
+        ("blocking_delegation", "execute_bound_tool"),
+        ("execution_unknown", "execute_bound_tool"),
+        ("cancellation", "cleanup_run_workspace"),
+        ("cleanup_failure", "cleanup_run_workspace"),
+    ],
 )
 async def test_stop_scenarios_never_schedule_a_later_ordinal(
     two_queue_world: World, scenario: str, last_effect_activity: str | None
@@ -1360,9 +1429,18 @@ git commit -m "feat: route agent tools through dedicated queue"
 
 ```python
 def test_compatibility_ids_are_exact(run_id: str, approval_id: str) -> None:
-    assert compatibility_workflow_id("advertised", run_id, step_index=4) == f"phase10-compat-advertised-{run_id}-4"
-    assert compatibility_workflow_id("tool-step", run_id, step_index=4) == f"phase10-compat-tool-step-{run_id}-4"
-    assert compatibility_workflow_id("approval", approval_id) == f"phase10-compat-approval-{approval_id}"
+    assert (
+        compatibility_workflow_id("advertised", run_id, step_index=4)
+        == f"phase10-compat-advertised-{run_id}-4"
+    )
+    assert (
+        compatibility_workflow_id("tool-step", run_id, step_index=4)
+        == f"phase10-compat-tool-step-{run_id}-4"
+    )
+    assert (
+        compatibility_workflow_id("approval", approval_id)
+        == f"phase10-compat-approval-{approval_id}"
+    )
     assert compatibility_workflow_id("sync", run_id) == f"phase10-compat-sync-{run_id}"
     assert compatibility_workflow_id("cleanup", run_id) == f"phase10-compat-cleanup-{run_id}"
 
@@ -1383,7 +1461,9 @@ async def test_legacy_retry_reattaches_without_local_effect(
     compatibility_world: CompatibilityWorld, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("jhin_connectors.build_default_catalog", local_effect_forbidden)
-    monkeypatch.setattr("jhin_connectors.cli.runner_client.delete_workspace", local_effect_forbidden)
+    monkeypatch.setattr(
+        "jhin_connectors.cli.runner_client.delete_workspace", local_effect_forbidden
+    )
     compatibility_world.client.start_workflow.side_effect = WorkflowAlreadyStartedError()
     compatibility_world.client.get_workflow_handle.return_value.result = AsyncMock(
         return_value=[compatibility_world.tool_call_id]
@@ -1393,9 +1473,7 @@ async def test_legacy_retry_reattaches_without_local_effect(
         compatibility_workflow_id("tool-step", compatibility_world.run_id, step_index=0)
     )
     assert result.done is False
-    assert await compatibility_world.committed_tool_call_ids() == [
-        compatibility_world.tool_call_id
-    ]
+    assert await compatibility_world.committed_tool_call_ids() == [compatibility_world.tool_call_id]
     assert compatibility_world.agent_effect_count == 0
 
 
@@ -1430,10 +1508,12 @@ Use stdlib-only dataclasses and one exact ID formatter:
 ```python
 CompatibilityKind = Literal["advertised", "tool-step", "approval", "sync", "cleanup"]
 
+
 @dataclass
 class AdvertisedCompatibilityInput:
     workspace_id: str
     agent_id: str
+
 
 @dataclass
 class ToolStepCompatibilityInput:
@@ -1442,15 +1522,18 @@ class ToolStepCompatibilityInput:
     step_index: int
     call_count: int
 
+
 @dataclass
 class ApprovalCompatibilityInput(ResolveBoundToolApprovalInput):
     pass
+
 
 @dataclass
 class SyncExternalToolInput:
     workspace_id: str
     task_id: str
     run_id: str
+
 
 def compatibility_workflow_id(
     kind: CompatibilityKind,
@@ -1495,6 +1578,7 @@ Define the sync invocation key alongside the existing tool key, without changing
 ```python
 SYNC_INVOCATION_FORMAT_VERSION = 1
 SYNC_INVOCATION_NAMESPACE = UUID("3dc26b04-1af9-5ec5-a0ea-d7d95c3a393b")
+
 
 def stable_sync_invocation_id(run_id: UUID) -> UUID:
     return uuid5(SYNC_INVOCATION_NAMESPACE, f"v1:{run_id.hex}:trigger-sync")
@@ -1555,6 +1639,7 @@ TOOL_ACTIVITY_NAMES = {
     "cleanup_run_workspace",
 }
 
+
 def test_distribution_dependencies_and_imports_are_one_way() -> None:
     assert "jhin-connectors" not in agent_dependencies
     assert "jhin-agents" not in tool_dependencies
@@ -1577,16 +1662,17 @@ def test_tool_worker_uses_current_dependency_free_logging_bootstrap(
         lambda **kwargs: configured.append(kwargs),
     )
     configure_current_logging("warning")
-    assert configured == [{
-        "level": "WARNING",
-        "format": "%(asctime)s %(levelname)s %(name)s %(message)s",
-    }]
+    assert configured == [
+        {
+            "level": "WARNING",
+            "format": "%(asctime)s %(levelname)s %(name)s %(message)s",
+        }
+    ]
 
 
 def test_tool_worker_never_imports_or_queries_agent_reasoning_authority() -> None:
     source = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in Path("services/tool_worker/src").rglob("*.py")
+        path.read_text(encoding="utf-8") for path in Path("services/tool_worker/src").rglob("*.py")
     )
     for forbidden in (
         "AgentStepReasoningRecord",
@@ -1603,8 +1689,12 @@ def test_tool_worker_never_imports_or_queries_agent_reasoning_authority() -> Non
 
 def test_worker_registration_sets_are_exact() -> None:
     assert set(agent_activity_names()) >= {
-        "reason_agent_step", "commit_agent_step", "run_agent_step", "resolve_approval",
-        "finalize_run", "sync_external",
+        "reason_agent_step",
+        "commit_agent_step",
+        "run_agent_step",
+        "resolve_approval",
+        "finalize_run",
+        "sync_external",
     }
     assert set(agent_activity_names()).isdisjoint(TOOL_ACTIVITY_NAMES)
     assert set(tool_activity_names()) == TOOL_ACTIVITY_NAMES
@@ -1613,9 +1703,7 @@ def test_worker_registration_sets_are_exact() -> None:
 async def test_poller_health_requires_a_workflow_poller(temporal: TemporalEnvironment) -> None:
     assert await queue_has_workflow_poller(temporal.address, "default", "empty-queue") is False
     async with temporal.worker(task_queue="live-queue", workflows=[NoopWorkflow]):
-        assert await queue_has_workflow_poller(
-            temporal.address, "default", "live-queue"
-        ) is True
+        assert await queue_has_workflow_poller(temporal.address, "default", "live-queue") is True
 
 
 def find_python_calls(root: Path, *, imported_name: str) -> set[Path]:
@@ -1637,13 +1725,12 @@ def find_python_calls(root: Path, *, imported_name: str) -> set[Path]:
 def test_executable_catalog_builder_has_one_runtime_caller() -> None:
     callers = find_python_calls(REPO_ROOT, imported_name="build_default_catalog")
     runtime_callers = {
-        path for path in callers
+        path
+        for path in callers
         if "tests" not in path.parts
         and path != Path("packages/connectors/src/jhin_connectors/registry.py")
     }
-    assert runtime_callers == {
-        Path("services/tool_worker/src/jhin_tool_worker/main.py")
-    }
+    assert runtime_callers == {Path("services/tool_worker/src/jhin_tool_worker/main.py")}
 ```
 
 - [ ] **Step 2: Run RED against old dependencies and registration**
@@ -1746,14 +1833,17 @@ Create a real temporary Unix socket and a fake Docker HTTP server behind it. The
 
 ```python
 def test_rootless_runner_requires_private_transport_and_no_socket() -> None:
-    assert validate_docker_authority(
-        mode="rootless",
-        socket_path=None,
-        transport_url="http://rootless-docker-transport:2375",
-        configured_gid=None,
-        effective_uid=10001,
-        supplemental_groups=set(),
-    ) == "http://rootless-docker-transport:2375"
+    assert (
+        validate_docker_authority(
+            mode="rootless",
+            socket_path=None,
+            transport_url="http://rootless-docker-transport:2375",
+            configured_gid=None,
+            effective_uid=10001,
+            supplemental_groups=set(),
+        )
+        == "http://rootless-docker-transport:2375"
+    )
     with pytest.raises(DockerSocketConfigurationError, match="no socket mount"):
         validate_docker_authority(
             mode="rootless",
@@ -1766,7 +1856,8 @@ def test_rootless_runner_requires_private_transport_and_no_socket() -> None:
 
 
 async def test_rootless_transport_relays_fixed_unix_upstream(
-    fake_docker_socket: Path, unused_tcp_port: int,
+    fake_docker_socket: Path,
+    unused_tcp_port: int,
 ) -> None:
     task = asyncio.create_task(
         serve_rootless_transport(
@@ -1809,26 +1900,31 @@ def test_rootful_requires_exact_socket_gid_and_membership(
     member_groups = {socket_gid} if groups else set()
     if matches:
         assert validate_docker_authority(
-            mode="rootful", socket_path=unix_socket, transport_url=None,
+            mode="rootful",
+            socket_path=unix_socket,
+            transport_url=None,
             configured_gid=supplied,
-            effective_uid=os.geteuid(), supplemental_groups=member_groups,
+            effective_uid=os.geteuid(),
+            supplemental_groups=member_groups,
         ).startswith("unix://")
     else:
         with pytest.raises(DockerSocketConfigurationError):
             validate_docker_authority(
-                mode="rootful", socket_path=unix_socket, transport_url=None,
+                mode="rootful",
+                socket_path=unix_socket,
+                transport_url=None,
                 configured_gid=supplied,
-                effective_uid=os.geteuid(), supplemental_groups=member_groups,
+                effective_uid=os.geteuid(),
+                supplemental_groups=member_groups,
             )
 
 
 def test_socket_boundary_contains_no_identity_or_permission_mutation() -> None:
-    tree = ast.parse(
-        Path(cast(str, DOCKER_SOCKET_MODULE.__file__)).read_text(encoding="utf-8")
-    )
+    tree = ast.parse(Path(cast(str, DOCKER_SOCKET_MODULE.__file__)).read_text(encoding="utf-8"))
     forbidden = {"chmod", "chown", "setuid", "setgid"}
     called = {
-        node.func.attr for node in ast.walk(tree)
+        node.func.attr
+        for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
     }
     assert called.isdisjoint(forbidden)
@@ -1848,6 +1944,7 @@ Expected: FAIL importing `validate_docker_authority` and `serve_rootless_transpo
 DockerSocketMode = Literal["rootless", "rootful"]
 ROOTLESS_TRANSPORT_URL = "http://rootless-docker-transport:2375"
 
+
 def validate_docker_authority(
     *,
     mode: DockerSocketMode,
@@ -1865,7 +1962,9 @@ def validate_docker_authority(
         if configured_gid is not None or supplemental_groups:
             raise DockerSocketConfigurationError("rootless runner requires no supplemental group")
         if transport_url != ROOTLESS_TRANSPORT_URL:
-            raise DockerSocketConfigurationError("rootless transport URL is not the private endpoint")
+            raise DockerSocketConfigurationError(
+                "rootless transport URL is not the private endpoint"
+            )
         return ROOTLESS_TRANSPORT_URL
     if socket_path is None or transport_url is not None:
         raise DockerSocketConfigurationError("rootful runner requires one Unix socket only")
@@ -1873,11 +1972,15 @@ def validate_docker_authority(
     if not stat.S_ISSOCK(info.st_mode):
         raise DockerSocketConfigurationError("configured Docker endpoint is not a Unix socket")
     if configured_gid is None or configured_gid <= 0 or info.st_gid != configured_gid:
-        raise DockerSocketConfigurationError("Docker socket group does not match SANDBOX_DOCKER_GID")
+        raise DockerSocketConfigurationError(
+            "Docker socket group does not match SANDBOX_DOCKER_GID"
+        )
     if supplemental_groups != {configured_gid}:
         raise DockerSocketConfigurationError("runner requires the exact Docker socket group only")
     if not os.access(socket_path, os.R_OK | os.W_OK):
-        raise DockerSocketConfigurationError("Docker socket is not readable and writable by the runner")
+        raise DockerSocketConfigurationError(
+            "Docker socket is not readable and writable by the runner"
+        )
     return f"unix://{socket_path}"
 ```
 
@@ -1940,7 +2043,8 @@ def render_compose(
 
 def test_rootful_render_has_exact_service_boundary() -> None:
     services = render_compose(
-        "compose.yaml", "compose.rootful.yaml",
+        "compose.yaml",
+        "compose.rootful.yaml",
         env={"APP_ENV": "production", "SANDBOX_DOCKER_GID": "10001"},
     )["services"]
     assert set(services["agent-worker"]["networks"]) == {"control", "data"}
@@ -1948,7 +2052,9 @@ def test_rootful_render_has_exact_service_boundary() -> None:
     assert set(services["sandbox-runner"]["networks"]) == {"runner"}
     assert "SANDBOX_RUNNER_URL" not in services["agent-worker"]["environment"]
     assert "SANDBOX_RUNNER_TOKEN" not in services["agent-worker"]["environment"]
-    assert services["tool-worker"]["environment"]["SANDBOX_RUNNER_URL"] == "http://sandbox-runner:8085"
+    assert (
+        services["tool-worker"]["environment"]["SANDBOX_RUNNER_URL"] == "http://sandbox-runner:8085"
+    )
     assert services["sandbox-runner"]["user"] != "0:0"
     assert services["sandbox-runner"]["privileged"] is False
     assert services["sandbox-runner"].get("group_add", []) == ["10001"]
@@ -1963,7 +2069,8 @@ def test_rootful_render_has_exact_service_boundary() -> None:
 
 def test_rootless_render_never_interpolates_gid() -> None:
     services = render_compose(
-        "compose.yaml", "compose.rootless.yaml",
+        "compose.yaml",
+        "compose.rootless.yaml",
         env={"PHASE10_ROOTLESS_DOCKER_SOCKET": "/run/user/10001/docker.sock"},
         env_without={"SANDBOX_DOCKER_GID"},
     )["services"]
@@ -1984,8 +2091,10 @@ def test_rootless_render_never_interpolates_gid() -> None:
     assert set(transport["networks"]) == {"engine"}
     assert transport["volumes"] == [
         {
-            "type": "bind", "source": "/run/user/10001/docker.sock",
-            "target": "/run/host/docker.sock", "read_only": False,
+            "type": "bind",
+            "source": "/run/user/10001/docker.sock",
+            "target": "/run/host/docker.sock",
+            "read_only": False,
             "bind": {"create_host_path": False},
         }
     ]
@@ -1995,7 +2104,9 @@ def test_rootless_render_never_interpolates_gid() -> None:
 ```python
 def test_dev_fakes_and_healthchecks_follow_worker_ownership() -> None:
     services = render_compose(
-        "compose.yaml", "compose.dev.yaml", "compose.rootless.yaml",
+        "compose.yaml",
+        "compose.dev.yaml",
+        "compose.rootless.yaml",
         env={"PHASE10_ROOTLESS_DOCKER_SOCKET": "/run/user/10001/docker.sock"},
         env_without={"APP_ENV", "SANDBOX_DOCKER_GID"},
     )["services"]
@@ -2015,7 +2126,9 @@ def test_dev_fakes_and_healthchecks_follow_worker_ownership() -> None:
 
 def test_dev_overlay_propagates_explicit_test_app_env() -> None:
     services = render_compose(
-        "compose.yaml", "compose.dev.yaml", "compose.rootless.yaml",
+        "compose.yaml",
+        "compose.dev.yaml",
+        "compose.rootless.yaml",
         env={
             "APP_ENV": "test",
             "PHASE10_ROOTLESS_DOCKER_SOCKET": "/run/user/10001/docker.sock",
@@ -2034,14 +2147,16 @@ def test_connector_origin_allowlist_is_exact_and_dev_only() -> None:
     development = _render_compose("compose.yaml", "compose.dev.yaml")
     production = _render_compose("compose.yaml")
     recipients = {
-        name for name, service in development["services"].items()
+        name
+        for name, service in development["services"].items()
         if "JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS" in service.get("environment", {})
     }
     assert recipients == {"api", "tool-worker"}
     for name in recipients:
-        assert development["services"][name]["environment"][
-            "JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS"
-        ] == DEV_CONNECTOR_ORIGINS
+        assert (
+            development["services"][name]["environment"]["JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS"]
+            == DEV_CONNECTOR_ORIGINS
+        )
     assert "JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS" not in json.dumps(production)
 
 
@@ -2052,41 +2167,45 @@ EXPECTED_CONNECTOR_FAKE_BUILD = {
     "args": {"SERVICE_PACKAGE": "jhin-tool-worker"},
 }
 
+
 def test_connector_fakes_use_tool_worker_image_and_provider_uses_agent_image() -> None:
     services = _render_compose("compose.yaml", "compose.dev.yaml")["services"]
     for name in ("fake-github", "fake-linear", "fake-vercel", "fake-supabase"):
         assert services[name]["build"]["args"]["SERVICE_PACKAGE"] == "jhin-tool-worker"
-    assert services["fake-provider"]["build"]["args"]["SERVICE_PACKAGE"] == (
-        "jhin-agent-worker"
-    )
+    assert services["fake-provider"]["build"]["args"]["SERVICE_PACKAGE"] == ("jhin-agent-worker")
+
 
 def test_phase9_http_origins_extend_existing_dev_allowlist_only() -> None:
     development = _render_compose("compose.yaml", "compose.dev.yaml")
     production = _render_compose("compose.yaml")
     for name in ("api", "tool-worker"):
-        assert development["services"][name]["environment"][
-            "JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS"
-        ] == DEV_HTTP_ORIGINS
-        assert "JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS" not in production[
-            "services"
-        ][name]["environment"]
-    assert "JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS" not in development[
-        "services"
-    ]["agent-worker"]["environment"]
+        assert (
+            development["services"][name]["environment"]["JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS"]
+            == DEV_HTTP_ORIGINS
+        )
+        assert (
+            "JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS" not in production["services"][name]["environment"]
+        )
+    assert (
+        "JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS"
+        not in development["services"]["agent-worker"]["environment"]
+    )
 
 
 # tests/test_compose_supabase_db_fixture.py
 def test_only_database_callers_receive_the_dev_fixture_allowlist() -> None:
     development = _render_compose("compose.yaml", "compose.dev.yaml")
     recipients = {
-        name for name, service in development["services"].items()
+        name
+        for name, service in development["services"].items()
         if "JHIN_CONNECTOR_ALLOWED_DB_HOSTS" in service.get("environment", {})
     }
     assert recipients == {"api", "tool-worker"}
     for name in recipients:
-        assert development["services"][name]["environment"][
-            "JHIN_CONNECTOR_ALLOWED_DB_HOSTS"
-        ] == FIXTURE_HOST
+        assert (
+            development["services"][name]["environment"]["JHIN_CONNECTOR_ALLOWED_DB_HOSTS"]
+            == FIXTURE_HOST
+        )
 ```
 
 In the existing `test_phase9_http_fakes_are_dev_only_healthy_and_loopback_bound` loop, replace its build assertion with `assert service["build"] == EXPECTED_CONNECTOR_FAKE_BUILD`; keep its command, network, loopback port, and healthcheck assertions unchanged.
@@ -2366,9 +2485,7 @@ async def hard_kill_at(
     host_root = stack.new_host_barrier_root(failpoint, invocation_id)
     await stack.recreate_tool_worker(barrier_environment(host_root, failpoint, invocation_id))
     assert container_env(stack, "tool-worker", "APP_ENV") == "test"
-    await stack.wait_for_barrier(
-        host_root, failpoint, invocation_id, suffix="arrived", timeout=10
-    )
+    await stack.wait_for_barrier(host_root, failpoint, invocation_id, suffix="arrived", timeout=10)
     if failpoint == TOOL_BEFORE_CLAIM:
         assert await stack.tool_call_count(invocation_id) == 0
         assert await stack.effect_count(invocation_id) == 0
@@ -2432,9 +2549,7 @@ async def test_agent_crash_matrix_retries_without_tool_effect_duplication(
     host_root = stack.new_host_barrier_root(failpoint, run_id)
     await stack.recreate_agent_worker(barrier_environment(host_root, failpoint, run_id))
     assert container_env(stack, "agent-worker", "APP_ENV") == "test"
-    await stack.wait_for_barrier(
-        host_root, failpoint, run_id, suffix="arrived", timeout=10
-    )
+    await stack.wait_for_barrier(host_root, failpoint, run_id, suffix="arrived", timeout=10)
     assert await stack.event_count(run_id, "agent.step.tool_manifest") == events_at_barrier[0]
     assert await stack.event_count(run_id, "agent.step.reasoning") == events_at_barrier[1]
     assert await stack.model_call_count(run_id) == 1
@@ -2465,7 +2580,8 @@ Exercise both startup validators in real service images as well as their Task 0/
 ```python
 @pytest.mark.parametrize("service", ["agent-worker", "tool-worker"])
 def test_worker_image_rejects_live_barrier_controls_in_production(
-    stack: ComposeStack, service: str,
+    stack: ComposeStack,
+    service: str,
 ) -> None:
     result = stack.run_service_once(
         service,
@@ -2526,8 +2642,17 @@ def build_phase9_agent_image(repo: Path, source_ref: str) -> str:
     )
     assert archive.stdout is not None
     built = subprocess.run(
-        ["docker", "build", "-f", "docker/python.Dockerfile",
-         "--build-arg", "SERVICE_PACKAGE=jhin-agent-worker", "-t", image, "-"],
+        [
+            "docker",
+            "build",
+            "-f",
+            "docker/python.Dockerfile",
+            "--build-arg",
+            "SERVICE_PACKAGE=jhin-agent-worker",
+            "-t",
+            image,
+            "-",
+        ],
         cwd=repo,
         stdin=archive.stdout,
         check=False,
@@ -2550,9 +2675,10 @@ async def test_inflight_phase9_histories_finish_after_phase10_swap(
         sync=PHASE9_SYNC_BEFORE_EFFECT,
         finalize=PHASE9_CLEANUP_BEFORE_EFFECT,
     )
-    assert await upgrade.count_events(
-        parked.normal.run_id, event_type="agent.step.reasoning", step=0
-    ) == 0
+    assert (
+        await upgrade.count_events(parked.normal.run_id, event_type="agent.step.reasoning", step=0)
+        == 0
+    )
     assert await upgrade.effect_count(parked.normal.invocation_id) == 0
 
     await upgrade.kill_phase9_workers(signal="SIGKILL")
@@ -2562,11 +2688,13 @@ async def test_inflight_phase9_histories_finish_after_phase10_swap(
     results = await upgrade.wait_all_closed(parked.workflow_ids)
 
     assert all(result.status == "completed" for result in results)
-    assert await upgrade.count_events(
-        parked.normal.run_id, event_type="agent.step.reasoning", step=0
-    ) == 1
+    assert (
+        await upgrade.count_events(parked.normal.run_id, event_type="agent.step.reasoning", step=0)
+        == 1
+    )
     assert set((await upgrade.load_manifest(parked.normal.run_id, step=0)).payload_json) == {
-        "step", "manifest"
+        "step",
+        "manifest",
     }
     assert await upgrade.effect_count(parked.normal.invocation_id) == 1
     assert await upgrade.comment_count(parked.sync.external_id) == 1

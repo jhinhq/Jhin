@@ -154,9 +154,7 @@ class EffectExpectation:
 class ScenarioResult:
     scenario_id: str
     socket_mode: Literal["rootful", "rootless"]
-    outcome: Literal[
-        "exactly_once", "at_most_once", "safe_failed", "execution_unknown"
-    ]
+    outcome: Literal["exactly_once", "at_most_once", "safe_failed", "execution_unknown"]
     duration_seconds: int
     final: AuthoritySnapshot
 ```
@@ -431,16 +429,44 @@ from pathlib import Path
 
 
 REQUIRED_SINKS = {
-    "secret.creation", "secret.encryption", "secret.decryption", "secret.rotation",
-    "secret.backup", "secret.recovery", "model.http.success", "model.http.error",
-    "connector.http.success", "connector.http.error", "webhook.ingress", "dlq.failure",
-    "replay.command", "temporal.payload", "temporal.history", "temporal.activity_failure",
-    "tool.manifest", "tool.gateway", "tool.approval", "tool.connector",
-    "tool.sandbox_call", "nats.header", "nats.envelope", "sandbox.env",
-    "sandbox.stdout", "sandbox.stderr", "sandbox.docker_error", "sandbox.orphan_cleanup",
-    "telemetry.log", "telemetry.trace", "telemetry.metric", "product.audit_metadata",
-    "product.run_event", "api.public", "api.protected", "ui.error_card",
-    "backup.artifact", "restore.output",
+    "secret.creation",
+    "secret.encryption",
+    "secret.decryption",
+    "secret.rotation",
+    "secret.backup",
+    "secret.recovery",
+    "model.http.success",
+    "model.http.error",
+    "connector.http.success",
+    "connector.http.error",
+    "webhook.ingress",
+    "dlq.failure",
+    "replay.command",
+    "temporal.payload",
+    "temporal.history",
+    "temporal.activity_failure",
+    "tool.manifest",
+    "tool.gateway",
+    "tool.approval",
+    "tool.connector",
+    "tool.sandbox_call",
+    "nats.header",
+    "nats.envelope",
+    "sandbox.env",
+    "sandbox.stdout",
+    "sandbox.stderr",
+    "sandbox.docker_error",
+    "sandbox.orphan_cleanup",
+    "telemetry.log",
+    "telemetry.trace",
+    "telemetry.metric",
+    "product.audit_metadata",
+    "product.run_event",
+    "api.public",
+    "api.protected",
+    "ui.error_card",
+    "backup.artifact",
+    "restore.output",
 }
 
 
@@ -465,11 +491,16 @@ from pathlib import Path
 
 
 SCENARIO_IDS = [
-    "01-agent-manifest-bind", "02-tool-effect-boundaries",
-    "03-event-post-handler-pre-ack", "04-quarantine-commit-replay",
-    "05-workflow-timer-approval", "06-nats-temporal-dispatch",
-    "07-postgres-activity-commit", "08-sandbox-orphan-socket",
-    "09-master-key-active-read", "10-restored-worker-restart-exit",
+    "01-agent-manifest-bind",
+    "02-tool-effect-boundaries",
+    "03-event-post-handler-pre-ack",
+    "04-quarantine-commit-replay",
+    "05-workflow-timer-approval",
+    "06-nats-temporal-dispatch",
+    "07-postgres-activity-commit",
+    "08-sandbox-orphan-socket",
+    "09-master-key-active-read",
+    "10-restored-worker-restart-exit",
 ]
 
 
@@ -493,12 +524,23 @@ def test_scenario_registry_has_exact_matrix_and_assertions() -> None:
     }
     for row in rows:
         assert set(row) == {
-            "id", "pytest_node", "faults", "effect_rule", "timeout_seconds", "assertions",
+            "id",
+            "pytest_node",
+            "faults",
+            "effect_rule",
+            "timeout_seconds",
+            "assertions",
         }
         assert 1 <= row["timeout_seconds"] <= 180
         assert row["assertions"] == [
-            "ui_api", "postgres", "temporal", "nats", "fake_effects",
-            "audit", "protected_health", "canary_absence",
+            "ui_api",
+            "postgres",
+            "temporal",
+            "nats",
+            "fake_effects",
+            "audit",
+            "protected_health",
+            "canary_absence",
         ]
         assert row["effect_rule"] == effect_rules[row["id"]]
 ```
@@ -619,8 +661,13 @@ def test_every_canary_is_unique_and_all_forms_are_scanned() -> None:
     for kind, value in canaries.by_kind().items():
         forms = canaries.forbidden_forms_for(kind)
         assert set(forms) == {
-            "raw", "json_escaped", "url_percent", "form_encoded",
-            "double_percent", "base64_standard", "base64_urlsafe",
+            "raw",
+            "json_escaped",
+            "url_percent",
+            "form_encoded",
+            "double_percent",
+            "base64_standard",
+            "base64_urlsafe",
         }
         encoded = quote(value, safe="")
         assert value.encode() in forms["raw"]
@@ -679,9 +726,7 @@ def build_composites(values: Mapping[str, str]) -> dict[str, str]:
     return {
         "authorization": f"Bearer {values['authorization']}",
         "cookie": f"session={values['cookie']}; HttpOnly; Secure",
-        "private_key_fragment": (
-            f"-----BEGIN PRIVATE KEY-----{values['private_key_fragment']}"
-        ),
+        "private_key_fragment": (f"-----BEGIN PRIVATE KEY-----{values['private_key_fragment']}"),
         "dsn": (
             f"postgresql://{quote(values['dsn_user'], safe='')}:"
             f"{quote(values['dsn_password'], safe='')}@db.invalid/jhin"
@@ -958,21 +1003,35 @@ from pathlib import Path
 def test_secret_audit_evidence_covers_every_sink_and_mode() -> None:
     document = json.loads(Path("docs/evidence/phase10-secret-audit.json").read_text())
     assert set(document) == {
-        "schema_version", "commit", "image_set_sha256", "canary_schema",
-        "modes", "status",
+        "schema_version",
+        "commit",
+        "image_set_sha256",
+        "canary_schema",
+        "modes",
+        "status",
     }
     assert document["schema_version"] == 1
     assert document["canary_schema"] == {"kinds": 9, "encoded_forms_minimum": 7}
     assert [row["socket_mode"] for row in document["modes"]] == ["rootful", "rootless"]
     for row in document["modes"]:
         assert set(row) == {
-            "socket_mode", "sink_count", "secret_lifecycle", "success_paths",
-            "failure_paths", "structural_redaction", "canary_violations", "status",
+            "socket_mode",
+            "sink_count",
+            "secret_lifecycle",
+            "success_paths",
+            "failure_paths",
+            "structural_redaction",
+            "canary_violations",
+            "status",
         }
         assert row["sink_count"] == 38
         assert row["secret_lifecycle"] == {
-            "created": True, "encrypted": True, "ordinary_use": True,
-            "rotated": True, "backed_up": True, "restored": True,
+            "created": True,
+            "encrypted": True,
+            "ordinary_use": True,
+            "rotated": True,
+            "backed_up": True,
+            "restored": True,
             "restored_use": True,
         }
         assert row["canary_violations"] == 0
@@ -1151,12 +1210,14 @@ async def wait_for_marker(path: Path) -> None:
 async def test_wait_failpoint_requires_exact_identity_and_release(tmp_path) -> None:
     identity = str(uuid4())
     name = TestFailpointName.EVENT_AFTER_HANDLER_BEFORE_ACK
-    points = TestFailpoints(TestFailpointConfig(
-        root=tmp_path,
-        selected=name,
-        match_identity=identity,
-        action=TestFailpointAction.WAIT,
-    ))
+    points = TestFailpoints(
+        TestFailpointConfig(
+            root=tmp_path,
+            selected=name,
+            match_identity=identity,
+            action=TestFailpointAction.WAIT,
+        )
+    )
     waiting = asyncio.create_task(points.reach(name, identity))
     marker_stem = f"{name.value}--{identity}"
     await wait_for_marker(tmp_path / f"{marker_stem}.arrived")
@@ -1166,12 +1227,14 @@ async def test_wait_failpoint_requires_exact_identity_and_release(tmp_path) -> N
 
 async def test_raise_once_fails_once_in_one_process(tmp_path) -> None:
     identity = str(uuid4())
-    points = TestFailpoints(TestFailpointConfig(
-        root=tmp_path,
-        selected=TestFailpointName.EVENT_BEFORE_QUARANTINE_COMMIT,
-        match_identity=identity,
-        action=TestFailpointAction.RAISE_ONCE,
-    ))
+    points = TestFailpoints(
+        TestFailpointConfig(
+            root=tmp_path,
+            selected=TestFailpointName.EVENT_BEFORE_QUARANTINE_COMMIT,
+            match_identity=identity,
+            action=TestFailpointAction.RAISE_ONCE,
+        )
+    )
     with pytest.raises(InjectedTestFailure, match="^injected_test_failure$"):
         await points.reach(TestFailpointName.EVENT_BEFORE_QUARANTINE_COMMIT, identity)
     await points.reach(TestFailpointName.EVENT_BEFORE_QUARANTINE_COMMIT, identity)
@@ -1343,23 +1406,31 @@ async def test_eventually_times_out_with_safe_diagnostics(fake_clock) -> None:
 
 
 def test_exact_integration_argv_overrides_addopts_and_selects_one_node() -> None:
-    node = (
-        "tests/integration/test_phase10_chaos_workers.py"
-        "::test_agent_manifest_bind_recovery"
-    )
+    node = "tests/integration/test_phase10_chaos_workers.py::test_agent_manifest_bind_recovery"
     assert exact_integration_argv(node) == [
-        "uv", "run", "pytest", "-o", "addopts=", "-m", "integration", node, "-q",
+        "uv",
+        "run",
+        "pytest",
+        "-o",
+        "addopts=",
+        "-m",
+        "integration",
+        node,
+        "-q",
     ]
-    assert validate_safe_pytest_summary(
-        {
-            "collected": 1,
-            "deselected": 0,
-            "passed": 1,
-            "failed": 0,
-            "skipped": 0,
-            "xfailed": 0,
-        }
-    ) is None
+    assert (
+        validate_safe_pytest_summary(
+            {
+                "collected": 1,
+                "deselected": 0,
+                "passed": 1,
+                "failed": 0,
+                "skipped": 0,
+                "xfailed": 0,
+            }
+        )
+        is None
+    )
 
 
 def test_exact_integration_summary_rejects_one_deselection() -> None:
@@ -1399,9 +1470,15 @@ Expected: FAIL because harness, polling, assertion, runner, and artifact modules
 Expose only exact service operations:
 
 ```python
-ALLOWED_KILL_SERVICES = frozenset({
-    "agent-worker", "tool-worker", "event-worker", "workflow-worker", "sandbox-runner",
-})
+ALLOWED_KILL_SERVICES = frozenset(
+    {
+        "agent-worker",
+        "tool-worker",
+        "event-worker",
+        "workflow-worker",
+        "sandbox-runner",
+    }
+)
 ALLOWED_RESTART_DEPENDENCIES = frozenset({"postgres", "nats", "temporal"})
 ```
 
@@ -1937,16 +2014,26 @@ Pin the orchestration order in `tests/test_phase10_final_exit_harness.py` with a
 def test_final_exit_uses_distinct_source_and_restored_projects(recording_exit_runner) -> None:
     result = recording_exit_runner.run(socket_mode="rootless")
     assert result.calls == [
-        "previous_state.seed", "upgrade.all", "backup.create", "backup.verify",
-        "restore.preflight", "restore.fresh", "restore.validate",
-        "exit.agent_kill", "exit.tool_kill", "exit.event_kill", "exit.validate",
-        "target.teardown", "source.teardown",
+        "previous_state.seed",
+        "upgrade.all",
+        "backup.create",
+        "backup.verify",
+        "restore.preflight",
+        "restore.fresh",
+        "restore.validate",
+        "exit.agent_kill",
+        "exit.tool_kill",
+        "exit.event_kill",
+        "exit.validate",
+        "target.teardown",
+        "source.teardown",
     ]
     assert result.source_project != result.target_project
     assert result.source_volume_ids.isdisjoint(result.target_volume_ids)
     assert result.target_was_fresh is True
     assert result.retained_adapter_calls == [
-        "upgrade_retained_project", "backup_retained_project",
+        "upgrade_retained_project",
+        "backup_retained_project",
         "restore_retained_project",
     ]
     assert result.adapter_lifecycle_calls == []
@@ -2219,10 +2306,19 @@ import re
 
 def test_manual_release_evidence_is_allowlisted(manual_release_document) -> None:
     assert set(manual_release_document) == {
-        "schema_version", "release_candidate_sha", "image_set_sha256", "date",
-        "clean_supported_host", "owner_onboarding", "provider_types",
-        "signed_linear_event", "isolated_repository_work", "pull_request_created",
-        "external_effect_count", "cleanup", "status",
+        "schema_version",
+        "release_candidate_sha",
+        "image_set_sha256",
+        "date",
+        "clean_supported_host",
+        "owner_onboarding",
+        "provider_types",
+        "signed_linear_event",
+        "isolated_repository_work",
+        "pull_request_created",
+        "external_effect_count",
+        "cleanup",
+        "status",
     }
     assert re.fullmatch(r"[0-9a-f]{40}", manual_release_document["release_candidate_sha"])
     assert manual_release_document["provider_types"] == ["github", "linear"]

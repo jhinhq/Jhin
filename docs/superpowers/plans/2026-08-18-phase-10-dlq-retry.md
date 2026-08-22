@@ -232,14 +232,17 @@ class RetrySafety(StrEnum):
     IDEMPOTENT = "idempotent"
     NON_IDEMPOTENT = "non_idempotent"
 
+
 class EventOriginStream(StrEnum):
     INGRESS = "INGRESS"
     EVENTS = "EVENTS"
+
 
 class EventProcessingMode(StrEnum):
     HANDLING = "handling"
     QUARANTINE_ONLY = "quarantine_only"
     COMPLETED = "completed"
+
 
 class EventFailureReason(StrEnum):
     INVALID_ENVELOPE = "invalid_envelope"
@@ -249,12 +252,14 @@ class EventFailureReason(StrEnum):
     PROCESSING_INVARIANT = "processing_invariant"
     WORKSPACE_DELETED = "workspace_deleted"
 
+
 class EventFailureStatus(StrEnum):
     OPEN = "open"
     REPLAY_REQUESTED = "replay_requested"
     REPLAYED = "replayed"
     RESOLVED = "resolved"
     EXPIRED = "expired"
+
 
 class EventReplayStatus(StrEnum):
     REQUESTED = "requested"
@@ -263,6 +268,7 @@ class EventReplayStatus(StrEnum):
     SUPERSEDED = "superseded"
     FAILED = "failed"
 
+
 class TaskRetryStatus(StrEnum):
     REQUESTED = "requested"
     DISPATCHING = "dispatching"
@@ -270,37 +276,47 @@ class TaskRetryStatus(StrEnum):
     REJECTED = "rejected"
     FAILED = "failed"
 
+
 class OperationsOutboxStatus(StrEnum):
     PENDING = "pending"
     PUBLISHING = "publishing"
     PUBLISHED = "published"
     FAILED = "failed"
 
+
 class RecoveryWorkspaceDeletionStatus(StrEnum):
     DELETING = "deleting"
     DELETED = "deleted"
     BLOCKED = "blocked"
 
+
 EVENT_REPLAY_NONTERMINAL = frozenset({EventReplayStatus.REQUESTED, EventReplayStatus.DISPATCHING})
 TASK_RETRY_NONTERMINAL = frozenset({TaskRetryStatus.REQUESTED, TaskRetryStatus.DISPATCHING})
+
 
 # packages/policy/src/jhin_policy/capabilities.py
 class ToolDefinition(BaseModel):
     # existing fields remain exact
     retry_safety: RetrySafety  # required; no default
 
+
 # packages/events/src/jhin_events/envelope.py
 class EventEnvelope(BaseModel):
     # existing fields remain exact
     replay_of_event_id: UUID | None = None
 
+
 def replay_root_event_id(envelope: EventEnvelope) -> UUID:
     return envelope.replay_of_event_id or envelope.event_id
+
 
 # packages/events/src/jhin_events/publisher.py
 class EventPublisher:
     async def publish(
-        self, envelope: EventEnvelope, *, headers: Mapping[str, str] | None = None,
+        self,
+        envelope: EventEnvelope,
+        *,
+        headers: Mapping[str, str] | None = None,
     ) -> PubAck: ...
     async def publish_to_subject(
         self,
@@ -311,18 +327,29 @@ class EventPublisher:
         headers: Mapping[str, str] | None = None,
     ) -> PubAck: ...
 
+
 # packages/events/src/jhin_events/replay.py
 INVALID_SUBJECT_SENTINEL = "<invalid-subject>"
 
+
 def validate_subject_envelope_binding(
-    *, origin_stream: EventOriginStream, subject: str, envelope: EventEnvelope,
+    *,
+    origin_stream: EventOriginStream,
+    subject: str,
+    envelope: EventEnvelope,
 ) -> None: ...
+
 
 # services/event_worker/src/jhin_event_worker/failures.py
 SafeEventErrorClass = Literal[
-    "validation", "unsupported", "dependency_unavailable",
-    "temporal_unavailable", "database_unavailable", "internal",
+    "validation",
+    "unsupported",
+    "dependency_unavailable",
+    "temporal_unavailable",
+    "database_unavailable",
+    "internal",
 ]
+
 
 @dataclass(frozen=True)
 class ClassifiedEventFailure:
@@ -332,10 +359,12 @@ class ClassifiedEventFailure:
     replayable: bool
     terminal_delivery: bool
 
+
 def classify_handler_error(error: BaseException) -> ClassifiedEventFailure: ...
 def invalid_envelope_failure(error_count: int) -> ClassifiedEventFailure: ...
 def unsupported_ingress_failure() -> ClassifiedEventFailure: ...
 def failure_for_reason(reason: EventFailureReason) -> ClassifiedEventFailure: ...
+
 
 # packages/events/src/jhin_events/replay.py
 @dataclass(frozen=True)
@@ -344,9 +373,12 @@ class ReplaySemanticIdentity:
     root_event_id: UUID
     semantic_key: str
 
+
 def replay_semantic_identity(
-    origin_stream: EventOriginStream, envelope: EventEnvelope,
+    origin_stream: EventOriginStream,
+    envelope: EventEnvelope,
 ) -> ReplaySemanticIdentity | None: ...
+
 
 # packages/recovery/src/jhin_recovery/trigger_start.py
 TriggerWorkflowName = Literal["TriggeredTaskWorkflow", "EngineeringTicketWorkflow"]
@@ -358,6 +390,7 @@ TRIGGER_URL_MAX_CHARS = 2_000
 TRIGGER_EXTERNAL_ID_MAX_CHARS = 500
 TRIGGER_MAX_RETEST_CYCLES = 20
 
+
 @dataclass(frozen=True)
 class AuthorizedTriggerStart:
     invocation_id: UUID
@@ -368,48 +401,78 @@ class AuthorizedTriggerStart:
     contract_version: Literal[1]
     authorized_at: datetime
 
+
 def serialize_trigger_workflow_input(
-    workflow_name: TriggerWorkflowName, workflow_input: TriggerWorkflowInput,
+    workflow_name: TriggerWorkflowName,
+    workflow_input: TriggerWorkflowInput,
 ) -> JsonDict: ...
 
+
 def deserialize_trigger_workflow_input(
-    workflow_name: TriggerWorkflowName, payload: JsonDict,
+    workflow_name: TriggerWorkflowName,
+    payload: JsonDict,
 ) -> TriggerWorkflowInput: ...
+
 
 @dataclass(frozen=True)
 class TriggerStartEvidence:
     outcome: Literal["accepted", "not_observed", "unknown", "invariant"]
     close_status: str | None
 
+
 async def authorize_trigger_start(
-    session: AsyncSession, *, invocation_id: UUID, workspace_id: UUID,
-    workflow_id: str, workflow_name: TriggerWorkflowName,
-    workflow_input: TriggerWorkflowInput, now: datetime,
+    session: AsyncSession,
+    *,
+    invocation_id: UUID,
+    workspace_id: UUID,
+    workflow_id: str,
+    workflow_name: TriggerWorkflowName,
+    workflow_input: TriggerWorkflowInput,
+    now: datetime,
 ) -> AuthorizedTriggerStart: ...
+
 
 async def load_authorized_trigger_start(
-    session: AsyncSession, *, invocation_id: UUID,
+    session: AsyncSession,
+    *,
+    invocation_id: UUID,
 ) -> AuthorizedTriggerStart: ...
 
+
 async def ensure_trigger_workflow(
-    temporal: TemporalClient, *, start: AuthorizedTriggerStart,
+    temporal: TemporalClient,
+    *,
+    start: AuthorizedTriggerStart,
     timeout_seconds: float = 5.0,
 ) -> TriggerStartEvidence: ...
 
+
 async def reconcile_authorized_trigger_start(
-    session_factory: async_sessionmaker[AsyncSession], temporal: TemporalClient,
-    *, invocation_id: UUID, timeout_seconds: float = 5.0,
+    session_factory: async_sessionmaker[AsyncSession],
+    temporal: TemporalClient,
+    *,
+    invocation_id: UUID,
+    timeout_seconds: float = 5.0,
 ) -> TriggerStartEvidence: ...
 
+
 async def reconcile_due_trigger_starts_batch(
-    session_factory: async_sessionmaker[AsyncSession], temporal: TemporalClient,
-    *, now: datetime | None = None, limit: int = 25,
+    session_factory: async_sessionmaker[AsyncSession],
+    temporal: TemporalClient,
+    *,
+    now: datetime | None = None,
+    limit: int = 25,
 ) -> int: ...
 
+
 async def run_trigger_start_reconciler(
-    session_factory: async_sessionmaker[AsyncSession], temporal: TemporalClient,
-    stop: asyncio.Event, *, poll_seconds: float = 1.0,
+    session_factory: async_sessionmaker[AsyncSession],
+    temporal: TemporalClient,
+    stop: asyncio.Event,
+    *,
+    poll_seconds: float = 1.0,
 ) -> None: ...
+
 
 # services/event_worker/src/jhin_event_worker/delivery.py
 PROCESSING_MAX_ATTEMPTS = 5
@@ -417,6 +480,7 @@ PROCESSING_LEASE_SECONDS = 60
 PROCESSING_LEASE_RENEW_SECONDS = 15
 PROCESSING_HANDLER_TIMEOUT_SECONDS = 300
 PROCESSING_NAK_SECONDS = (2, 4, 8, 16, 30)
+
 
 @dataclass(frozen=True)
 class SourceMessageMetadata:
@@ -429,10 +493,14 @@ class SourceMessageMetadata:
 
     @classmethod
     def from_msg(
-        cls, origin_stream: EventOriginStream, consumer_name: str, message: Msg,
+        cls,
+        origin_stream: EventOriginStream,
+        consumer_name: str,
+        message: Msg,
     ) -> "SourceMessageMetadata": ...
 
     def with_invalid_subject_sentinel(self) -> "SourceMessageMetadata": ...
+
 
 @dataclass(frozen=True)
 class DeliveryIdentity:
@@ -440,8 +508,10 @@ class DeliveryIdentity:
     event_id: UUID | None
     correlation_id: UUID | None
 
+
 class BusinessHandler(Protocol):
     async def handle_event(self, envelope: EventEnvelope) -> None: ...
+
 
 class QuarantineWriter(Protocol):
     async def __call__(
@@ -451,11 +521,13 @@ class QuarantineWriter(Protocol):
         failure: ClassifiedEventFailure,
     ) -> "QuarantineResult": ...
 
+
 async def defer_quarantine(
     source: SourceMessageMetadata,
     identity: DeliveryIdentity,
     failure: ClassifiedEventFailure,
 ) -> "QuarantineResult": ...
+
 
 class ClaimKind(StrEnum):
     HANDLE = "handle"
@@ -465,12 +537,14 @@ class ClaimKind(StrEnum):
     COMPLETED_QUARANTINE = "completed_quarantine"
     DELETED_WORKSPACE = "deleted_workspace"
 
+
 @dataclass(frozen=True)
 class ProcessingClaim:
     kind: ClaimKind
     attempt_number: int
     claim_token: UUID | None
     last_reason_code: EventFailureReason | None
+
 
 async def claim_processing_attempt(
     session_factory: async_sessionmaker[AsyncSession],
@@ -481,58 +555,81 @@ async def claim_processing_attempt(
     now: datetime | None = None,
 ) -> ProcessingClaim: ...
 
+
 async def renew_processing_claim(
     session_factory: async_sessionmaker[AsyncSession],
     source: SourceMessageMetadata,
-    *, claim_token: UUID, now: datetime | None = None,
+    *,
+    claim_token: UUID,
+    now: datetime | None = None,
 ) -> bool: ...
+
 
 class ProcessingLeaseKeeper:
     async def __aenter__(self) -> "ProcessingLeaseKeeper": ...
     async def assert_owned(self) -> None: ...
     async def __aexit__(
-        self, exc_type: type[BaseException] | None,
-        exc: BaseException | None, traceback: TracebackType | None,
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
     ) -> None: ...
+
 
 async def mark_handler_succeeded(
     session_factory: async_sessionmaker[AsyncSession],
     source: SourceMessageMetadata,
-    *, claim_token: UUID, now: datetime | None = None,
+    *,
+    claim_token: UUID,
+    now: datetime | None = None,
 ) -> None: ...
+
 
 async def mark_handler_failed(
     session_factory: async_sessionmaker[AsyncSession],
     source: SourceMessageMetadata,
-    *, claim_token: UUID, failure: ClassifiedEventFailure, now: datetime | None = None,
+    *,
+    claim_token: UUID,
+    failure: ClassifiedEventFailure,
+    now: datetime | None = None,
 ) -> EventProcessingMode: ...
+
 
 class DurableEventConsumer:
     def __init__(
         self,
-        session_factory: async_sessionmaker[AsyncSession], engine: AsyncEngine,
-        *, origin_stream: EventOriginStream, consumer_name: str,
-        business_handler: BusinessHandler, quarantine_writer: QuarantineWriter,
+        session_factory: async_sessionmaker[AsyncSession],
+        engine: AsyncEngine,
+        *,
+        origin_stream: EventOriginStream,
+        consumer_name: str,
+        business_handler: BusinessHandler,
+        quarantine_writer: QuarantineWriter,
     ) -> None: ...
     async def handle(self, message: Msg) -> None: ...
+
 
 # services/event_worker/src/jhin_event_worker/quarantine.py
 MAX_FAILURE_DETAIL_CHARS = 2_000
 MAX_FAILURE_SUBJECT_CHARS = 500
 MAX_DLQ_PAYLOAD_BYTES = 4_096
 
+
 @dataclass(frozen=True)
 class QuarantineResult:
     failure_id: UUID
     outbox_id: UUID
+
 
 async def commit_quarantine(
     session_factory: async_sessionmaker[AsyncSession],
     source: SourceMessageMetadata,
     identity: DeliveryIdentity,
     failure: ClassifiedEventFailure,
-    *, now: datetime | None = None,
+    *,
+    now: datetime | None = None,
 ) -> QuarantineResult: ...
+
 
 # packages/domain/src/jhin_domain/recovery.py, loaded from recovery_contract.json
 COMMAND_CLAIM_SECONDS = 30
@@ -542,25 +639,50 @@ COMMAND_BACKOFF_SECONDS = (1, 2, 4, 8, 15, 30, 60, 120, 300, 600)
 TASK_RETRY_MAX_GENERATION = 2_147_483_647
 
 ReplayDispatchCode = Literal[
-    "source_event_expired", "source_event_changed", "invalid_source_event",
-    "requester_unauthorized", "workspace_inactive", "reason_not_replayable",
-    "nats_unavailable", "database_unavailable", "dispatch_exhausted",
+    "source_event_expired",
+    "source_event_changed",
+    "invalid_source_event",
+    "requester_unauthorized",
+    "workspace_inactive",
+    "reason_not_replayable",
+    "nats_unavailable",
+    "database_unavailable",
+    "dispatch_exhausted",
     "invariant_violation",
 ]
 ReplayEligibilityReasonCode = Literal[
-    "eligible", "failure_not_open", "reason_not_replayable",
-    "source_event_expired", "source_event_changed", "source_check_unavailable",
-    "replay_in_progress", "idempotency_key_conflict",
+    "eligible",
+    "failure_not_open",
+    "reason_not_replayable",
+    "source_event_expired",
+    "source_event_changed",
+    "source_check_unavailable",
+    "replay_in_progress",
+    "idempotency_key_conflict",
 ]
 TaskRetryReasonCode = Literal[
-    "eligible", "task_not_failed", "workflow_active", "retry_in_progress",
+    "eligible",
+    "task_not_failed",
+    "workflow_active",
+    "retry_in_progress",
     "idempotency_key_conflict",
-    "agent_missing", "agent_inactive", "budget_exhausted", "authorization_unchanged",
-    "policy_unchanged", "configuration_unchanged", "max_steps_unchanged",
-    "explicit_rejection_unchanged", "committed_external_effect",
-    "ambiguous_external_effect", "unknown_tool_safety", "concurrency_wait",
-    "requester_unauthorized", "workspace_inactive", "temporal_unavailable",
-    "dispatch_exhausted", "invariant_violation",
+    "agent_missing",
+    "agent_inactive",
+    "budget_exhausted",
+    "authorization_unchanged",
+    "policy_unchanged",
+    "configuration_unchanged",
+    "max_steps_unchanged",
+    "explicit_rejection_unchanged",
+    "committed_external_effect",
+    "ambiguous_external_effect",
+    "unknown_tool_safety",
+    "concurrency_wait",
+    "requester_unauthorized",
+    "workspace_inactive",
+    "temporal_unavailable",
+    "dispatch_exhausted",
+    "invariant_violation",
 ]
 
 REPLAY_SAFE_COPY: Final[dict[ReplayDispatchCode, str]] = {
@@ -615,10 +737,12 @@ TASK_RETRY_SAFE_COPY: Final[dict[TaskRetryReasonCode, str]] = {
 # services/event_worker/src/jhin_event_worker/commands.py
 OUTBOX_CANDIDATE_SCAN_LIMIT = 100
 
+
 class CommandClaimMode(StrEnum):
     NEW_ATTEMPT = "new_attempt"
     RECONCILE_EXISTING = "reconcile_existing"
     RECONCILE_AT_CAP = "reconcile_at_cap"
+
 
 @dataclass(frozen=True)
 class CommandClaim:
@@ -628,36 +752,57 @@ class CommandClaim:
     mode: CommandClaimMode
     external_call_authorized_at: datetime | None
 
+
 @dataclass(frozen=True)
 class AuthorizedExternalCall:
     command_id: UUID
-    identity: str                 # validated ASCII, 1..200
-    attempt_count: int            # 1..20, immutable across same-ID re-drives
+    identity: str  # validated ASCII, 1..200
+    attempt_count: int  # 1..20, immutable across same-ID re-drives
     authorized_at: datetime
     baseline_sequence: int | None
 
+
 async def claim_due_outbox(
-    session: AsyncSession, *, now: datetime,
-    deletion_drain_workspace_id: UUID | None = None, limit: int = 25,
+    session: AsyncSession,
+    *,
+    now: datetime,
+    deletion_drain_workspace_id: UUID | None = None,
+    limit: int = 25,
 ) -> tuple[CommandClaim, ...]: ...
 
+
 async def authorize_external_call(
-    session: AsyncSession, *, command_id: UUID, claim_token: UUID,
-    identity: str, baseline_sequence: int | None, now: datetime,
+    session: AsyncSession,
+    *,
+    command_id: UUID,
+    claim_token: UUID,
+    identity: str,
+    baseline_sequence: int | None,
+    now: datetime,
 ) -> AuthorizedExternalCall: ...
 
+
 PreauthorizationFailureCode = Literal[
-    "nats_unavailable", "temporal_unavailable", "database_unavailable",
+    "nats_unavailable",
+    "temporal_unavailable",
+    "database_unavailable",
 ]
 
+
 async def record_preauthorization_failure(
-    session: AsyncSession, *, command_id: UUID, claim_token: UUID,
-    safe_error_code: PreauthorizationFailureCode, now: datetime,
+    session: AsyncSession,
+    *,
+    command_id: UUID,
+    claim_token: UUID,
+    safe_error_code: PreauthorizationFailureCode,
+    now: datetime,
 ) -> int: ...
+
 
 class SourceEventReader:
     def __init__(self, js: JetStreamContext) -> None: ...
     async def get_exact(self, *, stream: EventOriginStream, sequence: int) -> RawStreamMsg: ...
+
 
 @dataclass(frozen=True)
 class RawStreamMsg:
@@ -667,14 +812,20 @@ class RawStreamMsg:
     data: bytes
     headers: Mapping[str, str]
 
+
 async def publish_operations_message(
     js: JetStreamContext,
-    *, subject: str, payload: bytes, message_id: str,
+    *,
+    subject: str,
+    payload: bytes,
+    message_id: str,
 ) -> PubAck: ...
+
 
 # Implementation contract: publish_operations_message delegates to
 # jhin_events.telemetry.publish_jetstream(..., stream="DLQ",
 # message_id=message_id). It must not call js.publish directly.
+
 
 class OperationsCommandDispatcher:
     def __init__(
@@ -684,37 +835,53 @@ class OperationsCommandDispatcher:
         temporal: TemporalClient,
     ) -> None: ...
     async def reconcile_authorized_trigger_starts_batch(
-        self, *, now: datetime | None = None,
+        self,
+        *,
+        now: datetime | None = None,
     ) -> int: ...
     async def reconcile_authorized_ordinary_starts_batch(
-        self, *, now: datetime | None = None,
+        self,
+        *,
+        now: datetime | None = None,
     ) -> int: ...
     async def reconcile_ordinary_task_start_terminals_batch(
-        self, *, now: datetime | None = None,
+        self,
+        *,
+        now: datetime | None = None,
     ) -> int: ...
     async def dispatch_outbox_batch(self, *, now: datetime | None = None) -> int: ...
     async def dispatch_replay_batch(self, *, now: datetime | None = None) -> int: ...
     async def dispatch_task_retry_batch(self, *, now: datetime | None = None) -> int: ...
     async def reconcile_task_retry_terminals_batch(
-        self, *, now: datetime | None = None,
+        self,
+        *,
+        now: datetime | None = None,
     ) -> int: ...
     async def reconcile_workspace_deletions_batch(
-        self, *, now: datetime | None = None,
+        self,
+        *,
+        now: datetime | None = None,
     ) -> int: ...
     async def run(self, stop: asyncio.Event) -> None: ...
 
+
 # apps/api/src/jhin_api/idempotency.py
 IDEMPOTENCY_KEY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}\Z")
+
+
 def require_idempotency_key(request: Request) -> str: ...
+
 
 # apps/api/src/jhin_api/deps.py
 def require_operational_workspace_role(
     required: WorkspaceRole,
 ) -> Callable[..., Coroutine[Any, Any, WorkspaceContext]]: ...
 
+
 OperationalMemberCtx = Annotated[
     WorkspaceContext, Depends(require_operational_workspace_role(WorkspaceRole.MEMBER))
 ]
+
 
 # packages/recovery/src/jhin_recovery/task_retry.py
 @dataclass(frozen=True)
@@ -722,6 +889,7 @@ class TaskRetryEligibility:
     eligible: bool
     reason_code: TaskRetryReasonCode
     source_run_id: UUID | None
+
 
 MAX_TASK_WORKFLOW_IDS = 100
 TASK_RETRY_TERMINAL_HISTORY_MAX_EVENTS = 10_000
@@ -732,9 +900,11 @@ TASK_START_TERMINAL_RECONCILE_BATCH_SIZE = 25
 TASK_START_TERMINAL_RECONCILE_CLAIM_SECONDS = 30
 TASK_START_TERMINAL_RECONCILE_BACKOFF_SECONDS = (2, 4, 8, 15, 30, 60, 120, 300, 600)
 
+
 class TaskRetryEvaluationMode(StrEnum):
     API_REQUEST = "api_request"
     DISPATCH = "dispatch"
+
 
 @dataclass(frozen=True)
 class ManualRetryDispatchBinding:
@@ -742,13 +912,19 @@ class ManualRetryDispatchBinding:
     retry_id: UUID
     attempt_number: int
 
+
 def parse_manual_retry_dispatch_binding(
     metadata: Mapping[str, object],
 ) -> ManualRetryDispatchBinding | None: ...
 
+
 TaskWorkflowTargetKind = Literal[
-    "ordinary", "manual_retry", "not_started", "invariant",
+    "ordinary",
+    "manual_retry",
+    "not_started",
+    "invariant",
 ]
+
 
 @dataclass(frozen=True)
 class TaskWorkflowTarget:
@@ -757,9 +933,14 @@ class TaskWorkflowTarget:
     retry_id: UUID | None
     run_id: UUID | None
 
+
 async def resolve_active_task_workflow_target(
-    session: AsyncSession, *, workspace_id: UUID, task_id: UUID,
+    session: AsyncSession,
+    *,
+    workspace_id: UUID,
+    task_id: UUID,
 ) -> TaskWorkflowTarget: ...
+
 
 @dataclass(frozen=True)
 class KnownTaskWorkflow:
@@ -770,28 +951,46 @@ class KnownTaskWorkflow:
     agent_run_id: UUID | None
     task_retry_id: UUID | None
 
+
 async def collect_known_task_workflows(
-    session: AsyncSession, *, workspace_id: UUID, task_id: UUID,
+    session: AsyncSession,
+    *,
+    workspace_id: UUID,
+    task_id: UUID,
 ) -> tuple[KnownTaskWorkflow, ...]: ...
+
 
 async def evaluate_task_retry_request(
     session: AsyncSession,
     temporal: TemporalClient,
-    *, workspace_id: UUID, task_id: UUID, now: datetime | None = None,
+    *,
+    workspace_id: UUID,
+    task_id: UUID,
+    now: datetime | None = None,
 ) -> TaskRetryEligibility: ...
+
 
 async def evaluate_task_retry_dispatch(
     session: AsyncSession,
     temporal: TemporalClient,
-    *, retry_id: UUID, claim_token: UUID, now: datetime | None = None,
+    *,
+    retry_id: UUID,
+    claim_token: UUID,
+    now: datetime | None = None,
 ) -> TaskRetryEligibility: ...
+
 
 def classify_task_retry_effects(tool_calls: Sequence[ToolCall]) -> TaskRetryReasonCode | None: ...
 
+
 async def reconcile_task_retry_started(
     session: AsyncSession,
-    *, retry_id: UUID, workflow_id: str, now: datetime,
+    *,
+    retry_id: UUID,
+    workflow_id: str,
+    now: datetime,
 ) -> TaskRetry: ...
+
 
 @dataclass(frozen=True)
 class TaskRetryTerminalProof:
@@ -804,32 +1003,56 @@ class TaskRetryTerminalProof:
     run_status: Literal["completed", "failed", "cancelled"] | None
     proven_at: datetime
 
+
 async def record_task_retry_terminal_proof(
-    session: AsyncSession, *, retry_id: UUID, reconcile_claim_token: UUID,
+    session: AsyncSession,
+    *,
+    retry_id: UUID,
+    reconcile_claim_token: UUID,
     attempt_number: int,
-    workflow_id: str, workflow_status: str, run_outcome: str,
-    run_id: UUID | None, run_status: str | None, now: datetime,
+    workflow_id: str,
+    workflow_status: str,
+    run_outcome: str,
+    run_id: UUID | None,
+    run_status: str | None,
+    now: datetime,
 ) -> TaskRetryTerminalProof: ...
+
 
 @dataclass(frozen=True)
 class TaskRetryTerminalReconcileResult:
     retry_id: UUID
     outcome: Literal["open", "terminal_proven", "unknown", "invariant"]
-    workflow_status: Literal[
-        "completed", "failed", "cancelled", "terminated", "timed_out",
-    ] | None
+    workflow_status: (
+        Literal[
+            "completed",
+            "failed",
+            "cancelled",
+            "terminated",
+            "timed_out",
+        ]
+        | None
+    )
     run_outcome: Literal["terminal_run", "closed_before_run"] | None
 
+
 async def reconcile_task_retry_terminal(
-    session_factory: async_sessionmaker[AsyncSession], temporal: TemporalClient,
-    *, retry_id: UUID, timeout_seconds: float = 5.0,
+    session_factory: async_sessionmaker[AsyncSession],
+    temporal: TemporalClient,
+    *,
+    retry_id: UUID,
+    timeout_seconds: float = 5.0,
 ) -> TaskRetryTerminalReconcileResult: ...
 
+
 async def reconcile_due_task_retry_terminals_batch(
-    session_factory: async_sessionmaker[AsyncSession], temporal: TemporalClient,
-    *, now: datetime | None = None,
+    session_factory: async_sessionmaker[AsyncSession],
+    temporal: TemporalClient,
+    *,
+    now: datetime | None = None,
     limit: int = TASK_START_TERMINAL_RECONCILE_BATCH_SIZE,
 ) -> int: ...
+
 
 @dataclass(frozen=True)
 class AuthorizedTaskRetryStart:
@@ -841,25 +1064,40 @@ class AuthorizedTaskRetryStart:
     attempt_count: int
     authorized_at: datetime
 
+
 async def authorize_task_retry_start(
-    session: AsyncSession, *, retry_id: UUID, claim_token: UUID,
-    workflow_input: AgentTaskInput, now: datetime,
+    session: AsyncSession,
+    *,
+    retry_id: UUID,
+    claim_token: UUID,
+    workflow_input: AgentTaskInput,
+    now: datetime,
 ) -> AuthorizedTaskRetryStart: ...
 
+
 async def load_authorized_task_retry_start(
-    session: AsyncSession, *, retry_id: UUID,
+    session: AsyncSession,
+    *,
+    retry_id: UUID,
 ) -> AuthorizedTaskRetryStart: ...
+
 
 # apps/api/src/jhin_api/tasks/retry.py
 async def request_task_retry(
     session: AsyncSession,
     temporal: TemporalClient,
     ctx: WorkspaceContext,
-    *, task_id: UUID, idempotency_key: str, request_id: UUID, ip_hash: str,
+    *,
+    task_id: UUID,
+    idempotency_key: str,
+    request_id: UUID,
+    ip_hash: str,
 ) -> TaskRetry: ...
+
 
 # packages/recovery/src/jhin_recovery/deletion.py
 WORKSPACE_DELETE_DUE_BATCH_SIZE = 25
+
 
 @dataclass(frozen=True)
 class WorkspaceClaimGate:
@@ -868,34 +1106,54 @@ class WorkspaceClaimGate:
     workspace_active: bool
     deletion_status: RecoveryWorkspaceDeletionStatus | None
 
+
 async def lock_workspace_claim_gate(
-    session: AsyncSession, *, workspace_id: UUID,
+    session: AsyncSession,
+    *,
+    workspace_id: UUID,
 ) -> WorkspaceClaimGate: ...
+
 
 @dataclass(frozen=True)
 class AgentDeletionRecoveryEvidence:
     outcome: Literal[
-        "safe", "active_run", "ordinary_proof_pending",
-        "task_retry_proof_pending", "invariant",
+        "safe",
+        "active_run",
+        "ordinary_proof_pending",
+        "task_retry_proof_pending",
+        "invariant",
     ]
 
+
 async def evaluate_agent_deletion_recovery(
-    session: AsyncSession, *, workspace_id: UUID, agent_id: UUID,
+    session: AsyncSession,
+    *,
+    workspace_id: UUID,
+    agent_id: UUID,
 ) -> AgentDeletionRecoveryEvidence: ...
 
+
 async def request_workspace_deletion(
-    session: AsyncSession, *, workspace_id: UUID, requested_by_user_id: UUID,
-    request_id: UUID, ip_hash: str, now: datetime,
+    session: AsyncSession,
+    *,
+    workspace_id: UUID,
+    requested_by_user_id: UUID,
+    request_id: UUID,
+    ip_hash: str,
+    now: datetime,
 ) -> RecoveryWorkspaceDeletion: ...
+
 
 MAX_ORDINARY_SOURCE_ROWS_PER_PAGE = 500
 MAX_ORDINARY_WORKFLOW_IDS_PER_PAGE = 2_500
+
 
 @dataclass(frozen=True)
 class OrdinaryRunBinding:
     run_id: UUID
     task_id: UUID | None
     status: RunStatus
+
 
 @dataclass(frozen=True)
 class OrdinaryTriggerBinding:
@@ -908,11 +1166,13 @@ class OrdinaryTriggerBinding:
     start_accepted: bool
     terminal_proven: bool
 
+
 @dataclass(frozen=True)
 class DelegatedWrapperBinding:
     child_task_id: UUID
     parent_task_id: UUID
     parent_run_id: UUID | None
+
 
 @dataclass(frozen=True)
 class KnownOrdinaryWorkflow:
@@ -925,11 +1185,13 @@ class KnownOrdinaryWorkflow:
     trigger_invocations: tuple[OrdinaryTriggerBinding, ...]
     start_authorized: bool
 
+
 @dataclass(frozen=True)
 class OrdinaryWorkflowEvidence:
     workflow_id: str
     outcome: Literal["open", "closed_terminal", "not_observed", "unknown", "invariant"]
     close_status: str | None
+
 
 @dataclass(frozen=True)
 class OrdinaryWorkflowInventoryPage:
@@ -941,32 +1203,45 @@ class OrdinaryWorkflowInventoryPage:
     agent_runs_complete: bool
     trigger_invocations_complete: bool
 
+
 @dataclass(frozen=True)
 class AuthorizedTaskStart:
     task_id: UUID
     workspace_id: UUID
-    workflow_id: str              # ASCII, 1..200
+    workflow_id: str  # ASCII, 1..200
     workflow_input: AgentTaskInput
     contract_version: Literal[1]
     authorized_at: datetime
     accepted_at: datetime | None
+
 
 AGENT_TASK_START_CONTRACT_VERSION = 1
 AGENT_TASK_INSTRUCTION_MAX_CHARS = 20_000
 AGENT_TASK_INPUT_MAX_BYTES = 82_000
 ORDINARY_START_TERMINAL_HISTORY_MAX_EVENTS = 10_000
 
+
 def serialize_agent_task_input(workflow_input: AgentTaskInput) -> JsonDict: ...
 def deserialize_agent_task_input(payload: JsonDict) -> AgentTaskInput: ...
 
+
 async def authorize_ordinary_task_start(
-    session: AsyncSession, *, workspace_id: UUID, task_id: UUID,
-    agent_id: UUID, instruction: str, now: datetime,
+    session: AsyncSession,
+    *,
+    workspace_id: UUID,
+    task_id: UUID,
+    agent_id: UUID,
+    instruction: str,
+    now: datetime,
 ) -> AuthorizedTaskStart: ...
 
+
 async def load_authorized_ordinary_task_start(
-    session: AsyncSession, *, task_id: UUID,
+    session: AsyncSession,
+    *,
+    task_id: UUID,
 ) -> AuthorizedTaskStart: ...
+
 
 @dataclass(frozen=True)
 class OrdinaryTaskStartTerminalProof:
@@ -978,92 +1253,152 @@ class OrdinaryTaskStartTerminalProof:
     run_status: Literal["completed", "failed", "cancelled"] | None
     proven_at: datetime
 
+
 async def record_ordinary_task_start_terminal_proof(
-    session: AsyncSession, *, task_id: UUID, reconcile_claim_token: UUID,
+    session: AsyncSession,
+    *,
+    task_id: UUID,
+    reconcile_claim_token: UUID,
     workflow_id: str,
-    workflow_status: str, run_outcome: str, run_id: UUID | None,
-    run_status: str | None, now: datetime,
+    workflow_status: str,
+    run_outcome: str,
+    run_id: UUID | None,
+    run_status: str | None,
+    now: datetime,
 ) -> OrdinaryTaskStartTerminalProof: ...
+
 
 @dataclass(frozen=True)
 class OrdinaryTaskStartTerminalReconcileResult:
     task_id: UUID
     outcome: Literal["open", "terminal_proven", "unknown", "invariant"]
-    workflow_status: Literal[
-        "completed", "failed", "cancelled", "terminated", "timed_out",
-    ] | None
+    workflow_status: (
+        Literal[
+            "completed",
+            "failed",
+            "cancelled",
+            "terminated",
+            "timed_out",
+        ]
+        | None
+    )
     run_outcome: Literal["terminal_run", "closed_before_run"] | None
 
+
 async def reconcile_ordinary_task_start_terminal(
-    session_factory: async_sessionmaker[AsyncSession], temporal: TemporalClient,
-    *, task_id: UUID, timeout_seconds: float = 5.0,
+    session_factory: async_sessionmaker[AsyncSession],
+    temporal: TemporalClient,
+    *,
+    task_id: UUID,
+    timeout_seconds: float = 5.0,
 ) -> OrdinaryTaskStartTerminalReconcileResult: ...
 
+
 async def reconcile_due_ordinary_task_start_terminals_batch(
-    session_factory: async_sessionmaker[AsyncSession], temporal: TemporalClient,
-    *, now: datetime | None = None,
+    session_factory: async_sessionmaker[AsyncSession],
+    temporal: TemporalClient,
+    *,
+    now: datetime | None = None,
     limit: int = TASK_START_TERMINAL_RECONCILE_BATCH_SIZE,
 ) -> int: ...
 
+
 async def collect_workspace_ordinary_workflows(
-    session: AsyncSession, *, workspace_id: UUID,
-    after_task_id: UUID | None, after_agent_run_id: UUID | None,
+    session: AsyncSession,
+    *,
+    workspace_id: UUID,
+    after_task_id: UUID | None,
+    after_agent_run_id: UUID | None,
     after_trigger_invocation_id: UUID | None,
     limit: int = MAX_ORDINARY_SOURCE_ROWS_PER_PAGE,
 ) -> OrdinaryWorkflowInventoryPage: ...
 
+
 async def reconcile_authorized_ordinary_start(
-    session_factory: async_sessionmaker[AsyncSession], temporal: TemporalClient,
-    *, task_id: UUID, timeout_seconds: float = 5.0,
+    session_factory: async_sessionmaker[AsyncSession],
+    temporal: TemporalClient,
+    *,
+    task_id: UUID,
+    timeout_seconds: float = 5.0,
 ) -> OrdinaryWorkflowEvidence: ...
 
+
 async def reconcile_due_authorized_ordinary_starts_batch(
-    session_factory: async_sessionmaker[AsyncSession], temporal: TemporalClient,
-    *, now: datetime | None = None,
+    session_factory: async_sessionmaker[AsyncSession],
+    temporal: TemporalClient,
+    *,
+    now: datetime | None = None,
     limit: int = ORDINARY_START_RECONCILE_BATCH_SIZE,
 ) -> int: ...
 
+
 async def prove_ordinary_workflow_terminal(
-    session: AsyncSession, temporal: TemporalClient,
-    *, binding: KnownOrdinaryWorkflow, timeout_seconds: float = 5.0,
+    session: AsyncSession,
+    temporal: TemporalClient,
+    *,
+    binding: KnownOrdinaryWorkflow,
+    timeout_seconds: float = 5.0,
 ) -> OrdinaryWorkflowEvidence: ...
+
 
 async def reconcile_workspace_deletion(
     session_factory: async_sessionmaker[AsyncSession],
     js: JetStreamContext,
     temporal: TemporalClient,
-    *, workspace_id: UUID, now: datetime | None = None,
+    *,
+    workspace_id: UUID,
+    now: datetime | None = None,
 ) -> RecoveryWorkspaceDeletionStatus: ...
+
 
 async def reconcile_due_workspace_deletions_batch(
     session_factory: async_sessionmaker[AsyncSession],
     js: JetStreamContext,
     temporal: TemporalClient,
-    *, now: datetime | None = None,
+    *,
+    now: datetime | None = None,
     limit: int = WORKSPACE_DELETE_DUE_BATCH_SIZE,
 ) -> int: ...
 
+
 # packages/recovery/src/jhin_recovery/nats.py
 NATS_RECONCILE_MAX_MESSAGES = 10_000
+
 
 @dataclass(frozen=True)
 class PublishEvidence:
     outcome: Literal["accepted", "not_observed", "unknown"]
     stream_sequence: int | None
 
+
 async def capture_publish_baseline(
-    js: JetStreamContext, *, stream: str,
+    js: JetStreamContext,
+    *,
+    stream: str,
 ) -> int: ...  # last sequence, inclusive lower bound; 0 is valid for an empty stream
 
+
 async def reconcile_publish_after_baseline(
-    js: JetStreamContext, *, stream: str, subject: str, message_id: str,
+    js: JetStreamContext,
+    *,
+    stream: str,
+    subject: str,
+    message_id: str,
     baseline_sequence: int,
 ) -> PublishEvidence: ...
 
+
 async def reconcile_or_redrive_authorized_publish(
-    js: JetStreamContext, *, stream: str, subject: str, payload: bytes,
-    message_id: str, baseline_sequence: int, timeout_seconds: float = 5.0,
+    js: JetStreamContext,
+    *,
+    stream: str,
+    subject: str,
+    payload: bytes,
+    message_id: str,
+    baseline_sequence: int,
+    timeout_seconds: float = 5.0,
 ) -> PublishEvidence: ...
+
 
 # packages/workflows/src/jhin_workflows/agent_task/shared.py
 @dataclass
@@ -1079,32 +1414,68 @@ class AgentTaskInput:
 The complete retry-safety registry is fixed as follows. The catalog test must compare exact sets so a newly registered tool cannot silently inherit a classification.
 
 ```python
-PURE_TOOLS = frozenset({
-    "system.echo", "system.time", "system.demo.elevated", "example.ping",
-    "github.repository.read", "github.branch.list", "github.file.read",
-    "github.issue.read", "github.pull_request.read", "github.check.read",
-    "github.workflow_run.read", "linear.issue.read", "linear.issue.search",
-    "linear.metadata.read", "cli.file.read", "vercel.project.list",
-    "vercel.project.read", "vercel.deployment.list", "vercel.deployment.read",
-    "vercel.deployment.logs.read", "vercel.environment_metadata.read",
-    "supabase.project.read", "supabase.logs.read", "supabase.function.list",
-    "supabase.database.read",
-})
-IDEMPOTENT_TOOLS = frozenset({
-    "system.note.append", "system.demo.destructive",
-    "organization.delegate_task", "organization.report_result", "cli.file.write",
-})
-NON_IDEMPOTENT_TOOLS = frozenset({
-    "github.branch.create", "github.issue.comment", "github.pull_request.create",
-    "github.pull_request.comment", "github.pull_request.merge",
-    "github.workflow.dispatch", "linear.issue.create", "linear.issue.update",
-    "linear.comment.create", "cli.command.execute", "cli.repository.checkout",
-    "cli.test.run", "vercel.deployment.preview.create",
-    "vercel.deployment.redeploy", "vercel.deployment.promote",
-    "vercel.deployment.alias.assign", "supabase.function.deploy",
-    "supabase.function.delete", "supabase.database.write",
-    "supabase.database.destructive",
-})
+PURE_TOOLS = frozenset(
+    {
+        "system.echo",
+        "system.time",
+        "system.demo.elevated",
+        "example.ping",
+        "github.repository.read",
+        "github.branch.list",
+        "github.file.read",
+        "github.issue.read",
+        "github.pull_request.read",
+        "github.check.read",
+        "github.workflow_run.read",
+        "linear.issue.read",
+        "linear.issue.search",
+        "linear.metadata.read",
+        "cli.file.read",
+        "vercel.project.list",
+        "vercel.project.read",
+        "vercel.deployment.list",
+        "vercel.deployment.read",
+        "vercel.deployment.logs.read",
+        "vercel.environment_metadata.read",
+        "supabase.project.read",
+        "supabase.logs.read",
+        "supabase.function.list",
+        "supabase.database.read",
+    }
+)
+IDEMPOTENT_TOOLS = frozenset(
+    {
+        "system.note.append",
+        "system.demo.destructive",
+        "organization.delegate_task",
+        "organization.report_result",
+        "cli.file.write",
+    }
+)
+NON_IDEMPOTENT_TOOLS = frozenset(
+    {
+        "github.branch.create",
+        "github.issue.comment",
+        "github.pull_request.create",
+        "github.pull_request.comment",
+        "github.pull_request.merge",
+        "github.workflow.dispatch",
+        "linear.issue.create",
+        "linear.issue.update",
+        "linear.comment.create",
+        "cli.command.execute",
+        "cli.repository.checkout",
+        "cli.test.run",
+        "vercel.deployment.preview.create",
+        "vercel.deployment.redeploy",
+        "vercel.deployment.promote",
+        "vercel.deployment.alias.assign",
+        "supabase.function.deploy",
+        "supabase.function.delete",
+        "supabase.database.write",
+        "supabase.database.destructive",
+    }
+)
 ```
 
 `pure` means no durable/external mutation. `idempotent` here is limited to effects committed atomically with the gateway claim or deterministic same-content workspace writes. Every connector/provider mutation remains `non_idempotent` until a focused provider-idempotency contract and crash test justify changing that declaration.
@@ -1197,7 +1568,9 @@ def test_every_registered_tool_has_one_reviewed_retry_safety() -> None:
     assert not (PURE_TOOLS & NON_IDEMPOTENT_TOOLS)
     assert not (IDEMPOTENT_TOOLS & NON_IDEMPOTENT_TOOLS)
     assert {name for name, value in actual.items() if value is RetrySafety.PURE} == PURE_TOOLS
-    assert {name for name, value in actual.items() if value is RetrySafety.IDEMPOTENT} == IDEMPOTENT_TOOLS
+    assert {
+        name for name, value in actual.items() if value is RetrySafety.IDEMPOTENT
+    } == IDEMPOTENT_TOOLS
     assert {
         name for name, value in actual.items() if value is RetrySafety.NON_IDEMPOTENT
     } == NON_IDEMPOTENT_TOOLS
@@ -1277,15 +1650,27 @@ Assert exact table/column nullability, string lengths, check constraints, foreig
 
 ```python
 FORBIDDEN_COLUMNS = {
-    "raw_payload", "raw_message", "request_body", "response_body", "stack_trace",
-    "authorization", "cookie", "secret", "prompt", "tool_input",
+    "raw_payload",
+    "raw_message",
+    "request_body",
+    "response_body",
+    "stack_trace",
+    "authorization",
+    "cookie",
+    "secret",
+    "prompt",
+    "tool_input",
 }
+
 
 def test_recovery_tables_have_no_raw_payload_storage() -> None:
     for model in (
         RecoveryWorkspaceDeletion,
-        EventProcessingState, EventProcessingFailure, EventReplayRequest,
-        TaskRetry, OperationsOutbox,
+        EventProcessingState,
+        EventProcessingFailure,
+        EventReplayRequest,
+        TaskRetry,
+        OperationsOutbox,
     ):
         assert FORBIDDEN_COLUMNS.isdisjoint(model.__table__.columns.keys())
 ```
@@ -1613,19 +1998,25 @@ if row.mode == "completed":
         else ClaimKind.COMPLETED_QUARANTINE
     )
     return ProcessingClaim(
-        kind, row.handler_attempt_count, None,
+        kind,
+        row.handler_attempt_count,
+        None,
         EventFailureReason(row.last_reason_code) if row.last_reason_code else None,
     )
 if row.mode == "quarantine_only":
     if row.last_reason_code is None:
         raise ProcessingStateInvariantError("quarantine state has no terminal reason")
     return ProcessingClaim(
-        ClaimKind.QUARANTINE, row.handler_attempt_count, None,
+        ClaimKind.QUARANTINE,
+        row.handler_attempt_count,
+        None,
         EventFailureReason(row.last_reason_code),
     )
 if row.claim_expires_at is not None and row.claim_expires_at > now:
     return ProcessingClaim(
-        ClaimKind.LEASE_BUSY, row.handler_attempt_count, None,
+        ClaimKind.LEASE_BUSY,
+        row.handler_attempt_count,
+        None,
         EventFailureReason(row.last_reason_code) if row.last_reason_code else None,
     )
 if terminal_failure is not None:
@@ -1633,7 +2024,9 @@ if terminal_failure is not None:
     row.last_reason_code = terminal_failure.reason_code.value
     row.claim_token = None
     row.claim_expires_at = None
-    return ProcessingClaim(ClaimKind.QUARANTINE, row.handler_attempt_count, None, terminal_failure.reason_code)
+    return ProcessingClaim(
+        ClaimKind.QUARANTINE, row.handler_attempt_count, None, terminal_failure.reason_code
+    )
 if row.handler_attempt_count >= PROCESSING_MAX_ATTEMPTS:
     if row.last_reason_code is None:
         raise ProcessingStateInvariantError("exhausted state has no failure reason")
@@ -1641,7 +2034,9 @@ if row.handler_attempt_count >= PROCESSING_MAX_ATTEMPTS:
     row.claim_token = None
     row.claim_expires_at = None
     return ProcessingClaim(
-        ClaimKind.QUARANTINE, row.handler_attempt_count, None,
+        ClaimKind.QUARANTINE,
+        row.handler_attempt_count,
+        None,
         EventFailureReason(row.last_reason_code),
     )
 row.handler_attempt_count += 1
@@ -1649,7 +2044,9 @@ row.claim_token = new_uuid7()
 row.claim_expires_at = now + timedelta(seconds=PROCESSING_LEASE_SECONDS)
 row.last_attempted_at = now
 return ProcessingClaim(
-    ClaimKind.HANDLE, row.handler_attempt_count, row.claim_token,
+    ClaimKind.HANDLE,
+    row.handler_attempt_count,
+    row.claim_token,
     EventFailureReason(row.last_reason_code) if row.last_reason_code else None,
 )
 ```
@@ -1769,10 +2166,21 @@ Use predecessor `NATS_URL`/`TEMPORAL_ADDRESS` directly for minimal real fixtures
 
 ```python
 {
-    "message_id", "failure_id", "workspace_id", "event_id", "correlation_id",
-    "origin_stream", "consumer_name", "subject", "source_stream_sequence",
-    "source_consumer_sequence", "delivery_count", "handler_attempt_count",
-    "reason_code", "first_failed_at", "last_failed_at",
+    "message_id",
+    "failure_id",
+    "workspace_id",
+    "event_id",
+    "correlation_id",
+    "origin_stream",
+    "consumer_name",
+    "subject",
+    "source_stream_sequence",
+    "source_consumer_sequence",
+    "delivery_count",
+    "handler_attempt_count",
+    "reason_code",
+    "first_failed_at",
+    "last_failed_at",
 }
 ```
 
@@ -1946,6 +2354,7 @@ class ReplayEligibilityOut(BaseModel):
     eligible: StrictBool
     reason_code: ReplayEligibilityReasonCode
 
+
 class EventFailureSummaryOut(BaseModel):
     id: UUID
     event_id: UUID | None
@@ -1965,9 +2374,11 @@ class EventFailureSummaryOut(BaseModel):
     replayed_at: AwareDatetime | None
     resolved_at: AwareDatetime | None
 
+
 class EventFailurePageOut(BaseModel):
     items: Annotated[list[EventFailureSummaryOut], Field(max_length=100)]
     next_cursor: Annotated[str, Field(max_length=200)] | None
+
 
 class EventReplayRequestOut(BaseModel):
     id: UUID
@@ -1980,14 +2391,17 @@ class EventReplayRequestOut(BaseModel):
     published_at: AwareDatetime | None
     created_at: AwareDatetime
 
+
 class EventFailureDetailOut(EventFailureSummaryOut):
     replay_eligibility: ReplayEligibilityOut
     latest_replay: EventReplayRequestOut | None
     replay_history: Annotated[list[EventReplayRequestOut], Field(max_length=20)]
     replay_history_truncated: StrictBool
 
+
 class ResolveFailureIn(BaseModel):
     note: Annotated[str, Field(strict=True, min_length=1, max_length=1_000)]
+
 
 class TaskRetryHistoryOut(BaseModel):
     id: UUID
@@ -2002,16 +2416,16 @@ class TaskRetryHistoryOut(BaseModel):
     started_at: AwareDatetime | None
     created_at: AwareDatetime
 
+
 class TaskRetryHistoryPageOut(BaseModel):
     items: Annotated[list[TaskRetryHistoryOut], Field(max_length=100)]
     next_cursor: Annotated[str, Field(max_length=200)] | None
 
+
 class EventFailureHealthSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
     open_count: Annotated[int, Field(strict=True, ge=0, le=MAX_SAFE_COUNT)]
-    oldest_open_age_seconds: Annotated[
-        int, Field(strict=True, ge=0, le=MAX_SAFE_COUNT)
-    ] | None
+    oldest_open_age_seconds: Annotated[int, Field(strict=True, ge=0, le=MAX_SAFE_COUNT)] | None
     component: HealthComponent
 ```
 
@@ -2179,10 +2593,12 @@ class AutomaticRetryOut(BaseModel):
     maximum_attempts: Annotated[int, Field(ge=0, le=10_000)] | None
     next_attempt_at: AwareDatetime | None
 
+
 class ManualRetryEligibilityOut(BaseModel):
     eligible: StrictBool
     reason_code: TaskRetryReasonCode
     source_run_id: UUID | None
+
 
 class TaskRetryOut(BaseModel):
     id: UUID
@@ -2199,6 +2615,7 @@ class TaskRetryOut(BaseModel):
     available_at: AwareDatetime
     started_at: AwareDatetime | None
     created_at: AwareDatetime
+
 
 class TaskRetryStateOut(BaseModel):
     automatic: AutomaticRetryOut
@@ -2408,26 +2825,40 @@ TASK_RETRY_TERMINAL_RETENTION_DAYS = 90
 RETENTION_BATCH_SIZE = 500
 RETENTION_INTERVAL_SECONDS = 3600
 
+
 async def purge_completed_processing_states(
-    session_factory: async_sessionmaker[AsyncSession], *, now: datetime | None = None,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    now: datetime | None = None,
 ) -> int: ...
 
+
 async def purge_terminal_failures(
-    session_factory: async_sessionmaker[AsyncSession], *, now: datetime | None = None,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    now: datetime | None = None,
 ) -> int: ...
+
 
 async def purge_terminal_task_retries(
     session_factory: async_sessionmaker[AsyncSession],
     temporal: TemporalClient,
-    *, now: datetime, limit: int = RETENTION_BATCH_SIZE,
+    *,
+    now: datetime,
+    limit: int = RETENTION_BATCH_SIZE,
 ) -> int: ...
+
 
 async def purge_recovery_workspace_deletions(
-    session_factory: async_sessionmaker[AsyncSession], *, now: datetime | None = None,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    now: datetime | None = None,
 ) -> int: ...
 
+
 async def run_retention_loop(
-    session_factory: async_sessionmaker[AsyncSession], temporal: TemporalClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    temporal: TemporalClient,
     stop: asyncio.Event,
 ) -> None: ...
 ```
@@ -2478,9 +2909,12 @@ The harness uses these exact typed interfaces; tests import them directly from `
 SocketMode = Literal["rootful", "rootless"]
 KeyBearingService = Literal["api", "agent-worker", "tool-worker"]
 KEY_BEARING_SERVICES: tuple[KeyBearingService, ...] = (
-    "api", "agent-worker", "tool-worker",
+    "api",
+    "agent-worker",
+    "tool-worker",
 )
 MASTER_KEY_CONTAINER_PATH = "/run/secrets/jhin_master_key"
+
 
 @dataclass(frozen=True)
 class Phase10Compose:
@@ -2491,6 +2925,7 @@ class Phase10Compose:
     env: Mapping[str, str]
 
     def argv(self, *args: str) -> list[str]: ...
+
 
 @dataclass(frozen=True)
 class Phase10Endpoints:
@@ -2511,25 +2946,38 @@ class Phase10Endpoints:
     @classmethod
     def from_required_env(cls, environ: Mapping[str, str]) -> "Phase10Endpoints": ...
 
+
 @dataclass(frozen=True)
 class CommandResult:
     returncode: int
     stdout: str
     stderr: str
 
+
 def select_socket_overlay(
-    *, mode: SocketMode, environ: Mapping[str, str],
-    lstat_result: os.stat_result, stat_result: os.stat_result,
+    *,
+    mode: SocketMode,
+    environ: Mapping[str, str],
+    lstat_result: os.stat_result,
+    stat_result: os.stat_result,
 ) -> tuple[Path, Path, dict[str, str]]: ...  # overlay, resolved socket, child env
 
+
 def validate_rendered_compose(document: Mapping[str, object], compose: Phase10Compose) -> None: ...
-def resolve_endpoints(compose: Phase10Compose, *, timeout_seconds: int = 30) -> Phase10Endpoints: ...
+def resolve_endpoints(
+    compose: Phase10Compose, *, timeout_seconds: int = 30
+) -> Phase10Endpoints: ...
 def run_command(
-    argv: Sequence[str], *, environ: Mapping[str, str], timeout_seconds: int,
+    argv: Sequence[str],
+    *,
+    environ: Mapping[str, str],
+    timeout_seconds: int,
     stdin: bytes | bytearray | None = None,
 ) -> CommandResult: ...
 def key_read_check_argv(
-    compose: Phase10Compose, *, service: KeyBearingService,
+    compose: Phase10Compose,
+    *,
+    service: KeyBearingService,
 ) -> list[str]: ...
 def run_phase10(*, mode: SocketMode, environ: Mapping[str, str]) -> int: ...
 def cleanup_from_state(*, state_path: Path, environ: Mapping[str, str]) -> int: ...
@@ -2546,8 +2994,10 @@ class OwnedCompose:
     files: tuple[Path, ...]
     docker_socket: Path
     environ: Mapping[str, str]
+
     def run(self, *args: str, timeout_seconds: int = 60) -> CommandResult: ...
     def restart(self, service: str, *, timeout_seconds: int = 120) -> None: ...
+
 
 @dataclass(frozen=True)
 class ProcessingRow:
@@ -2558,6 +3008,7 @@ class ProcessingRow:
     handler_attempt_count: int
     claim_token: UUID | None
 
+
 @dataclass(frozen=True)
 class CommandRow:
     kind: Literal["outbox", "replay", "task_retry", "ordinary_task_start", "workspace_deletion"]
@@ -2567,11 +3018,13 @@ class CommandRow:
     external_call_authorized_at: datetime | None
     external_identity: str | None
 
+
 @dataclass(frozen=True)
 class TemporalHistory:
     workflow_id: str
     status: str
     closed: bool
+
 
 @dataclass(frozen=True)
 class WorkspaceDeletionProjection:
@@ -2579,28 +3032,49 @@ class WorkspaceDeletionProjection:
     status: Literal["deleting", "deleted", "blocked"]
     requested_at: datetime
 
+
 def owned_compose() -> Iterator[OwnedCompose]: ...
 async def wait_for_processing(
-    pool: asyncpg.Pool, *, key: tuple[str, str, int], predicate: Callable[[ProcessingRow], bool],
+    pool: asyncpg.Pool,
+    *,
+    key: tuple[str, str, int],
+    predicate: Callable[[ProcessingRow], bool],
     timeout_seconds: int = 30,
 ) -> ProcessingRow: ...
 async def wait_for_command(
-    pool: asyncpg.Pool, *, kind: str, command_id: UUID,
-    predicate: Callable[[CommandRow], bool], timeout_seconds: int = 30,
+    pool: asyncpg.Pool,
+    *,
+    kind: str,
+    command_id: UUID,
+    predicate: Callable[[CommandRow], bool],
+    timeout_seconds: int = 30,
 ) -> CommandRow: ...
-async def exact_stream_message(js: JetStreamContext, *, stream: str, sequence: int) -> RawStreamMsg: ...
-async def delete_exact_stream_message(js: JetStreamContext, *, stream: str, sequence: int) -> None: ...
-async def terminate_postgres_claim_backend(pool: asyncpg.Pool, *, application_name: str) -> None: ...
+async def exact_stream_message(
+    js: JetStreamContext, *, stream: str, sequence: int
+) -> RawStreamMsg: ...
+async def delete_exact_stream_message(
+    js: JetStreamContext, *, stream: str, sequence: int
+) -> None: ...
+async def terminate_postgres_claim_backend(
+    pool: asyncpg.Pool, *, application_name: str
+) -> None: ...
 def phase10_crash_barrier(tmp_path: Path, *, boundary: str, row_id: UUID) -> Iterator[Path]: ...
 async def temporal_history(client: TemporalClient, *, workflow_id: str) -> TemporalHistory: ...
 def block_dispatch_finalize(
     tmp_path: Path,
-    *, kind: Literal["outbox", "replay", "task_retry", "ordinary_task_start"], row_id: UUID,
+    *,
+    kind: Literal["outbox", "replay", "task_retry", "ordinary_task_start"],
+    row_id: UUID,
 ) -> Iterator[Path]: ...
-async def request_workspace_delete(client: httpx.AsyncClient, *, workspace_id: UUID, csrf: str) -> WorkspaceDeletionProjection: ...
+async def request_workspace_delete(
+    client: httpx.AsyncClient, *, workspace_id: UUID, csrf: str
+) -> WorkspaceDeletionProjection: ...
 async def wait_workspace_deletion(
-    pool: asyncpg.Pool, *, workspace_id: UUID,
-    status: Literal["deleting", "deleted", "blocked"], timeout_seconds: int = 30,
+    pool: asyncpg.Pool,
+    *,
+    workspace_id: UUID,
+    status: Literal["deleting", "deleted", "blocked"],
+    timeout_seconds: int = 30,
 ) -> WorkspaceDeletionProjection: ...
 ```
 

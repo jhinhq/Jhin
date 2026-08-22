@@ -113,6 +113,7 @@ ServiceName = Literal["api", "agent-worker", "tool-worker", "event-worker"]
 HeartbeatReadiness = Literal["ok", "degraded"]
 HeartbeatReason = Literal["master_key_unavailable", "sandbox_unreachable"]
 
+
 @dataclass(frozen=True)
 class HeartbeatIdentity:
     instance_id: UUID
@@ -125,6 +126,7 @@ class HeartbeatIdentity:
 
     def __post_init__(self) -> None: ...  # validates service, version, and aware UTC time
 
+
 @dataclass(frozen=True)
 class HeartbeatState:
     readiness: HeartbeatReadiness = "ok"
@@ -135,11 +137,14 @@ class HeartbeatState:
 
     def __post_init__(self) -> None: ...  # validates reason/field ownership and exact key tuple
 
+
 HeartbeatStateProvider = Callable[[], Awaitable[HeartbeatState]]
+
 
 class HeartbeatClock(Protocol):
     def monotonic(self) -> float: ...
     async def wait_until(self, deadline: float, stop: asyncio.Event) -> bool: ...
+
 
 async def upsert_heartbeat(
     session_factory: async_sessionmaker[AsyncSession],
@@ -149,11 +154,13 @@ async def upsert_heartbeat(
     now: datetime | None = None,
 ) -> None: ...
 
+
 async def purge_expired_heartbeats(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     now: datetime | None = None,
 ) -> int: ...
+
 
 async def run_heartbeat_loop(
     session_factory: async_sessionmaker[AsyncSession],
@@ -164,13 +171,16 @@ async def run_heartbeat_loop(
     clock: HeartbeatClock | None = None,
 ) -> None: ...
 
+
 # packages/secrets/src/jhin_secrets/crypto.py
 class SecretCrypto:
     @property
     def active_key_version(self) -> int: ...
     @property
     def supported_key_versions(self) -> tuple[int, ...]: ...
+
     # key_version remains a compatibility alias for active_key_version.
+
 
 # packages/events/src/jhin_events/streams.py
 INGRESS_CONSUMER = "event-worker-ingress"
@@ -180,11 +190,13 @@ EVENTS_CONSUMER = "event-worker"
 TEMPORAL_RECENT_ACCESS_DIAGNOSTIC_SECONDS = 30
 TEMPORAL_POLLER_RPC_TIMEOUT_SECONDS = 5
 
+
 @dataclass(frozen=True)
 class WorkflowPollerDiagnostics:
     retained: int
     recently_accessed: int
     invalid_last_access_timestamps: int
+
 
 async def workflow_poller_diagnostics(
     client: temporalio.client.Client,
@@ -193,6 +205,7 @@ async def workflow_poller_diagnostics(
     queue: str,
     checked_at: datetime,
 ) -> WorkflowPollerDiagnostics: ...
+
 
 # apps/api/src/jhin_api/temporal.py
 class TemporalClientProvider:
@@ -203,8 +216,10 @@ class TemporalClientProvider:
     ) -> None: ...
     async def get(self) -> temporalio.client.Client: ...
 
+
 # apps/api/src/jhin_api/health/service.py
 CONNECTOR_VERIFICATION_FRESH_SECONDS = 300
+
 
 @dataclass(frozen=True)
 class CurrentApiInstance:
@@ -213,9 +228,12 @@ class CurrentApiInstance:
     active_key_version: int | None
     supported_key_versions: tuple[int, ...]
 
+
 class ObservabilityRuntimeProtocol(Protocol):
     config: ObservabilityConfig
+
     def status(self) -> TelemetryExporterStatus: ...
+
 
 # apps/api/src/jhin_api/health/schemas.py
 MAX_SAFE_COUNT = 9_007_199_254_740_991
@@ -248,21 +266,25 @@ VersionCountMap = Annotated[
     Field(strict=True, max_length=MAX_SERVICE_VERSIONS),
 ]
 
+
 class LivenessResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     app: Annotated[str, Field(strict=True, min_length=1, max_length=64)]
     version: BoundedServiceVersion
     status: Literal["ok"]
 
+
 class ReadinessReport(BaseModel):
     model_config = ConfigDict(extra="forbid")
     status: Literal["ok", "degraded"]
+
 
 class HealthStatus(StrEnum):
     OK = "ok"
     DEGRADED = "degraded"
     DOWN = "down"
     UNKNOWN = "unknown"
+
 
 class HealthReasonCode(StrEnum):
     DATABASE_UNAVAILABLE = "database_unavailable"
@@ -286,6 +308,7 @@ class HealthReasonCode(StrEnum):
     TELEMETRY_NO_RECENT_SUCCESS = "telemetry_no_recent_success"
     TELEMETRY_EXPORT_FAILED = "telemetry_export_failed"
 
+
 class HealthAction(StrEnum):
     NONE = "none"
     CHECK_DATABASE = "check_database"
@@ -299,20 +322,25 @@ class HealthAction(StrEnum):
     REVIEW_KEY_ROLLOUT = "review_key_rollout"
     CHECK_TELEMETRY_EXPORTER = "check_telemetry_exporter"
 
+
 class HealthComponent(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    name: Annotated[str, Field(strict=True, min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9.-]{0,63}$")]
+    name: Annotated[
+        str, Field(strict=True, min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9.-]{0,63}$")
+    ]
     status: HealthStatus
     checked_at: AwareDatetime
     latency_ms: BoundedLatencyMs | None = None
     reason_code: HealthReasonCode | None = None
     action: HealthAction = HealthAction.NONE
 
+
 class SchemaHealthSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
     current_revision: BoundedRevision | None
     packaged_head: BoundedRevision
     component: HealthComponent
+
 
 class WorkerHealthSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -323,6 +351,7 @@ class WorkerHealthSummary(BaseModel):
     invalid_or_excess_versions: BoundedCount
     component: HealthComponent
 
+
 class EventConsumerHealthSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
     stream: Literal["INGRESS", "EVENTS"]
@@ -330,6 +359,7 @@ class EventConsumerHealthSummary(BaseModel):
     pending: BoundedCount
     redelivered: BoundedCount
     component: HealthComponent
+
 
 class TemporalQueueHealthSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -339,6 +369,7 @@ class TemporalQueueHealthSummary(BaseModel):
     invalid_last_access_timestamps: BoundedCount
     fresh_owner_instances: BoundedCount | None  # None for credential-free workflow-worker
     component: HealthComponent
+
 
 class ConnectorHealthSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -350,10 +381,12 @@ class ConnectorHealthSummary(BaseModel):
     invalid_or_excess_connections: BoundedCount
     component: HealthComponent
 
+
 class KeyVersionCount(BaseModel):
     model_config = ConfigDict(extra="forbid")
     key_version: BoundedKeyVersion
     secret_count: BoundedCount
+
 
 class KeyVersionDistribution(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -372,6 +405,7 @@ class KeyVersionDistribution(BaseModel):
             raise ValueError("active version must be supported")
         return self
 
+
 class KeyReporterSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
     service: Literal["api", "agent-worker", "tool-worker"]
@@ -382,6 +416,7 @@ class KeyReporterSummary(BaseModel):
     ]
     missing_metadata: BoundedCount
     invalid_or_excess_instances: BoundedCount
+
 
 class KeyHealthSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -397,6 +432,7 @@ class KeyHealthSummary(BaseModel):
     ]
     component: HealthComponent
 
+
 class TelemetryHealthSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
     configured: StrictBool
@@ -404,6 +440,7 @@ class TelemetryHealthSummary(BaseModel):
     last_success_at: AwareDatetime | None
     dropped_items: BoundedCount
     component: HealthComponent
+
 
 class OperationsHealthSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -414,9 +451,7 @@ class OperationsHealthSnapshot(BaseModel):
         Field(strict=True, min_length=MAX_COMPONENTS, max_length=MAX_COMPONENTS),
     ]
     schema: SchemaHealthSummary
-    workers: Annotated[
-        list[WorkerHealthSummary], Field(strict=True, min_length=4, max_length=4)
-    ]
+    workers: Annotated[list[WorkerHealthSummary], Field(strict=True, min_length=4, max_length=4)]
     event_consumers: Annotated[
         list[EventConsumerHealthSummary], Field(strict=True, min_length=2, max_length=2)
     ]
@@ -584,9 +619,7 @@ pytestmark = [
 
 PG_USER = "jhin"
 PG_PASSWORD = "jhin"
-ADMIN_DSN = (
-    f"postgresql://{PG_USER}:{PG_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/postgres"
-)
+ADMIN_DSN = f"postgresql://{PG_USER}:{PG_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/postgres"
 NOW = datetime(2026, 8, 18, 12, tzinfo=UTC)
 
 
@@ -657,9 +690,7 @@ async def migration_databases() -> AsyncIterator[MigrationDatabases]:
                         "WHERE datname = $1 AND pid <> pg_backend_pid()",
                         database_name,
                     )
-                    await cleanup_admin.execute(
-                        f'DROP DATABASE IF EXISTS "{database_name}"'
-                    )
+                    await cleanup_admin.execute(f'DROP DATABASE IF EXISTS "{database_name}"')
             finally:
                 await cleanup_admin.close()
 
@@ -785,7 +816,9 @@ class ServiceInstanceHeartbeat(Base):
             "('master_key_unavailable','sandbox_unreachable')",
             name="safe_reason_code",
         ),
-        CheckConstraint("active_key_version IS NULL OR active_key_version > 0", name="active_key_version"),
+        CheckConstraint(
+            "active_key_version IS NULL OR active_key_version > 0", name="active_key_version"
+        ),
         CheckConstraint(
             "(service = 'tool-worker' AND sandbox_reachable IS NOT NULL) OR "
             "(service <> 'tool-worker' AND sandbox_reachable IS NULL)",
@@ -1001,13 +1034,21 @@ def compose_service(name: str) -> dict[str, object]:
 
 def test_heartbeat_ownership_and_networks_are_exact() -> None:
     assert heartbeat_service("apps/api/src/jhin_api/main.py") == "api"
-    assert heartbeat_service("services/agent_worker/src/jhin_agent_worker/main.py") == "agent-worker"
+    assert (
+        heartbeat_service("services/agent_worker/src/jhin_agent_worker/main.py") == "agent-worker"
+    )
     assert heartbeat_service("services/tool_worker/src/jhin_tool_worker/main.py") == "tool-worker"
-    assert heartbeat_service("services/event_worker/src/jhin_event_worker/main.py") == "event-worker"
-    assert "run_heartbeat_loop" not in read("services/workflow_worker/src/jhin_workflow_worker/main.py")
+    assert (
+        heartbeat_service("services/event_worker/src/jhin_event_worker/main.py") == "event-worker"
+    )
+    assert "run_heartbeat_loop" not in read(
+        "services/workflow_worker/src/jhin_workflow_worker/main.py"
+    )
     assert "DATABASE_URL" not in compose_service("workflow-worker")["environment"]
     assert "sandbox_runner_url" not in read("apps/api/src/jhin_api/settings.py")
-    assert "sandbox_runner_url" not in read("services/agent_worker/src/jhin_agent_worker/settings.py")
+    assert "sandbox_runner_url" not in read(
+        "services/agent_worker/src/jhin_agent_worker/settings.py"
+    )
 ```
 
 - [ ] **Step 2: Run RED and inspect the expected failures**
@@ -1111,9 +1152,7 @@ class HeartbeatState:
             raise ValueError("healthy heartbeat cannot have a reason")
         versions = self.supported_key_versions
         if type(versions) is not tuple:
-            raise ValueError(
-                "supported key versions must be positive, sorted, unique, and bounded"
-            )
+            raise ValueError("supported key versions must be positive, sorted, unique, and bounded")
         if (
             len(versions) > 32
             or any(type(version) is not int for version in versions)
@@ -1127,9 +1166,7 @@ class HeartbeatState:
                 and versions != tuple(sorted(set(versions)))
             )
         ):
-            raise ValueError(
-                "supported key versions must be positive, sorted, unique, and bounded"
-            )
+            raise ValueError("supported key versions must be positive, sorted, unique, and bounded")
         if self.active_key_version is None and versions:
             raise ValueError("supported key versions require an active key version")
         if self.active_key_version is not None and (
@@ -1149,7 +1186,9 @@ def _validate_service_state(identity: HeartbeatIdentity, state: HeartbeatState) 
     key_bearing = identity.service in {"api", "agent-worker", "tool-worker"}
     if key_bearing and state.readiness == "ok":
         if state.active_key_version is None or state.active_key_version not in versions:
-            raise ValueError("healthy key-bearing services must report their active supported version")
+            raise ValueError(
+                "healthy key-bearing services must report their active supported version"
+            )
     if identity.service == "event-worker" and (state.active_key_version is not None or versions):
         raise ValueError("event-worker must not report key metadata")
     if identity.service == "tool-worker" and state.sandbox_reachable is None:
@@ -1194,9 +1233,11 @@ Run the bounded purge no more than once per monotonic hour per process. A two-se
 def active_key_version(self) -> int:
     return self._master.version
 
+
 @property
 def supported_key_versions(self) -> tuple[int, ...]:
     return (self._master.version,)
+
 
 @property
 def key_version(self) -> int:
@@ -1212,11 +1253,13 @@ Create each identity once per process boot using exact distribution mappings `ap
 ```python
 identity = HeartbeatIdentity.new(service="agent-worker", version=version("jhin-agent-worker"))
 
+
 async def agent_state() -> HeartbeatState:
     return HeartbeatState(
         active_key_version=resources.crypto.active_key_version,
         supported_key_versions=resources.crypto.supported_key_versions,
     )
+
 
 heartbeat_task = asyncio.create_task(
     run_heartbeat_loop(resources.session_factory, identity, agent_state, stop),
@@ -1244,6 +1287,7 @@ async def probe_sandbox_reachable(client: httpx.AsyncClient, base_url: str) -> b
         )
     except (TimeoutError, httpx.HTTPError, ValueError):
         return False
+
 
 async def tool_state() -> HeartbeatState:
     reachable = await probe_sandbox_reachable(resources.sandbox_http, settings.sandbox_runner_url)
@@ -1512,18 +1556,10 @@ def test_presence_counts_fresh_degraded_as_a_bounded_fresh_subset() -> None:
 def healthy_worker_probe() -> WorkerHeartbeatProbe:
     return WorkerHeartbeatProbe(
         by_service={
-            "api": ServiceHeartbeatPresence(
-                fresh=0, fresh_degraded=0, retained=0
-            ),
-            "agent-worker": ServiceHeartbeatPresence(
-                fresh=1, fresh_degraded=0, retained=1
-            ),
-            "tool-worker": ServiceHeartbeatPresence(
-                fresh=1, fresh_degraded=0, retained=1
-            ),
-            "event-worker": ServiceHeartbeatPresence(
-                fresh=1, fresh_degraded=0, retained=1
-            ),
+            "api": ServiceHeartbeatPresence(fresh=0, fresh_degraded=0, retained=0),
+            "agent-worker": ServiceHeartbeatPresence(fresh=1, fresh_degraded=0, retained=1),
+            "tool-worker": ServiceHeartbeatPresence(fresh=1, fresh_degraded=0, retained=1),
+            "event-worker": ServiceHeartbeatPresence(fresh=1, fresh_degraded=0, retained=1),
         },
         invalid_or_excess_rows=0,
     )
@@ -1533,9 +1569,7 @@ def test_public_worker_readiness_does_not_require_an_api_row() -> None:
     assert worker_heartbeats_ready(healthy_worker_probe()) is True
 
 
-@pytest.mark.parametrize(
-    "service", ["api", "agent-worker", "tool-worker", "event-worker"]
-)
+@pytest.mark.parametrize("service", ["api", "agent-worker", "tool-worker", "event-worker"])
 def test_public_worker_readiness_rejects_any_fresh_degraded_service(
     service: ServiceName,
 ) -> None:
@@ -1546,9 +1580,12 @@ def test_public_worker_readiness_rejects_any_fresh_degraded_service(
         fresh_degraded=1,
         retained=max(1, by_service[service].retained),
     )
-    assert worker_heartbeats_ready(
-        WorkerHeartbeatProbe(by_service=by_service, invalid_or_excess_rows=0)
-    ) is False
+    assert (
+        worker_heartbeats_ready(
+            WorkerHeartbeatProbe(by_service=by_service, invalid_or_excess_rows=0)
+        )
+        is False
+    )
 
 
 def test_fresh_degraded_owner_degrades_its_temporal_queue() -> None:
@@ -1557,9 +1594,7 @@ def test_fresh_degraded_owner_degrades_its_temporal_queue() -> None:
         diagnostics=WorkflowPollerDiagnostics(
             retained=1, recently_accessed=1, invalid_last_access_timestamps=0
         ),
-        owner_presence=ServiceHeartbeatPresence(
-            fresh=1, fresh_degraded=1, retained=1
-        ),
+        owner_presence=ServiceHeartbeatPresence(fresh=1, fresh_degraded=1, retained=1),
         checked_at=NOW,
     )
     assert row.component.reason_code == HealthReasonCode.WORKER_DEGRADED
@@ -1587,9 +1622,7 @@ async def test_provider_connects_once_for_concurrent_callers(
     expected = cast(TemporalClient, object())
     expected_interceptors = [cast(Interceptor, object())]
     interceptor_builder = Mock(return_value=expected_interceptors)
-    monkeypatch.setattr(
-        "jhin_api.temporal.temporal_client_interceptors", interceptor_builder
-    )
+    monkeypatch.setattr("jhin_api.temporal.temporal_client_interceptors", interceptor_builder)
 
     async def connect(
         address: str,
@@ -1762,10 +1795,7 @@ class ServiceHeartbeatPresence:
 
     def __post_init__(self) -> None:
         values = (self.fresh, self.fresh_degraded, self.retained)
-        if any(
-            type(value) is not int or not 0 <= value <= MAX_SAFE_COUNT
-            for value in values
-        ):
+        if any(type(value) is not int or not 0 <= value <= MAX_SAFE_COUNT for value in values):
             raise ValueError("heartbeat presence counts must be bounded integers")
         if not self.fresh_degraded <= self.fresh <= self.retained:
             raise ValueError("heartbeat presence counts violate subset ordering")
@@ -1778,13 +1808,9 @@ def classify_service_heartbeats(
 ) -> ServiceHeartbeatPresence:
     cutoff = checked_at - timedelta(seconds=HEARTBEAT_STALE_SECONDS)
     retained_rows = tuple(rows)
-    fresh_rows = tuple(
-        row for row in retained_rows if cutoff <= row.last_seen_at <= checked_at
-    )
+    fresh_rows = tuple(row for row in retained_rows if cutoff <= row.last_seen_at <= checked_at)
     fresh, _ = bounded_count(len(fresh_rows))
-    fresh_degraded, _ = bounded_count(
-        sum(row.readiness == "degraded" for row in fresh_rows)
-    )
+    fresh_degraded, _ = bounded_count(sum(row.readiness == "degraded" for row in fresh_rows))
     retained, _ = bounded_count(len(retained_rows))
     return ServiceHeartbeatPresence(
         fresh=fresh,
@@ -1802,8 +1828,7 @@ class WorkerHeartbeatProbe:
 def worker_heartbeats_ready(probe: WorkerHeartbeatProbe) -> bool:
     presence = probe.by_service
     required_live = all(
-        presence[service].fresh > 0
-        for service in ("agent-worker", "tool-worker", "event-worker")
+        presence[service].fresh > 0 for service in ("agent-worker", "tool-worker", "event-worker")
     )
     no_fresh_degraded = all(
         presence[service].fresh_degraded == 0
@@ -1836,12 +1861,14 @@ async def probe_temporal(
 ) -> TemporalProbe:
     async with asyncio.timeout(5.0):
         client = await provider.get()
-        diagnostics = await asyncio.gather(*(
-            workflow_poller_diagnostics(
-                client, namespace=namespace, queue=queue, checked_at=checked_at
+        diagnostics = await asyncio.gather(
+            *(
+                workflow_poller_diagnostics(
+                    client, namespace=namespace, queue=queue, checked_at=checked_at
+                )
+                for queue in (WORKFLOW_TASK_QUEUE, AGENT_TASK_QUEUE, TOOL_TASK_QUEUE)
             )
-            for queue in (WORKFLOW_TASK_QUEUE, AGENT_TASK_QUEUE, TOOL_TASK_QUEUE)
-        ))
+        )
     return temporal_probe_from_diagnostics(diagnostics, checked_at=checked_at)
 ```
 
@@ -1969,6 +1996,7 @@ In `apps/api/tests/conftest.py`, add an `OperationsHealthWorld` fixture owning t
 class FakeObservabilityRuntime:
     config: ObservabilityConfig
     _status: TelemetryExporterStatus
+
     def status(self) -> TelemetryExporterStatus:
         return self._status
 
@@ -2063,9 +2091,9 @@ Parameterize exact forward-compatible key rollout states. In each case seed one 
 @pytest.mark.parametrize(
     ("active", "supported", "secret_versions"),
     [
-        (1, (1, 2), [1, 1]),       # rollout stage 3: old writer, both readers
-        (2, (1, 2), [1, 2]),       # rollout stage 4: new writer, mixed rows
-        (2, (2,), [2, 2]),          # retirement: only the new reader remains
+        (1, (1, 2), [1, 1]),  # rollout stage 3: old writer, both readers
+        (2, (1, 2), [1, 2]),  # rollout stage 4: new writer, mixed rows
+        (2, (2,), [2, 2]),  # retirement: only the new reader remains
     ],
 )
 async def test_exact_key_distribution_rollout_states_are_healthy(
@@ -2545,9 +2573,7 @@ async def wait_public_readiness(
         if last_code == status_code and last_body == {"status": status}:
             return last_body
         await asyncio.sleep(1.0)
-    pytest.fail(
-        f"opaque readiness did not converge; code={last_code}, body={last_body}"
-    )
+    pytest.fail(f"opaque readiness did not converge; code={last_code}, body={last_body}")
 ```
 
 Diagnostics may append `docker compose ps --format json`, but never `docker inspect`, environments, secret mounts, database URLs, or raw service logs.
@@ -2557,18 +2583,28 @@ Test every failure in `try/finally` and require return to the prior healthy stat
 ```python
 try:
     compose("kill", "-s", "SIGKILL", "agent-worker")
-    await wait_health(client, workspace_id, lambda h: (
-        worker(h, "agent-worker")["fresh_instances"] == 0
-        and queue(h, "jhin-agent-queue")["fresh_owner_instances"] == 0
-        and queue(h, "jhin-agent-queue")["retained_pollers"] >= 1
-    ), timeout=50)
+    await wait_health(
+        client,
+        workspace_id,
+        lambda h: (
+            worker(h, "agent-worker")["fresh_instances"] == 0
+            and queue(h, "jhin-agent-queue")["fresh_owner_instances"] == 0
+            and queue(h, "jhin-agent-queue")["retained_pollers"] >= 1
+        ),
+        timeout=50,
+    )
 finally:
     compose("up", "-d", "agent-worker")
-await wait_health(client, workspace_id, lambda h: (
-    worker(h, "agent-worker")["fresh_instances"] >= 1
-    and queue(h, "jhin-agent-queue")["fresh_owner_instances"] >= 1
-    and queue(h, "jhin-agent-queue")["retained_pollers"] >= 1
-), timeout=65)
+await wait_health(
+    client,
+    workspace_id,
+    lambda h: (
+        worker(h, "agent-worker")["fresh_instances"] >= 1
+        and queue(h, "jhin-agent-queue")["fresh_owner_instances"] >= 1
+        and queue(h, "jhin-agent-queue")["retained_pollers"] >= 1
+    ),
+    timeout=65,
+)
 ```
 
 Repeat independently for tool-worker/`jhin-tool-queue`; its recovery must restore a fresh `sandbox_reachable=True` report. In both kill cases, explicitly prove a retained Temporal poller can remain while the fresh owner count reaches zero; this is the live regression against using `last_access_time` as liveness. Kill/restart event-worker and require its fresh count to reach zero only after the strict `>30 seconds` heartbeat boundary, then recover; INGRESS/EVENTS rows remain canonical and drain to their prior counts. The general workflow queue retains capability metadata through each worker-only case and continues to expose `fresh_owner_instances: null`, never a liveness claim.
@@ -2583,9 +2619,9 @@ async def test_sandbox_failure_degrades_and_recovers_anonymous_readiness(
     admin_client: httpx.AsyncClient,
     workspace_id: str,
 ) -> None:
-    assert await wait_public_readiness(
-        anonymous_client, status_code=200, status="ok"
-    ) == {"status": "ok"}
+    assert await wait_public_readiness(anonymous_client, status_code=200, status="ok") == {
+        "status": "ok"
+    }
     try:
         compose("stop", "sandbox-runner")
         assert await wait_public_readiness(
@@ -2601,16 +2637,19 @@ async def test_sandbox_failure_degrades_and_recovers_anonymous_readiness(
             admin_client,
             workspace_id,
             lambda health: (
-                component(health, "sandbox")["reason_code"]
-                == "sandbox_unreachable"
-                and worker(health, "tool-worker")["component"]["reason_code"]
-                == "worker_degraded"
+                component(health, "sandbox")["reason_code"] == "sandbox_unreachable"
+                and worker(health, "tool-worker")["component"]["reason_code"] == "worker_degraded"
             ),
             timeout=25.0,
         )
     finally:
         compose(
-            "up", "-d", "--wait", "--wait-timeout", "60", "sandbox-runner",
+            "up",
+            "-d",
+            "--wait",
+            "--wait-timeout",
+            "60",
+            "sandbox-runner",
             timeout=70,
         )
 
@@ -2656,19 +2695,38 @@ import pytest
 from tests.integration.conftest import compose, resolve_stack_contract
 
 ROOT = Path(__file__).resolve().parents[1]
-PROTECTED_HEALTH_SERVICES = frozenset({
-    "api", "web", "workflow-worker", "agent-worker", "tool-worker",
-    "event-worker", "sandbox-runner", "postgres", "nats", "temporal",
-})
+PROTECTED_HEALTH_SERVICES = frozenset(
+    {
+        "api",
+        "web",
+        "workflow-worker",
+        "agent-worker",
+        "tool-worker",
+        "event-worker",
+        "sandbox-runner",
+        "postgres",
+        "nats",
+        "temporal",
+    }
+)
 PORT_ENV = (
-    "WEB_PORT", "API_PORT", "FAKE_SUPABASE_DB_DEV_PORT",
-    "FAKE_PROVIDER_DEV_PORT", "FAKE_GITHUB_DEV_PORT", "FAKE_LINEAR_DEV_PORT",
-    "FAKE_VERCEL_DEV_PORT", "FAKE_SUPABASE_DEV_PORT", "SANDBOX_RUNNER_DEV_PORT",
-    "POSTGRES_DEV_PORT", "NATS_DEV_PORT", "NATS_MONITOR_DEV_PORT",
-    "TEMPORAL_DEV_PORT", "TEMPORAL_UI_DEV_PORT",
+    "WEB_PORT",
+    "API_PORT",
+    "FAKE_SUPABASE_DB_DEV_PORT",
+    "FAKE_PROVIDER_DEV_PORT",
+    "FAKE_GITHUB_DEV_PORT",
+    "FAKE_LINEAR_DEV_PORT",
+    "FAKE_VERCEL_DEV_PORT",
+    "FAKE_SUPABASE_DEV_PORT",
+    "SANDBOX_RUNNER_DEV_PORT",
+    "POSTGRES_DEV_PORT",
+    "NATS_DEV_PORT",
+    "NATS_MONITOR_DEV_PORT",
+    "TEMPORAL_DEV_PORT",
+    "TEMPORAL_UI_DEV_PORT",
 )
 
-FAKE_TOOL = r'''#!/usr/bin/env python3
+FAKE_TOOL = r"""#!/usr/bin/env python3
 import json
 import os
 import stat
@@ -2747,7 +2805,7 @@ elif tool == "docker":
         raise SystemExit(64)
 else:
     raise SystemExit(64)
-'''
+"""
 
 
 def recipe(name: str) -> str:
@@ -2778,12 +2836,14 @@ def trace_rows(path: Path) -> list[dict[str, Any]]:
 
 
 def test_protected_health_extends_the_telemetry_stack_contract() -> None:
-    contract = resolve_stack_contract({
-        "JHIN_PHASE10_SUITE": "protected-health",
-        "JHIN_TEST_COMPOSE_PROJECT": "jhin-phase10-health-contract",
-        "PHASE10_SOCKET_MODE": "rootful",
-        "SANDBOX_DOCKER_GID": "4242",
-    })
+    contract = resolve_stack_contract(
+        {
+            "JHIN_PHASE10_SUITE": "protected-health",
+            "JHIN_TEST_COMPOSE_PROJECT": "jhin-phase10-health-contract",
+            "PHASE10_SOCKET_MODE": "rootful",
+            "SANDBOX_DOCKER_GID": "4242",
+        }
+    )
     assert contract.project == "jhin-phase10-health-contract"
     assert contract.suite == "protected-health"
     assert contract.telemetry_mode is None
@@ -2793,21 +2853,19 @@ def test_protected_health_extends_the_telemetry_stack_contract() -> None:
     with pytest.raises(ValueError):
         resolve_stack_contract({"JHIN_PHASE10_SUITE": "unknown"})
     with pytest.raises(ValueError):
-        resolve_stack_contract({
-            "JHIN_PHASE10_SUITE": "protected-health",
-            "JHIN_TELEMETRY_MODE": "base",
-        })
+        resolve_stack_contract(
+            {
+                "JHIN_PHASE10_SUITE": "protected-health",
+                "JHIN_TELEMETRY_MODE": "base",
+            }
+        )
 
 
 def test_live_targets_delegate_only_to_the_isolated_runner() -> None:
     rootful = recipe("test-protected-health-integration-rootful")
     rootless = recipe("test-protected-health-integration-rootless")
-    assert rootful.strip() == (
-        "@bash scripts/run_phase10_protected_health.sh --mode rootful"
-    )
-    assert rootless.strip() == (
-        "@bash scripts/run_phase10_protected_health.sh --mode rootless"
-    )
+    assert rootful.strip() == ("@bash scripts/run_phase10_protected_health.sh --mode rootful")
+    assert rootless.strip() == ("@bash scripts/run_phase10_protected_health.sh --mode rootless")
 
 
 def test_runner_installs_cleanup_before_mutation_and_bounds_the_stack() -> None:
@@ -2830,7 +2888,8 @@ def test_runner_installs_cleanup_before_mutation_and_bounds_the_stack() -> None:
 
 @pytest.mark.parametrize("mode", ["rootful", "rootless"])
 def test_runner_isolated_modes_preserve_failure_and_cleanup(
-    tmp_path: Path, mode: str,
+    tmp_path: Path,
+    mode: str,
 ) -> None:
     binary = install_fake_tools(tmp_path)
     trace = tmp_path / "trace.jsonl"
@@ -2852,8 +2911,12 @@ def test_runner_isolated_modes_preserve_failure_and_cleanup(
     try:
         completed = subprocess.run(
             [
-                "bash", "scripts/run_phase10_protected_health.sh",
-                "--mode", mode, "--project", project,
+                "bash",
+                "scripts/run_phase10_protected_health.sh",
+                "--mode",
+                mode,
+                "--project",
+                project,
             ],
             cwd=ROOT,
             env=environment,
@@ -2873,10 +2936,7 @@ def test_runner_isolated_modes_preserve_failure_and_cleanup(
         assert row["mode"] == mode
         assert row["socket"] == str(socket_path)
         assert (row["gid"] == "4242") is (mode == "rootful")
-    compose_rows = [
-        row for row in rows
-        if row["tool"] == "docker" and row["args"][0] == "compose"
-    ]
+    compose_rows = [row for row in rows if row["tool"] == "docker" and row["args"][0] == "compose"]
     assert compose_rows
     for row in compose_rows:
         args = row["args"]
@@ -2895,7 +2955,12 @@ def test_runner_isolated_modes_preserve_failure_and_cleanup(
     down = next(args for args in command_lists if "down" in args)
     assert build[-4:] == ["--profile", "build", "build", "sandbox-image"]
     assert up[-6:] == [
-        "up", "-d", "--build", "--wait", "--wait-timeout", "240",
+        "up",
+        "-d",
+        "--build",
+        "--wait",
+        "--wait-timeout",
+        "240",
     ]
     assert down[-3:] == ["down", "-v", "--remove-orphans"]
     up_row = next(row for row in compose_rows if "up" in row["args"])
@@ -2903,19 +2968,22 @@ def test_runner_isolated_modes_preserve_failure_and_cleanup(
     assert up_row["key_dir_mode"] == 0o711
     assert up_row["key_mode"] & stat.S_IROTH
     expected_port_calls = {
-        ("api", "8000"), ("web", "3000"), ("postgres", "5432"),
-        ("fake-supabase-db", "5432"), ("nats", "4222"),
-        ("nats", "8222"), ("temporal", "7233"),
-        ("sandbox-runner", "8085"), ("fake-provider", "8080"),
-        ("fake-github", "8080"), ("fake-linear", "8080"),
-        ("fake-vercel", "8080"), ("fake-supabase", "8080"),
+        ("api", "8000"),
+        ("web", "3000"),
+        ("postgres", "5432"),
+        ("fake-supabase-db", "5432"),
+        ("nats", "4222"),
+        ("nats", "8222"),
+        ("temporal", "7233"),
+        ("sandbox-runner", "8085"),
+        ("fake-provider", "8080"),
+        ("fake-github", "8080"),
+        ("fake-linear", "8080"),
+        ("fake-vercel", "8080"),
+        ("fake-supabase", "8080"),
     }
-    assert {
-        (args[-2], args[-1]) for args in command_lists if "port" in args
-    } == expected_port_calls
-    pytest_row = next(
-        row for row in rows if row["tool"] == "uv" and "pytest" in row["args"]
-    )
+    assert {(args[-2], args[-1]) for args in command_lists if "port" in args} == expected_port_calls
+    pytest_row = next(row for row in rows if row["tool"] == "uv" and "pytest" in row["args"])
     assert pytest_row["api_url"].startswith("http://127.0.0.1:31")
     assert pytest_row["postgres_port"].isdigit()
     assert not list(tmp_path.glob("jhin-phase10-health-key.*"))
@@ -2940,9 +3008,12 @@ def test_dirty_project_fails_before_any_mutation(tmp_path: Path) -> None:
     try:
         completed = subprocess.run(
             [
-                "bash", "scripts/run_phase10_protected_health.sh",
-                "--mode", "rootful",
-                "--project", "jhin-phase10-health-rootful-dirty-contract",
+                "bash",
+                "scripts/run_phase10_protected_health.sh",
+                "--mode",
+                "rootful",
+                "--project",
+                "jhin-phase10-health-rootful-dirty-contract",
             ],
             cwd=ROOT,
             env=environment,
@@ -2956,10 +3027,7 @@ def test_dirty_project_fails_before_any_mutation(tmp_path: Path) -> None:
     assert completed.returncode != 0
     rows = trace_rows(trace)
     assert not any(row["tool"] == "uv" for row in rows)
-    assert not any(
-        row["tool"] == "docker" and row["args"][0] == "compose"
-        for row in rows
-    )
+    assert not any(row["tool"] == "docker" and row["args"][0] == "compose" for row in rows)
     assert not list(tmp_path.glob("jhin-phase10-health-key.*"))
 ```
 
@@ -2993,10 +3061,20 @@ class StackContract:
     suite: Phase10Suite | None = None
 
 
-PROTECTED_HEALTH_REQUIRED_SERVICES = frozenset({
-    "api", "web", "workflow-worker", "agent-worker", "tool-worker",
-    "event-worker", "sandbox-runner", "postgres", "nats", "temporal",
-})
+PROTECTED_HEALTH_REQUIRED_SERVICES = frozenset(
+    {
+        "api",
+        "web",
+        "workflow-worker",
+        "agent-worker",
+        "tool-worker",
+        "event-worker",
+        "sandbox-runner",
+        "postgres",
+        "nats",
+        "temporal",
+    }
+)
 ```
 
 At the beginning of the existing `resolve_stack_contract(environ)` implementation, add this validation, then retain telemetry's existing mode/project/socket validation exactly:

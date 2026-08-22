@@ -46,45 +46,87 @@ from typing import Literal, get_args
 # packages/observability/src/jhin_observability/registry.py is the one registry;
 # context.py and temporal.py import these names and never redeclare them.
 TEMPORAL_ACTIVITY_NAMES = (
-    "reason_agent_step", "commit_agent_step", "commit_approval_projection",
-    "resolve_advertised_tools", "execute_bound_tool", "resolve_bound_tool_approval",
-    "sync_external_tool", "cleanup_run_workspace", "resolve_snapshot",
-    "run_agent_step", "resolve_approval", "finalize_run", "finalize_run_projection",
-    "summarize_delegation", "deliver_delegation_result", "prepare_triggered_task",
-    "sync_external", "resolve_engineering_plan", "create_engineering_child_task",
-    "finalize_engineering_ticket", "record_beat",
+    "reason_agent_step",
+    "commit_agent_step",
+    "commit_approval_projection",
+    "resolve_advertised_tools",
+    "execute_bound_tool",
+    "resolve_bound_tool_approval",
+    "sync_external_tool",
+    "cleanup_run_workspace",
+    "resolve_snapshot",
+    "run_agent_step",
+    "resolve_approval",
+    "finalize_run",
+    "finalize_run_projection",
+    "summarize_delegation",
+    "deliver_delegation_result",
+    "prepare_triggered_task",
+    "sync_external",
+    "resolve_engineering_plan",
+    "create_engineering_child_task",
+    "finalize_engineering_ticket",
+    "record_beat",
 )
 SpanName = Literal[
-    "http.server.request", "db.operation", "nats.publish", "nats.consume",
-    "trigger.dispatch", "temporal.start_workflow", "temporal.signal_workflow",
-    "temporal.client.other", "temporal.activity.other",
-    "temporal.activity.reason_agent_step", "temporal.activity.commit_agent_step",
+    "http.server.request",
+    "db.operation",
+    "nats.publish",
+    "nats.consume",
+    "trigger.dispatch",
+    "temporal.start_workflow",
+    "temporal.signal_workflow",
+    "temporal.client.other",
+    "temporal.activity.other",
+    "temporal.activity.reason_agent_step",
+    "temporal.activity.commit_agent_step",
     "temporal.activity.commit_approval_projection",
     "temporal.activity.resolve_advertised_tools",
     "temporal.activity.execute_bound_tool",
     "temporal.activity.resolve_bound_tool_approval",
-    "temporal.activity.sync_external_tool", "temporal.activity.cleanup_run_workspace",
-    "temporal.activity.resolve_snapshot", "temporal.activity.run_agent_step",
-    "temporal.activity.resolve_approval", "temporal.activity.finalize_run",
+    "temporal.activity.sync_external_tool",
+    "temporal.activity.cleanup_run_workspace",
+    "temporal.activity.resolve_snapshot",
+    "temporal.activity.run_agent_step",
+    "temporal.activity.resolve_approval",
+    "temporal.activity.finalize_run",
     "temporal.activity.finalize_run_projection",
     "temporal.activity.summarize_delegation",
     "temporal.activity.deliver_delegation_result",
-    "temporal.activity.prepare_triggered_task", "temporal.activity.sync_external",
+    "temporal.activity.prepare_triggered_task",
+    "temporal.activity.sync_external",
     "temporal.activity.resolve_engineering_plan",
     "temporal.activity.create_engineering_child_task",
-    "temporal.activity.finalize_engineering_ticket", "temporal.activity.record_beat",
-    "model.request", "agent.reason_step", "tool.gateway.execute",
-    "tool.approval.resolve", "connector.http", "connector.database",
-    "sandbox.client", "sandbox.server", "sandbox.job.lifecycle",
+    "temporal.activity.finalize_engineering_ticket",
+    "temporal.activity.record_beat",
+    "model.request",
+    "agent.reason_step",
+    "tool.gateway.execute",
+    "tool.approval.resolve",
+    "connector.http",
+    "connector.database",
+    "sandbox.client",
+    "sandbox.server",
+    "sandbox.job.lifecycle",
 ]
 SPAN_NAMES: frozenset[str] = frozenset(get_args(SpanName))
 AttributeValue = str | bool | int | float
 MetricName = Literal[
-    "agent_runs_total", "agent_run_duration_seconds", "agent_run_failures_total",
-    "model_requests_total", "model_tokens_total", "model_cost_estimate",
-    "tool_calls_total", "tool_call_failures_total", "trigger_invocations_total",
-    "trigger_failures_total", "sandbox_jobs_total", "sandbox_job_duration_seconds",
-    "nats_consumer_lag", "temporal_activity_failures", "connector_health",
+    "agent_runs_total",
+    "agent_run_duration_seconds",
+    "agent_run_failures_total",
+    "model_requests_total",
+    "model_tokens_total",
+    "model_cost_estimate",
+    "tool_calls_total",
+    "tool_call_failures_total",
+    "trigger_invocations_total",
+    "trigger_failures_total",
+    "sandbox_jobs_total",
+    "sandbox_job_duration_seconds",
+    "nats_consumer_lag",
+    "temporal_activity_failures",
+    "connector_health",
     "connector_connections",
 ]
 ```
@@ -641,7 +683,9 @@ def test_every_registered_event_survives_the_runtime_renderer(
     get_logger("jhin.contract").info(event)
     record = json.loads(capsys.readouterr().out)
     assert record["event"] == event
-    assert set(("schema_version", "timestamp", "level", "service", "environment", "logger")) <= record
+    assert (
+        set(("schema_version", "timestamp", "level", "service", "environment", "logger")) <= record
+    )
 
 
 def test_job_id_is_allowed_only_on_sandbox_job_finished() -> None:
@@ -656,9 +700,10 @@ def test_job_id_is_allowed_only_on_sandbox_job_finished() -> None:
 
 @pytest.mark.parametrize("accepted", ["export_timeout", "export_failed"])
 def test_export_failure_codes_are_event_and_field_specific(accepted: str) -> None:
-    assert filter_log_event(
-        {"event": "telemetry.export_failed", "error_code": accepted}
-    )["error_code"] == accepted
+    assert (
+        filter_log_event({"event": "telemetry.export_failed", "error_code": accepted})["error_code"]
+        == accepted
+    )
 
 
 @pytest.mark.parametrize("rejected", ["internal_error", "timeout", "attacker-code"])
@@ -681,20 +726,26 @@ def test_export_failure_accepts_no_structured_error_or_foreign_fields() -> None:
 
 def test_structured_error_is_allowed_only_by_its_event_registry() -> None:
     structured = {"type": "RuntimeError", "code": "internal_error", "traceback": []}
-    assert filter_log_event(
-        {"event": "api.request_failed", "error": structured}
-    )["error"]["type"] == "RuntimeError"
-    assert "error" not in filter_log_event(
-        {"event": "worker.started", "error": structured}
+    assert (
+        filter_log_event({"event": "api.request_failed", "error": structured})["error"]["type"]
+        == "RuntimeError"
     )
+    assert "error" not in filter_log_event({"event": "worker.started", "error": structured})
 ```
 
 ```python
 @pytest.mark.parametrize(
     "key",
     [
-        "prompt", "completion", "sql", "tool_input", "tool_output",
-        "request_body", "response_body", "webhook_payload", "secret_env",
+        "prompt",
+        "completion",
+        "sql",
+        "tool_input",
+        "tool_output",
+        "request_body",
+        "response_body",
+        "webhook_payload",
+        "secret_env",
     ],
 )
 def test_payload_fields_are_always_redacted(key: str) -> None:
@@ -706,8 +757,12 @@ def test_redaction_bounds_are_exact() -> None:
     for _ in range(9):
         nested = {"child": nested}
     redacted = structural_redaction(
-        {"nested": nested, "mapping": {str(i): i for i in range(65)},
-         "items": list(range(65)), "text": "x" * 2_001}
+        {
+            "nested": nested,
+            "mapping": {str(i): i for i in range(65)},
+            "items": list(range(65)),
+            "text": "x" * 2_001,
+        }
     )
     assert "[TRUNCATED]" in json.dumps(redacted)
     assert len(redacted["mapping"]) == 64
@@ -742,14 +797,34 @@ MAX_LOG_STRING = 2_000
 MAX_TRACEBACK_FRAMES = 32
 SENSITIVE_KEYS = frozenset(
     {
-        "authorization", "cookie", "password", "secret", "token", "api_key",
-        "private_key", "dsn", "prompt", "completion", "sql", "tool_input",
-        "tool_output", "request_body", "response_body", "webhook_payload", "secret_env",
+        "authorization",
+        "cookie",
+        "password",
+        "secret",
+        "token",
+        "api_key",
+        "private_key",
+        "dsn",
+        "prompt",
+        "completion",
+        "sql",
+        "tool_input",
+        "tool_output",
+        "request_body",
+        "response_body",
+        "webhook_payload",
+        "secret_env",
     }
 )
 SENSITIVE_KEY_SUFFIXES = (
-    "_authorization", "_cookie", "_password", "_secret", "_token", "_api_key",
-    "_private_key", "_dsn",
+    "_authorization",
+    "_cookie",
+    "_password",
+    "_secret",
+    "_token",
+    "_api_key",
+    "_private_key",
+    "_dsn",
 )
 
 
@@ -834,30 +909,36 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
     "api.started": {},
     "api.stopped": {},
     "api.request_failed": {
-        "error_code": FieldKind.ENUM, "error": FieldKind.ERROR,
+        "error_code": FieldKind.ENUM,
+        "error": FieldKind.ERROR,
     },
     "api.request_finished": {
-        "http_method": FieldKind.ENUM, "http_route": FieldKind.ENUM,
+        "http_method": FieldKind.ENUM,
+        "http_route": FieldKind.ENUM,
         "http_status_class": FieldKind.ENUM,
     },
     "secrets.master_key_unavailable": {"error_code": FieldKind.ENUM},
     "security.master_key_env_source": {},
     "temporal.connect_retry": {
-        "error_type": FieldKind.ERROR_TYPE, "retry_in_seconds": FieldKind.SECONDS,
+        "error_type": FieldKind.ERROR_TYPE,
+        "retry_in_seconds": FieldKind.SECONDS,
     },
     "temporal.connected": {"task_queue": FieldKind.ENUM},
     "resources.retry": {
-        "error_type": FieldKind.ERROR_TYPE, "retry_in_seconds": FieldKind.SECONDS,
+        "error_type": FieldKind.ERROR_TYPE,
+        "retry_in_seconds": FieldKind.SECONDS,
     },
     "resources.ready": {},
     "nats.connect_retry": {
-        "error_type": FieldKind.ERROR_TYPE, "retry_in_seconds": FieldKind.SECONDS,
+        "error_type": FieldKind.ERROR_TYPE,
+        "retry_in_seconds": FieldKind.SECONDS,
     },
     "nats.connected": {"stream": FieldKind.ENUM},
     "worker.started": {"task_queue": FieldKind.ENUM},
     "worker.stopping": {},
     "events.publish_failed": {
-        "event_type": FieldKind.ENUM, "error_type": FieldKind.ERROR_TYPE,
+        "event_type": FieldKind.ENUM,
+        "error_type": FieldKind.ERROR_TYPE,
     },
     "concurrency.kick_failed": {"error_type": FieldKind.ERROR_TYPE},
     "model.client_close_failed": {"error_type": FieldKind.ERROR_TYPE},
@@ -866,7 +947,8 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
     "sandbox.network_ensure_failed": {"error_type": FieldKind.ERROR_TYPE},
     "sandbox.job.finished": {
         "job_id": FieldKind.ID,
-        "outcome": FieldKind.ENUM, "exit_code": FieldKind.COUNT,
+        "outcome": FieldKind.ENUM,
+        "exit_code": FieldKind.COUNT,
         "network_policy": FieldKind.ENUM,
     },
     "sandbox.reaped_container": {"count": FieldKind.COUNT},
@@ -874,7 +956,8 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
     "sandbox.reap_containers_failed": {"error_type": FieldKind.ERROR_TYPE},
     "sandbox.reap_volumes_failed": {"error_type": FieldKind.ERROR_TYPE},
     "sandbox_runner.started": {
-        "network_policy": FieldKind.ENUM, "token_configured": FieldKind.BOOL,
+        "network_policy": FieldKind.ENUM,
+        "token_configured": FieldKind.BOOL,
     },
     "trigger.task_deduped": {},
     "trigger.invoked": {"connector_type": FieldKind.ENUM, "outcome": FieldKind.ENUM},
@@ -883,23 +966,28 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
     "trigger.workflow_already_started": {"connector_type": FieldKind.ENUM},
     "webhook.accepted": {"connector_type": FieldKind.ENUM, "outcome": FieldKind.ENUM},
     "webhook.publish_or_commit_failed": {
-        "connector_type": FieldKind.ENUM, "error_type": FieldKind.ERROR_TYPE,
+        "connector_type": FieldKind.ENUM,
+        "error_type": FieldKind.ERROR_TYPE,
     },
     "webhook.rollback_failed": {"connector_type": FieldKind.ENUM},
     "jetstream.consumer_created": {"stream": FieldKind.ENUM, "consumer": FieldKind.ENUM},
     "jetstream.consumer_loop_started": {
-        "stream": FieldKind.ENUM, "consumer": FieldKind.ENUM,
+        "stream": FieldKind.ENUM,
+        "consumer": FieldKind.ENUM,
     },
     "jetstream.consumer_handler_failed": {
-        "stream": FieldKind.ENUM, "consumer": FieldKind.ENUM,
-        "error_type": FieldKind.ERROR_TYPE, "error_code": FieldKind.ENUM,
+        "stream": FieldKind.ENUM,
+        "consumer": FieldKind.ENUM,
+        "error_type": FieldKind.ERROR_TYPE,
+        "error_code": FieldKind.ENUM,
         "error": FieldKind.ERROR,
     },
     "heartbeat.recorded": {},
     "ingress.invalid_envelope": {"error_code": FieldKind.ENUM},
     "ingress.unhandled": {"connector_type": FieldKind.ENUM, "event_type": FieldKind.ENUM},
     "ingress.normalized": {
-        "connector_type": FieldKind.ENUM, "event_type": FieldKind.ENUM,
+        "connector_type": FieldKind.ENUM,
+        "event_type": FieldKind.ENUM,
         "produced": FieldKind.COUNT,
     },
     "event.invalid_envelope": {"error_code": FieldKind.ENUM},
@@ -909,7 +997,8 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
     "telemetry.export_failed": {"error_code": FieldKind.ENUM},
     "telemetry.export_recovered": {},
     "telemetry.nats_lag_probe_failed": {
-        "stream": FieldKind.ENUM, "consumer": FieldKind.ENUM,
+        "stream": FieldKind.ENUM,
+        "consumer": FieldKind.ENUM,
         "error_type": FieldKind.ERROR_TYPE,
     },
     "telemetry.connector_health_probe_failed": {"error_type": FieldKind.ERROR_TYPE},
@@ -917,11 +1006,13 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
     "web.stopping": {"signal": FieldKind.ENUM},
     "web.rewrite_configured": {"http_route": FieldKind.ENUM},
     "web.request_failed": {
-        "http_method": FieldKind.ENUM, "http_route": FieldKind.ENUM,
+        "http_method": FieldKind.ENUM,
+        "http_route": FieldKind.ENUM,
         "error_code": FieldKind.ENUM,
     },
     "web.framework_output_suppressed": {
-        "stream": FieldKind.ENUM, "count": FieldKind.COUNT,
+        "stream": FieldKind.ENUM,
+        "count": FieldKind.COUNT,
     },
     "stdlib.message": {},
     "log.event_rejected": {},
@@ -936,30 +1027,48 @@ FIELD_ENUM_VALUES: dict[str, frozenset[str]] = {
     "http_route": frozenset({"/api/:path*", "other"}),
     "http_status_class": frozenset({"1xx", "2xx", "3xx", "4xx", "5xx", "other"}),
     "network_policy": frozenset({"none", "internet", "other"}),
-    "outcome": frozenset({"ok", "accepted", "started", "completed", "failed", "cancelled", "timeout", "duplicate", "other"}),
+    "outcome": frozenset(
+        {
+            "ok",
+            "accepted",
+            "started",
+            "completed",
+            "failed",
+            "cancelled",
+            "timeout",
+            "duplicate",
+            "other",
+        }
+    ),
     "signal": frozenset({"SIGINT", "SIGTERM", "other"}),
     "stream": frozenset({"INGRESS", "EVENTS", "stdout", "stderr", "other"}),
-    "task_queue": frozenset({"jhin-workflow-queue", "jhin-agent-queue", "jhin-tool-queue", "other"}),
+    "task_queue": frozenset(
+        {"jhin-workflow-queue", "jhin-agent-queue", "jhin-tool-queue", "other"}
+    ),
 }
 EVENT_FIELD_ENUM_VALUES: dict[tuple[str, str], frozenset[str]] = {
-    ("telemetry.export_failed", "error_code"): frozenset(
-        {"export_timeout", "export_failed"}
-    ),
+    ("telemetry.export_failed", "error_code"): frozenset({"export_timeout", "export_failed"}),
 }
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _ERROR_TYPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]{0,127}$")
-BASE_FIELDS = frozenset({"schema_version", "timestamp", "level", "service", "environment", "event", "logger"})
+BASE_FIELDS = frozenset(
+    {"schema_version", "timestamp", "level", "service", "environment", "event", "logger"}
+)
 
 
-def normalize_log_field(
-    event: str, key: str, value: object, kind: FieldKind
-) -> object | None:
+def normalize_log_field(event: str, key: str, value: object, kind: FieldKind) -> object | None:
     if kind is FieldKind.ID:
         return value if isinstance(value, str) and _ID_RE.fullmatch(value) else None
     if kind is FieldKind.COUNT:
-        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+        return (
+            value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+        )
     if kind is FieldKind.SECONDS:
-        return value if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0 else None
+        return (
+            value
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
+            else None
+        )
     if kind is FieldKind.BOOL:
         return value if isinstance(value, bool) else None
     if kind is FieldKind.ERROR_TYPE:
@@ -993,7 +1102,9 @@ def filter_structured_error(value: Mapping[str, object]) -> dict[str, object]:
             line = raw.get("line", 0)
             frames.append(
                 {
-                    "file": filename if _ERROR_TYPE_RE.fullmatch(filename.replace("-", "_")) else "unknown",
+                    "file": filename
+                    if _ERROR_TYPE_RE.fullmatch(filename.replace("-", "_"))
+                    else "unknown",
                     "function": function if _ERROR_TYPE_RE.fullmatch(function) else "unknown",
                     "line": line if isinstance(line, int) and line >= 0 else 0,
                 }
@@ -1007,14 +1118,19 @@ def filter_structured_error(value: Mapping[str, object]) -> dict[str, object]:
 
 def filter_log_event(event_dict: Mapping[str, object]) -> dict[str, object]:
     raw_event = event_dict.get("event")
-    event = raw_event if isinstance(raw_event, str) and raw_event in EVENT_FIELD_RULES else "log.event_rejected"
+    event = (
+        raw_event
+        if isinstance(raw_event, str) and raw_event in EVENT_FIELD_RULES
+        else "log.event_rejected"
+    )
     output = {key: event_dict[key] for key in BASE_FIELDS - {"event"} if key in event_dict}
     output["event"] = event
     rules = {**CONTEXT_FIELD_RULES, **EVENT_FIELD_RULES[event]}
     for key, kind in rules.items():
-        if key in event_dict and (
-            value := normalize_log_field(event, key, event_dict[key], kind)
-        ) is not None:
+        if (
+            key in event_dict
+            and (value := normalize_log_field(event, key, event_dict[key], kind)) is not None
+        ):
             output[key] = value
     return output
 ```
@@ -1116,8 +1232,13 @@ class AuditFailure:
     path: Path
     line: int
     code: Literal[
-        "dynamic_event", "unregistered_event", "positional_text", "unregistered_field",
-        "direct_print", "direct_stream_write", "foreign_logging",
+        "dynamic_event",
+        "unregistered_event",
+        "positional_text",
+        "unregistered_field",
+        "direct_print",
+        "direct_stream_write",
+        "foreign_logging",
         "unresolved_logger_receiver",
     ]
 
@@ -1128,18 +1249,19 @@ AUDIT_EXCLUDED_FILES = frozenset({"seed.py", "migrate.py"})
 
 def application_python_paths(root: Path) -> tuple[Path, ...]:
     source_roots = (root / "apps/api/src", root / "packages", root / "services")
-    return tuple(sorted(
-        path
-        for source_root in source_roots
-        for path in source_root.rglob("*.py")
-        if not set(path.parts) & AUDIT_EXCLUDED_PARTS
-        and path.name not in AUDIT_EXCLUDED_FILES
-    ))
+    return tuple(
+        sorted(
+            path
+            for source_root in source_roots
+            for path in source_root.rglob("*.py")
+            if not set(path.parts) & AUDIT_EXCLUDED_PARTS and path.name not in AUDIT_EXCLUDED_FILES
+        )
+    )
 
 
-LOGGER_METHODS = frozenset({
-    "debug", "info", "warning", "warn", "error", "exception", "critical", "fatal", "log"
-})
+LOGGER_METHODS = frozenset(
+    {"debug", "info", "warning", "warn", "error", "exception", "critical", "fatal", "log"}
+)
 
 
 @dataclass(frozen=True)
@@ -1172,10 +1294,14 @@ def _qualified_name(node: ast.expr, aliases: Mapping[str, str]) -> str:
     return ""
 
 
-LOGGER_FACTORIES = frozenset({
-    "structlog.get_logger", "logging.getLogger", "jhin_observability.get_logger",
-    "jhin_observability.logging.get_logger",
-})
+LOGGER_FACTORIES = frozenset(
+    {
+        "structlog.get_logger",
+        "logging.getLogger",
+        "jhin_observability.get_logger",
+        "jhin_observability.logging.get_logger",
+    }
+)
 
 
 def _logger_bindings(tree: ast.AST, aliases: Mapping[str, str]) -> frozenset[str]:
@@ -1223,7 +1349,10 @@ def _assigns_container_lookup(
 ) -> bool:
     return any(
         isinstance(candidate, ast.Assign)
-        and any(isinstance(target, ast.Name) and target.id == "container" for target in candidate.targets)
+        and any(
+            isinstance(target, ast.Name) and target.id == "container"
+            for target in candidate.targets
+        )
         and isinstance(candidate.value, ast.Call)
         and ast.unparse(candidate.value.func) == "self.docker.containers.container"
         for candidate in ast.walk(function)
@@ -1252,19 +1381,13 @@ def _is_reviewed_non_logger_call(
         return (
             function.name == "_collect_logs"
             and _has_parameter(function, name="container", annotation="Any")
-        ) or (
-            function.name == "current_logs" and _assigns_container_lookup(function)
-        )
+        ) or (function.name == "current_logs" and _assigns_container_lookup(function))
     return (
-        relative.endswith(
-            "packages/connectors/src/jhin_connectors/supabase/database_tools.py"
-        )
+        relative.endswith("packages/connectors/src/jhin_connectors/supabase/database_tools.py")
         and function.name == "consume_result"
         and receiver == "completed"
         and method == "exception"
-        and _has_parameter(
-            function, name="completed", annotation="asyncio.Future[Any]"
-        )
+        and _has_parameter(function, name="completed", annotation="asyncio.Future[Any]")
     )
 
 
@@ -1294,8 +1417,13 @@ def collect_logging_method_calls(
                 )
                 calls.append(
                     LoggingCall(
-                        path, node.lineno, node.col_offset, method,
-                        cast(Literal["logger", "foreign_logging", "unresolved_logger_receiver"], kind),
+                        path,
+                        node.lineno,
+                        node.col_offset,
+                        method,
+                        cast(
+                            Literal["logger", "foreign_logging", "unresolved_logger_receiver"], kind
+                        ),
                     )
                 )
                 continue
@@ -1311,8 +1439,10 @@ def collect_logging_method_calls(
                 and _qualified_name(receiver_node.func, aliases) in LOGGER_FACTORIES
             )
             if (
-                isinstance(receiver_node, ast.Name) and receiver_node.id in bindings
-            ) or receiver_name == "temporalio.activity.logger" or direct_factory:
+                (isinstance(receiver_node, ast.Name) and receiver_node.id in bindings)
+                or receiver_name == "temporalio.activity.logger"
+                or direct_factory
+            ):
                 kind = "logger"
             elif receiver_name == "logging":
                 kind = "foreign_logging"
@@ -1320,21 +1450,26 @@ def collect_logging_method_calls(
                 # Fail closed on every logging-method-shaped call. Add an explicit
                 # non-logger exemption above only after a repository-wide review.
                 kind = "unresolved_logger_receiver"
-            calls.append(LoggingCall(
-                path, node.lineno, node.col_offset, method,
-                cast(Literal["logger", "foreign_logging", "unresolved_logger_receiver"], kind),
-            ))
-    return tuple(sorted(
-        calls,
-        key=lambda item: (item.path.as_posix(), item.line, item.column, item.method),
-    ))
+            calls.append(
+                LoggingCall(
+                    path,
+                    node.lineno,
+                    node.col_offset,
+                    method,
+                    cast(Literal["logger", "foreign_logging", "unresolved_logger_receiver"], kind),
+                )
+            )
+    return tuple(
+        sorted(
+            calls,
+            key=lambda item: (item.path.as_posix(), item.line, item.column, item.method),
+        )
+    )
 
 
 def audit_paths(paths: Sequence[Path]) -> list[AuditFailure]:
     calls = collect_logging_method_calls(paths)
-    by_location = {
-        (item.path, item.line, item.column, item.method): item for item in calls
-    }
+    by_location = {(item.path, item.line, item.column, item.method): item for item in calls}
     failures: list[AuditFailure] = []
     for path in paths:
         tree = ast.parse(path.read_text())
@@ -1412,9 +1547,7 @@ def test_reviewed_non_logger_receivers_are_semantically_narrow(tmp_path: Path) -
 def test_unresolved_actual_logger_shape_still_fails_closed(tmp_path: Path) -> None:
     source = tmp_path / "service.py"
     source.write_text("def emit(audit_logger):\n audit_logger.exception('raw')\n")
-    assert [failure.code for failure in audit_paths((source,))] == [
-        "unresolved_logger_receiver"
-    ]
+    assert [failure.code for failure in audit_paths((source,))] == ["unresolved_logger_receiver"]
 
 
 def main() -> int:
@@ -1442,9 +1575,7 @@ Expected: FAIL on the free-text master-key warning, formatted heartbeat activity
 Migrate every file in this task's `Files` block to these canonical call shapes; the same shape replaces each repeated call in agent/event/workflow/tool workers:
 
 ```python
-logger.warning(
-    "temporal.connect_retry", error_type=type(exc).__name__, retry_in_seconds=delay
-)
+logger.warning("temporal.connect_retry", error_type=type(exc).__name__, retry_in_seconds=delay)
 logger.warning("resources.retry", error_type=type(exc).__name__, retry_in_seconds=delay)
 logger.warning("nats.connect_retry", error_type=type(exc).__name__, retry_in_seconds=delay)
 logger.info("temporal.connected", task_queue=task_queue)
@@ -1492,9 +1623,7 @@ logger.error(
 )
 logger.error("webhook.rollback_failed", connector_type=connector_type)
 logger.error("ingress.invalid_envelope", error_code=SafeErrorCode.INVALID_REQUEST.value)
-logger.warning(
-    "ingress.unhandled", connector_type=connector_type, event_type=event_family
-)
+logger.warning("ingress.unhandled", connector_type=connector_type, event_type=event_family)
 logger.info(
     "ingress.normalized",
     connector_type=connector_type,
@@ -1503,9 +1632,7 @@ logger.info(
 )
 logger.error("event.invalid_envelope", error_code=SafeErrorCode.INVALID_REQUEST.value)
 logger.info("event.duplicate_skipped", num_delivered=metadata.num_delivered)
-logger.info(
-    "event.processed", event_type=event_family, num_delivered=metadata.num_delivered
-)
+logger.info("event.processed", event_type=event_family, num_delivered=metadata.num_delivered)
 logger.warning("sandbox.network_ensure_failed", error_type=type(exc).__name__)
 logger.warning("sandbox.reap_containers_failed", error_type=type(exc).__name__)
 logger.warning("sandbox.reap_volumes_failed", error_type=type(exc).__name__)
@@ -1618,7 +1745,9 @@ Add `"packages/observability/tests"` to root `tool.pytest.ini_options.testpaths`
 Then add:
 
 ```python
-def test_empty_endpoint_installs_noop_telemetry_but_json_logging(capsys: CaptureFixture[str]) -> None:
+def test_empty_endpoint_installs_noop_telemetry_but_json_logging(
+    capsys: CaptureFixture[str],
+) -> None:
     runtime = initialize_observability(
         ObservabilityConfig(service_name="api", service_version="0.1.0", environment="test")
     )
@@ -1639,8 +1768,11 @@ def test_empty_endpoint_installs_noop_telemetry_but_json_logging(capsys: Capture
 )
 def test_otlp_transport_configuration_is_explicit(endpoint: str, insecure: bool, ok: bool) -> None:
     kwargs = dict(
-        service_name="api", service_version="0.1.0", environment="test",
-        otlp_endpoint=endpoint, otlp_insecure=insecure,
+        service_name="api",
+        service_version="0.1.0",
+        environment="test",
+        otlp_endpoint=endpoint,
+        otlp_insecure=insecure,
     )
     if ok:
         assert ObservabilityConfig(**kwargs).otlp_endpoint == endpoint
@@ -1693,16 +1825,12 @@ def test_mixed_case_trace_carrier_is_rebuilt_with_canonical_keys() -> None:
     assert lowered.count("traceparent") == 1
     assert lowered.count("tracestate") <= 1
     assert "baggage" not in lowered
-    assert output["traceparent"].startswith(
-        "00-4bf92f3577b34da6a3ce929d0e0e4736-"
-    )
+    assert output["traceparent"].startswith("00-4bf92f3577b34da6a3ce929d0e0e4736-")
     assert "carrier-canary" not in json.dumps(output)
 
 
 def test_initialize_is_idempotent_only_for_the_same_config() -> None:
-    config = ObservabilityConfig(
-        service_name="api", service_version="0.1.0", environment="test"
-    )
+    config = ObservabilityConfig(service_name="api", service_version="0.1.0", environment="test")
     assert initialize_observability(config) is initialize_observability(config)
     with pytest.raises(ObservabilityConfigurationError, match="already initialized"):
         initialize_observability(replace(config, service_name="agent-worker"))
@@ -1710,9 +1838,7 @@ def test_initialize_is_idempotent_only_for_the_same_config() -> None:
 
 def test_noop_metrics_is_available_without_bootstrap_or_exporter_imports() -> None:
     metrics = noop_metrics()
-    metrics.counter("model_requests_total").add(
-        1, provider_type="openai", outcome="ok"
-    )
+    metrics.counter("model_requests_total").add(1, provider_type="openai", outcome="ok")
     metrics.histogram("agent_run_duration_seconds").record(1.25, outcome="completed")
     metrics.set_observable("connector_health", ())
     assert metrics.is_noop is True
@@ -1727,9 +1853,7 @@ def test_safe_span_requires_runtime_unless_caller_explicitly_supplies_noop() -> 
 
 
 def test_single_span_registry_covers_exactly_every_registered_activity() -> None:
-    activity_spans = {
-        name for name in SPAN_NAMES if name.startswith("temporal.activity.")
-    }
+    activity_spans = {name for name in SPAN_NAMES if name.startswith("temporal.activity.")}
     assert activity_spans == {
         *(f"temporal.activity.{name}" for name in TEMPORAL_ACTIVITY_NAMES),
         "temporal.activity.other",
@@ -1745,14 +1869,15 @@ def test_runtime_config_and_protected_health_status_are_public_and_exact() -> No
         TelemetryExporterStatus,
     )
 
-    config = ObservabilityConfig(
-        service_name="api", service_version="0.1.0", environment="test"
-    )
+    config = ObservabilityConfig(service_name="api", service_version="0.1.0", environment="test")
     runtime = initialize_observability(config)
     assert runtime.config is config
     assert isinstance(runtime, ObservabilityRuntime)
     assert [field.name for field in fields(TelemetryExporterStatus)] == [
-        "configured", "last_success_at", "dropped_items", "last_error_code"
+        "configured",
+        "last_success_at",
+        "dropped_items",
+        "last_error_code",
     ]
     assert runtime.status() == TelemetryExporterStatus(
         configured=False,
@@ -1835,9 +1960,7 @@ class ObservabilityConfig:
             parsed = urlsplit(self.otlp_endpoint)
             if parsed.scheme not in {"http", "https"} or not parsed.hostname:
                 raise ValueError("OTLP endpoint must be an absolute HTTP(S) URL")
-            local_cleartext = parsed.hostname in {
-                "otel-collector", "localhost", "127.0.0.1", "::1"
-            }
+            local_cleartext = parsed.hostname in {"otel-collector", "localhost", "127.0.0.1", "::1"}
             if parsed.scheme == "http" and (not self.otlp_insecure or not local_cleartext):
                 raise ValueError("cleartext OTLP is allowed only for local collectors")
             if parsed.username or parsed.password or parsed.query or parsed.fragment:
@@ -1872,9 +1995,9 @@ class ObservabilitySettings(BaseSettings):
     otel_exporter_otlp_certificate: Path | None = None
     otel_exporter_otlp_client_certificate: Path | None = None
     otel_exporter_otlp_client_key: Path | None = None
-    otel_traces_sampler: Literal[
-        "always_on", "always_off", "parentbased_traceidratio"
-    ] = "parentbased_traceidratio"
+    otel_traces_sampler: Literal["always_on", "always_off", "parentbased_traceidratio"] = (
+        "parentbased_traceidratio"
+    )
     otel_traces_sampler_arg: float = 0.10
     otel_bsp_max_queue_size: int = 2_048
     otel_bsp_max_export_batch_size: int = 512
@@ -1992,11 +2115,21 @@ from typing import Literal, Protocol
 
 
 MetricName = Literal[
-    "agent_runs_total", "agent_run_duration_seconds", "agent_run_failures_total",
-    "model_requests_total", "model_tokens_total", "model_cost_estimate",
-    "tool_calls_total", "tool_call_failures_total", "trigger_invocations_total",
-    "trigger_failures_total", "sandbox_jobs_total", "sandbox_job_duration_seconds",
-    "nats_consumer_lag", "temporal_activity_failures", "connector_health",
+    "agent_runs_total",
+    "agent_run_duration_seconds",
+    "agent_run_failures_total",
+    "model_requests_total",
+    "model_tokens_total",
+    "model_cost_estimate",
+    "tool_calls_total",
+    "tool_call_failures_total",
+    "trigger_invocations_total",
+    "trigger_failures_total",
+    "sandbox_jobs_total",
+    "sandbox_job_duration_seconds",
+    "nats_consumer_lag",
+    "temporal_activity_failures",
+    "connector_health",
     "connector_connections",
 ]
 
@@ -2084,27 +2217,66 @@ def noop_tracer() -> Tracer:
     """Explicit tracer for package/seed/host code that has no process bootstrap."""
     return _NOOP_TRACER
 
+
 SAFE_SPAN_ATTRIBUTE_KEYS = frozenset(
     {
-        "http.request.method", "http.route", "http.response.status_code",
-        "http.response.status_class", "db.system", "db.operation", "db.table",
-        "messaging.system", "jhin.stream", "jhin.consumer", "jhin.subject_family", "jhin.provider_type",
-        "jhin.connector_type", "jhin.operation", "jhin.outcome", "jhin.latency_ms",
-        "jhin.retry_count", "jhin.tool_family", "jhin.risk", "jhin.network_policy",
-        "jhin.request_id", "jhin.correlation_id", "jhin.workspace_id", "jhin.task_id",
-        "jhin.run_id", "jhin.job_id", "temporal.workflow_id", "temporal.run_id",
-        "temporal.task_queue", "temporal.workflow_type", "temporal.activity_type",
-        "temporal.attempt", "error.type", "error.code",
+        "http.request.method",
+        "http.route",
+        "http.response.status_code",
+        "http.response.status_class",
+        "db.system",
+        "db.operation",
+        "db.table",
+        "messaging.system",
+        "jhin.stream",
+        "jhin.consumer",
+        "jhin.subject_family",
+        "jhin.provider_type",
+        "jhin.connector_type",
+        "jhin.operation",
+        "jhin.outcome",
+        "jhin.latency_ms",
+        "jhin.retry_count",
+        "jhin.tool_family",
+        "jhin.risk",
+        "jhin.network_policy",
+        "jhin.request_id",
+        "jhin.correlation_id",
+        "jhin.workspace_id",
+        "jhin.task_id",
+        "jhin.run_id",
+        "jhin.job_id",
+        "temporal.workflow_id",
+        "temporal.run_id",
+        "temporal.task_queue",
+        "temporal.workflow_type",
+        "temporal.activity_type",
+        "temporal.attempt",
+        "error.type",
+        "error.code",
     }
 )
 
-SPAN_ID_ATTRIBUTE_KEYS = frozenset({
-    "jhin.request_id", "jhin.correlation_id", "jhin.workspace_id", "jhin.task_id",
-    "jhin.run_id", "jhin.job_id", "temporal.workflow_id", "temporal.run_id",
-})
-SPAN_NUMERIC_ATTRIBUTE_KEYS = frozenset({
-    "http.response.status_code", "jhin.latency_ms", "jhin.retry_count", "temporal.attempt",
-})
+SPAN_ID_ATTRIBUTE_KEYS = frozenset(
+    {
+        "jhin.request_id",
+        "jhin.correlation_id",
+        "jhin.workspace_id",
+        "jhin.task_id",
+        "jhin.run_id",
+        "jhin.job_id",
+        "temporal.workflow_id",
+        "temporal.run_id",
+    }
+)
+SPAN_NUMERIC_ATTRIBUTE_KEYS = frozenset(
+    {
+        "http.response.status_code",
+        "jhin.latency_ms",
+        "jhin.retry_count",
+        "temporal.attempt",
+    }
+)
 _SAFE_SPAN_STRING_RE = re.compile(r"^[A-Za-z0-9_./:{}*-]{1,200}$")
 _SAFE_SPAN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
@@ -2133,9 +2305,7 @@ def normalize_span_attributes(
             output[key] = value
         elif isinstance(value, str):
             output[key] = (
-                value
-                if "://" not in value and _SAFE_SPAN_STRING_RE.fullmatch(value)
-                else "other"
+                value if "://" not in value and _SAFE_SPAN_STRING_RE.fullmatch(value) else "other"
             )
     return output
 
@@ -2241,8 +2411,11 @@ def test_full_span_queue_only_increments_atomic_drop_counter_on_product_thread(
 
 def test_export_failure_is_safe_and_does_not_raise_to_caller(capsys: CaptureFixture[str]) -> None:
     processor = BoundedBatchSpanProcessor(
-        FailingSpanExporter(), diagnostics=ExportDiagnostics(), max_queue_size=4,
-        max_export_batch_size=2, export_timeout_millis=25,
+        FailingSpanExporter(),
+        diagnostics=ExportDiagnostics(),
+        max_queue_size=4,
+        max_export_batch_size=2,
+        export_timeout_millis=25,
     )
     processor.on_end(readable_span(1))
     assert processor.force_flush(timeout_millis=100) is True
@@ -2254,8 +2427,11 @@ def test_export_failure_is_safe_and_does_not_raise_to_caller(capsys: CaptureFixt
 def test_force_flush_and_shutdown_obey_deadline_when_exporter_is_blocked() -> None:
     exporter = ReleasableBlockingSpanExporter()
     processor = BoundedBatchSpanProcessor(
-        exporter, diagnostics=ExportDiagnostics(), max_queue_size=4,
-        max_export_batch_size=1, export_timeout_millis=25,
+        exporter,
+        diagnostics=ExportDiagnostics(),
+        max_queue_size=4,
+        max_export_batch_size=1,
+        export_timeout_millis=25,
     )
     processor.on_end(readable_span(1))
     assert exporter.entered.wait(timeout=1.0)
@@ -2313,9 +2489,7 @@ class ExportDiagnostics:
             self._last_error_code = None
             return recovered
 
-    def record_failure(
-        self, code: Literal["export_timeout", "export_failed"]
-    ) -> None:
+    def record_failure(self, code: Literal["export_timeout", "export_failed"]) -> None:
         if code not in {"export_timeout", "export_failed"}:
             raise ValueError("unregistered telemetry export error code")
         with self._lock:
@@ -2410,7 +2584,9 @@ EXPECTED = {
     "sandbox_job_duration_seconds": ("histogram", "s", {"outcome"}),
     "nats_consumer_lag": ("gauge", "{message}", {"stream", "consumer"}),
     "temporal_activity_failures": (
-        "counter", "{failure}", {"task_queue", "activity", "failure_class"}
+        "counter",
+        "{failure}",
+        {"task_queue", "activity", "failure_class"},
     ),
     "connector_health": ("gauge", "1", {"connector_type"}),
     "connector_connections": ("gauge", "{connection}", {"connector_type", "outcome"}),
@@ -2424,16 +2600,34 @@ def test_registry_exactly_matches_required_contract() -> None:
 @pytest.mark.parametrize(
     "forbidden",
     [
-        "workspace_id", "user_id", "agent_id", "team_id", "task_id", "run_id",
-        "event_id", "message_id", "connection_id", "approval_id", "tool_call_id",
-        "sandbox_job_id", "request_id", "correlation_id", "trace_id", "url",
-        "hostname", "repository", "project", "model_name",
+        "workspace_id",
+        "user_id",
+        "agent_id",
+        "team_id",
+        "task_id",
+        "run_id",
+        "event_id",
+        "message_id",
+        "connection_id",
+        "approval_id",
+        "tool_call_id",
+        "sandbox_job_id",
+        "request_id",
+        "correlation_id",
+        "trace_id",
+        "url",
+        "hostname",
+        "repository",
+        "project",
+        "model_name",
     ],
 )
 def test_every_identifier_label_is_rejected(forbidden: str) -> None:
     metrics = test_metrics()
     with pytest.raises(MetricLabelError, match=forbidden):
-        metrics.counter("agent_runs_total").add(1, service="agent-worker", outcome="completed", **{forbidden: "x"})
+        metrics.counter("agent_runs_total").add(
+            1, service="agent-worker", outcome="completed", **{forbidden: "x"}
+        )
 
 
 def test_dynamic_values_map_to_other() -> None:
@@ -2479,41 +2673,111 @@ from jhin_observability.registry import TEMPORAL_ACTIVITY_NAMES
 
 ALLOWED_METRIC_LABELS = frozenset(
     {
-        "service", "environment", "outcome", "failure_class", "provider_type",
-        "connector_type", "tool_family", "risk", "network_policy", "stream",
-        "consumer", "task_queue", "activity", "http_method", "http_route",
-        "http_status_class", "direction",
+        "service",
+        "environment",
+        "outcome",
+        "failure_class",
+        "provider_type",
+        "connector_type",
+        "tool_family",
+        "risk",
+        "network_policy",
+        "stream",
+        "consumer",
+        "task_queue",
+        "activity",
+        "http_method",
+        "http_route",
+        "http_status_class",
+        "direction",
     }
 )
 FORBIDDEN_IDENTIFIER_LABELS = frozenset(
     {
-        "workspace_id", "user_id", "agent_id", "team_id", "task_id", "run_id",
-        "event_id", "message_id", "connection_id", "approval_id", "tool_call_id",
-        "sandbox_job_id", "request_id", "correlation_id", "trace_id", "url", "hostname",
-        "repository", "project", "model_name",
+        "workspace_id",
+        "user_id",
+        "agent_id",
+        "team_id",
+        "task_id",
+        "run_id",
+        "event_id",
+        "message_id",
+        "connection_id",
+        "approval_id",
+        "tool_call_id",
+        "sandbox_job_id",
+        "request_id",
+        "correlation_id",
+        "trace_id",
+        "url",
+        "hostname",
+        "repository",
+        "project",
+        "model_name",
     }
 )
 LABEL_VALUES: dict[str, frozenset[str]] = {
     "service": frozenset(
-        {"api", "agent-worker", "tool-worker", "event-worker", "workflow-worker", "sandbox-runner", "web"}
+        {
+            "api",
+            "agent-worker",
+            "tool-worker",
+            "event-worker",
+            "workflow-worker",
+            "sandbox-runner",
+            "web",
+        }
     ),
     "environment": frozenset({"dev", "test", "staging", "production"}),
     "outcome": frozenset(
-        {"ok", "started", "completed", "failed", "cancelled", "timeout", "denied", "rejected", "duplicate", "execution_unknown", "healthy", "unhealthy", "other"}
+        {
+            "ok",
+            "started",
+            "completed",
+            "failed",
+            "cancelled",
+            "timeout",
+            "denied",
+            "rejected",
+            "duplicate",
+            "execution_unknown",
+            "healthy",
+            "unhealthy",
+            "other",
+        }
     ),
     "failure_class": frozenset(
-        {"authentication", "authorization", "validation", "rate_limit", "timeout", "transport", "dispatch", "target", "provider", "policy", "budget", "execution_unknown", "internal", "other"}
+        {
+            "authentication",
+            "authorization",
+            "validation",
+            "rate_limit",
+            "timeout",
+            "transport",
+            "dispatch",
+            "target",
+            "provider",
+            "policy",
+            "budget",
+            "execution_unknown",
+            "internal",
+            "other",
+        }
     ),
     "provider_type": frozenset(
         {"openai", "anthropic", "openrouter", "ollama", "openai_compatible", "other"}
     ),
     "connector_type": frozenset({"github", "linear", "vercel", "supabase", "cli", "other"}),
-    "tool_family": frozenset({"system", "organization", "github", "linear", "vercel", "supabase", "cli", "other"}),
+    "tool_family": frozenset(
+        {"system", "organization", "github", "linear", "vercel", "supabase", "cli", "other"}
+    ),
     "risk": frozenset({"read", "write", "elevated", "destructive", "other"}),
     "network_policy": frozenset({"none", "internet", "other"}),
     "stream": frozenset({"INGRESS", "EVENTS", "other"}),
     "consumer": frozenset({"event-worker-ingress", "event-worker", "other"}),
-    "task_queue": frozenset({"jhin-workflow-queue", "jhin-agent-queue", "jhin-tool-queue", "other"}),
+    "task_queue": frozenset(
+        {"jhin-workflow-queue", "jhin-agent-queue", "jhin-tool-queue", "other"}
+    ),
     "activity": frozenset((*TEMPORAL_ACTIVITY_NAMES, "other")),
     "direction": frozenset({"input", "output", "cached"}),
     "http_method": frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "other"}),
@@ -2555,42 +2819,33 @@ def _spec(kind: InstrumentKind, unit: str, *labels: str) -> MetricSpec:
     return MetricSpec(kind, unit, frozenset(labels))
 
 
-METRIC_SPECS: Mapping[MetricName, MetricSpec] = MappingProxyType({
-    "agent_runs_total": _spec("counter", "{run}", "service", "outcome"),
-    "agent_run_duration_seconds": _spec("histogram", "s", "outcome"),
-    "agent_run_failures_total": _spec("counter", "{failure}", "failure_class"),
-    "model_requests_total": _spec("counter", "{request}", "provider_type", "outcome"),
-    "model_tokens_total": _spec("counter", "{token}", "provider_type", "direction"),
-    "model_cost_estimate": _spec("counter", "USD", "provider_type"),
-    "tool_calls_total": _spec("counter", "{call}", "tool_family", "risk", "outcome"),
-    "tool_call_failures_total": _spec(
-        "counter", "{failure}", "tool_family", "failure_class"
-    ),
-    "trigger_invocations_total": _spec(
-        "counter", "{invocation}", "connector_type", "outcome"
-    ),
-    "trigger_failures_total": _spec(
-        "counter", "{failure}", "connector_type", "failure_class"
-    ),
-    "sandbox_jobs_total": _spec("counter", "{job}", "outcome", "network_policy"),
-    "sandbox_job_duration_seconds": _spec("histogram", "s", "outcome"),
-    "nats_consumer_lag": _spec("gauge", "{message}", "stream", "consumer"),
-    "temporal_activity_failures": _spec(
-        "counter", "{failure}", "task_queue", "activity", "failure_class"
-    ),
-    "connector_health": _spec("gauge", "1", "connector_type"),
-    "connector_connections": _spec(
-        "gauge", "{connection}", "connector_type", "outcome"
-    ),
-})
+METRIC_SPECS: Mapping[MetricName, MetricSpec] = MappingProxyType(
+    {
+        "agent_runs_total": _spec("counter", "{run}", "service", "outcome"),
+        "agent_run_duration_seconds": _spec("histogram", "s", "outcome"),
+        "agent_run_failures_total": _spec("counter", "{failure}", "failure_class"),
+        "model_requests_total": _spec("counter", "{request}", "provider_type", "outcome"),
+        "model_tokens_total": _spec("counter", "{token}", "provider_type", "direction"),
+        "model_cost_estimate": _spec("counter", "USD", "provider_type"),
+        "tool_calls_total": _spec("counter", "{call}", "tool_family", "risk", "outcome"),
+        "tool_call_failures_total": _spec("counter", "{failure}", "tool_family", "failure_class"),
+        "trigger_invocations_total": _spec("counter", "{invocation}", "connector_type", "outcome"),
+        "trigger_failures_total": _spec("counter", "{failure}", "connector_type", "failure_class"),
+        "sandbox_jobs_total": _spec("counter", "{job}", "outcome", "network_policy"),
+        "sandbox_job_duration_seconds": _spec("histogram", "s", "outcome"),
+        "nats_consumer_lag": _spec("gauge", "{message}", "stream", "consumer"),
+        "temporal_activity_failures": _spec(
+            "counter", "{failure}", "task_queue", "activity", "failure_class"
+        ),
+        "connector_health": _spec("gauge", "1", "connector_type"),
+        "connector_connections": _spec("gauge", "{connection}", "connector_type", "outcome"),
+    }
+)
 ROUTE_LABEL_VALUES = frozenset({"/api/:path*", "other"})
 
 
 def instrument_contracts() -> dict[str, tuple[InstrumentKind, str, set[str]]]:
-    return {
-        name: (spec.kind, spec.unit, set(spec.labels))
-        for name, spec in METRIC_SPECS.items()
-    }
+    return {name: (spec.kind, spec.unit, set(spec.labels)) for name, spec in METRIC_SPECS.items()}
 
 
 def _metric_spec(name: MetricName) -> MetricSpec:
@@ -2630,16 +2885,12 @@ def _finite_nonnegative(value: int | float, *, instrument: str) -> float:
 
 
 class AddInstrument(Protocol):
-    def add(
-        self, amount: int | float, attributes: Mapping[str, str] | None = None
-    ) -> None:
+    def add(self, amount: int | float, attributes: Mapping[str, str] | None = None) -> None:
         """Record one monotonic counter point."""
 
 
 class RecordInstrument(Protocol):
-    def record(
-        self, amount: int | float, attributes: Mapping[str, str] | None = None
-    ) -> None:
+    def record(self, amount: int | float, attributes: Mapping[str, str] | None = None) -> None:
         """Record one histogram point."""
 
 
@@ -2687,10 +2938,7 @@ class _ObservableState:
     def observe(self, name: MetricName) -> list[OTelObservation]:
         with self._lock:
             values = self._values.get(name, ())
-        return [
-            OTelObservation(value.value, attributes=dict(value.attributes))
-            for value in values
-        ]
+        return [OTelObservation(value.value, attributes=dict(value.attributes)) for value in values]
 
 
 def build_jhin_metrics(meter: Meter) -> JhinMetrics:
@@ -2867,7 +3115,9 @@ async def test_api_uses_valid_parent_returns_request_id_and_discards_baggage(
     assert "foreign" not in json.dumps(server.attributes)
 
 
-async def test_invalid_traceparent_creates_new_root(client: AsyncClient, spans: InMemorySpanExporter) -> None:
+async def test_invalid_traceparent_creates_new_root(
+    client: AsyncClient, spans: InMemorySpanExporter
+) -> None:
     response = await client.get("/api/v1/health", headers={"traceparent": "attacker-value"})
     server = next(span for span in spans.get_finished_spans() if span.name == "http.server.request")
     assert response.status_code == 200
@@ -2886,7 +3136,8 @@ async def test_request_context_is_cleared_after_exception(
     records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     finished = [record for record in records if record["event"] == "api.request_finished"]
     assert [record["request_id"] for record in finished[-2:]] == [
-        failed.headers["X-Request-ID"], succeeded.headers["X-Request-ID"],
+        failed.headers["X-Request-ID"],
+        succeeded.headers["X-Request-ID"],
     ]
     assert finished[-2]["request_id"] != finished[-1]["request_id"]
 
@@ -2993,9 +3244,11 @@ from jhin_observability import (
 
 def normalize_http_method(method: str) -> str:
     normalized = method.upper()
-    return normalized if normalized in {
-        "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"
-    } else "other"
+    return (
+        normalized
+        if normalized in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+        else "other"
+    )
 
 
 def normalize_http_route(request: Request) -> str:
@@ -3006,16 +3259,16 @@ def normalize_http_route(request: Request) -> str:
     return template if 1 <= len(template) <= 200 and template.startswith("/") else "other"
 
 
-def set_http_span_result(
-    span: Span, *, method: str, route: str, status_code: int
-) -> None:
+def set_http_span_result(span: Span, *, method: str, route: str, status_code: int) -> None:
     status = status_code if 100 <= status_code <= 599 else 500
-    for key, value in normalize_span_attributes({
-        "http.request.method": normalize_http_method(method),
-        "http.route": route,
-        "http.response.status_code": status,
-        "http.response.status_class": f"{status // 100}xx",
-    }).items():
+    for key, value in normalize_span_attributes(
+        {
+            "http.request.method": normalize_http_method(method),
+            "http.route": route,
+            "http.response.status_code": status,
+            "http.response.status_class": f"{status // 100}xx",
+        }
+    ).items():
         span.set_attribute(key, value)
 
 
@@ -3026,9 +3279,10 @@ async def observability_middleware(
     request_id = new_uuid7()
     request.state.request_id = request_id
     parent = extract_trace_context(request.headers)
-    with bind_context(request_id=request_id), safe_span(
-        "http.server.request", kind=SpanKind.SERVER, context=parent
-    ) as span:
+    with (
+        bind_context(request_id=request_id),
+        safe_span("http.server.request", kind=SpanKind.SERVER, context=parent) as span,
+    ):
         response: Response | None = None
         try:
             response = await call_next(request)
@@ -3070,7 +3324,9 @@ async def test_sql_span_has_operation_and_known_table_but_no_statement_or_dsn(
     dsn_canary = "postgresql+asyncpg://secret-user:secret-pass@db-canary/jhin"
     engine = create_test_engine_with_visible_dsn(dsn_canary)
     async with engine.connect() as connection:
-        await connection.execute(text("SELECT password FROM secret_canary WHERE token=:token"), {"token": "bind-canary"})
+        await connection.execute(
+            text("SELECT password FROM secret_canary WHERE token=:token"), {"token": "bind-canary"}
+        )
     rendered = json.dumps([dict(span.attributes or {}) for span in spans.get_finished_spans()])
     assert "db.operation" in rendered
     assert "SELECT password" not in rendered
@@ -3080,7 +3336,9 @@ async def test_sql_span_has_operation_and_known_table_but_no_statement_or_dsn(
 
 def test_unknown_table_is_other() -> None:
     assert normalized_sql_metadata("SELECT * FROM attacker_supplied") == {
-        "db.system": "postgresql", "db.operation": "SELECT", "db.table": "other"
+        "db.system": "postgresql",
+        "db.operation": "SELECT",
+        "db.table": "other",
     }
 
 
@@ -3099,7 +3357,8 @@ async def test_database_package_is_safe_before_observability_bootstrap() -> None
 def test_seed_explicitly_selects_package_noop_tracer_before_bootstrap() -> None:
     tree = ast.parse((REPO_ROOT / "apps/api/src/jhin_api/seed.py").read_text())
     create_calls = [
-        node for node in ast.walk(tree)
+        node
+        for node in ast.walk(tree)
         if isinstance(node, ast.Call) and ast.unparse(node.func) == "create_engine"
     ]
     assert len(create_calls) == 1
@@ -3223,12 +3482,8 @@ from jhin_event_worker.normalizer import IngressNormalizer
 from jhin_event_worker.processor import EventProcessor
 from jhin_observability import bind_context, get_runtime
 
-TRACEPARENT_RE = re.compile(
-    r"^00-[0-9a-f]{32}-[0-9a-f]{16}-0[01]$"
-)
-VALID_TRACEPARENT = (
-    "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
-)
+TRACEPARENT_RE = re.compile(r"^00-[0-9a-f]{32}-[0-9a-f]{16}-0[01]$")
+VALID_TRACEPARENT = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 VALID_PARENT_SPAN_ID = "00f067aa0ba902b7"
 KNOWN_CORRELATION = UUID("018f0000-0000-7000-8000-000000000001")
 
@@ -3319,8 +3574,10 @@ async def test_consumer_extracts_parent_and_binds_business_correlation(
     assert consumer.parent is not None
     assert format(consumer.parent.span_id, "016x") == VALID_PARENT_SPAN_ID
     assert dict(consumer.attributes) == {
-        "messaging.system": "nats", "jhin.stream": "EVENTS",
-        "jhin.consumer": "event-worker", "jhin.subject_family": "task",
+        "messaging.system": "nats",
+        "jhin.stream": "EVENTS",
+        "jhin.consumer": "event-worker",
+        "jhin.subject_family": "task",
         "jhin.outcome": "ok",
     }
     assert seen["correlation_id"] == str(KNOWN_CORRELATION)
@@ -3332,7 +3589,8 @@ def test_subject_stream_and_family_are_closed_and_workspace_free() -> None:
     subject = "jhin.v1.workspace-canary.task.created"
     assert classify_subject(subject) == ("EVENTS", "task")
     assert classify_subject("jhin.v1.workspace-canary.ingress.github.issue.updated") == (
-        "INGRESS", "ingress"
+        "INGRESS",
+        "ingress",
     )
     with pytest.raises(ValueError, match="stream/subject mismatch"):
         validate_stream_subject("INGRESS", subject)
@@ -3341,7 +3599,8 @@ def test_subject_stream_and_family_are_closed_and_workspace_free() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("origin_stream", ["INGRESS", "EVENTS"])
 async def test_dlq_helper_is_closed_traced_and_payload_free(
-    origin_stream: DlqOriginStream, spans: InMemorySpanExporter,
+    origin_stream: DlqOriginStream,
+    spans: InMemorySpanExporter,
 ) -> None:
     js = RecordingJetStream()
     await publish_invalid_envelope_dlq(js, origin_stream=origin_stream, error_count=2)
@@ -3355,7 +3614,8 @@ async def test_dlq_helper_is_closed_traced_and_payload_free(
     }
     span = next(span for span in spans.get_finished_spans() if span.name == "nats.publish")
     assert dict(span.attributes) == {
-        "messaging.system": "nats", "jhin.stream": "DLQ",
+        "messaging.system": "nats",
+        "jhin.stream": "DLQ",
         "jhin.subject_family": "dlq",
     }
     rendered = json.dumps({"name": span.name, "attributes": dict(span.attributes)})
@@ -3386,9 +3646,7 @@ async def test_existing_invalid_handlers_publish_only_closed_dlq_document(
     published = js.published[0]
     assert published.subject == f"jhin.dlq.{origin.lower()}"
     document = json.loads(published.payload)
-    assert set(document) == {
-        "schema_version", "reason", "origin_stream", "error_count"
-    }
+    assert set(document) == {"schema_version", "reason", "origin_stream", "error_count"}
     assert document["origin_stream"] == origin
     assert "raw-payload-canary" not in published.payload.decode()
     assert "auth-canary" not in published.payload.decode()
@@ -3412,7 +3670,18 @@ StreamName = Literal["INGRESS", "EVENTS", "DLQ"]
 DlqOriginStream = Literal["INGRESS", "EVENTS"]
 ConsumerName = Literal["event-worker-ingress", "event-worker"]
 SUBJECT_FAMILIES = frozenset(
-    {"ingress", "task", "agent", "tool", "approval", "connector", "trigger", "workflow", "system", "dlq"}
+    {
+        "ingress",
+        "task",
+        "agent",
+        "tool",
+        "approval",
+        "connector",
+        "trigger",
+        "workflow",
+        "system",
+        "dlq",
+    }
 )
 
 
@@ -3455,7 +3724,8 @@ async def publish_jetstream(
         "nats.publish",
         kind=SpanKind.PRODUCER,
         attributes={
-            "messaging.system": "nats", "jhin.stream": stream,
+            "messaging.system": "nats",
+            "jhin.stream": stream,
             "jhin.subject_family": family,
         },
     ):
@@ -3528,9 +3798,7 @@ async def dispatch_message(
     handler: MessageHandler,
 ) -> None:
     safe_stream = stream if stream in {"INGRESS", "EVENTS"} else "other"
-    safe_consumer = (
-        durable if durable in {"event-worker-ingress", "event-worker"} else "other"
-    )
+    safe_consumer = durable if durable in {"event-worker-ingress", "event-worker"} else "other"
     try:
         _actual_stream, family = classify_subject(message.subject)
     except ValueError:
@@ -3552,9 +3820,7 @@ async def dispatch_message(
             await handler(message)
             outcome = "ok"
         except Exception as exc:
-            record_span_error(
-                span, safe_error(exc, code=SafeErrorCode.INTERNAL_ERROR)
-            )
+            record_span_error(span, safe_error(exc, code=SafeErrorCode.INTERNAL_ERROR))
             raise
         finally:
             span.set_attribute("jhin.outcome", outcome)
@@ -3629,8 +3895,7 @@ class LagJetStream:
         return SimpleNamespace(num_pending=self.pending[(stream, consumer)])
 
 
-def recording_observables(
-) -> tuple[JhinMetrics, dict[MetricName, tuple[Observation, ...]]]:
+def recording_observables() -> tuple[JhinMetrics, dict[MetricName, tuple[Observation, ...]]]:
     recorded: dict[MetricName, tuple[Observation, ...]] = {}
     noops = noop_metrics()
     return JhinMetrics(
@@ -3817,7 +4082,8 @@ async def test_trace_crosses_agent_and_tool_queues_without_payload_ids_in_labels
         )
     assert result.activity_trace_id == result.client_trace_id
     assert {span.name for span in finished_spans()} >= {
-        "temporal.start_workflow", "temporal.activity.reason_agent_step",
+        "temporal.start_workflow",
+        "temporal.activity.reason_agent_step",
         "temporal.activity.execute_bound_tool",
     }
     assert all("workspace" not in dict(point.attributes) for point in metric_points())
@@ -3837,15 +4103,20 @@ async def test_workflow_replay_does_not_emit_duplicate_application_spans() -> No
 @pytest.mark.asyncio
 async def test_failed_activity_increments_closed_failure_metric_once() -> None:
     await execute_failing_activity(name="execute_bound_tool", attempts=2)
-    assert metric_sum(
-        "temporal_activity_failures",
-        task_queue="jhin-tool-queue",
-        activity="execute_bound_tool",
-        failure_class="internal",
-    ) == 2
+    assert (
+        metric_sum(
+            "temporal_activity_failures",
+            task_queue="jhin-tool-queue",
+            activity="execute_bound_tool",
+            failure_class="internal",
+        )
+        == 2
+    )
 
 
-def test_client_and_worker_interceptor_lists_have_exact_roles(runtime: ObservabilityRuntime) -> None:
+def test_client_and_worker_interceptor_lists_have_exact_roles(
+    runtime: ObservabilityRuntime,
+) -> None:
     client = temporal_client_interceptors(runtime)
     worker = temporal_worker_interceptors(runtime, task_queue="jhin-agent-queue")
     assert [(type(item), item.role) for item in client] == [
@@ -3858,7 +4129,8 @@ def test_client_and_worker_interceptor_lists_have_exact_roles(runtime: Observabi
 
 
 def test_temporal_error_has_no_exception_event_description_or_dynamic_name(
-    spans: InMemorySpanExporter, runtime: ObservabilityRuntime,
+    spans: InMemorySpanExporter,
+    runtime: ObservabilityRuntime,
 ) -> None:
     interceptor = SafeTemporalTracingInterceptor(runtime.tracer, role="client")
     with pytest.raises(RuntimeError, match="temporal-payload-canary"):
@@ -3884,7 +4156,11 @@ def test_temporal_error_has_no_exception_event_description_or_dynamic_name(
 def test_every_temporal_connect_and_worker_uses_shared_interceptor_helpers() -> None:
     wiring = audit_temporal_wiring(REPO_ROOT)
     assert wiring.client_connect_calls >= {
-        "api", "agent-worker", "tool-worker", "event-worker", "workflow-worker"
+        "api",
+        "agent-worker",
+        "tool-worker",
+        "event-worker",
+        "workflow-worker",
     }
     assert wiring.worker_calls == {"agent-worker", "tool-worker", "workflow-worker"}
     assert wiring.uninstrumented_client_connect_calls == []
@@ -3915,9 +4191,9 @@ from temporalio.client import Interceptor
 
 @pytest.fixture
 def api_temporal_runtime() -> Iterator[ObservabilityRuntime]:
-    runtime = initialize_observability(ObservabilityConfig(
-        service_name="api", service_version="0.1.0", environment="test"
-    ))
+    runtime = initialize_observability(
+        ObservabilityConfig(service_name="api", service_version="0.1.0", environment="test")
+    )
     try:
         yield runtime
     finally:
@@ -3930,9 +4206,9 @@ async def test_api_business_and_health_share_one_interceptor_aware_client(
     api_temporal_runtime: ObservabilityRuntime,
 ) -> None:
     runtime = api_temporal_runtime
-    settings = cast(Settings, SimpleNamespace(
-        temporal_address="temporal:7233", temporal_namespace="default"
-    ))
+    settings = cast(
+        Settings, SimpleNamespace(temporal_address="temporal:7233", temporal_namespace="default")
+    )
     connected: list[tuple[tuple[object, ...], dict[str, object]]] = []
     client = cast(TemporalClient, SimpleNamespace())
     expected_interceptors = [cast(Interceptor, object())]
@@ -3974,9 +4250,17 @@ def test_bootstrap_ast_contract_is_red_before_service_rewiring() -> None:
         REPO_ROOT / "services/sandbox_runner/src/jhin_sandbox_runner/main.py",
     )
     resource_suffixes = (
-        "create_engine", "nats.connect", "Client.connect", "TemporalClient.connect",
-        "httpx.AsyncClient", "JobManager", "Worker", "Resources.create",
-        "connect_with_retry", "resources_with_retry", "temporal_with_retry",
+        "create_engine",
+        "nats.connect",
+        "Client.connect",
+        "TemporalClient.connect",
+        "httpx.AsyncClient",
+        "JobManager",
+        "Worker",
+        "Resources.create",
+        "connect_with_retry",
+        "resources_with_retry",
+        "temporal_with_retry",
     )
     for path in entrypoints:
         tree = ast.parse(path.read_text())
@@ -3994,31 +4278,35 @@ def test_bootstrap_ast_contract_is_red_before_service_rewiring() -> None:
 
         resource_owners = 0
         for function in (
-            node for node in ast.walk(tree)
+            node
+            for node in ast.walk(tree)
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
             and node.name in {"main", "run", "lifespan", "create_app"}
         ):
             calls = sorted(
                 (
-                    node for node in ast.walk(function)
+                    node
+                    for node in ast.walk(function)
                     if isinstance(node, ast.Call) and owner(node) is function
                 ),
                 key=lambda node: (node.lineno, node.col_offset),
             )
             resources = [
-                call for call in calls
-                if ast.unparse(call.func).endswith(resource_suffixes)
+                call for call in calls if ast.unparse(call.func).endswith(resource_suffixes)
             ]
             if not resources:
                 continue
             resource_owners += 1
             initialization = [
-                call for call in calls
+                call
+                for call in calls
                 if ast.unparse(call.func).endswith("initialize_observability")
             ]
             assert initialization, (path, function.name)
             assert initialization[0].lineno < resources[0].lineno, (
-                path, function.name, ast.unparse(resources[0].func)
+                path,
+                function.name,
+                ast.unparse(resources[0].func),
             )
         assert resource_owners > 0, path
 
@@ -4030,7 +4318,8 @@ def test_long_lived_database_calls_inject_initialized_tracer() -> None:
         if path.name == "seed.py" or "tests" in path.parts:
             continue
         for call in (
-            node for node in ast.walk(ast.parse(path.read_text()))
+            node
+            for node in ast.walk(ast.parse(path.read_text()))
             if isinstance(node, ast.Call) and ast.unparse(node.func).endswith("create_engine")
         ):
             values = {keyword.arg: ast.unparse(keyword.value) for keyword in call.keywords}
@@ -4043,8 +4332,9 @@ def test_long_lived_database_calls_inject_initialized_tracer() -> None:
 # temporary "jhin-observability not in tool dependencies/imports" assertions.
 def test_tool_worker_keeps_authority_boundary_with_shared_observability() -> None:
     tool_dependencies = set(
-        tomllib.loads((REPO_ROOT / "services/tool_worker/pyproject.toml").read_text())
-        ["project"]["dependencies"]
+        tomllib.loads((REPO_ROOT / "services/tool_worker/pyproject.toml").read_text())["project"][
+            "dependencies"
+        ]
     )
     assert any(item.startswith("jhin-observability") for item in tool_dependencies)
     assert not any(item.startswith("jhin-models") for item in tool_dependencies)
@@ -4052,17 +4342,16 @@ def test_tool_worker_keeps_authority_boundary_with_shared_observability() -> Non
     assert not imports_under("services/tool_worker/src", "jhin_models")
     assert not imports_under("services/tool_worker/src", "jhin_agents")
     workflow_dependencies = set(
-        tomllib.loads((REPO_ROOT / "packages/workflows/pyproject.toml").read_text())
-        ["project"]["dependencies"]
+        tomllib.loads((REPO_ROOT / "packages/workflows/pyproject.toml").read_text())["project"][
+            "dependencies"
+        ]
     )
     assert any(item.startswith("jhin-observability") for item in workflow_dependencies)
 
 
 # services/tool_worker/tests/test_worker_registration.py
 def test_tool_worker_bootstraps_before_resources_and_registers_interceptors() -> None:
-    source = (
-        REPO_ROOT / "services/tool_worker/src/jhin_tool_worker/main.py"
-    ).read_text()
+    source = (REPO_ROOT / "services/tool_worker/src/jhin_tool_worker/main.py").read_text()
     tree = ast.parse(source)
     calls = sorted(
         (node for node in ast.walk(tree) if isinstance(node, ast.Call)),
@@ -4171,9 +4460,7 @@ class SafeTemporalTracingInterceptor(TracingInterceptor):
     def intercept_client(self, next: OutboundInterceptor) -> OutboundInterceptor:
         return super().intercept_client(next) if self.role == "client" else next
 
-    def intercept_activity(
-        self, next: ActivityInboundInterceptor
-    ) -> ActivityInboundInterceptor:
+    def intercept_activity(self, next: ActivityInboundInterceptor) -> ActivityInboundInterceptor:
         return super().intercept_activity(next) if self.role == "worker" else next
 
     def workflow_interceptor_class(
@@ -4189,9 +4476,7 @@ class SafeTemporalTracingInterceptor(TracingInterceptor):
     ) -> NexusOperationInboundInterceptor:
         return super().intercept_nexus_operation(next) if self.role == "worker" else next
 
-    def _completed_workflow_span(
-        self, params: CompletedWorkflowSpanParams
-    ) -> CarrierDict | None:
+    def _completed_workflow_span(self, params: CompletedWorkflowSpanParams) -> CarrierDict | None:
         return params.context
 
     @contextmanager
@@ -4232,9 +4517,7 @@ def safe_temporal_span_name(raw: str) -> str:
 
 
 _TEMPORAL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
-_TASK_QUEUES = frozenset(
-    {"jhin-workflow-queue", "jhin-agent-queue", "jhin-tool-queue"}
-)
+_TASK_QUEUES = frozenset({"jhin-workflow-queue", "jhin-agent-queue", "jhin-tool-queue"})
 
 
 def normalize_task_queue(value: str) -> str:
@@ -4304,9 +4587,7 @@ def _safe_temporal_current_span(
             set_status_on_exception=False,
         ) as span:
             if input_with_headers is not None:
-                input_with_headers.headers = root._context_to_headers(
-                    input_with_headers.headers
-                )
+                input_with_headers.headers = root._context_to_headers(input_with_headers.headers)
             if input_with_ctx is not None:
                 input_with_ctx.ctx = dataclasses.replace(
                     input_with_ctx.ctx,
@@ -4347,9 +4628,7 @@ class TemporalActivityMetricsInterceptor(temporalio.worker.Interceptor):
         self._metrics = metrics
         self._task_queue = normalize_task_queue(task_queue)
 
-    def intercept_activity(
-        self, next: ActivityInboundInterceptor
-    ) -> ActivityInboundInterceptor:
+    def intercept_activity(self, next: ActivityInboundInterceptor) -> ActivityInboundInterceptor:
         return _ActivityMetricsInbound(next, self._metrics, self._task_queue)
 
 
@@ -4462,11 +4741,13 @@ async def queue_has_workflow_poller(
         if raw_environment in {"dev", "test", "staging", "production"}
         else "production"
     )
-    active_runtime = runtime or initialize_observability(ObservabilityConfig(
-        service_name="temporal-poller-check",
-        service_version=service_version("jhin-workflows"),
-        environment=environment,
-    ))
+    active_runtime = runtime or initialize_observability(
+        ObservabilityConfig(
+            service_name="temporal-poller-check",
+            service_version=service_version("jhin-workflows"),
+            environment=environment,
+        )
+    )
     try:
         client = await Client.connect(
             address,
@@ -4530,12 +4811,15 @@ async def test_poller_forwards_the_builders_exact_interceptor_list(
     )
     monkeypatch.setattr(Client, "connect", connect)
 
-    assert await queue_has_workflow_poller(
-        "temporal.test:7233",
-        "default",
-        "jhin-workflow-queue",
-        runtime=active_runtime,
-    ) is True
+    assert (
+        await queue_has_workflow_poller(
+            "temporal.test:7233",
+            "default",
+            "jhin-workflow-queue",
+            runtime=active_runtime,
+        )
+        is True
+    )
     assert len(connected) == 1
     args, kwargs = connected[0]
     assert args == ("temporal.test:7233",)
@@ -4743,16 +5027,8 @@ def install_existing_runner_routes(
     def require_token(request: Request) -> None:
         configured = settings.sandbox_runner_token
         header = request.headers.get("authorization", "")
-        presented = (
-            header.removeprefix("Bearer ").strip()
-            if header.startswith("Bearer ")
-            else ""
-        )
-        if (
-            not configured
-            or not presented
-            or not secrets.compare_digest(presented, configured)
-        ):
+        presented = header.removeprefix("Bearer ").strip() if header.startswith("Bearer ") else ""
+        if not configured or not presented or not secrets.compare_digest(presented, configured):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="invalid runner token",
@@ -4851,7 +5127,9 @@ class TemporalWiringAudit:
 
 def _keyword_call_name(call: ast.Call, keyword: str) -> str | None:
     value = next((item.value for item in call.keywords if item.arg == keyword), None)
-    return value.func.id if isinstance(value, ast.Call) and isinstance(value.func, ast.Name) else None
+    return (
+        value.func.id if isinstance(value, ast.Call) and isinstance(value.func, ast.Name) else None
+    )
 
 
 def _import_aliases(tree: ast.AST) -> dict[str, str]:
@@ -4916,8 +5194,12 @@ def audit_temporal_wiring(root: Path) -> TemporalWiringAudit:
                 if _keyword_call_name(call, "interceptors") != "temporal_worker_interceptors":
                     bad_workers.append(f"{path}:{call.lineno}")
     return TemporalWiringAudit(
-        frozenset(clients), frozenset(workers), tuple(bad_clients), tuple(bad_workers),
-        tuple(health_connects), tuple(api_outside_provider),
+        frozenset(clients),
+        frozenset(workers),
+        tuple(bad_clients),
+        tuple(bad_workers),
+        tuple(health_connects),
+        tuple(api_outside_provider),
     )
 
 
@@ -5039,16 +5321,18 @@ git commit -m "feat(observability): trace Temporal service boundaries"
 ```python
 @pytest.mark.asyncio
 async def test_model_attempt_records_safe_metadata_only(
-    metrics: JhinMetrics, spans: InMemorySpanExporter, tracer: Tracer,
+    metrics: JhinMetrics,
+    spans: InMemorySpanExporter,
+    tracer: Tracer,
 ) -> None:
     prompt_canary = "prompt-canary-must-not-export"
     completion_canary = "completion-canary-must-not-export"
     raw = FakeModelClient(response=ModelResponse(text=completion_canary, latency_ms=17))
-    client = InstrumentedModelClient(
-        raw, provider_type="openai", metrics=metrics, tracer=tracer
-    )
+    client = InstrumentedModelClient(raw, provider_type="openai", metrics=metrics, tracer=tracer)
     await client.generate(
-        ModelRequest(model="private-model-name", messages=(ModelMessage(role="user", content=prompt_canary),))
+        ModelRequest(
+            model="private-model-name", messages=(ModelMessage(role="user", content=prompt_canary),)
+        )
     )
     assert metric_sum("model_requests_total", provider_type="openai", outcome="ok") == 1
     span = next(span for span in spans.get_finished_spans() if span.name == "model.request")
@@ -5067,7 +5351,9 @@ async def test_model_attempt_records_safe_metadata_only(
 
 @pytest.mark.asyncio
 async def test_failed_completed_attempt_counts_once_without_provider_body(
-    metrics: JhinMetrics, spans: InMemorySpanExporter, tracer: Tracer,
+    metrics: JhinMetrics,
+    spans: InMemorySpanExporter,
+    tracer: Tracer,
 ) -> None:
     client = InstrumentedModelClient(
         FakeModelClient(error=ModelProviderError("HTTP 500 provider-body-canary", retryable=True)),
@@ -5108,10 +5394,12 @@ async def test_api_provider_verification_uses_app_owned_metrics(
     monkeypatch.setattr(model_service, "build_model_client", fake_build_model_client)
     response = await admin_client.post(provider_verify_path())
     assert response.status_code == 200
-    assert observed == [(
-        api_app.state.observability.metrics,
-        api_app.state.observability.tracer,
-    )]
+    assert observed == [
+        (
+            api_app.state.observability.metrics,
+            api_app.state.observability.tracer,
+        )
+    ]
 ```
 
 Run RED:
@@ -5207,9 +5495,7 @@ def get_observability_runtime(request: Request) -> ObservabilityRuntime:
     return runtime
 
 
-ObservabilityRuntimeDep = Annotated[
-    ObservabilityRuntime, Depends(get_observability_runtime)
-]
+ObservabilityRuntimeDep = Annotated[ObservabilityRuntime, Depends(get_observability_runtime)]
 
 
 def _build_verification_client(
@@ -5237,8 +5523,14 @@ async def verify_provider_route(
     runtime: ObservabilityRuntimeDep,
 ) -> ProviderVerifyResult:
     ok, detail = await service.verify_provider(
-        db, crypto, ctx, provider_id, runtime.metrics, runtime.tracer,
-        request_id=req_id(request), ip_hash=ip_hash(request),
+        db,
+        crypto,
+        ctx,
+        provider_id,
+        runtime.metrics,
+        runtime.tracer,
+        request_id=req_id(request),
+        ip_hash=ip_hash(request),
     )
     return ProviderVerifyResult(ok=ok, detail=detail)
 ```
@@ -5253,7 +5545,8 @@ decryption, verification, audit, and commit statements stay byte-for-byte unchan
 ```python
 @pytest.mark.asyncio
 async def test_reasoning_span_ends_after_manifest_commit(
-    reasoning: AgentReasoningActivities, session_factory: SessionFactory,
+    reasoning: AgentReasoningActivities,
+    session_factory: SessionFactory,
 ) -> None:
     result = await reasoning.reason_agent_step_activity(reason_input_with_two_tools())
     spans = finished_spans_named("agent.reason_step")
@@ -5266,7 +5559,9 @@ async def test_reasoning_span_ends_after_manifest_commit(
 
 @pytest.mark.asyncio
 async def test_committed_usage_and_cost_are_not_double_counted_on_activity_replay() -> None:
-    params = committed_reason_step(input_tokens=11, output_tokens=7, cached_tokens=3, cost_micros=250_000)
+    params = committed_reason_step(
+        input_tokens=11, output_tokens=7, cached_tokens=3, cost_micros=250_000
+    )
     first = await reasoning.reason_agent_step_activity(params)
     replay = await reasoning.reason_agent_step_activity(params)
     assert replay == first
@@ -5311,14 +5606,16 @@ def record_committed_model_usage(
 ) -> None:
     provider = normalize_provider_type(provider_type)
     for direction, value in (
-        ("input", input_tokens), ("output", output_tokens), ("cached", cached_tokens)
+        ("input", input_tokens),
+        ("output", output_tokens),
+        ("cached", cached_tokens),
     ):
         if value > 0:
-            metrics.counter("model_tokens_total").add(value, provider_type=provider, direction=direction)
+            metrics.counter("model_tokens_total").add(
+                value, provider_type=provider, direction=direction
+            )
     if cost_micros > 0:
-        metrics.counter("model_cost_estimate").add(
-            cost_micros / 1_000_000, provider_type=provider
-        )
+        metrics.counter("model_cost_estimate").add(cost_micros / 1_000_000, provider_type=provider)
 ```
 
 In `AgentProjectionActivities.finalize_run_projection_activity`, lock/read the row and set `transitioned_to_terminal = current_status not in RUN_TERMINAL_STATUSES`. Commit the persisted timestamps/status first. Only when that boolean is true, record `agent_runs_total`, duration from persisted `started_at`/`completed_at`, and failure class. A crash after commit may lose diagnostic data; a retry must not duplicate it. Telemetry never introduces a durable outbox or changes the transaction.
@@ -5335,17 +5632,21 @@ async def test_committed_tool_outcome_counts_once_across_replay() -> None:
         bound_call("github.issue.comment", risk="elevated")
     )
     assert first.tool_call_id == replay.tool_call_id
-    assert metric_sum(
-        "tool_calls_total", tool_family="github", risk="elevated", outcome="completed"
-    ) == 1
+    assert (
+        metric_sum("tool_calls_total", tool_family="github", risk="elevated", outcome="completed")
+        == 1
+    )
 
 
 @pytest.mark.asyncio
 async def test_execution_unknown_records_terminal_failure_without_identifier_label() -> None:
     await activities.execute_bound_tool_activity(bound_call_that_becomes_unknown())
-    assert metric_sum(
-        "tool_call_failures_total", tool_family="github", failure_class="execution_unknown"
-    ) == 1
+    assert (
+        metric_sum(
+            "tool_call_failures_total", tool_family="github", failure_class="execution_unknown"
+        )
+        == 1
+    )
     assert "tool_call_id" not in exported_metric_attributes()
 ```
 
@@ -5365,7 +5666,11 @@ Add `jhin-observability` to `jhin-tools` and implement:
 ```python
 def tool_family(tool_name: str) -> str:
     prefix = tool_name.partition(".")[0]
-    return prefix if prefix in {"system", "organization", "github", "linear", "vercel", "supabase", "cli"} else "other"
+    return (
+        prefix
+        if prefix in {"system", "organization", "github", "linear", "vercel", "supabase", "cli"}
+        else "other"
+    )
 
 
 def record_committed_tool_outcome(metrics: JhinMetrics, outcome: GatewayOutcome) -> None:
@@ -5389,8 +5694,7 @@ Call this inside `ToolActivities.execute_bound_tool_activity` or `resolve_bound_
 ```python
 @pytest.mark.asyncio
 async def test_handle_event_counts_started_duplicate_and_failed_after_commits(
-    matcher: TriggerMatcher, trigger_case: TriggerTelemetryCase,
-    session_factory: SessionFactory
+    matcher: TriggerMatcher, trigger_case: TriggerTelemetryCase, session_factory: SessionFactory
 ) -> None:
     started_event = trigger_case.event_for("github", external_id="issue-1")
     await matcher.handle_event(started_event)
@@ -5406,18 +5710,14 @@ async def test_handle_event_counts_started_duplicate_and_failed_after_commits(
             )
         )
     assert statuses == ["started", "duplicate", "failed"]
-    assert metric_sum(
-        "trigger_invocations_total", connector_type="github", outcome="started"
-    ) == 1
-    assert metric_sum(
-        "trigger_invocations_total", connector_type="github", outcome="duplicate"
-    ) == 1
-    assert metric_sum(
-        "trigger_invocations_total", connector_type="github", outcome="failed"
-    ) == 1
-    assert metric_sum(
-        "trigger_failures_total", connector_type="github", failure_class="target"
-    ) == 1
+    assert metric_sum("trigger_invocations_total", connector_type="github", outcome="started") == 1
+    assert (
+        metric_sum("trigger_invocations_total", connector_type="github", outcome="duplicate") == 1
+    )
+    assert metric_sum("trigger_invocations_total", connector_type="github", outcome="failed") == 1
+    assert (
+        metric_sum("trigger_failures_total", connector_type="github", failure_class="target") == 1
+    )
 
 
 @pytest.mark.asyncio
@@ -5430,9 +5730,7 @@ async def test_two_failed_deliveries_create_and_count_two_fresh_invocations(
     temporal.fail_with = ConnectionError("provider-body-canary")
     for _delivery in range(2):
         with pytest.raises(ConnectionError):
-            await matcher.handle_event(
-                trigger_case.event_for("linear", external_id="issue-3")
-            )
+            await matcher.handle_event(trigger_case.event_for("linear", external_id="issue-3"))
     async with session_factory() as session:
         statuses = list(
             await session.scalars(
@@ -5440,15 +5738,11 @@ async def test_two_failed_deliveries_create_and_count_two_fresh_invocations(
             )
         )
     assert statuses == ["failed", "failed"]
-    assert metric_sum(
-        "trigger_invocations_total", connector_type="linear", outcome="started"
-    ) == 2
-    assert metric_sum(
-        "trigger_invocations_total", connector_type="linear", outcome="failed"
-    ) == 2
-    assert metric_sum(
-        "trigger_failures_total", connector_type="linear", failure_class="dispatch"
-    ) == 2
+    assert metric_sum("trigger_invocations_total", connector_type="linear", outcome="started") == 2
+    assert metric_sum("trigger_invocations_total", connector_type="linear", outcome="failed") == 2
+    assert (
+        metric_sum("trigger_failures_total", connector_type="linear", failure_class="dispatch") == 2
+    )
 ```
 
 Define the test seam in `services/event_worker/tests/test_telemetry.py` rather than using
@@ -5479,9 +5773,7 @@ class TriggerTelemetryCase:
     def event_for(self, connector_type: str, *, external_id: str) -> EventEnvelope:
         return self._event(connector_type, external_id, self.valid_trigger_id)
 
-    def event_for_missing_agent(
-        self, connector_type: str, *, external_id: str
-    ) -> EventEnvelope:
+    def event_for_missing_agent(self, connector_type: str, *, external_id: str) -> EventEnvelope:
         return self._event(connector_type, external_id, self.missing_agent_trigger_id)
 
 
@@ -5706,9 +5998,7 @@ def provider_failure(canary: str) -> Callable[[httpx.Request], httpx.Response]:
     return respond
 
 
-def one_finished_span(
-    exporter: InMemorySpanExporter, name: str
-) -> ReadableSpan:
+def one_finished_span(exporter: InMemorySpanExporter, name: str) -> ReadableSpan:
     matches = [span for span in exporter.get_finished_spans() if span.name == name]
     assert len(matches) == 1
     return matches[0]
@@ -5778,9 +6068,7 @@ async def test_in_span_provider_failure_exports_only_safe_connector_metadata(
         headers={"Authorization": "Bearer auth-canary"},
         json={"secret": "body-canary"},
     )
-    client = httpx.AsyncClient(
-        transport=httpx.MockTransport(provider_failure("error-body-canary"))
-    )
+    client = httpx.AsyncClient(transport=httpx.MockTransport(provider_failure("error-body-canary")))
     try:
         with pytest.raises(ProviderHTTPError):
             await send_bounded_json(
@@ -5795,9 +6083,7 @@ async def test_in_span_provider_failure_exports_only_safe_connector_metadata(
         await client.aclose()
 
     rendered = exported_span_payload(exporter)
-    for canary in (
-        "query-canary", "auth-canary", "body-canary", "error-body-canary"
-    ):
+    for canary in ("query-canary", "auth-canary", "body-canary", "error-body-canary"):
         assert canary not in rendered
     span = one_finished_span(exporter, "connector.http")
     attributes = dict(span.attributes or {})
@@ -5896,18 +6182,16 @@ async def test_supabase_asyncpg_span_excludes_dsn_sql_bindings_and_results(
     connection = TelemetryDatabaseConnection()
 
     async def fake_connect(**kwargs: Any) -> TelemetryDatabaseConnection:
-        assert kwargs["dsn"] == (
-            "postgresql://dsn-user-canary:dsn-pass-canary@127.0.0.1:65433/db"
-        )
+        assert kwargs["dsn"] == ("postgresql://dsn-user-canary:dsn-pass-canary@127.0.0.1:65433/db")
         return connection
 
     async def fake_verify_live_role(
         selected: TelemetryDatabaseConnection, allowed_schemas: tuple[str, ...]
     ) -> None:
         assert selected is connection and allowed_schemas == ("public",)
-        assert await selected.fetchrow(
-            "SELECT secret_canary WHERE value=$1", "bind-canary"
-        ) == {"value": "result-canary"}
+        assert await selected.fetchrow("SELECT secret_canary WHERE value=$1", "bind-canary") == {
+            "value": "result-canary"
+        }
 
     monkeypatch.setenv("JHIN_CONNECTOR_ALLOWED_DB_HOSTS", "127.0.0.1:65433")
     monkeypatch.setattr(database_client.asyncpg, "connect", fake_connect)
@@ -5920,10 +6204,7 @@ async def test_supabase_asyncpg_span_excludes_dsn_sql_bindings_and_results(
         tracer=tracer,
     )
     assert connection.closed is True
-    matches = [
-        span for span in exporter.get_finished_spans()
-        if span.name == "connector.database"
-    ]
+    matches = [span for span in exporter.get_finished_spans() if span.name == "connector.database"]
     assert len(matches) == 1
     span = matches[0]
     assert dict(span.attributes) == {
@@ -5933,8 +6214,11 @@ async def test_supabase_asyncpg_span_excludes_dsn_sql_bindings_and_results(
     }
     rendered = json.dumps({"name": span.name, "attributes": dict(span.attributes)})
     for canary in (
-        "dsn-user-canary", "dsn-pass-canary",
-        "SELECT secret_canary", "bind-canary", "result-canary",
+        "dsn-user-canary",
+        "dsn-pass-canary",
+        "SELECT secret_canary",
+        "bind-canary",
+        "result-canary",
     ):
         assert canary not in rendered
 ```
@@ -5976,9 +6260,7 @@ async def send_bounded_json(
     if expected_status_codes is not None and (
         not expected_status_codes
         or any(
-            isinstance(status, bool)
-            or not isinstance(status, int)
-            or not 200 <= status < 300
+            isinstance(status, bool) or not isinstance(status, int) or not 200 <= status < 300
             for status in expected_status_codes
         )
     ):
@@ -6058,9 +6340,9 @@ cases byte-for-byte except for adding these three keyword arguments to every
 `send_bounded_json(...)` call:
 
 ```python
-connector_type="github",
-operation="verify",
-tracer=noop_tracer(),
+connector_type = ("github",)
+operation = ("verify",)
+tracer = (noop_tracer(),)
 ```
 
 Append this regression to that same file so a later required-argument change cannot silently drop a
@@ -6118,17 +6400,13 @@ Add this binding-aware production audit to `packages/connectors/tests/test_telem
 
 ```python
 def test_every_connector_boundary_call_uses_the_owned_tracer() -> None:
-    roots = (
-        REPO_ROOT / "packages/connectors/src/jhin_connectors",
-    )
+    roots = (REPO_ROOT / "packages/connectors/src/jhin_connectors",)
     failures: list[str] = []
     for path in (candidate for root in roots for candidate in root.rglob("*.py")):
         tree = ast.parse(path.read_text())
         for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
             name = ast.unparse(call.func).rsplit(".", 1)[-1]
-            if name not in {
-                "send_bounded_json", "trace_connector_database", "_transport_request"
-            }:
+            if name not in {"send_bounded_json", "trace_connector_database", "_transport_request"}:
                 continue
             keywords = {keyword.arg: ast.unparse(keyword.value) for keyword in call.keywords}
             if keywords.get("tracer") not in {"self._telemetry.tracer", "tracer"}:
@@ -6141,7 +6419,8 @@ def test_tool_worker_catalog_injects_process_tracer() -> None:
         (REPO_ROOT / "services/tool_worker/src/jhin_tool_worker/resources.py").read_text()
     )
     calls = [
-        node for node in ast.walk(tree)
+        node
+        for node in ast.walk(tree)
         if isinstance(node, ast.Call) and ast.unparse(node.func).endswith("build_default_catalog")
     ]
     assert len(calls) == 1
@@ -6177,9 +6456,7 @@ async def trace_connector_database(
             outcome = "ok"
             return result
         except Exception as exc:
-            record_span_error(
-                span, safe_error(exc, code=SafeErrorCode.UPSTREAM_UNAVAILABLE)
-            )
+            record_span_error(span, safe_error(exc, code=SafeErrorCode.UPSTREAM_UNAVAILABLE))
             raise
         finally:
             span.set_attribute("jhin.outcome", outcome)
@@ -6207,10 +6484,7 @@ from jhin_observability import Observation
 def observation_values(
     values: Sequence[Observation], *label_keys: str
 ) -> dict[tuple[str, ...], int]:
-    return {
-        tuple(item.attributes[key] for key in label_keys): int(item.value)
-        for item in values
-    }
+    return {tuple(item.attributes[key] for key in label_keys): int(item.value) for item in values}
 
 
 def test_connector_health_aggregates_only_enabled_rows() -> None:
@@ -6270,7 +6544,10 @@ async def load_connector_health_rows(session_factory: SessionFactory) -> list[Co
                 ).where(Connection.status != ConnectionStatus.DISABLED.value)
             )
         ).all()
-    return [ConnectorHealthRow(type_, status, verified, has_error) for type_, status, verified, has_error in rows]
+    return [
+        ConnectorHealthRow(type_, status, verified, has_error)
+        for type_, status, verified, has_error in rows
+    ]
 
 
 def connector_health_observations(
@@ -6321,9 +6598,7 @@ async def poll_connector_health(
             metrics.set_observable("connector_health", health)
             metrics.set_observable("connector_connections", counts)
         except Exception as exc:
-            logger.warning(
-                "telemetry.connector_health_probe_failed", error_type=type(exc).__name__
-            )
+            logger.warning("telemetry.connector_health_probe_failed", error_type=type(exc).__name__)
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
         except TimeoutError:
@@ -6360,7 +6635,9 @@ def job_request(
 
 @pytest.mark.asyncio
 async def test_runner_receives_trace_headers_but_job_env_does_not(
-    spans: InMemorySpanExporter, metrics: JhinMetrics, tracer: Tracer,
+    spans: InMemorySpanExporter,
+    metrics: JhinMetrics,
+    tracer: Tracer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SANDBOX_RUNNER_TOKEN", "test-token")
@@ -6382,7 +6659,8 @@ async def test_runner_receives_trace_headers_but_job_env_does_not(
     assert "TRACEPARENT" not in payload["env"] and "TRACEPARENT" not in payload["secret_env"]
     assert result["status"] == "completed" and result["duration_ms"] == 7
     assert [request.path for request in transport.requests] == [
-        "/v1/jobs", "/v1/jobs/018f0000-0000-7000-8000-000000000010",
+        "/v1/jobs",
+        "/v1/jobs/018f0000-0000-7000-8000-000000000010",
         "/v1/jobs/018f0000-0000-7000-8000-000000000010",
     ]
     assert all(0 < request.timeout_seconds <= 30 for request in transport.requests)
@@ -6391,9 +6669,11 @@ async def test_runner_receives_trace_headers_but_job_env_does_not(
 
 @pytest.mark.asyncio
 async def test_runner_terminal_job_metrics_emit_once(
-    metrics: JhinMetrics, monkeypatch: pytest.MonkeyPatch,
+    metrics: JhinMetrics,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = JobManager(test_settings(), metrics=metrics)
+
     async def complete_without_docker(record: JobRecord) -> None:
         record.started_at = datetime(2026, 8, 18, tzinfo=UTC)
         await manager._finish_terminal(
@@ -6401,15 +6681,14 @@ async def test_runner_terminal_job_metrics_emit_once(
             "completed",
             finished_at=datetime(2026, 8, 18, 0, 0, 1, tzinfo=UTC),
         )
+
     monkeypatch.setattr(manager, "_run", complete_without_docker)
     request = job_request(network_policy="internet", command=["/bin/true"])
     first = await manager.submit(request)
     terminal = await manager.wait_terminal(first.request.job_id, timeout_seconds=2.0)
     assert terminal.status == "completed"
     assert terminal.duration_ms is not None and terminal.duration_ms >= 0
-    await manager._finish_terminal(
-        terminal, "completed", finished_at=terminal.finished_at
-    )
+    await manager._finish_terminal(terminal, "completed", finished_at=terminal.finished_at)
     stored = manager.get(request.job_id)
     assert stored is terminal and stored.to_response().status == "completed"
     first_cancel = await manager.cancel(request.job_id)
@@ -6422,15 +6701,16 @@ async def test_runner_terminal_job_metrics_emit_once(
 
 @pytest.mark.asyncio
 async def test_every_duplicate_job_id_keeps_existing_validation_behavior(
-    metrics: JhinMetrics, monkeypatch: pytest.MonkeyPatch,
+    metrics: JhinMetrics,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = JobManager(test_settings(), metrics=metrics)
+
     async def no_container_work(_record: JobRecord) -> None:
         return None
+
     monkeypatch.setattr(manager, "_run", no_container_work)
-    first = job_request(
-        job_id="018f0000-0000-7000-8000-000000000011", command=["/bin/true"]
-    )
+    first = job_request(job_id="018f0000-0000-7000-8000-000000000011", command=["/bin/true"])
     await manager.submit(first)
     for duplicate in (
         first.model_copy(deep=True),
@@ -6452,12 +6732,13 @@ def test_duplicate_submit_http_contract_remains_422(monkeypatch: pytest.MonkeyPa
     request = job_request(job_id="018f0000-0000-7000-8000-000000000012")
     with TestClient(app) as client:
         headers = {"Authorization": "Bearer test-token"}
-        assert client.post(
-            "/v1/jobs", headers=headers, json=request.model_dump(mode="json")
-        ).status_code == 202
-        response = client.post(
-            "/v1/jobs", headers=headers, json=request.model_dump(mode="json")
+        assert (
+            client.post(
+                "/v1/jobs", headers=headers, json=request.model_dump(mode="json")
+            ).status_code
+            == 202
         )
+        response = client.post("/v1/jobs", headers=headers, json=request.model_dump(mode="json"))
     assert response.status_code == 422
     assert response.json()["detail"] == f"job {request.job_id} already exists"
 ```
@@ -6559,15 +6840,16 @@ async def _transport_request(
     ) as span:
         try:
             response = await transport.request(
-                method, path, headers=headers, json_body=json_body,
+                method,
+                path,
+                headers=headers,
+                json_body=json_body,
                 timeout_seconds=timeout_seconds,
             )
             outcome = "ok" if 200 <= response.status_code < 300 else "failed"
             return response
         except Exception as exc:
-            record_span_error(
-                span, safe_error(exc, code=SafeErrorCode.UPSTREAM_UNAVAILABLE)
-            )
+            record_span_error(span, safe_error(exc, code=SafeErrorCode.UPSTREAM_UNAVAILABLE))
             raise
         finally:
             span.set_attribute("jhin.outcome", outcome)
@@ -6844,9 +7126,7 @@ class JobManager:
             record.task = asyncio.create_task(self._run(record))
             return record
 
-    async def wait_terminal(
-        self, job_id: str, *, timeout_seconds: float
-    ) -> JobRecord:
+    async def wait_terminal(self, job_id: str, *, timeout_seconds: float) -> JobRecord:
         async with self._jobs_lock:
             record = self._jobs.get(job_id)
             task = record.task if record is not None else None
@@ -7576,7 +7856,9 @@ def test_built_web_container_stdout_is_complete_json_v1(
     image = "jhin-web-telemetry-test:local"
     subprocess.run(
         ["docker", "build", "-f", "apps/web/Dockerfile", "-t", image, "."],
-        cwd=REPO_ROOT, check=True, timeout=600,
+        cwd=REPO_ROOT,
+        check=True,
+        timeout=600,
     )
     container_id = docker_container(image)
     wait_http(f"http://127.0.0.1:{published_port(container_id, 3000)}/", timeout=60)
@@ -7588,12 +7870,20 @@ def test_built_web_container_stdout_is_complete_json_v1(
     records = [json.loads(line) for line in logs.stdout.splitlines()]
     assert records
     required = {
-        "schema_version", "timestamp", "level", "service", "environment",
-        "event", "logger",
+        "schema_version",
+        "timestamp",
+        "level",
+        "service",
+        "environment",
+        "event",
+        "logger",
     }
     allowed_events = {
-        "web.started", "web.stopping", "web.rewrite_configured",
-        "web.request_failed", "web.framework_output_suppressed",
+        "web.started",
+        "web.stopping",
+        "web.rewrite_configured",
+        "web.request_failed",
+        "web.framework_output_suppressed",
         "log.event_rejected",
     }
     for record in records:
@@ -7616,7 +7906,10 @@ def test_built_web_container_stdout_is_complete_json_v1(
 def published_port(container_id: str, container_port: int) -> int:
     output = subprocess.run(
         ["docker", "port", container_id, f"{container_port}/tcp"],
-        capture_output=True, text=True, check=True, timeout=10,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
     ).stdout.strip()
     return int(output.rsplit(":", 1)[1])
 
@@ -7640,7 +7933,10 @@ def docker_container(request: pytest.FixtureRequest) -> Callable[[str], str]:
     def start(image: str) -> str:
         container_id = subprocess.run(
             ["docker", "run", "-d", "-P", image],
-            capture_output=True, text=True, check=True, timeout=20,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=20,
         ).stdout.strip()
         created.append(container_id)
         return container_id
@@ -7649,7 +7945,10 @@ def docker_container(request: pytest.FixtureRequest) -> Callable[[str], str]:
         for container_id in created:
             subprocess.run(
                 ["docker", "rm", "-f", container_id],
-                capture_output=True, text=True, check=False, timeout=20,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=20,
             )
 
     request.addfinalizer(cleanup)
@@ -7747,8 +8046,13 @@ def render_compose(
     else:
         environment.pop("SANDBOX_DOCKER_GID", None)
     completed = subprocess.run(
-        argv, cwd=ROOT, env=environment, capture_output=True, text=True,
-        check=True, timeout=30,
+        argv,
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
     )
     document = json.loads(completed.stdout)
     assert isinstance(document, dict)
@@ -7771,8 +8075,14 @@ def test_profile_is_optional_internal_and_credential_free(rendered: dict[str, An
         assert service["healthcheck"]["test"][0:2] == ["CMD", "/bin/busybox"]
         serialized = json.dumps(service).lower()
         for forbidden in (
-            "database_url", "nats_url", "temporal_address", "master_key", "docker.sock",
-            "sandbox_runner_token", "authorization", "api_key",
+            "database_url",
+            "nats_url",
+            "temporal_address",
+            "master_key",
+            "docker.sock",
+            "sandbox_runner_token",
+            "authorization",
+            "api_key",
         ):
             assert forbidden not in serialized
     assert rendered["networks"]["monitoring"]["internal"] is True
@@ -7787,13 +8097,22 @@ def test_monitoring_retention_is_exact() -> None:
 
 @pytest.mark.parametrize(
     "service",
-    ["web", "api", "workflow-worker", "agent-worker", "tool-worker", "event-worker", "sandbox-runner"],
+    [
+        "web",
+        "api",
+        "workflow-worker",
+        "agent-worker",
+        "tool-worker",
+        "event-worker",
+        "sandbox-runner",
+    ],
 )
 def test_every_application_service_has_bounded_json_file_logs(
     rendered: dict[str, Any], service: str
 ) -> None:
     assert rendered["services"][service]["logging"] == {
-        "driver": "json-file", "options": {"max-file": "5", "max-size": "20m"}
+        "driver": "json-file",
+        "options": {"max-file": "5", "max-size": "20m"},
     }
 ```
 
@@ -7995,19 +8314,47 @@ providers:
 ```python
 PANELS = (
     ("Agent runs", "sum by (outcome) (rate(agent_runs_total[5m]))", "ops"),
-    ("Agent run p95", "histogram_quantile(0.95, sum by (le, outcome) (rate(agent_run_duration_seconds_bucket[5m])))", "s"),
+    (
+        "Agent run p95",
+        "histogram_quantile(0.95, sum by (le, outcome) (rate(agent_run_duration_seconds_bucket[5m])))",
+        "s",
+    ),
     ("Agent failures", "sum by (failure_class) (rate(agent_run_failures_total[5m]))", "ops"),
     ("Model attempts", "sum by (provider_type, outcome) (rate(model_requests_total[5m]))", "ops"),
     ("Model tokens", "sum by (provider_type, direction) (rate(model_tokens_total[5m]))", "ops"),
-    ("Estimated model cost", "sum by (provider_type) (increase(model_cost_estimate[1h]))", "currencyUSD"),
+    (
+        "Estimated model cost",
+        "sum by (provider_type) (increase(model_cost_estimate[1h]))",
+        "currencyUSD",
+    ),
     ("Tool calls", "sum by (tool_family, risk, outcome) (rate(tool_calls_total[5m]))", "ops"),
-    ("Tool failures", "sum by (tool_family, failure_class) (rate(tool_call_failures_total[5m]))", "ops"),
-    ("Trigger invocations", "sum by (connector_type, outcome) (rate(trigger_invocations_total[5m]))", "ops"),
-    ("Trigger failures", "sum by (connector_type, failure_class) (rate(trigger_failures_total[5m]))", "ops"),
+    (
+        "Tool failures",
+        "sum by (tool_family, failure_class) (rate(tool_call_failures_total[5m]))",
+        "ops",
+    ),
+    (
+        "Trigger invocations",
+        "sum by (connector_type, outcome) (rate(trigger_invocations_total[5m]))",
+        "ops",
+    ),
+    (
+        "Trigger failures",
+        "sum by (connector_type, failure_class) (rate(trigger_failures_total[5m]))",
+        "ops",
+    ),
     ("Sandbox jobs", "sum by (outcome, network_policy) (rate(sandbox_jobs_total[5m]))", "ops"),
-    ("Sandbox job p95", "histogram_quantile(0.95, sum by (le, outcome) (rate(sandbox_job_duration_seconds_bucket[5m])))", "s"),
+    (
+        "Sandbox job p95",
+        "histogram_quantile(0.95, sum by (le, outcome) (rate(sandbox_job_duration_seconds_bucket[5m])))",
+        "s",
+    ),
     ("NATS consumer lag", "max by (stream, consumer) (nats_consumer_lag)", "short"),
-    ("Temporal activity failures", "sum by (task_queue, activity, failure_class) (rate(temporal_activity_failures[5m]))", "ops"),
+    (
+        "Temporal activity failures",
+        "sum by (task_queue, activity, failure_class) (rate(temporal_activity_failures[5m]))",
+        "ops",
+    ),
     ("Connector health", "min by (connector_type) (connector_health)", "short"),
     ("Connector counts", "sum by (connector_type, outcome) (connector_connections)", "short"),
 )
@@ -8325,31 +8672,42 @@ def test_legacy_integration_keeps_project_fallback_and_required_services() -> No
     assert contract.project == "jhin"
     assert contract.telemetry_mode is None
     assert contract.socket_mode == "rootless"
-    assert contract.required_services == frozenset({
-        "api", "web", "workflow-worker", "event-worker", "postgres", "nats",
-        "temporal",
-    })
+    assert contract.required_services == frozenset(
+        {
+            "api",
+            "web",
+            "workflow-worker",
+            "event-worker",
+            "postgres",
+            "nats",
+            "temporal",
+        }
+    )
 
 
 def test_telemetry_contract_is_strict_and_selects_exactly_one_overlay() -> None:
     with pytest.raises(ValueError, match="JHIN_TEST_COMPOSE_PROJECT"):
         resolve_stack_contract({"JHIN_TELEMETRY_MODE": "base"})
-    rootful = resolve_stack_contract({
-        "JHIN_TELEMETRY_MODE": "observed",
-        "JHIN_TEST_COMPOSE_PROJECT": "jhin-phase10-observed",
-        "PHASE10_SOCKET_MODE": "rootful",
-        "SANDBOX_DOCKER_GID": "998",
-    })
+    rootful = resolve_stack_contract(
+        {
+            "JHIN_TELEMETRY_MODE": "observed",
+            "JHIN_TEST_COMPOSE_PROJECT": "jhin-phase10-observed",
+            "PHASE10_SOCKET_MODE": "rootful",
+            "SANDBOX_DOCKER_GID": "998",
+        }
+    )
     assert rootful.socket_mode == "rootful"
     assert compose_files(rootful.socket_mode).count("compose.rootful.yaml") == 1
     assert "compose.rootless.yaml" not in compose_files(rootful.socket_mode)
     with pytest.raises(ValueError, match="must be unset"):
-        resolve_stack_contract({
-            "JHIN_TELEMETRY_MODE": "base",
-            "JHIN_TEST_COMPOSE_PROJECT": "jhin-phase10-base",
-            "PHASE10_SOCKET_MODE": "rootless",
-            "SANDBOX_DOCKER_GID": "998",
-        })
+        resolve_stack_contract(
+            {
+                "JHIN_TELEMETRY_MODE": "base",
+                "JHIN_TEST_COMPOSE_PROJECT": "jhin-phase10-base",
+                "PHASE10_SOCKET_MODE": "rootless",
+                "SANDBOX_DOCKER_GID": "998",
+            }
+        )
 
 
 def test_legacy_make_gate_still_invokes_unscoped_integration_suite() -> None:
@@ -8366,14 +8724,21 @@ def test_scenario_driver_contract_exists_before_harness_rewrite() -> None:
     source = path.read_text()
     tree = ast.parse(source)
     fixtures = {
-        node.name for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     assert "scenario_driver" in fixtures
     for required in (
-        "prompt", "completion", "connector_response", "connector_error",
-        "authorization", "cookie", "dsn_user", "dsn_password", "webhook_body",
-        "tool_output", "sandbox_secret_env",
+        "prompt",
+        "completion",
+        "connector_response",
+        "connector_error",
+        "authorization",
+        "cookie",
+        "dsn_user",
+        "dsn_password",
+        "webhook_body",
+        "tool_output",
+        "sandbox_secret_env",
     ):
         assert f"canaries.{required}" in source
 ```
@@ -8417,26 +8782,55 @@ import httpx
 import pytest
 
 APPLICATION_SERVICES = (
-    "web", "api", "workflow-worker", "agent-worker", "tool-worker",
-    "event-worker", "sandbox-runner",
+    "web",
+    "api",
+    "workflow-worker",
+    "agent-worker",
+    "tool-worker",
+    "event-worker",
+    "sandbox-runner",
 )
 SocketMode = Literal["rootful", "rootless"]
 
 
 def compose_files(mode: SocketMode) -> tuple[str, ...]:
     return (
-        "-f", "compose.yaml", "-f", "compose.dev.yaml",
-        "-f", f"compose.{mode}.yaml",
+        "-f",
+        "compose.yaml",
+        "-f",
+        "compose.dev.yaml",
+        "-f",
+        f"compose.{mode}.yaml",
     )
 
 
-LEGACY_REQUIRED_SERVICES = frozenset({
-    "api", "web", "workflow-worker", "event-worker", "postgres", "nats", "temporal",
-})
-TELEMETRY_REQUIRED_SERVICES = frozenset({
-    "api", "web", "workflow-worker", "agent-worker", "tool-worker", "event-worker",
-    "sandbox-runner", "postgres", "nats", "temporal", "fake-provider", "fake-linear",
-})
+LEGACY_REQUIRED_SERVICES = frozenset(
+    {
+        "api",
+        "web",
+        "workflow-worker",
+        "event-worker",
+        "postgres",
+        "nats",
+        "temporal",
+    }
+)
+TELEMETRY_REQUIRED_SERVICES = frozenset(
+    {
+        "api",
+        "web",
+        "workflow-worker",
+        "agent-worker",
+        "tool-worker",
+        "event-worker",
+        "sandbox-runner",
+        "postgres",
+        "nats",
+        "temporal",
+        "fake-provider",
+        "fake-linear",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -8505,9 +8899,7 @@ class TelemetryCanaries:
         return tuple(getattr(self, field.name) for field in dataclasses.fields(self))
 
 
-ScenarioDriver = Callable[
-    ["Stack", str, TelemetryCanaries | None], Awaitable[ScenarioResult]
-]
+ScenarioDriver = Callable[["Stack", str, TelemetryCanaries | None], Awaitable[ScenarioResult]]
 
 
 @dataclass
@@ -8526,8 +8918,12 @@ class Stack:
             environment.pop("SANDBOX_DOCKER_GID", None)
         return subprocess.run(
             ["docker", "compose", "-p", self.project, *compose_files(self.socket_mode), *args],
-            cwd=REPO_ROOT, env=environment, capture_output=True, text=True,
-            check=True, timeout=timeout,
+            cwd=REPO_ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=timeout,
         )
 
     async def compose(self, *args: str, timeout: float = 180.0) -> str:
@@ -8578,8 +8974,7 @@ class Stack:
                 or not isinstance(manifest["values"], dict)
                 or set(manifest["values"]) != expected
                 or not all(
-                    isinstance(value, str) and value
-                    for value in manifest["values"].values()
+                    isinstance(value, str) and value for value in manifest["values"].values()
                 )
             ):
                 raise ValueError("telemetry canary manifest schema mismatch")
@@ -8632,7 +9027,8 @@ class Stack:
                     batches = response.json().get("batches", [])
                     spans = [
                         {**span, "trace_id": str(span.get("traceId", "")).lower()}
-                        for batch in batches for scope in batch.get("scopeSpans", [])
+                        for batch in batches
+                        for scope in batch.get("scopeSpans", [])
                         for span in scope.get("spans", [])
                     ]
                     if spans and required <= {str(span.get("name", "")) for span in spans}:
@@ -8644,13 +9040,19 @@ class Stack:
 
     async def collector_metrics(self) -> str:
         return await self.compose(
-            "exec", "-T", "otel-collector", "/bin/busybox", "wget", "-qO-",
+            "exec",
+            "-T",
+            "otel-collector",
+            "/bin/busybox",
+            "wget",
+            "-qO-",
             "http://127.0.0.1:9464/metrics",
         )
 
     async def emit_metric_fixtures(self) -> None:
         await self.compose(
-            "cp", "tests/integration/emit_phase10_metrics.py",
+            "cp",
+            "tests/integration/emit_phase10_metrics.py",
             "api:/tmp/emit_phase10_metrics.py",
         )
         await self.compose("exec", "-T", "api", "python", "/tmp/emit_phase10_metrics.py")
@@ -8669,20 +9071,31 @@ class Stack:
                     stream,
                 )
             await self.compose(
-                "cp", "tests/integration/emit_phase10_metrics.py",
+                "cp",
+                "tests/integration/emit_phase10_metrics.py",
                 "api:/tmp/emit_phase10_metrics.py",
             )
             await self.compose("cp", str(local_path), f"api:{container_path}")
             await self.compose(
-                "exec", "-T", "api", "python", "/tmp/emit_phase10_metrics.py",
-                "--database-canary-file", container_path,
-                "--traceparent", traceparent,
+                "exec",
+                "-T",
+                "api",
+                "python",
+                "/tmp/emit_phase10_metrics.py",
+                "--database-canary-file",
+                container_path,
+                "--traceparent",
+                traceparent,
             )
         finally:
             local_path.unlink(missing_ok=True)
             with contextlib.suppress(subprocess.CalledProcessError):
                 await self.compose(
-                    "exec", "-T", "api", "python", "-c",
+                    "exec",
+                    "-T",
+                    "api",
+                    "python",
+                    "-c",
                     "from pathlib import Path; Path('/tmp/phase10-sink-canaries.json').unlink(missing_ok=True)",
                 )
 
@@ -8693,14 +9106,19 @@ class Stack:
             self.last_result.trace_id,
             timeout=30,
             required_names={
-                "model.request", "connector.http", "connector.database",
+                "model.request",
+                "connector.http",
+                "connector.database",
                 "sandbox.job.lifecycle",
             },
         )
-        return "\n".join((
-            await self.logs_all_application_services(),
-            json.dumps(spans, sort_keys=True), await self.collector_metrics(),
-        ))
+        return "\n".join(
+            (
+                await self.logs_all_application_services(),
+                json.dumps(spans, sort_keys=True),
+                await self.collector_metrics(),
+            )
+        )
 
 
 @pytest.fixture
@@ -8710,8 +9128,12 @@ async def telemetry_stack(scenario_driver: ScenarioDriver) -> AsyncIterator[Stac
         raise ValueError("telemetry_stack requires JHIN_TELEMETRY_MODE")
     async with httpx.AsyncClient(base_url=API_URL, timeout=30) as api:
         yield Stack(
-            contract.project, contract.telemetry_mode, contract.socket_mode, api,
-            os.environ.get("JHIN_TEMPO_URL", "http://127.0.0.1:3200"), scenario_driver,
+            contract.project,
+            contract.telemetry_mode,
+            contract.socket_mode,
+            api,
+            os.environ.get("JHIN_TEMPO_URL", "http://127.0.0.1:3200"),
+            scenario_driver,
         )
 
 
@@ -8737,7 +9159,10 @@ def _require_stack() -> None:
     try:
         contract = resolve_stack_contract(os.environ)
         result = compose(
-            "ps", "--services", "--filter", "status=running",
+            "ps",
+            "--services",
+            "--filter",
+            "status=running",
             project=contract.project,
             socket_mode=contract.socket_mode,
         )
@@ -8751,9 +9176,7 @@ def _require_stack() -> None:
                 "integration tests need the dev stack running (make dev); "
                 f"missing: {sorted(missing)}"
             )
-        pytest.fail(
-            f"compose project {contract.project} missing services: {sorted(missing)}"
-        )
+        pytest.fail(f"compose project {contract.project} missing services: {sorted(missing)}")
 ```
 
 Extend `compose` with the keyword-only project argument using this complete replacement; explicit telemetry callers never use the legacy fallback, while older suites retain it:
@@ -8840,43 +9263,67 @@ def scenario_driver() -> ScenarioDriver:
         tag = uuid4().hex[:10]
         linear_created = await post(
             f"/api/v1/workspaces/{workspace}/connections",
-            {"connector_type": "linear", "name": f"Telemetry Linear {tag}",
-             "auth_type": "api_key", "credentials": {"api_key": "fake-linear-api-key"},
-             "config": {"base_url": "http://fake-linear:8080"}},
+            {
+                "connector_type": "linear",
+                "name": f"Telemetry Linear {tag}",
+                "auth_type": "api_key",
+                "credentials": {"api_key": "fake-linear-api-key"},
+                "config": {"base_url": "http://fake-linear:8080"},
+            },
         )
         linear = linear_created["connection"]
         github: Mapping[str, object] | None = None
         if canaries is not None:
-            github = (await post(
+            github = (
+                await post(
+                    f"/api/v1/workspaces/{workspace}/connections",
+                    {
+                        "connector_type": "github",
+                        "name": f"Telemetry GitHub {tag}",
+                        "auth_type": "token",
+                        "credentials": {"token": canaries.sandbox_secret_env},
+                        "config": {"base_url": "http://fake-github:8080"},
+                    },
+                )
+            )["connection"]
+        cli = (
+            await post(
                 f"/api/v1/workspaces/{workspace}/connections",
-                {"connector_type": "github", "name": f"Telemetry GitHub {tag}",
-                 "auth_type": "token",
-                 "credentials": {"token": canaries.sandbox_secret_env},
-                 "config": {"base_url": "http://fake-github:8080"}},
-            ))["connection"]
-        cli = (await post(
-            f"/api/v1/workspaces/{workspace}/connections",
-            {"connector_type": "cli", "name": f"Telemetry CLI {tag}",
-             "auth_type": "none", "credentials": {},
-             "config": {
-                 "default_network": "internet" if github is not None else "none",
-                 **({"git_connection_id": github["id"]} if github is not None else {}),
-             }},
-        ))["connection"]
+                {
+                    "connector_type": "cli",
+                    "name": f"Telemetry CLI {tag}",
+                    "auth_type": "none",
+                    "credentials": {},
+                    "config": {
+                        "default_network": "internet" if github is not None else "none",
+                        **({"git_connection_id": github["id"]} if github is not None else {}),
+                    },
+                },
+            )
+        )["connection"]
         provider = await post(
             f"/api/v1/workspaces/{workspace}/model-providers",
-            {"type": "openai_compatible", "display_name": f"Telemetry provider {tag}",
-             "base_url": "http://fake-provider:8080/v1"},
+            {
+                "type": "openai_compatible",
+                "display_name": f"Telemetry provider {tag}",
+                "base_url": "http://fake-provider:8080/v1",
+            },
         )
         profile = await post(
             f"/api/v1/workspaces/{workspace}/model-profiles",
-            {"provider_id": provider["id"], "model_name": "fake-mini",
-             "display_name": f"Telemetry profile {tag}"},
+            {
+                "provider_id": provider["id"],
+                "model_name": "fake-mini",
+                "display_name": f"Telemetry profile {tag}",
+            },
         )
         agent = await post(
             f"/api/v1/workspaces/{workspace}/agents",
-            {"name": f"Telemetry agent {tag}", "system_prompt": "Use both requested tools.",
-             "model_profile_id": profile["id"]},
+            {
+                "name": f"Telemetry agent {tag}",
+                "system_prompt": "Use both requested tools.",
+                "model_profile_id": profile["id"],
+            },
         )
         for capability, scope in (
             ("linear.issue.read", {"connection_id": linear["id"], "issue": "ENG-*"}),
@@ -8889,42 +9336,55 @@ def scenario_driver() -> ScenarioDriver:
         title = f"Telemetry {tag}"
         trigger = await post(
             f"/api/v1/workspaces/{workspace}/triggers",
-            {"name": title, "connection_id": linear["id"],
-             "event_type": "connector.linear.issue.updated",
-             "filter": {"all": [
-                 {"path": "data.team.key", "op": "eq", "value": "ENG"},
-                 {"path": "data.state.name", "op": "transitioned_to", "value": "Todo"},
-                 {"path": "data.title", "op": "eq", "value": title},
-             ]}, "target_agent_id": agent["id"], "action_config": {"comment_back": False},
-             "dedupe_window_seconds": 3600},
+            {
+                "name": title,
+                "connection_id": linear["id"],
+                "event_type": "connector.linear.issue.updated",
+                "filter": {
+                    "all": [
+                        {"path": "data.team.key", "op": "eq", "value": "ENG"},
+                        {"path": "data.state.name", "op": "transitioned_to", "value": "Todo"},
+                        {"path": "data.title", "op": "eq", "value": title},
+                    ]
+                },
+                "target_agent_id": agent["id"],
+                "action_config": {"comment_back": False},
+                "dedupe_window_seconds": 3600,
+            },
         )
         prompt_text = canaries.prompt if canaries is not None else "telemetry prompt"
         completion_marker = (
             "[[telemetry_completion_b64:"
             + base64.b64encode(canaries.completion.encode()).decode()
             + "]]"
-            if canaries is not None else ""
+            if canaries is not None
+            else ""
         )
         command = (
             f"printf %s {shlex.quote(canaries.tool_output)}"
-            if canaries is not None else "printf telemetry-ok"
+            if canaries is not None
+            else "printf telemetry-ok"
         )
         cli_arguments: dict[str, object] = {
-            "connection_id": cli["id"], "command": command,
+            "connection_id": cli["id"],
+            "command": command,
         }
-        markers = " ".join((
-            f'[[tool:linear.issue.read {{"connection_id":"{linear["id"]}","issue":"ENG-142"}}]]',
-            f'[[tool:cli.command.execute {json.dumps(cli_arguments, separators=(",", ":"))}]]',
-            prompt_text,
-            completion_marker,
-        ))
+        markers = " ".join(
+            (
+                f'[[tool:linear.issue.read {{"connection_id":"{linear["id"]}","issue":"ENG-142"}}]]',
+                f"[[tool:cli.command.execute {json.dumps(cli_arguments, separators=(',', ':'))}]]",
+                prompt_text,
+                completion_marker,
+            )
+        )
         async with httpx.AsyncClient(base_url=FAKE_LINEAR_URL, timeout=15) as fake:
             edited = await fake.post(
                 "/_admin/issues/ENG-142/edit",
                 json={
                     "title": title,
                     "description": canaries.connector_response
-                    if canaries is not None else "telemetry connector response",
+                    if canaries is not None
+                    else "telemetry connector response",
                 },
             )
             edited.raise_for_status()
@@ -8934,24 +9394,38 @@ def scenario_driver() -> ScenarioDriver:
         backlog = next(row for row in team["states"] if row["name"] == "Backlog")
         todo = next(row for row in team["states"] if row["name"] == "Todo")
         payload = {
-            "action": "update", "type": "Issue", "organizationId": "telemetry-org",
-            "webhookId": f"telemetry-{tag}", "webhookTimestamp": int(time.time() * 1000),
-            "url": issue["url"], "updatedFrom": {"stateId": backlog["id"]},
-            "data": {"id": issue["id"], "identifier": "ENG-142", "title": title,
-                     "description": f"Run: {markers}", "priority": 0,
-                     "team": {"id": team["id"], "key": "ENG", "name": "Engineering"},
-                     "state": {"id": todo["id"], "name": "Todo", "type": todo["type"]},
-                     "labels": [], "url": issue["url"]},
+            "action": "update",
+            "type": "Issue",
+            "organizationId": "telemetry-org",
+            "webhookId": f"telemetry-{tag}",
+            "webhookTimestamp": int(time.time() * 1000),
+            "url": issue["url"],
+            "updatedFrom": {"stateId": backlog["id"]},
+            "data": {
+                "id": issue["id"],
+                "identifier": "ENG-142",
+                "title": title,
+                "description": f"Run: {markers}",
+                "priority": 0,
+                "team": {"id": team["id"], "key": "ENG", "name": "Engineering"},
+                "state": {"id": todo["id"], "name": "Todo", "type": todo["type"]},
+                "labels": [],
+                "url": issue["url"],
+            },
         }
         body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         webhook = linear_created["webhook"]
         await asyncio.sleep(6.0)
         response = await stack.api.post(
-            webhook["url_path"], content=body,
-            headers={"content-type": "application/json", "linear-event": "Issue",
-                     "linear-delivery": f"telemetry-{tag}",
-                     "linear-signature": sign_payload(webhook["secret"], body),
-                     "traceparent": traceparent},
+            webhook["url_path"],
+            content=body,
+            headers={
+                "content-type": "application/json",
+                "linear-event": "Issue",
+                "linear-delivery": f"telemetry-{tag}",
+                "linear-signature": sign_payload(webhook["secret"], body),
+                "traceparent": traceparent,
+            },
         )
         assert response.status_code == 202, response.text
         if canaries is not None:
@@ -9015,8 +9489,11 @@ def scenario_driver() -> ScenarioDriver:
         terminal = await stack.wait_for_task_terminal(timeout=120)
         detail = (await stack.api.get(f"/api/v1/workspaces/{workspace}/tasks/{task_id}")).json()
         return ScenarioResult(
-            traceparent.split("-")[1], workspace, task_id,
-            str(detail["runs"][0]["id"]), str(terminal["state"]),
+            traceparent.split("-")[1],
+            workspace,
+            task_id,
+            str(detail["runs"][0]["id"]),
+            str(terminal["state"]),
         )
 
     return drive
@@ -9033,9 +9510,10 @@ def test_telemetry_completion_marker_is_decoded_only_into_fake_response() -> Non
     canary = "completion-response-canary"
     encoded = base64.b64encode(canary.encode()).decode()
     status, response = build_completion(
-        {"model": "fake-mini", "messages": [
-            {"role": "user", "content": f"[[telemetry_completion_b64:{encoded}]]"}
-        ]}
+        {
+            "model": "fake-mini",
+            "messages": [{"role": "user", "content": f"[[telemetry_completion_b64:{encoded}]]"}],
+        }
     )
     assert status == 200
     assert response["choices"][0]["message"]["content"] == canary
@@ -9047,10 +9525,18 @@ def test_fake_linear_one_shot_error_body_is_consumed_once() -> None:
         state, "POST", "/_admin/telemetry/next-error", {}, {"body": "connector-error-canary"}
     ) == (200, {"configured": True})
     first = handle_request(
-        state, "POST", "/graphql", {"Authorization": "fake-linear-api-key"}, {"query": "{ viewer { id } }"}
+        state,
+        "POST",
+        "/graphql",
+        {"Authorization": "fake-linear-api-key"},
+        {"query": "{ viewer { id } }"},
     )
     second = handle_request(
-        state, "POST", "/graphql", {"Authorization": "fake-linear-api-key"}, {"query": "{ viewer { id } }"}
+        state,
+        "POST",
+        "/graphql",
+        {"Authorization": "fake-linear-api-key"},
+        {"query": "{ viewer { id } }"},
     )
     assert first == (500, {"errors": [{"message": "connector-error-canary"}]})
     assert second[0] == 200
@@ -9067,9 +9553,7 @@ Expected: FAIL because neither closed test seam exists. Then add exactly:
 
 ```python
 # fake_openai.py
-TELEMETRY_COMPLETION_RE = re.compile(
-    r"\[\[telemetry_completion_b64:([A-Za-z0-9+/=]+)\]\]"
-)
+TELEMETRY_COMPLETION_RE = re.compile(r"\[\[telemetry_completion_b64:([A-Za-z0-9+/=]+)\]\]")
 
 
 def _telemetry_completion(messages: list[dict[str, Any]]) -> str | None:
@@ -9083,11 +9567,10 @@ def _telemetry_completion(messages: list[dict[str, Any]]) -> str | None:
             return value[:2_000]
     return None
 
+
 def _completion_reply(model: str, messages: list[dict[str, Any]]) -> str:
     tool_results = [
-        str(message.get("content", ""))
-        for message in messages
-        if message.get("role") == "tool"
+        str(message.get("content", "")) for message in messages if message.get("role") == "tool"
     ]
     last_user = next(
         (
@@ -9228,7 +9711,9 @@ async def test_no_telemetry_sink_contains_raw_or_encoded_canary(
     for canary in canaries:
         raw = canary.encode()
         for encoded in (
-            canary, quote(canary, safe=""), base64.b64encode(raw).decode(),
+            canary,
+            quote(canary, safe=""),
+            base64.b64encode(raw).decode(),
             base64.urlsafe_b64encode(raw).decode(),
         ):
             assert encoded not in sinks
@@ -9237,7 +9722,9 @@ async def test_no_telemetry_sink_contains_raw_or_encoded_canary(
         observed_stack.last_result.trace_id,
         timeout=30,
         required_names={
-            "model.request", "connector.http", "connector.database",
+            "model.request",
+            "connector.http",
+            "connector.database",
             "sandbox.job.lifecycle",
         },
     )
@@ -9289,7 +9776,8 @@ FIXTURES = {
     "trigger_failures_total": {"connector_type": "linear", "failure_class": "dispatch"},
     "sandbox_jobs_total": {"outcome": "completed", "network_policy": "none"},
     "temporal_activity_failures": {
-        "task_queue": "jhin-tool-queue", "activity": "execute_bound_tool",
+        "task_queue": "jhin-tool-queue",
+        "activity": "execute_bound_tool",
         "failure_class": "internal",
     },
 }
@@ -9319,9 +9807,7 @@ def emit_metric_fixtures() -> None:
         for name, labels in HISTOGRAMS.items():
             runtime.metrics.histogram(cast(MetricName, name)).record(0.1, **labels)
         for name, (value, labels) in GAUGES.items():
-            runtime.metrics.set_observable(
-                cast(MetricName, name), (Observation(value, labels),)
-            )
+            runtime.metrics.set_observable(cast(MetricName, name), (Observation(value, labels),))
     finally:
         runtime.shutdown(timeout_millis=10_000)
 
@@ -9336,17 +9822,18 @@ async def emit_database_canary(path: Path, traceparent: str) -> None:
     parent = extract_trace_context({"traceparent": traceparent})
     token = attach(parent)
     try:
+
         async def fail_like_asyncpg() -> None:
             raise RuntimeError(
                 "postgresql://"
-                + document["dsn_user"] + ":" + document["dsn_password"]
+                + document["dsn_user"]
+                + ":"
+                + document["dsn_password"]
                 + "@db.telemetry.invalid/jhin"
             )
 
         with contextlib.suppress(RuntimeError):
-            await trace_connector_database(
-                "verify", fail_like_asyncpg, tracer=runtime.tracer
-            )
+            await trace_connector_database("verify", fail_like_asyncpg, tracer=runtime.tracer)
     finally:
         detach(token)
         runtime.shutdown(timeout_millis=10_000)
@@ -9390,9 +9877,7 @@ imports `instrument_contracts()` for the expected types/labels and rejects every
 exported `FORBIDDEN_IDENTIFIER_LABELS`; it does not maintain a second metric registry.
 
 ```python
-OPENMETRICS_SAMPLE_RE = re.compile(
-    r"^([A-Za-z_:][A-Za-z0-9_:]*)(?:\{([^}]*)\})?\s"
-)
+OPENMETRICS_SAMPLE_RE = re.compile(r"^([A-Za-z_:][A-Za-z0-9_:]*)(?:\{([^}]*)\})?\s")
 OPENMETRICS_LABEL_RE = re.compile(r'(?:^|,)([A-Za-z_][A-Za-z0-9_]*)="')
 
 
@@ -9450,13 +9935,11 @@ async def test_collector_exposes_exact_metric_names_and_label_sets(
         else:
             assert samples[name] == {expected}
         emitted_names = (
-            {f"{name}_bucket", f"{name}_count", f"{name}_sum"}
-            if kind == "histogram" else {name}
+            {f"{name}_bucket", f"{name}_count", f"{name}_sum"} if kind == "histogram" else {name}
         )
         for emitted in emitted_names:
             assert all(
-                FORBIDDEN_IDENTIFIER_LABELS.isdisjoint(label_set)
-                for label_set in samples[emitted]
+                FORBIDDEN_IDENTIFIER_LABELS.isdisjoint(label_set) for label_set in samples[emitted]
             )
         if kind == "counter":
             assert f"{name}_total" not in samples
@@ -9470,11 +9953,17 @@ async def test_collector_exposes_exact_metric_names_and_label_sets(
 @pytest.mark.integration
 @pytest.mark.parametrize(
     "service",
-    ["web", "api", "workflow-worker", "agent-worker", "tool-worker", "event-worker", "sandbox-runner"],
+    [
+        "web",
+        "api",
+        "workflow-worker",
+        "agent-worker",
+        "tool-worker",
+        "event-worker",
+        "sandbox-runner",
+    ],
 )
-async def test_application_stdout_is_schema_v1_jsonl(
-    observed_stack: Stack, service: str
-) -> None:
+async def test_application_stdout_is_schema_v1_jsonl(observed_stack: Stack, service: str) -> None:
     lines = await observed_stack.logs(service)
     assert lines
     for line in lines:
@@ -9732,19 +10221,26 @@ def test_canary_manifest_is_private_and_has_the_exact_sink_registry(
 
 @pytest.mark.parametrize("as_list", [False, True])
 def test_capture_projects_only_closed_compose_status(
-    tmp_path: Path, as_list: bool, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    as_list: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("SANDBOX_DOCKER_GID", raising=False)
     manifest = tmp_path / "canaries.json"
     write_canary_manifest(manifest)
     source = {
-        "Project": "jhin-phase10-observed", "Service": "api",
-        "State": "running", "Health": "healthy",
-        "Command": "must-not-be-copied", "Environment": ["SECRET=must-not-be-copied"],
+        "Project": "jhin-phase10-observed",
+        "Service": "api",
+        "State": "running",
+        "Health": "healthy",
+        "Command": "must-not-be-copied",
+        "Environment": ["SECRET=must-not-be-copied"],
     }
     completed = subprocess.CompletedProcess(
-        args=[], returncode=0,
-        stdout=json.dumps([source] if as_list else source), stderr="",
+        args=[],
+        returncode=0,
+        stdout=json.dumps([source] if as_list else source),
+        stderr="",
     )
     destination = tmp_path / "status.json"
     invocations: list[tuple[list[str], dict[str, object]]] = []
@@ -9754,21 +10250,26 @@ def test_capture_projects_only_closed_compose_status(
         return completed
 
     capture_status(
-        ["jhin-phase10-observed"], socket_mode="rootless", destination=destination,
-        canary_file=manifest, runner=runner,
+        ["jhin-phase10-observed"],
+        socket_mode="rootless",
+        destination=destination,
+        canary_file=manifest,
+        runner=runner,
     )
     assert invocations[0][0].count("compose.rootless.yaml") == 1
     assert "compose.rootful.yaml" not in invocations[0][0]
-    assert "SANDBOX_DOCKER_GID" not in cast(
-        Mapping[str, str], invocations[0][1]["env"]
-    )
+    assert "SANDBOX_DOCKER_GID" not in cast(Mapping[str, str], invocations[0][1]["env"])
     assert json.loads(destination.read_text()) == {
         "schema_version": 1,
         "kind": "compose_status",
-        "services": [{
-            "project": "jhin-phase10-observed", "service": "api",
-            "state": "running", "health": "healthy",
-        }],
+        "services": [
+            {
+                "project": "jhin-phase10-observed",
+                "service": "api",
+                "state": "running",
+                "health": "healthy",
+            }
+        ],
     }
 
 
@@ -9819,18 +10320,48 @@ ROOT = Path(__file__).resolve().parents[1]
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 
 CANARY_KINDS = (
-    "prompt", "completion", "connector_response", "connector_error",
-    "authorization", "cookie", "api_key", "private_key", "dsn_user",
-    "dsn_password", "webhook_secret", "webhook_body", "tool_output",
+    "prompt",
+    "completion",
+    "connector_response",
+    "connector_error",
+    "authorization",
+    "cookie",
+    "api_key",
+    "private_key",
+    "dsn_user",
+    "dsn_password",
+    "webhook_secret",
+    "webhook_body",
+    "tool_output",
     "sandbox_secret_env",
 )
 PROJECTS = frozenset({"jhin-phase10-base", "jhin-phase10-observed"})
-SERVICES = frozenset({
-    "web", "api", "workflow-worker", "agent-worker", "tool-worker", "event-worker",
-    "sandbox-runner", "postgres", "nats", "temporal", "temporal-ui", "sandbox-image",
-    "fake-provider", "fake-github", "fake-linear", "fake-vercel", "fake-supabase",
-    "fake-supabase-db", "otel-collector", "prometheus", "tempo", "grafana",
-})
+SERVICES = frozenset(
+    {
+        "web",
+        "api",
+        "workflow-worker",
+        "agent-worker",
+        "tool-worker",
+        "event-worker",
+        "sandbox-runner",
+        "postgres",
+        "nats",
+        "temporal",
+        "temporal-ui",
+        "sandbox-image",
+        "fake-provider",
+        "fake-github",
+        "fake-linear",
+        "fake-vercel",
+        "fake-supabase",
+        "fake-supabase-db",
+        "otel-collector",
+        "prometheus",
+        "tempo",
+        "grafana",
+    }
+)
 STATES = frozenset({"running", "exited", "paused", "restarting", "created"})
 HEALTH = frozenset({"healthy", "unhealthy", "starting", "none"})
 
@@ -9842,10 +10373,7 @@ class ArtifactRejected(RuntimeError):
 def write_canary_manifest(destination: Path) -> None:
     if destination.exists():
         raise ArtifactRejected("canary manifest already exists")
-    values = {
-        kind: f"phase10-{kind}-{secrets.token_urlsafe(24)}"
-        for kind in CANARY_KINDS
-    }
+    values = {kind: f"phase10-{kind}-{secrets.token_urlsafe(24)}" for kind in CANARY_KINDS}
     descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w") as stream:
         json.dump(
@@ -9875,8 +10403,14 @@ def encoded_canaries(values: Sequence[str]) -> frozenset[str]:
     output: set[str] = set()
     for value in values:
         raw = value.encode()
-        output.update((value, quote(value, safe=""), base64.b64encode(raw).decode(),
-                       base64.urlsafe_b64encode(raw).decode()))
+        output.update(
+            (
+                value,
+                quote(value, safe=""),
+                base64.b64encode(raw).decode(),
+                base64.urlsafe_b64encode(raw).decode(),
+            )
+        )
     return frozenset(output)
 
 
@@ -9891,8 +10425,12 @@ def validate_document(document: object, canaries: Sequence[str]) -> dict[str, ob
     for row in rows:
         if not isinstance(row, dict) or set(row) != {"project", "service", "state", "health"}:
             raise ArtifactRejected("service row schema mismatch")
-        if (row["project"] not in PROJECTS or row["service"] not in SERVICES
-                or row["state"] not in STATES or row["health"] not in HEALTH):
+        if (
+            row["project"] not in PROJECTS
+            or row["service"] not in SERVICES
+            or row["state"] not in STATES
+            or row["health"] not in HEALTH
+        ):
             raise ArtifactRejected("unregistered status value")
     rendered = json.dumps(document, sort_keys=True, separators=(",", ":"))
     if any(value and value in rendered for value in encoded_canaries(canaries)):
@@ -9962,11 +10500,27 @@ def capture_status(
         if project not in PROJECTS:
             raise ArtifactRejected("unregistered Compose project")
         completed = runner(
-            ["docker", "compose", "-p", project, "-f", "compose.yaml",
-             "-f", "compose.dev.yaml", "-f", f"compose.{socket_mode}.yaml",
-             "ps", "--format", "json"],
-            cwd=ROOT, env=environment, shell=False, capture_output=True,
-            text=True, check=True,
+            [
+                "docker",
+                "compose",
+                "-p",
+                project,
+                "-f",
+                "compose.yaml",
+                "-f",
+                "compose.dev.yaml",
+                "-f",
+                f"compose.{socket_mode}.yaml",
+                "ps",
+                "--format",
+                "json",
+            ],
+            cwd=ROOT,
+            env=environment,
+            shell=False,
+            capture_output=True,
+            text=True,
+            check=True,
         )
         rows.extend(parse_compose_status(project, completed.stdout))
     write_validated(
@@ -9977,9 +10531,7 @@ def capture_status(
 
 
 def validate_file(input_path: Path, canary_file: Path) -> None:
-    validate_document(
-        json.loads(input_path.read_text()), read_canary_manifest(canary_file)
-    )
+    validate_document(json.loads(input_path.read_text()), read_canary_manifest(canary_file))
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -10101,9 +10653,12 @@ from scripts.record_phase10_telemetry_evidence import (
 
 
 REQUIRED_ACCEPTANCE_CHECKS = (
-    "Connected webhook-agent-tool trace", "Exact metric/cardinality contract",
-    "JSON-v1 all application services", "Profile-absent product work",
-    "Collector-outage product work", "Cross-sink canary absence",
+    "Connected webhook-agent-tool trace",
+    "Exact metric/cardinality contract",
+    "JSON-v1 all application services",
+    "Profile-absent product work",
+    "Collector-outage product work",
+    "Cross-sink canary absence",
 )
 
 
@@ -10188,10 +10743,7 @@ def test_record_evidence_is_deterministic_and_complete(tmp_path: Path) -> None:
 def test_profile_absent_row_cannot_be_supplied_without_actual_gate_result(
     tmp_path: Path,
 ) -> None:
-    results = [
-        row for row in all_gate_results_passed()
-        if row.name != "Profile-absent acceptance"
-    ]
+    results = [row for row in all_gate_results_passed() if row.name != "Profile-absent acceptance"]
     with pytest.raises(EvidenceRefused, match="acceptance gate missing"):
         record_evidence(results, destination=tmp_path / "evidence.md")
 
@@ -10252,15 +10804,28 @@ else:
 
 ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_LOCK_PACKAGES = (
-    "asyncpg", "fastapi", "httpx", "opentelemetry-api",
-    "opentelemetry-exporter-otlp-proto-grpc", "opentelemetry-sdk",
-    "pydantic-settings", "sqlalchemy", "structlog", "temporalio",
+    "asyncpg",
+    "fastapi",
+    "httpx",
+    "opentelemetry-api",
+    "opentelemetry-exporter-otlp-proto-grpc",
+    "opentelemetry-sdk",
+    "pydantic-settings",
+    "sqlalchemy",
+    "structlog",
+    "temporalio",
 )
-REQUIRED_VERSION_COMPONENTS = frozenset({
-    "package:jhin-observability", "lock:next",
-    *(f"lock:{name}" for name in REQUIRED_LOCK_PACKAGES),
-    "image:otel-collector", "image:prometheus", "image:tempo", "image:grafana",
-})
+REQUIRED_VERSION_COMPONENTS = frozenset(
+    {
+        "package:jhin-observability",
+        "lock:next",
+        *(f"lock:{name}" for name in REQUIRED_LOCK_PACKAGES),
+        "image:otel-collector",
+        "image:prometheus",
+        "image:tempo",
+        "image:grafana",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -10287,8 +10852,13 @@ def run_gate(
 ) -> tuple[GateResult, str]:
     started = time.monotonic()
     completed = runner(
-        list(argv), shell=False, capture_output=True, text=True, check=False,
-        cwd=ROOT, env=env,
+        list(argv),
+        shell=False,
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=ROOT,
+        env=env,
     )
     output = completed.stdout + completed.stderr
     return (
@@ -10323,10 +10893,26 @@ def discover_versions() -> dict[str, str]:
     compose_environment.pop("SANDBOX_DOCKER_GID", None)
     compose = json.loads(
         subprocess.run(
-            ["docker", "compose", "-f", "compose.yaml", "-f", "compose.dev.yaml",
-             "-f", "compose.rootless.yaml", "--profile", "observability",
-             "config", "--format", "json"],
-            cwd=ROOT, env=compose_environment, capture_output=True, text=True, check=True,
+            [
+                "docker",
+                "compose",
+                "-f",
+                "compose.yaml",
+                "-f",
+                "compose.dev.yaml",
+                "-f",
+                "compose.rootless.yaml",
+                "--profile",
+                "observability",
+                "config",
+                "--format",
+                "json",
+            ],
+            cwd=ROOT,
+            env=compose_environment,
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout
     )
     services = compose["services"]
@@ -10388,21 +10974,28 @@ def record_evidence(
     for value in forbidden_values:
         raw = value.encode()
         forms = (
-            value, quote(value, safe=""), base64.b64encode(raw).decode(),
+            value,
+            quote(value, safe=""),
+            base64.b64encode(raw).decode(),
             base64.urlsafe_b64encode(raw).decode(),
         )
         if any(form and form in captured_output for form in forms):
             raise EvidenceRefused("sensitive telemetry value")
     stamp = recorded_at or datetime.now(UTC)
-    commit = git_commit or subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=ROOT,
-        capture_output=True, text=True, check=True
-    ).stdout.strip()
+    commit = (
+        git_commit
+        or subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True
+        ).stdout.strip()
+    )
     version_map = dict(versions or discover_versions())
     if set(version_map) != REQUIRED_VERSION_COMPONENTS:
         raise EvidenceRefused("version provenance registry mismatch")
-    if not commit or any(not key.strip() or not value.strip() for key, value in version_map.items()):
+    if not commit or any(
+        not key.strip() or not value.strip() for key, value in version_map.items()
+    ):
         raise EvidenceRefused("blank provenance cell")
+
     def cell(value: object) -> str:
         rendered = str(value).replace("|", "\\|").replace("\n", " ").strip()
         if not rendered:
@@ -10410,9 +11003,13 @@ def record_evidence(
         return rendered
 
     lines = [
-        "# Phase 10 Telemetry Evidence", "",
+        "# Phase 10 Telemetry Evidence",
+        "",
         f"- Recorded at: `{stamp.astimezone(UTC).isoformat()}`",
-        f"- Git commit: `{cell(commit)}`", "", "## Gates", "",
+        f"- Git commit: `{cell(commit)}`",
+        "",
+        "## Gates",
+        "",
         "| Gate | Command | Result | Elapsed seconds |",
         "|---|---|---:|---:|",
     ]
@@ -10457,9 +11054,32 @@ GATES = (
     ("Web lint", ["pnpm", "--filter", "jhin-web", "lint"]),
     ("Web typecheck", ["pnpm", "--filter", "jhin-web", "typecheck"]),
     ("Web build", ["pnpm", "--filter", "jhin-web", "build"]),
-    ("Compose model", ["uv", "run", "python", "scripts/assert_phase10_observability_compose.py", "--mode", "rootless"]),
-    ("Tool-worker Compose model", ["uv", "run", "python", "scripts/assert_phase10_tool_worker_compose.py", "--mode", "rootless"]),
-    ("Dashboard generated", ["uv", "run", "python", "scripts/build_phase10_dashboard.py", "--check"]),
+    (
+        "Compose model",
+        [
+            "uv",
+            "run",
+            "python",
+            "scripts/assert_phase10_observability_compose.py",
+            "--mode",
+            "rootless",
+        ],
+    ),
+    (
+        "Tool-worker Compose model",
+        [
+            "uv",
+            "run",
+            "python",
+            "scripts/assert_phase10_tool_worker_compose.py",
+            "--mode",
+            "rootless",
+        ],
+    ),
+    (
+        "Dashboard generated",
+        ["uv", "run", "python", "scripts/build_phase10_dashboard.py", "--check"],
+    ),
     ("Logging audit", ["uv", "run", "python", "scripts/audit_phase10_logging.py"]),
     ("Profile-absent acceptance", ["make", "test-telemetry-base"]),
     ("Observed telemetry acceptance", ["make", "test-telemetry-observed"]),

@@ -11,13 +11,18 @@ backbone, and PostgreSQL is the system of record. A FastAPI control-plane API
 owns configuration and authorization, and a Next.js frontend provides the
 operations UI.
 
-> Status: Phase 9 — Vercel and Supabase are now governed production
-> integrations with exact connection/project/environment/schema scopes,
-> approval-time reauthorization, bounded provider and SQL outputs, deployment
-> webhooks, and a live connection access summary. Phase 9 does not complete
-> the broader company, chat, memory, or operations redesign. See
-> [Vercel and Supabase Connectors](docs/architecture/vercel-and-supabase.md)
-> for the authority planes, least-privilege setup, and operator boundaries.
+> Status: Phases 1–9 of the implementation plan are complete and verified
+> (70 compose-stack integration tests). On top of that, Jhin now has a
+> chat-first experience: named, persistent conversations with every agent,
+> a company activity feed that shows agents handing work to each other, an
+> Attention inbox, friendly Agents/Company/Automations/Apps pages, and an
+> **Advanced** area that keeps every operational screen (work queue, runs,
+> approvals, connectors, triggers, models, audit). The UI follows the Jhin
+> landing-page design. See [Conversations and Company Activity](docs/architecture/conversations.md).
+> Phase 10 (production operations) is in progress on the
+> `codex/phase10-operations` branch (tool-worker boundary, telemetry,
+> sandbox hardening); Phase 11 (open-source release) is designed under
+> `docs/superpowers` but not started.
 
 ## Quick start
 
@@ -117,6 +122,23 @@ showcase: a fake Linear connection, `linear.*` read/search/metadata/comment
 grants for the Senior Software Engineer, and the enabled trigger **"Pick up
 new engineering tickets"** (team ENG + state transitions to Todo → assign to
 the SWE, comment the outcome back on the issue).
+
+### Chats, Activity, and Attention
+
+- **Chats** (the default screen) — pick an agent and describe what you want.
+  Each conversation is a persistent thread; every turn that needs work
+  becomes a durable task behind the scenes, and follow-up turns carry the
+  earlier conversation as context. Rename, pin, archive, and search chats;
+  inline cards show handoffs, reviews, and approvals; "Details" reveals
+  the underlying work episodes, cost, and a link into Advanced.
+- **Activity** — who asked whom for what, and how it went: delegations,
+  reviews, results, escalations, and task lifecycle projected as plain
+  language cards with "Open chat" / "Open in Advanced" links.
+- **Attention** — pending approvals, failed work, and chats waiting on you.
+- **Agents / Company** — a directory with profiles (purpose, colleagues,
+  what each agent can use, recent activity) and an org outline/map.
+- **Automations / Apps** — friendly views over triggers and connectors; the
+  full builders remain under Advanced.
 
 ### Models and tasks
 

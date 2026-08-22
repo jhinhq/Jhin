@@ -67,6 +67,7 @@ MAX_KEY_VERSIONS = 32
 MIN_KEY_VERSION = 1
 MAX_KEY_VERSION = 2_147_483_647
 
+
 class MasterKeyErrorCode(StrEnum):
     NOT_CONFIGURED = "master_key_not_configured"
     FILE_UNREADABLE = "master_key_file_unreadable"
@@ -75,13 +76,16 @@ class MasterKeyErrorCode(StrEnum):
     INLINE_FORBIDDEN = "master_key_inline_forbidden"
     VERSION_UNAVAILABLE = "master_key_version_unavailable"
 
+
 class MasterKeyError(Exception):
     code: MasterKeyErrorCode
+
 
 @dataclass(frozen=True, repr=False)
 class MasterKey:
     key: bytes = field(repr=False)
     version: int = 1
+
 
 @dataclass(frozen=True, repr=False)
 class MasterKeyRing:
@@ -96,6 +100,7 @@ class MasterKeyRing:
         if version not in self._keys:
             raise MasterKeyError(MasterKeyErrorCode.VERSION_UNAVAILABLE)
         return MasterKey(self._keys[version], version)
+
 
 def parse_master_key_document(raw: bytes, *, allow_legacy: bool = True) -> MasterKeyRing: ...
 def load_master_key(
@@ -126,6 +131,7 @@ class RewrappedPayload:
     key_version: int
     fingerprint: str = field(repr=False)
 
+
 class SecretCrypto:
     def __init__(self, master: MasterKey | MasterKeyRing) -> None: ...
     @property
@@ -151,6 +157,7 @@ class SecretRedactor:
     @property
     def registered_value_count(self) -> int: ...
 
+
 @contextmanager
 def scoped_secret_material(plaintext: str) -> Iterator[None]: ...
 ```
@@ -160,6 +167,7 @@ def scoped_secret_material(plaintext: str) -> Iterator[None]: ...
 ```python
 # packages/db/src/jhin_db/models/key_rotation.py
 RotationStatus = Literal["prepared", "rewrapping", "verifying", "completed", "aborted"]
+
 
 class MasterKeyRotation(Base, UuidPkMixin):
     from_version: Mapped[int]
@@ -216,11 +224,13 @@ SELECT pg_backend_pid() = :backend_pid
    )
 """)
 
+
 class RotationStage(StrEnum):
     DISTRIBUTED = "distributed"
     ACTIVATED = "activated"
     RETIREMENT_READY = "retirement-ready"
     RETIRED = "retired"
+
 
 class RotationSafeErrorCode(StrEnum):
     REPLICA_GATE_CLOSED = "replica_gate_closed"
@@ -236,12 +246,14 @@ class RotationSafeErrorCode(StrEnum):
     RETIREMENT_FENCE_MISSING = "retirement_fence_missing"
     RETIREMENT_FENCE_EXPIRED = "retirement_fence_expired"
 
+
 @dataclass(frozen=True)
 class ReplicaKeyDistribution:
     service: Literal["api", "agent-worker", "tool-worker"]
     active_version: int
     supported_versions: tuple[int, ...]
     instance_count: int
+
 
 @dataclass(frozen=True)
 class ReplicaGateResult:
@@ -251,6 +263,7 @@ class ReplicaGateResult:
     missing_services: tuple[str, ...]
     mismatched_instances: int
     future_instances: int
+
 
 @dataclass(frozen=True)
 class RotationRunResult:
@@ -263,7 +276,9 @@ class RotationRunResult:
     rows_failed: int
     safe_error_code: RotationSafeErrorCode | None
 
+
 RetirementFenceState = Literal["armed", "committed", "cancelled"]
+
 
 @dataclass(frozen=True)
 class RetirementFenceResult:
@@ -273,32 +288,37 @@ class RetirementFenceResult:
     state: RetirementFenceState
     safe_error_code: RotationSafeErrorCode | None
 
+
 class RotationLease(Protocol):
     def transaction(self) -> AbstractAsyncContextManager[AsyncSession]: ...
     async def assert_held(self, session: AsyncSession) -> None: ...
 
+
 class MutationGenerationSource(Protocol):
     async def current(self, session: AsyncSession) -> int: ...
+
 
 class PostgresMutationGenerationSource:
     async def current(self, session: AsyncSession) -> int: ...
 
+
 class RotationDatabaseClock(Protocol):
     async def checked_at(self, session: AsyncSession) -> datetime: ...
+
 
 class PostgresRotationDatabaseClock:
     async def checked_at(self, session: AsyncSession) -> datetime: ...
 
+
 class PostgresRotationLease:
     @classmethod
-    async def try_acquire(
-        cls, connection: AsyncConnection
-    ) -> PostgresRotationLease | None: ...
+    async def try_acquire(cls, connection: AsyncConnection) -> PostgresRotationLease | None: ...
     def transaction(self) -> AbstractAsyncContextManager[AsyncSession]: ...
     async def assert_held(self, session: AsyncSession) -> None: ...
     async def release(self) -> None: ...
     @property
     def backend_pid(self) -> int: ...
+
 
 async def check_replica_gate(
     session: AsyncSession,
@@ -308,6 +328,7 @@ async def check_replica_gate(
     to_version: int,
     now: datetime,
 ) -> ReplicaGateResult: ...
+
 
 class RotationRunner:
     def __init__(
@@ -338,16 +359,21 @@ class RotationRunner:
 @dataclass
 class FakeMutationGenerationSource:
     value: int = 0
+
     async def current(self, session: AsyncSession) -> int:
         return self.value
+
     def advance(self) -> None:
         self.value += 1
+
 
 @dataclass
 class FakeRotationDatabaseClock:
     value: datetime
+
     async def checked_at(self, session: AsyncSession) -> datetime:
         return self.value
+
     def set(self, value: datetime) -> None:
         self.value = value
 ```
@@ -372,6 +398,7 @@ class RotationOptions:
     abort: bool
     retirement_action: Literal["arm", "commit", "cancel"] | None
     retirement_fence_id: UUID | None
+
 
 def parse_args(argv: Sequence[str]) -> RotationOptions: ...
 async def async_main(options: RotationOptions, environ: Mapping[str, str]) -> int: ...
@@ -565,17 +592,24 @@ Also cover missing/empty/non-UTF-8 documents, a FIFO/nonregular file without blo
 def test_offline_add_activate_retire_never_overwrites_or_prints_material(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    first, distributed, active, retired = (tmp_path / name for name in ("v1", "both", "v2", "only-v2"))
+    first, distributed, active, retired = (
+        tmp_path / name for name in ("v1", "both", "v2", "only-v2")
+    )
     assert keyring_main(["create", "--output", str(first), "--version", "1"]) == 0
-    assert keyring_main([
-        "add", "--input", str(first), "--output", str(distributed), "--version", "2"
-    ]) == 0
-    assert keyring_main([
-        "activate", "--input", str(distributed), "--output", str(active), "--version", "2"
-    ]) == 0
-    assert keyring_main([
-        "retire", "--input", str(active), "--output", str(retired), "--version", "1"
-    ]) == 0
+    assert (
+        keyring_main(["add", "--input", str(first), "--output", str(distributed), "--version", "2"])
+        == 0
+    )
+    assert (
+        keyring_main(
+            ["activate", "--input", str(distributed), "--output", str(active), "--version", "2"]
+        )
+        == 0
+    )
+    assert (
+        keyring_main(["retire", "--input", str(active), "--output", str(retired), "--version", "1"])
+        == 0
+    )
     assert stat.S_IMODE(retired.stat().st_mode) == 0o600
     ring = load_master_key({"MASTER_KEY_FILE": str(retired)}, app_env="production")
     assert (ring.active_version, ring.supported_key_versions) == (2, (2,))
@@ -608,28 +642,45 @@ def test_cli_subprocess_closes_argparse_and_os_errors(tmp_path: Path) -> None:
     output.chmod(0o600)
     exists = subprocess.run(
         [
-            sys.executable, "-m", "jhin_secrets.keyring_cli", "create",
-            "--output", str(output), "--version", "1",
+            sys.executable,
+            "-m",
+            "jhin_secrets.keyring_cli",
+            "create",
+            "--output",
+            str(output),
+            "--version",
+            "1",
         ],
         capture_output=True,
         text=True,
         check=False,
     )
     assert (exists.returncode, exists.stdout, exists.stderr) == (
-        4, "", "master_key_output_exists\n"
+        4,
+        "",
+        "master_key_output_exists\n",
     )
     rejected = subprocess.run(
         [
-            sys.executable, "-m", "jhin_secrets.keyring_cli", "create",
-            "--output", str(tmp_path / "unused"), "--version", "1",
-            "--database-url", "postgresql://DSN_CANARY_DO_NOT_ECHO",
+            sys.executable,
+            "-m",
+            "jhin_secrets.keyring_cli",
+            "create",
+            "--output",
+            str(tmp_path / "unused"),
+            "--version",
+            "1",
+            "--database-url",
+            "postgresql://DSN_CANARY_DO_NOT_ECHO",
         ],
         capture_output=True,
         text=True,
         check=False,
     )
     assert (rejected.returncode, rejected.stdout, rejected.stderr) == (
-        2, "", "master_key_invalid_arguments\n"
+        2,
+        "",
+        "master_key_invalid_arguments\n",
     )
     rendered = exists.stdout + exists.stderr + rejected.stdout + rejected.stderr
     assert "PATH_CANARY_DO_NOT_ECHO" not in rendered
@@ -696,9 +747,7 @@ Expected cached names: exactly the fifteen paths in `git add`, and the recorded 
 
 ```python
 def crypto_ring(active: int = 1) -> SecretCrypto:
-    return SecretCrypto(
-        MasterKeyRing(active_version=active, _keys={1: b"1" * 32, 2: b"2" * 32})
-    )
+    return SecretCrypto(MasterKeyRing(active_version=active, _keys={1: b"1" * 32, 2: b"2" * 32}))
 
 
 def unwrap_for_test(master_key: bytes, wrapped_data_key: bytes) -> bytes:
@@ -745,7 +794,9 @@ def test_verify_uses_constant_time_target_fingerprint(monkeypatch: pytest.Monkey
         lambda left, right: comparisons.append((left, right)) or real_compare(left, right),
     )
     ring.verify(payload, expected_version=2)
-    assert comparisons == [(payload.fingerprint, ring.fingerprint("verify-canary-value", key_version=2))]
+    assert comparisons == [
+        (payload.fingerprint, ring.fingerprint("verify-canary-value", key_version=2))
+    ]
 
 
 def test_rewrap_and_verify_errors_never_render_sensitive_fields() -> None:
@@ -865,6 +916,7 @@ The health interface is exact:
 class PackagedSchemaError(RuntimeError):
     pass
 
+
 def packaged_schema_head() -> str:
     heads = ScriptDirectory.from_config(alembic_config("sqlite://")).get_heads()
     if len(heads) != 1 or REVISION_PATTERN.fullmatch(heads[0]) is None:
@@ -887,8 +939,7 @@ def test_master_key_rotation_is_only_head_after_dlq() -> None:
 
 def test_0017_has_no_secret_backfill_or_secret_column_ddl() -> None:
     MIGRATION_0017 = ROOT / (
-        "packages/db/src/jhin_db/alembic/versions/"
-        "20260818_0017_master_key_rotation.py"
+        "packages/db/src/jhin_db/alembic/versions/20260818_0017_master_key_rotation.py"
     )
     source = MIGRATION_0017.read_text(encoding="utf-8")
     assert "UPDATE secret SET" not in source
@@ -901,7 +952,9 @@ def test_0017_has_no_secret_backfill_or_secret_column_ddl() -> None:
     assert "AFTER INSERT OR DELETE OR UPDATE OF ciphertext, nonce" not in source
 
 
-async def test_database_probe_uses_packaged_head_0017(database_probe_world: DatabaseProbeWorld) -> None:
+async def test_database_probe_uses_packaged_head_0017(
+    database_probe_world: DatabaseProbeWorld,
+) -> None:
     database_probe_world.current_revisions = ["0017"]
     result = await database_probe_world.probe()
     assert result.packaged_head == "0017"
@@ -991,18 +1044,22 @@ async def test_credential_mutation_generation_tracks_only_semantic_secret_change
     await migrated_pg.execute(
         "UPDATE secret SET wrapped_data_key=:wrapped, key_version=2, "
         "secret_fingerprint=:fingerprint WHERE id=:id",
-        wrapped=b"wrapper-only", fingerprint="wrapper-fingerprint", id=secret_id,
+        wrapped=b"wrapper-only",
+        fingerprint="wrapper-fingerprint",
+        id=secret_id,
     )
     assert await migrated_pg.credential_mutation_generation() == 1
 
     await migrated_pg.execute(
         "UPDATE secret SET ciphertext=:ciphertext WHERE id=:id",
-        ciphertext=b"rotated-ciphertext", id=secret_id,
+        ciphertext=b"rotated-ciphertext",
+        id=secret_id,
     )
     assert await migrated_pg.credential_mutation_generation() == 2
     await migrated_pg.execute(
         "UPDATE secret SET nonce=:nonce WHERE id=:id",
-        nonce=b"rotated-nonce", id=secret_id,
+        nonce=b"rotated-nonce",
+        id=secret_id,
     )
     assert await migrated_pg.credential_mutation_generation() == 3
     await migrated_pg.execute("DELETE FROM secret WHERE id=:id", id=secret_id)
@@ -1085,9 +1142,7 @@ PREVIOUS_IMAGE_SEMANTIC_SQL = {
         "(:new_id, :workspace_id, :new_name, 'api_key', :ciphertext, :nonce, "
         ":wrapped_data_key, 1, :fingerprint, '', NULL, NULL, NULL)"
     ),
-    "ciphertext-update": (
-        "UPDATE secret SET ciphertext=:ciphertext WHERE id=:target_id"
-    ),
+    "ciphertext-update": ("UPDATE secret SET ciphertext=:ciphertext WHERE id=:target_id"),
     "nonce-update": "UPDATE secret SET nonce=:nonce WHERE id=:target_id",
     "delete": "DELETE FROM secret WHERE id=:target_id",
 }
@@ -1299,12 +1354,14 @@ raise SystemExit(0)
         text=True,
         check=False,
     )
-    assert (result.returncode, result.stdout, result.stderr) == (
-        78, "", f"{expected_code}\n"
-    )
+    assert (result.returncode, result.stdout, result.stderr) == (78, "", f"{expected_code}\n")
     for forbidden in (
-        str(unsafe), str(invalid), inline,
-        "PATH_CANARY", "KEY_MATERIAL_CANARY", "INLINE_API_CANARY",
+        str(unsafe),
+        str(invalid),
+        inline,
+        "PATH_CANARY",
+        "KEY_MATERIAL_CANARY",
+        "INLINE_API_CANARY",
     ):
         assert forbidden not in result.stdout + result.stderr
 
@@ -1337,19 +1394,21 @@ def test_only_expected_services_and_transient_seed_load_master_key() -> None:
             "MASTER_KEY_FILE_HOST": "/tmp/EXPECTED_CONFIGURED_KEY_SOURCE",
         },
     )
-    assert rootful["secrets"]["jhin_master_key"]["file"] == (
-        "/tmp/EXPECTED_CONFIGURED_KEY_SOURCE"
-    )
+    assert rootful["secrets"]["jhin_master_key"]["file"] == ("/tmp/EXPECTED_CONFIGURED_KEY_SOURCE")
     rendered = rootful["services"]
     for service in ("api", "agent-worker", "tool-worker"):
         assert rendered[service]["environment"]["MASTER_KEY_FILE"] == "/run/secrets/jhin_master_key"
-        assert rendered[service]["secrets"] == [{
-            "source": "jhin_master_key",
-            "target": "/run/secrets/jhin_master_key",
-        }]
+        assert rendered[service]["secrets"] == [
+            {
+                "source": "jhin_master_key",
+                "target": "/run/secrets/jhin_master_key",
+            }
+        ]
     for service in set(rendered) - {"api", "agent-worker", "tool-worker"}:
         assert "MASTER_KEY_FILE" not in rendered[service].get("environment", {})
-        assert all(item.get("source") != "jhin_master_key" for item in rendered[service].get("secrets", []))
+        assert all(
+            item.get("source") != "jhin_master_key" for item in rendered[service].get("secrets", [])
+        )
     rootless = compose_config(
         files=("compose.yaml", "compose.rootless.yaml"),
         env_without={"SANDBOX_DOCKER_GID", "SANDBOX_DOCKER_SOCKET_HOST"},
@@ -1359,15 +1418,13 @@ def test_only_expected_services_and_transient_seed_load_master_key() -> None:
 
 
 @pytest.mark.parametrize("kind", ["legacy", "versioned"])
-def test_seed_loads_file_formats_and_uses_active_writer(
-    tmp_path: Path, kind: str
-) -> None:
-    path = write_legacy_v1(tmp_path) if kind == "legacy" else write_ring(
-        tmp_path, active=2, versions=(1, 2)
+def test_seed_loads_file_formats_and_uses_active_writer(tmp_path: Path, kind: str) -> None:
+    path = (
+        write_legacy_v1(tmp_path)
+        if kind == "legacy"
+        else write_ring(tmp_path, active=2, versions=(1, 2))
     )
-    crypto = _load_seed_crypto(
-        environ={"MASTER_KEY_FILE": str(path)}, app_env="production"
-    )
+    crypto = _load_seed_crypto(environ={"MASTER_KEY_FILE": str(path)}, app_env="production")
     assert crypto is not None
     assert crypto.active_key_version == (1 if kind == "legacy" else 2)
 
@@ -1377,9 +1434,7 @@ def test_seed_rejects_production_inline_without_echoing_material(
 ) -> None:
     marker = base64.b64encode(b"INLINE_SEED_CANARY_VALUE_123456"[:32]).decode()
     with pytest.raises(MasterKeyError, match="master_key_inline_forbidden"):
-        _load_seed_crypto(
-            environ={"MASTER_KEY": marker}, app_env="production"
-        )
+        _load_seed_crypto(environ={"MASTER_KEY": marker}, app_env="production")
     assert marker not in " ".join(record.getMessage() for record in caplog.records)
 
 
@@ -1390,8 +1445,10 @@ async def test_seed_writes_with_file_active_version(
     kind: str,
     expected_version: int,
 ) -> None:
-    path = write_legacy_v1(tmp_path) if kind == "legacy" else write_ring(
-        tmp_path, active=2, versions=(1, 2)
+    path = (
+        write_legacy_v1(tmp_path)
+        if kind == "legacy"
+        else write_ring(tmp_path, active=2, versions=(1, 2))
     )
     result = await seed(
         session,
@@ -1470,9 +1527,7 @@ async def test_gate_requires_every_fresh_replica_exactly(
         session.add(heartbeat(service, NOW, active=active, supported=supported))
     session.add(heartbeat("api", NOW - timedelta(seconds=31), active=99, supported=(99,)))
     await session.commit()
-    gate = await check_replica_gate(
-        session, stage=stage, from_version=1, to_version=2, now=NOW
-    )
+    gate = await check_replica_gate(session, stage=stage, from_version=1, to_version=2, now=NOW)
     assert gate.open is True
     assert gate.missing_services == ()
     assert gate.mismatched_instances == 0
@@ -1492,8 +1547,7 @@ async def test_one_fresh_mismatch_closes_gate_without_unioning_versions(
     assert gate.open is False
     assert gate.mismatched_instances == 1
     assert [
-        (row.service, row.active_version, row.supported_versions)
-        for row in gate.distributions
+        (row.service, row.active_version, row.supported_versions) for row in gate.distributions
     ] == [
         ("agent-worker", 2, (1, 2)),
         ("api", 2, (1, 2)),
@@ -1536,8 +1590,14 @@ async def test_one_batch_rewraps_only_three_fields_and_checkpoints_atomically(
     before_generation = await rotation_world.credential_mutation_generation()
     before = {
         row.id: (
-            row.ciphertext, row.nonce, row.wrapped_data_key, row.secret_fingerprint,
-            row.created_at, row.updated_at, row.rotated_at, row.last_used_at,
+            row.ciphertext,
+            row.nonce,
+            row.wrapped_data_key,
+            row.secret_fingerprint,
+            row.created_at,
+            row.updated_at,
+            row.rotated_at,
+            row.last_used_at,
         )
         for row in (first, second)
     }
@@ -1552,10 +1612,15 @@ async def test_one_batch_rewraps_only_three_fields_and_checkpoints_atomically(
     assert migrated.wrapped_data_key != before[migrated.id][2]
     assert migrated.secret_fingerprint != before[migrated.id][3]
     assert (
-        migrated.created_at, migrated.updated_at, migrated.rotated_at, migrated.last_used_at
+        migrated.created_at,
+        migrated.updated_at,
+        migrated.rotated_at,
+        migrated.last_used_at,
     ) == before[migrated.id][4:]
     assert rotation_world.rewrap_update_set_columns == [
-        "wrapped_data_key", "key_version", "secret_fingerprint"
+        "wrapped_data_key",
+        "key_version",
+        "secret_fingerprint",
     ]
     assert await rotation_world.credential_mutation_generation() == before_generation
     state = await rotation_world.rotation()
@@ -1576,12 +1641,18 @@ async def test_resume_verifies_and_completes_with_append_only_audits(
     assert final.rows_verified == 3
     assert await rotation_world.secret_versions() == [2, 2, 2]
     assert await rotation_world.audit_actions() == [
-        "master_key.rotation_started", "master_key.rotation_completed"
+        "master_key.rotation_started",
+        "master_key.rotation_completed",
     ]
     for metadata in await rotation_world.audit_metadata():
         assert set(metadata) <= {
-            "from_version", "to_version", "rows_total", "rows_rewrapped",
-            "rows_verified", "rows_failed", "safe_error_code",
+            "from_version",
+            "to_version",
+            "rows_total",
+            "rows_rewrapped",
+            "rows_verified",
+            "rows_failed",
+            "safe_error_code",
         }
 
 
@@ -1703,9 +1774,7 @@ async def test_retirement_preview_then_arm_creates_durable_write_fence(
     assert await rotation_world.retirement_ready(1, 2) is True
     assert (await rotation_world.rotation()).retirement_fence_id is None
 
-    armed = await rotation_world.runner().arm_retirement_fence(
-        from_version=1, to_version=2
-    )
+    armed = await rotation_world.runner().arm_retirement_fence(from_version=1, to_version=2)
     state = await rotation_world.rotation()
     assert armed.state == "armed"
     assert state.retirement_fence_id == armed.fence_id
@@ -1721,9 +1790,7 @@ async def test_retirement_preview_then_arm_creates_durable_write_fence(
     with pytest.raises(RotationError, match="retirement_fence_active"):
         await rotation_world.runner().run(from_version=1, to_version=2)
     with pytest.raises(RotationError, match="retirement_fence_active"):
-        await rotation_world.runner().arm_retirement_fence(
-            from_version=1, to_version=2
-        )
+        await rotation_world.runner().arm_retirement_fence(from_version=1, to_version=2)
     assert await rotation_world.secret_snapshot() == before
     assert await rotation_world.credential_mutation_generation() == generation
 
@@ -1738,9 +1805,7 @@ async def test_retirement_commit_revalidates_retired_reporters_and_generation(
     await rotation_world.runner().run(from_version=1, to_version=2)
     rotation_world.set_database_clock(NOW)
     await rotation_world.set_exact_reporters(active=2, supported=(1, 2), seen_at=NOW)
-    armed = await rotation_world.runner().arm_retirement_fence(
-        from_version=1, to_version=2
-    )
+    armed = await rotation_world.runner().arm_retirement_fence(from_version=1, to_version=2)
 
     await rotation_world.set_exact_reporters(active=2, supported=(1, 2), seen_at=NOW)
     with pytest.raises(RotationError, match="replica_gate_closed"):
@@ -1763,9 +1828,7 @@ async def test_expired_fence_stays_closed_until_dual_ring_cancel(
     await rotation_world.runner().run(from_version=1, to_version=2)
     rotation_world.set_database_clock(NOW)
     await rotation_world.set_exact_reporters(active=2, supported=(1, 2), seen_at=NOW)
-    armed = await rotation_world.runner().arm_retirement_fence(
-        from_version=1, to_version=2
-    )
+    armed = await rotation_world.runner().arm_retirement_fence(from_version=1, to_version=2)
     rotation_world.set_database_clock(NOW + timedelta(seconds=601))
     await rotation_world.set_exact_reporters(
         active=2, supported=(2,), seen_at=NOW + timedelta(seconds=601)
@@ -1816,9 +1879,7 @@ async def test_parked_approval_survives_wrapper_only_rewrap_but_not_credential_d
     await gateway_world.rotate_actual_credentials(connection.id, "changed-token")
     await gateway_world.approve(second.approval_id)
     denied = await gateway_world.resolve(second.approval_id)
-    assert (denied.status, denied.decision_code) == (
-        "denied", "approval_connection_changed"
-    )
+    assert (denied.status, denied.decision_code) == ("denied", "approval_connection_changed")
     assert gateway_world.effects == 1
 ```
 
@@ -1833,12 +1894,14 @@ async def test_real_pg_rewrap_survives_restart_during_active_reads(
 ) -> None:
     seeded = await postgres_rotation_world.seed_v1_secrets(25)
     stop = asyncio.Event()
-    readers = [asyncio.create_task(postgres_rotation_world.read_loop(row.id, stop)) for row in seeded]
+    readers = [
+        asyncio.create_task(postgres_rotation_world.read_loop(row.id, stop)) for row in seeded
+    ]
     try:
         while True:
-            result = await postgres_rotation_world.new_runner(
-                batch_size=3, max_batches=2
-            ).run(from_version=1, to_version=2)
+            result = await postgres_rotation_world.new_runner(batch_size=3, max_batches=2).run(
+                from_version=1, to_version=2
+            )
             if result.status == "completed":
                 break
         assert result.rows_rewrapped == 25
@@ -1858,18 +1921,14 @@ async def test_lock_backend_loss_fences_mutation_then_new_runner_resumes(
 ) -> None:
     await postgres_rotation_world.seed_v1_secrets(3)
     lease = await postgres_rotation_world.acquire_lease()
-    first = await postgres_rotation_world.runner(
-        lease=lease, batch_size=1, max_batches=1
-    ).run(from_version=1, to_version=2)
+    first = await postgres_rotation_world.runner(lease=lease, batch_size=1, max_batches=1).run(
+        from_version=1, to_version=2
+    )
     assert first.rows_rewrapped == 1
     checkpoint = await postgres_rotation_world.durable_checkpoint()
     await postgres_rotation_world.terminate_backend(lease.backend_pid)
-    with pytest.raises(
-        RotationLockError, match="rotation_advisory_lock_lost"
-    ):
-        await postgres_rotation_world.runner(lease=lease).run(
-            from_version=1, to_version=2
-        )
+    with pytest.raises(RotationLockError, match="rotation_advisory_lock_lost"):
+        await postgres_rotation_world.runner(lease=lease).run(from_version=1, to_version=2)
     assert await postgres_rotation_world.durable_checkpoint() == checkpoint
     assert await postgres_rotation_world.count_by_version() == {1: 2, 2: 1}
 
@@ -1894,9 +1953,7 @@ async def test_second_runner_cannot_mutate_while_first_backend_holds_lock(
     await first.release()
     second = await PostgresRotationLease.try_acquire(second_connection)
     assert second is not None
-    result = await postgres_rotation_world.runner(lease=second).run(
-        from_version=1, to_version=2
-    )
+    result = await postgres_rotation_world.runner(lease=second).run(from_version=1, to_version=2)
     assert result.status == "completed"
 
 
@@ -1909,14 +1966,10 @@ async def test_real_pg_post_verify_mutation_cannot_reuse_stale_completion_author
     target = (await postgres_rotation_world.seed_v1_secrets(1))[0]
     barrier = postgres_rotation_world.pause_before_completion_check()
     task = asyncio.create_task(
-        postgres_rotation_world.new_runner(batch_size=1).run(
-            from_version=1, to_version=2
-        )
+        postgres_rotation_world.new_runner(batch_size=1).run(from_version=1, to_version=2)
     )
     await barrier.arrived.wait()
-    captured = (
-        await postgres_rotation_world.rotation()
-    ).credential_mutation_generation
+    captured = (await postgres_rotation_world.rotation()).credential_mutation_generation
     assert captured is not None
     assert captured == await postgres_rotation_world.credential_mutation_generation()
     await postgres_rotation_world.semantic_mutation_from_independent_connection(
@@ -2011,12 +2064,11 @@ async def test_advisory_acquisition_installs_both_exact_timeouts_before_authorit
         elapsed = time.monotonic() - started
     assert lease is not None
     assert elapsed < ROTATION_CLIENT_TIMEOUT_SECONDS
-    assert await postgres_rotation_world.show_connection_setting(
-        connection, "lock_timeout"
-    ) == "5s"
-    assert await postgres_rotation_world.show_connection_setting(
-        connection, "statement_timeout"
-    ) == "30s"
+    assert await postgres_rotation_world.show_connection_setting(connection, "lock_timeout") == "5s"
+    assert (
+        await postgres_rotation_world.show_connection_setting(connection, "statement_timeout")
+        == "30s"
+    )
     assert sql.authority_prefix == [
         "SET lock_timeout = '5000ms'",
         "SET statement_timeout = '30000ms'",
@@ -2068,9 +2120,7 @@ async def test_arm_and_cancel_recheck_reporters_after_final_state_and_secret_loc
     before = await postgres_rotation_world.durable_snapshot()
     if action == "arm":
         task = asyncio.create_task(
-            postgres_rotation_world.new_runner().arm_retirement_fence(
-                from_version=1, to_version=2
-            )
+            postgres_rotation_world.new_runner().arm_retirement_fence(from_version=1, to_version=2)
         )
     else:
         assert fence_id is not None
@@ -2097,12 +2147,8 @@ async def test_retirement_uses_database_clock_despite_host_clock_skew(
     await postgres_rotation_world.seed_v1_secrets(1)
     await postgres_rotation_world.complete_rotation(1, 2)
     db_before = await postgres_rotation_world.db_now()
-    await postgres_rotation_world.set_exact_reporters(
-        active=2, supported=(1, 2), seen_at=db_before
-    )
-    with postgres_rotation_world.poison_rotation_host_clock(
-        db_before + timedelta(days=3650)
-    ):
+    await postgres_rotation_world.set_exact_reporters(active=2, supported=(1, 2), seen_at=db_before)
+    with postgres_rotation_world.poison_rotation_host_clock(db_before + timedelta(days=3650)):
         armed = await postgres_rotation_world.new_runner().arm_retirement_fence(
             from_version=1, to_version=2
         )
@@ -2119,9 +2165,7 @@ async def test_retirement_uses_database_clock_despite_host_clock_skew(
     )
     await postgres_rotation_world.force_fence_deadline_before_database_now(armed.fence_id)
     before = await postgres_rotation_world.durable_snapshot()
-    with postgres_rotation_world.poison_rotation_host_clock(
-        db_before - timedelta(days=3650)
-    ):
+    with postgres_rotation_world.poison_rotation_host_clock(db_before - timedelta(days=3650)):
         with pytest.raises(RotationError, match="retirement_fence_expired"):
             await postgres_rotation_world.new_runner().commit_retirement_fence(
                 from_version=1, to_version=2, fence_id=armed.fence_id
@@ -2142,9 +2186,7 @@ async def test_arm_boundary_blocks_racing_mutation_and_second_runner(
     )
     barrier = postgres_rotation_world.pause_after_retirement_share_lock()
     arm_task = asyncio.create_task(
-        postgres_rotation_world.new_runner().arm_retirement_fence(
-            from_version=1, to_version=2
-        )
+        postgres_rotation_world.new_runner().arm_retirement_fence(from_version=1, to_version=2)
     )
     await barrier.arrived.wait()
     before = await postgres_rotation_world.durable_snapshot()
@@ -2307,39 +2349,58 @@ def test_exact_supported_command_shapes() -> None:
         retirement_action=None,
         retirement_fence_id=None,
     )
-    assert parse_args([
-        "--from", "1", "--to", "2", "--batch-size", "25", "--max-batches", "8"
-    ]).max_batches == 8
-    assert parse_args([
-        "--from", "1", "--to", "2", "--check-stage", "retirement-ready"
-    ]).check_stage is RotationStage.RETIREMENT_READY
+    assert (
+        parse_args(
+            ["--from", "1", "--to", "2", "--batch-size", "25", "--max-batches", "8"]
+        ).max_batches
+        == 8
+    )
+    assert (
+        parse_args(["--from", "1", "--to", "2", "--check-stage", "retirement-ready"]).check_stage
+        is RotationStage.RETIREMENT_READY
+    )
     assert parse_args(["--from", "1", "--to", "2", "--abort"]).abort is True
-    armed = parse_args([
-        "--from", "1", "--to", "2", "--retirement-action", "arm"
-    ])
+    armed = parse_args(["--from", "1", "--to", "2", "--retirement-action", "arm"])
     assert (armed.retirement_action, armed.retirement_fence_id) == ("arm", None)
     fence_id = UUID("00000000-0000-4000-8000-000000000012")
     for action in ("commit", "cancel"):
-        parsed = parse_args([
-            "--from", "1", "--to", "2", "--retirement-action", action,
-            "--fence-id", str(fence_id),
-        ])
-        assert (parsed.retirement_action, parsed.retirement_fence_id) == (
-            action, fence_id
+        parsed = parse_args(
+            [
+                "--from",
+                "1",
+                "--to",
+                "2",
+                "--retirement-action",
+                action,
+                "--fence-id",
+                str(fence_id),
+            ]
         )
+        assert (parsed.retirement_action, parsed.retirement_fence_id) == (action, fence_id)
 
 
 @pytest.mark.parametrize(
     "argv",
     [
-        [], ["--from", "1"], ["--from", "1", "--to", "1"],
+        [],
+        ["--from", "1"],
+        ["--from", "1", "--to", "1"],
         ["--from", "0", "--to", "2"],
         ["--from", "1", "--to", "2", "--abort", "--check-stage", "activated"],
         ["--from", "1", "--to", "2", "--abort", "--retirement-action", "arm"],
         ["--from", "1", "--to", "2", "--check-stage", "retired", "--retirement-action", "commit"],
         ["--from", "1", "--to", "2", "--retirement-action", "commit"],
         ["--from", "1", "--to", "2", "--retirement-action", "cancel"],
-        ["--from", "1", "--to", "2", "--retirement-action", "arm", "--fence-id", "00000000-0000-4000-8000-000000000012"],
+        [
+            "--from",
+            "1",
+            "--to",
+            "2",
+            "--retirement-action",
+            "arm",
+            "--fence-id",
+            "00000000-0000-4000-8000-000000000012",
+        ],
         ["--from", "1", "--to", "2", "--fence-id", "not-a-uuid"],
         ["--from", "1", "--to", "2", "--batch-size", "1001"],
         ["--from", "1", "--to", "2", "--database-url", "forbidden"],
@@ -2363,8 +2424,14 @@ async def test_cli_prints_one_bounded_safe_object(
     output = capsys.readouterr()
     body = json.loads(output.out)
     assert set(body) == {
-        "from_version", "to_version", "status", "rows_total", "rows_rewrapped",
-        "rows_verified", "rows_failed", "safe_error_code",
+        "from_version",
+        "to_version",
+        "status",
+        "rows_total",
+        "rows_rewrapped",
+        "rows_verified",
+        "rows_failed",
+        "safe_error_code",
     }
     assert output.err == ""
     for canary in cli_world.key_plaintext_path_dsn_fingerprint_canaries:
@@ -2377,24 +2444,28 @@ async def test_retirement_actions_use_fresh_lease_and_fixed_output(
 ) -> None:
     await cli_world.seed_completed_rotation_and_activated_reporters()
     arm_code = await async_main(
-        parse_args([
-            "--from", "1", "--to", "2", "--retirement-action", "arm"
-        ]),
+        parse_args(["--from", "1", "--to", "2", "--retirement-action", "arm"]),
         cli_world.environ,
     )
     arm_body = json.loads(capsys.readouterr().out)
     assert arm_code == 0
-    assert set(arm_body) == {
-        "from_version", "to_version", "fence_id", "state", "safe_error_code"
-    }
+    assert set(arm_body) == {"from_version", "to_version", "fence_id", "state", "safe_error_code"}
     assert arm_body["state"] == "armed"
 
     await cli_world.set_retired_reporters()
     commit_code = await async_main(
-        parse_args([
-            "--from", "1", "--to", "2", "--retirement-action", "commit",
-            "--fence-id", arm_body["fence_id"],
-        ]),
+        parse_args(
+            [
+                "--from",
+                "1",
+                "--to",
+                "2",
+                "--retirement-action",
+                "commit",
+                "--fence-id",
+                arm_body["fence_id"],
+            ]
+        ),
         cli_world.environ,
     )
     commit_body = json.loads(capsys.readouterr().out)
@@ -2440,9 +2511,7 @@ Use real PostgreSQL for the lock test:
 @pytest.mark.integration
 async def test_busy_advisory_lock_refuses_without_state_change(pg_cli_world: PgCliWorld) -> None:
     async with pg_cli_world.hold_advisory_lock(MASTER_KEY_ROTATION_ADVISORY_LOCK):
-        code = await async_main(
-            parse_args(["--from", "1", "--to", "2"]), pg_cli_world.environ
-        )
+        code = await async_main(parse_args(["--from", "1", "--to", "2"]), pg_cli_world.environ)
     assert code == 4
     assert await pg_cli_world.rotation_count() == 0
     assert await pg_cli_world.audit_count() == 0
@@ -2522,13 +2591,24 @@ class MasterKeyRotationSummary(BaseModel):
     workspace_rows_to_version: BoundedCount
     started_at: AwareDatetime
     completed_at: AwareDatetime | None
-    safe_error_code: Literal[
-        "replica_gate_closed", "conflicting_rotation", "unexpected_secret_version",
-        "secret_decryption_failed", "secret_verification_failed", "source_rows_remain",
-        "row_lock_timeout", "rotation_statement_timeout",
-        "rotation_advisory_lock_lost", "retirement_fence_active",
-        "retirement_fence_missing", "retirement_fence_expired",
-    ] | None
+    safe_error_code: (
+        Literal[
+            "replica_gate_closed",
+            "conflicting_rotation",
+            "unexpected_secret_version",
+            "secret_decryption_failed",
+            "secret_verification_failed",
+            "source_rows_remain",
+            "row_lock_timeout",
+            "rotation_statement_timeout",
+            "rotation_advisory_lock_lost",
+            "retirement_fence_active",
+            "retirement_fence_missing",
+            "retirement_fence_expired",
+        ]
+        | None
+    )
+
 
 class KeyHealthSummary(BaseModel):
     # Preserve every existing field exactly, then append:
@@ -2548,31 +2628,48 @@ async def test_rotation_projection_is_bounded_and_omits_authority_fields(
     operations_world: OperationsHealthWorld,
 ) -> None:
     await operations_world.seed_rotation(
-        from_version=1, to_version=2, status="rewrapping",
-        rows_total=999, rows_rewrapped=555, rows_verified=444, rows_failed=7,
+        from_version=1,
+        to_version=2,
+        status="rewrapping",
+        rows_total=999,
+        rows_rewrapped=555,
+        rows_verified=444,
+        rows_failed=7,
     )
     await operations_world.seed_workspace_secret(version=1)
     await operations_world.seed_workspace_secret(version=2)
     foreign = await operations_world.create_foreign_workspace()
     for _ in range(25):
         await operations_world.seed_workspace_secret(version=2, workspace_id=foreign.id)
-    snapshot = await operations_world.key_snapshot(
-        active=2, supported=(1, 2), secret_versions=[]
-    )
+    snapshot = await operations_world.key_snapshot(active=2, supported=(1, 2), secret_versions=[])
     assert snapshot.keyring.rotation == MasterKeyRotationSummary(
-        from_version=1, to_version=2, status="rewrapping",
+        from_version=1,
+        to_version=2,
+        status="rewrapping",
         workspace_rows_total=2,
         workspace_rows_from_version=1,
         workspace_rows_to_version=1,
-        started_at=NOW, completed_at=None, safe_error_code=None,
+        started_at=NOW,
+        completed_at=None,
+        safe_error_code=None,
     )
     body = snapshot.model_dump(mode="json")
     serialized = json.dumps(body)
     for forbidden_key in (
-        "id", "last_secret_id", "key", "path", "plaintext", "fingerprint",
-        "ciphertext", "nonce", "wrapped_data_key", "credential_mutation_generation",
-        "retirement_fence_id", "retirement_fence_generation",
-        "retirement_fence_started_at", "retirement_fence_deadline",
+        "id",
+        "last_secret_id",
+        "key",
+        "path",
+        "plaintext",
+        "fingerprint",
+        "ciphertext",
+        "nonce",
+        "wrapped_data_key",
+        "credential_mutation_generation",
+        "retirement_fence_id",
+        "retirement_fence_generation",
+        "retirement_fence_started_at",
+        "retirement_fence_deadline",
     ):
         assert forbidden_key not in recursive_keys(body)
     assert "ROTATION_SECRET_CANARY" not in serialized
@@ -2582,7 +2679,9 @@ async def test_rotation_projection_is_bounded_and_omits_authority_fields(
 
 async def test_anonymous_health_never_adds_rotation_fields(client: AsyncClient) -> None:
     assert (await client.get("/api/v1/health")).json() == {
-        "app": "Jhin", "version": "0.1.0", "status": "ok"
+        "app": "Jhin",
+        "version": "0.1.0",
+        "status": "ok",
     }
     readiness = await client.get("/api/v1/health/ready")
     assert readiness.json() in ({"status": "ok"}, {"status": "degraded"})
@@ -2688,24 +2787,17 @@ def test_rotation_live_recipe_is_uid_correct_isolated_and_destructive_only_to_it
     assert "install-runtime-key" in body
     assert "cleanup-runtime-key" in body
     assert "pinned-compose-down" in body
-    assert (
-        'JHIN_RUNTIME_KEY_IDENTITY_HANDOFF="$$fixture_dir/'
-        'runtime-key-identity.json"' in body
-    )
+    assert 'JHIN_RUNTIME_KEY_IDENTITY_HANDOFF="$$fixture_dir/runtime-key-identity.json"' in body
     assert "export JHIN_RUNTIME_KEY_IDENTITY_HANDOFF" in body
     assert '--identity-output "$$JHIN_RUNTIME_KEY_IDENTITY_HANDOFF"' in body
     assert '--identity-file "$$JHIN_RUNTIME_KEY_IDENTITY_HANDOFF"' in body
-    assert (
-        'test "$$runtime_cleanup_output" = "runtime_key_cleaned"' in body
-    )
+    assert 'test "$$runtime_cleanup_output" = "runtime_key_cleaned"' in body
     assert "outer_trap_cleanup_ok" in body
     assert "outer_trap_cleanup_failed" in body
     assert "runtime_key_cleanup_rejected" not in body
     assert 'find "$$fixture_dir" -xdev -depth -delete' in body
     assert "trap" in body
-    assert body.index("export JHIN_RUNTIME_KEY_IDENTITY_HANDOFF") < body.index(
-        "trap"
-    )
+    assert body.index("export JHIN_RUNTIME_KEY_IDENTITY_HANDOFF") < body.index("trap")
     assert body.index("trap") < body.index("install-runtime-key")
     assert body.rindex("pinned-compose-down") < body.rindex("cleanup-runtime-key")
     assert 'MASTER_KEY_FILE_HOST="$$runtime_key"' in body
@@ -2751,9 +2843,7 @@ def test_compose_project_pins_validated_socket_and_ignores_hostile_inheritance(
             "COMPOSE_ENV_FILES": "/tmp/HOSTILE_ENV_FILE",
             "COMPOSE_PATH_SEPARATOR": "!",
             "COMPOSE_DISABLE_ENV_FILE": "0",
-            "JHIN_RUNTIME_KEY_IDENTITY_HANDOFF": (
-                "/tmp/HOSTILE_RUNTIME_IDENTITY_HANDOFF"
-            ),
+            "JHIN_RUNTIME_KEY_IDENTITY_HANDOFF": ("/tmp/HOSTILE_RUNTIME_IDENTITY_HANDOFF"),
         }
         for name, value in hostile.items():
             monkeypatch.setenv(name, value)
@@ -2766,12 +2856,8 @@ def test_compose_project_pins_validated_socket_and_ignores_hostile_inheritance(
         inode=expected_stat.st_ino,
     )
 
-    first = new_isolated_project(
-        docker_socket=docker_socket, pid=1234, token="a1b2c3d4"
-    )
-    second = new_isolated_project(
-        docker_socket=docker_socket, pid=1234, token="b2c3d4e5"
-    )
+    first = new_isolated_project(docker_socket=docker_socket, pid=1234, token="a1b2c3d4")
+    second = new_isolated_project(docker_socket=docker_socket, pid=1234, token="b2c3d4e5")
     assert first.name == "jhin-keyrot-1234-a1b2c3d4"
     assert first.name != second.name
     assert first.env["SANDBOX_DOCKER_SOCKET_HOST"] == str(socket_path.resolve())
@@ -2783,26 +2869,32 @@ def test_compose_project_pins_validated_socket_and_ignores_hostile_inheritance(
     assert stat.S_IMODE(docker_config.stat().st_mode) == 0o700
     assert list(docker_config.iterdir()) == []
     for name in DOCKER_AUTHORITY_ENV_TO_SCRUB - {
-        "DOCKER_HOST", "DOCKER_CONFIG", "COMPOSE_DISABLE_ENV_FILE"
+        "DOCKER_HOST",
+        "DOCKER_CONFIG",
+        "COMPOSE_DISABLE_ENV_FILE",
     }:
         assert name not in first.env
     assert first.env["DOCKER_HOST"] != hostile["DOCKER_HOST"]
     assert first.env["DOCKER_CONFIG"] != hostile["DOCKER_CONFIG"]
-    assert first.env["COMPOSE_DISABLE_ENV_FILE"] != hostile[
-        "COMPOSE_DISABLE_ENV_FILE"
-    ]
-    assert first.env["SANDBOX_DOCKER_SOCKET_HOST"] != hostile[
-        "SANDBOX_DOCKER_SOCKET_HOST"
-    ]
+    assert first.env["COMPOSE_DISABLE_ENV_FILE"] != hostile["COMPOSE_DISABLE_ENV_FILE"]
+    assert first.env["SANDBOX_DOCKER_SOCKET_HOST"] != hostile["SANDBOX_DOCKER_SOCKET_HOST"]
     assert first.env["SANDBOX_DOCKER_GID"] != hostile["SANDBOX_DOCKER_GID"]
     assert "JHIN_RUNTIME_KEY_IDENTITY_HANDOFF" not in first.env
     zero_ports = {
-        "WEB_PORT", "API_PORT", "FAKE_SUPABASE_DB_DEV_PORT",
-        "FAKE_PROVIDER_DEV_PORT", "FAKE_GITHUB_DEV_PORT",
-        "FAKE_LINEAR_DEV_PORT", "FAKE_VERCEL_DEV_PORT",
-        "FAKE_SUPABASE_DEV_PORT", "SANDBOX_RUNNER_DEV_PORT",
-        "POSTGRES_DEV_PORT", "NATS_DEV_PORT", "NATS_MONITOR_DEV_PORT",
-        "TEMPORAL_DEV_PORT", "TEMPORAL_UI_DEV_PORT",
+        "WEB_PORT",
+        "API_PORT",
+        "FAKE_SUPABASE_DB_DEV_PORT",
+        "FAKE_PROVIDER_DEV_PORT",
+        "FAKE_GITHUB_DEV_PORT",
+        "FAKE_LINEAR_DEV_PORT",
+        "FAKE_VERCEL_DEV_PORT",
+        "FAKE_SUPABASE_DEV_PORT",
+        "SANDBOX_RUNNER_DEV_PORT",
+        "POSTGRES_DEV_PORT",
+        "NATS_DEV_PORT",
+        "NATS_MONITOR_DEV_PORT",
+        "TEMPORAL_DEV_PORT",
+        "TEMPORAL_UI_DEV_PORT",
     }
     assert {name for name in zero_ports if first.env[name] == "0"} == zero_ports
     assert first.env["SANDBOX_NETWORK"] == f"{first.name}_sandbox"
@@ -2815,16 +2907,19 @@ def test_compose_project_pins_validated_socket_and_ignores_hostile_inheritance(
     for command in commands:
         assert command[:4] == ["docker", "compose", "-p", first.name]
         assert command[4:12] == [
-            "-f", "compose.yaml",
-            "-f", "compose.dev.yaml",
-            "-f", "compose.rootful.yaml",
-            "-f", "tests/integration/compose.phase10-keyring-upgrade.yaml",
+            "-f",
+            "compose.yaml",
+            "-f",
+            "compose.dev.yaml",
+            "-f",
+            "compose.rootful.yaml",
+            "-f",
+            "tests/integration/compose.phase10-keyring-upgrade.yaml",
         ]
     assert first.cleanup_argv[-3:] == ["down", "-v", "--remove-orphans"]
     rendered = first.render_config()
     assert all(
-        config["name"].startswith(f"{first.name}_")
-        for config in rendered["volumes"].values()
+        config["name"].startswith(f"{first.name}_") for config in rendered["volumes"].values()
     )
     assert rendered["networks"]["sandbox"]["name"] == f"{first.name}_sandbox"
     assert all(
@@ -2845,7 +2940,12 @@ def test_compose_project_pins_validated_socket_and_ignores_hostile_inheritance(
         ["docker", "network", "inspect", f"{first.name}_sandbox"],
         ["docker", "volume", "inspect", f"{first.name}_postgres_data"],
         first.argv(
-            "exec", "-T", "api", "stat", "-c", "%u:%g:%a",
+            "exec",
+            "-T",
+            "api",
+            "stat",
+            "-c",
+            "%u:%g:%a",
             "/run/secrets/jhin_master_key",
         ),
         first.cleanup_argv,
@@ -2858,26 +2958,56 @@ def test_compose_project_pins_validated_socket_and_ignores_hostile_inheritance(
         assert call.env["COMPOSE_DISABLE_ENV_FILE"] == "1"
         assert call.env.get("DOCKER_CONTEXT") is None
         assert call.env.get("COMPOSE_PROFILES") is None
+
+
 def test_runtime_installer_uses_only_stdin_and_root_owned_exact_targets() -> None:
     target = RuntimeKeyTarget(
         fixed_root=Path("/run/jhin-key-rotation"),
         leaf_name="jhin-keyrot-1234-a1b2c3d4",
-        runtime_file=Path(
-            "/run/jhin-key-rotation/jhin-keyrot-1234-a1b2c3d4/jhin_master_key"
-        ),
+        runtime_file=Path("/run/jhin-key-rotation/jhin-keyrot-1234-a1b2c3d4/jhin_master_key"),
     )
     assert prepare_runtime_root_argv(target) == [
-        "sudo", "-n", "install", "-d", "-m", "0700", "-o", "0", "-g", "0",
-        "--", "/run/jhin-key-rotation",
+        "sudo",
+        "-n",
+        "install",
+        "-d",
+        "-m",
+        "0700",
+        "-o",
+        "0",
+        "-g",
+        "0",
+        "--",
+        "/run/jhin-key-rotation",
     ]
     assert prepare_runtime_leaf_argv(target) == [
-        "sudo", "-n", "install", "-d", "-m", "0700", "-o", "0", "-g", "0",
-        "--", str(target.runtime_file.parent),
+        "sudo",
+        "-n",
+        "install",
+        "-d",
+        "-m",
+        "0700",
+        "-o",
+        "0",
+        "-g",
+        "0",
+        "--",
+        str(target.runtime_file.parent),
     ]
     install = runtime_key_install_argv(target)
     assert install == [
-        "sudo", "-n", "install", "-m", "0600", "-o", "10001", "-g", "10001",
-        "--", "/proc/self/fd/0", str(target.runtime_file),
+        "sudo",
+        "-n",
+        "install",
+        "-m",
+        "0600",
+        "-o",
+        "10001",
+        "-g",
+        "10001",
+        "--",
+        "/proc/self/fd/0",
+        str(target.runtime_file),
     ]
     identity = RuntimeKeyIdentitySnapshot(
         format_version=1,
@@ -2908,9 +3038,7 @@ def test_runtime_install_passes_only_the_unprivileged_open_fd(
     target = RuntimeKeyTarget(
         fixed_root=Path("/run/jhin-key-rotation"),
         leaf_name="jhin-keyrot-1234-a1b2c3d4",
-        runtime_file=Path(
-            "/run/jhin-key-rotation/jhin-keyrot-1234-a1b2c3d4/jhin_master_key"
-        ),
+        runtime_file=Path("/run/jhin-key-rotation/jhin-keyrot-1234-a1b2c3d4/jhin_master_key"),
     )
     fd = open_operator_key_fd(operator_key)
     try:
@@ -2937,9 +3065,7 @@ def test_runtime_installer_cli_closes_argparse_and_os_errors_without_paths_or_by
     target = RuntimeKeyTarget(
         fixed_root=Path("/run/jhin-key-rotation"),
         leaf_name="jhin-keyrot-1234-a1b2c3d4",
-        runtime_file=Path(
-            "/run/jhin-key-rotation/jhin-keyrot-1234-a1b2c3d4/jhin_master_key"
-        ),
+        runtime_file=Path("/run/jhin-key-rotation/jhin-keyrot-1234-a1b2c3d4/jhin_master_key"),
     )
     identity_output = tmp_path / "runtime-identity.json"
     outside = tmp_path / "OUTSIDE_REFERENT_PATH_CANARY"
@@ -2950,9 +3076,12 @@ def test_runtime_installer_cli_closes_argparse_and_os_errors_without_paths_or_by
     results = [
         run_runtime_key_install_cli(
             [
-                "--operator-key", str(operator_key),
-                "--project", "jhin-keyrot-test",
-                "--identity-output", str(identity_output),
+                "--operator-key",
+                str(operator_key),
+                "--project",
+                "jhin-keyrot-test",
+                "--identity-output",
+                str(identity_output),
             ],
             runner=RaisingCommandRunner(failure),
             target_factory=lambda _project: target,
@@ -2962,9 +3091,12 @@ def test_runtime_installer_cli_closes_argparse_and_os_errors_without_paths_or_by
     results.append(
         run_runtime_key_install_cli(
             [
-                "--operator-key", str(operator_key),
-                "--project", "../BAD_PROJECT_CANARY",
-                "--identity-output", str(identity_output),
+                "--operator-key",
+                str(operator_key),
+                "--project",
+                "../BAD_PROJECT_CANARY",
+                "--identity-output",
+                str(identity_output),
             ],
             runner=NoOpCommandRunner(),
             target_factory=lambda _project: target,
@@ -2973,9 +3105,12 @@ def test_runtime_installer_cli_closes_argparse_and_os_errors_without_paths_or_by
     results.append(
         run_runtime_key_install_cli(
             [
-                "--operator-key", str(tmp_path / "MISSING_SOURCE_PATH_CANARY"),
-                "--project", "jhin-keyrot-test",
-                "--identity-output", str(identity_output),
+                "--operator-key",
+                str(tmp_path / "MISSING_SOURCE_PATH_CANARY"),
+                "--project",
+                "jhin-keyrot-test",
+                "--identity-output",
+                str(identity_output),
             ],
             runner=NoOpCommandRunner(),
             target_factory=lambda _project: target,
@@ -2989,10 +3124,15 @@ def test_runtime_installer_cli_closes_argparse_and_os_errors_without_paths_or_by
     ]
     rendered = "".join(result.stdout + result.stderr for result in results) + caplog.text
     for forbidden in (
-        str(operator_key), str(target.runtime_file), str(outside),
+        str(operator_key),
+        str(target.runtime_file),
+        str(outside),
         str(identity_output),
-        "RUNTIME_KEY_BYTES_CANARY", "HOSTILE_FILE_EXISTS_ERROR",
-        "HOSTILE_OS_ERROR", "BAD_PROJECT_CANARY", "MISSING_SOURCE_PATH_CANARY",
+        "RUNTIME_KEY_BYTES_CANARY",
+        "HOSTILE_FILE_EXISTS_ERROR",
+        "HOSTILE_OS_ERROR",
+        "BAD_PROJECT_CANARY",
+        "MISSING_SOURCE_PATH_CANARY",
     ):
         assert forbidden not in rendered
 
@@ -3005,9 +3145,7 @@ def identity_snapshot(*, runtime_inode: int) -> RuntimeKeyIdentitySnapshot:
         run_root=RuntimePathIdentity(1, 3, 0, 0, 0o755, 1),
         fixed_root=RuntimePathIdentity(1, 4, 0, 0, 0o700, 1),
         random_leaf=RuntimePathIdentity(1, 5, 0, 0, 0o700, 1),
-        runtime_file=RuntimePathIdentity(
-            1, runtime_inode, 10001, 10001, 0o600, 1
-        ),
+        runtime_file=RuntimePathIdentity(1, runtime_inode, 10001, 10001, 0o600, 1),
     )
 
 
@@ -3031,22 +3169,33 @@ def test_replacement_atomically_updates_stable_identity_handoff_for_cleanup(
     world = FakePrivilegedRuntimeWorld(project="jhin-keyrot-test")
     source = write_private_keyring(tmp_path / "operator-key")
     handoff = tmp_path / "runtime-identity.json"
-    assert run_runtime_key_install_cli(
-        [
-            "--operator-key", str(source),
-            "--project", world.project,
-            "--identity-output", str(handoff),
-        ],
-        runner=world.runner,
-        target_factory=world.target,
-    ).returncode == 0
+    assert (
+        run_runtime_key_install_cli(
+            [
+                "--operator-key",
+                str(source),
+                "--project",
+                world.project,
+                "--identity-output",
+                str(handoff),
+            ],
+            runner=world.runner,
+            target_factory=world.target,
+        ).returncode
+        == 0
+    )
     assert stat.S_IMODE(handoff.lstat().st_mode) == 0o600
     assert handoff.lstat().st_nlink == 1
     assert handoff.stat().st_size <= MAX_RUNTIME_IDENTITY_BYTES
     receipt = json.loads(handoff.read_text(encoding="ascii"))
     assert set(receipt) == {
-        "format_version", "project_name", "filesystem_root", "run_root",
-        "fixed_root", "random_leaf", "runtime_file",
+        "format_version",
+        "project_name",
+        "filesystem_root",
+        "run_root",
+        "fixed_root",
+        "random_leaf",
+        "runtime_file",
     }
     assert str(world.target(world.project).runtime_file) not in json.dumps(receipt)
     assert "KEY_MATERIAL" not in json.dumps(receipt)
@@ -3058,15 +3207,21 @@ def test_replacement_atomically_updates_stable_identity_handoff_for_cleanup(
     # GNU install replaces the runtime target inode; the same stable handoff
     # path must be atomically replaced with the new validated receipt.
     world.replace_runtime_file_inode()
-    assert run_runtime_key_install_cli(
-        [
-            "--operator-key", str(source),
-            "--project", world.project,
-            "--identity-output", str(handoff),
-        ],
-        runner=world.runner,
-        target_factory=world.target,
-    ).returncode == 0
+    assert (
+        run_runtime_key_install_cli(
+            [
+                "--operator-key",
+                str(source),
+                "--project",
+                world.project,
+                "--identity-output",
+                str(handoff),
+            ],
+            runner=world.runner,
+            target_factory=world.target,
+        ).returncode
+        == 0
+    )
     current = read_runtime_identity_handoff(handoff)
     assert current.runtime_file.inode != first.runtime_file.inode
     assert handoff.lstat().st_ino != handoff_inode
@@ -3074,44 +3229,51 @@ def test_replacement_atomically_updates_stable_identity_handoff_for_cleanup(
     before = world.privileged_metadata()
     stale_result = run_runtime_key_cleanup_cli(
         [
-            "--project", world.project,
-            "--identity-file", str(stale),
+            "--project",
+            world.project,
+            "--identity-file",
+            str(stale),
         ],
         runner=world.runner,
         target_factory=world.target,
     )
     assert (stale_result.returncode, stale_result.stdout, stale_result.stderr) == (
-        1, "", "runtime_key_cleanup_rejected\n"
+        1,
+        "",
+        "runtime_key_cleanup_rejected\n",
     )
     assert world.privileged_metadata() == before
 
     cleaned = run_runtime_key_cleanup_cli(
         [
-            "--project", world.project,
-            "--identity-file", str(handoff),
+            "--project",
+            world.project,
+            "--identity-file",
+            str(handoff),
         ],
         runner=world.runner,
         target_factory=world.target,
     )
-    assert (cleaned.returncode, cleaned.stdout, cleaned.stderr) == (
-        0, "runtime_key_cleaned\n", ""
-    )
+    assert (cleaned.returncode, cleaned.stdout, cleaned.stderr) == (0, "runtime_key_cleaned\n", "")
     assert world.runtime_leaf_absent()
     call_count_before = len(world.runner.calls)
     missing = run_runtime_key_cleanup_cli(
         [
-            "--project", world.project,
-            "--identity-file", str(handoff),
+            "--project",
+            world.project,
+            "--identity-file",
+            str(handoff),
         ],
         runner=world.runner,
         target_factory=world.target,
     )
     assert (missing.returncode, missing.stdout, missing.stderr) == (
-        1, "", "runtime_key_cleanup_rejected\n"
+        1,
+        "",
+        "runtime_key_cleanup_rejected\n",
     )
     assert not any(
-        tuple(call.argv[:3])
-        in (("sudo", "-n", "rm"), ("sudo", "-n", "rmdir"))
+        tuple(call.argv[:3]) in (("sudo", "-n", "rm"), ("sudo", "-n", "rmdir"))
         for call in world.runner.calls[call_count_before:]
     )
     assert world.runtime_leaf_absent()
@@ -3190,14 +3352,27 @@ RuntimeIdentityFailpoint = Literal[
     "after-identity-sibling-fsync-before-replace",
     "after-identity-replace-before-directory-fsync",
 ]
-DOCKER_AUTHORITY_ENV_TO_SCRUB = frozenset({
-    "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_TLS", "DOCKER_TLS_VERIFY",
-    "DOCKER_CERT_PATH", "DOCKER_TLS_CERTDIR", "DOCKER_API_VERSION",
-    "DOCKER_CUSTOM_HEADERS",
-    "DOCKER_CONFIG", "DOCKER_DEFAULT_PLATFORM",
-    "COMPOSE_PROFILES", "COMPOSE_FILE", "COMPOSE_PROJECT_NAME",
-    "COMPOSE_ENV_FILES", "COMPOSE_PATH_SEPARATOR", "COMPOSE_DISABLE_ENV_FILE",
-})
+DOCKER_AUTHORITY_ENV_TO_SCRUB = frozenset(
+    {
+        "DOCKER_HOST",
+        "DOCKER_CONTEXT",
+        "DOCKER_TLS",
+        "DOCKER_TLS_VERIFY",
+        "DOCKER_CERT_PATH",
+        "DOCKER_TLS_CERTDIR",
+        "DOCKER_API_VERSION",
+        "DOCKER_CUSTOM_HEADERS",
+        "DOCKER_CONFIG",
+        "DOCKER_DEFAULT_PLATFORM",
+        "COMPOSE_PROFILES",
+        "COMPOSE_FILE",
+        "COMPOSE_PROJECT_NAME",
+        "COMPOSE_ENV_FILES",
+        "COMPOSE_PATH_SEPARATOR",
+        "COMPOSE_DISABLE_ENV_FILE",
+    }
+)
+
 
 @dataclass(frozen=True)
 class DockerSocket:
@@ -3206,15 +3381,18 @@ class DockerSocket:
     device: int
     inode: int
 
+
 def validated_docker_socket(
     environ: Mapping[str, str] | None = None,
 ) -> DockerSocket: ...
+
 
 @dataclass(frozen=True)
 class RuntimeKeyTarget:
     fixed_root: Path
     leaf_name: str
     runtime_file: Path
+
 
 @dataclass(frozen=True)
 class RuntimePathIdentity:
@@ -3224,6 +3402,7 @@ class RuntimePathIdentity:
     gid: int
     mode: int
     links: int
+
 
 @dataclass(frozen=True)
 class RuntimeKeyIdentitySnapshot:
@@ -3235,15 +3414,22 @@ class RuntimeKeyIdentitySnapshot:
     random_leaf: RuntimePathIdentity
     runtime_file: RuntimePathIdentity
 
+
 class RuntimeKeyInstallError(RuntimeError): ...
+
+
 class SimulatedIdentityPublishCrash(RuntimeError): ...
+
+
 class HarnessContractError(RuntimeError): ...
+
 
 @dataclass(frozen=True)
 class SafeCommandResult:
     returncode: int
     stdout: str
     stderr: str
+
 
 class CommandRunner(Protocol):
     def run(
@@ -3257,6 +3443,7 @@ class CommandRunner(Protocol):
         timeout: float,
     ) -> SafeCommandResult: ...
 
+
 @dataclass(frozen=True)
 class DotenvRenderProbe:
     image: str
@@ -3265,12 +3452,14 @@ class DotenvRenderProbe:
     command_env: Mapping[str, str]
     allowlisted_render: Mapping[str, object]
 
+
 @dataclass(frozen=True)
 class SafeCliResult:
     returncode: int
     body: Mapping[str, object]
     stdout: str
     stderr: str
+
 
 @dataclass(frozen=True)
 class BackupEvidence:
@@ -3281,6 +3470,7 @@ class BackupEvidence:
     database_verified: bool
     keyring_verified: bool
 
+
 @dataclass(frozen=True)
 class StackRuntimeSnapshot:
     key_service_generations: tuple[tuple[str, int], ...]
@@ -3288,18 +3478,22 @@ class StackRuntimeSnapshot:
     rotation_attempt_count: int
     rotation_audit_count: int
 
+
 class RuntimeAncestorRaceBarrier(Protocol):
     arrived: asyncio.Event
     release: asyncio.Event
+
     def attempt_unprivileged_swap(
         self, *, outside: Path, attack: Literal["rename", "symlink"]
     ) -> None: ...
+
 
 @dataclass(frozen=True)
 class ComposeProject:
     name: str
     env: Mapping[str, str]
     docker_socket: DockerSocket
+
     def argv(self, *args: str) -> list[str]: ...
     @property
     def cleanup_argv(self) -> list[str]: ...
@@ -3314,6 +3508,7 @@ class ComposeProject:
         timeout: float = 120.0,
     ) -> SafeCommandResult: ...
 
+
 def pinned_docker_environment(
     socket: DockerSocket,
     *,
@@ -3321,12 +3516,15 @@ def pinned_docker_environment(
     docker_config_dir: Path,
 ) -> dict[str, str]: ...
 
+
 def new_isolated_project(
     *, docker_socket: DockerSocket, pid: int | None = None, token: str | None = None
 ) -> ComposeProject: ...
 
+
 class KeyRotationHarness:
     project: ComposeProject
+
     def install_runtime_key(self, operator_key: Path) -> Path: ...
     def install_runtime_key_for_mode_test(
         self, operator_key: Path, *, mode: Literal[0o640]
@@ -3337,9 +3535,7 @@ class KeyRotationHarness:
         *,
         failpoint: RuntimeIdentityFailpoint | None = None,
     ) -> SafeCommandResult: ...
-    def cleanup_runtime_key_process(
-        self, *, identity_file: Path
-    ) -> SafeCommandResult: ...
+    def cleanup_runtime_key_process(self, *, identity_file: Path) -> SafeCommandResult: ...
     def private_legacy_v1_file(self) -> Path: ...
     def distributed_ring(self, *, from_version: int, to_version: int) -> Path: ...
     def activate_ring(self, source: Path, *, version: int) -> Path: ...
@@ -3398,7 +3594,9 @@ class KeyRotationHarness:
     async def current_revision(self) -> str: ...
     async def credential_mutation_generation(self) -> int: ...
     async def pre_keyring_rotate_actual_credential(self, secret_id: UUID) -> None: ...
-    async def wait_rotation_status(self, status: str, timeout: float = 65.0) -> dict[str, object]: ...
+    async def wait_rotation_status(
+        self, status: str, timeout: float = 65.0
+    ) -> dict[str, object]: ...
     def runtime_ancestor_metadata(
         self,
     ) -> tuple[tuple[str, str, str, str], ...]: ...
@@ -3415,6 +3613,7 @@ class KeyRotationHarness:
     def arm_runtime_ancestor_race(
         self, phase: Literal["install", "cleanup"]
     ) -> RuntimeAncestorRaceBarrier: ...
+
 
 def new_runtime_key_target(project_name: str) -> RuntimeKeyTarget: ...
 def open_operator_key_fd(operator_key: Path) -> int: ...
@@ -3447,9 +3646,7 @@ def run_runtime_key_cleanup_cli(
     runner: CommandRunner,
     target_factory: Callable[[str], RuntimeKeyTarget] = new_runtime_key_target,
 ) -> SafeCliResult: ...
-def run_pinned_compose_down_cli(
-    argv: Sequence[str], *, runner: CommandRunner
-) -> SafeCliResult: ...
+def run_pinned_compose_down_cli(argv: Sequence[str], *, runner: CommandRunner) -> SafeCliResult: ...
 ```
 
 Helpers may print `docker compose ps` and sanitized protected-health JSON on timeout, but never `docker container inspect`, container environments, mounts, key files, database rows containing secret fields, or raw logs. Bounded image/network/volume inspection used only to prove project isolation is routed through the pinned command runner and its output is reduced to allowlisted identifiers before retention. `stdout_fd` is accepted only for the mode-0600 database-backup sink; when supplied, `SafeCommandResult.stdout == ""`, the runner never buffers or decodes those bytes, and the descriptor is closed by its unprivileged caller in `finally`. Every subprocess uses argument arrays, finite timeouts, and `check=False` followed by a safe bounded error.
@@ -3468,22 +3665,21 @@ async def test_pre_keyring_images_ignore_0017_and_handoff_legacy_v1(
     # The invoking UID cannot traverse the root-owned mode-0700 leaf. This
     # projection comes from the exact privileged numeric-stat helper and is
     # sanitized before crossing the command boundary.
-    assert key_rotation.runtime_key_metadata() == (
-        "uid=10001", "gid=10001", "mode=600", "links=1"
-    )
+    assert key_rotation.runtime_key_metadata() == ("uid=10001", "gid=10001", "mode=600", "links=1")
     await key_rotation.migrate_head("0017")
     await key_rotation.start_pre_keyring_services(runtime)
     for service in ("api-pre-keyring", "agent-worker-pre-keyring", "tool-worker-pre-keyring"):
         assert await key_rotation.container_key_stat(service) == (
-            "uid=10001", "gid=10001", "mode=600", "reader_uid=10001"
+            "uid=10001",
+            "gid=10001",
+            "mode=600",
+            "reader_uid=10001",
         )
     secret_ids = await key_rotation.seed_credentials_through_pre_keyring_api()
     assert await key_rotation.pre_keyring_read_all(secret_ids) == "ok"
     before_previous_image_mutation = await key_rotation.credential_mutation_generation()
     await key_rotation.pre_keyring_rotate_actual_credential(secret_ids[0])
-    assert await key_rotation.credential_mutation_generation() > (
-        before_previous_image_mutation
-    )
+    assert await key_rotation.credential_mutation_generation() > (before_previous_image_mutation)
     assert await key_rotation.pre_keyring_read_all(secret_ids) == "ok"
 
     await key_rotation.start_current_key_services(runtime)
@@ -3495,9 +3691,7 @@ async def test_pre_keyring_images_ignore_0017_and_handoff_legacy_v1(
     pre_backup = await key_rotation.verify_backup_pair(stage="pre")
     assert (pre_backup.database_verified, pre_backup.keyring_verified) == (True, True)
     distributed = key_rotation.offline_add_version(legacy, version=2, active=1)
-    await key_rotation.recreate_key_services(
-        key_rotation.install_runtime_key(distributed)
-    )
+    await key_rotation.recreate_key_services(key_rotation.install_runtime_key(distributed))
     await key_rotation.wait_key_gate(RotationStage.DISTRIBUTED)
 ```
 
@@ -3544,7 +3738,9 @@ def outer_trap_runtime_guard(
     previous_handoff_inode = stable.lstat().st_ino
     restored = key_rotation.install_runtime_key_process(operator_key)
     assert (restored.returncode, restored.stdout, restored.stderr) == (
-        0, "runtime_key_installed uid=10001 gid=10001 mode=600\n", ""
+        0,
+        "runtime_key_installed uid=10001 gid=10001 mode=600\n",
+        "",
     )
     assert stable.lstat().st_ino != previous_handoff_inode
     assert key_rotation.read_runtime_identity().runtime_file == (
@@ -3560,16 +3756,12 @@ async def test_staged_rotation_survives_restarts_and_retires_old_key(
     pre_backup = await key_rotation.verify_backup_pair(stage="pre")
     assert (pre_backup.database_verified, pre_backup.keyring_verified) == (True, True)
     distributed = key_rotation.distributed_ring(from_version=1, to_version=2)
-    await key_rotation.recreate_key_services(
-        key_rotation.install_runtime_key(distributed)
-    )
+    await key_rotation.recreate_key_services(key_rotation.install_runtime_key(distributed))
     await key_rotation.wait_key_gate(RotationStage.DISTRIBUTED)
     v1 = await key_rotation.seed_credentials(expected_version=1)
 
     activated = key_rotation.activate_ring(distributed, version=2)
-    await key_rotation.recreate_key_services(
-        key_rotation.install_runtime_key(activated)
-    )
+    await key_rotation.recreate_key_services(key_rotation.install_runtime_key(activated))
     await key_rotation.wait_key_gate(RotationStage.ACTIVATED)
     v2 = await key_rotation.seed_credentials(expected_version=2)
     before = await key_rotation.snapshot_credentials((*v1, *v2))
@@ -3614,12 +3806,8 @@ async def test_staged_rotation_survives_restarts_and_retires_old_key(
             "retirement_fence_active"
         )
     refused = await key_rotation.run_rotation()
-    assert (refused.returncode, refused.body["safe_error_code"]) == (
-        5, "retirement_fence_active"
-    )
-    await key_rotation.recreate_key_services(
-        key_rotation.install_runtime_key(retired)
-    )
+    assert (refused.returncode, refused.body["safe_error_code"]) == (5, "retirement_fence_active")
+    await key_rotation.recreate_key_services(key_rotation.install_runtime_key(retired))
     await key_rotation.wait_key_gate(RotationStage.RETIRED)
     committed = await key_rotation.retirement_action("commit", fence_id=fence_id)
     assert (committed.returncode, committed.body["state"]) == (0, "committed")
@@ -3649,9 +3837,7 @@ async def test_both_backup_components_are_required_at_each_effect_boundary(
 
     pre = await key_rotation.verify_backup_pair(stage="pre")
     assert (pre.database_verified, pre.keyring_verified) == (True, True)
-    await key_rotation.completed_activated_rotation(
-        from_version=1, to_version=2, pre_backup=pre
-    )
+    await key_rotation.completed_activated_rotation(from_version=1, to_version=2, pre_backup=pre)
     key_rotation.fail_backup_component_for_test(stage="post", component=component)
     evidence = await key_rotation.verify_backup_pair(stage="post")
     assert (evidence.database_verified, evidence.keyring_verified) != (True, True)
@@ -3682,15 +3868,14 @@ async def test_failed_retirement_cutover_restores_dual_ring_before_cancel(
     )
     failed_commit = await key_rotation.retirement_action("commit", fence_id=fence_id)
     assert (failed_commit.returncode, failed_commit.body["safe_error_code"]) == (
-        3, "replica_gate_closed"
+        3,
+        "replica_gate_closed",
     )
     assert await key_rotation.assert_semantic_mutation_fenced("create") == (
         "retirement_fence_active"
     )
 
-    await key_rotation.recreate_key_services(
-        key_rotation.install_runtime_key(activated)
-    )
+    await key_rotation.recreate_key_services(key_rotation.install_runtime_key(activated))
     await key_rotation.wait_key_gate(RotationStage.ACTIVATED)
     cancelled = await key_rotation.retirement_action("cancel", fence_id=fence_id)
     assert (cancelled.returncode, cancelled.body["state"]) == (0, "cancelled")
@@ -3746,8 +3931,12 @@ async def test_runtime_key_ancestor_swap_cannot_redirect_privilege(
     outside.write_bytes(b"outside-bytes-must-not-change")
     before_stat = outside.lstat()
     before_identity = (
-        before_stat.st_dev, before_stat.st_ino, before_stat.st_uid,
-        before_stat.st_gid, stat.S_IMODE(before_stat.st_mode), before_stat.st_nlink,
+        before_stat.st_dev,
+        before_stat.st_ino,
+        before_stat.st_uid,
+        before_stat.st_gid,
+        stat.S_IMODE(before_stat.st_mode),
+        before_stat.st_nlink,
     )
     barrier = key_rotation.arm_runtime_ancestor_race(phase)
     if phase == "install":
@@ -3762,13 +3951,20 @@ async def test_runtime_key_ancestor_swap_cannot_redirect_privilege(
     await task
     after_stat = outside.lstat()
     assert (
-        after_stat.st_dev, after_stat.st_ino, after_stat.st_uid,
-        after_stat.st_gid, stat.S_IMODE(after_stat.st_mode), after_stat.st_nlink,
+        after_stat.st_dev,
+        after_stat.st_ino,
+        after_stat.st_uid,
+        after_stat.st_gid,
+        stat.S_IMODE(after_stat.st_mode),
+        after_stat.st_nlink,
     ) == before_identity
     assert outside.read_bytes() == b"outside-bytes-must-not-change"
     if phase == "install":
         assert key_rotation.runtime_key_metadata() == (
-            "uid=10001", "gid=10001", "mode=600", "links=1"
+            "uid=10001",
+            "gid=10001",
+            "mode=600",
+            "links=1",
         )
     else:
         assert key_rotation.runtime_leaf_absent()
@@ -3786,7 +3982,9 @@ async def test_replacement_publishes_latest_receipt_for_separate_cleanup(
     assert_exported_runtime_identity_handoff(stable)
     first = key_rotation.install_runtime_key_process(operator_key)
     assert (first.returncode, first.stdout, first.stderr) == (
-        0, "runtime_key_installed uid=10001 gid=10001 mode=600\n", ""
+        0,
+        "runtime_key_installed uid=10001 gid=10001 mode=600\n",
+        "",
     )
     first_receipt = key_rotation.read_runtime_identity()
     assert first_receipt.runtime_file == key_rotation.runtime_key_identity()
@@ -3798,7 +3996,9 @@ async def test_replacement_publishes_latest_receipt_for_separate_cleanup(
     # cleanup between the two separate installer processes.
     replacement = key_rotation.install_runtime_key_process(operator_key)
     assert (replacement.returncode, replacement.stdout, replacement.stderr) == (
-        0, "runtime_key_installed uid=10001 gid=10001 mode=600\n", ""
+        0,
+        "runtime_key_installed uid=10001 gid=10001 mode=600\n",
+        "",
     )
     latest = key_rotation.read_runtime_identity()
     assert_exported_runtime_identity_handoff(key_rotation.runtime_identity_file())
@@ -3812,25 +4012,33 @@ async def test_replacement_publishes_latest_receipt_for_separate_cleanup(
     outside_before = outside.lstat()
     stale = key_rotation.cleanup_runtime_key_process(identity_file=stale_receipt)
     assert (stale.returncode, stale.stdout, stale.stderr) == (
-        1, "", "runtime_key_cleanup_rejected\n"
+        1,
+        "",
+        "runtime_key_cleanup_rejected\n",
     )
     assert key_rotation.runtime_key_identity() == latest.runtime_file
     outside_after = outside.lstat()
     assert (
-        outside_after.st_dev, outside_after.st_ino, outside_after.st_mode,
-        outside_after.st_uid, outside_after.st_gid, outside_after.st_nlink,
+        outside_after.st_dev,
+        outside_after.st_ino,
+        outside_after.st_mode,
+        outside_after.st_uid,
+        outside_after.st_gid,
+        outside_after.st_nlink,
     ) == (
-        outside_before.st_dev, outside_before.st_ino, outside_before.st_mode,
-        outside_before.st_uid, outside_before.st_gid, outside_before.st_nlink,
+        outside_before.st_dev,
+        outside_before.st_ino,
+        outside_before.st_mode,
+        outside_before.st_uid,
+        outside_before.st_gid,
+        outside_before.st_nlink,
     )
     assert outside.read_bytes() == b"outside-two-process-bytes"
 
     # A separately launched cleanup reads the latest receipt from the same
     # stable handoff that Make exported before installing its trap.
     current = key_rotation.cleanup_runtime_key_process(identity_file=stable)
-    assert (current.returncode, current.stdout, current.stderr) == (
-        0, "runtime_key_cleaned\n", ""
-    )
+    assert (current.returncode, current.stdout, current.stderr) == (0, "runtime_key_cleaned\n", "")
     assert key_rotation.runtime_leaf_absent()
 
 
@@ -3857,9 +4065,7 @@ async def test_identity_handoff_process_crash_is_atomic_and_cleanup_is_closed(
     assert key_rotation.install_runtime_key_process(operator_key).returncode == 0
     old = key_rotation.read_runtime_identity()
 
-    crashed = key_rotation.install_runtime_key_process(
-        operator_key, failpoint=failpoint
-    )
+    crashed = key_rotation.install_runtime_key_process(operator_key, failpoint=failpoint)
     assert (crashed.returncode, crashed.stdout, crashed.stderr) == (97, "", "")
     current_runtime = key_rotation.runtime_key_identity()
     assert current_runtime.inode != old.runtime_file.inode
@@ -3875,13 +4081,17 @@ async def test_identity_handoff_process_crash_is_atomic_and_cleanup_is_closed(
     if stable_generation == "new":
         assert published.runtime_file == current_runtime
         assert (cleanup.returncode, cleanup.stdout, cleanup.stderr) == (
-            0, "runtime_key_cleaned\n", ""
+            0,
+            "runtime_key_cleaned\n",
+            "",
         )
         assert key_rotation.runtime_leaf_absent()
     else:
         assert published.runtime_file == old.runtime_file
         assert (cleanup.returncode, cleanup.stdout, cleanup.stderr) == (
-            1, "", "runtime_key_cleanup_rejected\n"
+            1,
+            "",
+            "runtime_key_cleanup_rejected\n",
         )
         assert key_rotation.runtime_key_identity() == current_runtime
         recovered = key_rotation.install_runtime_key_process(operator_key)
