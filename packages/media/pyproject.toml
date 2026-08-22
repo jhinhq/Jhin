@@ -1,0 +1,22 @@
+[project]
+name = "jhin-media"
+version = "0.1.0"
+description = "Safe image normalization and the MediaStore boundary for Jhin avatars"
+requires-python = ">=3.13"
+dependencies = [
+    "pillow>=11.0",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "jhin-db",
+    "jhin-domain",
+]
+
+[tool.uv.sources]
+jhin-db = { workspace = true }
+jhin-domain = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jhin_media"]
