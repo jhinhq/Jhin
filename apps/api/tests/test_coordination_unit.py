@@ -12,6 +12,8 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from temporalio.exceptions import WorkflowAlreadyStartedError
+from temporalio.service import RPCError, RPCStatusCode
 
 from jhin_api.conversations import service as conversations
 from jhin_api.coordination import service
@@ -33,12 +35,31 @@ from jhin_tools.reviews import open_review
 from jhin_tools.work_requests import create_work_request
 
 
+class FakeHandle:
+    def __init__(self, temporal: FakeTemporal, workflow_id: str) -> None:
+        self._temporal = temporal
+        self._id = workflow_id
+
+    async def signal(self, name: str, args: list[Any] | None = None) -> None:
+        if self._temporal.signal_error is not None:
+            raise self._temporal.signal_error
+        self._temporal.signals.append((self._id, name, list(args or [])))
+
+
 class FakeTemporal:
     def __init__(self) -> None:
         self.started: list[tuple[str, Any, str]] = []
+        self.signals: list[tuple[str, str, list[Any]]] = []
+        self.signal_error: Exception | None = None
+        self.start_error: Exception | None = None
 
     async def start_workflow(self, name: str, arg: Any, *, id: str, task_queue: str) -> None:
+        if self.start_error is not None:
+            raise self.start_error
         self.started.append((name, arg, id))
+
+    def get_workflow_handle(self, workflow_id: str) -> FakeHandle:
+        return FakeHandle(self, workflow_id)
 
 
 @pytest.fixture
@@ -279,6 +300,221 @@ async def test_human_review_decision_and_attention(
     _items, total, pending = await service.list_reviews(session, admin_ctx.workspace_id)
     assert total == 2 and pending == 0
     assert (await conversations.attention(session, admin_ctx.workspace_id)).counts.reviews == 0
+
+
+async def test_human_decision_signals_the_parked_task_workflow(
+    session: AsyncSession, admin_ctx: WorkspaceContext, agents: tuple[Agent, Agent, Agent]
+) -> None:
+    """POST /reviews/{id}/decide commits first, then wakes the source task's
+    AgentTaskWorkflow with review_decision (the same durable contract the
+    approval decision uses); repeating the same verdict re-signals."""
+    _, swe, _ = agents
+    task = Task(
+        workspace_id=admin_ctx.workspace_id,
+        title="Parked on review",
+        state=TaskState.RUNNING.value,
+        assigned_agent_id=swe.id,
+        correlation_id=new_uuid7(),
+        temporal_workflow_id="task-parked",
+    )
+    session.add(task)
+    await session.flush()
+    tool_call_id = new_uuid7()
+    review, _ = await open_review(
+        session,
+        workspace_id=admin_ctx.workspace_id,
+        subject_agent_id=swe.id,
+        trigger_key=f"pre_action:{tool_call_id}:p",
+        mode=ReviewMode.PRE_ACTION,
+        selector=ReviewerSelector(kind="human"),
+        fail_closed=True,
+        task_id=task.id,
+        tool_call_id=tool_call_id,
+    )
+    temporal = FakeTemporal()
+    decided = await service.decide_review(
+        session,
+        member(admin_ctx),
+        review.id,
+        verdict="approve",
+        feedback="Go ahead.",
+        request_id=new_uuid7(),
+        ip_hash="h",
+        temporal=temporal,  # type: ignore[arg-type]
+    )
+    assert decided.status == "approved"
+    assert temporal.signals == [("task-parked", "review_decision", [str(review.id), "approved"])]
+
+    # Same verdict again: no second decision, the wake-up is repeated.
+    again = await service.decide_review(
+        session,
+        member(admin_ctx),
+        review.id,
+        verdict="approve",
+        feedback="Go ahead.",
+        request_id=new_uuid7(),
+        ip_hash="h",
+        temporal=temporal,  # type: ignore[arg-type]
+    )
+    assert again.decided_at == decided.decided_at
+    assert len(temporal.signals) == 2
+    # A different verdict after the fact conflicts.
+    with pytest.raises(HTTPException) as conflict:
+        await service.decide_review(
+            session,
+            member(admin_ctx),
+            review.id,
+            verdict="changes_requested",
+            feedback="no",
+            request_id=new_uuid7(),
+            ip_hash="h",
+            temporal=temporal,  # type: ignore[arg-type]
+        )
+    assert conflict.value.status_code == 409
+
+    # Signal failure on a review that parks a tool call is surfaced (409)
+    # after the decision is durable, so the client can retry the same verdict.
+    other_call = new_uuid7()
+    parked, _ = await open_review(
+        session,
+        workspace_id=admin_ctx.workspace_id,
+        subject_agent_id=swe.id,
+        trigger_key=f"pre_action:{other_call}:p",
+        mode=ReviewMode.PRE_ACTION,
+        selector=ReviewerSelector(kind="human"),
+        fail_closed=True,
+        task_id=task.id,
+        tool_call_id=other_call,
+    )
+    temporal.signal_error = RPCError("gone", RPCStatusCode.NOT_FOUND, b"")
+    with pytest.raises(HTTPException) as undelivered:
+        await service.decide_review(
+            session,
+            member(admin_ctx),
+            parked.id,
+            verdict="changes_requested",
+            feedback="Not yet.",
+            request_id=new_uuid7(),
+            ip_hash="h",
+            temporal=temporal,  # type: ignore[arg-type]
+        )
+    assert undelivered.value.status_code == 409
+    assert (await session.get(WorkReview, parked.id)).status == "changes_requested"  # type: ignore[union-attr]
+    # A review that gates nothing ignores delivery failures.
+    loose, _ = await open_review(
+        session,
+        workspace_id=admin_ctx.workspace_id,
+        subject_agent_id=swe.id,
+        trigger_key="explicit",
+        mode=ReviewMode.BEFORE_CLOSE,
+        selector=ReviewerSelector(kind="human"),
+        fail_closed=False,
+        task_id=task.id,
+    )
+    decided_loose = await service.decide_review(
+        session,
+        member(admin_ctx),
+        loose.id,
+        verdict="approve",
+        feedback="",
+        request_id=new_uuid7(),
+        ip_hash="h",
+        temporal=temporal,  # type: ignore[arg-type]
+    )
+    assert decided_loose.status == "approved"
+
+
+async def test_periodic_policy_lifecycle_starts_and_stops_its_workflow(
+    session: AsyncSession, admin_ctx: WorkspaceContext, agents: tuple[Agent, Agent, Agent]
+) -> None:
+    cto, _, _ = agents
+    temporal = FakeTemporal()
+    body = ReviewPolicyIn(
+        name="weekly",
+        scope_kind=ReviewScopeKind.AGENT,
+        scope_id=cto.id,
+        mode=ReviewMode.PERIODIC,
+        conditions=[ReviewCondition(kind=ReviewConditionKind.ALWAYS)],
+        reviewer=ReviewerSelector(kind="human"),
+        period_seconds=7 * 24 * 3600,
+    )
+    policy = await service.create_review_policy(
+        session,
+        admin_ctx,
+        body,
+        request_id=new_uuid7(),
+        ip_hash="h",
+        temporal=temporal,  # type: ignore[arg-type]
+    )
+    workflow_id = f"review-periodic-{policy.id}"
+    assert [(n, i) for n, _a, i in temporal.started] == [("PeriodicReviewWorkflow", workflow_id)]
+    assert temporal.started[0][1].policy_id == str(policy.id)
+
+    # A cadence change refreshes the running workflow (duplicate start is a no-op).
+    temporal.start_error = WorkflowAlreadyStartedError(workflow_id, "PeriodicReviewWorkflow")
+    await service.update_review_policy(
+        session,
+        admin_ctx,
+        policy.id,
+        ReviewPolicyUpdate(period_seconds=3600),
+        request_id=new_uuid7(),
+        ip_hash="h",
+        temporal=temporal,  # type: ignore[arg-type]
+    )
+    assert temporal.signals[-1] == (workflow_id, "refresh", [])
+    # Disabling stops it; re-enabling starts a fresh one under the same id.
+    await service.update_review_policy(
+        session,
+        admin_ctx,
+        policy.id,
+        ReviewPolicyUpdate(enabled=False),
+        request_id=new_uuid7(),
+        ip_hash="h",
+        temporal=temporal,  # type: ignore[arg-type]
+    )
+    assert temporal.signals[-1] == (workflow_id, "stop", [])
+    temporal.start_error = None
+    await service.update_review_policy(
+        session,
+        admin_ctx,
+        policy.id,
+        ReviewPolicyUpdate(enabled=True),
+        request_id=new_uuid7(),
+        ip_hash="h",
+        temporal=temporal,  # type: ignore[arg-type]
+    )
+    assert len(temporal.started) == 2
+    # Unrelated edits do not touch the workflow; delete stops it.
+    signals_before = len(temporal.signals)
+    await service.update_review_policy(
+        session,
+        admin_ctx,
+        policy.id,
+        ReviewPolicyUpdate(name="weekly (renamed)"),
+        request_id=new_uuid7(),
+        ip_hash="h",
+        temporal=temporal,  # type: ignore[arg-type]
+    )
+    assert len(temporal.signals) == signals_before and len(temporal.started) == 2
+    await service.delete_review_policy(
+        session,
+        admin_ctx,
+        policy.id,
+        request_id=new_uuid7(),
+        ip_hash="h",
+        temporal=temporal,  # type: ignore[arg-type]
+    )
+    assert temporal.signals[-1] == (workflow_id, "stop", [])
+    # Non-periodic policies never start a workflow.
+    await service.create_review_policy(
+        session,
+        admin_ctx,
+        ReviewPolicyIn(name="gate", conditions=[ReviewCondition(kind=ReviewConditionKind.ALWAYS)]),
+        request_id=new_uuid7(),
+        ip_hash="h",
+        temporal=temporal,  # type: ignore[arg-type]
+    )
+    assert len(temporal.started) == 2
 
 
 async def test_activity_projects_work_requests_without_duplicates(

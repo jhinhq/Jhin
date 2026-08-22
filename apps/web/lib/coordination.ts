@@ -433,6 +433,7 @@ export function rollupStatusText(status: string): { label: string; tone: "ok" | 
       return { label: "Queued", tone: "neutral" };
     case "paused":
     case "waiting_approval":
+    case "waiting_review":
     case "waiting_delegation":
     case "pending":
       return { label: "Waiting", tone: "warn" };

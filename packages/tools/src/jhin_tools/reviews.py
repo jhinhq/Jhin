@@ -160,10 +160,13 @@ def task_type_of(task: Task | None) -> str | None:
 
 
 async def reviewer_candidates(
-    session: AsyncSession, workspace_id: UUID, subject_agent_id: UUID, selector: ReviewerSelector
+    session: AsyncSession,
+    workspace_id: UUID,
+    subject_agent_id: UUID | None,
+    selector: ReviewerSelector,
 ) -> ReviewerCandidates:
     """Load only the candidates the selector can name; never the whole org."""
-    subject = await session.get(Agent, subject_agent_id)
+    subject = await session.get(Agent, subject_agent_id) if subject_agent_id is not None else None
     wanted: set[UUID] = set()
     manager_id = subject.manager_agent_id if subject is not None else None
     if manager_id is not None:
@@ -195,7 +198,8 @@ async def reviewer_candidates(
         )
         active = {str(i): s == AgentStatus.ACTIVE.value for i, s in rows.all()}
     # An agent never reviews its own work.
-    active.pop(str(subject_agent_id), None)
+    if subject_agent_id is not None:
+        active.pop(str(subject_agent_id), None)
     return ReviewerCandidates(
         manager_agent_id=str(manager_id) if manager_id else None,
         active_agents=active,
@@ -221,7 +225,7 @@ async def open_review(
     session: AsyncSession,
     *,
     workspace_id: UUID,
-    subject_agent_id: UUID,
+    subject_agent_id: UUID | None,
     trigger_key: str,
     mode: ReviewMode,
     selector: ReviewerSelector,
@@ -519,6 +523,11 @@ class SubmitReviewOutput(BaseModel):
     review_id: str
     status: str
     verdict: str
+    # The source task and its durable workflow id, so the agent worker can
+    # lift this decision into a ``review_decision`` signal that resumes a
+    # run parked on the review (see ``AgentTaskWorkflow``).
+    task_id: str | None = None
+    source_workflow_id: str | None = None
 
 
 async def _request_review(ctx: ToolExecutionContext, payload: BaseModel) -> BaseModel:
@@ -626,8 +635,112 @@ async def _submit_review(ctx: ToolExecutionContext, payload: BaseModel) -> BaseM
         feedback=data.feedback,
         decided_by_agent_id=ctx.agent_id,
     )
+    task = await ctx.session.get(Task, review.task_id) if review.task_id is not None else None
     return SubmitReviewOutput(
-        review_id=str(review.id), status=review.status, verdict=review.verdict or data.verdict
+        review_id=str(review.id),
+        status=review.status,
+        verdict=review.verdict or data.verdict,
+        task_id=str(task.id) if task is not None else None,
+        source_workflow_id=task.temporal_workflow_id if task is not None else None,
+    )
+
+
+# --- periodic reviews ---
+
+
+PERIODIC_WINDOW_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def periodic_trigger_key(policy_id: UUID, window_start: datetime) -> str:
+    return f"periodic:{policy_id}:{window_start.astimezone(UTC).strftime(PERIODIC_WINDOW_FORMAT)}"
+
+
+async def _periodic_rollup_agent(
+    session: AsyncSession, policy: ReviewPolicy, selector: ReviewerSelector
+) -> Agent | None:
+    """Whose rollup summarises the period: a named reviewer agent, else the
+    scoped agent's manager, else the scoped team's manager."""
+    if selector.kind == "agent" and selector.agent_id:
+        try:
+            named = await session.get(Agent, UUID(selector.agent_id))
+        except ValueError:
+            named = None
+        if named is not None and named.workspace_id == policy.workspace_id:
+            return named
+    if policy.scope_kind == "agent" and policy.scope_id is not None:
+        subject = await session.get(Agent, policy.scope_id)
+        if subject is not None and subject.manager_agent_id is not None:
+            manager = await session.get(Agent, subject.manager_agent_id)
+            if manager is not None and manager.workspace_id == policy.workspace_id:
+                return manager
+    if policy.scope_kind == "team" and policy.scope_id is not None:
+        from jhin_db.models import Team
+
+        team = await session.get(Team, policy.scope_id)
+        if team is not None and team.manager_agent_id is not None:
+            manager = await session.get(Agent, team.manager_agent_id)
+            if manager is not None and manager.workspace_id == policy.workspace_id:
+                return manager
+    return None
+
+
+async def open_periodic_review(
+    session: AsyncSession,
+    policy: ReviewPolicy,
+    *,
+    window_start: datetime,
+    window_end: datetime,
+) -> tuple[WorkReview, bool]:
+    """Open the one ``work_review`` for a periodic policy window.
+
+    Idempotent per ``(policy, window_start)`` through the trigger key. The
+    evidence is the deterministic manager rollup of the reviewer's scope
+    (source ids only — never transcripts), so the reviewer sees what the
+    period contained without a second model call.
+    """
+    from jhin_tools.rollups import build_manager_rollup
+
+    selector = ReviewerSelector.model_validate(policy.reviewer_selector_json or {})
+    subject_agent_id = policy.scope_id if policy.scope_kind == "agent" else None
+    rollup_agent = await _periodic_rollup_agent(session, policy, selector)
+    evidence: dict[str, Any] = {
+        "window_start": window_start.astimezone(UTC).strftime(PERIODIC_WINDOW_FORMAT),
+        "window_end": window_end.astimezone(UTC).strftime(PERIODIC_WINDOW_FORMAT),
+        "period_seconds": policy.period_seconds,
+        "scope_kind": policy.scope_kind,
+        "scope_id": str(policy.scope_id) if policy.scope_id else None,
+        "scope_key": policy.scope_key,
+        "summary": f"Periodic review of {policy.name}",
+    }
+    if rollup_agent is not None:
+        rollup = await build_manager_rollup(session, rollup_agent, now=window_end)
+        evidence.update(
+            {
+                "rollup_agent_id": str(rollup_agent.id),
+                "rollup_source_ids": rollup.source_ids,
+                "rollup_counts": {
+                    "reports": len(rollup.reports),
+                    "active_work": len(rollup.active_work),
+                    "recent_work": len(rollup.recent_work),
+                    "blocked_or_failed": len(rollup.blocked_or_failed),
+                    "pending_reviews": len(rollup.pending_reviews),
+                    "pending_approvals": len(rollup.pending_approvals),
+                    "outcomes": len(rollup.outcomes),
+                    "open_work_requests": len(rollup.open_work_requests),
+                },
+                "rollup_truncated": rollup.truncated,
+            }
+        )
+    return await open_review(
+        session,
+        workspace_id=policy.workspace_id,
+        subject_agent_id=subject_agent_id,
+        trigger_key=periodic_trigger_key(policy.id, window_start),
+        mode=ReviewMode.PERIODIC,
+        selector=selector,
+        fail_closed=policy.fail_closed,
+        policy_id=policy.id,
+        evidence=evidence,
     )
 
 
@@ -688,5 +801,7 @@ __all__ = [
     "evaluate_review_event",
     "get_review",
     "load_policy_specs",
+    "open_periodic_review",
     "open_review",
+    "periodic_trigger_key",
 ]

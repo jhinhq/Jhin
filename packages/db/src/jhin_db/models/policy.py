@@ -99,6 +99,10 @@ class ToolCall(Base, UuidPkMixin, CreatedAtMixin):
     approval_id: Mapped[UUID | None] = mapped_column(
         StdUuid, ForeignKey("approval.id", ondelete="SET NULL"), default=None
     )
+    # Pending pre-action work review this call is parked on (migration 0019).
+    review_id: Mapped[UUID | None] = mapped_column(
+        StdUuid, ForeignKey("work_review.id", ondelete="SET NULL"), default=None, index=True
+    )
     started_at: Mapped[datetime | None] = mapped_column(UtcDateTime, default=None)
     completed_at: Mapped[datetime | None] = mapped_column(UtcDateTime, default=None)
     duration_ms: Mapped[int | None] = mapped_column(Integer, default=None)

@@ -41,6 +41,7 @@ from jhin_workflows.avatar_generation import AvatarGenerationWorkflow
 from jhin_workflows.delegated_task import DelegatedTaskWorkflow
 from jhin_workflows.engineering_ticket import EngineeringTicketWorkflow
 from jhin_workflows.memory_maintenance import MemoryMaintenanceWorkflow
+from jhin_workflows.periodic_review import PeriodicReviewWorkflow
 from jhin_workflows.triggered_task import TriggeredTaskWorkflow
 from jhin_workflows.work_request_task import WorkRequestTaskWorkflow
 
@@ -212,12 +213,14 @@ async def main() -> None:
             AvatarGenerationWorkflow,
             WorkRequestTaskWorkflow,
             MemoryMaintenanceWorkflow,
+            PeriodicReviewWorkflow,
         ]
         agent_activities: list[Callable[..., Any]] = [
             activities.resolve_snapshot_activity,
             activities.reason_agent_step_activity,
             activities.commit_agent_step_activity,
             activities.commit_approval_projection_activity,
+            activities.commit_review_projection_activity,
             activities.finalize_run_projection_activity,
             activities.summarize_delegation_activity,
             activities.deliver_delegation_result_activity,
@@ -234,6 +237,8 @@ async def main() -> None:
             media_activities.generate_avatar_activity,
             media_activities.fail_avatar_generation_activity,
             coordination_activities.finalize_work_request_activity,
+            coordination_activities.load_periodic_review_policy_activity,
+            coordination_activities.open_periodic_review_activity,
         ]
         heartbeat_task = asyncio.create_task(run_heartbeat())
         worker = build_temporal_worker(

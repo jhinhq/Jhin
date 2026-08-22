@@ -177,6 +177,7 @@ async def main() -> None:
             tools.resolve_advertised_tools_activity,
             tools.execute_bound_tool_activity,
             tools.resolve_bound_tool_approval_activity,
+            tools.resolve_bound_tool_review_activity,
             triggers.sync_external_tool_activity,
             cleanup.cleanup_run_workspace_activity,
         ]

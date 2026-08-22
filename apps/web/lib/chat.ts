@@ -46,7 +46,7 @@ export type LiveStatusTone = "accent" | "neutral" | "warn";
 export interface LiveStatus {
   label: string;
   tone: LiveStatusTone;
-  kind: "working" | "queued" | "review" | "paused";
+  kind: "working" | "queued" | "review" | "waiting_review" | "paused";
 }
 
 /** Small live status for a conversation, or null when nothing is happening. */
@@ -55,6 +55,10 @@ export function statusLabelFor(
 ): LiveStatus | null {
   if (conversation.active_run_status === "waiting_approval") {
     return { label: "Needs your review", tone: "warn", kind: "review" };
+  }
+  if (conversation.active_run_status === "waiting_review") {
+    // Parked on a work review (a manager/AI reviewer or a person decides).
+    return { label: "Waiting for a review", tone: "neutral", kind: "waiting_review" };
   }
   switch (conversation.active_task_state) {
     case "running":

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -34,7 +35,13 @@ from jhin_domain import MessageType, RunStatus, TaskState, WorkRequestStatus, ne
 from jhin_tools.builtin import ToolExecutionContext, build_builtin_catalog
 from jhin_tools.directory import DirectoryEntry, build_roster, render_roster, search_directory
 from jhin_tools.gateway import GatewayOutcome, ToolGateway
-from jhin_tools.reviews import ToolCallIntent, check_review_gate, decide_review
+from jhin_tools.reviews import (
+    ToolCallIntent,
+    check_review_gate,
+    decide_review,
+    open_periodic_review,
+    periodic_trigger_key,
+)
 from jhin_tools.rollups import build_manager_rollup, render_manager_rollup
 from jhin_tools.work_requests import finalize_work_request
 
@@ -571,6 +578,91 @@ async def test_explicit_review_request_falls_back_to_manager(
     assert output["reviewer_agent_name"] == "CTO" and output["status"] == "pending"
     review = await session.get(WorkReview, UUID(output["review_id"]))
     assert review is not None and review.evidence_json["summary"] == "PR ready"
+
+
+async def test_submit_review_output_names_the_source_workflow(
+    session: AsyncSession, org: Org
+) -> None:
+    """The assigned AI reviewer's decision carries the source task's durable
+    workflow id so the agent worker can lift it into a review_decision signal."""
+    org.task.temporal_workflow_id = f"task-{org.task.id}"
+    run = await run_for(session, org, org.swe, org.task)
+    session.add(
+        ReviewPolicy(
+            workspace_id=org.workspace.id,
+            name="destructive needs manager",
+            mode="pre_action",
+            conditions_json=[{"kind": "destructive_action"}],
+            reviewer_selector_json={"kind": "reporting_manager"},
+            fail_closed=True,
+        )
+    )
+    await session.flush()
+    call_id = new_uuid7()
+    gate = await check_review_gate(
+        session,
+        run,
+        ToolCallIntent(
+            tool_name="system.demo.destructive", risk="destructive", tool_call_id=call_id
+        ),
+    )
+    assert gate.status == "wait_review"
+    await grant(session, org, org.cto, "organization.review.request")
+    ok = await org.gateway(session, org.cto).request(
+        "organization.review.submit",
+        json.dumps({"review_id": str(gate.review_id), "verdict": "approve", "feedback": "ok"}),
+    )
+    assert ok.status == "executed", ok.decision_reason
+    assert ok.sanitized_output == {
+        "review_id": str(gate.review_id),
+        "status": "approved",
+        "verdict": "approve",
+        "task_id": str(org.task.id),
+        "source_workflow_id": f"task-{org.task.id}",
+    }
+
+
+async def test_periodic_review_opens_one_review_per_window_with_rollup_evidence(
+    session: AsyncSession, org: Org
+) -> None:
+    policy = ReviewPolicy(
+        workspace_id=org.workspace.id,
+        name="weekly engineering review",
+        scope_kind="agent",
+        scope_id=org.swe.id,
+        mode="periodic",
+        conditions_json=[{"kind": "always"}],
+        reviewer_selector_json={"kind": "reporting_manager"},
+        period_seconds=7 * 24 * 3600,
+    )
+    session.add(policy)
+    await run_for(session, org, org.swe, org.task)
+    await session.flush()
+    window_end = datetime(2026, 8, 24, 0, 0, tzinfo=UTC)
+    window_start = window_end - timedelta(days=7)
+
+    review, created = await open_periodic_review(
+        session, policy, window_start=window_start, window_end=window_end
+    )
+    again, created_again = await open_periodic_review(
+        session, policy, window_start=window_start, window_end=window_end
+    )
+
+    assert created and not created_again and again.id == review.id
+    assert review.trigger_key == periodic_trigger_key(policy.id, window_start)
+    assert review.mode == "periodic" and review.status == "pending"
+    assert review.reviewer_agent_id == org.cto.id and review.subject_agent_id == org.swe.id
+    evidence = review.evidence_json
+    assert evidence["window_start"] == "2026-08-17T00:00:00Z"
+    assert evidence["window_end"] == "2026-08-24T00:00:00Z"
+    assert evidence["rollup_agent_id"] == str(org.cto.id)
+    assert str(org.task.id) in evidence["rollup_source_ids"]
+    assert "system_prompt" not in json.dumps(evidence)
+    # The next window is a different review.
+    later, created_later = await open_periodic_review(
+        session, policy, window_start=window_end, window_end=window_end + timedelta(days=7)
+    )
+    assert created_later and later.id != review.id
 
 
 # --- rollups ---

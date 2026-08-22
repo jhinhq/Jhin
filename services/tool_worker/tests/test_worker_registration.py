@@ -29,6 +29,7 @@ from jhin_workflows.avatar_generation import AvatarGenerationWorkflow
 from jhin_workflows.delegated_task import DelegatedTaskWorkflow
 from jhin_workflows.engineering_ticket import EngineeringTicketWorkflow
 from jhin_workflows.memory_maintenance import MemoryMaintenanceWorkflow
+from jhin_workflows.periodic_review import PeriodicReviewWorkflow
 from jhin_workflows.tool_compat import (
     AdvertisedToolsCompatibilityWorkflow,
     ApprovalCompatibilityWorkflow,
@@ -43,6 +44,7 @@ TOOL_ACTIVITY_NAMES = {
     "resolve_advertised_tools",
     "execute_bound_tool",
     "resolve_bound_tool_approval",
+    "resolve_bound_tool_review",
     "sync_external_tool",
     "cleanup_run_workspace",
 }
@@ -50,6 +52,7 @@ TOOL_ACTIVITY_ORDER = [
     "resolve_advertised_tools",
     "execute_bound_tool",
     "resolve_bound_tool_approval",
+    "resolve_bound_tool_review",
     "sync_external_tool",
     "cleanup_run_workspace",
 ]
@@ -59,6 +62,7 @@ AGENT_ACTIVITY_NAMES = {
     "reason_agent_step",
     "commit_agent_step",
     "commit_approval_projection",
+    "commit_review_projection",
     "finalize_run_projection",
     "summarize_delegation",
     "deliver_delegation_result",
@@ -75,12 +79,15 @@ AGENT_ACTIVITY_NAMES = {
     "generate_avatar",
     "fail_avatar_generation",
     "finalize_work_request",
+    "load_periodic_review_policy",
+    "open_periodic_review",
 }
 AGENT_ACTIVITY_ORDER = [
     "resolve_snapshot",
     "reason_agent_step",
     "commit_agent_step",
     "commit_approval_projection",
+    "commit_review_projection",
     "finalize_run_projection",
     "summarize_delegation",
     "deliver_delegation_result",
@@ -97,6 +104,8 @@ AGENT_ACTIVITY_ORDER = [
     "generate_avatar",
     "fail_avatar_generation",
     "finalize_work_request",
+    "load_periodic_review_policy",
+    "open_periodic_review",
 ]
 
 
@@ -325,6 +334,7 @@ async def test_agent_worker_registration_uses_only_agent_and_legacy_coordinators
         AvatarGenerationWorkflow,
         WorkRequestTaskWorkflow,
         MemoryMaintenanceWorkflow,
+        PeriodicReviewWorkflow,
     ]
     assert cast(Any, captured["worker"]).workflows is captured["workflows"]
     assert cast(Any, captured["worker"]).activities is captured["activities"]
@@ -378,6 +388,7 @@ async def test_tool_worker_registration_is_exactly_the_effect_boundary(
     assert isinstance(registered["resolve_advertised_tools"].__self__, ToolActivities)
     assert isinstance(registered["execute_bound_tool"].__self__, ToolActivities)
     assert isinstance(registered["resolve_bound_tool_approval"].__self__, ToolActivities)
+    assert isinstance(registered["resolve_bound_tool_review"].__self__, ToolActivities)
     assert isinstance(registered["sync_external_tool"].__self__, TriggerToolActivities)
     assert isinstance(registered["cleanup_run_workspace"].__self__, CleanupActivities)
     assert resources.close_count == 1

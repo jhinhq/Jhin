@@ -65,10 +65,18 @@ def test_media_directly_follows_memory() -> None:
     assert media.down_revision == "0016"
 
 
-def test_coordination_directly_follows_0017_and_is_the_head() -> None:
+def test_coordination_directly_follows_0017() -> None:
     scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
     coordination = scripts.get_revision("0018")
 
     assert coordination is not None
     assert coordination.down_revision == "0017"
-    assert scripts.get_heads() == ["0018"]
+
+
+def test_review_parking_directly_follows_0018_and_is_the_head() -> None:
+    scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
+    parking = scripts.get_revision("0019")
+
+    assert parking is not None
+    assert parking.down_revision == "0018"
+    assert scripts.get_heads() == ["0019"]

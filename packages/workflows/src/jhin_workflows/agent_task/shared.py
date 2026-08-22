@@ -29,6 +29,14 @@ ACTIVITY_RESOLVE_BOUND_TOOL_APPROVAL = "resolve_bound_tool_approval"
 ACTIVITY_COMMIT_APPROVAL_PROJECTION = "commit_approval_projection"
 ACTIVITY_CLEANUP_RUN_WORKSPACE = "cleanup_run_workspace"
 ACTIVITY_FINALIZE_RUN_PROJECTION = "finalize_run_projection"
+# Durable review parking (coordination release): the tool worker resumes a
+# ``pending_review`` call after the review is decided; the agent worker
+# commits the sanitized projection. Same shape as the approval pair.
+ACTIVITY_RESOLVE_BOUND_TOOL_REVIEW = "resolve_bound_tool_review"
+ACTIVITY_COMMIT_REVIEW_PROJECTION = "commit_review_projection"
+# Signal name delivered by ``decide_review`` (API) or lifted from an executed
+# ``organization.review.submit`` call into the source task workflow.
+SIGNAL_REVIEW_DECISION = "review_decision"
 
 
 @dataclass
@@ -70,6 +78,18 @@ class DelegationRequest:
     provider_call_id: str = ""
     # Canonical gateway invocation id used for durable transcript pairing.
     gateway_tool_call_id: str = ""
+
+
+@dataclass
+class ReviewDecisionSignal:
+    """One decided review surfaced by the step activity (the assigned AI
+    reviewer executed ``organization.review.submit``): the workflow forwards
+    it as a ``review_decision`` signal to the source task workflow so a run
+    parked on that review resumes (duplicate signals are idempotent)."""
+
+    review_id: str
+    status: str  # WorkReviewStatus value after the decision
+    source_workflow_id: str
 
 
 @dataclass
@@ -132,6 +152,8 @@ class BoundToolResult:
     status: str
     approval_id: str | None = None
     stop_reason: str | None = None
+    # Set when the gateway parked the call on a pending work review.
+    review_id: str | None = None
 
 
 @dataclass
@@ -164,6 +186,20 @@ class CommitApprovalProjectionInput(ResolveBoundToolApprovalInput):
 
 
 @dataclass
+class ResolveBoundToolReviewInput:
+    workspace_id: str
+    task_id: str
+    run_id: str
+    agent_id: str
+    review_id: str
+
+
+@dataclass
+class CommitReviewProjectionInput(ResolveBoundToolReviewInput):
+    tool_call_id: str = ""
+
+
+@dataclass
 class CleanupRunWorkspaceInput:
     workspace_id: str
     run_id: str
@@ -184,6 +220,10 @@ class StepResult:
     # Set when the gateway parked a tool call pending human approval: the
     # workflow suspends on the approval_decision signal for this id.
     waiting_approval_id: str | None = None
+    # Set when the gateway parked a tool call pending a work review: the
+    # workflow suspends on the review_decision signal for this id, then
+    # resumes the call through the normal approval/claim/effect path.
+    waiting_review_id: str | None = None
     # Delegations executed this step (plan 7.5): the workflow starts one
     # DelegatedTaskWorkflow per entry and awaits the blocking one (at most
     # one — the step parks immediately after a blocking delegation).
@@ -191,6 +231,9 @@ class StepResult:
     # Work requests this agent accepted during the step (coordination
     # release): each starts one abandoned WorkRequestTaskWorkflow child.
     work_request_starts: list[WorkRequestStart] = field(default_factory=list)
+    # Reviews this agent decided during the step as the assigned AI
+    # reviewer: the workflow signals each source task workflow.
+    review_decisions: list[ReviewDecisionSignal] = field(default_factory=list)
     # A claimed mutation whose terminal outcome cannot be proven. The
     # activity persists this before failing non-retryably so the workflow
     # cannot advance to another model step and repeat the effect.

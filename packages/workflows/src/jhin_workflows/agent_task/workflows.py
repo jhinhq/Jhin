@@ -22,6 +22,7 @@ from jhin_workflows.agent_task.shared import (
     ACTIVITY_CLEANUP_RUN_WORKSPACE,
     ACTIVITY_COMMIT_AGENT_STEP,
     ACTIVITY_COMMIT_APPROVAL_PROJECTION,
+    ACTIVITY_COMMIT_REVIEW_PROJECTION,
     ACTIVITY_EXECUTE_BOUND_TOOL,
     ACTIVITY_FINALIZE_RUN,
     ACTIVITY_FINALIZE_RUN_PROJECTION,
@@ -29,9 +30,11 @@ from jhin_workflows.agent_task.shared import (
     ACTIVITY_RESOLVE_ADVERTISED_TOOLS,
     ACTIVITY_RESOLVE_APPROVAL,
     ACTIVITY_RESOLVE_BOUND_TOOL_APPROVAL,
+    ACTIVITY_RESOLVE_BOUND_TOOL_REVIEW,
     ACTIVITY_RESOLVE_SNAPSHOT,
     ACTIVITY_RUN_AGENT_STEP,
     PHASE10_TOOL_WORKER_PATCH,
+    SIGNAL_REVIEW_DECISION,
     AdvertisedTool,
     AgentTaskInput,
     AgentTaskResult,
@@ -40,6 +43,7 @@ from jhin_workflows.agent_task.shared import (
     CleanupRunWorkspaceInput,
     CommitAgentStepInput,
     CommitApprovalProjectionInput,
+    CommitReviewProjectionInput,
     DelegationRequest,
     ExecuteBoundToolInput,
     FinalizeInput,
@@ -48,6 +52,8 @@ from jhin_workflows.agent_task.shared import (
     ResolveAdvertisedToolsInput,
     ResolveApprovalInput,
     ResolveBoundToolApprovalInput,
+    ResolveBoundToolReviewInput,
+    ReviewDecisionSignal,
     RunStepInput,
     SnapshotResult,
     StepResult,
@@ -110,6 +116,11 @@ class AgentTaskWorkflow:
         # approval_id -> decision ("approved" | "rejected"), delivered by the
         # approval_decision signal from the API.
         self._approval_decisions: dict[str, str] = {}
+        # review_id -> decided status ("approved" | "changes_requested" |
+        # "escalated"), delivered by the review_decision signal. Stored even
+        # when it arrives before the run parks, so a decision that races the
+        # park still resumes the workflow.
+        self._review_decisions: dict[str, str] = {}
         # Set by the slot_available signal: a concurrency slot may have freed
         # (plan 30); wakes the queued admission loop early.
         self._slot_kick = False
@@ -139,6 +150,15 @@ class AgentTaskWorkflow:
         the activity re-reads the Postgres approval row as the authority."""
         if approval_id and decision in ("approved", "rejected"):
             self._approval_decisions[approval_id] = decision
+
+    @workflow.signal(name=SIGNAL_REVIEW_DECISION)
+    def review_decision(self, review_id: str, status: str) -> None:
+        """A reviewer (human via the API, or the assigned AI reviewer via
+        ``organization.review.submit``) decided a work review. The signal
+        only wakes the workflow; the tool worker re-reads the Postgres
+        ``work_review`` row as the authority before resuming the call."""
+        if review_id and status in ("approved", "changes_requested", "escalated"):
+            self._review_decisions[review_id] = status
 
     @workflow.signal
     def slot_available(self) -> None:
@@ -363,11 +383,85 @@ class AgentTaskWorkflow:
             for accepted in step.work_request_starts:
                 await self._start_work_request_task(params, accepted)
 
-            if step.waiting_approval_id is not None:
+            # Reviews this agent decided as the assigned AI reviewer wake the
+            # source task workflow (same signal the human API sends).
+            for decided in step.review_decisions:
+                await self._forward_review_decision(params, decided)
+
+            waiting_approval_id = step.waiting_approval_id
+            if step.waiting_review_id is not None:
+                # Durable review wait (coordination release): the tool call is
+                # persisted as pending_review and the run holds its slot as
+                # waiting_review; park until the review_decision signal, then
+                # resume the very same call through the tool worker, which
+                # re-runs authorization and may stage a human approval.
+                review_id = step.waiting_review_id
+                if not use_tool_worker:
+                    error_code = "review_wait_unsupported"
+                    error_message = "legacy histories cannot park on a work review"
+                    break
+                self._status = "waiting_review"
+                self._waiting_reason = f"review:{review_id}"
+
+                def _reviewed(pending_id: str = review_id) -> bool:
+                    return pending_id in self._review_decisions or self._cancelled
+
+                await workflow.wait_condition(_reviewed)
+                if review_id not in self._review_decisions:
+                    break  # woken by cancel, not by a decision
+                self._review_decisions.pop(review_id)
+                self._waiting_reason = None
+                self._status = "running"
+                try:
+                    reviewed_call = await workflow.execute_activity(
+                        ACTIVITY_RESOLVE_BOUND_TOOL_REVIEW,
+                        ResolveBoundToolReviewInput(
+                            workspace_id=params.workspace_id,
+                            task_id=params.task_id,
+                            run_id=snapshot.run_id,
+                            agent_id=params.agent_id,
+                            review_id=review_id,
+                        ),
+                        result_type=BoundToolResult,
+                        task_queue=TOOL_TASK_QUEUE,
+                        start_to_close_timeout=timedelta(minutes=10),
+                        retry_policy=_RESOLVE_APPROVAL_RETRY,
+                    )
+                    reviewed = await workflow.execute_activity(
+                        ACTIVITY_COMMIT_REVIEW_PROJECTION,
+                        CommitReviewProjectionInput(
+                            workspace_id=params.workspace_id,
+                            task_id=params.task_id,
+                            run_id=snapshot.run_id,
+                            agent_id=params.agent_id,
+                            review_id=review_id,
+                            tool_call_id=reviewed_call.tool_call_id,
+                        ),
+                        result_type=StepResult,
+                        task_queue=AGENT_TASK_QUEUE,
+                        start_to_close_timeout=timedelta(seconds=30),
+                        retry_policy=_FINALIZE_RETRY,
+                    )
+                except Exception as exc:
+                    error_code = "review_resolution_failed"
+                    error_message = str(exc)[:2000]
+                    break
+                if reviewed.execution_unknown_tool_call_id is not None:
+                    error_code = "tool_execution_unknown"
+                    error_message = (
+                        f"tool call {reviewed.execution_unknown_tool_call_id} execution "
+                        "outcome is unknown; manual reconciliation is required"
+                    )
+                    break
+                # An approved review may have staged the call for human
+                # approval: fall through into the ordinary approval wait.
+                waiting_approval_id = reviewed.waiting_approval_id
+
+            if waiting_approval_id is not None:
                 # Durable approval wait (plan 8.2, 12.5): the tool call and
                 # approval rows are already persisted; park until a human
                 # decides. Workflow state survives worker restarts.
-                approval_id = step.waiting_approval_id
+                approval_id = waiting_approval_id
                 self._status = "waiting_approval"
                 self._waiting_reason = f"approval:{approval_id}"
 
@@ -512,6 +606,21 @@ class AgentTaskWorkflow:
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=_FINALIZE_RETRY,
         )
+
+    async def _forward_review_decision(
+        self, params: AgentTaskInput, decided: ReviewDecisionSignal
+    ) -> None:
+        """Signal the source task workflow that its review was decided. The
+        decision is already durable in Postgres; a closed or missing target
+        workflow is not an error for the reviewer's own run."""
+        if not decided.source_workflow_id or not decided.review_id:
+            return
+        if decided.source_workflow_id == f"task-{params.task_id}":
+            self.review_decision(decided.review_id, decided.status)
+            return
+        handle = workflow.get_external_workflow_handle(decided.source_workflow_id)
+        with contextlib.suppress(Exception):
+            await handle.signal(SIGNAL_REVIEW_DECISION, args=[decided.review_id, decided.status])
 
     async def _start_work_request_task(
         self, params: AgentTaskInput, accepted: WorkRequestStart

@@ -56,15 +56,26 @@ The following paths all cross `jhin-tool-queue`:
 - **Ordinary calls:** tool-worker reloads the one canonical call, current run
   context, live grants, connection state, and executable definition. After
   grant, scope, and validator authorization the gateway evaluates the
-  pre-action review gate (`docs/architecture/coordination.md`): a pending or
-  blocking review is a recorded denial, persisted before any approval row or
-  execution claim exists. Otherwise the gateway inserts or reloads the stable
-  `ToolCall` claim before dispatch and commits its sanitized terminal result.
-  Agent-worker only projects that row.
+  pre-action review gate (`docs/architecture/coordination.md`): a blocking
+  review is a recorded denial and a pending review parks the call as a
+  `pending_review` row under the stable invocation id — both persisted
+  before any approval row or execution claim exists. Otherwise the gateway
+  inserts or reloads the stable `ToolCall` claim before dispatch and commits
+  its sanitized terminal result. Agent-worker only projects that row.
 - **Approval:** `AgentTaskWorkflow` owns the durable wait and signal. After a
   decision, tool-worker reloads the current PostgreSQL `Approval`, tool call,
   manifest binding, and authorization context, then resolves the existing
   claim. Agent-worker commits only the sanitized approval projection.
+- **Review:** the same shape. `AgentTaskWorkflow` parks on the
+  `review_decision` signal (`waiting_review` keeps the admission slot).
+  After a decision, tool-worker's `resolve_bound_tool_review` reloads the
+  PostgreSQL `work_review`, the `pending_review` tool call, manifest binding,
+  and authorization context, then `ToolGateway.resolve_review` either
+  records the reviewer's denial, stages a human approval on the same row, or
+  CAS-claims `pending_review → executing` and runs the effect once.
+  Agent-worker's `commit_review_projection` commits only the sanitized
+  projection (idempotent on the `review.<status>` run event) and may hand
+  the workflow straight into the approval wait.
 - **Trigger and engineering sync:** tool-worker reloads the task, trigger,
   enabled `comment_back` standing authority, connection, run, and external
   identity. It claims `system.trigger.sync_external` under the stable sync ID

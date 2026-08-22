@@ -175,8 +175,11 @@ async def create_review_policy(
     body: ReviewPolicyIn,
     request_id: RequestId,
     ip: IpHash,
+    temporal: TemporalDep,
 ) -> ReviewPolicyOut:
-    policy = await service.create_review_policy(db, ctx, body, request_id=request_id, ip_hash=ip)
+    policy = await service.create_review_policy(
+        db, ctx, body, request_id=request_id, ip_hash=ip, temporal=temporal
+    )
     return ReviewPolicyOut.model_validate(policy)
 
 
@@ -195,9 +198,10 @@ async def update_review_policy(
     body: ReviewPolicyUpdate,
     request_id: RequestId,
     ip: IpHash,
+    temporal: TemporalDep,
 ) -> ReviewPolicyOut:
     policy = await service.update_review_policy(
-        db, ctx, policy_id, body, request_id=request_id, ip_hash=ip
+        db, ctx, policy_id, body, request_id=request_id, ip_hash=ip, temporal=temporal
     )
     return ReviewPolicyOut.model_validate(policy)
 
@@ -209,8 +213,11 @@ async def delete_review_policy(
     policy_id: UUID,
     request_id: RequestId,
     ip: IpHash,
+    temporal: TemporalDep,
 ) -> Response:
-    await service.delete_review_policy(db, ctx, policy_id, request_id=request_id, ip_hash=ip)
+    await service.delete_review_policy(
+        db, ctx, policy_id, request_id=request_id, ip_hash=ip, temporal=temporal
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -251,6 +258,7 @@ async def decide_review(
     body: ReviewDecisionIn,
     request_id: RequestId,
     ip: IpHash,
+    temporal: TemporalDep,
 ) -> WorkReviewOut:
     review = await service.decide_review(
         db,
@@ -260,6 +268,7 @@ async def decide_review(
         feedback=body.feedback,
         request_id=request_id,
         ip_hash=ip,
+        temporal=temporal,
     )
     return (await service.project_reviews(db, ctx.workspace_id, [review]))[0]
 

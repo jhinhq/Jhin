@@ -68,6 +68,12 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
     "concurrency.kick_failed": {"error_type": FieldKind.ERROR_TYPE},
     # Memory release (docs/architecture/memory.md).
     "memory.retrieval_failed": {"error_type": FieldKind.ERROR_TYPE},
+    "memory.embedding_failed": {
+        "error_type": FieldKind.ERROR_TYPE,
+        "workspace_id": FieldKind.ID,
+        "count": FieldKind.COUNT,
+    },
+    "memory.embedded": {"workspace_id": FieldKind.ID, "count": FieldKind.COUNT},
     "memory.maintenance_start": {"status": FieldKind.ENUM, "task_id": FieldKind.ID},
     "memory.maintenance_start_failed": {"error_type": FieldKind.ERROR_TYPE},
     "memory.maintained": {
@@ -85,6 +91,12 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
         "task_id": FieldKind.ID,
         "run_status": FieldKind.ENUM,
         "request_status": FieldKind.ENUM,
+    },
+    "periodic_review.window": {
+        "policy_id": FieldKind.ID,
+        "review_id": FieldKind.ID,
+        "status": FieldKind.ENUM,
+        "created": FieldKind.BOOL,
     },
     # Media release (docs/architecture/media.md).
     "avatar.generated": {

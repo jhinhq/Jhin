@@ -234,7 +234,11 @@ export function AttentionInbox({
                           {timeAgo(review.requested_at, now)}
                         </time>
                       </p>
-                      {review.mode === "pre_action" || review.mode === "before_close" ? (
+                      {review.tool_call_id ? (
+                        <p className="mt-1 text-xs text-warn" data-testid={`review-parked-${review.id}`}>
+                          The agent is waiting for this review before it continues.
+                        </p>
+                      ) : review.mode === "pre_action" || review.mode === "before_close" ? (
                         <p className="mt-1 text-xs text-warn">The agent is paused until someone decides.</p>
                       ) : null}
                       <div className="mt-2 flex flex-wrap items-center gap-1.5">

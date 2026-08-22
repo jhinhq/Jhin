@@ -14,6 +14,7 @@ const STATE_TONES: Record<string, "neutral" | "ok" | "warn" | "danger" | "accent
   cancelled: "neutral",
   pending: "neutral",
   waiting_approval: "warn",
+  waiting_review: "warn",
   waiting_delegation: "warn",
 };
 

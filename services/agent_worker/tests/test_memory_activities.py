@@ -5,10 +5,11 @@ application, explicit-remember handling, and idempotent re-application."""
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
+from uuid import UUID
 
 import pytest
 from sqlalchemy import select
@@ -38,7 +39,16 @@ from jhin_domain import (
     TaskState,
     new_uuid7,
 )
-from jhin_models import ModelClient, ModelRequest, ModelResponse, ModelUsage
+from jhin_memory import embedding as embedding_module
+from jhin_models import (
+    EmbeddingResult,
+    ModelClient,
+    ModelProviderError,
+    ModelRequest,
+    ModelResponse,
+    ModelUsage,
+)
+from jhin_models.testing import deterministic_embedding
 from jhin_observability import noop_metrics, noop_tracer
 from jhin_workflows.memory_maintenance import (
     ApplyMemoryCandidatesInput,
@@ -64,6 +74,28 @@ class StubClient(ModelClient):
 
     async def close(self) -> None:
         self.closed = True
+
+
+class StubEmbeddingClient(StubClient):
+    fail = False
+
+    def __init__(self) -> None:
+        super().__init__("")
+
+    async def embed(
+        self, texts: Sequence[str], *, model: str, dimensions: int | None = None
+    ) -> EmbeddingResult:
+        if StubEmbeddingClient.fail:
+            raise ModelProviderError("stub: boom", status_code=500, retryable=True)
+        dims = dimensions or 8
+        return EmbeddingResult(
+            vectors=tuple(tuple(deterministic_embedding(t, dimensions=dims)) for t in texts),
+            model=model,
+            dimensions=dims,
+        )
+
+
+EMBED_CONFIG = {"embeddings": {"enabled": True, "model": "fake-embed", "dimensions": 8}}
 
 
 class StubResources:
@@ -465,3 +497,66 @@ class TestApply:
             apply_input(world, source_id=str(new_uuid7())),
         )
         assert not missing.ok and missing.error == "source_not_found"
+
+
+class TestApplyEmbeds:
+    async def _enable_embeddings(self, world: World) -> None:
+        async with world.session_factory() as session:
+            profile = await session.scalar(
+                select(ModelProfile).where(ModelProfile.workspace_id == world.workspace.id)
+            )
+            assert profile is not None
+            profile.config_json = EMBED_CONFIG
+            await session.commit()
+
+    async def test_created_records_are_embedded_best_effort(
+        self, world: World, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        await self._enable_embeddings(world)
+        monkeypatch.setattr(
+            embedding_module, "build_model_client", lambda *a, **k: StubEmbeddingClient()
+        )
+        StubEmbeddingClient.fail = False
+        result = await ActivityEnvironment().run(
+            world.activities.apply_memory_candidates_activity, apply_input(world)
+        )
+        assert result.ok and result.activated == 1
+        async with world.session_factory() as session:
+            record = await session.get(MemoryRecord, UUID(result.created_ids[0]))
+            assert record is not None
+            assert record.embedding_model == "fake-embed"
+            assert record.embedding_dimensions == 8
+            audit = await session.scalar(
+                select(AuditEvent).where(AuditEvent.action == "memory.maintained")
+            )
+            assert audit is not None and audit.metadata_json["embedded"] == 1
+
+    async def test_embedding_failure_keeps_the_record(
+        self, world: World, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        await self._enable_embeddings(world)
+        monkeypatch.setattr(
+            embedding_module, "build_model_client", lambda *a, **k: StubEmbeddingClient()
+        )
+        StubEmbeddingClient.fail = True
+        try:
+            result = await ActivityEnvironment().run(
+                world.activities.apply_memory_candidates_activity, apply_input(world)
+            )
+        finally:
+            StubEmbeddingClient.fail = False
+        assert result.ok and result.activated == 1
+        async with world.session_factory() as session:
+            record = await session.get(MemoryRecord, UUID(result.created_ids[0]))
+            assert record is not None
+            assert record.status == MemoryStatus.ACTIVE.value
+            assert record.embedding_json is None
+
+    async def test_without_embedding_profile_nothing_is_embedded(self, world: World) -> None:
+        result = await ActivityEnvironment().run(
+            world.activities.apply_memory_candidates_activity, apply_input(world)
+        )
+        assert result.ok
+        async with world.session_factory() as session:
+            record = await session.get(MemoryRecord, UUID(result.created_ids[0]))
+            assert record is not None and record.embedding_json is None

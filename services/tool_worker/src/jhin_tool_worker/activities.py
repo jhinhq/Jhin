@@ -1,4 +1,5 @@
-"""Tool-worker activities: discovery, bound execution, and approval resolution."""
+"""Tool-worker activities: discovery, bound execution, and approval/review
+resolution."""
 
 from __future__ import annotations
 
@@ -26,8 +27,9 @@ from jhin_db.models import (
     RunEvent,
     Task,
     ToolCall,
+    WorkReview,
 )
-from jhin_domain import ApprovalStatus, ToolCallStatus
+from jhin_domain import ApprovalStatus, ToolCallStatus, WorkReviewStatus
 from jhin_observability import (
     MetricName,  # noqa: F401 - referenced by metric literal type comments
     SafeError,
@@ -58,11 +60,13 @@ from jhin_workflows.agent_task.shared import (
     ACTIVITY_EXECUTE_BOUND_TOOL,
     ACTIVITY_RESOLVE_ADVERTISED_TOOLS,
     ACTIVITY_RESOLVE_BOUND_TOOL_APPROVAL,
+    ACTIVITY_RESOLVE_BOUND_TOOL_REVIEW,
     AdvertisedTool,
     BoundToolResult,
     ExecuteBoundToolInput,
     ResolveAdvertisedToolsInput,
     ResolveBoundToolApprovalInput,
+    ResolveBoundToolReviewInput,
 )
 
 
@@ -121,6 +125,7 @@ class _ToolTelemetryAuthority:
 
 _TOOL_EXECUTE_SPAN_NAME = "tool.gateway.execute"
 _TOOL_APPROVAL_SPAN_NAME = "tool.approval.resolve"
+_TOOL_REVIEW_SPAN_NAME = "tool.review.resolve"
 _TOOL_FAMILY_ATTRIBUTE = "jhin.tool_family"
 _TOOL_RISK_ATTRIBUTE = "jhin.risk"
 _TOOL_OUTCOME_ATTRIBUTE = "jhin.outcome"
@@ -458,6 +463,8 @@ def _bound_result(outcome: GatewayOutcome) -> BoundToolResult:
     stop_reason: str | None = None
     if outcome.status == "needs_approval":
         stop_reason = "needs_approval"
+    elif outcome.status == "needs_review":
+        stop_reason = "needs_review"
     elif outcome.status == "execution_unknown":
         stop_reason = SafeErrorCode.EXECUTION_UNKNOWN.value
     elif (
@@ -471,6 +478,7 @@ def _bound_result(outcome: GatewayOutcome) -> BoundToolResult:
         status=outcome.status,
         approval_id=str(outcome.approval_id) if outcome.approval_id is not None else None,
         stop_reason=stop_reason,
+        review_id=str(outcome.review_id) if outcome.review_id is not None else None,
     )
 
 
@@ -1124,6 +1132,143 @@ class ToolActivities:
                 if outcome.tool_call_id != expected_tool_call_id:
                     raise _non_retryable(
                         "approval tool identity changed during resolution",
+                        error_type="tool_invocation_mismatch",
+                    )
+                result = _bound_result(outcome)
+            except BaseException as active_error:
+                scope.finish(active_error)
+                raise
+            scope.finish(None)
+            return result
+
+    @activity.defn(name=ACTIVITY_RESOLVE_BOUND_TOOL_REVIEW)
+    async def resolve_bound_tool_review_activity(
+        self,
+        params: ResolveBoundToolReviewInput,
+    ) -> BoundToolResult:
+        """Resume one review-parked call (mirrors approval resolution).
+
+        Reloads the durable ``work_review``/``tool_call``/run/agent/task
+        context and the canonical manifest binding, then hands the existing
+        claim to ``ToolGateway.resolve_review``: approved reviews continue
+        through fresh authorization, approval staging, or the stable
+        execution claim; ``changes_requested``/``escalated`` record a denial
+        carrying the reviewer's feedback. A still-pending review is a
+        retryable error, exactly like a pending approval.
+        """
+        _prevalidate_tool_telemetry_schema()
+        workspace_id = _uuid(params.workspace_id, field="workspace_id")
+        task_id = _uuid(params.task_id, field="task_id")
+        run_id = _uuid(params.run_id, field="run_id")
+        agent_id = _uuid(params.agent_id, field="agent_id")
+        review_id = _uuid(params.review_id, field="review_id")
+        async with self._resources.session_factory() as session:
+            durable = (
+                await session.execute(
+                    select(WorkReview, ToolCall, AgentRun, Agent, Task)
+                    .join(
+                        ToolCall,
+                        (ToolCall.review_id == WorkReview.id)
+                        & (ToolCall.workspace_id == WorkReview.workspace_id),
+                    )
+                    .join(
+                        AgentRun,
+                        (AgentRun.id == ToolCall.run_id)
+                        & (AgentRun.workspace_id == ToolCall.workspace_id),
+                    )
+                    .join(
+                        Agent,
+                        (Agent.id == ToolCall.agent_id)
+                        & (Agent.workspace_id == ToolCall.workspace_id),
+                    )
+                    .join(
+                        Task,
+                        (Task.id == AgentRun.task_id)
+                        & (Task.workspace_id == AgentRun.workspace_id)
+                        & (Task.assigned_agent_id == AgentRun.agent_id),
+                    )
+                    .where(
+                        WorkReview.id == review_id,
+                        WorkReview.workspace_id == workspace_id,
+                        WorkReview.run_id == run_id,
+                        WorkReview.subject_agent_id == agent_id,
+                        ToolCall.run_id == run_id,
+                        ToolCall.agent_id == agent_id,
+                        ToolCall.workspace_id == workspace_id,
+                        AgentRun.workspace_id == workspace_id,
+                        AgentRun.task_id == task_id,
+                        AgentRun.agent_id == agent_id,
+                        Agent.id == agent_id,
+                        Task.id == task_id,
+                    )
+                    .limit(2)
+                )
+            ).one_or_none()
+            if durable is None:
+                raise _non_retryable(
+                    "review execution context not found",
+                    error_type="review_context_not_found",
+                )
+            review, tool_call, _run, agent, _task = durable
+            expected_tool_call_id = tool_call.id
+            manifest_step_index, entry = await _validate_approval_manifest_binding(
+                session,
+                workspace_id=workspace_id,
+                run_id=run_id,
+                tool_call=tool_call,
+                catalog=self._catalog,
+            )
+            if review.status == WorkReviewStatus.PENDING.value:
+                raise ApplicationError("review still pending", type="review_pending")
+            pre_gateway_tool_call_status = tool_call.status
+            scope = _ToolSpanScope(self._tracer, _TOOL_REVIEW_SPAN_NAME)
+            try:
+                gateway = ToolGateway(
+                    ToolExecutionContext(
+                        session=session,
+                        workspace_id=workspace_id,
+                        task_id=task_id,
+                        run_id=run_id,
+                        agent_id=agent_id,
+                        agent_name=agent.name,
+                        crypto=self._resources.crypto,
+                        session_factory=self._resources.session_factory,
+                        test_barrier=self._resources.test_barrier,
+                    ),
+                    self._catalog,
+                )
+                try:
+                    outcome = await gateway.resolve_review(review_id)
+                    await session.commit()
+                except asyncio.CancelledError:
+                    self._record_cancelled_tool_span(scope.span, entry.tool_name)
+                    raise
+                except GatewayStateError as error:
+                    await session.rollback()
+                    raise _non_retryable(
+                        "review gateway state is invalid",
+                        error_type="review_state_invalid",
+                    ) from error
+                await self._record_committed_tool_telemetry(
+                    scope.span,
+                    outcome=outcome,
+                    workspace_id=workspace_id,
+                    task_id=task_id,
+                    run_id=run_id,
+                    agent_id=agent_id,
+                    step_index=manifest_step_index,
+                    ordinal=entry.ordinal,
+                    manifest_tool_name=entry.tool_name,
+                    manifest_arguments_json=entry.arguments_json,
+                    approval_id=outcome.approval_id,
+                    suppress_terminal_metrics=(
+                        pre_gateway_tool_call_status == ToolCallStatus.EXECUTION_UNKNOWN.value
+                        and outcome.status == "execution_unknown"
+                    ),
+                )
+                if outcome.tool_call_id != expected_tool_call_id:
+                    raise _non_retryable(
+                        "review tool identity changed during resolution",
                         error_type="tool_invocation_mismatch",
                     )
                 result = _bound_result(outcome)

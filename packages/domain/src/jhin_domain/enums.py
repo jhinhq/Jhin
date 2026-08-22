@@ -128,6 +128,10 @@ class RunStatus(StrEnum):
     # Parked on a blocking delegation: a child task/run is doing the work
     # and the parent resumes when its summary arrives (plan 7.5, 8.3).
     WAITING_DELEGATION = "waiting_delegation"
+    # Parked on a pending pre-action work review (coordination release): the
+    # tool call is persisted as ``pending_review`` and the workflow resumes
+    # on the ``review_decision`` signal, exactly like an approval wait.
+    WAITING_REVIEW = "waiting_review"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -145,6 +149,7 @@ RUN_ACTIVE_STATUSES = frozenset(
         RunStatus.PAUSED,
         RunStatus.WAITING_APPROVAL,
         RunStatus.WAITING_DELEGATION,
+        RunStatus.WAITING_REVIEW,
     }
 )
 
@@ -324,6 +329,9 @@ class ToolCallStatus(StrEnum):
     """
 
     PENDING_APPROVAL = "pending_approval"
+    # Parked on a pending work review (``tool_call.review_id``); resumes
+    # through the normal approval/claim/effect path once decided.
+    PENDING_REVIEW = "pending_review"
     EXECUTING = "executing"
     EXECUTION_UNKNOWN = "execution_unknown"
     COMPLETED = "completed"

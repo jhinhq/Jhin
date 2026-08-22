@@ -24,11 +24,23 @@ Authorization and safety).
 - Mandatory (`fail_closed`) pre-action/before-close reviews with no
   resolvable AI reviewer fail closed: they park on a human-assigned review
   that shows up in Attention.
+- A pending pre-action review parks the exact tool call durably
+  (`tool_call.status = pending_review`, `tool_call.review_id`), holds the
+  run's concurrency slot as `waiting_review`, and resumes that same call —
+  never a re-issued one — through the normal authorization → human approval
+  → claim → effect path exactly once. The Postgres `work_review` row is the
+  authority; the `review_decision` signal only wakes the workflow.
 - Directory, roster, and rollups expose public identity and structured
   status only — never system prompts, grants, model config, memories,
   transcripts, or conversation text.
 
-## Data model (migration `0018`, down revision `0017`)
+## Data model (migration `0018`, down revision `0017`; parking in `0019`)
+
+Migration `0019` (down revision `0018`) adds the nullable, indexed
+`tool_call.review_id` (FK `work_review.id`, `SET NULL`) and the domain adds
+`ToolCallStatus.PENDING_REVIEW` and `RunStatus.WAITING_REVIEW` (a member of
+`RUN_ACTIVE_STATUSES`, so a parked run keeps its admission slot exactly like
+`waiting_approval`).
 
 ### `work_request`
 
@@ -145,7 +157,7 @@ the Phase 8 organization tools.
 - `proceed` — no policy matched, review approved/skipped, or the mode is
   non-blocking;
 - `wait_review` — a pending review exists (`review_id`, reviewer type/id);
-  park the run and re-run the full authorization chain on resume;
+  the gateway parks the call and the run resumes on the decision (below);
 - `blocked` — `changes_requested`/`escalated`; return `feedback` to the
   model without executing.
 
@@ -153,6 +165,87 @@ Trigger keys are `pre_action:{tool_call_id}:{policy_id}` (or
 `{run_id}:{tool_name}` when no tool call id exists yet), so retries of the
 same call find the same review. `evaluate_review_event` is the generic
 entry for `before_close`/`post_action` moments.
+
+### Durable review parking (the approval path, mirrored)
+
+Parking reuses the approval machinery one-for-one; there is no second wait
+mechanism:
+
+| approval wait | review wait |
+| --- | --- |
+| `ToolCall.status = pending_approval`, `approval_id` | `ToolCall.status = pending_review`, `review_id` |
+| `GatewayOutcome.status = needs_approval` | `needs_review` (`review_id`) |
+| `BoundToolResult.stop_reason = needs_approval` | `needs_review` (`review_id`) |
+| `StepResult.waiting_approval_id` → `RunStatus.WAITING_APPROVAL` | `StepResult.waiting_review_id` → `RunStatus.WAITING_REVIEW` |
+| workflow status `waiting_approval`, reason `approval:<id>` | `waiting_review`, reason `review:<id>` |
+| signal `approval_decision(approval_id, decision)` | signal `review_decision(review_id, status)` (`SIGNAL_REVIEW_DECISION`) |
+| `resolve_bound_tool_approval` (tool queue) → `ToolGateway.resolve_approved/rejected` | `resolve_bound_tool_review` (tool queue) → `ToolGateway.resolve_review` |
+| `commit_approval_projection` (agent queue) | `commit_review_projection` (agent queue) |
+
+1. **Park.** `ToolGateway._request_once` runs the gate after grant/scope/
+   validator authorization. On `wait_review` with a deterministic
+   invocation id it inserts the `pending_review` row under that stable id
+   (audit `tool.call.requested`, `review.requested`) and commits before
+   any approval row or execution claim exists. A retried bound execution
+   replays the park (`replayed=True`); it never re-evaluates or executes.
+   Without an invocation id (legacy/direct callers) a pending review is
+   still a recorded `review_pending` denial, because nothing could resume
+   it.
+2. **Project.** `commit_agent_step` maps the row to `needs_review`, emits
+   `node.request_review`, writes no `tool_result` message, sets
+   `run.status = waiting_review`, stores `waiting_review_id` in the
+   `agent.step.committed` bundle (so a projection retry replays it), and
+   publishes `agent.run.waiting_review`.
+3. **Wait.** `AgentTaskWorkflow` parks on `wait_condition` until
+   `review_decision` arrives or the run is cancelled. Decisions are kept in
+   a dict keyed by review id, so a decision delivered *before* the park
+   (the race) still resumes; worker restarts replay the durable wait.
+4. **Decide.** `POST /reviews/{id}/decide` commits the decision, then
+   signals the source task's `temporal_workflow_id`; repeating the same
+   verdict re-sends the signal (a commit→signal failure is repairable
+   without a second decision); delivery failure is a 409 only when a tool
+   call is parked on the review. The AI reviewer's
+   `organization.review.submit` output carries `task_id` and
+   `source_workflow_id`; the agent worker lifts every executed submit into
+   `StepResult.review_decisions` (durable in the committed bundle) and the
+   reviewer's workflow forwards each as a `review_decision` signal to the
+   source workflow (a closed target is ignored).
+5. **Resume.** `resolve_bound_tool_review` reloads review/tool call/run/
+   agent/task and the canonical manifest binding, fails retryably while the
+   review is pending, then `ToolGateway.resolve_review` (under the call's
+   lifecycle lock): terminal rows replay; `executing` becomes
+   `execution_unknown`; `pending_approval` replays the staged approval;
+   `pending_review` re-validates the parked input against the tool schema,
+   then — for a non-approved review — records a denial with the reviewer's
+   feedback (`review_changes_requested`/`review_escalated`), otherwise
+   reloads grants/rules/validator live, runs the review gate again (another
+   still-pending policy re-parks the same row on its review id), and
+   either stages a human approval on the **same** row (`pending_approval`,
+   new `Approval`) or CAS-claims `pending_review → executing` and runs the
+   effect once. `commit_review_projection` then writes the `review.<status>`
+   run event (its idempotency marker), the `tool_result` message, and the
+   run status — or, when an approval was staged, `node.request_approval`,
+   `waiting_approval`, and returns `waiting_approval_id` so the workflow
+   falls straight into the ordinary approval wait.
+
+### Periodic reviews
+
+`PeriodicReviewWorkflow(PeriodicReviewInput{workspace_id, policy_id})`,
+workflow id `review-periodic-{policy_id}` on the agent queue, is the durable
+scheduler for one enabled `periodic` policy. It reloads the policy
+(`load_periodic_review_policy`) before every window, computes the
+epoch-aligned UTC window of `period_seconds` containing `workflow.now()`,
+sleeps to its end (interrupted by the `stop`/`refresh` signals), then
+`open_periodic_review` opens at most one `work_review` per window (trigger
+key `periodic:{policy_id}:{window_start}`), continuing-as-new every 500
+windows. Evidence is the deterministic manager rollup of the reviewer's
+scope — the named reviewer agent, else the scoped agent's manager, else the
+scoped team's manager — as `rollup_source_ids`/`rollup_counts` plus the
+window bounds; never transcripts. The API starts the workflow when a
+periodic policy is created or enabled, sends `refresh` on cadence/reviewer
+changes (a duplicate start is a no-op that refreshes), and `stop` on
+disable, mode change, or delete; a lost signal only delays the effect by one
+window because the workflow re-reads the policy itself.
 
 ## API
 
@@ -170,7 +263,7 @@ All routes are under `/api/v1/workspaces/{workspace_id}`, CSRF-protected,
 | GET/PATCH/DELETE | `/review-policies/{id}` | viewer / admin / admin |
 | GET | `/reviews?status=&reviewer=human|agent` | viewer |
 | GET | `/reviews/{id}` | viewer |
-| POST | `/reviews/{id}/decide` (`{verdict, feedback}`) | member for human-assigned reviews; admin for AI-assigned |
+| POST | `/reviews/{id}/decide` (`{verdict, feedback}`) | member for human-assigned reviews; admin for AI-assigned; commits, then signals `review_decision` to the source task workflow (idempotent on repeat) |
 | GET | `/agents/{id}/rollup` | viewer |
 
 `GET /activity` now projects work requests (`asked_agent` at creation,
@@ -205,12 +298,18 @@ Wired on top of the Phase 10 tool-worker boundary
   only place tools execute) after grant/scope/validator authorization and
   before approval staging or the stable execution claim, so no effect
   identity exists when the gate decides. `blocked` is a recorded denial
-  whose reason is the reviewer's feedback; `wait_review` is a recorded
-  denial with code `review_pending` naming the review id (the workflow has
-  no review signal yet, so the run is not parked — the model is told to
-  finish without the call, and a later call finds the decided review:
-  approved proceeds, changes requested returns the feedback). A retried
-  invocation replays the persisted denial rather than re-evaluating.
+  whose reason is the reviewer's feedback; `wait_review` parks the call as
+  `pending_review` (see "Durable review parking") and the run resumes on
+  the `review_decision` signal through `resolve_bound_tool_review` +
+  `commit_review_projection`. A retried invocation replays the persisted
+  park or denial rather than re-evaluating.
+- `review_decision_from_output(row.sanitized_output_json)` — lifts every
+  executed `organization.review.submit` row into
+  `StepResult.review_decisions` so the reviewer's `AgentTaskWorkflow`
+  signals the source task workflow.
+- `CoordinationActivities.load_periodic_review_policy_activity` /
+  `open_periodic_review_activity` — `PeriodicReviewWorkflow`'s activities,
+  registered in `main.py` with the workflow.
 - `work_request_start_from_output(row.sanitized_output_json)` — the agent
   worker's `commit_agent_step` lifts every executed
   `organization.respond_work_request` row into
@@ -234,3 +333,18 @@ Wired on top of the Phase 10 tool-worker boundary
   human decisions, activity/attention projection, rollup and directory.
 - `packages/workflows/tests/test_work_request_task_workflow.py` and
   `services/agent_worker/tests/test_coordination_activities.py`.
+- Review parking: `services/tool_worker/tests/test_bound_review.py` (park
+  before any claim, retry replay, pending → retryable, approved executes
+  once, changes requested denies with feedback, review → approval → effect
+  order, live re-authorization, context mismatch),
+  `services/agent_worker/tests/test_review_projection.py` (waiting_review
+  projection and replay, decision lifting, review projection repair/replay,
+  staged approval, execution unknown, terminal run),
+  `packages/workflows/tests/test_agent_task_reviews.py` (signal after and
+  before the park, review → approval fall-through, cancel while parked,
+  decision forwarding to the source workflow),
+  `packages/workflows/tests/test_periodic_review_workflow.py`
+  (time-skipping windows, stop/refresh, disabled/deleted), the API
+  decide→signal and periodic lifecycle tests in
+  `apps/api/tests/test_coordination_unit.py`, and
+  `packages/db/tests/test_migration_graph.py` (`0019` head).

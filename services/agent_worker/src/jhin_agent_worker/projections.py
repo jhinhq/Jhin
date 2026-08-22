@@ -16,7 +16,10 @@ from temporalio import activity
 from temporalio.client import Client as TemporalClient
 from temporalio.exceptions import ApplicationError
 
-from jhin_agent_worker.coordination_activities import work_request_start_from_output
+from jhin_agent_worker.coordination_activities import (
+    review_decision_from_output,
+    work_request_start_from_output,
+)
 from jhin_agent_worker.reasoning import (
     AgentStepReasoningRecord,
     ManifestCall,
@@ -24,7 +27,7 @@ from jhin_agent_worker.reasoning import (
     manifest_calls_from_payload,
 )
 from jhin_agent_worker.resources import Resources
-from jhin_db.models import AgentRun, Approval, Message, RunEvent, Task, ToolCall
+from jhin_db.models import AgentRun, Approval, Message, RunEvent, Task, ToolCall, WorkReview
 from jhin_domain import (
     ApprovalStatus,
     MessageVisibility,
@@ -33,6 +36,7 @@ from jhin_domain import (
     SenderType,
     TaskState,
     ToolCallStatus,
+    WorkReviewStatus,
 )
 from jhin_events import EventEnvelope, EventSource
 from jhin_observability import (
@@ -49,11 +53,14 @@ from jhin_tools import stable_tool_invocation_id
 from jhin_workflows.agent_task.shared import (
     ACTIVITY_COMMIT_AGENT_STEP,
     ACTIVITY_COMMIT_APPROVAL_PROJECTION,
+    ACTIVITY_COMMIT_REVIEW_PROJECTION,
     ACTIVITY_FINALIZE_RUN_PROJECTION,
     CommitAgentStepInput,
     CommitApprovalProjectionInput,
+    CommitReviewProjectionInput,
     DelegationRequest,
     FinalizeInput,
+    ReviewDecisionSignal,
     StepResult,
     WorkRequestStart,
 )
@@ -75,6 +82,7 @@ _VALID_TRANSITION_NODES = frozenset(
         "execute_tool",
         "observe",
         "request_approval",
+        "request_review",
         "finalize",
     }
 )
@@ -84,6 +92,7 @@ _TOOL_STATUS_MAP = {
     ToolCallStatus.DENIED.value: "denied",
     ToolCallStatus.REJECTED.value: "rejected",
     ToolCallStatus.PENDING_APPROVAL.value: "needs_approval",
+    ToolCallStatus.PENDING_REVIEW.value: "needs_review",
     ToolCallStatus.EXECUTION_UNKNOWN.value: "execution_unknown",
 }
 _SAFE_STATUS_REASONS = {
@@ -92,6 +101,7 @@ _SAFE_STATUS_REASONS = {
     "denied": "tool call denied",
     "rejected": "tool approval was rejected",
     "needs_approval": "tool call requires human approval",
+    "needs_review": "tool call is waiting for a work review",
     "execution_unknown": ("tool execution outcome is unknown; manual reconciliation is required"),
 }
 _PRESERVED_FINAL_ERRORS = frozenset(
@@ -487,6 +497,13 @@ class AgentProjectionActivities:
                 type="step_result_malformed",
                 non_retryable=True,
             )
+        raw_review_decisions = raw_result.get("review_decisions", [])
+        if not isinstance(raw_review_decisions, list):
+            raise ApplicationError(
+                "committed step review decisions are malformed",
+                type="step_result_malformed",
+                non_retryable=True,
+            )
         try:
             result = StepResult(
                 done=bool(raw_result["done"]),
@@ -495,11 +512,17 @@ class AgentProjectionActivities:
                 cached_tokens=int(raw_result.get("cached_tokens", 0)),
                 cost_micros=int(raw_result.get("cost_micros", 0)),
                 waiting_approval_id=raw_result.get("waiting_approval_id"),
+                waiting_review_id=raw_result.get("waiting_review_id"),
                 delegations=[
                     DelegationRequest(**item) for item in raw_delegations if isinstance(item, dict)
                 ],
                 work_request_starts=[
                     WorkRequestStart(**item) for item in raw_work_requests if isinstance(item, dict)
+                ],
+                review_decisions=[
+                    ReviewDecisionSignal(**item)
+                    for item in raw_review_decisions
+                    if isinstance(item, dict)
                 ],
                 execution_unknown_tool_call_id=raw_result.get("execution_unknown_tool_call_id"),
             )
@@ -737,6 +760,14 @@ class AgentProjectionActivities:
                     "reason": result.decision_reason,
                 },
             )
+        elif result.status == "needs_review":
+            emit(
+                "node.request_review",
+                {
+                    "review_id": str(result.row.review_id) if result.row.review_id else None,
+                    "reason": result.decision_reason,
+                },
+            )
         emit(
             "tool.call",
             {
@@ -768,6 +799,14 @@ class AgentProjectionActivities:
         )
 
     @staticmethod
+    def _review_decision(result: _ProjectedToolOutcome) -> ReviewDecisionSignal | None:
+        """An executed ``organization.review.submit`` decided a review; the
+        workflow signals the source task so a parked run resumes."""
+        if result.status != "executed" or result.manifest.tool_name != "organization.review.submit":
+            return None
+        return review_decision_from_output(result.row.sanitized_output_json)
+
+    @staticmethod
     def _work_request_start(result: _ProjectedToolOutcome) -> WorkRequestStart | None:
         """An executed ``organization.respond_work_request`` accept created
         the task row; the workflow starts its WorkRequestTaskWorkflow."""
@@ -786,6 +825,7 @@ class AgentProjectionActivities:
         agent_id = UUID(params.agent_id)
 
         waiting_approval_id: str | None = None
+        waiting_review_id: str | None = None
         blocking_delegation: DelegationRequest | None = None
         projected: list[_ProjectedToolOutcome] = []
         async with self._resources.session_factory() as session:
@@ -875,7 +915,7 @@ class AgentProjectionActivities:
 
             for earlier in projected[:-1]:
                 delegation = self._delegation_request(earlier)
-                if earlier.status in {"needs_approval", "execution_unknown"} or (
+                if earlier.status in {"needs_approval", "needs_review", "execution_unknown"} or (
                     delegation is not None and delegation.blocking
                 ):
                     raise ApplicationError(
@@ -913,7 +953,7 @@ class AgentProjectionActivities:
                 final = projected[-1]
                 delegation = self._delegation_request(final)
                 permitted_stop = (
-                    final.status in {"needs_approval", "execution_unknown"}
+                    final.status in {"needs_approval", "needs_review", "execution_unknown"}
                     or (delegation is not None and delegation.blocking)
                     or params.cancelled_after_tool_call_id is not None
                 )
@@ -926,6 +966,7 @@ class AgentProjectionActivities:
 
             delegations: list[DelegationRequest] = []
             work_request_starts: list[WorkRequestStart] = []
+            review_decisions: list[ReviewDecisionSignal] = []
             for result in projected:
                 delegation = self._delegation_request(result)
                 if delegation is not None:
@@ -935,8 +976,19 @@ class AgentProjectionActivities:
                 work_request = self._work_request_start(result)
                 if work_request is not None:
                     work_request_starts.append(work_request)
+                decided_review = self._review_decision(result)
+                if decided_review is not None:
+                    review_decisions.append(decided_review)
                 if result.status == "needs_approval" and result.approval is not None:
                     waiting_approval_id = str(result.approval.id)
+                if result.status == "needs_review":
+                    if result.row.review_id is None:
+                        raise ApplicationError(
+                            "pending tool call has no matching review evidence",
+                            type="tool_projection_binding_mismatch",
+                            non_retryable=True,
+                        )
+                    waiting_review_id = str(result.row.review_id)
 
             execution_unknown_tool_call_id = next(
                 (
@@ -953,8 +1005,10 @@ class AgentProjectionActivities:
                 cached_tokens=reasoning.usage.cached_tokens,
                 cost_micros=reasoning.usage.cost_micros,
                 waiting_approval_id=waiting_approval_id,
+                waiting_review_id=waiting_review_id,
                 delegations=delegations,
                 work_request_starts=work_request_starts,
+                review_decisions=review_decisions,
                 execution_unknown_tool_call_id=execution_unknown_tool_call_id,
             )
 
@@ -965,6 +1019,8 @@ class AgentProjectionActivities:
             run.steps_used = params.step_index + 1
             if waiting_approval_id is not None:
                 run.status = RunStatus.WAITING_APPROVAL.value
+            elif waiting_review_id is not None:
+                run.status = RunStatus.WAITING_REVIEW.value
             elif blocking_delegation is not None:
                 run.status = RunStatus.WAITING_DELEGATION.value
             if execution_unknown_tool_call_id is not None:
@@ -1060,7 +1116,7 @@ class AgentProjectionActivities:
                     result=result,
                 )
                 delegation = self._delegation_request(result)
-                if result.status == "needs_approval" or (
+                if result.status in ("needs_approval", "needs_review") or (
                     delegation is not None and delegation.blocking
                 ):
                     continue
@@ -1124,6 +1180,20 @@ class AgentProjectionActivities:
                     "run_id": params.run_id,
                     "task_id": params.task_id,
                     "approval_id": waiting_approval_id,
+                },
+            )
+        if waiting_review_id is not None:
+            parked = projected[-1]
+            await self._publish(
+                workspace_id,
+                "agent.run.waiting_review",
+                {
+                    "run_id": params.run_id,
+                    "task_id": params.task_id,
+                    "agent_id": params.agent_id,
+                    "review_id": waiting_review_id,
+                    "tool_name": parked.manifest.tool_name,
+                    "risk": parked.risk,
                 },
             )
         if blocking_delegation is not None:
@@ -1461,6 +1531,332 @@ class AgentProjectionActivities:
                 "task_id": params.task_id,
                 "approval_id": params.approval_id,
                 "decision": approval.status,
+                "tool_status": result.status,
+            },
+        )
+        return StepResult(done=False)
+
+    @activity.defn(name=ACTIVITY_COMMIT_REVIEW_PROJECTION)
+    async def commit_review_projection_activity(
+        self,
+        params: CommitReviewProjectionInput,
+    ) -> StepResult:
+        """Project the resumed review-parked call (mirrors the approval
+        projection). Idempotent on the ``review.<status>`` run event for this
+        review: a retry after a crash replays the durable row state."""
+        workspace_id = UUID(params.workspace_id)
+        task_id = UUID(params.task_id)
+        run_id = UUID(params.run_id)
+        agent_id = UUID(params.agent_id)
+        review_id = UUID(params.review_id)
+        tool_call_id = UUID(params.tool_call_id)
+
+        async with self._resources.session_factory() as session:
+            run = await session.scalar(
+                select(AgentRun)
+                .where(
+                    AgentRun.id == run_id,
+                    AgentRun.workspace_id == workspace_id,
+                    AgentRun.task_id == task_id,
+                    AgentRun.agent_id == agent_id,
+                )
+                .with_for_update()
+            )
+            if run is None:
+                raise ApplicationError(
+                    "agent run not found for review projection",
+                    type="run_not_found",
+                    non_retryable=True,
+                )
+            review = await session.scalar(
+                select(WorkReview).where(
+                    WorkReview.id == review_id,
+                    WorkReview.workspace_id == workspace_id,
+                    WorkReview.run_id == run_id,
+                    WorkReview.subject_agent_id == agent_id,
+                )
+            )
+            if review is None:
+                raise ApplicationError(
+                    "review not found", type="review_not_found", non_retryable=True
+                )
+            if review.status == WorkReviewStatus.PENDING.value:
+                raise ApplicationError("review still pending", type="review_pending")
+            if run.status in {
+                RunStatus.COMPLETED.value,
+                RunStatus.FAILED.value,
+                RunStatus.CANCELLED.value,
+            }:
+                if run.error_code == "tool_execution_unknown":
+                    raise ApplicationError(
+                        run.error_message
+                        or "tool execution outcome is unknown; manual reconciliation is required",
+                        type="tool_execution_unknown",
+                        non_retryable=True,
+                    )
+                raise ApplicationError(
+                    "review cannot resume an already-terminal agent run",
+                    type="run_already_terminal",
+                    non_retryable=True,
+                )
+            row = await session.get(ToolCall, tool_call_id)
+            if row is None or row.run_id != run_id or row.agent_id != agent_id:
+                raise ApplicationError(
+                    "review tool call binding does not match",
+                    type="tool_projection_binding_mismatch",
+                    non_retryable=True,
+                )
+            step_index, manifest = await self._approval_manifest_binding(
+                session,
+                workspace_id=workspace_id,
+                task_id=task_id,
+                run_id=run_id,
+                tool_call_id=tool_call_id,
+            )
+            reasoning_event = await load_step_event(
+                session,
+                workspace_id=workspace_id,
+                task_id=task_id,
+                run_id=run_id,
+                step_index=step_index,
+                event_type="agent.step.reasoning",
+            )
+            if reasoning_event is None:
+                raise ApplicationError(
+                    "agent step reasoning sidecar is missing",
+                    type="reasoning_sidecar_missing",
+                    non_retryable=True,
+                )
+            manifest_event = await load_step_event(
+                session,
+                workspace_id=workspace_id,
+                task_id=task_id,
+                run_id=run_id,
+                step_index=step_index,
+                event_type="agent.step.tool_manifest",
+            )
+            if manifest_event is None:
+                raise ApplicationError(
+                    "agent step tool manifest is missing",
+                    type="tool_step_manifest_missing",
+                    non_retryable=True,
+                )
+            calls = manifest_calls_from_payload(
+                manifest_event.payload_json, expected_step=step_index
+            )
+            reasoning = AgentStepReasoningRecord.from_payload(
+                reasoning_event.payload_json,
+                expected_step=step_index,
+                expected_call_count=len(calls),
+            )
+            provider_call_id = reasoning.provider_call_ids[manifest.ordinal]
+
+            result = await self._projected_outcome(
+                session,
+                row=row,
+                manifest=manifest,
+                provider_call_id=provider_call_id,
+                workspace_id=workspace_id,
+                task_id=task_id,
+                run_id=run_id,
+                agent_id=agent_id,
+            )
+            if result.status == "needs_review":
+                if row.review_id == review_id:
+                    raise ApplicationError(
+                        "review tool call is still parked", type="review_pending"
+                    )
+                # Another matched policy is still pending: park again.
+                run.status = RunStatus.WAITING_REVIEW.value
+                await session.commit()
+                return StepResult(done=False, waiting_review_id=str(row.review_id))
+
+            bundle_exists = (
+                await session.scalar(
+                    select(func.count(RunEvent.id)).where(
+                        RunEvent.workspace_id == workspace_id,
+                        RunEvent.run_id == run_id,
+                        RunEvent.event_type == f"review.{review.status}",
+                        RunEvent.payload_json["review_id"].as_string() == params.review_id,
+                    )
+                )
+                or 0
+            ) > 0
+            if bundle_exists:
+                if result.status == "execution_unknown":
+                    run.status = RunStatus.FAILED.value
+                    run.error_code = "tool_execution_unknown"
+                    run.error_message = (
+                        f"tool call {tool_call_id} execution outcome is unknown; "
+                        "manual reconciliation is required"
+                    )
+                    await session.commit()
+                    raise ApplicationError(
+                        run.error_message,
+                        type="tool_execution_unknown",
+                        non_retryable=True,
+                    )
+                replayed_approval_id = (
+                    str(result.approval.id)
+                    if result.status == "needs_approval" and result.approval is not None
+                    else None
+                )
+                await session.rollback()
+                return StepResult(done=False, waiting_approval_id=replayed_approval_id)
+
+            seq = await self._next_seq(session, run_id)
+            self._add_run_event(
+                session,
+                workspace_id=workspace_id,
+                run_id=run_id,
+                task_id=task_id,
+                seq=seq,
+                event_type=f"review.{review.status}",
+                payload={
+                    "review_id": params.review_id,
+                    "tool_call_id": str(tool_call_id),
+                    "tool_name": manifest.tool_name,
+                    "status": result.status,
+                    "verdict": review.verdict,
+                    "feedback": redact_text(review.feedback)[:_MAX_REASON_CHARS],
+                    "decided_by_user_id": (
+                        str(review.decided_by_user_id)
+                        if review.decided_by_user_id is not None
+                        else None
+                    ),
+                    "decided_by_agent_id": (
+                        str(review.decided_by_agent_id)
+                        if review.decided_by_agent_id is not None
+                        else None
+                    ),
+                },
+            )
+            seq += 1
+            waiting_approval_id: str | None = None
+            if result.status == "needs_approval" and result.approval is not None:
+                # The approved review let the call advance into the ordinary
+                # human-approval wait; the workflow parks on that next.
+                waiting_approval_id = str(result.approval.id)
+                self._add_run_event(
+                    session,
+                    workspace_id=workspace_id,
+                    run_id=run_id,
+                    task_id=task_id,
+                    seq=seq,
+                    event_type="node.request_approval",
+                    payload={
+                        "step": step_index,
+                        "tool_name": manifest.tool_name,
+                        "tool_call_id": str(tool_call_id),
+                        "approval_id": waiting_approval_id,
+                        "reason": result.decision_reason,
+                        "after_review": True,
+                    },
+                )
+                seq += 1
+                run.status = RunStatus.WAITING_APPROVAL.value
+            else:
+                self._add_tool_message(
+                    session,
+                    workspace_id=workspace_id,
+                    task_id=task_id,
+                    run_id=run_id,
+                    agent_id=agent_id,
+                    message_type="tool_result",
+                    content={
+                        "tool_call_id": str(tool_call_id),
+                        "provider_call_id": provider_call_id,
+                        "review_id": params.review_id,
+                        "tool_name": manifest.tool_name,
+                        "status": result.status,
+                        "result": result.observation_json(),
+                    },
+                )
+                if result.status == "execution_unknown":
+                    run.status = RunStatus.FAILED.value
+                    run.error_code = "tool_execution_unknown"
+                    run.error_message = (
+                        f"tool call {tool_call_id} execution outcome is unknown; "
+                        "manual reconciliation is required"
+                    )
+                else:
+                    run.status = RunStatus.RUNNING.value
+                if result.status in ("executed", "failed"):
+                    self._add_run_event(
+                        session,
+                        workspace_id=workspace_id,
+                        run_id=run_id,
+                        task_id=task_id,
+                        seq=seq,
+                        event_type="node.execute_tool",
+                        payload={
+                            "tool_name": manifest.tool_name,
+                            "status": result.status,
+                            "duration_ms": row.duration_ms,
+                            "after_review": True,
+                        },
+                    )
+                    seq += 1
+            self._add_run_event(
+                session,
+                workspace_id=workspace_id,
+                run_id=run_id,
+                task_id=task_id,
+                seq=seq,
+                event_type="tool.call",
+                payload={
+                    "tool_name": manifest.tool_name,
+                    "tool_call_id": str(tool_call_id),
+                    "risk": result.risk,
+                    "status": result.status,
+                    "decision": result.decision_code,
+                    "reason": result.decision_reason,
+                    "error_code": row.error_code,
+                    "duration_ms": row.duration_ms,
+                    "approval_id": waiting_approval_id,
+                    "review_id": params.review_id,
+                },
+            )
+            await session.commit()
+
+        if result.status == "execution_unknown":
+            raise ApplicationError(
+                f"tool call {tool_call_id} execution outcome is unknown; "
+                "manual reconciliation is required",
+                type="tool_execution_unknown",
+                non_retryable=True,
+            )
+        if waiting_approval_id is not None:
+            await self._publish(
+                workspace_id,
+                "approval.requested",
+                {
+                    "approval_id": waiting_approval_id,
+                    "run_id": params.run_id,
+                    "task_id": params.task_id,
+                    "agent_id": params.agent_id,
+                    "tool_name": manifest.tool_name,
+                    "risk": result.risk,
+                },
+            )
+            await self._publish(
+                workspace_id,
+                "agent.run.waiting_approval",
+                {
+                    "run_id": params.run_id,
+                    "task_id": params.task_id,
+                    "approval_id": waiting_approval_id,
+                },
+            )
+            return StepResult(done=False, waiting_approval_id=waiting_approval_id)
+        await self._publish(
+            workspace_id,
+            "agent.run.resumed",
+            {
+                "run_id": params.run_id,
+                "task_id": params.task_id,
+                "review_id": params.review_id,
+                "decision": review.status,
                 "tool_status": result.status,
             },
         )

@@ -73,6 +73,12 @@ describe("statusLabelFor", () => {
     ).toMatchObject({ label: "Needs your review", kind: "review" });
   });
 
+  it("shows the parked review wait", () => {
+    expect(
+      statusLabelFor({ active_task_state: "running", active_run_status: "waiting_review" }),
+    ).toMatchObject({ label: "Waiting for a review", kind: "waiting_review", tone: "neutral" });
+  });
+
   it("maps task states to friendly text", () => {
     expect(statusLabelFor({ active_task_state: "running", active_run_status: null })?.label).toBe(
       "Working…",

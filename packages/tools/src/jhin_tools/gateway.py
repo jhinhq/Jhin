@@ -46,8 +46,9 @@ from jhin_db.models import (
     Connection,
     Secret,
     ToolCall,
+    WorkReview,
 )
-from jhin_domain import ActorType, ApprovalStatus, ToolCallStatus, new_uuid7
+from jhin_domain import ActorType, ApprovalStatus, ToolCallStatus, WorkReviewStatus, new_uuid7
 from jhin_policy import (
     DecisionType,
     Grant,
@@ -59,7 +60,7 @@ from jhin_policy import (
 from jhin_tools.builtin import ToolCatalog, ToolExecutionContext, ToolExecutor
 from jhin_tools.errors import ToolExecutionError
 from jhin_tools.invocation import TOOL_INVOCATION_FORMAT_VERSION
-from jhin_tools.reviews import ReviewError, ToolCallIntent, check_review_gate
+from jhin_tools.reviews import GateResult, ReviewError, ToolCallIntent, check_review_gate
 from jhin_tools.sanitize import (
     MAX_DOCUMENT_BYTES,
     StrictJSONError,
@@ -73,6 +74,7 @@ GatewayStatus = Literal[
     "failed",
     "denied",
     "needs_approval",
+    "needs_review",
     "rejected",
     "execution_unknown",
 ]
@@ -127,6 +129,8 @@ class GatewayOutcome(BaseModel):
     sanitized_input: dict[str, Any]
     sanitized_output: dict[str, Any] | None = None
     approval_id: UUID | None = None
+    # The pending work review a ``needs_review`` call is parked on.
+    review_id: UUID | None = None
     provider_call_id: str | None = None
     error_code: str | None = None
     duration_ms: int | None = None
@@ -335,12 +339,13 @@ class ToolGateway:
     def _finish_parked_call(
         self,
         row: ToolCall,
-        approval_id: UUID,
+        approval_id: UUID | None,
         *,
         status: Literal["denied", "failed"],
         code: str,
         reason: str,
         risk: str | None,
+        review_id: UUID | None = None,
     ) -> GatewayOutcome:
         """Finalize every pre-executor parked-call failure with one audit."""
         row.status = (
@@ -351,7 +356,12 @@ class ToolGateway:
         self._audit(
             f"tool.call.{status}",
             row.id,
-            {"code": code, "reason": reason, "approval_id": str(approval_id)},
+            {
+                "code": code,
+                "reason": reason,
+                **({"approval_id": str(approval_id)} if approval_id is not None else {}),
+                **({"review_id": str(review_id)} if review_id is not None else {}),
+            },
         )
         return GatewayOutcome(
             status=status,
@@ -362,7 +372,30 @@ class ToolGateway:
             decision_reason=reason,
             sanitized_input=row.sanitized_input_json,
             approval_id=approval_id,
+            review_id=review_id,
             error_code=code,
+        )
+
+    def _needs_review_outcome(
+        self,
+        row: ToolCall,
+        review: WorkReview,
+        *,
+        risk: str | None,
+        reason: str,
+        replayed: bool,
+    ) -> GatewayOutcome:
+        """The call is parked on a pending work review (``pending_review``)."""
+        return GatewayOutcome(
+            status="needs_review",
+            tool_call_id=row.id,
+            tool_name=row.tool_name,
+            risk=risk,
+            decision_code="review_required",
+            decision_reason=reason,
+            sanitized_input=row.sanitized_input_json,
+            review_id=review.id,
+            replayed=replayed,
         )
 
     def _replayed_outcome(
@@ -577,6 +610,20 @@ class ToolGateway:
                     dumped,
                 )
 
+        if row.status == ToolCallStatus.PENDING_REVIEW.value:
+            # Parked on a work review: a retried bound execution replays the
+            # park. Resumption goes only through ``resolve_review`` after the
+            # workflow receives the review_decision signal.
+            review = await self._review_for_row(row)
+            if review is None:
+                return await self._invocation_mismatch(invocation_id, definition, dumped)
+            return self._needs_review_outcome(
+                row,
+                review,
+                risk=definition.risk.value,
+                reason=f"this call is parked on review {review.id}",
+                replayed=True,
+            )
         if row.status in _TERMINAL_TOOL_STATUSES:
             return self._replayed_outcome(
                 row,
@@ -734,7 +781,10 @@ class ToolGateway:
                 approval=approval,
                 replayed=False,
             )
-        if row.status == ToolCallStatus.PENDING_APPROVAL.value:
+        if row.status in (
+            ToolCallStatus.PENDING_APPROVAL.value,
+            ToolCallStatus.PENDING_REVIEW.value,
+        ):
             # A vanished or schema-invalid tool definition cannot prove that
             # the currently supplied input is the exact operation a human was
             # shown. Only already-terminal outcomes are repairable through
@@ -1372,9 +1422,26 @@ class ToolGateway:
         # review can never race an effect. Both outcomes are recorded
         # denials carrying the review id; a retried invocation replays the
         # same denial instead of re-evaluating.
-        review_denial = await self._review_gate(definition, invocation_id=invocation_id)
-        if review_denial is not None:
-            code, reason = review_denial
+        review_gate = await self._review_gate(definition, invocation_id=invocation_id)
+        if review_gate is not None:
+            if (
+                review_gate.status == "wait_review"
+                and review_gate.review_id is not None
+                and invocation_id is not None
+            ):
+                # Durable parking: persist the call as pending_review so the
+                # workflow can suspend on the review_decision signal and
+                # resume this exact call (``resolve_review``) once decided.
+                return await self._park_for_review(
+                    definition,
+                    invocation_id=invocation_id,
+                    review_id=review_gate.review_id,
+                    reason=review_gate.reason,
+                    sanitized_input=sanitized_input,
+                    dumped=dumped,
+                    connection_id=connection_id,
+                )
+            code, reason = self._review_denial(review_gate)
             return await self._persist_denial(
                 invocation_id=invocation_id,
                 tool_name=definition.name,
@@ -1421,32 +1488,14 @@ class ToolGateway:
                     )
             now = datetime.now(UTC)
             tool_call_id = invocation_id or new_uuid7()
-            approval = Approval(
-                id=new_uuid7(),
-                workspace_id=self._ctx.workspace_id,
-                task_id=self._ctx.task_id,
-                run_id=self._ctx.run_id,
-                requested_by_agent_id=self._ctx.agent_id,
-                action_type=definition.name,
-                action_payload_sanitized={
-                    "approval_format_version": _APPROVAL_FORMAT_VERSION,
-                    "workspace_id": str(self._ctx.workspace_id),
-                    "agent_id": str(self._ctx.agent_id),
-                    "run_id": str(self._ctx.run_id),
-                    "task_id": str(self._ctx.task_id),
-                    "tool_name": definition.name,
-                    "capability": definition.required_capability,
-                    "risk": definition.risk.value,
-                    "input": sanitized_input,
-                    "tool_call_id": str(tool_call_id),
-                    "invocation_format_version": TOOL_INVOCATION_FORMAT_VERSION,
-                    "invocation_id": str(tool_call_id),
-                    "connection_authorization_digest": connection_digest,
-                    "provider_call_id": safe_provider_call_id,
-                },
+            approval = self._build_approval(
+                definition,
+                tool_call_id=tool_call_id,
+                sanitized_input=sanitized_input,
+                connection_digest=connection_digest,
+                provider_call_id=safe_provider_call_id,
                 reason=decision.reason,
-                status=ApprovalStatus.PENDING.value,
-                requested_at=now,
+                now=now,
             )
             self._ctx.session.add(approval)
             row = ToolCall(
@@ -1540,14 +1589,14 @@ class ToolGateway:
         definition: ToolDefinition,
         *,
         invocation_id: UUID | None,
-    ) -> tuple[str, str] | None:
+    ) -> GateResult | None:
         """Pre-action review policies for one authorized call.
 
-        Returns ``None`` to proceed, otherwise the ``(code, reason)`` of the
-        recorded denial. ``wait_review`` cannot park the run (there is no
-        review signal on the workflow yet), so the model is told the call is
-        awaiting review and must finish without it; a decided review lets a
-        later call through (approved) or returns its feedback (blocked).
+        Returns ``None`` to proceed. ``wait_review`` parks the call (the
+        caller persists it as ``pending_review``); ``blocked`` — and a
+        reviewer-resolution failure — become recorded denials. Without a
+        deterministic invocation id (legacy/direct callers) a pending review
+        is also a denial, because nothing can resume the call.
         """
         run = await self._ctx.session.get(AgentRun, self._ctx.run_id)
         if run is None or run.workspace_id != self._ctx.workspace_id:
@@ -1560,9 +1609,13 @@ class ToolGateway:
         try:
             gate = await check_review_gate(self._ctx.session, run, intent)
         except ReviewError as error:
-            return error.code, error.message
+            return GateResult(status="blocked", code=error.code, reason=error.message)
         if gate.status == "proceed":
             return None
+        return gate
+
+    @staticmethod
+    def _review_denial(gate: GateResult) -> tuple[str, str]:
         if gate.status == "wait_review":
             reviewer = gate.reviewer_type or "a reviewer"
             return (
@@ -1571,6 +1624,469 @@ class ToolGateway:
                 f"do not retry it and continue without it ({gate.reason})",
             )
         return gate.code, gate.feedback or gate.reason
+
+    def _build_approval(
+        self,
+        definition: ToolDefinition,
+        *,
+        tool_call_id: UUID,
+        sanitized_input: dict[str, Any],
+        connection_digest: str | None,
+        provider_call_id: str,
+        reason: str,
+        now: datetime,
+    ) -> Approval:
+        """One pending approval bound to the exact call a human will see."""
+        return Approval(
+            id=new_uuid7(),
+            workspace_id=self._ctx.workspace_id,
+            task_id=self._ctx.task_id,
+            run_id=self._ctx.run_id,
+            requested_by_agent_id=self._ctx.agent_id,
+            action_type=definition.name,
+            action_payload_sanitized={
+                "approval_format_version": _APPROVAL_FORMAT_VERSION,
+                "workspace_id": str(self._ctx.workspace_id),
+                "agent_id": str(self._ctx.agent_id),
+                "run_id": str(self._ctx.run_id),
+                "task_id": str(self._ctx.task_id),
+                "tool_name": definition.name,
+                "capability": definition.required_capability,
+                "risk": definition.risk.value,
+                "input": sanitized_input,
+                "tool_call_id": str(tool_call_id),
+                "invocation_format_version": TOOL_INVOCATION_FORMAT_VERSION,
+                "invocation_id": str(tool_call_id),
+                "connection_authorization_digest": connection_digest,
+                "provider_call_id": provider_call_id,
+            },
+            reason=reason,
+            status=ApprovalStatus.PENDING.value,
+            requested_at=now,
+        )
+
+    async def _review_for_row(self, row: ToolCall) -> WorkReview | None:
+        if row.review_id is None:
+            return None
+        review: WorkReview | None = await self._ctx.session.scalar(
+            select(WorkReview).where(
+                WorkReview.id == row.review_id,
+                WorkReview.workspace_id == self._ctx.workspace_id,
+            )
+        )
+        return review
+
+    async def _park_for_review(
+        self,
+        definition: ToolDefinition,
+        *,
+        invocation_id: UUID,
+        review_id: UUID,
+        reason: str,
+        sanitized_input: dict[str, Any],
+        dumped: dict[str, Any],
+        connection_id: UUID | None,
+    ) -> GatewayOutcome:
+        """Persist the call as ``pending_review`` before anything else exists.
+
+        Mirrors approval staging: the row is committed under the stable
+        invocation id so a retry replays the park, and no approval row or
+        execution claim exists until the review is decided.
+        """
+        if sanitized_input != dumped:
+            return await self._persist_denial(
+                invocation_id=invocation_id,
+                tool_name=definition.name,
+                code="review_input_not_lossless",
+                reason=(
+                    "tool input changed during required sanitization and cannot be "
+                    "replayed safely after review"
+                ),
+                sanitized_input=sanitized_input,
+                risk=definition.risk.value,
+                connection_id=connection_id,
+            )
+        review = await self._ctx.session.scalar(
+            select(WorkReview).where(
+                WorkReview.id == review_id, WorkReview.workspace_id == self._ctx.workspace_id
+            )
+        )
+        if review is None:
+            raise GatewayStateError(f"review {review_id} disappeared before parking")
+        row = ToolCall(
+            id=invocation_id,
+            workspace_id=self._ctx.workspace_id,
+            run_id=self._ctx.run_id,
+            agent_id=self._ctx.agent_id,
+            tool_name=definition.name,
+            connection_id=connection_id,
+            sanitized_input_json=sanitized_input,
+            sanitized_output_json={},
+            status=ToolCallStatus.PENDING_REVIEW.value,
+            review_id=review.id,
+            started_at=datetime.now(UTC),
+        )
+        self._ctx.session.add(row)
+        self._audit("tool.call.requested", row.id, {"tool_name": definition.name})
+        self._audit(
+            "review.requested",
+            row.id,
+            {
+                "review_id": str(review.id),
+                "tool_name": definition.name,
+                "risk": definition.risk.value,
+                "reviewer_type": review.reviewer_type,
+                "reason": reason,
+            },
+        )
+        try:
+            await self._ctx.session.commit()
+        except IntegrityError:
+            await self._ctx.session.rollback()
+            self._ctx.session.expire_all()
+            replay = await self._existing_invocation_outcome(invocation_id, definition, dumped)
+            if replay is None:
+                raise GatewayStateError(
+                    f"tool call {invocation_id} review park could not be reloaded"
+                ) from None
+            return replay
+        return self._needs_review_outcome(
+            row, review, risk=definition.risk.value, reason=reason, replayed=False
+        )
+
+    async def resolve_review(self, review_id: UUID) -> GatewayOutcome:
+        """Resume one review-parked call under its full lifecycle lock."""
+        _review, row = await self._load_review_pair(review_id)
+        invocation_id = row.id
+        bind = self._ctx.session.bind
+        if isinstance(bind, AsyncEngine) and bind.dialect.name == "postgresql":
+            await self._ctx.session.rollback()
+        async with self._invocation_lifecycle_lock(
+            invocation_id, refresh_if_contended=True
+        ) as gateway:
+            try:
+                if gateway._ctx.test_barrier is not None:
+                    await gateway._ctx.test_barrier.arrive_and_wait(
+                        TOOL_BEFORE_CLAIM, invocation_id
+                    )
+                outcome = await gateway._resolve_review_once(review_id)
+                await gateway._ctx.session.commit()
+                return outcome
+            except BaseException:
+                await gateway._ctx.session.rollback()
+                raise
+
+    async def _resolve_review_once(self, review_id: UUID) -> GatewayOutcome:
+        """Resume a ``pending_review`` call after its review was decided.
+
+        The Postgres ``work_review`` row is the authority — never the signal
+        payload. ``approved`` continues the ordinary chain from where the
+        park interrupted it: fresh grants/policy/validator, the review gate
+        again (another policy may still be pending), then human-approval
+        staging or the stable execution claim and the effect, exactly once.
+        ``changes_requested``/``escalated`` deny the call with the reviewer's
+        feedback and execute nothing.
+        """
+        review, row = await self._load_review_pair(review_id)
+        if review.status == WorkReviewStatus.PENDING.value:
+            raise GatewayStateError(f"review {review_id} is still pending")
+        if row.status in _TERMINAL_TOOL_STATUSES:
+            return self._replayed_outcome(row)
+        if row.status in (
+            ToolCallStatus.EXECUTING.value,
+            ToolCallStatus.EXECUTION_UNKNOWN.value,
+        ):
+            return await self._persist_execution_unknown(row.id, risk=None)
+        if row.status == ToolCallStatus.PENDING_APPROVAL.value:
+            # Already resumed into approval staging; a retry replays it.
+            approval = (
+                await self._ctx.session.get(Approval, row.approval_id)
+                if row.approval_id is not None
+                else None
+            )
+            if approval is None:
+                raise GatewayStateError(f"tool call {row.id} lost its approval binding")
+            payload_risk = approval.action_payload_sanitized.get("risk")
+            return GatewayOutcome(
+                status="needs_approval",
+                tool_call_id=row.id,
+                tool_name=row.tool_name,
+                risk=payload_risk if isinstance(payload_risk, str) else None,
+                decision_code="approval_required",
+                decision_reason=approval.reason,
+                sanitized_input=row.sanitized_input_json,
+                approval_id=approval.id,
+                review_id=review.id,
+                replayed=True,
+            )
+        if row.status != ToolCallStatus.PENDING_REVIEW.value:
+            raise GatewayStateError(f"tool call {row.id} is '{row.status}', not pending review")
+
+        entry = self._catalog.get(row.tool_name)
+        if entry is None:
+            return self._finish_parked_call(
+                row,
+                None,
+                status="failed",
+                code="tool_not_found",
+                reason="tool disappeared from the registry before resolution",
+                risk=None,
+                review_id=review.id,
+            )
+        definition, _ = entry
+        try:
+            validated = definition.input_model.model_validate(row.sanitized_input_json)
+        except ValidationError:
+            return self._finish_parked_call(
+                row,
+                None,
+                status="failed",
+                code="review_binding_mismatch",
+                reason="parked input no longer matches the tool schema",
+                risk=definition.risk.value,
+                review_id=review.id,
+            )
+        dumped = validated.model_dump(mode="json")
+        if dumped != row.sanitized_input_json or self._sanitize(dumped) != dumped:
+            return self._finish_parked_call(
+                row,
+                None,
+                status="failed",
+                code="review_binding_mismatch",
+                reason="parked input is not the exact operation the reviewer saw",
+                risk=definition.risk.value,
+                review_id=review.id,
+            )
+        connection_id = _connection_uuid(dumped)
+        if connection_id != row.connection_id:
+            return self._finish_parked_call(
+                row,
+                None,
+                status="failed",
+                code="review_binding_mismatch",
+                reason="parked call connection binding changed",
+                risk=definition.risk.value,
+                review_id=review.id,
+            )
+
+        if review.status != WorkReviewStatus.APPROVED.value:
+            return self._finish_parked_call(
+                row,
+                None,
+                status="denied",
+                code=f"review_{review.status}",
+                reason=review.feedback or f"review outcome: {review.status}",
+                risk=definition.risk.value,
+                review_id=review.id,
+            )
+
+        # Live authorization, never a snapshot from when the call parked.
+        requested_scope = {
+            key: dumped[key] for key in definition.scope_keys if dumped.get(key) is not None
+        }
+        grants = await self._load_grants()
+        decision = evaluate(
+            definition,
+            grants=grants,
+            rules=await self._load_rules(),
+            requested_scope=requested_scope,
+        )
+        if decision.decision is DecisionType.DENY:
+            return self._finish_parked_call(
+                row,
+                None,
+                status="denied",
+                code=decision.code,
+                reason=decision.reason,
+                risk=definition.risk.value,
+                review_id=review.id,
+            )
+        validator = self._catalog.validator_for(definition.name)
+        if validator is not None:
+            veto = await validator(self._ctx, validated, grants)
+            if veto is not None and veto.decision is DecisionType.DENY:
+                return self._finish_parked_call(
+                    row,
+                    None,
+                    status="denied",
+                    code=veto.code,
+                    reason=veto.reason,
+                    risk=definition.risk.value,
+                    review_id=review.id,
+                )
+        # The gate again: the decided review passes, but another matched
+        # policy may still be pending, in which case the call parks on it.
+        gate = await self._review_gate(definition, invocation_id=row.id)
+        if gate is not None:
+            if gate.status == "wait_review" and gate.review_id is not None:
+                other = await self._ctx.session.scalar(
+                    select(WorkReview).where(
+                        WorkReview.id == gate.review_id,
+                        WorkReview.workspace_id == self._ctx.workspace_id,
+                    )
+                )
+                if other is None:
+                    raise GatewayStateError(f"review {gate.review_id} disappeared")
+                row.review_id = other.id
+                self._audit(
+                    "review.requested",
+                    row.id,
+                    {"review_id": str(other.id), "tool_name": definition.name},
+                )
+                return self._needs_review_outcome(
+                    row, other, risk=definition.risk.value, reason=gate.reason, replayed=False
+                )
+            code, reason = self._review_denial(gate)
+            return self._finish_parked_call(
+                row,
+                None,
+                status="denied",
+                code=code,
+                reason=reason,
+                risk=definition.risk.value,
+                review_id=review.id,
+            )
+        self._audit(
+            "tool.call.review_approved",
+            row.id,
+            {"review_id": str(review.id), "tool_name": definition.name},
+        )
+
+        if decision.decision is DecisionType.REQUIRE_APPROVAL:
+            connection_digest: str | None = None
+            if connection_id is not None:
+                connection_digest = await self._connection_authorization_digest(connection_id)
+                if connection_digest is None:
+                    return self._finish_parked_call(
+                        row,
+                        None,
+                        status="denied",
+                        code="approval_connection_unavailable",
+                        reason="connection authorization state is unavailable for approval binding",
+                        risk=definition.risk.value,
+                        review_id=review.id,
+                    )
+            now = datetime.now(UTC)
+            approval = self._build_approval(
+                definition,
+                tool_call_id=row.id,
+                sanitized_input=row.sanitized_input_json,
+                connection_digest=connection_digest,
+                provider_call_id="",
+                reason=decision.reason,
+                now=now,
+            )
+            self._ctx.session.add(approval)
+            row.status = ToolCallStatus.PENDING_APPROVAL.value
+            row.approval_id = approval.id
+            self._audit(
+                "approval.requested",
+                row.id,
+                {
+                    "approval_id": str(approval.id),
+                    "review_id": str(review.id),
+                    "tool_name": definition.name,
+                    "risk": definition.risk.value,
+                    "reason": decision.reason,
+                },
+            )
+            return GatewayOutcome(
+                status="needs_approval",
+                tool_call_id=row.id,
+                tool_name=definition.name,
+                risk=definition.risk.value,
+                decision_code=decision.code,
+                decision_reason=decision.reason,
+                sanitized_input=row.sanitized_input_json,
+                approval_id=approval.id,
+                review_id=review.id,
+            )
+
+        replay = await self._claim_reviewed_call(row)
+        if replay is not None:
+            return replay
+        return await self._execute(definition, row, validated)
+
+    async def _claim_reviewed_call(self, row: ToolCall) -> GatewayOutcome | None:
+        """Atomically move ``pending_review`` to the stable executing claim and
+        commit it before the effect, like ``_claim_parked_call``."""
+        row_id = row.id
+        claimed_id = await self._ctx.session.scalar(
+            update(ToolCall)
+            .where(
+                ToolCall.id == row_id,
+                ToolCall.workspace_id == self._ctx.workspace_id,
+                ToolCall.status == ToolCallStatus.PENDING_REVIEW.value,
+            )
+            .values(status=ToolCallStatus.EXECUTING.value)
+            .returning(ToolCall.id)
+            .execution_options(synchronize_session=False)
+        )
+        if claimed_id is not None:
+            self._audit(
+                "tool.call.claimed",
+                row_id,
+                {"review_id": str(row.review_id), "tool_name": row.tool_name},
+            )
+            await self._ctx.session.commit()
+            if self._ctx.test_barrier is not None:
+                await self._ctx.test_barrier.arrive_and_wait(TOOL_AFTER_CLAIM, row_id)
+            await self._ctx.session.refresh(row)
+            return None
+        await self._ctx.session.rollback()
+        current = await self._ctx.session.scalar(
+            select(ToolCall)
+            .where(ToolCall.id == row_id, ToolCall.workspace_id == self._ctx.workspace_id)
+            .with_for_update()
+        )
+        if current is None:
+            raise GatewayStateError(f"tool call {row_id} disappeared while claiming review")
+        if current.status in _TERMINAL_TOOL_STATUSES:
+            return self._replayed_outcome(current)
+        if current.status in (
+            ToolCallStatus.EXECUTING.value,
+            ToolCallStatus.EXECUTION_UNKNOWN.value,
+        ):
+            return await self._persist_execution_unknown(current.id, risk=None)
+        raise GatewayStateError(
+            f"tool call {row_id} changed to unexpected status '{current.status}'"
+        )
+
+    async def _load_review_pair(self, review_id: UUID) -> tuple[WorkReview, ToolCall]:
+        review = await self._ctx.session.scalar(
+            select(WorkReview).where(
+                WorkReview.id == review_id,
+                WorkReview.workspace_id == self._ctx.workspace_id,
+            )
+        )
+        if review is None:
+            raise GatewayStateError(f"review {review_id} not found in workspace")
+        if (
+            review.subject_agent_id != self._ctx.agent_id
+            or review.run_id != self._ctx.run_id
+            or (review.task_id is not None and review.task_id != self._ctx.task_id)
+        ):
+            raise GatewayStateError(f"review {review_id} does not belong to this execution context")
+        rows = list(
+            await self._ctx.session.scalars(
+                select(ToolCall).where(
+                    ToolCall.review_id == review_id,
+                    ToolCall.workspace_id == self._ctx.workspace_id,
+                )
+            )
+        )
+        if len(rows) != 1:
+            raise GatewayStateError(
+                f"expected exactly one tool_call parked on review {review_id}, found {len(rows)}"
+            )
+        row = rows[0]
+        if (
+            row.agent_id != self._ctx.agent_id
+            or row.run_id != self._ctx.run_id
+            or (review.tool_call_id is not None and review.tool_call_id != row.id)
+        ):
+            raise GatewayStateError(f"tool call {row.id} does not match its review")
+        return review, row
 
     async def _validate_parked_approval_binding(
         self,

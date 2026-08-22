@@ -15,7 +15,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.client import Client as TemporalClient
-from temporalio.exceptions import TemporalError
+from temporalio.exceptions import TemporalError, WorkflowAlreadyStartedError
 from temporalio.service import RPCError
 
 from jhin_api.audit import service as audit
@@ -31,6 +31,7 @@ from jhin_db.models import Agent, ReviewPolicy, Task, WorkRequest, WorkReview, W
 from jhin_domain import (
     ActorType,
     ReviewerType,
+    ReviewMode,
     TaskState,
     WorkReviewStatus,
     WorkspaceRole,
@@ -46,6 +47,13 @@ from jhin_tools import reviews as reviews_service
 from jhin_tools import work_requests as wr
 from jhin_tools.rollups import ManagerRollup, build_manager_rollup
 from jhin_workflows import AGENT_TASK_QUEUE
+from jhin_workflows.agent_task.shared import SIGNAL_REVIEW_DECISION
+from jhin_workflows.periodic_review import (
+    SIGNAL_PERIODIC_REVIEW_REFRESH,
+    SIGNAL_PERIODIC_REVIEW_STOP,
+    PeriodicReviewInput,
+    periodic_review_workflow_id,
+)
 from jhin_workflows.work_request_task import WorkRequestTaskInput, work_request_workflow_id
 
 MAX_PAGE_SIZE = 100
@@ -345,6 +353,55 @@ async def _validate_scope_target(
             raise _not_found("Team")
 
 
+def _periodic_active(policy: ReviewPolicy) -> bool:
+    return bool(policy.enabled) and policy.mode == ReviewMode.PERIODIC.value
+
+
+async def _signal_periodic_review(temporal: TemporalClient, policy_id: UUID, signal: str) -> None:
+    """Best effort: the workflow also reloads the policy before every
+    window, so a lost stop/refresh only delays the effect by one window."""
+    handle = temporal.get_workflow_handle(periodic_review_workflow_id(str(policy_id)))
+    try:
+        await handle.signal(signal)
+    except (RPCError, TemporalError, OSError):
+        return
+
+
+async def sync_periodic_review_workflow(
+    temporal: TemporalClient | None,
+    policy: ReviewPolicy,
+    *,
+    deleted: bool = False,
+) -> None:
+    """Start/stop the durable ``PeriodicReviewWorkflow`` for a committed
+    policy change. Enabled periodic policies get exactly one workflow
+    (``review-periodic-{policy_id}``; a duplicate start becomes a
+    ``refresh`` signal); disabled, re-moded, or deleted policies are told to
+    stop. Called after commit; failures never roll the policy back."""
+    if temporal is None:
+        return
+    if deleted or not _periodic_active(policy):
+        await _signal_periodic_review(temporal, policy.id, SIGNAL_PERIODIC_REVIEW_STOP)
+        return
+    try:
+        await temporal.start_workflow(
+            "PeriodicReviewWorkflow",
+            PeriodicReviewInput(workspace_id=str(policy.workspace_id), policy_id=str(policy.id)),
+            id=periodic_review_workflow_id(str(policy.id)),
+            task_queue=AGENT_TASK_QUEUE,
+        )
+    except WorkflowAlreadyStartedError:
+        await _signal_periodic_review(temporal, policy.id, SIGNAL_PERIODIC_REVIEW_REFRESH)
+    except (RPCError, TemporalError, OSError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "The review policy was saved, but its periodic review workflow could not "
+                "be started (Temporal unavailable)"
+            ),
+        ) from exc
+
+
 async def create_review_policy(
     db: AsyncSession,
     ctx: WorkspaceContext,
@@ -352,6 +409,7 @@ async def create_review_policy(
     *,
     request_id: UUID,
     ip_hash: str,
+    temporal: TemporalClient | None = None,
 ) -> ReviewPolicy:
     await _validate_scope_target(db, ctx.workspace_id, body)
     policy = ReviewPolicy(
@@ -383,6 +441,7 @@ async def create_review_policy(
         metadata={"name": policy.name, "mode": policy.mode, "scope_kind": policy.scope_kind},
     )
     await db.commit()
+    await sync_periodic_review_workflow(temporal, policy)
     return policy
 
 
@@ -394,6 +453,7 @@ async def update_review_policy(
     *,
     request_id: UUID,
     ip_hash: str,
+    temporal: TemporalClient | None = None,
 ) -> ReviewPolicy:
     policy = await get_review_policy(db, ctx.workspace_id, policy_id)
     changed: dict[str, Any] = {}
@@ -420,6 +480,8 @@ async def update_review_policy(
         metadata={"fields": sorted(changed)},
     )
     await db.commit()
+    if changed.keys() & {"enabled", "mode", "period_seconds", "reviewer", "scope_kind", "scope_id"}:
+        await sync_periodic_review_workflow(temporal, policy)
     return policy
 
 
@@ -430,6 +492,7 @@ async def delete_review_policy(
     *,
     request_id: UUID,
     ip_hash: str,
+    temporal: TemporalClient | None = None,
 ) -> None:
     policy = await get_review_policy(db, ctx.workspace_id, policy_id)
     audit.record(
@@ -445,6 +508,7 @@ async def delete_review_policy(
     )
     await db.delete(policy)
     await db.commit()
+    await sync_periodic_review_workflow(temporal, policy, deleted=True)
 
 
 # --- reviews ---
@@ -536,10 +600,16 @@ async def decide_review(
     feedback: str,
     request_id: UUID,
     ip_hash: str,
+    temporal: TemporalClient | None = None,
 ) -> WorkReview:
     """A human decides a review. Members decide human-assigned reviews;
     admins may also decide on behalf of an AI reviewer. The decision gates
-    or records only — it never touches approvals or grants."""
+    or records only — it never touches approvals or grants.
+
+    Like approval decisions, the row is committed first and the source task
+    workflow is then woken with the ``review_decision`` signal; repeating the
+    same verdict re-sends the signal so a commit→signal failure is repairable
+    without recording a second decision."""
     review = await get_review(db, ctx.workspace_id, review_id)
     if review.reviewer_type == ReviewerType.AGENT.value and not role_satisfies(
         ctx.role, WorkspaceRole.ADMIN
@@ -549,6 +619,9 @@ async def decide_review(
             detail="This review is assigned to an AI reviewer; only an admin may decide it",
         )
     if review.status != WorkReviewStatus.PENDING.value:
+        if review.verdict == verdict and review.decided_by_user_id == ctx.user.id:
+            await signal_review_workflow(temporal, db, review)
+            return review
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=f"Review is already {review.status}"
         )
@@ -573,7 +646,37 @@ async def decide_review(
         metadata={"verdict": verdict, "status": review.status},
     )
     await db.commit()
+    await signal_review_workflow(temporal, db, review)
     return review
+
+
+async def signal_review_workflow(
+    temporal: TemporalClient | None, db: AsyncSession, review: WorkReview
+) -> None:
+    """Wake the source task's ``AgentTaskWorkflow`` with ``review_decision``.
+    The decision is already durable; a failure is surfaced (409) only when a
+    tool call is actually parked on this review, so the caller can retry the
+    idempotent decision. Reviews that gate nothing ignore delivery errors."""
+    if temporal is None or review.task_id is None:
+        return
+    task = await db.scalar(
+        select(Task).where(Task.id == review.task_id, Task.workspace_id == review.workspace_id)
+    )
+    if task is None or task.temporal_workflow_id is None:
+        return
+    handle = temporal.get_workflow_handle(task.temporal_workflow_id)
+    try:
+        await handle.signal(SIGNAL_REVIEW_DECISION, args=[str(review.id), review.status])
+    except (RPCError, TemporalError, OSError) as exc:
+        if review.tool_call_id is None:
+            return
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Review decision '{review.verdict}' was recorded, but the task workflow "
+                "could not be signaled (it may have already finished)"
+            ),
+        ) from exc
 
 
 # --- rollups ---

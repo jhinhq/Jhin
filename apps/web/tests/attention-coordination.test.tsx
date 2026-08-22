@@ -115,6 +115,7 @@ describe("AttentionInbox coordination sections", () => {
     expect(card.textContent).toContain("Before a risky action");
     expect(card.textContent).toContain("Destructive actions");
     expect(card.textContent).not.toContain("pre_action:tc1:p1");
+    expect(screen.getByTestId("review-parked-rv1").textContent).toContain("waiting for this review");
 
     fireEvent.click(screen.getByRole("button", { name: "Decide" }));
     // Changes need feedback.
