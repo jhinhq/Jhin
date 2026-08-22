@@ -8,6 +8,7 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.36",
     "jhin-db",
     "jhin-domain",
+    "jhin-observability",
     "jhin-policy",
     "jhin-secrets",
 ]
@@ -15,6 +16,7 @@ dependencies = [
 [tool.uv.sources]
 jhin-db = { workspace = true }
 jhin-domain = { workspace = true }
+jhin-observability = { workspace = true }
 jhin-policy = { workspace = true }
 jhin-secrets = { workspace = true }
 

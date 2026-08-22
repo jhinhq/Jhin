@@ -1038,6 +1038,8 @@ source = { editable = "packages/models" }
 dependencies = [
     { name = "httpx" },
     { name = "jhin-domain" },
+    { name = "jhin-observability" },
+    { name = "opentelemetry-api" },
     { name = "pydantic" },
 ]
 
@@ -1045,6 +1047,8 @@ dependencies = [
 requires-dist = [
     { name = "httpx", specifier = ">=0.28" },
     { name = "jhin-domain", editable = "packages/domain" },
+    { name = "jhin-observability", editable = "packages/observability" },
+    { name = "opentelemetry-api", specifier = ">=1.38,<2" },
     { name = "pydantic", specifier = ">=2.10" },
 ]
 
@@ -1174,6 +1178,7 @@ source = { editable = "packages/tools" }
 dependencies = [
     { name = "jhin-db" },
     { name = "jhin-domain" },
+    { name = "jhin-observability" },
     { name = "jhin-policy" },
     { name = "jhin-secrets" },
     { name = "pydantic" },
@@ -1184,6 +1189,7 @@ dependencies = [
 requires-dist = [
     { name = "jhin-db", editable = "packages/db" },
     { name = "jhin-domain", editable = "packages/domain" },
+    { name = "jhin-observability", editable = "packages/observability" },
     { name = "jhin-policy", editable = "packages/policy" },
     { name = "jhin-secrets", editable = "packages/secrets" },
     { name = "pydantic", specifier = ">=2.10" },
