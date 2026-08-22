@@ -23,13 +23,12 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
-    Uuid,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
 from jhin_db.base import Base
-from jhin_db.columns import TimestampMixin, UtcDateTime, UuidPkMixin
+from jhin_db.columns import StdUuid, TimestampMixin, UtcDateTime, UuidPkMixin
 from jhin_domain import AvatarGenerationStatus, MediaAssetStatus
 
 MEDIA_KIND_AVATAR = "avatar"
@@ -56,10 +55,10 @@ class MediaAsset(Base, UuidPkMixin, TimestampMixin):
     )
 
     workspace_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
     )
     kind: Mapped[str] = mapped_column(String(32), default=MEDIA_KIND_AVATAR)
-    owner_agent_id: Mapped[UUID | None] = mapped_column(Uuid, default=None)
+    owner_agent_id: Mapped[UUID | None] = mapped_column(StdUuid, default=None)
     status: Mapped[str] = mapped_column(String(16), default=MediaAssetStatus.PENDING.value)
     # Always ``image/webp`` for avatars: every variant is re-encoded.
     content_type: Mapped[str] = mapped_column(String(64), default="image/webp")
@@ -72,7 +71,7 @@ class MediaAsset(Base, UuidPkMixin, TimestampMixin):
     variant_128: Mapped[bytes] = mapped_column(LargeBinary)
     variant_256: Mapped[bytes] = mapped_column(LargeBinary)
     created_by_user_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("user.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("user.id", ondelete="SET NULL"), default=None
     )
     retired_at: Mapped[datetime | None] = mapped_column(UtcDateTime, default=None)
 
@@ -104,9 +103,9 @@ class AvatarGeneration(Base, UuidPkMixin, TimestampMixin):
     )
 
     workspace_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
     )
-    agent_id: Mapped[UUID] = mapped_column(Uuid)
+    agent_id: Mapped[UUID] = mapped_column(StdUuid)
     # Derived from public identity fields plus the explicit user hint only;
     # never from system prompts, memory, or conversations.
     prompt: Mapped[str] = mapped_column(Text)
@@ -114,7 +113,7 @@ class AvatarGeneration(Base, UuidPkMixin, TimestampMixin):
     provider_type: Mapped[str] = mapped_column(String(32))
     provider_display_name: Mapped[str] = mapped_column(String(200))
     model_profile_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("model_profile.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("model_profile.id", ondelete="SET NULL"), default=None
     )
     model_name: Mapped[str] = mapped_column(String(200))
     image_size: Mapped[str] = mapped_column(String(16), default="1024x1024")
@@ -124,11 +123,11 @@ class AvatarGeneration(Base, UuidPkMixin, TimestampMixin):
     error: Mapped[str | None] = mapped_column(Text, default=None)
     error_code: Mapped[str | None] = mapped_column(String(64), default=None)
     result_asset_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("media_asset.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("media_asset.id", ondelete="SET NULL"), default=None
     )
     temporal_workflow_id: Mapped[str | None] = mapped_column(String(200), default=None)
     created_by_user_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("user.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("user.id", ondelete="SET NULL"), default=None
     )
     started_at: Mapped[datetime | None] = mapped_column(UtcDateTime, default=None)
     finished_at: Mapped[datetime | None] = mapped_column(UtcDateTime, default=None)

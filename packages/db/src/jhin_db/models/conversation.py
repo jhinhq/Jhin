@@ -10,11 +10,11 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import Boolean, ForeignKey, Index, String, Uuid, text
+from sqlalchemy import Boolean, ForeignKey, Index, String, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from jhin_db.base import Base
-from jhin_db.columns import TimestampMixin, UtcDateTime, UuidPkMixin
+from jhin_db.columns import StdUuid, TimestampMixin, UtcDateTime, UuidPkMixin
 from jhin_domain import ConversationStatus
 
 
@@ -30,7 +30,7 @@ class Conversation(Base, UuidPkMixin, TimestampMixin):
     )
 
     workspace_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
     )
     title: Mapped[str] = mapped_column(String(200))
     status: Mapped[str] = mapped_column(
@@ -38,9 +38,9 @@ class Conversation(Base, UuidPkMixin, TimestampMixin):
     )
     pinned: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
     primary_agent_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("agent.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("agent.id", ondelete="SET NULL"), default=None
     )
     created_by_user_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("user.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("user.id", ondelete="SET NULL"), default=None
     )
     last_activity_at: Mapped[datetime] = mapped_column(UtcDateTime)

@@ -21,7 +21,6 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
-    Uuid,
     event,
     func,
     text,
@@ -29,7 +28,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, validates
 
 from jhin_db.base import Base
-from jhin_db.columns import JsonDict, JsonList, TimestampMixin, UtcDateTime, UuidPkMixin
+from jhin_db.columns import JsonDict, JsonList, StdUuid, TimestampMixin, UtcDateTime, UuidPkMixin
 from jhin_domain import AgentStatus, AutonomyLevel, WorkspaceStatus
 
 MAX_EXPERTISE_TAGS = 20
@@ -58,7 +57,7 @@ class Workspace(Base, UuidPkMixin, TimestampMixin):
     status: Mapped[str] = mapped_column(String(32), default=WorkspaceStatus.ACTIVE.value)
     # use_alter: workspace <-> model_profile reference each other.
     default_model_profile_id: Mapped[UUID | None] = mapped_column(
-        Uuid,
+        StdUuid,
         ForeignKey(
             "model_profile.id",
             ondelete="SET NULL",
@@ -76,10 +75,10 @@ class WorkspaceMembership(Base, UuidPkMixin, TimestampMixin):
     __table_args__ = (UniqueConstraint("workspace_id", "user_id"),)
 
     workspace_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
     )
     user_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("user.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("user.id", ondelete="CASCADE"), index=True
     )
     role: Mapped[str] = mapped_column(String(32))
 
@@ -89,16 +88,16 @@ class Team(Base, UuidPkMixin, TimestampMixin):
     __table_args__ = (UniqueConstraint("workspace_id", "id", name="uq_team_workspace_id_id"),)
 
     workspace_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
     )
     name: Mapped[str] = mapped_column(String(200))
     description: Mapped[str] = mapped_column(Text, default="")
     parent_team_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("team.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("team.id", ondelete="SET NULL"), default=None
     )
     # use_alter breaks the team <-> agent circular foreign-key dependency.
     manager_agent_id: Mapped[UUID | None] = mapped_column(
-        Uuid,
+        StdUuid,
         ForeignKey("agent.id", ondelete="SET NULL", use_alter=True, name="fk_team_manager_agent"),
         default=None,
     )
@@ -114,13 +113,13 @@ class Agent(Base, UuidPkMixin, TimestampMixin):
     )
 
     workspace_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
     )
     team_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("team.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("team.id", ondelete="SET NULL"), default=None
     )
     manager_agent_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("agent.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("agent.id", ondelete="SET NULL"), default=None
     )
     name: Mapped[str] = mapped_column(String(200))
     slug: Mapped[str] = mapped_column(String(120))
@@ -131,7 +130,7 @@ class Agent(Base, UuidPkMixin, TimestampMixin):
     autonomy_level: Mapped[str] = mapped_column(String(32), default=AutonomyLevel.SUPERVISED.value)
     # Null means "use the workspace default profile" (plan 15.2).
     model_profile_id: Mapped[UUID | None] = mapped_column(
-        Uuid,
+        StdUuid,
         ForeignKey(
             "model_profile.id",
             ondelete="SET NULL",
@@ -169,7 +168,7 @@ class Agent(Base, UuidPkMixin, TimestampMixin):
         String(16), default="initials", server_default=text("'initials'")
     )
     active_avatar_asset_id: Mapped[UUID | None] = mapped_column(
-        Uuid,
+        StdUuid,
         ForeignKey(
             "media_asset.id",
             ondelete="SET NULL",
@@ -240,9 +239,11 @@ class AgentTeamMembership(Base, UuidPkMixin):
         ),
     )
 
-    workspace_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("workspace.id", ondelete="CASCADE"))
-    agent_id: Mapped[UUID] = mapped_column(Uuid)
-    team_id: Mapped[UUID] = mapped_column(Uuid)
+    workspace_id: Mapped[UUID] = mapped_column(
+        StdUuid, ForeignKey("workspace.id", ondelete="CASCADE")
+    )
+    agent_id: Mapped[UUID] = mapped_column(StdUuid)
+    team_id: Mapped[UUID] = mapped_column(StdUuid)
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
     role_label: Mapped[str] = mapped_column(String(200), default="", server_default=text("''"))
     joined_at: Mapped[datetime] = mapped_column(
@@ -303,9 +304,11 @@ class AgentRelationship(Base, UuidPkMixin, TimestampMixin):
         ),
     )
 
-    workspace_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("workspace.id", ondelete="CASCADE"))
-    source_agent_id: Mapped[UUID] = mapped_column(Uuid)
-    target_agent_id: Mapped[UUID] = mapped_column(Uuid)
+    workspace_id: Mapped[UUID] = mapped_column(
+        StdUuid, ForeignKey("workspace.id", ondelete="CASCADE")
+    )
+    source_agent_id: Mapped[UUID] = mapped_column(StdUuid)
+    target_agent_id: Mapped[UUID] = mapped_column(StdUuid)
     kind: Mapped[str] = mapped_column(String(32))
     purpose: Mapped[str] = mapped_column(Text, default="", server_default=text("''"))
     status: Mapped[str] = mapped_column(

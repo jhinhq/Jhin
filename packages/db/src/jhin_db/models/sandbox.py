@@ -13,11 +13,11 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import Float, ForeignKey, Integer, String, Text, Uuid
+from sqlalchemy import Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from jhin_db.base import Base
-from jhin_db.columns import CreatedAtMixin, UtcDateTime, UuidPkMixin
+from jhin_db.columns import CreatedAtMixin, StdUuid, UtcDateTime, UuidPkMixin
 from jhin_domain import SandboxJobStatus
 
 
@@ -25,16 +25,16 @@ class SandboxJob(Base, UuidPkMixin, CreatedAtMixin):
     __tablename__ = "sandbox_job"
 
     workspace_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
     )
     run_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("agent_run.id", ondelete="SET NULL"), default=None, index=True
+        StdUuid, ForeignKey("agent_run.id", ondelete="SET NULL"), default=None, index=True
     )
     task_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("task.id", ondelete="SET NULL"), default=None, index=True
+        StdUuid, ForeignKey("task.id", ondelete="SET NULL"), default=None, index=True
     )
     tool_call_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("tool_call.id", ondelete="SET NULL"), default=None, index=True
+        StdUuid, ForeignKey("tool_call.id", ondelete="SET NULL"), default=None, index=True
     )
     status: Mapped[str] = mapped_column(
         String(32), default=SandboxJobStatus.RUNNING.value, index=True

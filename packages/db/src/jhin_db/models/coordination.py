@@ -28,13 +28,12 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
-    Uuid,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
 from jhin_db.base import Base
-from jhin_db.columns import JsonDict, JsonList, TimestampMixin, UtcDateTime, UuidPkMixin
+from jhin_db.columns import JsonDict, JsonList, StdUuid, TimestampMixin, UtcDateTime, UuidPkMixin
 from jhin_domain import ReviewMode, ReviewScopeKind, WorkRequestStatus, WorkReviewStatus
 
 
@@ -58,28 +57,30 @@ class WorkRequest(Base, UuidPkMixin, TimestampMixin):
     )
 
     workspace_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
     )
     conversation_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("conversation.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("conversation.id", ondelete="SET NULL"), default=None
     )
     requester_agent_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("agent.id", ondelete="CASCADE")
+        StdUuid, ForeignKey("agent.id", ondelete="CASCADE")
     )
     requester_task_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("task.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("task.id", ondelete="SET NULL"), default=None
     )
     requester_run_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("agent_run.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("agent_run.id", ondelete="SET NULL"), default=None
     )
     # Top of the requester task's lineage (delegation parents and earlier
     # request hops). The ping-pong guard keys on it.
-    root_task_id: Mapped[UUID | None] = mapped_column(Uuid, default=None)
+    root_task_id: Mapped[UUID | None] = mapped_column(StdUuid, default=None)
     # Set when a human opened the request on behalf of the requesting agent.
     requested_by_user_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("user.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("user.id", ondelete="SET NULL"), default=None
     )
-    target_agent_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("agent.id", ondelete="CASCADE"))
+    target_agent_id: Mapped[UUID] = mapped_column(
+        StdUuid, ForeignKey("agent.id", ondelete="CASCADE")
+    )
     title: Mapped[str] = mapped_column(String(500))
     description: Mapped[str] = mapped_column(Text, default="")
     expected_output: Mapped[str] = mapped_column(Text, default="", server_default=text("''"))
@@ -91,7 +92,7 @@ class WorkRequest(Base, UuidPkMixin, TimestampMixin):
     # that itself came from a request at depth n.
     depth: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     created_task_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("task.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("task.id", ondelete="SET NULL"), default=None
     )
     response: Mapped[str] = mapped_column(Text, default="", server_default=text("''"))
     responded_at: Mapped[datetime | None] = mapped_column(UtcDateTime, default=None)
@@ -115,11 +116,11 @@ class ReviewPolicy(Base, UuidPkMixin, TimestampMixin):
     )
 
     workspace_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
     )
     name: Mapped[str] = mapped_column(String(200))
     scope_kind: Mapped[str] = mapped_column(String(32), default=ReviewScopeKind.WORKSPACE.value)
-    scope_id: Mapped[UUID | None] = mapped_column(Uuid, default=None)
+    scope_id: Mapped[UUID | None] = mapped_column(StdUuid, default=None)
     scope_key: Mapped[str | None] = mapped_column(String(100), default=None)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
     mode: Mapped[str] = mapped_column(String(32), default=ReviewMode.BEFORE_CLOSE.value)
@@ -132,7 +133,7 @@ class ReviewPolicy(Base, UuidPkMixin, TimestampMixin):
     # Periodic mode cadence; ignored for other modes.
     period_seconds: Mapped[int | None] = mapped_column(Integer, default=None)
     created_by_user_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("user.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("user.id", ondelete="SET NULL"), default=None
     )
 
 
@@ -153,24 +154,24 @@ class WorkReview(Base, UuidPkMixin, TimestampMixin):
     )
 
     workspace_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
     )
     policy_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("review_policy.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("review_policy.id", ondelete="SET NULL"), default=None
     )
     task_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("task.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("task.id", ondelete="SET NULL"), default=None
     )
     run_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("agent_run.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("agent_run.id", ondelete="SET NULL"), default=None
     )
-    tool_call_id: Mapped[UUID | None] = mapped_column(Uuid, default=None)
+    tool_call_id: Mapped[UUID | None] = mapped_column(StdUuid, default=None)
     work_request_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("work_request.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("work_request.id", ondelete="SET NULL"), default=None
     )
     # Agent whose work is under review (the source run's agent).
     subject_agent_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("agent.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("agent.id", ondelete="SET NULL"), default=None
     )
     trigger_key: Mapped[str] = mapped_column(String(300))
     mode: Mapped[str] = mapped_column(String(32))
@@ -180,10 +181,10 @@ class WorkReview(Base, UuidPkMixin, TimestampMixin):
     # "agent" | "human" | "none" (skipped/fail-closed with no reviewer).
     reviewer_type: Mapped[str] = mapped_column(String(16))
     reviewer_agent_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("agent.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("agent.id", ondelete="SET NULL"), default=None
     )
     reviewer_user_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("user.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("user.id", ondelete="SET NULL"), default=None
     )
     status: Mapped[str] = mapped_column(
         String(32), default=WorkReviewStatus.PENDING.value, index=True
@@ -193,8 +194,8 @@ class WorkReview(Base, UuidPkMixin, TimestampMixin):
     requested_at: Mapped[datetime] = mapped_column(UtcDateTime)
     decided_at: Mapped[datetime | None] = mapped_column(UtcDateTime, default=None)
     decided_by_user_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("user.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("user.id", ondelete="SET NULL"), default=None
     )
     decided_by_agent_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("agent.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("agent.id", ondelete="SET NULL"), default=None
     )

@@ -13,11 +13,11 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, Text, Uuid, text
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from jhin_db.base import Base
-from jhin_db.columns import CreatedAtMixin, JsonDict, TimestampMixin, UuidPkMixin
+from jhin_db.columns import CreatedAtMixin, JsonDict, StdUuid, TimestampMixin, UuidPkMixin
 from jhin_domain import TriggerActionType, TriggerType
 
 # Two events for the same transition inside this window collapse into one
@@ -29,13 +29,13 @@ class Trigger(Base, UuidPkMixin, TimestampMixin):
     __tablename__ = "trigger"
 
     workspace_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
     )
     name: Mapped[str] = mapped_column(String(200))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     trigger_type: Mapped[str] = mapped_column(String(32), default=TriggerType.CONNECTOR_EVENT.value)
     connection_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("connection.id", ondelete="CASCADE"), default=None, index=True
+        StdUuid, ForeignKey("connection.id", ondelete="CASCADE"), default=None, index=True
     )
     # Canonical event type this trigger listens for, e.g.
     # ``connector.linear.issue.updated``.
@@ -46,10 +46,10 @@ class Trigger(Base, UuidPkMixin, TimestampMixin):
         String(32), default=TriggerActionType.START_AGENT_TASK.value
     )
     target_agent_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("agent.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("agent.id", ondelete="SET NULL"), default=None
     )
     target_team_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("team.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("team.id", ondelete="SET NULL"), default=None
     )
     # Reserved for workflow templates (plan 6.11); unused by start_agent_task.
     workflow_definition: Mapped[dict[str, Any] | None] = mapped_column(JsonDict, default=None)
@@ -60,7 +60,7 @@ class Trigger(Base, UuidPkMixin, TimestampMixin):
         Integer, default=DEFAULT_DEDUPE_WINDOW_SECONDS
     )
     created_by_user_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("user.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("user.id", ondelete="SET NULL"), default=None
     )
 
 
@@ -86,16 +86,16 @@ class TriggerInvocation(Base, UuidPkMixin, CreatedAtMixin):
     )
 
     workspace_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
     )
     trigger_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("trigger.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("trigger.id", ondelete="CASCADE"), index=True
     )
     idempotency_key: Mapped[str] = mapped_column(String(128))
     # The canonical event that matched (envelope event_id).
-    event_id: Mapped[UUID] = mapped_column(Uuid)
+    event_id: Mapped[UUID] = mapped_column(StdUuid)
     task_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("task.id", ondelete="SET NULL"), default=None, index=True
+        StdUuid, ForeignKey("task.id", ondelete="SET NULL"), default=None, index=True
     )
     workflow_id: Mapped[str | None] = mapped_column(String(200), default=None)
     status: Mapped[str] = mapped_column(String(16), index=True)

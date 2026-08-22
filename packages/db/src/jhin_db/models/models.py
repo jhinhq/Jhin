@@ -11,11 +11,11 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, UniqueConstraint, Uuid
+from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from jhin_db.base import Base
-from jhin_db.columns import JsonDict, TimestampMixin, UtcDateTime, UuidPkMixin
+from jhin_db.columns import JsonDict, StdUuid, TimestampMixin, UtcDateTime, UuidPkMixin
 
 
 class ModelProvider(Base, UuidPkMixin, TimestampMixin):
@@ -23,13 +23,13 @@ class ModelProvider(Base, UuidPkMixin, TimestampMixin):
     __table_args__ = (UniqueConstraint("workspace_id", "display_name"),)
 
     workspace_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
     )
     type: Mapped[str] = mapped_column(String(32))
     display_name: Mapped[str] = mapped_column(String(200))
     base_url: Mapped[str | None] = mapped_column(String(500), default=None)
     secret_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("secret.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("secret.id", ondelete="SET NULL"), default=None
     )
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     last_verified_at: Mapped[datetime | None] = mapped_column(UtcDateTime, default=None)
@@ -41,10 +41,10 @@ class ModelProfile(Base, UuidPkMixin, TimestampMixin):
     __table_args__ = (UniqueConstraint("workspace_id", "display_name"),)
 
     workspace_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
     )
     provider_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("model_provider.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("model_provider.id", ondelete="CASCADE"), index=True
     )
     model_name: Mapped[str] = mapped_column(String(200))
     display_name: Mapped[str] = mapped_column(String(200))

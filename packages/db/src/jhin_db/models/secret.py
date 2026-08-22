@@ -9,11 +9,11 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import ForeignKey, Integer, LargeBinary, String, UniqueConstraint, Uuid
+from sqlalchemy import ForeignKey, Integer, LargeBinary, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from jhin_db.base import Base
-from jhin_db.columns import TimestampMixin, UtcDateTime, UuidPkMixin
+from jhin_db.columns import StdUuid, TimestampMixin, UtcDateTime, UuidPkMixin
 from jhin_domain import SecretType
 
 
@@ -22,7 +22,7 @@ class Secret(Base, UuidPkMixin, TimestampMixin):
     __table_args__ = (UniqueConstraint("workspace_id", "name"),)
 
     workspace_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
     )
     name: Mapped[str] = mapped_column(String(200))
     type: Mapped[str] = mapped_column(String(32), default=SecretType.API_KEY.value)
@@ -37,7 +37,7 @@ class Secret(Base, UuidPkMixin, TimestampMixin):
     # secrets never requires decryption.
     masked_hint: Mapped[str] = mapped_column(String(16), default="")
     created_by_user_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("user.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("user.id", ondelete="SET NULL"), default=None
     )
     last_used_at: Mapped[datetime | None] = mapped_column(UtcDateTime, default=None)
     rotated_at: Mapped[datetime | None] = mapped_column(UtcDateTime, default=None)

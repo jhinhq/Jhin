@@ -11,11 +11,18 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import BigInteger, ForeignKey, Integer, String, Text, Uuid
+from sqlalchemy import BigInteger, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from jhin_db.base import Base
-from jhin_db.columns import CreatedAtMixin, JsonDict, TimestampMixin, UtcDateTime, UuidPkMixin
+from jhin_db.columns import (
+    CreatedAtMixin,
+    JsonDict,
+    StdUuid,
+    TimestampMixin,
+    UtcDateTime,
+    UuidPkMixin,
+)
 from jhin_domain import MessageVisibility, RunStatus, TaskPriority, TaskState
 
 
@@ -23,7 +30,7 @@ class Task(Base, UuidPkMixin, TimestampMixin):
     __tablename__ = "task"
 
     workspace_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
     )
     external_source: Mapped[str | None] = mapped_column(String(64), default=None)
     external_id: Mapped[str | None] = mapped_column(String(200), default=None)
@@ -32,21 +39,21 @@ class Task(Base, UuidPkMixin, TimestampMixin):
     state: Mapped[str] = mapped_column(String(32), default=TaskState.QUEUED.value, index=True)
     priority: Mapped[str] = mapped_column(String(16), default=TaskPriority.NORMAL.value)
     assigned_agent_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("agent.id", ondelete="SET NULL"), default=None, index=True
+        StdUuid, ForeignKey("agent.id", ondelete="SET NULL"), default=None, index=True
     )
     assigned_team_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("team.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("team.id", ondelete="SET NULL"), default=None
     )
     parent_task_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("task.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("task.id", ondelete="SET NULL"), default=None
     )
-    trigger_id: Mapped[UUID | None] = mapped_column(Uuid, default=None)
+    trigger_id: Mapped[UUID | None] = mapped_column(StdUuid, default=None)
     # First-class conversations: the chat thread this task episode belongs to.
     conversation_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("conversation.id", ondelete="SET NULL"), default=None, index=True
+        StdUuid, ForeignKey("conversation.id", ondelete="SET NULL"), default=None, index=True
     )
     temporal_workflow_id: Mapped[str | None] = mapped_column(String(200), default=None)
-    correlation_id: Mapped[UUID] = mapped_column(Uuid)
+    correlation_id: Mapped[UUID] = mapped_column(StdUuid)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JsonDict, default=dict)
 
 
@@ -54,21 +61,21 @@ class AgentRun(Base, UuidPkMixin, TimestampMixin):
     __tablename__ = "agent_run"
 
     workspace_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
     )
     agent_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("agent.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("agent.id", ondelete="CASCADE"), index=True
     )
     task_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("task.id", ondelete="SET NULL"), default=None, index=True
+        StdUuid, ForeignKey("task.id", ondelete="SET NULL"), default=None, index=True
     )
     parent_run_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("agent_run.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("agent_run.id", ondelete="SET NULL"), default=None
     )
     status: Mapped[str] = mapped_column(String(32), default=RunStatus.PENDING.value, index=True)
     reason: Mapped[str] = mapped_column(String(200), default="")
     model_profile_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("model_profile.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("model_profile.id", ondelete="SET NULL"), default=None
     )
     # Immutable configuration hash (plan 7.1): which exact snapshot ran.
     snapshot_hash: Mapped[str] = mapped_column(String(64), default="")
@@ -90,21 +97,21 @@ class Message(Base, UuidPkMixin, CreatedAtMixin):
     __tablename__ = "message"
 
     workspace_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
     )
     task_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("task.id", ondelete="CASCADE"), default=None, index=True
+        StdUuid, ForeignKey("task.id", ondelete="CASCADE"), default=None, index=True
     )
     run_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("agent_run.id", ondelete="SET NULL"), default=None, index=True
+        StdUuid, ForeignKey("agent_run.id", ondelete="SET NULL"), default=None, index=True
     )
     conversation_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("conversation.id", ondelete="SET NULL"), default=None, index=True
+        StdUuid, ForeignKey("conversation.id", ondelete="SET NULL"), default=None, index=True
     )
     sender_type: Mapped[str] = mapped_column(String(16))
-    sender_id: Mapped[UUID | None] = mapped_column(Uuid, default=None)
+    sender_id: Mapped[UUID | None] = mapped_column(StdUuid, default=None)
     recipient_type: Mapped[str] = mapped_column(String(16))
-    recipient_id: Mapped[UUID | None] = mapped_column(Uuid, default=None)
+    recipient_id: Mapped[UUID | None] = mapped_column(StdUuid, default=None)
     message_type: Mapped[str] = mapped_column(String(32), default="text")
     content_json: Mapped[dict[str, Any]] = mapped_column(JsonDict, default=dict)
     visibility: Mapped[str] = mapped_column(String(16), default=MessageVisibility.VISIBLE.value)
@@ -119,13 +126,13 @@ class RunEvent(Base, UuidPkMixin, CreatedAtMixin):
     __tablename__ = "run_event"
 
     workspace_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
     )
     run_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("agent_run.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("agent_run.id", ondelete="CASCADE"), index=True
     )
     task_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("task.id", ondelete="CASCADE"), default=None, index=True
+        StdUuid, ForeignKey("task.id", ondelete="CASCADE"), default=None, index=True
     )
     seq: Mapped[int] = mapped_column(Integer)
     event_type: Mapped[str] = mapped_column(String(100))

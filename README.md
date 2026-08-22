@@ -29,6 +29,16 @@ operations UI.
 
 ## Quick start
 
+> **macOS / Docker Desktop note.** The Phase 10 sandbox contract needs a Linux
+> Docker socket in `rootful` (root-owned, positive docker GID) or `rootless`
+> (UID 10001 daemon) mode. Docker Desktop exposes a `uid 0 / gid 0` socket
+> behind a symlink, which satisfies neither, so on a Mac the plain
+> `docker compose -f compose.yaml -f compose.dev.yaml up -d --build` starts
+> every service except `sandbox-runner` (CLI sandbox jobs are unavailable;
+> chats, agents, memory, connectors, triggers, and approvals all work). The
+> leased integration harness and `make test-integration` require Linux.
+
+
 Requirements: Linux Docker with Compose v2, Python 3.13, `uv`, and `make`.
 
 ```bash

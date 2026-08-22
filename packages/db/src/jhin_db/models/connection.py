@@ -14,11 +14,18 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ForeignKey, String, Text, UniqueConstraint, Uuid
+from sqlalchemy import ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from jhin_db.base import Base
-from jhin_db.columns import CreatedAtMixin, JsonDict, TimestampMixin, UtcDateTime, UuidPkMixin
+from jhin_db.columns import (
+    CreatedAtMixin,
+    JsonDict,
+    StdUuid,
+    TimestampMixin,
+    UtcDateTime,
+    UuidPkMixin,
+)
 from jhin_domain import ConnectionStatus
 
 
@@ -32,7 +39,7 @@ class Connection(Base, UuidPkMixin, TimestampMixin):
     __table_args__ = (UniqueConstraint("workspace_id", "name"),)
 
     workspace_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
     )
     connector_type: Mapped[str] = mapped_column(String(50), index=True)
     name: Mapped[str] = mapped_column(String(200))
@@ -42,14 +49,14 @@ class Connection(Base, UuidPkMixin, TimestampMixin):
         String(64), unique=True, index=True, default=new_public_id
     )
     encrypted_secret_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("secret.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("secret.id", ondelete="SET NULL"), default=None
     )
     webhook_secret_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("secret.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("secret.id", ondelete="SET NULL"), default=None
     )
     config_json: Mapped[dict[str, Any]] = mapped_column(JsonDict, default=dict)
     created_by_user_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("user.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("user.id", ondelete="SET NULL"), default=None
     )
     last_verified_at: Mapped[datetime | None] = mapped_column(UtcDateTime, default=None)
     last_error: Mapped[str | None] = mapped_column(Text, default=None)
@@ -65,12 +72,12 @@ class WebhookDelivery(Base, UuidPkMixin, CreatedAtMixin):
     __table_args__ = (UniqueConstraint("connection_id", "delivery_id"),)
 
     workspace_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
     )
     connection_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("connection.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("connection.id", ondelete="CASCADE"), index=True
     )
     delivery_id: Mapped[str] = mapped_column(String(200))
     event: Mapped[str] = mapped_column(String(100))
     # The ingress envelope id published for this delivery (deterministic).
-    event_id: Mapped[UUID] = mapped_column(Uuid)
+    event_id: Mapped[UUID] = mapped_column(StdUuid)

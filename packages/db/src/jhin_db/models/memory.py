@@ -18,11 +18,11 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, Uuid, text
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from jhin_db.base import Base
-from jhin_db.columns import JsonList, TimestampMixin, UtcDateTime, UuidPkMixin
+from jhin_db.columns import JsonList, StdUuid, TimestampMixin, UtcDateTime, UuidPkMixin
 from jhin_domain import MemorySensitivity, MemoryStatus
 
 
@@ -36,11 +36,11 @@ class MemoryRecord(Base, UuidPkMixin, TimestampMixin):
     )
 
     workspace_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
     )
     # agent | team | workspace; scope_id is the agent/team/workspace id.
     scope: Mapped[str] = mapped_column(String(16))
-    scope_id: Mapped[UUID] = mapped_column(Uuid)
+    scope_id: Mapped[UUID] = mapped_column(StdUuid)
     kind: Mapped[str] = mapped_column(String(32))
     # Optional normalized subject key used for contradiction detection
     # ("deploy.day", "user.timezone"); free-form memories leave it null.
@@ -51,15 +51,15 @@ class MemoryRecord(Base, UuidPkMixin, TimestampMixin):
     content_hash: Mapped[str] = mapped_column(String(64), default="")
 
     source_conversation_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("conversation.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("conversation.id", ondelete="SET NULL"), default=None
     )
     source_message_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("message.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("message.id", ondelete="SET NULL"), default=None
     )
     source_task_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("task.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("task.id", ondelete="SET NULL"), default=None
     )
-    source_event_id: Mapped[UUID | None] = mapped_column(Uuid, default=None)
+    source_event_id: Mapped[UUID | None] = mapped_column(StdUuid, default=None)
 
     # The source's visibility ceiling (agent|team|workspace). Non-amplification:
     # ``scope`` may never be broader than ``visibility``.
@@ -82,7 +82,7 @@ class MemoryRecord(Base, UuidPkMixin, TimestampMixin):
 
     version: Mapped[int] = mapped_column(Integer, default=1, server_default=text("1"))
     supersedes_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("memory_record.id", ondelete="SET NULL"), default=None
+        StdUuid, ForeignKey("memory_record.id", ondelete="SET NULL"), default=None
     )
 
     # Portable embedding: JSON list of floats (null when absent or forgotten).
@@ -92,7 +92,7 @@ class MemoryRecord(Base, UuidPkMixin, TimestampMixin):
 
     # user | agent | system
     created_by_type: Mapped[str] = mapped_column(String(16))
-    created_by_id: Mapped[UUID | None] = mapped_column(Uuid, default=None)
+    created_by_id: Mapped[UUID | None] = mapped_column(StdUuid, default=None)
     # Policy evidence (decision reasons, redaction flags) — never content.
     policy_json: Mapped[dict[str, Any]] = mapped_column(
         JsonList, default=dict, server_default=text("'{}'")

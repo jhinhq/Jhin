@@ -5,11 +5,11 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import ForeignKey, String, Uuid
+from sqlalchemy import ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from jhin_db.base import Base
-from jhin_db.columns import CreatedAtMixin, TimestampMixin, UtcDateTime, UuidPkMixin
+from jhin_db.columns import CreatedAtMixin, StdUuid, TimestampMixin, UtcDateTime, UuidPkMixin
 from jhin_domain import UserStatus
 
 
@@ -32,7 +32,7 @@ class UserSession(Base, UuidPkMixin, CreatedAtMixin):
     __tablename__ = "user_session"
 
     user_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("user.id", ondelete="CASCADE"), index=True
+        StdUuid, ForeignKey("user.id", ondelete="CASCADE"), index=True
     )
     token_hash: Mapped[str] = mapped_column(String(128), unique=True)
     expires_at: Mapped[datetime] = mapped_column(UtcDateTime)
