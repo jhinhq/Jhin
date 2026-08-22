@@ -6,6 +6,16 @@ Deterministic policy (:mod:`jhin_memory.policy`), persistence
 (:mod:`jhin_memory.extraction`). See docs/architecture/memory.md.
 """
 
+from jhin_memory.embedding import (
+    DEFAULT_BACKFILL_LIMIT,
+    MAX_BACKFILL_LIMIT,
+    MEMORY_EMBEDDED_EVENT,
+    MEMORY_EMBEDDING_FAILED_EVENT,
+    EmbeddingProfile,
+    MemoryEmbedder,
+    resolve_memory_embedder,
+    select_embedding_profile,
+)
 from jhin_memory.extraction import (
     EXTRACTION_SYSTEM_PROMPT,
     CandidateParseError,
@@ -56,20 +66,26 @@ from jhin_memory.types import (
 )
 
 __all__ = [
+    "DEFAULT_BACKFILL_LIMIT",
     "DEFAULT_MAX_CHARS",
     "DEFAULT_MAX_RECORDS",
     "EXTRACTION_SYSTEM_PROMPT",
+    "MAX_BACKFILL_LIMIT",
+    "MEMORY_EMBEDDED_EVENT",
+    "MEMORY_EMBEDDING_FAILED_EVENT",
     "MEMORY_RETRIEVED_EVENT",
     "REDACTION_MARKER",
     "ActorFacts",
     "ApplyResult",
     "CandidateParseError",
+    "EmbeddingProfile",
     "ExistingRecord",
     "ExtractionResult",
     "MemoryCandidate",
     "MemoryContext",
     "MemoryContextItem",
     "MemoryDecision",
+    "MemoryEmbedder",
     "MemoryProvenance",
     "ScreeningResult",
     "SourceFacts",
@@ -91,8 +107,10 @@ __all__ = [
     "parse_candidates",
     "record_retrieval_provenance",
     "render_context",
+    "resolve_memory_embedder",
     "scope_exceeds",
     "screen_content",
+    "select_embedding_profile",
     "set_embedding",
     "system_actor",
     "unavailable_context",

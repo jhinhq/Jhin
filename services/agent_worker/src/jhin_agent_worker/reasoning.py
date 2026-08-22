@@ -41,6 +41,7 @@ from jhin_memory import (
     MemoryContext,
     build_memory_context,
     record_retrieval_provenance,
+    resolve_memory_embedder,
     unavailable_context,
 )
 from jhin_memory.retrieval import DEFAULT_MAX_CHARS, DEFAULT_MAX_RECORDS
@@ -789,11 +790,33 @@ class AgentReasoningActivities:
         )
         try:
             async with self._resources.session_factory() as session:
+                # Semantic ranking is best-effort: no embedding profile or a
+                # failed embedding call degrades to lexical retrieval.
+                query_embedding: list[float] | None = None
+                embedding_model: str | None = None
+                embedder = await resolve_memory_embedder(
+                    session,
+                    self._resources.crypto,
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    metrics=self._metrics,
+                    tracer=self._tracer,
+                )
+                if embedder is not None:
+                    try:
+                        query_embedding = await embedder.embed_query(
+                            query, workspace_id=workspace_id
+                        )
+                        embedding_model = embedder.model
+                    finally:
+                        await embedder.close()
                 return await build_memory_context(
                     session,
                     workspace_id=workspace_id,
                     agent_id=agent_id,
                     query=query,
+                    query_embedding=query_embedding,
+                    embedding_model=embedding_model,
                 )
         except Exception as error:
             logger.warning("memory.retrieval_failed", error_type=type(error).__name__)

@@ -24,6 +24,7 @@ from jhin_memory import (
     set_embedding,
 )
 from jhin_memory.retrieval import MEMORY_RETRIEVED_EVENT
+from jhin_models.testing import deterministic_embedding
 
 NOW = datetime(2026, 8, 21, 12, 0, tzinfo=UTC)
 
@@ -228,7 +229,9 @@ class TestRanking:
         assert ctx.provenance.mode == "hybrid"
         assert ctx.provenance.degraded is False
 
-    async def test_mismatched_dimensions_fall_back(self, session: AsyncSession, w: World) -> None:
+    async def test_mismatched_dimensions_are_never_compared(
+        self, session: AsyncSession, w: World
+    ) -> None:
         record = await seed(session, w, "alpha")
         await set_embedding(session, record, [1.0, 0.0, 0.0], model="m")
         ctx = await build_memory_context(
@@ -240,8 +243,50 @@ class TestRanking:
             now=NOW,
         )
         assert [i.id for i in ctx.items] == [record.id]
-        assert ctx.provenance.mode == "lexical"
-        assert ctx.provenance.degraded is True
+        # The query was embedded, so the run is not degraded — but nothing
+        # could be scored semantically and the provenance says so.
+        assert ctx.provenance.mode == "hybrid"
+        assert ctx.provenance.degraded is False
+        assert ctx.provenance.policy["semantic_scored"] == 0
+
+    async def test_mismatched_model_is_never_compared(
+        self, session: AsyncSession, w: World
+    ) -> None:
+        near = await seed(session, w, "alpha")
+        await set_embedding(session, near, [1.0, 0.0], model="old-model")
+        ctx = await build_memory_context(
+            session,
+            workspace_id=w.workspace.id,
+            agent_id=w.me.id,
+            query="zzz",
+            query_embedding=[1.0, 0.0],
+            embedding_model="new-model",
+            now=NOW,
+        )
+        assert ctx.provenance.policy["semantic_scored"] == 0
+        assert ctx.provenance.policy["embedding_model"] == "new-model"
+
+    async def test_semantic_relation_outranks_lexical_lookalike(
+        self, session: AsyncSession, w: World
+    ) -> None:
+        """With the fake provider's hashed bag-of-words vectors a memory that
+        shares vocabulary with the query ranks above one that only shares a
+        token the lexical scorer also sees."""
+        related = await seed(session, w, "We deploy the api to production every friday afternoon")
+        lookalike = await seed(session, w, "The friday lunch order is always pizza", created_at=NOW)
+        for record in (related, lookalike):
+            await set_embedding(
+                session, record, deterministic_embedding(record.content), model="fake-embed"
+            )
+        query = "when do we deploy to production"
+        ids = await context_ids(
+            session,
+            w,
+            query,
+            query_embedding=deterministic_embedding(query),
+            embedding_model="fake-embed",
+        )
+        assert ids.index(related.id) < ids.index(lookalike.id)
 
     async def test_without_embeddings_is_degraded_lexical(
         self, session: AsyncSession, w: World

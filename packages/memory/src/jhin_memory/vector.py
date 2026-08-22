@@ -66,17 +66,38 @@ async def nearest_record_ids(
     workspace_id: UUID,
     query: Sequence[float],
     limit: int,
+    model: str | None = None,
 ) -> list[UUID]:
     """Approximate-nearest prefilter using the pgvector column; empty when
-    unavailable (the caller falls back to recency/lexical candidates)."""
-    if not await pgvector_available(session):
+    unavailable (the caller falls back to recency/lexical candidates).
+
+    Only rows whose stored dimensions equal the query's (and whose
+    ``embedding_model`` matches, when given) are compared — pgvector raises
+    on mixed dimensions and vectors from different models are meaningless to
+    compare.
+    """
+    if not await pgvector_available(session) or not query:
         return []
+    clauses = [
+        "workspace_id = :ws",
+        "embedding_vec IS NOT NULL",
+        "embedding_dimensions = :dims",
+    ]
+    params: dict[str, object] = {
+        "ws": workspace_id,
+        "vec": json.dumps([float(v) for v in query]),
+        "dims": len(query),
+        "limit": limit,
+    }
+    if model:
+        clauses.append("embedding_model = :model")
+        params["model"] = model
     rows = await session.execute(
         text(
-            "SELECT id FROM memory_record "
-            "WHERE workspace_id = :ws AND embedding_vec IS NOT NULL "
-            "ORDER BY embedding_vec <=> CAST(:vec AS vector) LIMIT :limit"
+            "SELECT id FROM memory_record WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY embedding_vec <=> CAST(:vec AS vector) LIMIT :limit"
         ),
-        {"ws": workspace_id, "vec": json.dumps([float(v) for v in query]), "limit": limit},
+        params,
     )
     return [row[0] for row in rows]

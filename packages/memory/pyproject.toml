@@ -9,12 +9,16 @@ dependencies = [
     "jhin-db",
     "jhin-domain",
     "jhin-models",
+    "jhin-observability",
+    "jhin-secrets",
 ]
 
 [tool.uv.sources]
 jhin-db = { workspace = true }
 jhin-domain = { workspace = true }
 jhin-models = { workspace = true }
+jhin-observability = { workspace = true }
+jhin-secrets = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

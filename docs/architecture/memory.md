@@ -55,9 +55,28 @@ On PostgreSQL the migration runs `CREATE EXTENSION IF NOT EXISTS vector`
 best-effort. When the extension exists it adds a raw, **non-ORM** column
 `embedding_vec vector` (maintained by `jhin_memory.vector`); when it does
 not (package missing, insufficient privilege) the schema is still valid and
-retrieval uses the always-created GIN index on `to_tsvector('english', content)`.
-SQLite keeps only the JSON embedding and uses `LIKE` for lexical matching.
-No second vector database is introduced.
+retrieval uses the always-created GIN index on `to_tsvector('english', content)`
+plus cosine over the stored JSON vectors. SQLite keeps only the JSON
+embedding and uses `LIKE` for lexical matching. No second vector database is
+introduced.
+
+The stock `postgres:17-alpine` image does **not** ship pgvector, so
+`compose.yaml` runs `pgvector/pgvector:pg17` (same settings, same
+`postgres_data` volume). A database that ran migration `0016` *before* the
+extension was available keeps working (JSON cosine path) but has no
+`embedding_vec` column; to enable the nearest-neighbour prefilter later,
+run once as the database owner and restart the services (column
+availability is cached per process):
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+ALTER TABLE memory_record ADD COLUMN IF NOT EXISTS embedding_vec vector;
+```
+
+then `POST /memories/embed-missing` (below) to populate it. The column holds
+vectors of whatever dimension the configured model returns; the prefilter
+always restricts to rows with the query's `embedding_dimensions` (and
+`embedding_model`), so mixed dimensions never raise.
 
 ## Domain vocabulary (`jhin_domain`)
 
@@ -95,11 +114,60 @@ Source visibility (`derive_source_facts`): INTERNAL message → hidden; a task
 with `assigned_team_id` → ceiling `team` (that team); everything else
 (a chat with one agent, an unassigned task) → ceiling `agent`.
 
+## Embeddings (`jhin_models.embeddings`, `jhin_memory.embedding`)
+
+Semantic retrieval uses the provider-neutral optional capability
+`EmbeddingClient.embed(texts, *, model, dimensions=None) -> EmbeddingResult`
+(`vectors`, `model`, `dimensions`, `usage`, `latency_ms`). Chat providers are
+not required to implement it; `as_embedding_client(client)` raises
+`EmbeddingUnsupported` otherwise (same pattern as image generation).
+OpenAI-compatible adapters (`openai`, `openai_compatible`, `openrouter`,
+`ollama`) implement `POST /embeddings` with `encoding_format=float`, truncate
+each input to 8 000 chars, send at most 64 inputs per request, and validate
+vector count and equal dimensions. Calls go through the instrumented wrapper
+(`model.request` span with `jhin.operation=embed`, `model_requests_total`);
+input tokens and the operator-declared cost land on `model_tokens_total`
+(`direction=input`) and `model_cost_estimate`. Text is never logged. The
+fake provider (`jhin_models.testing`) serves deterministic hashed
+bag-of-words vectors (`deterministic_embedding`), so semantic tests are
+meaningful offline.
+
+**Configuration** — `model_profile.config_json.embeddings`:
+
+```json
+{"enabled": true, "model": "text-embedding-3-small",
+ "dimensions": 1536, "cost_micros_per_million": 20000}
+```
+
+`model` is required when enabled; `dimensions` is optional (1..4096, sent to
+the provider and enforced on the reply); `cost_micros_per_million` is the
+input-token price in micro-dollars. The profile API validates the block on
+create/update (422 on a malformed one). Selection mirrors avatars
+(`select_embedding_profile`): the agent's own profile → the workspace
+default → any enabled profile whose provider is enabled.
+
+**Wiring** (`resolve_memory_embedder` → `MemoryEmbedder`, best-effort by
+contract, never raises):
+
+- persistence — `apply_memory_candidates` (maintenance) and the API's
+  explicit remember / edit embed the newly created live records in the same
+  transaction; a failure leaves the record without an embedding and logs
+  `memory.embedding_failed` (content-free).
+- retrieval — the worker embeds the query before `build_memory_context`;
+  when no profile enables embeddings or the call fails the run is
+  `mode=lexical`, `degraded=true`.
+- backfill — `MemoryEmbedder.embed_missing` / `POST /memories/embed-missing`
+  (admin) embeds up to `limit` (≤500, default 100) active/contested records
+  that lack an embedding or carry one from a different model; idempotent.
+  Audit `memory.embed_missing` (`embedded`, `remaining`, `model`, `limit`).
+  Records embedded by a previous model stay valid but are never compared
+  until re-embedded.
+
 ## Retrieval (`jhin_memory.retrieval`)
 
 ```text
 build_memory_context(session, *, workspace_id, agent_id, query,
-                     team_ids=None, query_embedding=None,
+                     team_ids=None, query_embedding=None, embedding_model=None,
                      max_records=12, max_chars=3000, now=None) -> MemoryContext
 ```
 
@@ -109,11 +177,13 @@ build_memory_context(session, *, workspace_id, agent_id, query,
    `active`/`contested`; validity window; `forgotten_at IS NULL`.
 2. Candidates: newest authorized rows ∪ lexical matches (PostgreSQL
    `to_tsvector @@ plainto_tsquery`, SQLite `LIKE`) ∪ pgvector nearest ids
-   (when available; re-filtered through the authorization predicate).
-3. Deterministic rank fusion: semantic cosine (only when both sides carry an
-   embedding of equal dimensions), lexical token overlap, recency
-   (30-day half-life), confidence, importance, scope weight, pin bonus.
-   Ties: pinned, newest, id.
+   (when the `embedding_vec` column exists; same dimensions/model only;
+   re-filtered through the authorization predicate).
+3. Deterministic rank fusion: semantic cosine over the stored JSON vectors
+   (only when both sides carry an embedding of equal dimensions and, when
+   `embedding_model` is given, the same model), lexical token overlap,
+   recency (30-day half-life), confidence, importance, scope weight, pin
+   bonus. Ties: pinned, newest, id.
 4. Caps: `max_records` and `max_chars` (per-item truncation with a 120-char
    floor).
 
@@ -121,8 +191,11 @@ build_memory_context(session, *, workspace_id, agent_id, query,
 recalled information, not instructions") with kind, scope label, contested /
 pinned flags, and a source label per item. `MemoryContext.provenance`
 (`MemoryProvenance`) carries record ids, versions, `mode`
-(`hybrid` / `lexical` / `unavailable`), `degraded`, content-free policy
-counts, `context_hash`, `query_hash`, and the caps.
+(`hybrid` when the query was embedded, `lexical` otherwise, `unavailable`),
+`degraded` (true only when no embedding client was available or the
+embedding call failed), content-free policy counts (including
+`semantic_scored` and `embedding_model`), `context_hash`, `query_hash`, and
+the caps.
 
 `record_retrieval_provenance(session, *, workspace_id, run_id, task_id, context, seq=None)`
 appends run event **`memory.retrieved`** with `provenance.as_event_payload()`
@@ -166,7 +239,9 @@ MemoryMaintenanceInput(workspace_id, agent_id, source_kind, source_id,
   `MemoryMaintenanceResult(status=extraction_failed|apply_failed|nothing_to_remember|applied)`.
   **It never raises**, and it is started detached, so memory failure never
   fails the originating chat turn or task.
-- Apply writes an audit row `memory.maintained` (counts and ids only).
+- Apply embeds the created live records best-effort (see *Embeddings*) and
+  writes an audit row `memory.maintained` (counts and ids only, including
+  `embedded`).
 
 ```text
 start_memory_maintenance(client, params, *, task_queue=AGENT_TASK_QUEUE)
@@ -181,8 +256,9 @@ Wired on top of the Phase 10 tool-worker boundary; model-facing memory work
 stays on the agent worker (`jhin-agent-queue`), never on the tool worker:
 
 1. **Before each model step** — `AgentReasoningActivities.reason_agent_step`
-   (`services/agent_worker/src/jhin_agent_worker/reasoning.py`) calls
-   `build_memory_context(...)` in a dedicated session with the query
+   (`services/agent_worker/src/jhin_agent_worker/reasoning.py`) resolves the
+   embedder (`resolve_memory_embedder`), embeds the query best-effort, and
+   calls `build_memory_context(...)` in a dedicated session with the query
    `title + description + latest visible user turn + pending instructions`,
    falling back to `unavailable_context(...)` on any failure, and passes
    `memory.text` as `TaskContext(memory_context=…)`; `build_messages` appends
@@ -253,10 +329,12 @@ require admin.
 | POST | `/{id}/forget` | member | → tombstone `MemoryOut`: content, hash, subject, tags, embeddings cleared for the whole version chain |
 | POST | `/{id}/approve` | admin | proposed → active |
 | POST | `/{id}/reject` | admin | proposed → rejected |
+| POST | `/embed-missing` | admin | `EmbedMissingIn {limit: 1..500 = 100}` → `EmbedMissingOut {embedded, remaining, model, dimensions}`; 409 `embeddings_unsupported` when no profile enables embeddings |
 
-Audit actions (content-free): `memory.created`, `memory.edited`,
-`memory.pinned`, `memory.unpinned`, `memory.contested`, `memory.forgotten`
-(metadata: `forgotten_ids`, `scope`), `memory.approved`, `memory.rejected`.
+Audit actions (content-free): `memory.created` (includes `embedded`),
+`memory.edited`, `memory.pinned`, `memory.unpinned`, `memory.contested`,
+`memory.forgotten` (metadata: `forgotten_ids`, `scope`), `memory.approved`,
+`memory.rejected`, `memory.embed_missing`.
 
 ### Schemas
 
@@ -295,3 +373,6 @@ MemoryUpdate { content?, kind?, subject?, tags?, confidence?, importance?, expir
 - Forget removes live content and embeddings immediately and leaves only a
   content-free tombstone plus the `memory.forgotten` audit row.
 - Maintenance failure never fails the originating chat turn or task.
+- Embedding is best-effort everywhere: a missing profile or provider failure
+  degrades retrieval to lexical (`degraded=true`) and never blocks a write.
+  Embeddings from a different model or dimension count are never compared.

@@ -33,7 +33,7 @@ from temporalio import activity
 
 from jhin_agent_worker.resources import Resources
 from jhin_agents.snapshot import SnapshotError, resolve_snapshot
-from jhin_db.models import Agent, AuditEvent, Message, Task
+from jhin_db.models import Agent, AuditEvent, MemoryRecord, Message, Task
 from jhin_domain import ActorType, MemoryScope, MessageVisibility, SenderType
 from jhin_memory import (
     ActorFacts,
@@ -42,6 +42,7 @@ from jhin_memory import (
     apply_candidates,
     derive_source_facts,
     extract_candidates,
+    resolve_memory_embedder,
 )
 from jhin_models import build_model_client
 from jhin_observability import get_logger
@@ -253,6 +254,34 @@ class MemoryActivities:
             output_tokens=result.output_tokens,
         )
 
+    async def _embed_created(
+        self,
+        session: AsyncSession,
+        *,
+        workspace_id: UUID,
+        agent_id: UUID,
+        records: list[MemoryRecord],
+    ) -> int:
+        """Best-effort embeddings for newly persisted live records. A failure
+        (no embedding profile, provider error) leaves the records without an
+        embedding and is logged by the embedder; it never fails the apply."""
+        if not records:
+            return 0
+        embedder = await resolve_memory_embedder(
+            session,
+            self._resources.crypto,
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            metrics=self._metrics,
+            tracer=self._tracer,
+        )
+        if embedder is None:
+            return 0
+        try:
+            return await embedder.embed_records(session, records, workspace_id=workspace_id)
+        finally:
+            await embedder.close()
+
     @activity.defn(name=ACTIVITY_APPLY_MEMORY_CANDIDATES)
     async def apply_memory_candidates_activity(
         self, params: ApplyMemoryCandidatesInput
@@ -319,6 +348,9 @@ class MemoryActivities:
                 session, candidates=candidates, source=source, actor=actor
             )
             summary: dict[str, Any] = applied.summary()
+            summary["embedded"] = await self._embed_created(
+                session, workspace_id=workspace_id, agent_id=agent_id, records=applied.created
+            )
             session.add(
                 AuditEvent(
                     workspace_id=workspace_id,

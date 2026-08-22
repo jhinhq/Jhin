@@ -12,7 +12,7 @@ import base64
 import binascii
 import json
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 import httpx
@@ -27,6 +27,7 @@ from jhin_models.base import (
     ModelUsage,
     classify_retryable,
 )
+from jhin_models.embeddings import MAX_EMBEDDING_BATCH, EmbeddingResult, bound_inputs
 from jhin_models.images import DEFAULT_IMAGE_SIZE, GeneratedImage
 
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0)
@@ -253,6 +254,80 @@ class OpenAICompatibleClient(ModelClient):
             model=str(body.get("model") or model),
             provider_request_id=response.headers.get("x-request-id"),
             latency_ms=int((time.perf_counter() - started) * 1000),
+        )
+
+    async def embed(
+        self, texts: Sequence[str], *, model: str, dimensions: int | None = None
+    ) -> EmbeddingResult:
+        """OpenAI Embeddings API (``POST /embeddings``), float vectors.
+
+        Inputs are truncated and sent in batches of ``MAX_EMBEDDING_BATCH``;
+        vectors are reassembled in input order and validated for count and
+        equal dimensions. The text itself never reaches logs or errors.
+        """
+        started = time.perf_counter()
+        bounded = bound_inputs(texts)
+        if not bounded:
+            return EmbeddingResult(vectors=(), model=model, dimensions=dimensions or 0)
+        vectors: list[tuple[float, ...]] = []
+        usage = ModelUsage()
+        responded_model = model
+        request_id: str | None = None
+        for start in range(0, len(bounded), MAX_EMBEDDING_BATCH):
+            batch = bounded[start : start + MAX_EMBEDDING_BATCH]
+            payload: dict[str, Any] = {"model": model, "input": batch, "encoding_format": "float"}
+            if dimensions is not None:
+                payload["dimensions"] = dimensions
+            response = await self._post("/embeddings", payload)
+            body = response.json()
+            entries = body.get("data") if isinstance(body, dict) else None
+            if not isinstance(entries, list) or len(entries) != len(batch):
+                raise ModelProviderError(
+                    f"{self.provider_name}: embedding response carried "
+                    f"{len(entries) if isinstance(entries, list) else 0} vectors for "
+                    f"{len(batch)} inputs"
+                )
+            ordered = sorted(
+                (entry for entry in entries if isinstance(entry, dict)),
+                key=lambda entry: int(entry.get("index") or 0),
+            )
+            for entry in ordered:
+                raw = entry.get("embedding")
+                if not isinstance(raw, list) or not raw:
+                    raise ModelProviderError(
+                        f"{self.provider_name}: embedding response carried a malformed vector"
+                    )
+                try:
+                    vectors.append(tuple(float(v) for v in raw))
+                except (TypeError, ValueError) as exc:
+                    raise ModelProviderError(
+                        f"{self.provider_name}: embedding response carried a malformed vector"
+                    ) from exc
+            batch_usage = body.get("usage") or {}
+            usage = ModelUsage(
+                input_tokens=usage.input_tokens + int(batch_usage.get("prompt_tokens") or 0),
+                output_tokens=0,
+                cached_tokens=0,
+            )
+            responded_model = str(body.get("model") or model)
+            request_id = request_id or response.headers.get("x-request-id")
+        width = len(vectors[0])
+        if any(len(vector) != width for vector in vectors):
+            raise ModelProviderError(
+                f"{self.provider_name}: embedding response mixed vector dimensions"
+            )
+        if dimensions is not None and width != dimensions:
+            raise ModelProviderError(
+                f"{self.provider_name}: embedding response returned {width} dimensions, "
+                f"expected {dimensions}"
+            )
+        return EmbeddingResult(
+            vectors=tuple(vectors),
+            model=responded_model,
+            dimensions=width,
+            usage=usage,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            provider_request_id=request_id,
         )
 
     async def close(self) -> None:

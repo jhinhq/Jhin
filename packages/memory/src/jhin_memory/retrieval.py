@@ -177,11 +177,22 @@ def score_record(
     query_tokens: Sequence[str],
     query_embedding: Sequence[float] | None,
     now: datetime,
+    embedding_model: str | None = None,
 ) -> tuple[float, bool]:
-    """Deterministic fused score; returns (score, used_semantic)."""
+    """Deterministic fused score; returns (score, used_semantic).
+
+    Semantic similarity is only used when both sides carry an embedding of
+    equal dimensions and (when ``embedding_model`` is given) the same model.
+    """
     semantic: float | None = None
-    if query_embedding is not None and record.embedding_json:
-        cos = _cosine(query_embedding, record.embedding_json)
+    comparable = (
+        query_embedding is not None
+        and bool(record.embedding_json)
+        and (embedding_model is None or record.embedding_model == embedding_model)
+    )
+    if comparable:
+        assert query_embedding is not None
+        cos = _cosine(query_embedding, record.embedding_json or [])
         if cos is not None:
             semantic = (cos + 1.0) / 2.0
 
@@ -226,6 +237,7 @@ async def gather_candidates(
     query_embedding: Sequence[float] | None,
     now: datetime,
     limit: int = _CANDIDATE_LIMIT,
+    embedding_model: str | None = None,
 ) -> list[MemoryRecord]:
     auth = authorization_filter(
         workspace_id=workspace_id, agent_id=agent_id, team_ids=team_ids, now=now
@@ -253,7 +265,11 @@ async def gather_candidates(
 
     if query_embedding is not None:
         nearest = await nearest_record_ids(
-            session, workspace_id=workspace_id, query=query_embedding, limit=limit
+            session,
+            workspace_id=workspace_id,
+            query=query_embedding,
+            limit=limit,
+            model=embedding_model,
         )
         missing = [i for i in nearest if i not in by_id]
         if missing:
@@ -307,6 +323,7 @@ async def build_memory_context(
     query: str,
     team_ids: Sequence[UUID] | None = None,
     query_embedding: Sequence[float] | None = None,
+    embedding_model: str | None = None,
     max_records: int = DEFAULT_MAX_RECORDS,
     max_chars: int = DEFAULT_MAX_CHARS,
     now: datetime | None = None,
@@ -314,9 +331,11 @@ async def build_memory_context(
     """Authorized, ranked, bounded memory for one run.
 
     ``team_ids`` defaults to the agent's *current* teams (resolved live, never
-    cached across membership changes). Pass ``query_embedding`` (same model/
-    dimensions as stored embeddings) to enable semantic ranking; without it
-    the result is lexical-only and ``degraded`` is set.
+    cached across membership changes). Pass ``query_embedding`` (and the
+    ``embedding_model`` that produced it) to rank semantically — mode
+    ``hybrid``; stored embeddings from another model or dimension count are
+    never compared. Without a query embedding (no embedding client, or the
+    call failed) the result is lexical-only and ``degraded`` is set.
     """
     now = now or datetime.now(UTC)
     if team_ids is None:
@@ -329,13 +348,18 @@ async def build_memory_context(
         query=query,
         query_embedding=query_embedding,
         now=now,
+        embedding_model=embedding_model,
     )
     query_tokens = tokenize(query)
     scored: list[tuple[float, bool, MemoryRecord]] = []
     semantic_used = 0
     for record in candidates:
         score, used = score_record(
-            record, query_tokens=query_tokens, query_embedding=query_embedding, now=now
+            record,
+            query_tokens=query_tokens,
+            query_embedding=query_embedding,
+            now=now,
+            embedding_model=embedding_model,
         )
         semantic_used += int(used)
         scored.append((score, used, record))
@@ -373,13 +397,10 @@ async def build_memory_context(
             )
         )
 
-    mode: RetrievalMode
-    if query_embedding is not None and semantic_used:
-        mode = "hybrid"
-    elif candidates or query_tokens:
-        mode = "lexical"
-    else:
-        mode = "lexical"
+    # Degraded means the query could not be embedded (no client / call
+    # failed). A hybrid query over records that carry no comparable
+    # embedding still ranks them lexically, and ``semantic_scored`` says so.
+    mode: RetrievalMode = "hybrid" if query_embedding is not None else "lexical"
     degraded = mode != "hybrid"
     provenance = MemoryProvenance(
         record_ids=tuple(item.id for item in items),
@@ -390,6 +411,7 @@ async def build_memory_context(
             "authorized_candidates": len(candidates),
             "selected": len(items),
             "semantic_scored": semantic_used,
+            "embedding_model": embedding_model or "",
             "truncated": truncated,
             "team_ids": [str(t) for t in team_ids],
             "filters": ["live_authorization", "status", "validity_window", "not_forgotten"],

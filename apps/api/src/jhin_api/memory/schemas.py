@@ -9,6 +9,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from jhin_domain import MemoryKind, MemoryScope, MemoryStatus
+from jhin_memory import DEFAULT_BACKFILL_LIMIT, MAX_BACKFILL_LIMIT
 from jhin_memory.types import MAX_CANDIDATE_CHARS, MAX_TAGS
 
 
@@ -111,3 +112,16 @@ class ContestIn(BaseModel):
 
 class MemoryStatusFilter(BaseModel):
     status: MemoryStatus
+
+
+class EmbedMissingIn(BaseModel):
+    """Bounded backfill batch for ``POST /memories/embed-missing``."""
+
+    limit: int = Field(default=DEFAULT_BACKFILL_LIMIT, ge=1, le=MAX_BACKFILL_LIMIT)
+
+
+class EmbedMissingOut(BaseModel):
+    embedded: int
+    remaining: int
+    model: str
+    dimensions: int | None

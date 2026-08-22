@@ -1072,6 +1072,8 @@ dependencies = [
     { name = "jhin-db" },
     { name = "jhin-domain" },
     { name = "jhin-models" },
+    { name = "jhin-observability" },
+    { name = "jhin-secrets" },
     { name = "pydantic" },
     { name = "sqlalchemy", extra = ["asyncio"] },
 ]
@@ -1081,6 +1083,8 @@ requires-dist = [
     { name = "jhin-db", editable = "packages/db" },
     { name = "jhin-domain", editable = "packages/domain" },
     { name = "jhin-models", editable = "packages/models" },
+    { name = "jhin-observability", editable = "packages/observability" },
+    { name = "jhin-secrets", editable = "packages/secrets" },
     { name = "pydantic", specifier = ">=2.10" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.36" },
 ]

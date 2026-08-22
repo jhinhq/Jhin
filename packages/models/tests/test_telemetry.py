@@ -3270,6 +3270,7 @@ def test_exact_production_model_factory_owners_supply_semantic_handles() -> None
                     "metrics",
                     "tracer",
                 ),
+                "packages/memory/src/jhin_memory/embedding.py": ("metrics", "tracer"),
             },
         )
         == []

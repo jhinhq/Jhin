@@ -8,11 +8,14 @@ content; forgetting leaves a content-free tombstone.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException, status
+from opentelemetry.trace import Tracer
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,10 +39,51 @@ from jhin_memory import (
     create_version,
     derive_source_facts,
     forget_record,
+    resolve_memory_embedder,
 )
+from jhin_observability import JhinMetrics
+from jhin_secrets import SecretCrypto
 
 MAX_PAGE_SIZE = 100
 TARGET_TYPE = "memory_record"
+
+
+@dataclass(frozen=True)
+class EmbeddingDeps:
+    """What the API needs to build an embedding client: the master-key crypto
+    (``None`` when no key is configured) and the process telemetry."""
+
+    crypto: SecretCrypto | None
+    metrics: JhinMetrics | None = None
+    tracer: Tracer | None = None
+
+
+async def _embed_best_effort(
+    session: AsyncSession,
+    ctx: WorkspaceContext,
+    deps: EmbeddingDeps | None,
+    records: Sequence[MemoryRecord],
+    *,
+    agent_id: UUID | None,
+) -> int:
+    """Embed freshly persisted records; failure leaves them without an
+    embedding (the embedder logs ``memory.embedding_failed``)."""
+    if deps is None or not records:
+        return 0
+    embedder = await resolve_memory_embedder(
+        session,
+        deps.crypto,
+        workspace_id=ctx.workspace_id,
+        agent_id=agent_id,
+        metrics=deps.metrics,
+        tracer=deps.tracer,
+    )
+    if embedder is None:
+        return 0
+    try:
+        return await embedder.embed_records(session, records, workspace_id=ctx.workspace_id)
+    finally:
+        await embedder.close()
 
 
 def authority_for(role: WorkspaceRole) -> MemoryScope | None:
@@ -155,6 +199,7 @@ async def create_memory(
     *,
     request_id: UUID | None = None,
     ip_hash: str | None = None,
+    embedding: EmbeddingDeps | None = None,
 ) -> MemoryRecord:
     _require_scope_authority(ctx, payload.scope)
     agent_id = payload.agent_id
@@ -222,6 +267,7 @@ async def create_memory(
             detail={"message": "Memory rejected by policy", "reasons": list(decision.reasons)},
         )
     record = result.created[0]
+    embedded = await _embed_best_effort(session, ctx, embedding, [record], agent_id=agent_id)
     _audit(
         session,
         ctx,
@@ -229,7 +275,12 @@ async def create_memory(
         record.id,
         request_id=request_id,
         ip_hash=ip_hash,
-        metadata={"scope": record.scope, "status": record.status, **decision.evidence()},
+        metadata={
+            "scope": record.scope,
+            "status": record.status,
+            "embedded": bool(embedded),
+            **decision.evidence(),
+        },
     )
     await session.commit()
     return record
@@ -243,6 +294,7 @@ async def update_memory(
     *,
     request_id: UUID | None = None,
     ip_hash: str | None = None,
+    embedding: EmbeddingDeps | None = None,
 ) -> MemoryRecord:
     previous = await get_memory(session, ctx.workspace_id, memory_id)
     _require_scope_authority(ctx, MemoryScope(previous.scope))
@@ -270,6 +322,13 @@ async def update_memory(
         confidence=payload.confidence,
         importance=payload.importance,
         expires_at=payload.expires_at if "expires_at" in values else None,
+    )
+    await _embed_best_effort(
+        session,
+        ctx,
+        embedding,
+        [new],
+        agent_id=new.scope_id if new.scope == MemoryScope.AGENT.value else None,
     )
     _audit(
         session,
@@ -437,3 +496,61 @@ async def reject_memory(
     )
     await session.commit()
     return record
+
+
+async def embed_missing(
+    session: AsyncSession,
+    ctx: WorkspaceContext,
+    *,
+    embedding: EmbeddingDeps,
+    limit: int,
+    request_id: UUID | None = None,
+    ip_hash: str | None = None,
+) -> tuple[int, int, str, int | None]:
+    """Admin backfill: embed up to ``limit`` live records lacking an embedding
+    for the workspace's current embedding model. Idempotent — a second call
+    embeds nothing. 409 when no enabled profile declares embeddings."""
+    if not role_satisfies(ctx.role, WorkspaceRole.ADMIN):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, detail="Backfilling memory requires an admin"
+        )
+    embedder = await resolve_memory_embedder(
+        session,
+        embedding.crypto,
+        workspace_id=ctx.workspace_id,
+        metrics=embedding.metrics,
+        tracer=embedding.tracer,
+    )
+    if embedder is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "embeddings_unsupported",
+                "message": "No enabled model profile in this workspace declares "
+                "config_json.embeddings; retrieval stays lexical.",
+            },
+        )
+    try:
+        embedded, remaining = await embedder.embed_missing(
+            session, workspace_id=ctx.workspace_id, limit=limit
+        )
+    finally:
+        await embedder.close()
+    audit.record(
+        session,
+        action="memory.embed_missing",
+        target_type="workspace",
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user.id,
+        target_id=ctx.workspace_id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        metadata={
+            "embedded": embedded,
+            "remaining": remaining,
+            "model": embedder.model,
+            "limit": limit,
+        },
+    )
+    await session.commit()
+    return embedded, remaining, embedder.model, embedder.dimensions

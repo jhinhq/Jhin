@@ -246,6 +246,67 @@ def build_image_generation(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     }
 
 
+DEFAULT_EMBEDDING_DIMENSIONS = 64
+_EMBED_TOKEN_RE = re.compile(r"[a-z0-9]{2,}")
+
+
+def deterministic_embedding(
+    text: str, *, dimensions: int = DEFAULT_EMBEDDING_DIMENSIONS
+) -> list[float]:
+    """Hashed bag-of-words vector of fixed ``dimensions``, L2-normalised.
+
+    Each token is hashed (sha256) to one coordinate and a sign, so texts that
+    share words are close in cosine space and unrelated texts are near
+    orthogonal. Deterministic across processes (no ``hash()`` randomisation),
+    which makes semantic-ranking tests meaningful offline.
+    """
+    dimensions = max(1, dimensions)
+    vector = [0.0] * dimensions
+    tokens = _EMBED_TOKEN_RE.findall(text.casefold())
+    if not tokens:
+        vector[0] = 1.0
+        return vector
+    for token in tokens:
+        digest = hashlib.sha256(token.encode()).digest()
+        index = int.from_bytes(digest[:4], "big") % dimensions
+        sign = 1.0 if digest[4] & 1 else -1.0
+        vector[index] += sign
+    norm = sum(v * v for v in vector) ** 0.5
+    if norm == 0:
+        vector[0] = 1.0
+        return vector
+    return [v / norm for v in vector]
+
+
+def build_embeddings(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """``POST /v1/embeddings``: deterministic pseudo-embeddings.
+
+    ``model == "always-fails"`` returns HTTP 500 like the chat endpoint;
+    ``dimensions`` is honoured (default 64). Usage is length-derived.
+    """
+    model = str(body.get("model", "fake-embed"))
+    if model == FAIL_MODEL:
+        return 500, {"error": {"message": "simulated provider failure"}}
+    raw_input = body.get("input", [])
+    texts = [raw_input] if isinstance(raw_input, str) else [str(t) for t in raw_input]
+    dimensions = int(body.get("dimensions") or DEFAULT_EMBEDDING_DIMENSIONS)
+    data = [
+        {
+            "object": "embedding",
+            "index": i,
+            "embedding": deterministic_embedding(t, dimensions=dimensions),
+        }
+        for i, t in enumerate(texts)
+    ]
+    prompt_tokens = sum(_estimate_tokens(t) for t in texts)
+    return 200, {
+        "object": "list",
+        "model": model,
+        "data": data,
+        "usage": {"prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens},
+    }
+
+
 class _Handler(BaseHTTPRequestHandler):
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
         data = json.dumps(payload).encode()
@@ -266,7 +327,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = self.path.rstrip("/")
-        if not (path.endswith("/chat/completions") or path.endswith("/images/generations")):
+        routes = ("/chat/completions", "/images/generations", "/embeddings")
+        if not path.endswith(routes):
             self._send_json(404, {"error": {"message": f"no route {self.path}"}})
             return
         length = int(self.headers.get("Content-Length", "0"))
@@ -277,6 +339,8 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path.endswith("/images/generations"):
             status, payload = build_image_generation(body)
+        elif path.endswith("/embeddings"):
+            status, payload = build_embeddings(body)
         else:
             status, payload = build_completion(body)
         self._send_json(status, payload)

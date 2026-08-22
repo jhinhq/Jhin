@@ -15,6 +15,13 @@ from jhin_models.base import (
     ModelUsage,
     ToolSchema,
 )
+from jhin_models.embeddings import (
+    EmbeddingClient,
+    EmbeddingConfig,
+    EmbeddingResult,
+    EmbeddingUnsupported,
+    as_embedding_client,
+)
 from jhin_models.factory import build_model_client
 from jhin_models.images import (
     GeneratedImage,
@@ -25,6 +32,10 @@ from jhin_models.images import (
 )
 
 __all__ = [
+    "EmbeddingClient",
+    "EmbeddingConfig",
+    "EmbeddingResult",
+    "EmbeddingUnsupported",
     "GeneratedImage",
     "ImageGenerationClient",
     "ImageGenerationConfig",
@@ -37,6 +48,7 @@ __all__ = [
     "ModelToolCall",
     "ModelUsage",
     "ToolSchema",
+    "as_embedding_client",
     "as_image_generation_client",
     "build_model_client",
 ]

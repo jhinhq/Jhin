@@ -1,7 +1,8 @@
 """Routes for curated memory.
 
 /api/v1/workspaces/{workspace_id}/memories   list/create/get/edit,
-                                            pin, contest, forget, approve, reject
+                                            pin, contest, forget, approve, reject,
+                                            embed-missing (admin backfill)
 """
 
 from uuid import UUID
@@ -14,6 +15,8 @@ from jhin_api.deps import get_request_id as req_id
 from jhin_api.memory import service
 from jhin_api.memory.schemas import (
     ContestIn,
+    EmbedMissingIn,
+    EmbedMissingOut,
     MemoryCreate,
     MemoryListOut,
     MemoryOut,
@@ -23,12 +26,24 @@ from jhin_api.memory.schemas import (
 from jhin_api.security.csrf import csrf_protect
 from jhin_db.models import MemoryRecord
 from jhin_domain import MemoryScope, MemoryStatus
+from jhin_observability import ObservabilityRuntime
 
 router = APIRouter(
     prefix="/api/v1/workspaces/{workspace_id}/memories",
     tags=["memory"],
     dependencies=[Depends(csrf_protect)],
 )
+
+
+def _embedding_deps(request: Request) -> service.EmbeddingDeps:
+    """Soft dependencies: embeddings are best-effort, so a missing master key
+    or observability runtime must not turn a memory write into a 503."""
+    runtime = getattr(request.app.state, "observability", None)
+    metrics = runtime.metrics if isinstance(runtime, ObservabilityRuntime) else None
+    tracer = runtime.tracer if isinstance(runtime, ObservabilityRuntime) else None
+    return service.EmbeddingDeps(
+        crypto=getattr(request.app.state, "secret_crypto", None), metrics=metrics, tracer=tracer
+    )
 
 
 def _out(record: MemoryRecord) -> MemoryOut:
@@ -76,9 +91,35 @@ async def create_memory(
     payload: MemoryCreate, request: Request, ctx: MemberCtx, db: DbSession
 ) -> MemoryOut:
     record = await service.create_memory(
-        db, ctx, payload, request_id=req_id(request), ip_hash=ip_hash(request)
+        db,
+        ctx,
+        payload,
+        request_id=req_id(request),
+        ip_hash=ip_hash(request),
+        embedding=_embedding_deps(request),
     )
     return _out(record)
+
+
+@router.post("/embed-missing")
+async def embed_missing(
+    request: Request,
+    ctx: AdminCtx,
+    db: DbSession,
+    payload: EmbedMissingIn | None = None,
+) -> EmbedMissingOut:
+    limit = payload.limit if payload is not None else EmbedMissingIn().limit
+    embedded, remaining, model, dimensions = await service.embed_missing(
+        db,
+        ctx,
+        embedding=_embedding_deps(request),
+        limit=limit,
+        request_id=req_id(request),
+        ip_hash=ip_hash(request),
+    )
+    return EmbedMissingOut(
+        embedded=embedded, remaining=remaining, model=model, dimensions=dimensions
+    )
 
 
 @router.get("/{memory_id}")
@@ -91,7 +132,13 @@ async def update_memory(
     memory_id: UUID, payload: MemoryUpdate, request: Request, ctx: MemberCtx, db: DbSession
 ) -> MemoryOut:
     record = await service.update_memory(
-        db, ctx, memory_id, payload, request_id=req_id(request), ip_hash=ip_hash(request)
+        db,
+        ctx,
+        memory_id,
+        payload,
+        request_id=req_id(request),
+        ip_hash=ip_hash(request),
+        embedding=_embedding_deps(request),
     )
     return _out(record)
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import math
 import sys
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from types import TracebackType
 from typing import Any, cast
@@ -15,6 +15,7 @@ from opentelemetry.trace import Span, SpanKind, Tracer
 
 from jhin_domain import ModelProviderType
 from jhin_models.base import ModelClient, ModelRequest, ModelResponse
+from jhin_models.embeddings import EmbeddingClient, EmbeddingResult
 from jhin_models.images import ImageGenerationClient
 from jhin_observability import (
     SPAN_NAMES,
@@ -237,6 +238,25 @@ async def _cleanup_iterator(
     return None, None
 
 
+class _InstrumentedEmbeddingClient:
+    """Embedding view of an instrumented client (see ``embedding_client``)."""
+
+    def __init__(self, wrapped: EmbeddingClient, *, owner: InstrumentedModelClient) -> None:
+        self._wrapped = wrapped
+        self._owner = owner
+
+    @property
+    def provider_name(self) -> str:
+        return self._owner.provider_name
+
+    async def embed(
+        self, texts: Sequence[str], *, model: str, dimensions: int | None = None
+    ) -> EmbeddingResult:
+        return await self._owner._embed_instrumented(
+            self._wrapped, texts, model=model, dimensions=dimensions
+        )
+
+
 class InstrumentedModelClient(ModelClient):
     """One telemetry wrapper around one provider adapter."""
 
@@ -355,6 +375,62 @@ class InstrumentedModelClient(ModelClient):
     @property
     def provider_name(self) -> str:
         return str(getattr(self._wrapped, "provider_name", type(self._wrapped).__name__))
+
+    def embedding_client(self) -> EmbeddingClient:
+        """Unwrap for ``as_embedding_client``; the returned client keeps the
+        attempt telemetry (``operation=embed``) of this wrapper."""
+        from jhin_models.embeddings import as_embedding_client
+
+        wrapped = as_embedding_client(self._wrapped)
+        return _InstrumentedEmbeddingClient(wrapped, owner=self)
+
+    async def _embed_instrumented(
+        self,
+        wrapped: EmbeddingClient,
+        texts: Sequence[str],
+        *,
+        model: str,
+        dimensions: int | None,
+    ) -> EmbeddingResult:
+        with _attempt_span(
+            self._tracer,
+            provider_type=self._provider_type,
+            operation="embed",
+        ) as span:
+            try:
+                result = await wrapped.embed(texts, model=model, dimensions=dimensions)
+            except asyncio.CancelledError:
+                _finish_attempt(
+                    self._metrics,
+                    span,
+                    provider_type=self._provider_type,
+                    outcome="cancelled",
+                )
+                raise
+            except Exception as error:
+                _finish_attempt(
+                    self._metrics,
+                    span,
+                    provider_type=self._provider_type,
+                    outcome="failed",
+                    error=error,
+                )
+                raise
+            latency = _safe_latency(result.latency_ms)
+            if latency is not None:
+                _run_diagnostic(
+                    lambda: set_span_attributes(
+                        span,
+                        {_MODEL_LATENCY_ATTRIBUTE_KEY: latency},
+                    )
+                )
+            _finish_attempt(
+                self._metrics,
+                span,
+                provider_type=self._provider_type,
+                outcome="ok",
+            )
+            return result
 
     def image_generation_client(self) -> ImageGenerationClient:
         """Unwrap for ``as_image_generation_client``: the adapter decides

@@ -4,9 +4,33 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from jhin_domain import ModelProviderType
+from jhin_models import EmbeddingConfig
+from jhin_models.embeddings import EMBEDDINGS_CONFIG_KEY
+
+
+def validate_profile_config(config_json: dict[str, Any]) -> dict[str, Any]:
+    """Validate the typed capability blocks inside ``config_json``.
+
+    ``embeddings`` (``{enabled, model, dimensions, cost_micros_per_million}``)
+    must parse as :class:`EmbeddingConfig`; other keys are passed through.
+    """
+    raw = config_json.get(EMBEDDINGS_CONFIG_KEY)
+    if raw is None:
+        return config_json
+    if not isinstance(raw, dict):
+        raise ValueError(f"config_json.{EMBEDDINGS_CONFIG_KEY} must be an object")
+    try:
+        EmbeddingConfig.model_validate(raw)
+    except ValidationError as exc:
+        problems = "; ".join(
+            f"{'.'.join(str(p) for p in err['loc']) or EMBEDDINGS_CONFIG_KEY}: {err['msg']}"
+            for err in exc.errors()
+        )
+        raise ValueError(f"config_json.{EMBEDDINGS_CONFIG_KEY} is invalid: {problems}") from None
+    return config_json
 
 
 class ModelProviderCreate(BaseModel):
@@ -54,6 +78,11 @@ class ModelProfileCreate(BaseModel):
     supports_reasoning: bool = False
     config_json: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("config_json")
+    @classmethod
+    def _config(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return validate_profile_config(value)
+
 
 class ModelProfileUpdate(BaseModel):
     provider_id: UUID | None = None
@@ -65,6 +94,11 @@ class ModelProfileUpdate(BaseModel):
     supports_tools: bool | None = None
     supports_reasoning: bool | None = None
     config_json: dict[str, Any] | None = None
+
+    @field_validator("config_json")
+    @classmethod
+    def _config(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        return None if value is None else validate_profile_config(value)
 
 
 class ModelProfileOut(BaseModel):
