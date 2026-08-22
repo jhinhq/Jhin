@@ -4,7 +4,10 @@ Connectors are how Jhin agents reach external systems (GitHub, Linear, …)
 without ever holding credentials. This document describes the SDK in
 `packages/connectors` (`jhin_connectors`), the runtime paths a connector
 participates in, and — most importantly — how to contribute a new connector
-without touching any other service (plan sections 11, 36.5).
+without touching any other service (plan sections 11, 36.5). Executable
+connector ownership lives exclusively in `jhin-tool-worker`; the agent worker
+holds model reasoning and sanitized projections but imports no connector
+package.
 
 ## The pieces
 
@@ -37,17 +40,24 @@ optional encrypted webhook secret, public non-secret `config_json` (e.g.
 
 ## Runtime paths
 
-**Tool execution.** The agent worker builds its catalog with
-`build_default_catalog()` (built-ins + every registered connector's tools).
+**Tool execution.** At startup, the tool worker is the sole runtime caller of
+`build_default_catalog()` (built-ins plus every registered connector's tools).
+Before a model step it filters live grants to advertised, dependency-light
+schemas on `jhin-tool-queue`; the agent worker receives those schemas but no
+executor or credential. The model's complete ordered call set is bound before
+any effect, and the tool worker later reloads only one canonical bound call by
+run, step, and ordinal.
+
 Every connector tool input carries a `connection_id`; the gateway checks the
-grant (which may scope `connection_id`, `repository`, `branch` with glob
-patterns) before the executor runs. The executor calls
+grant (which may scope `connection_id`, `repository`, and `branch` with glob
+patterns) before the executor runs. The tool-worker executor calls
 `resolve_connection(...)`, which loads the connection **inside the caller's
 workspace**, refuses disabled connections, decrypts the credential secret with
-the worker's master key, and registers every credential value with the
-`SecretRedactor` so tokens can never leak into sanitized outputs, errors, or
-logs (plan 13.5, 48.1/48.9/48.11). Credentials exist in memory only for the
-duration of the call.
+the tool worker's master key, and registers every credential value with the
+`SecretRedactor` so tokens cannot leak into sanitized outputs, errors, or logs
+(plan 13.5, 48.1/48.9/48.11). Credentials exist in tool-worker memory only for
+the duration of the call. The durable PostgreSQL `ToolCall`/`Approval` claim,
+not a worker process or retry, is the effect authority.
 
 **Webhooks.** `POST /api/v1/webhooks/{connector_type}/{public_id}` has no
 session auth (plan 19). The API looks up the connection by `public_id`,
@@ -107,3 +117,7 @@ a new connector appears there automatically.
   denied `tool_call` rows and audited.
 - Workspace isolation: `resolve_connection` filters by the executing
   workspace id; a connection id from another workspace behaves as not found.
+- Worker isolation: connector executors, resolved credentials, sandbox runner
+  endpoint/token, and executable catalogs stay out of the agent-worker
+  distribution. Agent-side projections consume only durable IDs and sanitized
+  rows after the tool-worker transaction commits.

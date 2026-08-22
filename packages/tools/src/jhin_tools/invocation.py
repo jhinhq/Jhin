@@ -6,6 +6,8 @@ from uuid import UUID, uuid5
 
 TOOL_INVOCATION_FORMAT_VERSION = 1
 TOOL_INVOCATION_NAMESPACE = UUID("4f0ac960-eab4-5f17-9b65-9f9bcbf3e0a8")
+SYNC_INVOCATION_FORMAT_VERSION = 1
+SYNC_INVOCATION_NAMESPACE = UUID("3dc26b04-1af9-5ec5-a0ea-d7d95c3a393b")
 # Compatibility aliases for code written during the Task 1 implementation.
 INVOCATION_FORMAT_VERSION = TOOL_INVOCATION_FORMAT_VERSION
 INVOCATION_NAMESPACE = TOOL_INVOCATION_NAMESPACE
@@ -22,4 +24,12 @@ def stable_tool_invocation_id(run_id: UUID, step_index: int, tool_call_ordinal: 
     return uuid5(
         TOOL_INVOCATION_NAMESPACE,
         f"v1:{run_id.hex}:{step_index}:{tool_call_ordinal}",
+    )
+
+
+def stable_sync_invocation_id(run_id: UUID) -> UUID:
+    """Return the stable claim key for one trigger comment-back effect."""
+    return uuid5(
+        SYNC_INVOCATION_NAMESPACE,
+        f"v1:{run_id.hex}:trigger-sync",
     )

@@ -17,6 +17,7 @@ from temporalio import activity, workflow
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
+from jhin_workflows import AGENT_TASK_QUEUE, TOOL_TASK_QUEUE
 from jhin_workflows.agent_task import (
     ACTIVITY_FINALIZE_RUN,
     ACTIVITY_RESOLVE_SNAPSHOT,
@@ -28,6 +29,23 @@ from jhin_workflows.agent_task import (
     RunStepInput,
     SnapshotResult,
     StepResult,
+)
+from jhin_workflows.agent_task.shared import (
+    ACTIVITY_CLEANUP_RUN_WORKSPACE,
+    ACTIVITY_COMMIT_AGENT_STEP,
+    ACTIVITY_EXECUTE_BOUND_TOOL,
+    ACTIVITY_FINALIZE_RUN_PROJECTION,
+    ACTIVITY_REASON_AGENT_STEP,
+    ACTIVITY_RESOLVE_ADVERTISED_TOOLS,
+    AdvertisedTool,
+    BoundToolResult,
+    CleanupRunWorkspaceInput,
+    CleanupRunWorkspaceResult,
+    CommitAgentStepInput,
+    ExecuteBoundToolInput,
+    ReasonAgentStepInput,
+    ReasonAgentStepResult,
+    ResolveAdvertisedToolsInput,
 )
 from jhin_workflows.delegated_task import (
     ACTIVITY_DELIVER_DELEGATION_RESULT,
@@ -74,6 +92,7 @@ class Stubs:
         self.run_id = str(uuid.uuid4())
         self.resolve_calls = 0
         self.step_calls: list[RunStepInput] = []
+        self.commit_calls: list[CommitAgentStepInput] = []
         self.deliver_calls: list[DeliverDelegationResultInput] = []
         self.finalize_calls: list[FinalizeInput] = []
 
@@ -98,12 +117,45 @@ class Stubs:
         self.step_calls.append(params)
         return self.steps[min(len(self.step_calls) - 1, len(self.steps) - 1)]
 
+    @activity.defn(name=ACTIVITY_RESOLVE_ADVERTISED_TOOLS)
+    async def advertised(self, _params: ResolveAdvertisedToolsInput) -> list[AdvertisedTool]:
+        return []
+
+    @activity.defn(name=ACTIVITY_REASON_AGENT_STEP)
+    async def reason(self, params: ReasonAgentStepInput) -> ReasonAgentStepResult:
+        self.step_calls.append(params)
+        result = self.steps[min(params.step_index, len(self.steps) - 1)]
+        return ReasonAgentStepResult(call_count=1 if result.delegations else 0)
+
+    @activity.defn(name=ACTIVITY_EXECUTE_BOUND_TOOL)
+    async def execute(self, params: ExecuteBoundToolInput) -> BoundToolResult:
+        result = self.steps[min(params.step_index, len(self.steps) - 1)]
+        delegation = result.delegations[0]
+        return BoundToolResult(
+            tool_call_id=delegation.gateway_tool_call_id,
+            status="executed",
+            stop_reason="blocking_delegation" if delegation.blocking else None,
+        )
+
+    @activity.defn(name=ACTIVITY_COMMIT_AGENT_STEP)
+    async def commit(self, params: CommitAgentStepInput) -> StepResult:
+        self.commit_calls.append(params)
+        return self.steps[min(params.step_index, len(self.steps) - 1)]
+
     @activity.defn(name=ACTIVITY_DELIVER_DELEGATION_RESULT)
     async def deliver(self, params: DeliverDelegationResultInput) -> None:
         self.deliver_calls.append(params)
 
     @activity.defn(name=ACTIVITY_FINALIZE_RUN)
     async def finalize(self, params: FinalizeInput) -> None:
+        self.finalize_calls.append(params)
+
+    @activity.defn(name=ACTIVITY_CLEANUP_RUN_WORKSPACE)
+    async def cleanup(self, _params: CleanupRunWorkspaceInput) -> CleanupRunWorkspaceResult:
+        return CleanupRunWorkspaceResult(deleted=True)
+
+    @activity.defn(name=ACTIVITY_FINALIZE_RUN_PROJECTION)
+    async def finalize_projection(self, params: FinalizeInput) -> None:
         self.finalize_calls.append(params)
 
 
@@ -118,18 +170,32 @@ def make_input() -> AgentTaskInput:
 async def run_workflow(stubs: Stubs, params: AgentTaskInput) -> Any:
     env = await WorkflowEnvironment.start_time_skipping()
     try:
-        task_queue = f"test-{uuid.uuid4()}"
-        async with Worker(
-            env.client,
-            task_queue=task_queue,
-            workflows=[AgentTaskWorkflow, StubDelegatedTaskWorkflow],
-            activities=[stubs.resolve, stubs.step, stubs.deliver, stubs.finalize],
+        async with (
+            Worker(
+                env.client,
+                task_queue=AGENT_TASK_QUEUE,
+                workflows=[AgentTaskWorkflow, StubDelegatedTaskWorkflow],
+                activities=[
+                    stubs.resolve,
+                    stubs.step,
+                    stubs.reason,
+                    stubs.commit,
+                    stubs.deliver,
+                    stubs.finalize,
+                    stubs.finalize_projection,
+                ],
+            ),
+            Worker(
+                env.client,
+                task_queue=TOOL_TASK_QUEUE,
+                activities=[stubs.advertised, stubs.execute, stubs.cleanup],
+            ),
         ):
             return await env.client.execute_workflow(
                 AgentTaskWorkflow.run,
                 params,
                 id=f"task-{params.task_id}",
-                task_queue=task_queue,
+                task_queue=AGENT_TASK_QUEUE,
             )
     finally:
         await env.shutdown()

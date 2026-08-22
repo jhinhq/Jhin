@@ -1,33 +1,79 @@
 .DEFAULT_GOAL := help
-COMPOSE := docker compose
-COMPOSE_DEV := docker compose -f compose.yaml -f compose.dev.yaml
+
+PYTEST := uv run pytest
+PHASE10_HARNESS := uv run python -m tests.integration.phase10_upgrade_harness
+PHASE10_MODE ?= rootful
+SANDBOX_DOCKER_SOCKET_HOST ?= /var/run/docker.sock
 
 .PHONY: help dev test test-unit test-integration lint typecheck migrate seed \
-	compose-up compose-down sample-workflow master-key sandbox-image
-
-MASTER_KEY_PATH := secrets/dev/jhin_master_key
+	compose-up compose-down sample-workflow master-key sandbox-image \
+	test-tool-worker-boundary test-tool-worker-boundary-integration \
+	test-phase10-regressions test-tool-worker-live-upgrade \
+	test-sandbox-socket-rootful test-sandbox-socket-rootless \
+	test-sandbox-socket-wrong-gid
 
 help: ## List available targets
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-38s\033[0m %s\n", $$1, $$2}'
 
-master-key: ## Generate the local dev master key file (required once before `make dev`)
-	@test -f $(MASTER_KEY_PATH) && echo "master key already exists at $(MASTER_KEY_PATH)" \
-		|| uv run python scripts/generate_master_key.py $(MASTER_KEY_PATH)
+dev: compose-up ## Boot one isolated dev stack through the Phase 10 authority
 
-dev: master-key sandbox-image ## Boot the full stack with dev overrides (hot reload, localhost infra ports)
-	$(COMPOSE_DEV) up -d --build
+master-key: ## Explain master-key ownership for the isolated stack
+	@echo "The Phase 10 lifecycle creates, installs, and removes its own nonprinting master key."
 
-sandbox-image: ## Build the default sandbox job image (jhin-sandbox:latest)
-	$(COMPOSE_DEV) --profile build build sandbox-image
+sandbox-image: ## Rebuild the sandbox job image through the leased Docker authority
+	$(PHASE10_HARNESS) compose -- --profile build build sandbox-image
 
 test: test-unit ## Alias for test-unit
 
 test-unit: ## Run Python unit tests and frontend Vitest
-	uv run pytest
+	$(PYTEST)
 	pnpm --filter jhin-web test
 
-test-integration: ## Run integration tests against the running compose stack
-	uv run pytest -m integration tests/integration -v
+test-integration: test-phase10-regressions ## Run the frozen live regression set in isolation
+
+test-tool-worker-boundary: ## Run focused Phase 10 unit, replay, dependency, and render gates
+	$(PYTEST) \
+		packages/workflows/tests/test_agent_task_tool_routing.py \
+		packages/workflows/tests/test_tool_compat_workflows.py \
+		packages/workflows/tests/test_phase10_history_replay.py \
+		services/agent_worker/tests/test_reasoning_manifest.py \
+		services/agent_worker/tests/test_legacy_manifest_sidecar.py \
+		services/agent_worker/tests/test_step_projection.py \
+		services/agent_worker/tests/test_compatibility_coordinators.py \
+		services/tool_worker/tests \
+		services/sandbox_runner/tests \
+		tests/test_worker_dependency_boundaries.py \
+		tests/test_executable_catalog_boundary.py \
+		tests/test_phase10_tool_worker_compose.py \
+		tests/test_phase9_production_compose.py \
+		tests/integration/test_phase10_tool_worker_boundary.py \
+		tests/integration/test_phase10_sandbox_socket_modes.py \
+		-q
+
+test-tool-worker-boundary-integration: ## Run the exact live boundary and crash matrix
+	$(PHASE10_HARNESS) run --mode $(PHASE10_MODE) --scenario boundary
+
+test-phase10-regressions: ## Run the exact Phase 3/6/7/9 live regression files
+	$(PHASE10_HARNESS) run --mode $(PHASE10_MODE) --scenario regressions
+
+test-tool-worker-live-upgrade: ## Run the frozen Phase 9 to current in-flight upgrade
+	$(PHASE10_HARNESS) run --mode $(PHASE10_MODE) --scenario upgrade
+
+test-sandbox-socket-rootful: ## Verify the selected rootful socket and live sandbox path
+	test -n "$(SANDBOX_DOCKER_GID)"
+	$(PHASE10_HARNESS) run --mode rootful --scenario socket-rootful
+
+test-sandbox-socket-rootless: ## Verify an existing host-UID-10001 rootless daemon
+	test -n "$(PHASE10_ROOTLESS_DOCKER_SOCKET)"
+	test -S "$(PHASE10_ROOTLESS_DOCKER_SOCKET)"
+	test "$$(stat -c %u "$(PHASE10_ROOTLESS_DOCKER_SOCKET)")" = "10001"
+	env -u SANDBOX_DOCKER_GID \
+		PHASE10_ROOTLESS_DOCKER_SOCKET="$(PHASE10_ROOTLESS_DOCKER_SOCKET)" \
+		$(PHASE10_HARNESS) run --mode rootless --scenario socket-rootless
+
+test-sandbox-socket-wrong-gid: ## Prove rootful runner startup fails closed on a false GID
+	test -n "$(SANDBOX_DOCKER_GID)"
+	$(PHASE10_HARNESS) run --mode rootful --scenario wrong-gid
 
 lint: ## Ruff + eslint
 	uv run ruff check .
@@ -38,18 +84,17 @@ typecheck: ## mypy + tsc
 	uv run mypy
 	pnpm --filter jhin-web typecheck
 
-migrate: ## Run Alembic migrations inside the compose network
-	$(COMPOSE) run --rm --no-deps api jhin-db-migrate
+migrate: ## Run Alembic through the leased isolated Compose authority
+	$(PHASE10_HARNESS) compose -- run --rm --no-deps api jhin-db-migrate
 
-seed: ## Seed dev data: owner account + Engineering/Marketing sample org
-	$(COMPOSE) run --rm --no-deps api jhin-seed-dev
+seed: ## Seed dev data through the leased isolated Compose authority
+	$(PHASE10_HARNESS) compose -- run --rm --no-deps api jhin-seed-dev
 
-compose-up: master-key ## Start the production-shaped stack
-	$(COMPOSE) --profile build build sandbox-image
-	$(COMPOSE) up -d --build
+compose-up: ## Start one persistent isolated production-shaped stack
+	$(PHASE10_HARNESS) up --mode $(PHASE10_MODE)
 
-compose-down: ## Stop the stack (volumes preserved)
-	$(COMPOSE_DEV) down --remove-orphans
+compose-down: ## Stop and exhaustively clean the leased isolated stack
+	$(PHASE10_HARNESS) down
 
-sample-workflow: ## Start the sample durable Temporal workflow (requires dev stack)
+sample-workflow: ## Start the sample durable Temporal workflow (requires compose-up)
 	uv run python scripts/start_sample_workflow.py

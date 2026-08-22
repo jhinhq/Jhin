@@ -79,6 +79,7 @@ services:
         SERVICE_PACKAGE: jhin-workflow-worker
     command: ["jhin-workflow-worker"]
     environment:
+      APP_ENV: ${APP_ENV:-production}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
@@ -101,14 +102,45 @@ services:
         SERVICE_PACKAGE: jhin-agent-worker
     command: ["jhin-agent-worker"]
     environment:
+      APP_ENV: ${APP_ENV:-production}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-jhin}:${POSTGRES_PASSWORD:-jhin}@postgres:5432/${POSTGRES_DB:-jhin}
       NATS_URL: nats://nats:4222
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
       MASTER_KEY_FILE: /run/secrets/jhin_master_key
-      # CLI connector → sandbox runner (plan 11.6, 14): the worker resolves
-      # credentials itself and sends jobs over the internal runner network.
+    secrets:
+      - jhin_master_key
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "jhin-temporal-poller-check", "jhin-agent-queue"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks: [control, data]
+    restart: unless-stopped
+
+  tool-worker:
+    build:
+      <<: *python-build
+      args:
+        SERVICE_PACKAGE: jhin-tool-worker
+    command: ["jhin-tool-worker"]
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-jhin}:${POSTGRES_PASSWORD:-jhin}@postgres:5432/${POSTGRES_DB:-jhin}
+      NATS_URL: nats://nats:4222
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      MASTER_KEY_FILE: /run/secrets/jhin_master_key
       SANDBOX_RUNNER_URL: http://sandbox-runner:8085
       SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:-dev-sandbox-runner-token}
       SANDBOX_DEFAULT_IMAGE: ${SANDBOX_DEFAULT_IMAGE:-jhin-sandbox:latest}
@@ -122,7 +154,7 @@ services:
       temporal:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "jhin-health-check"]
+      test: ["CMD", "jhin-temporal-poller-check", "jhin-tool-queue"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -130,27 +162,27 @@ services:
     networks: [control, data, runner]
     restart: unless-stopped
 
-  # The ONLY service holding the Docker socket (plan 14, 48.7): it creates
-  # locked-down ephemeral job containers and never mounts the socket, host
-  # paths, or compose networks into them. It holds neither the master key nor
-  # database credentials, and is reachable only on the internal `runner`
-  # network (never published; compose.dev.yaml may bind it to 127.0.0.1 for
-  # debugging). Runs as root because the mounted Docker socket requires it —
-  # see docs/architecture/sandboxing.md for the trust boundary.
+  # The only service allowed to create sandbox jobs. Docker authority is
+  # deliberately absent from this base file: exactly one rootful/rootless
+  # overlay must supply it. The runner itself always remains UID/GID 10001.
   sandbox-runner:
     build:
       <<: *python-build
       args:
         SERVICE_PACKAGE: jhin-sandbox-runner
+    image: ${SANDBOX_RUNNER_IMAGE:-jhin-sandbox-runner:local}
+    pull_policy: build
     command: ["jhin-sandbox-runner"]
-    user: "0:0"
+    user: "10001:10001"
+    privileged: false
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
     environment:
+      APP_ENV: ${APP_ENV:-production}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:-dev-sandbox-runner-token}
       SANDBOX_DEFAULT_IMAGE: ${SANDBOX_DEFAULT_IMAGE:-jhin-sandbox:latest}
       SANDBOX_NETWORK: ${SANDBOX_NETWORK:-jhin_sandbox}
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
     healthcheck:
       test:
         - CMD
@@ -186,6 +218,7 @@ services:
         SERVICE_PACKAGE: jhin-event-worker
     command: ["jhin-event-worker"]
     environment:
+      APP_ENV: ${APP_ENV:-production}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       NATS_URL: nats://nats:4222
       # Trigger matching: reads triggers, records invocations, starts
@@ -216,7 +249,11 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-jhin}
       POSTGRES_DB: ${POSTGRES_DB:-jhin}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - type: volume
+        source: postgres_data
+        target: /var/lib/postgresql/data
+        volume:
+          nocopy: true
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-jhin} -d ${POSTGRES_DB:-jhin}"]
       interval: 5s
@@ -229,7 +266,11 @@ services:
     image: nats:2.12-alpine
     command: ["--config", "/etc/nats/nats.conf"]
     volumes:
-      - nats_data:/data
+      - type: volume
+        source: nats_data
+        target: /data
+        volume:
+          nocopy: true
       - ./config/nats.conf:/etc/nats/nats.conf:ro
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8222/healthz"]
@@ -281,11 +322,19 @@ services:
 
 networks:
   edge:
+    driver: bridge
+    external: false
   control:
+    driver: bridge
+    external: false
   data:
-  # agent-worker ↔ sandbox-runner only (plan 24.1). Job containers are NOT
+    driver: bridge
+    external: false
+  # tool-worker ↔ sandbox-runner only (plan 24.1). Job containers are NOT
   # on this network: they get "none" or the jhin_sandbox bridge below.
   runner:
+    driver: bridge
+    external: false
   # Dedicated bridge for network_policy=internet jobs (plan 14.4). No
   # control-plane service may ever attach to it; in production nothing in
   # this file references it and the runner creates it via the Docker API.
@@ -293,13 +342,15 @@ networks:
   # compose project name.
   sandbox:
     name: ${SANDBOX_NETWORK:-jhin_sandbox}
+    driver: bridge
+    external: false
 
 volumes:
   postgres_data:
   nats_data:
 
 # The master key encrypts all user secrets (plan 13.2). It is mounted only
-# into services that must decrypt (api, agent-worker) — never into web.
+# into services that must decrypt (api, agent-worker, tool-worker) — never into web.
 # Create the dev key with `make master-key`.
 secrets:
   jhin_master_key:

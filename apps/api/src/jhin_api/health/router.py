@@ -10,6 +10,7 @@ from jhin_api import __version__
 from jhin_api.health import service
 from jhin_api.health.schemas import LivenessReport, ReadinessReport
 from jhin_api.settings import Settings
+from jhin_api.temporal import TemporalClientProvider
 
 router = APIRouter(prefix="/api/v1", tags=["health"])
 
@@ -24,6 +25,11 @@ def _engine(request: Request) -> AsyncEngine:
     return engine
 
 
+def _temporal_provider(request: Request) -> TemporalClientProvider:
+    provider: TemporalClientProvider = request.app.state.temporal_provider
+    return provider
+
+
 @router.get("/health")
 async def health(settings: Annotated[Settings, Depends(_settings)]) -> LivenessReport:
     return LivenessReport(status="ok", app=settings.app_name, version=__version__)
@@ -33,9 +39,10 @@ async def health(settings: Annotated[Settings, Depends(_settings)]) -> LivenessR
 async def health_ready(
     settings: Annotated[Settings, Depends(_settings)],
     engine: Annotated[AsyncEngine, Depends(_engine)],
+    temporal_provider: Annotated[TemporalClientProvider, Depends(_temporal_provider)],
     response: Response,
 ) -> ReadinessReport:
-    report = await service.readiness(settings, engine)
+    report = await service.readiness(settings, engine, temporal_provider)
     if report.status != "ok":
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return report

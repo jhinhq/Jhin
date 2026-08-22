@@ -1,13 +1,12 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Literal
+
+from jhin_observability import ObservabilitySettings
 
 
-class Settings(BaseSettings):
-    model_config = SettingsConfigDict(extra="ignore")
-
+class Settings(ObservabilitySettings):
     nats_url: str = "nats://localhost:4222"
-    log_level: str = "INFO"
-    consumer_durable_name: str = "event-worker"
-    ingress_durable_name: str = "event-worker-ingress"
+    consumer_durable_name: Literal["event-worker"] = "event-worker"
+    ingress_durable_name: Literal["event-worker-ingress"] = "event-worker-ingress"
     # Trigger matching (plan 10.5): the matcher reads triggers from Postgres
     # and starts TriggeredTaskWorkflow through Temporal.
     database_url: str = "postgresql+asyncpg://jhin:jhin@localhost:5432/jhin"

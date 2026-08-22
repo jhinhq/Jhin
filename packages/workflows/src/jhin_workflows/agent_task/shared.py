@@ -13,11 +13,22 @@ credentials — activities decrypt provider secrets at the moment of use.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 ACTIVITY_RESOLVE_SNAPSHOT = "resolve_snapshot"
 ACTIVITY_RUN_AGENT_STEP = "run_agent_step"
 ACTIVITY_RESOLVE_APPROVAL = "resolve_approval"
 ACTIVITY_FINALIZE_RUN = "finalize_run"
+
+PHASE10_TOOL_WORKER_PATCH = "phase10-tool-worker-boundary-v1"
+ACTIVITY_RESOLVE_ADVERTISED_TOOLS = "resolve_advertised_tools"
+ACTIVITY_REASON_AGENT_STEP = "reason_agent_step"
+ACTIVITY_EXECUTE_BOUND_TOOL = "execute_bound_tool"
+ACTIVITY_COMMIT_AGENT_STEP = "commit_agent_step"
+ACTIVITY_RESOLVE_BOUND_TOOL_APPROVAL = "resolve_bound_tool_approval"
+ACTIVITY_COMMIT_APPROVAL_PROJECTION = "commit_approval_projection"
+ACTIVITY_CLEANUP_RUN_WORKSPACE = "cleanup_run_workspace"
+ACTIVITY_FINALIZE_RUN_PROJECTION = "finalize_run_projection"
 
 
 @dataclass
@@ -82,6 +93,85 @@ class RunStepInput:
     step_index: int
     instruction: str = ""
     user_instructions: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class AdvertisedTool:
+    name: str
+    description: str
+    parameters: dict[str, Any]
+
+
+@dataclass
+class ResolveAdvertisedToolsInput:
+    workspace_id: str
+    agent_id: str
+
+
+@dataclass
+class ReasonAgentStepInput(RunStepInput):
+    advertised_tools: list[AdvertisedTool] = field(default_factory=list)
+
+
+@dataclass
+class ReasonAgentStepResult:
+    call_count: int
+
+
+@dataclass
+class ExecuteBoundToolInput:
+    workspace_id: str
+    run_id: str
+    step_index: int
+    ordinal: int
+
+
+@dataclass
+class BoundToolResult:
+    tool_call_id: str
+    status: str
+    approval_id: str | None = None
+    stop_reason: str | None = None
+
+
+@dataclass
+class CommitAgentStepInput:
+    workspace_id: str
+    task_id: str
+    run_id: str
+    agent_id: str
+    step_index: int
+    gateway_tool_call_ids: list[str] = field(default_factory=list)
+    # A cancellation signal arrived after this canonical call completed but
+    # before the remaining manifest calls were scheduled. The projection
+    # validates the marker against the exact prefix and rejects any omitted
+    # call that already has a durable ToolCall row.
+    cancelled_after_tool_call_id: str | None = None
+
+
+@dataclass
+class ResolveBoundToolApprovalInput:
+    workspace_id: str
+    task_id: str
+    run_id: str
+    agent_id: str
+    approval_id: str
+
+
+@dataclass
+class CommitApprovalProjectionInput(ResolveBoundToolApprovalInput):
+    tool_call_id: str = ""
+
+
+@dataclass
+class CleanupRunWorkspaceInput:
+    workspace_id: str
+    run_id: str
+
+
+@dataclass
+class CleanupRunWorkspaceResult:
+    deleted: bool
 
 
 @dataclass

@@ -65,6 +65,7 @@ from jhin_tools.sanitize import (
     sanitize_payload,
     strict_json_loads,
 )
+from jhin_tools.test_barriers import TOOL_AFTER_CLAIM, TOOL_AFTER_EFFECT, TOOL_BEFORE_CLAIM
 
 GatewayStatus = Literal[
     "executed",
@@ -85,6 +86,7 @@ _TERMINAL_TOOL_STATUSES = frozenset(
     }
 )
 _PROCESS_INVOCATION_LOCKS: dict[UUID, asyncio.Lock] = {}
+_PROCESS_INVOCATION_LOCK_ENTRANTS: dict[UUID, int] = {}
 _PROCESS_INVOCATION_LOCKS_GUARD = asyncio.Lock()
 
 
@@ -164,7 +166,12 @@ class ToolGateway:
         return self._ctx.session_factory
 
     @asynccontextmanager
-    async def _invocation_lifecycle_lock(self, invocation_id: UUID) -> AsyncIterator[ToolGateway]:
+    async def _invocation_lifecycle_lock(
+        self,
+        invocation_id: UUID,
+        *,
+        refresh_if_contended: bool = False,
+    ) -> AsyncIterator[ToolGateway]:
         """Serialize claim through terminal persistence for one invocation.
 
         PostgreSQL session-level advisory locks survive the transaction
@@ -196,8 +203,25 @@ class ToolGateway:
         # tests; PostgreSQL integration remains the multi-process authority.
         async with _PROCESS_INVOCATION_LOCKS_GUARD:
             lock = _PROCESS_INVOCATION_LOCKS.setdefault(invocation_id, asyncio.Lock())
-        async with lock:
-            yield self
+            entrants = _PROCESS_INVOCATION_LOCK_ENTRANTS.get(invocation_id, 0)
+            contended = entrants > 0
+            _PROCESS_INVOCATION_LOCK_ENTRANTS[invocation_id] = entrants + 1
+        try:
+            # Approval resolution loads the invocation id before taking this
+            # portable lock. Discard that snapshot only when another entrant
+            # owns or awaits the lease, including asyncio's fair wake-up gap.
+            if refresh_if_contended and contended:
+                self._ctx.session.expire_all()
+            async with lock:
+                yield self
+        finally:
+            async with _PROCESS_INVOCATION_LOCKS_GUARD:
+                remaining = _PROCESS_INVOCATION_LOCK_ENTRANTS[invocation_id] - 1
+                if remaining:
+                    _PROCESS_INVOCATION_LOCK_ENTRANTS[invocation_id] = remaining
+                else:
+                    del _PROCESS_INVOCATION_LOCK_ENTRANTS[invocation_id]
+                    del _PROCESS_INVOCATION_LOCKS[invocation_id]
 
     def _audit_on(
         self,
@@ -855,6 +879,8 @@ class ToolGateway:
                 },
             )
             await claim_session.commit()
+            if self._ctx.test_barrier is not None:
+                await self._ctx.test_barrier.arrive_and_wait(TOOL_AFTER_CLAIM, invocation_id)
         except IntegrityError:
             await self._ctx.session.rollback()
             self._ctx.session.expire_all()
@@ -937,6 +963,8 @@ class ToolGateway:
                 {"approval_id": str(approval_id), "tool_name": tool_name},
             )
             await self._ctx.session.commit()
+            if self._ctx.test_barrier is not None:
+                await self._ctx.test_barrier.arrive_and_wait(TOOL_AFTER_CLAIM, row_id)
         else:
             await self._ctx.session.rollback()
         if claimed_id is not None:
@@ -1127,6 +1155,8 @@ class ToolGateway:
             # side effect) separately from the activity's transcript bundle.
             # A crash between those commits can then repair the bundle by
             # replaying this exact outcome without invoking the executor.
+            if self._ctx.test_barrier is not None:
+                await self._ctx.test_barrier.arrive_and_wait(TOOL_AFTER_EFFECT, tool_call_id)
             await session.commit()
             await session.refresh(row)
         return GatewayOutcome(
@@ -1161,6 +1191,8 @@ class ToolGateway:
                 invocation_id=None,
             )
         async with self._invocation_lifecycle_lock(invocation_id) as gateway:
+            if gateway._ctx.test_barrier is not None:
+                await gateway._ctx.test_barrier.arrive_and_wait(TOOL_BEFORE_CLAIM, invocation_id)
             return await gateway._request_once(
                 tool_name,
                 arguments_json,
@@ -1634,8 +1666,14 @@ class ToolGateway:
         bind = self._ctx.session.bind
         if isinstance(bind, AsyncEngine) and bind.dialect.name == "postgresql":
             await self._ctx.session.rollback()
-        async with self._invocation_lifecycle_lock(invocation_id) as gateway:
+        async with self._invocation_lifecycle_lock(
+            invocation_id, refresh_if_contended=True
+        ) as gateway:
             try:
+                if gateway._ctx.test_barrier is not None:
+                    await gateway._ctx.test_barrier.arrive_and_wait(
+                        TOOL_BEFORE_CLAIM, invocation_id
+                    )
                 outcome = await gateway._resolve_approved_once(approval_id)
                 await gateway._ctx.session.commit()
                 return outcome
@@ -1747,7 +1785,9 @@ class ToolGateway:
         bind = self._ctx.session.bind
         if isinstance(bind, AsyncEngine) and bind.dialect.name == "postgresql":
             await self._ctx.session.rollback()
-        async with self._invocation_lifecycle_lock(invocation_id) as gateway:
+        async with self._invocation_lifecycle_lock(
+            invocation_id, refresh_if_contended=True
+        ) as gateway:
             try:
                 outcome = await gateway._resolve_rejected_once(approval_id)
                 await gateway._ctx.session.commit()

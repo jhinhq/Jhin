@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from jhin_sandbox_runner.jobs import (
@@ -18,6 +20,8 @@ SETTINGS = Settings(
     sandbox_runner_token="test-token",
     sandbox_default_image="jhin-sandbox:test",
     sandbox_network="jhin_sandbox_test",
+    sandbox_docker_mode="rootless",
+    sandbox_docker_transport_url="http://rootless-docker-transport:2375",
 )
 
 
@@ -52,13 +56,22 @@ class TestIsolationInvariants:
 
     def test_no_docker_socket_or_host_mounts(self) -> None:
         """Plan 48.7: jobs never receive the Docker socket or host paths.
-        The only bind, ever, is the named workspace volume."""
+        The only mount, ever, is the named workspace volume."""
         host = config_for(request(workspace_key="run-abc"))["HostConfig"]
-        binds = host.get("Binds", [])
-        assert binds == ["jhin-sandbox-ws-run-abc:/workspace"]
-        assert not any("docker.sock" in b or b.startswith("/") for b in binds)
+        assert "Binds" not in host
+        mounts = host.get("Mounts", [])
+        assert mounts == [
+            {
+                "Type": "volume",
+                "Source": "jhin-sandbox-ws-run-abc",
+                "Target": "/workspace",
+                "ReadOnly": False,
+                "VolumeOptions": {"NoCopy": True},
+            }
+        ]
+        assert "docker.sock" not in repr(mounts)
         host_no_ws = config_for(request())["HostConfig"]
-        assert "Binds" not in host_no_ws
+        assert "Binds" not in host_no_ws and "Mounts" not in host_no_ws
 
     def test_network_policy_mapping(self) -> None:
         assert config_for(request())["HostConfig"]["NetworkMode"] == "none"
@@ -66,8 +79,104 @@ class TestIsolationInvariants:
         # A dedicated sandbox bridge — never "host", never a control network.
         assert internet["HostConfig"]["NetworkMode"] == "jhin_sandbox_test"
 
+    @pytest.mark.parametrize("network", ["runner", "engine"])
+    def test_control_plane_network_is_rejected(self, network: str) -> None:
+        unsafe_settings = SETTINGS.model_copy(update={"sandbox_network": network})
+        req = request(network_policy="internet")
+        cpu, memory, pids, _timeout = resolve_limits(req, unsafe_settings)
+        with pytest.raises(JobValidationError, match="control-plane network"):
+            build_container_config(
+                req,
+                unsafe_settings,
+                image="jhin-sandbox:test",
+                cpu_limit=cpu,
+                memory_mb=memory,
+                pids_limit=pids,
+            )
+
     def test_runs_as_non_root_uid_1000(self) -> None:
-        assert config_for(request())["User"] == "1000:1000"
+        config = config_for(request())
+        assert config["User"] == "1000:1000"
+        assert "GroupAdd" not in config["HostConfig"]
+
+    def test_job_never_inherits_runner_docker_authority(self) -> None:
+        config = config_for(
+            request(
+                env={
+                    "SANDBOX_DOCKER_MODE": "rootful",
+                    "DOCKER_HOST": "unix:///run/host/docker.sock",
+                }
+            )
+        )
+        host = config["HostConfig"]
+        assert all(
+            forbidden not in repr(config)
+            for forbidden in (
+                "/var/run/docker.sock",
+                "/run/jhin/docker.sock",
+                "/run/host/docker.sock",
+                "rootless-docker-transport",
+                "SANDBOX_DOCKER_",
+                "DOCKER_HOST",
+            )
+        )
+        assert host["NetworkMode"] not in {"runner", "engine"}
+
+    @pytest.mark.parametrize("field", ["env", "secret_env"])
+    @pytest.mark.parametrize(
+        "forbidden_name",
+        [
+            "DOCKER_HOST",
+            "DOCKER_CONTEXT",
+            "DOCKER_CONFIG",
+            "DOCKER_TLS",
+            "DOCKER_TLS_VERIFY",
+            "DOCKER_CERT_PATH",
+            "DOCKER_API_VERSION",
+            "DOCKER_CUSTOM_AUTHORITY",
+            "SANDBOX_DOCKER_MODE",
+            "SANDBOX_DOCKER_SOCKET",
+            "SANDBOX_DOCKER_TRANSPORT_URL",
+            "SANDBOX_DOCKER_GID",
+            "SANDBOX_DOCKER_CUSTOM_AUTHORITY",
+        ],
+    )
+    def test_all_docker_authority_variable_names_are_removed(
+        self, field: str, forbidden_name: str
+    ) -> None:
+        config = config_for(
+            request(**{field: {forbidden_name: "not-authority", "KEEP_ME": "normal-secret"}})
+        )
+        environment = dict(entry.split("=", 1) for entry in config["Env"])
+        assert forbidden_name not in environment
+        assert environment["KEEP_ME"] == "normal-secret"
+
+    @pytest.mark.parametrize("field", ["env", "secret_env"])
+    @pytest.mark.parametrize(
+        "forbidden_value",
+        [
+            "rootless-docker-transport",
+            "rootless-docker-transport:2375",
+            "http://rootless-docker-transport:2375",
+            "tcp://rootless-docker-transport:2375",
+            "https://rootless-docker-transport:2375/v1.47",
+            "/var/run/docker.sock",
+            "unix:///var/run/docker.sock",
+            "/run/jhin/docker.sock",
+            "file:///run/jhin/docker.sock",
+            "/run/host/docker.sock",
+            "unix:///run/host/docker.sock",
+        ],
+    )
+    def test_all_docker_authority_value_forms_are_removed(
+        self, field: str, forbidden_value: str
+    ) -> None:
+        config = config_for(
+            request(**{field: {"AUTHORITY_ALIAS": forbidden_value, "KEEP_ME": "safe"}})
+        )
+        environment = dict(entry.split("=", 1) for entry in config["Env"])
+        assert "AUTHORITY_ALIAS" not in environment
+        assert environment["KEEP_ME"] == "safe"
 
     def test_resource_limits_applied(self) -> None:
         req = request(cpu_limit=1.5, memory_mb=512, pids_limit=64)
@@ -132,3 +241,11 @@ class TestRequestValidation:
 
     def test_volume_name_shape(self) -> None:
         assert workspace_volume_name("run-1") == "jhin-sandbox-ws-run-1"
+
+
+def test_python_runtime_image_creates_exact_numeric_runner_identity() -> None:
+    dockerfile = (Path(__file__).parents[3] / "docker" / "python.Dockerfile").read_text(
+        encoding="utf-8"
+    )
+    assert "groupadd --gid 10001 jhin" in dockerfile
+    assert "useradd --create-home --uid 10001 --gid 10001 jhin" in dockerfile

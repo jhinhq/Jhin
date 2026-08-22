@@ -115,6 +115,9 @@ class LinearConnector(Connector):
     def tools(self) -> tuple[tuple[ToolDefinition, ToolExecutor], ...]:
         return LINEAR_TOOLS
 
+    def tool_definitions(self) -> tuple[ToolDefinition, ...]:
+        return tuple(definition for definition, _executor in LINEAR_TOOLS)
+
     def parse_webhook(
         self, headers: Mapping[str, str], body: bytes, secret: str
     ) -> RawWebhookEvent:

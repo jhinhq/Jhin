@@ -1,9 +1,10 @@
 """AgentTaskWorkflow (plan 8.2): the durable spine of one agent-owned task.
 
 Temporal owns everything around the run — pause/resume/cancel signals, step
-budget, retries, and final persistence. Model calls happen only inside the
-``run_agent_step`` activity on the agent worker (plan 7.4, 52); this file
-must stay deterministic and free of I/O.
+budget, retries, and final persistence. New histories split model reasoning
+from deterministic effects across the agent and tool queues; frozen Phase 9
+histories retain their recorded agent-worker activity commands. This file must
+stay deterministic and free of I/O.
 """
 
 from __future__ import annotations
@@ -18,16 +19,35 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.workflow import ParentClosePolicy
 
 from jhin_workflows.agent_task.shared import (
+    ACTIVITY_CLEANUP_RUN_WORKSPACE,
+    ACTIVITY_COMMIT_AGENT_STEP,
+    ACTIVITY_COMMIT_APPROVAL_PROJECTION,
+    ACTIVITY_EXECUTE_BOUND_TOOL,
     ACTIVITY_FINALIZE_RUN,
+    ACTIVITY_FINALIZE_RUN_PROJECTION,
+    ACTIVITY_REASON_AGENT_STEP,
+    ACTIVITY_RESOLVE_ADVERTISED_TOOLS,
     ACTIVITY_RESOLVE_APPROVAL,
+    ACTIVITY_RESOLVE_BOUND_TOOL_APPROVAL,
     ACTIVITY_RESOLVE_SNAPSHOT,
     ACTIVITY_RUN_AGENT_STEP,
+    PHASE10_TOOL_WORKER_PATCH,
+    AdvertisedTool,
     AgentTaskInput,
     AgentTaskResult,
     AgentTaskStatus,
+    BoundToolResult,
+    CleanupRunWorkspaceInput,
+    CommitAgentStepInput,
+    CommitApprovalProjectionInput,
     DelegationRequest,
+    ExecuteBoundToolInput,
     FinalizeInput,
+    ReasonAgentStepInput,
+    ReasonAgentStepResult,
+    ResolveAdvertisedToolsInput,
     ResolveApprovalInput,
+    ResolveBoundToolApprovalInput,
     RunStepInput,
     SnapshotResult,
     StepResult,
@@ -39,6 +59,7 @@ from jhin_workflows.delegated_task.shared import (
     DelegatedTaskResult,
     DeliverDelegationResultInput,
 )
+from jhin_workflows.task_queues import AGENT_TASK_QUEUE, TOOL_TASK_QUEUE
 from jhin_workflows.work_request_task.shared import (
     WorkRequestTaskInput,
     work_request_workflow_id,
@@ -68,6 +89,7 @@ _FINALIZE_RETRY = RetryPolicy(
     maximum_interval=timedelta(seconds=15),
     maximum_attempts=5,
 )
+_CLEANUP_SCHEDULE_TO_CLOSE_TIMEOUT = timedelta(seconds=30)
 _RESOLVE_APPROVAL_RETRY = RetryPolicy(
     initial_interval=timedelta(seconds=1),
     backoff_coefficient=2.0,
@@ -135,6 +157,10 @@ class AgentTaskWorkflow:
             pending_instructions=len(self._pending_instructions),
         )
 
+    def _cancel_requested(self) -> bool:
+        """Re-read signal-owned cancellation state across activity awaits."""
+        return self._cancelled
+
     # --- Run ---
 
     @workflow.run
@@ -185,6 +211,7 @@ class AgentTaskWorkflow:
         self._waiting_reason = None
 
         totals.run_id = snapshot.run_id
+        use_tool_worker = workflow.patched(PHASE10_TOOL_WORKER_PATCH)
         done = False
 
         while not done and self._steps_used < snapshot.max_steps:
@@ -201,22 +228,102 @@ class AgentTaskWorkflow:
             instructions = self._pending_instructions
             self._pending_instructions = []
             try:
-                step: StepResult = await workflow.execute_activity(
-                    ACTIVITY_RUN_AGENT_STEP,
-                    RunStepInput(
-                        workspace_id=params.workspace_id,
-                        task_id=params.task_id,
-                        run_id=snapshot.run_id,
-                        agent_id=params.agent_id,
-                        snapshot_json=snapshot.snapshot_json,
-                        step_index=self._steps_used,
-                        instruction=params.instruction,
-                        user_instructions=instructions,
-                    ),
-                    result_type=StepResult,
-                    start_to_close_timeout=timedelta(minutes=10),
-                    retry_policy=_STEP_RETRY,
-                )
+                if use_tool_worker:
+                    advertised = await workflow.execute_activity(
+                        ACTIVITY_RESOLVE_ADVERTISED_TOOLS,
+                        ResolveAdvertisedToolsInput(
+                            workspace_id=params.workspace_id,
+                            agent_id=params.agent_id,
+                        ),
+                        result_type=list[AdvertisedTool],
+                        task_queue=TOOL_TASK_QUEUE,
+                        start_to_close_timeout=timedelta(seconds=30),
+                        retry_policy=_STEP_RETRY,
+                    )
+                    reasoned = await workflow.execute_activity(
+                        ACTIVITY_REASON_AGENT_STEP,
+                        ReasonAgentStepInput(
+                            workspace_id=params.workspace_id,
+                            task_id=params.task_id,
+                            run_id=snapshot.run_id,
+                            agent_id=params.agent_id,
+                            snapshot_json=snapshot.snapshot_json,
+                            step_index=self._steps_used,
+                            instruction=params.instruction,
+                            user_instructions=instructions,
+                            advertised_tools=advertised,
+                        ),
+                        result_type=ReasonAgentStepResult,
+                        task_queue=AGENT_TASK_QUEUE,
+                        start_to_close_timeout=timedelta(minutes=10),
+                        retry_policy=_STEP_RETRY,
+                    )
+                    tool_ids: list[str] = []
+                    stopped_for_durable_outcome = False
+                    for ordinal in range(reasoned.call_count):
+                        if self._cancel_requested():
+                            break
+                        bound = await workflow.execute_activity(
+                            ACTIVITY_EXECUTE_BOUND_TOOL,
+                            ExecuteBoundToolInput(
+                                workspace_id=params.workspace_id,
+                                run_id=snapshot.run_id,
+                                step_index=self._steps_used,
+                                ordinal=ordinal,
+                            ),
+                            result_type=BoundToolResult,
+                            task_queue=TOOL_TASK_QUEUE,
+                            start_to_close_timeout=timedelta(minutes=10),
+                            retry_policy=_STEP_RETRY,
+                        )
+                        tool_ids.append(bound.tool_call_id)
+                        if bound.stop_reason is not None:
+                            stopped_for_durable_outcome = True
+                            break
+                        if self._cancel_requested():
+                            break
+                    cancellation_truncation_id: str | None = None
+                    if (
+                        self._cancel_requested()
+                        and len(tool_ids) < reasoned.call_count
+                        and not stopped_for_durable_outcome
+                    ):
+                        if not tool_ids:
+                            break
+                        cancellation_truncation_id = tool_ids[-1]
+                    step = await workflow.execute_activity(
+                        ACTIVITY_COMMIT_AGENT_STEP,
+                        CommitAgentStepInput(
+                            workspace_id=params.workspace_id,
+                            task_id=params.task_id,
+                            run_id=snapshot.run_id,
+                            agent_id=params.agent_id,
+                            step_index=self._steps_used,
+                            gateway_tool_call_ids=tool_ids,
+                            cancelled_after_tool_call_id=cancellation_truncation_id,
+                        ),
+                        result_type=StepResult,
+                        task_queue=AGENT_TASK_QUEUE,
+                        start_to_close_timeout=timedelta(seconds=30),
+                        retry_policy=_FINALIZE_RETRY,
+                    )
+                else:
+                    step = await workflow.execute_activity(
+                        ACTIVITY_RUN_AGENT_STEP,
+                        RunStepInput(
+                            workspace_id=params.workspace_id,
+                            task_id=params.task_id,
+                            run_id=snapshot.run_id,
+                            agent_id=params.agent_id,
+                            snapshot_json=snapshot.snapshot_json,
+                            step_index=self._steps_used,
+                            instruction=params.instruction,
+                            user_instructions=instructions,
+                        ),
+                        result_type=StepResult,
+                        start_to_close_timeout=timedelta(minutes=10),
+                        retry_policy=_STEP_RETRY,
+                    )
             except Exception as exc:
                 error_code = "step_failed"
                 error_message = str(exc)[:2000]
@@ -227,6 +334,13 @@ class AgentTaskWorkflow:
             totals.output_tokens += step.output_tokens
             totals.cost_micros += step.cost_micros
             done = step.done
+            if step.execution_unknown_tool_call_id is not None:
+                error_code = "tool_execution_unknown"
+                error_message = (
+                    f"tool call {step.execution_unknown_tool_call_id} execution outcome is "
+                    "unknown; manual reconciliation is required"
+                )
+                break
 
             # Durable delegation (plan 7.5, 8.3): the tool executor persisted
             # the child task row; the workflow starts the child workflow and
@@ -267,20 +381,51 @@ class AgentTaskWorkflow:
                 self._waiting_reason = None
                 self._status = "running"
                 try:
-                    await workflow.execute_activity(
-                        ACTIVITY_RESOLVE_APPROVAL,
-                        ResolveApprovalInput(
-                            workspace_id=params.workspace_id,
-                            task_id=params.task_id,
-                            run_id=snapshot.run_id,
-                            agent_id=params.agent_id,
-                            approval_id=approval_id,
-                            decision=decision,
-                        ),
-                        result_type=StepResult,
-                        start_to_close_timeout=timedelta(minutes=10),
-                        retry_policy=_RESOLVE_APPROVAL_RETRY,
-                    )
+                    if use_tool_worker:
+                        resolved = await workflow.execute_activity(
+                            ACTIVITY_RESOLVE_BOUND_TOOL_APPROVAL,
+                            ResolveBoundToolApprovalInput(
+                                workspace_id=params.workspace_id,
+                                task_id=params.task_id,
+                                run_id=snapshot.run_id,
+                                agent_id=params.agent_id,
+                                approval_id=approval_id,
+                            ),
+                            result_type=BoundToolResult,
+                            task_queue=TOOL_TASK_QUEUE,
+                            start_to_close_timeout=timedelta(minutes=10),
+                            retry_policy=_RESOLVE_APPROVAL_RETRY,
+                        )
+                        await workflow.execute_activity(
+                            ACTIVITY_COMMIT_APPROVAL_PROJECTION,
+                            CommitApprovalProjectionInput(
+                                workspace_id=params.workspace_id,
+                                task_id=params.task_id,
+                                run_id=snapshot.run_id,
+                                agent_id=params.agent_id,
+                                approval_id=approval_id,
+                                tool_call_id=resolved.tool_call_id,
+                            ),
+                            result_type=StepResult,
+                            task_queue=AGENT_TASK_QUEUE,
+                            start_to_close_timeout=timedelta(seconds=30),
+                            retry_policy=_FINALIZE_RETRY,
+                        )
+                    else:
+                        await workflow.execute_activity(
+                            ACTIVITY_RESOLVE_APPROVAL,
+                            ResolveApprovalInput(
+                                workspace_id=params.workspace_id,
+                                task_id=params.task_id,
+                                run_id=snapshot.run_id,
+                                agent_id=params.agent_id,
+                                approval_id=approval_id,
+                                decision=decision,
+                            ),
+                            result_type=StepResult,
+                            start_to_close_timeout=timedelta(minutes=10),
+                            retry_policy=_RESOLVE_APPROVAL_RETRY,
+                        )
                 except Exception as exc:
                     error_code = "approval_resolution_failed"
                     error_message = str(exc)[:2000]
@@ -306,6 +451,7 @@ class AgentTaskWorkflow:
             status=final_status,
             error_code=error_code,
             error_message=error_message,
+            use_tool_worker=use_tool_worker,
         )
         self._status = final_status
         totals.status = final_status
@@ -393,18 +539,42 @@ class AgentTaskWorkflow:
         status: str,
         error_code: str | None,
         error_message: str | None,
+        use_tool_worker: bool = False,
     ) -> None:
-        await workflow.execute_activity(
-            ACTIVITY_FINALIZE_RUN,
-            FinalizeInput(
-                workspace_id=params.workspace_id,
-                task_id=params.task_id,
-                run_id=run_id,
-                status=status,
-                steps_used=self._steps_used,
-                error_code=error_code,
-                error_message=error_message,
-            ),
-            start_to_close_timeout=timedelta(seconds=30),
-            retry_policy=_FINALIZE_RETRY,
+        finalize_input = FinalizeInput(
+            workspace_id=params.workspace_id,
+            task_id=params.task_id,
+            run_id=run_id,
+            status=status,
+            steps_used=self._steps_used,
+            error_code=error_code,
+            error_message=error_message,
         )
+        if use_tool_worker:
+            if run_id is not None:
+                with contextlib.suppress(Exception):
+                    await workflow.execute_activity(
+                        ACTIVITY_CLEANUP_RUN_WORKSPACE,
+                        CleanupRunWorkspaceInput(
+                            workspace_id=params.workspace_id,
+                            run_id=run_id,
+                        ),
+                        task_queue=TOOL_TASK_QUEUE,
+                        start_to_close_timeout=timedelta(seconds=30),
+                        schedule_to_close_timeout=_CLEANUP_SCHEDULE_TO_CLOSE_TIMEOUT,
+                        retry_policy=_FINALIZE_RETRY,
+                    )
+            await workflow.execute_activity(
+                ACTIVITY_FINALIZE_RUN_PROJECTION,
+                finalize_input,
+                task_queue=AGENT_TASK_QUEUE,
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=_FINALIZE_RETRY,
+            )
+        else:
+            await workflow.execute_activity(
+                ACTIVITY_FINALIZE_RUN,
+                finalize_input,
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=_FINALIZE_RETRY,
+            )

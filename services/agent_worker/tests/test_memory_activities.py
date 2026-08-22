@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -38,6 +39,7 @@ from jhin_domain import (
     new_uuid7,
 )
 from jhin_models import ModelClient, ModelRequest, ModelResponse, ModelUsage
+from jhin_observability import noop_metrics, noop_tracer
 from jhin_workflows.memory_maintenance import (
     ApplyMemoryCandidatesInput,
     ExtractMemoryCandidatesInput,
@@ -68,6 +70,7 @@ class StubResources:
     def __init__(self, session_factory: Any) -> None:
         self.session_factory = session_factory
         self.crypto = None
+        self.runtime = SimpleNamespace(metrics=noop_metrics(), tracer=noop_tracer())
 
 
 class World:

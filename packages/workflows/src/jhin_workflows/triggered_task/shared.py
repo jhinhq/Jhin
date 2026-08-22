@@ -11,6 +11,8 @@ from dataclasses import dataclass
 
 ACTIVITY_PREPARE_TRIGGERED_TASK = "prepare_triggered_task"
 ACTIVITY_SYNC_EXTERNAL = "sync_external"
+ACTIVITY_SYNC_EXTERNAL_TOOL = "sync_external_tool"
+PHASE10_TRIGGER_SYNC_PATCH = "phase10-trigger-sync-tool-routing-v1"
 
 
 @dataclass

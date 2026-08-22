@@ -9,10 +9,11 @@ from time import perf_counter
 import nats
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
-from temporalio.client import Client as TemporalClient
+from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 from jhin_api.health.schemas import DependencyStatus, ReadinessReport
 from jhin_api.settings import Settings
+from jhin_api.temporal import TemporalClientProvider
 
 CHECK_TIMEOUT_SECONDS = 5.0
 
@@ -31,16 +32,29 @@ async def check_nats(nats_url: str) -> None:
         await client.close()
 
 
-async def check_temporal(address: str, namespace: str) -> None:
-    # A non-lazy connect performs a server round-trip (system info exchange),
-    # so success here proves the frontend is reachable and serving.
-    await TemporalClient.connect(address, namespace=namespace)
+class TemporalHealthUnavailable(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("Temporal workflow service is unavailable")
+
+
+async def check_temporal(provider: TemporalClientProvider) -> None:
+    try:
+        client = await provider.get()
+        healthy = await client.service_client.check_health()
+    except (asyncio.CancelledError, TemporalCancelledError):
+        raise
+    except Exception:
+        raise TemporalHealthUnavailable() from None
+    if not healthy:
+        raise TemporalHealthUnavailable()
 
 
 async def _timed(name: str, check: Callable[[], Awaitable[None]]) -> DependencyStatus:
     start = perf_counter()
     try:
         await asyncio.wait_for(check(), CHECK_TIMEOUT_SECONDS)
+    except (asyncio.CancelledError, TemporalCancelledError):
+        raise
     except Exception as exc:
         return DependencyStatus(
             name=name,
@@ -53,13 +67,17 @@ async def _timed(name: str, check: Callable[[], Awaitable[None]]) -> DependencyS
     )
 
 
-async def readiness(settings: Settings, engine: AsyncEngine) -> ReadinessReport:
+async def readiness(
+    settings: Settings,
+    engine: AsyncEngine,
+    temporal_provider: TemporalClientProvider,
+) -> ReadinessReport:
     dependencies = await asyncio.gather(
         _timed("postgres", lambda: check_postgres(engine)),
         _timed("nats", lambda: check_nats(settings.nats_url)),
         _timed(
             "temporal",
-            lambda: check_temporal(settings.temporal_address, settings.temporal_namespace),
+            lambda: check_temporal(temporal_provider),
         ),
     )
     status = "ok" if all(dep.status == "ok" for dep in dependencies) else "degraded"

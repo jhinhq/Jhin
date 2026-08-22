@@ -5,6 +5,7 @@ unsupported profile) records the failure and keeps the previous avatar."""
 from __future__ import annotations
 
 import io
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
@@ -31,6 +32,7 @@ from jhin_media import PostgresMediaStore, normalize_avatar
 from jhin_media.avatars import activate_avatar
 from jhin_models import GeneratedImage, ModelProviderError
 from jhin_models.testing import deterministic_png
+from jhin_observability import noop_metrics, noop_tracer
 from jhin_workflows.avatar_generation import (
     AvatarGenerationInput,
     FailAvatarGenerationInput,
@@ -41,6 +43,7 @@ class StubResources:
     def __init__(self, session_factory: Any) -> None:
         self.session_factory = session_factory
         self.crypto = None
+        self.runtime = SimpleNamespace(metrics=noop_metrics(), tracer=noop_tracer())
 
 
 class StubImageClient:

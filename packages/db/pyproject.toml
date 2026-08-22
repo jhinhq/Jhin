@@ -4,14 +4,17 @@ version = "0.1.0"
 description = "SQLAlchemy 2 async engine and Alembic migrations for Jhin"
 requires-python = ">=3.13"
 dependencies = [
-    "sqlalchemy[asyncio]>=2.0.36",
+    "sqlalchemy[asyncio]>=2.0.36,<3",
     "asyncpg>=0.30",
     "alembic>=1.14",
     "jhin-domain",
+    "jhin-observability",
+    "opentelemetry-api>=1.38,<2",
 ]
 
 [tool.uv.sources]
 jhin-domain = { workspace = true }
+jhin-observability = { workspace = true }
 
 [project.scripts]
 jhin-db-migrate = "jhin_db.migrate:main"

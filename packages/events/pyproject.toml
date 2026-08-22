@@ -5,13 +5,16 @@ description = "Event envelope, subject conventions, and NATS JetStream helpers f
 requires-python = ">=3.13"
 dependencies = [
     "nats-py>=2.13",
+    "opentelemetry-api>=1.38,<2",
     "pydantic>=2.10",
     "structlog>=25.1",
     "jhin-domain",
+    "jhin-observability",
 ]
 
 [tool.uv.sources]
 jhin-domain = { workspace = true }
+jhin-observability = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

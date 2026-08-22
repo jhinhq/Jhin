@@ -32,6 +32,7 @@ from jhin_policy import (
     capability_matches,
 )
 from jhin_secrets import SecretCrypto
+from jhin_tools.test_barriers import CrashBarrier
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,7 @@ class ToolExecutionContext:
     crypto: SecretCrypto | None = None
     session_factory: async_sessionmaker[AsyncSession] | None = None
     tool_call_id: UUID | None = None
+    test_barrier: CrashBarrier | None = None
 
 
 ToolExecutor = Callable[[ToolExecutionContext, BaseModel], Awaitable[BaseModel]]
@@ -101,6 +103,23 @@ class ToolCatalog:
 
     def definitions(self) -> tuple[ToolDefinition, ...]:
         return tuple(self.registry)
+
+
+class ToolDefinitionCatalog:
+    """Tool definitions without executor or validator callables.
+
+    API and discovery processes use this catalog so constructing a public
+    schema view cannot import or initialize executable connector behavior.
+    """
+
+    def __init__(self) -> None:
+        self._registry = CapabilityRegistry()
+
+    def register(self, definition: ToolDefinition) -> None:
+        self._registry.register(definition)
+
+    def definitions(self) -> tuple[ToolDefinition, ...]:
+        return tuple(self._registry)
 
 
 # --- system.echo (read) ---
@@ -282,6 +301,26 @@ BUILTIN_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor], ...] = (
 )
 
 
+def builtin_tool_definitions() -> tuple[ToolDefinition, ...]:
+    """Built-in definitions without importing any executor into the caller."""
+    from jhin_tools.directory import DIRECTORY_TOOLS
+    from jhin_tools.memory import MEMORY_TOOLS
+    from jhin_tools.organization import ORGANIZATION_TOOLS
+    from jhin_tools.reviews import REVIEW_TOOLS
+    from jhin_tools.work_requests import WORK_REQUEST_TOOLS
+
+    return tuple(definition for definition, _executor in BUILTIN_TOOLS) + tuple(
+        definition
+        for definition, _executor, _validator in (
+            *ORGANIZATION_TOOLS,
+            *DIRECTORY_TOOLS,
+            *WORK_REQUEST_TOOLS,
+            *REVIEW_TOOLS,
+            *MEMORY_TOOLS,
+        )
+    )
+
+
 def build_builtin_catalog() -> ToolCatalog:
     """The default built-in catalog: Phase 4 system tools plus the Phase 8
     organization tools (delegation + structured result reporting). Phase 5
@@ -312,7 +351,7 @@ def build_builtin_catalog() -> ToolCatalog:
 
 
 def allowed_tool_definitions(
-    catalog: ToolCatalog, grants: Sequence[Grant]
+    catalog: ToolCatalog | ToolDefinitionCatalog, grants: Sequence[Grant]
 ) -> tuple[ToolDefinition, ...]:
     """Tools worth advertising to the model: those with any matching allow
     grant. Advertisement is prompt economy, not authorization — the gateway

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import ModuleType
@@ -107,43 +108,56 @@ def test_compose_project_validation_rejects_unsafe_names(project: str) -> None:
         validate_compose_project(project)
 
 
-def test_integration_compose_uses_literal_validated_project(
+@pytest.mark.parametrize("mode", ["rootful", "rootless"])
+def test_integration_compose_uses_literal_validated_project_and_explicit_mode(
+    mode: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from tests.integration import conftest as harness
+    from tests.integration.phase10_upgrade_harness import (
+        ComposeAuthority,
+        write_authority_lease,
+    )
 
     observed: dict[str, Any] = {}
 
-    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def fake_run(command: tuple[str, ...], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         observed["command"] = command
         observed["kwargs"] = kwargs
         return subprocess.CompletedProcess(command, 0, stdout="api\n", stderr="")
 
-    monkeypatch.setenv("JHIN_TEST_COMPOSE_PROJECT", "jhin-phase9-acceptance")
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    authority = ComposeAuthority.create(
+        repo=ROOT,
+        mode=mode,
+        socket_path=Path(
+            "/var/run/docker.sock" if mode == "rootful" else "/run/user/10001/docker.sock"
+        ),
+        socket_gid=10001 if mode == "rootful" else None,
+        token="f9a8b7c6d5e4",
+        source_environment={"PATH": os.environ.get("PATH", "")},
+    )
+    lease = Path("/tmp") / f"jhin-p10-phase9-contract-{os.getpid()}-{mode}.json"
+    lease.unlink(missing_ok=True)
+    try:
+        write_authority_lease(authority, lease)
+        monkeypatch.setenv("JHIN_PHASE10_AUTHORITY_LEASE", str(lease))
+        monkeypatch.setenv("PHASE10_SOCKET_MODE", mode)
+        monkeypatch.setattr(harness, "run_command", fake_run)
 
-    harness.compose("ps", timeout=7.0)
+        harness.compose("ps", timeout=7.0)
 
-    assert observed == {
-        "command": [
-            "docker",
-            "compose",
-            "-p",
-            "jhin-phase9-acceptance",
-            "-f",
-            "compose.yaml",
-            "-f",
-            "compose.dev.yaml",
-            "ps",
-        ],
-        "kwargs": {
-            "cwd": harness.REPO_ROOT,
-            "capture_output": True,
-            "text": True,
-            "timeout": 7.0,
-            "check": True,
-        },
-    }
+        assert observed == {
+            "command": authority.compose_command("ps"),
+            "kwargs": {
+                "env": authority.environment,
+                "cwd": harness.REPO_ROOT,
+                "timeout": 7.0,
+                "check": True,
+            },
+        }
+    finally:
+        lease.unlink(missing_ok=True)
+        authority.remove_runtime_paths()
 
 
 def test_production_assertion_cli_renders_only_base_compose(

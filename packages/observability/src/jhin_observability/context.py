@@ -1,0 +1,298 @@
+"""Trace-only propagation and safe span/context helpers."""
+
+from __future__ import annotations
+
+import asyncio
+import math
+import re
+import sys
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager, suppress
+from typing import TypeGuard
+from uuid import UUID
+
+import structlog
+from opentelemetry import context as otel_context
+from opentelemetry import trace
+from opentelemetry.context import Context
+from opentelemetry.propagators.textmap import Getter
+from opentelemetry.trace import NoOpTracerProvider, Span, SpanKind, Status, StatusCode, Tracer
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+from jhin_observability.errors import SafeError
+from jhin_observability.redaction import structural_redaction
+from jhin_observability.registry import (
+    SPAN_ATTRIBUTE_VALUES,
+    SPAN_NAMES,
+    AttributeValue,
+    SpanName,
+)
+
+_TRACEPARENT_HEADER = "traceparent"
+_TRACESTATE_HEADER = "tracestate"
+_BAGGAGE_HEADER = "baggage"
+_TRACE_CONTEXT_HEADERS = (_TRACEPARENT_HEADER, _TRACESTATE_HEADER)
+TRACE_CARRIER_KEYS = frozenset((*_TRACE_CONTEXT_HEADERS, _BAGGAGE_HEADER))
+TRACE_PROPAGATOR = TraceContextTextMapPropagator()
+
+SPAN_ID_ATTRIBUTE_KEYS = frozenset(
+    {
+        "jhin.request_id",
+        "jhin.correlation_id",
+        "jhin.workspace_id",
+        "jhin.task_id",
+        "jhin.run_id",
+        "jhin.job_id",
+        "temporal.workflow_id",
+        "temporal.run_id",
+    }
+)
+SPAN_NUMERIC_ATTRIBUTE_KEYS = frozenset(
+    {
+        "http.response.status_code",
+        "jhin.latency_ms",
+        "jhin.retry_count",
+        "temporal.attempt",
+    }
+)
+SAFE_SPAN_ATTRIBUTE_KEYS = frozenset(
+    {*SPAN_ATTRIBUTE_VALUES, *SPAN_ID_ATTRIBUTE_KEYS, *SPAN_NUMERIC_ATTRIBUTE_KEYS}
+)
+_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_NOOP_TRACER = NoOpTracerProvider().get_tracer("jhin-observability.package-noop")
+_FALLBACK_SPAN = trace.NonRecordingSpan(trace.INVALID_SPAN_CONTEXT)
+
+
+class _CaseInsensitiveGetter(Getter[Mapping[str, str]]):
+    def get(self, carrier: Mapping[str, str], key: str) -> list[str] | None:
+        value = carrier.get(key)
+        return [value] if value is not None else None
+
+    def keys(self, carrier: Mapping[str, str]) -> list[str]:
+        return list(carrier)
+
+
+_TRACE_GETTER = _CaseInsensitiveGetter()
+
+
+def noop_tracer() -> Tracer:
+    """Return the explicit package/seed/host no-op tracer."""
+    return _NOOP_TRACER
+
+
+def is_safe_context_id(value: object) -> TypeGuard[str]:
+    """Return whether an exact built-in string satisfies the context ID grammar."""
+    return type(value) is str and _ID_RE.fullmatch(value) is not None
+
+
+def extract_trace_context(headers: Mapping[str, str]) -> Context:
+    carrier: dict[str, str] = {}
+    for key, value in headers.items():
+        normalized = key.lower()
+        if normalized in _TRACE_CONTEXT_HEADERS and normalized not in carrier:
+            carrier[normalized] = value
+    return TRACE_PROPAGATOR.extract(carrier=carrier, getter=_TRACE_GETTER)
+
+
+def inject_trace_headers(headers: Mapping[str, str] | None = None) -> dict[str, str]:
+    copied = {} if headers is None else dict(headers)
+    preserved = {
+        key: value for key, value in copied.items() if key.lower() not in TRACE_CARRIER_KEYS
+    }
+    injected: dict[str, str] = {}
+    TRACE_PROPAGATOR.inject(carrier=injected)
+    for key in _TRACE_CONTEXT_HEADERS:
+        if key in injected:
+            preserved[key] = injected[key]
+    return preserved
+
+
+def _structurally_unchanged(key: str, value: object) -> bool:
+    redacted = structural_redaction({key: value})
+    return isinstance(redacted, dict) and key in redacted and redacted[key] == value
+
+
+def normalize_span_attributes(
+    attributes: Mapping[str, AttributeValue] | None,
+) -> dict[str, AttributeValue]:
+    output: dict[str, AttributeValue] = {}
+    for key, value in (attributes or {}).items():
+        if key not in SAFE_SPAN_ATTRIBUTE_KEYS:
+            raise ValueError(f"unregistered span attribute key: {key}")
+        if key in SPAN_ID_ATTRIBUTE_KEYS:
+            if is_safe_context_id(value) and _structurally_unchanged(key, value):
+                output[key] = value
+            continue
+        if key in SPAN_NUMERIC_ATTRIBUTE_KEYS:
+            if (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+                and 0 <= value <= 1_000_000_000
+                and _structurally_unchanged(key, value)
+            ):
+                output[key] = value
+            continue
+        allowed = SPAN_ATTRIBUTE_VALUES[key]
+        output[key] = (
+            value
+            if isinstance(value, str) and _structurally_unchanged(key, value) and value in allowed
+            else "other"
+        )
+    return output
+
+
+def set_span_attributes(
+    span: Span,
+    attributes: Mapping[str, AttributeValue],
+) -> None:
+    """Best-effort set a fully validated, closed span attribute mapping."""
+    normalized = normalize_span_attributes(attributes)
+    for key, value in normalized.items():
+        with suppress(Exception):
+            span.set_attribute(key, value)
+
+
+def _current_otel_context() -> Context | None:
+    try:
+        return otel_context.get_current()
+    except Exception:
+        return None
+
+
+def _best_effort_restore_context(context: Context) -> None:
+    current = _current_otel_context()
+    if current is None or current is context:
+        return
+    with suppress(Exception):
+        otel_context.attach(context)
+
+
+@contextmanager
+def bind_context(
+    *,
+    request_id: str | UUID | None = None,
+    correlation_id: str | UUID | None = None,
+    workspace_id: str | UUID | None = None,
+    task_id: str | UUID | None = None,
+    run_id: str | UUID | None = None,
+) -> Iterator[None]:
+    supplied = {
+        "request_id": request_id,
+        "correlation_id": correlation_id,
+        "workspace_id": workspace_id,
+        "task_id": task_id,
+        "run_id": run_id,
+    }
+    values: dict[str, str] = {}
+    for key, value in supplied.items():
+        if value is None:
+            continue
+        rendered = str(value) if type(value) is UUID else value
+        if not is_safe_context_id(rendered):
+            raise ValueError(f"invalid {key}")
+        values[key] = rendered
+    tokens = structlog.contextvars.bind_contextvars(**values)
+    try:
+        try:
+            span = trace.get_current_span()
+            if span.is_recording():
+                set_span_attributes(span, {f"jhin.{key}": value for key, value in values.items()})
+        except Exception:
+            pass
+        yield
+    finally:
+        structlog.contextvars.reset_contextvars(**tokens)
+
+
+@contextmanager
+def safe_span(
+    name: SpanName,
+    *,
+    tracer: Tracer | None = None,
+    kind: SpanKind = SpanKind.INTERNAL,
+    attributes: Mapping[str, AttributeValue] | None = None,
+    context: Context | None = None,
+) -> Iterator[Span]:
+    if name not in SPAN_NAMES:
+        raise ValueError("unregistered span name")
+    normalized_attributes = normalize_span_attributes(attributes)
+    if tracer is None:
+        from jhin_observability.bootstrap import get_runtime
+
+        selected_tracer = get_runtime().tracer
+    else:
+        selected_tracer = tracer
+    entry_context = _current_otel_context()
+    if entry_context is None:
+        yield _FALLBACK_SPAN
+        return
+
+    manager = None
+    span: Span = _FALLBACK_SPAN
+    try:
+        manager = selected_tracer.start_as_current_span(
+            name,
+            context=context,
+            kind=kind,
+            attributes=normalized_attributes,
+            record_exception=False,
+            set_status_on_exception=False,
+        )
+        span = manager.__enter__()
+        if _current_otel_context() is None:
+            raise RuntimeError("unavailable OTel context")
+    except BaseException as setup_error:
+        if not isinstance(setup_error, Exception):
+            _best_effort_restore_context(entry_context)
+            raise
+        try:
+            if manager is not None:
+                manager.__exit__(type(setup_error), setup_error, setup_error.__traceback__)
+        except Exception:
+            pass
+        finally:
+            _best_effort_restore_context(entry_context)
+        manager = None
+        span = _FALLBACK_SPAN
+
+    try:
+        yield span
+    finally:
+        if manager is not None:
+            error_type, error, error_traceback = sys.exc_info()
+            try:
+                manager.__exit__(error_type, error, error_traceback)
+            except asyncio.CancelledError:
+                if error is None:
+                    raise
+            except Exception:
+                pass
+            finally:
+                _best_effort_restore_context(entry_context)
+
+
+def record_span_error(span: Span, error: SafeError) -> None:
+    with suppress(Exception):
+        span.set_status(Status(StatusCode.ERROR))
+    with suppress(Exception):
+        span.set_attribute("error.type", error.type)
+    with suppress(Exception):
+        span.set_attribute("error.code", error.code.value)
+
+
+__all__ = [
+    "SAFE_SPAN_ATTRIBUTE_KEYS",
+    "SPAN_ID_ATTRIBUTE_KEYS",
+    "SPAN_NUMERIC_ATTRIBUTE_KEYS",
+    "TRACE_CARRIER_KEYS",
+    "bind_context",
+    "extract_trace_context",
+    "inject_trace_headers",
+    "is_safe_context_id",
+    "noop_tracer",
+    "normalize_span_attributes",
+    "record_span_error",
+    "safe_span",
+    "set_span_attributes",
+]

@@ -4,9 +4,11 @@ agent tool call (plan section 12) — plus the Phase 4 built-in system tools."""
 from jhin_tools.builtin import (
     BUILTIN_TOOLS,
     ToolCatalog,
+    ToolDefinitionCatalog,
     ToolExecutionContext,
     allowed_tool_definitions,
     build_builtin_catalog,
+    builtin_tool_definitions,
 )
 from jhin_tools.errors import ToolExecutionError
 from jhin_tools.gateway import (
@@ -18,8 +20,11 @@ from jhin_tools.invocation import (
     INVOCATION_FORMAT_VERSION,
     MAX_TOOL_CALLS_PER_STEP,
     MAX_TOOL_STEP_INDEX,
+    SYNC_INVOCATION_FORMAT_VERSION,
+    SYNC_INVOCATION_NAMESPACE,
     TOOL_INVOCATION_FORMAT_VERSION,
     TOOL_INVOCATION_NAMESPACE,
+    stable_sync_invocation_id,
     stable_tool_invocation_id,
 )
 from jhin_tools.sanitize import (
@@ -27,24 +32,53 @@ from jhin_tools.sanitize import (
     MAX_STRING_CHARS,
     sanitize_payload,
 )
+from jhin_tools.test_barriers import (
+    AGENT_BEFORE_BIND,
+    PHASE9_AFTER_MANIFEST,
+    PHASE9_CLEANUP_BEFORE_EFFECT,
+    PHASE9_SYNC_BEFORE_EFFECT,
+    TOOL_AFTER_CLAIM,
+    TOOL_AFTER_EFFECT,
+    TOOL_BEFORE_CLAIM,
+    CrashBarrier,
+    CrashBarrierConfig,
+    CrashBarrierName,
+    release_barrier,
+)
 
 __all__ = [
+    "AGENT_BEFORE_BIND",
     "BUILTIN_TOOLS",
     "INVOCATION_FORMAT_VERSION",
     "MAX_DOCUMENT_BYTES",
     "MAX_STRING_CHARS",
     "MAX_TOOL_CALLS_PER_STEP",
     "MAX_TOOL_STEP_INDEX",
+    "PHASE9_AFTER_MANIFEST",
+    "PHASE9_CLEANUP_BEFORE_EFFECT",
+    "PHASE9_SYNC_BEFORE_EFFECT",
+    "SYNC_INVOCATION_FORMAT_VERSION",
+    "SYNC_INVOCATION_NAMESPACE",
+    "TOOL_AFTER_CLAIM",
+    "TOOL_AFTER_EFFECT",
+    "TOOL_BEFORE_CLAIM",
     "TOOL_INVOCATION_FORMAT_VERSION",
     "TOOL_INVOCATION_NAMESPACE",
+    "CrashBarrier",
+    "CrashBarrierConfig",
+    "CrashBarrierName",
     "GatewayOutcome",
     "GatewayStateError",
     "ToolCatalog",
+    "ToolDefinitionCatalog",
     "ToolExecutionContext",
     "ToolExecutionError",
     "ToolGateway",
     "allowed_tool_definitions",
     "build_builtin_catalog",
+    "builtin_tool_definitions",
+    "release_barrier",
     "sanitize_payload",
+    "stable_sync_invocation_id",
     "stable_tool_invocation_id",
 ]

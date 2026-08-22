@@ -1,10 +1,15 @@
 """Envelope encryption unit tests (plan 32.1: secret encryption/decryption)."""
 
 import base64
+import json
+import logging
 import secrets as stdlib_secrets
+from collections.abc import Iterator
 
 import pytest
+import structlog
 
+from jhin_observability import configure_json_logging
 from jhin_secrets.crypto import (
     EncryptedPayload,
     MasterKey,
@@ -95,12 +100,57 @@ def test_load_master_key_from_file(tmp_path: object) -> None:
     assert len(key.key) == 32
 
 
-def test_load_master_key_env_fallback_warns(caplog: pytest.LogCaptureFixture) -> None:
+@pytest.fixture
+def restore_logging_globals() -> Iterator[None]:
+    root = logging.getLogger()
+    original_handlers = list(root.handlers)
+    original_level = root.level
+    original_named = {
+        candidate: (list(candidate.handlers), candidate.level, candidate.propagate)
+        for candidate in logging.root.manager.loggerDict.values()
+        if isinstance(candidate, logging.Logger)
+    }
+    original_structlog_config = dict(structlog.get_config())
+    try:
+        yield
+    finally:
+        installed_handlers = [
+            handler for handler in root.handlers if handler not in original_handlers
+        ]
+        root.handlers[:] = original_handlers
+        root.setLevel(original_level)
+        for named, (handlers, level, propagate) in original_named.items():
+            named.handlers[:] = handlers
+            named.setLevel(level)
+            named.propagate = propagate
+        for handler in installed_handlers:
+            handler.close()
+        structlog.configure(**original_structlog_config)
+
+
+def test_load_master_key_env_fallback_emits_safe_json_v1(
+    capsys: pytest.CaptureFixture[str], restore_logging_globals: None
+) -> None:
     material = base64.b64encode(stdlib_secrets.token_bytes(32)).decode()
-    with caplog.at_level("WARNING"):
-        key = load_master_key({"MASTER_KEY": material})
+    configure_json_logging(service="secrets-test", environment="test", level="WARNING")
+
+    key = load_master_key({"MASTER_KEY": material})
+
     assert len(key.key) == 32
-    assert any("MASTER_KEY environment variable" in record.message for record in caplog.records)
+    rendered = capsys.readouterr().out
+    record = json.loads(rendered)
+    assert record == {
+        "environment": "test",
+        "event": "security.master_key_env_source",
+        "level": "warning",
+        "logger": "jhin_secrets.crypto",
+        "schema_version": 1,
+        "service": "secrets-test",
+        "timestamp": record["timestamp"],
+    }
+    assert "MASTER_KEY" not in rendered
+    assert material not in rendered
+    assert "local development" not in rendered
 
 
 def test_missing_master_key_raises() -> None:

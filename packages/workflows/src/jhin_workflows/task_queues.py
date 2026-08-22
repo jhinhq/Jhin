@@ -7,3 +7,4 @@ general workflow worker.
 
 WORKFLOW_TASK_QUEUE = "jhin-workflow-queue"
 AGENT_TASK_QUEUE = "jhin-agent-queue"
+TOOL_TASK_QUEUE = "jhin-tool-queue"

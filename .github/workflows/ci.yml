@@ -15,6 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -35,6 +37,9 @@ jobs:
 
       - name: Unit tests
         run: uv run pytest
+
+      - name: Phase 10 focused boundary
+        run: make test-tool-worker-boundary
 
   web:
     name: Web lint / typecheck / tests / build
@@ -82,6 +87,15 @@ jobs:
           - name: agent-worker
             dockerfile: docker/python.Dockerfile
             build_args: SERVICE_PACKAGE=jhin-agent-worker
+          - name: tool-worker
+            dockerfile: docker/python.Dockerfile
+            build_args: SERVICE_PACKAGE=jhin-tool-worker
+          - name: sandbox-runner
+            dockerfile: docker/python.Dockerfile
+            build_args: SERVICE_PACKAGE=jhin-sandbox-runner
+          - name: sandbox-job
+            dockerfile: docker/sandbox.Dockerfile
+            build_args: ""
           - name: web
             dockerfile: apps/web/Dockerfile
             build_args: ""
@@ -99,3 +113,241 @@ jobs:
           push: false
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,scope=${{ matrix.name }},mode=max
+
+  phase10-rootful-live:
+    name: Phase 10 rootful live boundary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      PHASE10_MODE: rootful
+      PHASE10_ROOTFUL_DOCKER_SOCKET: /var/run/docker.sock
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync workspace
+        run: uv sync --frozen --all-packages
+
+      - name: Export rootful socket authority
+        run: |
+          test -S /var/run/docker.sock
+          socket_gid="$(stat -c %g /var/run/docker.sock)"
+          test "$socket_gid" -gt 0
+          echo "SANDBOX_DOCKER_GID=$socket_gid" >> "$GITHUB_ENV"
+
+      - name: Validate rootful Compose contract
+        run: |
+          SANDBOX_DOCKER_SOCKET_HOST="$PHASE10_ROOTFUL_DOCKER_SOCKET" \
+            uv run python scripts/assert_phase10_tool_worker_compose.py --mode rootful
+
+      - name: Rootful tool-worker boundary
+        run: make test-tool-worker-boundary-integration
+
+      - name: Frozen live regressions
+        run: make test-phase10-regressions
+
+      - name: Rootful sandbox socket
+        run: make test-sandbox-socket-rootful
+
+      - name: Rootful wrong-GID failure
+        run: make test-sandbox-socket-wrong-gid
+
+      - name: Phase 9 to Phase 10 in-flight upgrade
+        run: make test-tool-worker-live-upgrade
+
+  phase10-rootless-live:
+    name: Phase 10 rootless live boundary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Provision UID-10001 rootless Docker prerequisites
+        run: |
+          sudo install -m 0755 -d /etc/apt/keyrings
+          sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+            -o /etc/apt/keyrings/docker.asc
+          sudo chmod a+r /etc/apt/keyrings/docker.asc
+          . /etc/os-release
+          printf '%s\n' \
+            'Types: deb' \
+            'URIs: https://download.docker.com/linux/ubuntu' \
+            "Suites: ${UBUNTU_CODENAME:-$VERSION_CODENAME}" \
+            'Components: stable' \
+            "Architectures: $(dpkg --print-architecture)" \
+            'Signed-By: /etc/apt/keyrings/docker.asc' \
+            | sudo tee /etc/apt/sources.list.d/docker.sources >/dev/null
+          sudo apt-get update
+          docker_ce_version="$(dpkg-query -W -f='${Version}' docker-ce)"
+          test -n "$docker_ce_version"
+          sudo apt-get install -y \
+            uidmap dbus-user-session slirp4netns fuse-overlayfs \
+            docker-ce-rootless-extras="$docker_ce_version"
+          sudo groupadd --gid 10001 phase10rootless
+          sudo useradd --uid 10001 --gid 10001 --create-home \
+            --shell /bin/bash phase10rootless
+          sudo sed -i '/^phase10rootless:/d' /etc/subuid
+          sudo sed -i '/^phase10rootless:/d' /etc/subgid
+          printf '%s\n' 'phase10rootless:524288:65536' | sudo tee -a /etc/subuid >/dev/null
+          printf '%s\n' 'phase10rootless:524288:65536' | sudo tee -a /etc/subgid >/dev/null
+          test "$(awk -F: '$1 == "phase10rootless" {print $2 ":" $3}' /etc/subuid)" = "524288:65536"
+          test "$(awk -F: '$1 == "phase10rootless" {print $2 ":" $3}' /etc/subgid)" = "524288:65536"
+          awk -F: '$1 != "phase10rootless" && $2 < 589824 && ($2 + $3) > 524288 {exit 1}' /etc/subuid
+          awk -F: '$1 != "phase10rootless" && $2 < 589824 && ($2 + $3) > 524288 {exit 1}' /etc/subgid
+          sudo install -d -m 0755 /etc/systemd/system/user@10001.service.d
+          printf '%s\n' '[Service]' 'Delegate=cpu memory pids' \
+            | sudo tee /etc/systemd/system/user@10001.service.d/delegate.conf >/dev/null
+          sudo systemctl daemon-reload
+          sudo loginctl enable-linger phase10rootless
+          sudo systemctl start user@10001.service
+          test -d /run/user/10001
+
+      - name: Start and validate UID-10001 rootless Docker
+        run: |
+          sudo -u phase10rootless -H env \
+            HOME=/home/phase10rootless \
+            XDG_CONFIG_HOME=/home/phase10rootless/.config \
+            XDG_RUNTIME_DIR=/run/user/10001 \
+            DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/10001/bus \
+            systemctl --user set-environment \
+            HOME=/home/phase10rootless \
+            XDG_CONFIG_HOME=/home/phase10rootless/.config \
+            XDG_RUNTIME_DIR=/run/user/10001
+          manager_environment="$(
+            sudo -u phase10rootless -H env \
+              HOME=/home/phase10rootless \
+              XDG_CONFIG_HOME=/home/phase10rootless/.config \
+              XDG_RUNTIME_DIR=/run/user/10001 \
+              DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/10001/bus \
+              systemctl --user show-environment
+          )"
+          for expected in \
+            'HOME=/home/phase10rootless' \
+            'XDG_CONFIG_HOME=/home/phase10rootless/.config' \
+            'XDG_RUNTIME_DIR=/run/user/10001'
+          do
+            grep -Fx "$expected" <<<"$manager_environment" >/dev/null
+          done
+          unset manager_environment
+          sudo -u phase10rootless -H env \
+            HOME=/home/phase10rootless \
+            XDG_CONFIG_HOME=/home/phase10rootless/.config \
+            XDG_RUNTIME_DIR=/run/user/10001 \
+            DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/10001/bus \
+            rootlesskit true
+          if ! sudo -u phase10rootless -H env \
+            HOME=/home/phase10rootless \
+            XDG_CONFIG_HOME=/home/phase10rootless/.config \
+            XDG_RUNTIME_DIR=/run/user/10001 \
+            DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/10001/bus \
+            dockerd-rootless-setuptool.sh install --force; then
+            sudo -u phase10rootless -H env \
+              HOME=/home/phase10rootless \
+              XDG_CONFIG_HOME=/home/phase10rootless/.config \
+              XDG_RUNTIME_DIR=/run/user/10001 \
+              DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/10001/bus \
+              systemctl --user --no-pager --full status docker.service || true
+            sudo -u phase10rootless -H env \
+              HOME=/home/phase10rootless \
+              XDG_CONFIG_HOME=/home/phase10rootless/.config \
+              XDG_RUNTIME_DIR=/run/user/10001 \
+              DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/10001/bus \
+              journalctl --user --no-pager -n 100 -u docker.service || true
+            exit 1
+          fi
+          test "$(sudo -u phase10rootless -H stat -c %u /run/user/10001/docker.sock)" = "10001"
+          security_options="$(sudo -u phase10rootless -H docker --host unix:///run/user/10001/docker.sock info --format '{{json .SecurityOptions}}')"
+          case "$security_options" in *rootless*) ;; *) exit 1 ;; esac
+          test "$(sudo -u phase10rootless -H docker --host unix:///run/user/10001/docker.sock info --format '{{.CgroupVersion}}')" = "2"
+          test "$(sudo -u phase10rootless -H docker --host unix:///run/user/10001/docker.sock info --format '{{.CgroupDriver}}')" = "systemd"
+          echo "PHASE10_ROOTLESS_DOCKER_SOCKET=/run/user/10001/docker.sock" >> "$GITHUB_ENV"
+          echo "ROOTLESS_SOCKET_SNAPSHOT=$(sudo -u phase10rootless -H stat -c '%d:%i:%f:%u:%g' /run/user/10001/docker.sock)" >> "$GITHUB_ENV"
+
+      - name: Sync workspace for the rootless test UID
+        run: |
+          rootless_workspace=/tmp/jhin-phase10-rootless-workspace
+          sudo install -d -o 10001 -g 10001 -m 0711 "$rootless_workspace"
+          sudo cp -a "$GITHUB_WORKSPACE"/. "$rootless_workspace"/
+          sudo chown -R 10001:10001 "$rootless_workspace"
+          sudo chmod 0711 "$rootless_workspace"
+          sudo install -d -o 10001 -g 10001 -m 0700 /tmp/jhin-phase10-uv-cache
+          sudo -u phase10rootless -H env \
+            PATH="$PATH" \
+            UV_CACHE_DIR=/tmp/jhin-phase10-uv-cache \
+            uv --directory "$rootless_workspace" sync --frozen --all-packages
+
+      - name: Validate rootless Compose contract
+        working-directory: /tmp/jhin-phase10-rootless-workspace
+        run: |
+          sudo -u phase10rootless -H env \
+            PATH="$PATH" \
+            XDG_RUNTIME_DIR=/run/user/10001 \
+            DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/10001/bus \
+            UV_CACHE_DIR=/tmp/jhin-phase10-uv-cache \
+            PHASE10_ROOTLESS_DOCKER_SOCKET="$PHASE10_ROOTLESS_DOCKER_SOCKET" \
+            uv run python scripts/assert_phase10_tool_worker_compose.py --mode rootless
+
+      - name: Rootless sandbox socket
+        working-directory: /tmp/jhin-phase10-rootless-workspace
+        run: |
+          sudo -u phase10rootless -H env \
+            PATH="$PATH" \
+            XDG_RUNTIME_DIR=/run/user/10001 \
+            DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/10001/bus \
+            UV_CACHE_DIR=/tmp/jhin-phase10-uv-cache \
+            PHASE10_ROOTLESS_DOCKER_SOCKET="$PHASE10_ROOTLESS_DOCKER_SOCKET" \
+            make test-sandbox-socket-rootless
+
+      - name: Rootless tool-worker boundary
+        working-directory: /tmp/jhin-phase10-rootless-workspace
+        run: |
+          sudo -u phase10rootless -H env \
+            PATH="$PATH" \
+            XDG_RUNTIME_DIR=/run/user/10001 \
+            DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/10001/bus \
+            UV_CACHE_DIR=/tmp/jhin-phase10-uv-cache \
+            PHASE10_MODE=rootless \
+            PHASE10_ROOTLESS_DOCKER_SOCKET="$PHASE10_ROOTLESS_DOCKER_SOCKET" \
+            make test-tool-worker-boundary-integration
+
+      - name: Rootless Phase 9 to Phase 10 in-flight upgrade
+        working-directory: /tmp/jhin-phase10-rootless-workspace
+        run: |
+          sudo -u phase10rootless -H env \
+            PATH="$PATH" \
+            XDG_RUNTIME_DIR=/run/user/10001 \
+            DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/10001/bus \
+            UV_CACHE_DIR=/tmp/jhin-phase10-uv-cache \
+            PHASE10_MODE=rootless \
+            PHASE10_ROOTLESS_DOCKER_SOCKET="$PHASE10_ROOTLESS_DOCKER_SOCKET" \
+            make test-tool-worker-live-upgrade
+
+      - name: Stop the CI-owned rootless daemon after identity verification
+        if: ${{ always() && env.ROOTLESS_SOCKET_SNAPSHOT != '' }}
+        run: |
+          stop_rootless() {
+            sudo -u phase10rootless -H env \
+              XDG_RUNTIME_DIR=/run/user/10001 \
+              DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/10001/bus \
+              systemctl --user stop docker.service
+          }
+          trap 'stop_rootless || true' EXIT
+          test -n "$ROOTLESS_SOCKET_SNAPSHOT"
+          sudo -u phase10rootless -H test -S /run/user/10001/docker.sock
+          test "$(sudo -u phase10rootless -H stat -c '%d:%i:%f:%u:%g' /run/user/10001/docker.sock)" = "$ROOTLESS_SOCKET_SNAPSHOT"
+          stop_rootless
+          trap - EXIT

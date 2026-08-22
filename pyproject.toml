@@ -13,6 +13,7 @@ members = [
     "services/workflow_worker",
     "services/event_worker",
     "services/agent_worker",
+    "services/tool_worker",
     "services/sandbox_runner",
     "packages/db",
     "packages/domain",
@@ -44,11 +45,13 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py313"
+extend-exclude = ["docs/superpowers/plans"]
 src = [
     "apps/api/src",
     "services/workflow_worker/src",
     "services/event_worker/src",
     "services/agent_worker/src",
+    "services/tool_worker/src",
     "services/sandbox_runner/src",
     "packages/db/src",
     "packages/domain/src",
@@ -90,6 +93,7 @@ files = [
     "services/workflow_worker/src",
     "services/event_worker/src",
     "services/agent_worker/src",
+    "services/tool_worker/src",
     "services/sandbox_runner/src",
     "packages/db/src",
     "packages/domain/src",
@@ -110,8 +114,24 @@ files = [
 ]
 
 [[tool.mypy.overrides]]
-module = ["nats.*", "uuid_utils.*", "asyncpg.*", "aiodocker.*"]
+module = [
+    "nats.*",
+    "uuid_utils.*",
+    "asyncpg.*",
+    "aiodocker.*",
+    "grpc",
+    "grpc.*",
+    "jhin_secrets.*",
+]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["test_logging"]
+disable_error_code = ["index"]
+
+[[tool.mypy.overrides]]
+module = ["test_log_audit"]
+disable_error_code = ["redundant-cast"]
 
 # aiodocker's volume API is untyped; calls into it are contained here.
 [[tool.mypy.overrides]]
@@ -120,12 +140,14 @@ disallow_untyped_calls = false
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+pythonpath = [".", "services/agent_worker/tests"]
 testpaths = [
     "apps/api/tests",
     "packages/domain/tests",
     "packages/events/tests",
     "packages/workflows/tests",
     "packages/db/tests",
+    "packages/observability/tests",
     "packages/secrets/tests",
     "packages/models/tests",
     "packages/agents/tests",
@@ -136,11 +158,13 @@ testpaths = [
     "packages/memory/tests",
     "packages/media/tests",
     "services/agent_worker/tests",
+    "services/tool_worker/tests",
     "services/event_worker/tests",
+    "services/workflow_worker/tests",
     "services/sandbox_runner/tests",
     "tests",
 ]
 markers = [
     "integration: requires the running Docker Compose stack (deselected by default)",
 ]
-addopts = "-m 'not integration'"
+addopts = "-m 'not integration' --import-mode=importlib"

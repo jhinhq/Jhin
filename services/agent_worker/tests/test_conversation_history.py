@@ -4,6 +4,7 @@ precede the current task's transcript, visible text only, capped."""
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -25,6 +26,7 @@ from jhin_domain import (
     TaskState,
     new_uuid7,
 )
+from jhin_observability import noop_metrics, noop_tracer
 
 T0 = datetime(2026, 8, 21, 9, 0, tzinfo=UTC)
 
@@ -34,6 +36,7 @@ class StubResources:
         self.session_factory = session_factory
         self.publisher = None
         self.crypto = None
+        self.runtime = SimpleNamespace(metrics=noop_metrics(), tracer=noop_tracer())
 
 
 class World:

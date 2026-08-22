@@ -36,3 +36,6 @@ class CliConnector(Connector):
 
     def tools(self) -> tuple[tuple[ToolDefinition, ToolExecutor], ...]:
         return CLI_TOOLS
+
+    def tool_definitions(self) -> tuple[ToolDefinition, ...]:
+        return tuple(definition for definition, _executor in CLI_TOOLS)

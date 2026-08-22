@@ -17,7 +17,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import logging
 import os
 import secrets as stdlib_secrets
 from dataclasses import dataclass
@@ -25,7 +24,9 @@ from dataclasses import dataclass
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-logger = logging.getLogger(__name__)
+from jhin_observability import get_logger
+
+logger = get_logger(__name__)
 
 MASTER_KEY_FILE_ENV = "MASTER_KEY_FILE"
 MASTER_KEY_ENV = "MASTER_KEY"
@@ -94,11 +95,7 @@ def load_master_key(environ: dict[str, str] | None = None) -> MasterKey:
 
     inline = env.get(MASTER_KEY_ENV)
     if inline:
-        logger.warning(
-            "SECURITY: master key loaded from the MASTER_KEY environment variable. "
-            "This is acceptable only for local development. Use MASTER_KEY_FILE "
-            "with a mounted key file (e.g. /run/secrets/jhin_master_key) instead."
-        )
+        logger.warning("security.master_key_env_source")
         return MasterKey(key=decode_master_key_material(inline))
 
     raise MasterKeyError(

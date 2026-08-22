@@ -6,6 +6,7 @@ Every connector implements :class:`Connector`:
 - ``verify_connection(ctx)`` — live credential/health check;
 - ``tools()`` — tool definitions plus executors, registered into the same
   catalog and gateway the Phase 4 built-ins use (plan 12);
+- ``tool_definitions()`` — the definition-only view safe for API discovery;
 - ``normalize_event(raw)`` — maps raw provider webhook payloads to canonical
   ``connector.<type>.<entity>.<event>`` domain events (plan 9.2).
 
@@ -112,6 +113,10 @@ class Connector(ABC):
     @abstractmethod
     def tools(self) -> tuple[tuple[ToolDefinition, ToolExecutor], ...]:
         """Tool definitions and executors to register into the catalog."""
+
+    @abstractmethod
+    def tool_definitions(self) -> tuple[ToolDefinition, ...]:
+        """Tool definitions without executor callables."""
 
     def webhook_events(self) -> tuple[str, ...]:
         """Provider event names accepted at the webhook endpoint."""

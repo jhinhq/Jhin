@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import logging
 from typing import Literal
 
 from temporalio.client import Client, WorkflowHandle
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
+from jhin_observability import get_logger
 from jhin_workflows.memory_maintenance.shared import (
     MEMORY_MAINTENANCE_WORKFLOW,
     SOURCE_KINDS,
@@ -18,7 +18,7 @@ from jhin_workflows.memory_maintenance.shared import (
 )
 from jhin_workflows.task_queues import AGENT_TASK_QUEUE
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 StartStatus = Literal["started", "duplicate", "invalid", "failed"]
 
@@ -50,9 +50,6 @@ async def start_memory_maintenance(
     except WorkflowAlreadyStartedError:
         return "duplicate", None
     except Exception as exc:
-        logger.warning(
-            "memory.maintenance_start_failed",
-            extra={"workflow_id": workflow_id, "error": type(exc).__name__},
-        )
+        logger.warning("memory.maintenance_start_failed", error_type=type(exc).__name__)
         return "failed", None
     return "started", handle

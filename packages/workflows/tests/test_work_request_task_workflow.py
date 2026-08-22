@@ -10,19 +10,31 @@ from temporalio import activity, workflow
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
+from jhin_workflows import AGENT_TASK_QUEUE, TOOL_TASK_QUEUE
 from jhin_workflows.agent_task import (
-    ACTIVITY_FINALIZE_RUN,
     ACTIVITY_RESOLVE_SNAPSHOT,
-    ACTIVITY_RUN_AGENT_STEP,
     AgentTaskInput,
     AgentTaskResult,
     AgentTaskWorkflow,
     FinalizeInput,
-    RunStepInput,
     SnapshotResult,
     StepResult,
 )
-from jhin_workflows.agent_task.shared import WorkRequestStart
+from jhin_workflows.agent_task.shared import (
+    ACTIVITY_CLEANUP_RUN_WORKSPACE,
+    ACTIVITY_COMMIT_AGENT_STEP,
+    ACTIVITY_FINALIZE_RUN_PROJECTION,
+    ACTIVITY_REASON_AGENT_STEP,
+    ACTIVITY_RESOLVE_ADVERTISED_TOOLS,
+    AdvertisedTool,
+    CleanupRunWorkspaceInput,
+    CleanupRunWorkspaceResult,
+    CommitAgentStepInput,
+    ReasonAgentStepInput,
+    ReasonAgentStepResult,
+    ResolveAdvertisedToolsInput,
+    WorkRequestStart,
+)
 from jhin_workflows.work_request_task import (
     ACTIVITY_FINALIZE_WORK_REQUEST,
     FinalizeWorkRequestInput,
@@ -112,6 +124,10 @@ class StubWorkRequestTaskWorkflow:
 
 
 class AgentStubs:
+    """Phase 10 step path (docs/architecture/tool-worker-boundary.md): the
+    tool queue resolves tools and cleans up, the agent queue reasons,
+    commits, and finalizes. Each commit reports the same accepted request."""
+
     def __init__(self, starts: list[WorkRequestStart]) -> None:
         self.starts = starts
         self.steps = 0
@@ -120,14 +136,26 @@ class AgentStubs:
     async def resolve(self, params: AgentTaskInput) -> SnapshotResult:
         return SnapshotResult(run_id="run-1", snapshot_json="{}", snapshot_hash="h", max_steps=5)
 
-    @activity.defn(name=ACTIVITY_RUN_AGENT_STEP)
-    async def step(self, params: RunStepInput) -> StepResult:
+    @activity.defn(name=ACTIVITY_RESOLVE_ADVERTISED_TOOLS)
+    async def advertised(self, params: ResolveAdvertisedToolsInput) -> list[AdvertisedTool]:
+        return []
+
+    @activity.defn(name=ACTIVITY_REASON_AGENT_STEP)
+    async def reason(self, params: ReasonAgentStepInput) -> ReasonAgentStepResult:
+        return ReasonAgentStepResult(call_count=0)
+
+    @activity.defn(name=ACTIVITY_COMMIT_AGENT_STEP)
+    async def commit(self, params: CommitAgentStepInput) -> StepResult:
         self.steps += 1
         # Two steps report the same accepted request (a retried tool call):
         # the second start must be a no-op, not a failure.
         return StepResult(done=self.steps >= 2, work_request_starts=list(self.starts))
 
-    @activity.defn(name=ACTIVITY_FINALIZE_RUN)
+    @activity.defn(name=ACTIVITY_CLEANUP_RUN_WORKSPACE)
+    async def cleanup(self, params: CleanupRunWorkspaceInput) -> CleanupRunWorkspaceResult:
+        return CleanupRunWorkspaceResult(deleted=True)
+
+    @activity.defn(name=ACTIVITY_FINALIZE_RUN_PROJECTION)
     async def finalize(self, params: FinalizeInput) -> None:
         return None
 
@@ -138,20 +166,27 @@ async def test_agent_task_workflow_starts_work_request_child_once() -> None:
     stubs = AgentStubs(starts)
     env = await WorkflowEnvironment.start_time_skipping()
     try:
-        task_queue = f"test-{uuid.uuid4()}"
-        async with Worker(
-            env.client,
-            task_queue=task_queue,
-            workflows=[AgentTaskWorkflow, StubWorkRequestTaskWorkflow],
-            activities=[stubs.resolve, stubs.step, stubs.finalize],
+        async with (
+            Worker(
+                env.client,
+                task_queue=AGENT_TASK_QUEUE,
+                workflows=[AgentTaskWorkflow, StubWorkRequestTaskWorkflow],
+                activities=[stubs.resolve, stubs.reason, stubs.commit, stubs.finalize],
+            ),
+            Worker(
+                env.client,
+                task_queue=TOOL_TASK_QUEUE,
+                activities=[stubs.advertised, stubs.cleanup],
+            ),
         ):
             result: AgentTaskResult = await env.client.execute_workflow(
                 AgentTaskWorkflow.run,
                 AgentTaskInput(workspace_id="ws", task_id="parent", agent_id="a1"),
                 id=f"task-{uuid.uuid4()}",
-                task_queue=task_queue,
+                task_queue=AGENT_TASK_QUEUE,
             )
             assert result.status == "completed"
+            assert stubs.steps == 2
             handle = env.client.get_workflow_handle(
                 work_request_workflow_id(request_id), result_type=WorkRequestTaskResult
             )

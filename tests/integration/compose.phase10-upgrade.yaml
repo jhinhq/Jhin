@@ -1,0 +1,224 @@
+x-phase9-environment: &phase9-environment
+  APP_ENV: test
+  LOG_LEVEL: INFO
+  DATABASE_URL: postgresql+asyncpg://jhin:jhin@postgres:5432/jhin
+  NATS_URL: nats://nats:4222
+  TEMPORAL_ADDRESS: temporal:7233
+  MASTER_KEY_FILE: /run/secrets/jhin_master_key
+  SANDBOX_RUNNER_URL: http://sandbox-runner:8085
+  SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:-dev-sandbox-runner-token}
+  SANDBOX_DEFAULT_IMAGE: ${SANDBOX_DEFAULT_IMAGE:?required}
+  JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS: http://fake-github:8080,http://fake-linear:8080,http://fake-vercel:8080,http://fake-supabase:8080
+  JHIN_CONNECTOR_ALLOWED_DB_HOSTS: fake-supabase-db:5432
+
+x-phase9-worker: &phase9-worker
+  profiles: [phase10-upgrade]
+  image: ${PHASE9_AGENT_IMAGE:?required}
+  pull_policy: never
+  command: [jhin-agent-worker]
+  restart: "no"
+  secrets: [jhin_master_key]
+  depends_on:
+    postgres:
+      condition: service_healthy
+    nats:
+      condition: service_healthy
+    temporal:
+      condition: service_healthy
+    sandbox-runner:
+      condition: service_healthy
+  healthcheck:
+    test: [CMD, jhin-health-check]
+    interval: 5s
+    timeout: 5s
+    retries: 12
+    start_period: 10s
+  networks: [control, data, runner]
+
+x-phase10-agent-environment: &phase10-agent-environment
+  APP_ENV: test
+  LOG_LEVEL: INFO
+  DATABASE_URL: postgresql+asyncpg://jhin:jhin@postgres:5432/jhin
+  NATS_URL: nats://nats:4222
+  TEMPORAL_ADDRESS: temporal:7233
+  MASTER_KEY_FILE: /run/secrets/jhin_master_key
+  JHIN_TEST_CRASH_BARRIER_DIR: ""
+  JHIN_TEST_CRASH_BARRIER_NAME: ""
+  JHIN_TEST_CRASH_BARRIER_MATCH: ""
+
+x-phase10-agent: &phase10-agent
+  profiles: [phase10-upgrade]
+  build:
+    context: .
+    dockerfile: docker/python.Dockerfile
+    args:
+      SERVICE_PACKAGE: jhin-agent-worker
+  command: [jhin-agent-worker]
+  restart: "no"
+  secrets: [jhin_master_key]
+  depends_on:
+    postgres:
+      condition: service_healthy
+    nats:
+      condition: service_healthy
+    temporal:
+      condition: service_healthy
+  healthcheck:
+    test: [CMD, jhin-temporal-poller-check, jhin-agent-queue]
+    interval: 5s
+    timeout: 5s
+    retries: 12
+    start_period: 10s
+  networks: [control, data]
+
+x-phase10-tool-environment: &phase10-tool-environment
+  APP_ENV: test
+  LOG_LEVEL: INFO
+  DATABASE_URL: postgresql+asyncpg://jhin:jhin@postgres:5432/jhin
+  NATS_URL: nats://nats:4222
+  TEMPORAL_ADDRESS: temporal:7233
+  MASTER_KEY_FILE: /run/secrets/jhin_master_key
+  SANDBOX_RUNNER_URL: http://sandbox-runner:8085
+  SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:-dev-sandbox-runner-token}
+  SANDBOX_DEFAULT_IMAGE: ${SANDBOX_DEFAULT_IMAGE:?required}
+  JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS: http://fake-github:8080,http://fake-linear:8080,http://fake-vercel:8080,http://fake-supabase:8080
+  JHIN_CONNECTOR_ALLOWED_DB_HOSTS: fake-supabase-db:5432
+  JHIN_TEST_CRASH_BARRIER_DIR: ""
+  JHIN_TEST_CRASH_BARRIER_NAME: ""
+  JHIN_TEST_CRASH_BARRIER_MATCH: ""
+
+x-phase10-tool: &phase10-tool
+  profiles: [phase10-upgrade]
+  build:
+    context: .
+    dockerfile: docker/python.Dockerfile
+    args:
+      SERVICE_PACKAGE: jhin-tool-worker
+  command: [jhin-tool-worker]
+  restart: "no"
+  secrets: [jhin_master_key]
+  depends_on:
+    postgres:
+      condition: service_healthy
+    nats:
+      condition: service_healthy
+    temporal:
+      condition: service_healthy
+    sandbox-runner:
+      condition: service_healthy
+  healthcheck:
+    test: [CMD, jhin-temporal-poller-check, jhin-tool-queue]
+    interval: 5s
+    timeout: 5s
+    retries: 12
+    start_period: 10s
+  networks: [control, data, runner]
+
+services:
+  phase9-agent-worker-normal:
+    <<: *phase9-worker
+    environment:
+      <<: *phase9-environment
+      TEMPORAL_NAMESPACE: ${PHASE10_UPGRADE_NAMESPACE_NORMAL:?required}
+      JHIN_TEST_CRASH_BARRIER_DIR: /run/jhin/test-barriers
+      JHIN_TEST_CRASH_BARRIER_NAME: ${PHASE10_UPGRADE_BARRIER_NORMAL_NAME:-}
+      JHIN_TEST_CRASH_BARRIER_MATCH: ${PHASE10_UPGRADE_BARRIER_NORMAL_MATCH:-}
+    volumes:
+      - ${PHASE10_UPGRADE_BARRIER_NORMAL_HOST:?required}:/run/jhin/test-barriers
+
+  phase9-agent-worker-approval:
+    <<: *phase9-worker
+    environment:
+      <<: *phase9-environment
+      TEMPORAL_NAMESPACE: ${PHASE10_UPGRADE_NAMESPACE_APPROVAL:?required}
+      JHIN_TEST_CRASH_BARRIER_DIR: ""
+      JHIN_TEST_CRASH_BARRIER_NAME: ""
+      JHIN_TEST_CRASH_BARRIER_MATCH: ""
+    volumes:
+      - ${PHASE10_UPGRADE_BARRIER_APPROVAL_HOST:?required}:/run/jhin/test-barriers
+
+  phase9-agent-worker-sync:
+    <<: *phase9-worker
+    environment:
+      <<: *phase9-environment
+      TEMPORAL_NAMESPACE: ${PHASE10_UPGRADE_NAMESPACE_SYNC:?required}
+      JHIN_TEST_CRASH_BARRIER_DIR: /run/jhin/test-barriers
+      JHIN_TEST_CRASH_BARRIER_NAME: ${PHASE10_UPGRADE_BARRIER_SYNC_NAME:-}
+      JHIN_TEST_CRASH_BARRIER_MATCH: ${PHASE10_UPGRADE_BARRIER_SYNC_MATCH:-}
+    volumes:
+      - ${PHASE10_UPGRADE_BARRIER_SYNC_HOST:?required}:/run/jhin/test-barriers
+
+  phase9-agent-worker-cleanup:
+    <<: *phase9-worker
+    environment:
+      <<: *phase9-environment
+      TEMPORAL_NAMESPACE: ${PHASE10_UPGRADE_NAMESPACE_CLEANUP:?required}
+      JHIN_TEST_CRASH_BARRIER_DIR: /run/jhin/test-barriers
+      JHIN_TEST_CRASH_BARRIER_NAME: ${PHASE10_UPGRADE_BARRIER_CLEANUP_NAME:-}
+      JHIN_TEST_CRASH_BARRIER_MATCH: ${PHASE10_UPGRADE_BARRIER_CLEANUP_MATCH:-}
+    volumes:
+      - ${PHASE10_UPGRADE_BARRIER_CLEANUP_HOST:?required}:/run/jhin/test-barriers
+
+  phase10-agent-worker-normal:
+    <<: *phase10-agent
+    environment:
+      <<: *phase10-agent-environment
+      TEMPORAL_NAMESPACE: ${PHASE10_UPGRADE_NAMESPACE_NORMAL:?required}
+    volumes:
+      - ${PHASE10_UPGRADE_BARRIER_NORMAL_HOST:?required}:/run/jhin/test-barriers
+
+  phase10-agent-worker-approval:
+    <<: *phase10-agent
+    environment:
+      <<: *phase10-agent-environment
+      TEMPORAL_NAMESPACE: ${PHASE10_UPGRADE_NAMESPACE_APPROVAL:?required}
+    volumes:
+      - ${PHASE10_UPGRADE_BARRIER_APPROVAL_HOST:?required}:/run/jhin/test-barriers
+
+  phase10-agent-worker-sync:
+    <<: *phase10-agent
+    environment:
+      <<: *phase10-agent-environment
+      TEMPORAL_NAMESPACE: ${PHASE10_UPGRADE_NAMESPACE_SYNC:?required}
+    volumes:
+      - ${PHASE10_UPGRADE_BARRIER_SYNC_HOST:?required}:/run/jhin/test-barriers
+
+  phase10-agent-worker-cleanup:
+    <<: *phase10-agent
+    environment:
+      <<: *phase10-agent-environment
+      TEMPORAL_NAMESPACE: ${PHASE10_UPGRADE_NAMESPACE_CLEANUP:?required}
+    volumes:
+      - ${PHASE10_UPGRADE_BARRIER_CLEANUP_HOST:?required}:/run/jhin/test-barriers
+
+  phase10-tool-worker-normal:
+    <<: *phase10-tool
+    environment:
+      <<: *phase10-tool-environment
+      TEMPORAL_NAMESPACE: ${PHASE10_UPGRADE_NAMESPACE_NORMAL:?required}
+    volumes:
+      - ${PHASE10_UPGRADE_BARRIER_NORMAL_HOST:?required}:/run/jhin/test-barriers
+
+  phase10-tool-worker-approval:
+    <<: *phase10-tool
+    environment:
+      <<: *phase10-tool-environment
+      TEMPORAL_NAMESPACE: ${PHASE10_UPGRADE_NAMESPACE_APPROVAL:?required}
+    volumes:
+      - ${PHASE10_UPGRADE_BARRIER_APPROVAL_HOST:?required}:/run/jhin/test-barriers
+
+  phase10-tool-worker-sync:
+    <<: *phase10-tool
+    environment:
+      <<: *phase10-tool-environment
+      TEMPORAL_NAMESPACE: ${PHASE10_UPGRADE_NAMESPACE_SYNC:?required}
+    volumes:
+      - ${PHASE10_UPGRADE_BARRIER_SYNC_HOST:?required}:/run/jhin/test-barriers
+
+  phase10-tool-worker-cleanup:
+    <<: *phase10-tool
+    environment:
+      <<: *phase10-tool-environment
+      TEMPORAL_NAMESPACE: ${PHASE10_UPGRADE_NAMESPACE_CLEANUP:?required}
+    volumes:
+      - ${PHASE10_UPGRADE_BARRIER_CLEANUP_HOST:?required}:/run/jhin/test-barriers

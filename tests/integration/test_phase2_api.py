@@ -22,9 +22,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from jhin_api.main import create_app
 from jhin_api.security.passwords import hash_password
 from jhin_api.settings import Settings
-from jhin_db import create_engine, create_session_factory
 from jhin_db.migrate import upgrade_to_head
 from jhin_db.models import AuditEvent, User
+from jhin_observability import ObservabilityNotInitializedError, get_runtime
 
 from .conftest import POSTGRES_HOST as PG_HOST
 from .conftest import POSTGRES_PORT as PG_PORT
@@ -89,21 +89,25 @@ class ApiHarness:
 
 @pytest.fixture
 async def api(migrated_db_url: str) -> AsyncIterator[ApiHarness]:
-    settings = Settings(database_url=migrated_db_url, login_max_attempts=3)
+    settings = Settings(
+        app_env="test",
+        database_url=migrated_db_url,
+        login_max_attempts=3,
+        otel_exporter_otlp_endpoint=None,
+        otel_exporter_otlp_insecure=False,
+    )
     app = create_app(settings)
-    # ASGITransport does not run lifespan; wire state exactly as lifespan does.
-    engine = create_engine(migrated_db_url)
-    app.state.engine = engine
-    app.state.session_factory = create_session_factory(engine)
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        yield ApiHarness(
-            client=client,
-            transport=transport,
-            engine=engine,
-            session_factory=app.state.session_factory,
-        )
-    await engine.dispose()
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            yield ApiHarness(
+                client=client,
+                transport=transport,
+                engine=app.state.engine,
+                session_factory=app.state.session_factory,
+            )
+    with pytest.raises(ObservabilityNotInitializedError):
+        get_runtime()
 
 
 async def _bootstrap(api: ApiHarness) -> str:

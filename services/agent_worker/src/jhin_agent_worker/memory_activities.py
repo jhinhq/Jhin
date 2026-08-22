@@ -181,6 +181,8 @@ async def load_source_text(
 class MemoryActivities:
     def __init__(self, resources: Resources) -> None:
         self._resources = resources
+        self._metrics = resources.runtime.metrics
+        self._tracer = resources.runtime.tracer
 
     @activity.defn(name=ACTIVITY_EXTRACT_MEMORY_CANDIDATES)
     async def extract_memory_candidates_activity(
@@ -222,6 +224,8 @@ class MemoryActivities:
                     snapshot.model_profile.provider_type,
                     base_url=snapshot.model_profile.base_url,
                     api_key=api_key,
+                    metrics=self._metrics,
+                    tracer=self._tracer,
                 )
             except Exception as exc:
                 return ExtractMemoryCandidatesResult(

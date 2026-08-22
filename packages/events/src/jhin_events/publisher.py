@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from nats.js import JetStreamContext
+from collections.abc import Mapping
+from typing import cast
+
 from nats.js.api import PubAck
+from opentelemetry.trace import Tracer
 
 from jhin_events.envelope import EventEnvelope
 from jhin_events.subjects import event_subject
-
-MSG_ID_HEADER = "Nats-Msg-Id"
+from jhin_events.telemetry import MSG_ID_HEADER as MSG_ID_HEADER
+from jhin_events.telemetry import JetStreamPublisher, publish_jetstream
 
 
 class EventPublisher:
@@ -19,13 +22,25 @@ class EventPublisher:
     not stored again (``PubAck.duplicate`` is set).
     """
 
-    def __init__(self, js: JetStreamContext) -> None:
-        self._js = js
+    def __init__(self, js: object, *, tracer: Tracer | None = None) -> None:
+        from jhin_observability import noop_tracer
 
-    async def publish(self, envelope: EventEnvelope) -> PubAck:
+        self._js = cast(JetStreamPublisher, js)
+        self._tracer = tracer if tracer is not None else noop_tracer()
+
+    async def publish(
+        self,
+        envelope: EventEnvelope,
+        *,
+        headers: Mapping[str, str] | None = None,
+    ) -> PubAck:
         subject = event_subject(envelope.workspace_id, envelope.event_type)
-        return await self._js.publish(
+        return await publish_jetstream(
+            self._js,
             subject,
             envelope.to_bytes(),
-            headers={MSG_ID_HEADER: str(envelope.event_id)},
+            headers=headers,
+            message_id=str(envelope.event_id),
+            stream="EVENTS",
+            tracer=self._tracer,
         )

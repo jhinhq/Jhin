@@ -87,6 +87,9 @@ class VercelConnector(Connector):
     def tools(self) -> tuple[tuple[ToolDefinition, ToolExecutor], ...]:
         return VERCEL_TOOLS
 
+    def tool_definitions(self) -> tuple[ToolDefinition, ...]:
+        return tuple(definition for definition, _executor in VERCEL_TOOLS)
+
     def parse_webhook(
         self, headers: Mapping[str, str], body: bytes, secret: str
     ) -> RawWebhookEvent:

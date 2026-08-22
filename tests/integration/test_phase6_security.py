@@ -23,8 +23,8 @@ import json
 import os
 import subprocess
 import time
-from collections.abc import AsyncIterator
-from typing import Any
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Any, Protocol, cast
 from uuid import uuid4
 
 import httpx
@@ -43,6 +43,28 @@ RUNNER_TOKEN = os.environ.get("SANDBOX_RUNNER_TOKEN", "dev-sandbox-runner-token"
 FAKE_PROVIDER_URL = "http://fake-provider:8080/v1"
 JOB_WAIT_SECONDS = 90.0
 TASK_TIMEOUT_SECONDS = 120.0
+FORBIDDEN_JOB_SOCKET_PATHS = (
+    "/var/run/docker.sock",
+    "/run/jhin/docker.sock",
+    "/run/host/docker.sock",
+)
+FORBIDDEN_JOB_DNS_NAMES = (
+    "postgres",
+    "api",
+    "temporal",
+    "nats",
+    "sandbox-runner",
+    "agent-worker",
+    "tool-worker",
+    "rootless-docker-transport",
+)
+JOB_CONTAINER_USER = "1000:1000"
+SANDBOX_NETWORK = os.environ.get("SANDBOX_NETWORK", "jhin_sandbox")
+
+
+class CancelResponse(Protocol):
+    status_code: int
+    text: str
 
 
 def _job_id() -> str:
@@ -90,6 +112,247 @@ def _docker(*args: str) -> str:
     return result.stdout.strip()
 
 
+def assert_job_container_boundary(
+    inspected: object,
+    *,
+    job_id: str,
+    network_policy: str,
+    sandbox_network: str,
+) -> None:
+    """Fail closed on the host-observed Docker authority of one live job."""
+    assert isinstance(inspected, dict), "container inspection must be an object"
+    config = inspected.get("Config")
+    host = inspected.get("HostConfig")
+    mounts = inspected.get("Mounts")
+    assert isinstance(config, dict), "container inspection Config must be an object"
+    assert isinstance(host, dict), "container inspection HostConfig must be an object"
+    assert isinstance(mounts, list), "container inspection Mounts must be a list"
+
+    expected_network = "none" if network_policy == "none" else sandbox_network
+    assert network_policy in {"none", "internet"}, "unexpected job network policy"
+    assert host.get("NetworkMode") == expected_network, "job network authority drifted"
+    assert (host.get("GroupAdd") or []) == [], "job supplemental group authority drifted"
+    assert config.get("User") == JOB_CONTAINER_USER, "job user authority drifted"
+    labels = config.get("Labels")
+    assert isinstance(labels, dict), "job labels must be an object"
+    assert labels.get("jhin.sandbox.job") == job_id, "job label identity drifted"
+
+    environment = config.get("Env") or []
+    assert isinstance(environment, list) and all(isinstance(item, str) for item in environment), (
+        "job environment must be a string list"
+    )
+    for item in environment:
+        name = item.partition("=")[0].upper()
+        assert not name.startswith(("DOCKER_", "SANDBOX_DOCKER_")), (
+            "job environment retained Docker authority"
+        )
+        assert "rootless-docker-transport" not in item.casefold(), (
+            "job environment retained adapter authority"
+        )
+        assert not any(path in item for path in FORBIDDEN_JOB_SOCKET_PATHS), (
+            "job environment retained socket authority"
+        )
+
+    binds = host.get("Binds") or []
+    assert isinstance(binds, list) and all(isinstance(bind, str) for bind in binds), (
+        "job bind authority must be a string list"
+    )
+    for bind in binds:
+        assert not any(path in bind for path in FORBIDDEN_JOB_SOCKET_PATHS), (
+            "job bind retained Docker authority"
+        )
+    for mount in mounts:
+        assert isinstance(mount, dict), "job mount inspection must be an object"
+        serialized = json.dumps(mount, sort_keys=True)
+        assert not any(path in serialized for path in FORBIDDEN_JOB_SOCKET_PATHS), (
+            "job mount retained Docker authority"
+        )
+
+
+async def _wait_for_job_container(job_id: str) -> dict[str, Any]:
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        identifiers = _docker(
+            "ps", "-aq", "--filter", f"label=jhin.sandbox.job={job_id}"
+        ).splitlines()
+        assert len(identifiers) <= 1, f"job label matched multiple containers: {identifiers}"
+        if identifiers:
+            decoded: object = json.loads(_docker("inspect", identifiers[0]))
+            assert isinstance(decoded, list) and len(decoded) == 1, (
+                "docker inspect must return exactly one job container"
+            )
+            inspected = decoded[0]
+            assert isinstance(inspected, dict), "docker inspect row must be an object"
+            return inspected
+        await asyncio.sleep(0.2)
+    pytest.fail(f"job {job_id} never produced a labeled container")
+
+
+async def _wait_for_job_container_removal(job_id: str) -> None:
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        if _docker("ps", "-aq", "--filter", f"label=jhin.sandbox.job={job_id}") == "":
+            return
+        await asyncio.sleep(0.2)
+    identifiers = _docker("ps", "-aq", "--filter", f"label=jhin.sandbox.job={job_id}").splitlines()
+    assert len(identifiers) <= 1, f"job label matched multiple containers: {identifiers}"
+    if not identifiers:
+        return
+    pytest.fail(f"job {job_id} container survived cancellation: {identifiers}")
+
+
+async def _emergency_force_remove_job_container(job_id: str) -> None:
+    """Attempt every exact-label removal, then surface all retained invariants."""
+    label_filter = f"label=jhin.sandbox.job={job_id}"
+    errors: list[BaseException] = []
+    identifiers: tuple[str, ...] = ()
+
+    try:
+        identifiers = tuple(_docker("ps", "-aq", "--filter", label_filter).splitlines())
+    except BaseException as exc:
+        errors.append(exc)
+
+    if len(identifiers) > 1:
+        errors.append(AssertionError(f"job label matched multiple containers: {list(identifiers)}"))
+
+    for identifier in identifiers:
+        try:
+            _docker("rm", "-f", identifier)
+        except BaseException as exc:
+            errors.append(exc)
+
+    try:
+        remaining = tuple(_docker("ps", "-aq", "--filter", label_filter).splitlines())
+    except BaseException as exc:
+        errors.append(exc)
+    else:
+        if remaining:
+            errors.append(
+                AssertionError(f"job {job_id} survived emergency force removal: {list(remaining)}")
+            )
+
+    if len(errors) == 1:
+        raise errors[0]
+    if errors:
+        raise BaseExceptionGroup("emergency job-container cleanup failed", errors)
+
+
+async def cleanup_live_job(
+    *,
+    cancel: Callable[[], Awaitable[object]],
+    wait_terminal: Callable[[], Awaitable[dict[str, Any]]],
+    remove_container: Callable[[], Awaitable[None]],
+    emergency_remove_container: Callable[[], Awaitable[None]] | None = None,
+) -> dict[str, Any]:
+    """Attempt every cleanup step before surfacing cancellation or cleanup failures."""
+    cancelled: object | None = None
+    terminal: dict[str, Any] | None = None
+    cleanup_errors: list[BaseException] = []
+    cancel_completed = False
+    wait_completed = False
+    product_removal_failed = False
+
+    try:
+        try:
+            cancelled = await cancel()
+            cancel_completed = True
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+    finally:
+        try:
+            try:
+                terminal = await wait_terminal()
+                wait_completed = True
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+        finally:
+            try:
+                try:
+                    await remove_container()
+                except BaseException as exc:
+                    product_removal_failed = True
+                    cleanup_errors.append(exc)
+            finally:
+                if product_removal_failed:
+                    if emergency_remove_container is None:
+                        cleanup_errors.append(
+                            RuntimeError(
+                                "product removal failed without an emergency cleanup callback"
+                            )
+                        )
+                    else:
+                        try:
+                            await emergency_remove_container()
+                        except BaseException as exc:
+                            cleanup_errors.append(exc)
+
+    if cancel_completed:
+        try:
+            assert cancelled is not None, "cancel did not return a response"
+            cancellation_result = cast(CancelResponse, cancelled)
+            assert cancellation_result.status_code == 200, (
+                f"cancel: {cancellation_result.status_code} {cancellation_result.text}"
+            )
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+    if wait_completed:
+        try:
+            assert terminal is not None, "terminal wait returned no job"
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+
+    if len(cleanup_errors) == 1:
+        raise cleanup_errors[0]
+    if cleanup_errors:
+        raise BaseExceptionGroup("live job cleanup failed", cleanup_errors)
+    assert terminal is not None
+    return terminal
+
+
+async def _wait_for_boundary_probe(client: httpx.AsyncClient, job_id: str) -> None:
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        response = await client.get(
+            f"/v1/jobs/{job_id}/logs",
+            headers={"Authorization": f"Bearer {RUNNER_TOKEN}"},
+        )
+        assert response.status_code == 200, response.text
+        if "boundary-probe-complete" in response.json()["stdout"]:
+            return
+        await asyncio.sleep(0.2)
+    pytest.fail(f"job {job_id} boundary probe did not complete")
+
+
+def assert_job_boundary_denials(output: str) -> None:
+    """Assert a live job cannot discover any Docker-authority boundary."""
+    for path in FORBIDDEN_JOB_SOCKET_PATHS:
+        assert f"socket-denied:{path}" in output, output
+    for name in FORBIDDEN_JOB_DNS_NAMES:
+        assert f"dns-denied:{name}" in output, output
+    assert "adapter-tcp-denied" in output, output
+    assert "sandbox-docker-env-denied" in output, output
+    assert "boundary-probe-complete" in output, output
+
+
+def _job_boundary_probe() -> str:
+    socket_paths = " ".join(FORBIDDEN_JOB_SOCKET_PATHS)
+    dns_names = " ".join(FORBIDDEN_JOB_DNS_NAMES)
+    return (
+        f"for p in {socket_paths}; do "
+        '  if test ! -e "$p" && ! grep -Fq "$p" /proc/self/mountinfo; then '
+        "    echo socket-denied:$p; "
+        "  fi; "
+        "done; "
+        f"for h in {dns_names}; do "
+        '  getent hosts "$h" >/dev/null 2>&1 || echo dns-denied:$h; '
+        "done; "
+        "curl -fsS --max-time 3 http://rootless-docker-transport:2375/_ping "
+        ">/dev/null 2>&1 || echo adapter-tcp-denied; "
+        "if ! env | grep -q '^SANDBOX_DOCKER_'; then echo sandbox-docker-env-denied; fi; "
+        "echo boundary-probe-complete"
+    )
+
+
 @pytest.fixture
 async def runner() -> AsyncIterator[httpx.AsyncClient]:
     async with httpx.AsyncClient(base_url=RUNNER_URL, timeout=30.0) as client:
@@ -114,17 +377,45 @@ async def test_runner_rejects_missing_or_wrong_token(runner: httpx.AsyncClient) 
 # --- no Docker socket, non-root, read-only rootfs (plan 14.1, 48.7) ------------
 
 
-async def test_job_has_no_docker_socket(runner: httpx.AsyncClient) -> None:
-    job = await _run_job(
-        runner,
-        command=_bash(
-            "stat /var/run/docker.sock 2>&1; "
-            "grep -c docker.sock /proc/self/mountinfo || echo no-socket-mount"
-        ),
+@pytest.mark.parametrize("network_policy", ["none", "internet"])
+async def test_live_job_has_no_docker_authority(
+    runner: httpx.AsyncClient,
+    network_policy: str,
+) -> None:
+    body: dict[str, Any] = {
+        "job_id": _job_id(),
+        "network_policy": network_policy,
+        "command": _bash(f"{_job_boundary_probe()}; sleep 120"),
+        "timeout_seconds": 180,
+    }
+    await _submit(runner, body)
+    inspected: dict[str, Any] | None = None
+    job: dict[str, Any] | None = None
+    try:
+        inspected = await _wait_for_job_container(body["job_id"])
+        await _wait_for_boundary_probe(runner, body["job_id"])
+    finally:
+        job = await cleanup_live_job(
+            cancel=lambda: runner.post(
+                f"/v1/jobs/{body['job_id']}/cancel",
+                headers={"Authorization": f"Bearer {RUNNER_TOKEN}"},
+            ),
+            wait_terminal=lambda: _wait(runner, body["job_id"]),
+            remove_container=lambda: _wait_for_job_container_removal(body["job_id"]),
+            emergency_remove_container=lambda: _emergency_force_remove_job_container(
+                body["job_id"]
+            ),
+        )
+
+    assert inspected is not None
+    assert job is not None and job["status"] == "cancelled", job
+    assert_job_container_boundary(
+        inspected,
+        job_id=body["job_id"],
+        network_policy=network_policy,
+        sandbox_network=SANDBOX_NETWORK,
     )
-    assert job["status"] == "completed", job
-    assert "No such file or directory" in job["stdout"]
-    assert "no-socket-mount" in job["stdout"]
+    assert_job_boundary_denials(job["stdout"])
 
 
 async def test_job_is_non_root_with_readonly_rootfs(runner: httpx.AsyncClient) -> None:
@@ -157,7 +448,8 @@ async def test_network_none_blocks_all_egress(runner: httpx.AsyncClient) -> None
             "curl -s -m 4 http://fake-github:8080/_state >/dev/null 2>&1 "
             "|| echo fake-github-unreachable; "
             "curl -s -m 4 http://example.com >/dev/null 2>&1 || echo external-unreachable; "
-            "for h in postgres api temporal nats sandbox-runner; do "
+            "for h in postgres api temporal nats sandbox-runner agent-worker tool-worker "
+            "rootless-docker-transport; do "
             "  getent hosts $h >/dev/null 2>&1 || echo no-dns-$h; "
             "done; "
             "echo interfaces=$(ls /sys/class/net | sort | tr '\\n' ',')"
@@ -168,7 +460,7 @@ async def test_network_none_blocks_all_egress(runner: httpx.AsyncClient) -> None
     assert "fake-github-unreachable" in out
     assert "external-unreachable" in out
     # Control-plane service names must not even resolve (plan 14.4).
-    for host in ("postgres", "api", "temporal", "nats", "sandbox-runner"):
+    for host in FORBIDDEN_JOB_DNS_NAMES:
         assert f"no-dns-{host}" in out, out
     # No veth into any bridge — only loopback and inert kernel tunnel stubs.
     interfaces_line = next(line for line in out.splitlines() if line.startswith("interfaces="))
@@ -186,7 +478,8 @@ async def test_network_internet_reaches_sandbox_bridge_only(runner: httpx.AsyncC
         network_policy="internet",
         command=_bash(
             "curl -s -m 5 http://fake-github:8080/_state >/dev/null && echo fake-github-ok; "
-            "for h in postgres api temporal nats sandbox-runner; do "
+            "for h in postgres api temporal nats sandbox-runner agent-worker tool-worker "
+            "rootless-docker-transport; do "
             "  getent hosts $h >/dev/null 2>&1 || echo no-dns-$h; "
             "done"
         ),
@@ -194,7 +487,7 @@ async def test_network_internet_reaches_sandbox_bridge_only(runner: httpx.AsyncC
     assert job["status"] == "completed", job
     out = job["stdout"]
     assert "fake-github-ok" in out
-    for host in ("postgres", "api", "temporal", "nats", "sandbox-runner"):
+    for host in FORBIDDEN_JOB_DNS_NAMES:
         assert f"no-dns-{host}" in out, out
 
 

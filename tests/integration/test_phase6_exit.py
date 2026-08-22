@@ -21,10 +21,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-import subprocess
 import time
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import httpx
@@ -32,7 +31,7 @@ import pytest
 
 from jhin_api.seed import DEV_OWNER_EMAIL, DEV_OWNER_PASSWORD
 
-from .conftest import API_URL, FAKE_GITHUB_URL, REPO_ROOT, compose
+from .conftest import API_URL, FAKE_GITHUB_URL, compose, compose_authority, run_command
 
 pytestmark = pytest.mark.integration
 
@@ -127,10 +126,18 @@ async def _run_task(
 
 
 def _docker(*args: str) -> str:
-    result = subprocess.run(
-        ["docker", *args], cwd=REPO_ROOT, capture_output=True, text=True, timeout=30, check=True
+    authority = compose_authority()
+    result = run_command(
+        authority.docker_command(*args),
+        env=authority.environment,
+        cwd=authority.repo,
+        timeout=30.0,
+        check=True,
     )
-    return result.stdout.strip()
+    stdout = result.stdout
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode("utf-8", errors="strict")
+    return cast(str, stdout).strip()
 
 
 def _psql(sql: str) -> str:

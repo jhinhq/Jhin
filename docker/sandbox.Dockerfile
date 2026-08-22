@@ -11,7 +11,11 @@
 
 FROM debian:bookworm-slim
 
-RUN apt-get update \
+# readline-common's first-install script uses a metadata-preserving copy when
+# /etc/inputrc is absent. Rootless overlay2 rejects that metadata operation, so
+# create the exact destination first and later populate only its contents.
+RUN install -m 0644 /dev/null /etc/inputrc \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         bash \
         ca-certificates \
@@ -19,6 +23,10 @@ RUN apt-get update \
         git \
         nodejs \
         python3 \
+    && cat /usr/share/readline/inputrc > /etc/inputrc \
+    && chmod 0644 /etc/inputrc \
+    && cmp -s /usr/share/readline/inputrc /etc/inputrc \
+    && test "$(stat -c '%u:%g:%a' /etc/inputrc)" = "0:0:644" \
     && rm -rf /var/lib/apt/lists/*
 
 # uid/gid 1000 matches the runner's enforced "User": "1000:1000" (plan 14.3).

@@ -23,6 +23,7 @@ from jhin_workflows.memory_maintenance.shared import (
     ExtractMemoryCandidatesResult,
     MemoryMaintenanceInput,
     MemoryMaintenanceResult,
+    memory_maintenance_workflow_id,
 )
 
 _RETRY = RetryPolicy(
@@ -37,7 +38,9 @@ _RETRY = RetryPolicy(
 class MemoryMaintenanceWorkflow:
     @workflow.run
     async def run(self, params: MemoryMaintenanceInput) -> MemoryMaintenanceResult:
-        workflow_id = workflow.info().workflow_id
+        # Deterministic over the input (the starter uses the same formula), so
+        # the result carries the id without consulting workflow info.
+        workflow_id = memory_maintenance_workflow_id(params)
         try:
             extraction: ExtractMemoryCandidatesResult = await workflow.execute_activity(
                 ACTIVITY_EXTRACT_MEMORY_CANDIDATES,

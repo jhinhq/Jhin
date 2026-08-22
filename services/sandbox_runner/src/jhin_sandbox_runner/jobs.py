@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -27,7 +28,12 @@ from typing import Any
 import aiodocker
 from aiodocker.exceptions import DockerError
 
-from jhin_observability import get_logger
+from jhin_observability import get_logger, normalize_sandbox_outcome
+from jhin_sandbox_runner.docker_socket import (
+    DockerSocketConfigurationError,
+    normalize_supplemental_groups,
+    validate_docker_authority,
+)
 from jhin_sandbox_runner.schemas import SandboxJobRequest, SandboxJobStatusResponse
 from jhin_sandbox_runner.settings import Settings
 from jhin_secrets.redaction import SecretRedactor
@@ -36,14 +42,43 @@ logger = get_logger(__name__)
 
 JOB_LABEL = "jhin.sandbox.job"
 WORKSPACE_LABEL = "jhin.sandbox.workspace"
+WORKSPACE_INIT_LABEL = "jhin.sandbox.workspace.init"
 WORKSPACE_VOLUME_PREFIX = "jhin-sandbox-ws-"
 
 _TRUNCATION_MARKER = "\n…[truncated by sandbox runner]"
 _POLL_INTERVAL_SECONDS = 0.5
+DOCKER_CHECK_TIMEOUT_SECONDS = 5.0
+_FORBIDDEN_JOB_ENV_NAME_PREFIXES = ("DOCKER_", "SANDBOX_DOCKER_")
+_FORBIDDEN_JOB_ENV_SOCKET_PATHS = (
+    "/var/run/docker.sock",
+    "/run/jhin/docker.sock",
+    "/run/host/docker.sock",
+)
+_ROOTLESS_TRANSPORT_HOSTNAME = "rootless-docker-transport"
+_WORKSPACE_INIT_TARGET = "/jhin-workspace-init"
+_WORKSPACE_INIT_SCRIPT = """\
+import os
+import stat
+
+path = "/jhin-workspace-init"
+before = os.lstat(path)
+if not stat.S_ISDIR(before.st_mode):
+    raise SystemExit(2)
+os.chmod(path, 0o700)
+os.chown(path, 1000, 1000)
+after = os.stat(path)
+expected = (1000, 1000, 0o700)
+actual = (after.st_uid, after.st_gid, stat.S_IMODE(after.st_mode))
+raise SystemExit(0 if actual == expected else 3)
+"""
 
 
 class JobValidationError(Exception):
     """The request asks for more than the configured caps allow."""
+
+
+class DockerDaemonConfigurationError(RuntimeError):
+    """The selected Docker daemon does not match the configured trust mode."""
 
 
 @dataclass
@@ -120,6 +155,24 @@ def workspace_volume_name(workspace_key: str) -> str:
     return f"{WORKSPACE_VOLUME_PREFIX}{workspace_key}"
 
 
+def _workspace_volume_mount(workspace_key: str, target: str) -> dict[str, Any]:
+    return {
+        "Type": "volume",
+        "Source": workspace_volume_name(workspace_key),
+        "Target": target,
+        "ReadOnly": False,
+        "VolumeOptions": {"NoCopy": True},
+    }
+
+
+def _job_environment_value_is_safe(name: str, value: str) -> bool:
+    if name.startswith(_FORBIDDEN_JOB_ENV_NAME_PREFIXES):
+        return False
+    if _ROOTLESS_TRANSPORT_HOSTNAME in value.casefold():
+        return False
+    return not any(path in value for path in _FORBIDDEN_JOB_ENV_SOCKET_PATHS)
+
+
 def build_container_config(
     request: SandboxJobRequest,
     settings: Settings,
@@ -134,15 +187,23 @@ def build_container_config(
     Pure function so the security-relevant knobs are directly unit-testable
     (no privileged mode, no host network, cap drop, read-only root, ...).
     """
+    requested_env = {**request.env, **request.secret_env}
+    safe_env = {
+        name: value
+        for name, value in requested_env.items()
+        if _job_environment_value_is_safe(name, value)
+    }
     env = {
         # Read-only root: HOME must live on the writable workspace so tools
         # like git can write their config.
         "HOME": request.working_dir,
-        **request.env,
-        **request.secret_env,
+        **safe_env,
     }
+    network_mode = "none" if request.network_policy == "none" else settings.sandbox_network
+    if network_mode in {"runner", "engine"}:
+        raise JobValidationError("jobs cannot join a control-plane network")
     host_config: dict[str, Any] = {
-        "NetworkMode": "none" if request.network_policy == "none" else settings.sandbox_network,
+        "NetworkMode": network_mode,
         "Memory": memory_mb * 1024 * 1024,
         "MemorySwap": memory_mb * 1024 * 1024,  # no swap beyond the cap
         "NanoCpus": int(cpu_limit * 1_000_000_000),
@@ -155,8 +216,8 @@ def build_container_config(
         "AutoRemove": False,
     }
     if request.workspace_key:
-        host_config["Binds"] = [
-            f"{workspace_volume_name(request.workspace_key)}:{request.working_dir}"
+        host_config["Mounts"] = [
+            _workspace_volume_mount(request.workspace_key, request.working_dir)
         ]
     else:
         # No persistent workspace requested: still give the job a writable
@@ -189,9 +250,48 @@ class JobManager:
         return self._docker
 
     async def start(self) -> None:
-        self._docker = aiodocker.Docker()
-        await self._ensure_sandbox_network()
-        await self.reap_orphans()
+        effective_uid = os.geteuid()
+        effective_gid = os.getegid()
+        if self._settings.sandbox_docker_mode == "rootless" and effective_gid != 10001:
+            raise DockerSocketConfigurationError("rootless runner requires UID/GID 10001:10001")
+        authority_groups = normalize_supplemental_groups(
+            effective_gid=effective_gid,
+            process_groups=os.getgroups(),
+        )
+        if (
+            self._settings.sandbox_docker_mode == "rootful"
+            and self._settings.sandbox_docker_gid == effective_gid
+        ):
+            authority_groups.add(effective_gid)
+        validated_url = validate_docker_authority(
+            mode=self._settings.sandbox_docker_mode,
+            socket_path=self._settings.sandbox_docker_socket,
+            transport_url=self._settings.sandbox_docker_transport_url,
+            configured_gid=self._settings.sandbox_docker_gid,
+            effective_uid=effective_uid,
+            supplemental_groups=authority_groups,
+        )
+        client = aiodocker.Docker(url=validated_url)
+        self._docker = client
+        try:
+            await asyncio.wait_for(client.version(), timeout=DOCKER_CHECK_TIMEOUT_SECONDS)
+            info = await asyncio.wait_for(
+                client.system.info(), timeout=DOCKER_CHECK_TIMEOUT_SECONDS
+            )
+            security_options = info.get("SecurityOptions", [])
+            if self._settings.sandbox_docker_mode == "rootless" and (
+                not isinstance(security_options, list) or "name=rootless" not in security_options
+            ):
+                raise DockerDaemonConfigurationError(
+                    "configured rootless Docker daemon is not rootless"
+                )
+            await self._ensure_sandbox_network()
+            await self.reap_orphans()
+        except BaseException:
+            self._docker = None
+            with contextlib.suppress(Exception):
+                await client.close()
+            raise
 
     async def _ensure_sandbox_network(self) -> None:
         """Create the dedicated job bridge network if compose has not.
@@ -201,27 +301,30 @@ class JobManager:
         owns its creation.
         """
         name = self._settings.sandbox_network
-        try:
-            networks = await self.docker.networks.list(filters={"name": name})
-            if not any(entry.get("Name") == name for entry in networks):
-                await self.docker.networks.create(
-                    {"Name": name, "Driver": "bridge", "Labels": {"jhin.sandbox.network": "1"}}
-                )
-                logger.info("sandbox.network_created", network=name)
-        except DockerError as exc:
-            logger.warning("sandbox.network_ensure_failed", network=name, error=exc.message)
+        networks = await self.docker.networks.list(filters={"name": name})
+        if not any(entry.get("Name") == name for entry in networks):
+            await self.docker.networks.create(
+                {"Name": name, "Driver": "bridge", "Labels": {"jhin.sandbox.network": "1"}}
+            )
+            logger.info("sandbox.network_created")
 
     async def close(self) -> None:
         for record in self._jobs.values():
             if record.task is not None and not record.task.done():
                 record.task.cancel()
         if self._docker is not None:
-            await self._docker.close()
+            client = self._docker
+            self._docker = None
+            await client.close()
 
     async def ping(self) -> bool:
         try:
-            await self.docker.version()
-            return True
+
+            async def ping_daemon() -> bool:
+                async with self.docker._query("_ping", versioned_api=False) as response:
+                    return response.status == 200 and await response.text() == "OK"
+
+            return await asyncio.wait_for(ping_daemon(), timeout=DOCKER_CHECK_TIMEOUT_SECONDS)
         except Exception:
             return False
 
@@ -270,7 +373,10 @@ class JobManager:
         terminal_status = "failed"
         try:
             if request.workspace_key:
-                await self._ensure_workspace_volume(request.workspace_key)
+                await self._ensure_workspace_volume(
+                    request.workspace_key,
+                    job_id=request.job_id,
+                )
             config = build_container_config(
                 request,
                 self._settings,
@@ -311,9 +417,8 @@ class JobManager:
             logger.info(
                 "sandbox.job.finished",
                 job_id=request.job_id,
-                status=record.status,
-                exit_code=record.exit_code,
-                image=record.image,
+                outcome=normalize_sandbox_outcome(record.status),
+                exit_code=max(0, record.exit_code or 0),
                 network_policy=request.network_policy,
             )
 
@@ -380,13 +485,51 @@ class JobManager:
 
     # --- workspaces ---
 
-    async def _ensure_workspace_volume(self, workspace_key: str) -> None:
+    async def _ensure_workspace_volume(self, workspace_key: str, *, job_id: str) -> None:
         await self.docker.volumes.create(
             {
                 "Name": workspace_volume_name(workspace_key),
                 "Labels": {WORKSPACE_LABEL: workspace_key},
             }
         )
+        initializer = await self.docker.containers.create(
+            {
+                "Image": self._settings.sandbox_default_image,
+                "Entrypoint": ["python3", "-c"],
+                "Cmd": [_WORKSPACE_INIT_SCRIPT],
+                "User": "0:0",
+                "Labels": {WORKSPACE_INIT_LABEL: workspace_key},
+                "HostConfig": {
+                    "NetworkMode": "none",
+                    "Memory": 64 * 1024 * 1024,
+                    "MemorySwap": 64 * 1024 * 1024,
+                    "NanoCpus": 1_000_000_000,
+                    "PidsLimit": 16,
+                    "CapDrop": ["ALL"],
+                    "CapAdd": ["CHOWN", "FOWNER"],
+                    "SecurityOpt": ["no-new-privileges:true"],
+                    "ReadonlyRootfs": True,
+                    "Privileged": False,
+                    "AutoRemove": False,
+                    "Mounts": [_workspace_volume_mount(workspace_key, _WORKSPACE_INIT_TARGET)],
+                },
+            },
+            name=f"jhin-sbx-init-{job_id[:32]}",
+        )
+        delete_failed = False
+        try:
+            await initializer.start()
+            result = await initializer.wait(timeout=DOCKER_CHECK_TIMEOUT_SECONDS)
+            status_code = result.get("StatusCode") if isinstance(result, dict) else None
+            if type(status_code) is not int or status_code != 0:
+                raise RuntimeError("sandbox workspace initialization failed")
+        finally:
+            try:
+                await initializer.delete(force=True, v=True)
+            except Exception:
+                delete_failed = True
+        if delete_failed:
+            raise RuntimeError("sandbox workspace initializer cleanup failed")
 
     async def delete_workspace(self, workspace_key: str) -> bool:
         name = workspace_volume_name(workspace_key)
@@ -402,34 +545,31 @@ class JobManager:
     async def reap_orphans(self) -> None:
         """Remove leftover job containers (and stale workspace volumes) from
         a previous runner process that died mid-job."""
-        try:
+        seen_containers: set[str] = set()
+        reaped_containers = 0
+        for label in (JOB_LABEL, WORKSPACE_INIT_LABEL):
             containers = await self.docker.containers.list(
-                all=1, filters=json.dumps({"label": [JOB_LABEL]})
+                all=1, filters=json.dumps({"label": [label]})
             )
             for container in containers:
-                try:
-                    await container.delete(force=True, v=True)
-                    logger.info("sandbox.reaped_container", container_id=container.id[:12])
-                except DockerError:
-                    pass
-        except DockerError as exc:
-            logger.warning("sandbox.reap_containers_failed", error=exc.message)
+                identifier = str(container.id)
+                if identifier in seen_containers:
+                    continue
+                seen_containers.add(identifier)
+                await container.delete(force=True, v=True)
+                reaped_containers += 1
+        if reaped_containers:
+            logger.info("sandbox.reaped_container", count=reaped_containers)
 
         max_age = self._settings.sandbox_workspace_max_age_hours * 3600
-        try:
-            listing = await self.docker.volumes.list(filters={"label": [WORKSPACE_LABEL]})
-            for entry in listing.get("Volumes") or []:
-                created = entry.get("CreatedAt", "")
-                try:
-                    age = (datetime.now(UTC) - datetime.fromisoformat(created)).total_seconds()
-                except ValueError:
-                    continue
-                if age > max_age:
-                    try:
-                        volume = await self.docker.volumes.get(entry["Name"])
-                        await volume.delete()
-                        logger.info("sandbox.reaped_workspace", volume=entry["Name"])
-                    except DockerError:
-                        pass
-        except DockerError as exc:
-            logger.warning("sandbox.reap_volumes_failed", error=exc.message)
+        listing = await self.docker.volumes.list(filters={"label": [WORKSPACE_LABEL]})
+        reaped_workspaces = 0
+        for entry in listing.get("Volumes") or []:
+            created = entry.get("CreatedAt", "")
+            age = (datetime.now(UTC) - datetime.fromisoformat(created)).total_seconds()
+            if age > max_age:
+                volume = await self.docker.volumes.get(entry["Name"])
+                await volume.delete()
+                reaped_workspaces += 1
+        if reaped_workspaces:
+            logger.info("sandbox.reaped_workspace", count=reaped_workspaces)

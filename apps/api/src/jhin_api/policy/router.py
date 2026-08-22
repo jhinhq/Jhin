@@ -21,7 +21,7 @@ from jhin_api.policy.schemas import (
     ToolOut,
 )
 from jhin_api.security.csrf import csrf_protect
-from jhin_connectors import build_default_catalog
+from jhin_connectors import build_default_definition_catalog
 
 router = APIRouter(
     prefix="/api/v1/workspaces/{workspace_id}",
@@ -44,7 +44,7 @@ async def list_tools(ctx: ViewerCtx) -> list[ToolOut]:
             required_grant_scope_keys=definition.required_grant_scope_keys,
             input_schema=definition.input_json_schema(),
         )
-        for definition in build_default_catalog().definitions()
+        for definition in build_default_definition_catalog().definitions()
     ]
 
 

@@ -43,6 +43,7 @@ from jhin_domain import (
     WorkspaceRole,
     new_uuid7,
 )
+from jhin_observability import noop_tracer
 from jhin_secrets import SecretCrypto, SecretStore, load_master_key
 from jhin_secrets.crypto import MasterKeyError
 
@@ -409,7 +410,7 @@ async def run() -> None:
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise SystemExit("DATABASE_URL environment variable is required")
-    engine = create_engine(database_url)
+    engine = create_engine(database_url, tracer=noop_tracer())
     session_factory = create_session_factory(engine)
     try:
         async with session_factory() as session:

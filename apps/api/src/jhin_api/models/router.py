@@ -10,7 +10,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
 
-from jhin_api.deps import AdminCtx, DbSession, SecretCryptoDep, ViewerCtx
+from jhin_api.deps import AdminCtx, DbSession, ObservabilityRuntimeDep, SecretCryptoDep, ViewerCtx
 from jhin_api.deps import client_ip_hash as ip_hash
 from jhin_api.deps import get_request_id as req_id
 from jhin_api.models import service
@@ -102,9 +102,17 @@ async def verify_provider(
     ctx: AdminCtx,
     db: DbSession,
     crypto: SecretCryptoDep,
+    runtime: ObservabilityRuntimeDep,
 ) -> ProviderVerifyResult:
     ok, detail = await service.verify_provider(
-        db, crypto, ctx, provider_id, request_id=req_id(request), ip_hash=ip_hash(request)
+        db,
+        crypto,
+        ctx,
+        provider_id,
+        runtime.metrics,
+        runtime.tracer,
+        request_id=req_id(request),
+        ip_hash=ip_hash(request),
     )
     return ProviderVerifyResult(ok=ok, detail=detail)
 

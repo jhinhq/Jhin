@@ -13,9 +13,11 @@ from jhin_connectors import (
     ConnectorRegistry,
     SecretFieldSpec,
     build_default_catalog,
+    build_default_definition_catalog,
     default_registry,
     normalize_config,
 )
+from jhin_connectors.cli.connector import CliConnector
 from jhin_connectors.example.connector import ExampleConnector
 from jhin_connectors.github.connector import GitHubConnector
 from jhin_connectors.github.manifest import GITHUB_CAPABILITIES
@@ -23,6 +25,7 @@ from jhin_connectors.linear.connector import LinearConnector
 from jhin_connectors.linear.manifest import LINEAR_MANIFEST
 from jhin_connectors.supabase.connector import SupabaseConnector
 from jhin_connectors.vercel.connector import VercelConnector
+from jhin_policy import ToolDefinition
 
 
 def _typed_manifest() -> ConnectorManifest:
@@ -390,6 +393,39 @@ def test_default_catalog_contains_builtins_and_github_tools() -> None:
         "github.workflow_run.read",
     ):
         assert expected in names
+
+
+def test_default_definition_catalog_matches_executable_definitions() -> None:
+    executable_names = tuple(
+        definition.name for definition in build_default_catalog().definitions()
+    )
+
+    definition_names = tuple(
+        definition.name for definition in build_default_definition_catalog().definitions()
+    )
+
+    assert definition_names == executable_names
+
+
+@pytest.mark.parametrize(
+    "connector",
+    [
+        GitHubConnector(),
+        CliConnector(),
+        LinearConnector(),
+        VercelConnector(),
+        SupabaseConnector(),
+        ExampleConnector(),
+    ],
+)
+def test_connectors_expose_definitions_without_executor_callables(connector: Any) -> None:
+    definitions = connector.tool_definitions()
+
+    assert definitions
+    assert all(isinstance(definition, ToolDefinition) for definition in definitions)
+    assert tuple(definition.name for definition in definitions) == tuple(
+        definition.name for definition, _executor in connector.tools()
+    )
 
 
 def test_github_risk_levels_match_plan() -> None:

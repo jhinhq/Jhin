@@ -4,16 +4,21 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from typing import cast
 
-import structlog
 from nats.errors import TimeoutError as NatsTimeoutError
 from nats.js import JetStreamContext
 from nats.js.api import AckPolicy, ConsumerConfig
 from nats.js.errors import NotFoundError
+from opentelemetry.trace import Tracer
 
 from nats.aio.msg import Msg  # isort: skip
 
-logger = structlog.stdlib.get_logger(__name__)
+from jhin_events.telemetry import MessageHandler as TelemetryMessageHandler
+from jhin_events.telemetry import NatsMessage, dispatch_or_nak
+from jhin_observability import get_logger
+
+logger = get_logger(__name__)
 
 MessageHandler = Callable[[Msg], Awaitable[None]]
 
@@ -42,12 +47,13 @@ async def ensure_pull_consumer(
                 max_deliver=max_deliver,
             ),
         )
-        logger.info("jetstream.consumer.created", stream=stream, durable=durable)
+        logger.info("jetstream.consumer_created", stream=stream, consumer=durable)
 
 
 async def run_pull_consumer(
     js: JetStreamContext,
     *,
+    tracer: Tracer,
     stream: str,
     durable: str,
     handler: MessageHandler,
@@ -62,20 +68,17 @@ async def run_pull_consumer(
     """
     await ensure_pull_consumer(js, stream=stream, durable=durable)
     subscription = await js.pull_subscribe_bind(durable, stream=stream)
-    logger.info("jetstream.consumer.loop_started", stream=stream, durable=durable)
+    logger.info("jetstream.consumer_loop_started", stream=stream, consumer=durable)
     while not stop.is_set():
         try:
             messages = await subscription.fetch(batch=batch, timeout=fetch_timeout_seconds)
         except NatsTimeoutError:
             continue
         for message in messages:
-            try:
-                await handler(message)
-            except Exception:
-                logger.exception(
-                    "jetstream.consumer.handler_error",
-                    stream=stream,
-                    durable=durable,
-                    subject=message.subject,
-                )
-                await message.nak(delay=2)
+            await dispatch_or_nak(
+                cast(NatsMessage, message),
+                stream=stream,
+                durable=durable,
+                handler=cast(TelemetryMessageHandler, handler),
+                tracer=tracer,
+            )

@@ -22,6 +22,11 @@ FAKE_SERVICES = {
         "port": "8095",
     },
 }
+EXPECTED_CONNECTOR_FAKE_BUILD = {
+    "context": str(ROOT),
+    "dockerfile": "docker/python.Dockerfile",
+    "args": {"SERVICE_PACKAGE": "jhin-tool-worker"},
+}
 
 
 def _render_compose(*files: str) -> dict[str, Any]:
@@ -49,11 +54,7 @@ def test_phase9_http_fakes_are_dev_only_healthy_and_loopback_bound() -> None:
         assert service_name not in production["services"]
 
         service = development["services"][service_name]
-        assert service["build"] == {
-            "context": str(ROOT),
-            "dockerfile": "docker/python.Dockerfile",
-            "args": {"SERVICE_PACKAGE": "jhin-agent-worker"},
-        }
+        assert service["build"] == EXPECTED_CONNECTOR_FAKE_BUILD
         assert service["command"] == ["python", "-m", expected["module"]]
         assert service["networks"] == {"data": None}
         assert service["ports"] == [
@@ -80,7 +81,7 @@ def test_phase9_http_origins_extend_existing_dev_allowlist_only() -> None:
     development = _render_compose("compose.yaml", "compose.dev.yaml")
     production = _render_compose("compose.yaml")
 
-    for service_name in ("api", "agent-worker"):
+    for service_name in ("api", "tool-worker"):
         assert (
             development["services"][service_name]["environment"][
                 "JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS"
@@ -91,6 +92,17 @@ def test_phase9_http_origins_extend_existing_dev_allowlist_only() -> None:
             "JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS"
             not in production["services"][service_name]["environment"]
         )
+    assert (
+        "JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS"
+        not in development["services"]["agent-worker"]["environment"]
+    )
+
+
+def test_connector_fakes_use_tool_worker_image_and_provider_uses_agent_image() -> None:
+    services = _render_compose("compose.yaml", "compose.dev.yaml")["services"]
+    for name in ("fake-github", "fake-linear", "fake-vercel", "fake-supabase"):
+        assert services[name]["build"]["args"]["SERVICE_PACKAGE"] == "jhin-tool-worker"
+    assert services["fake-provider"]["build"]["args"]["SERVICE_PACKAGE"] == ("jhin-agent-worker")
 
 
 def test_environment_example_documents_only_commented_http_fake_ports() -> None:

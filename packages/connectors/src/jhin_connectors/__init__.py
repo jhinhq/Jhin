@@ -49,6 +49,7 @@ from jhin_connectors.registry import (
     DEFAULT_CONNECTORS,
     ConnectorRegistry,
     build_default_catalog,
+    build_default_definition_catalog,
     default_registry,
 )
 
@@ -74,6 +75,7 @@ __all__ = [
     "WebhookSecretMode",
     "WebhookVerificationError",
     "build_default_catalog",
+    "build_default_definition_catalog",
     "default_registry",
     "normalize_config",
     "resolve_connection",

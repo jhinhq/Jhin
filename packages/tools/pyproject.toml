@@ -9,6 +9,7 @@ dependencies = [
     "jhin-db",
     "jhin-domain",
     "jhin-memory",
+    "jhin-observability",
     "jhin-policy",
     "jhin-secrets",
 ]
@@ -17,6 +18,7 @@ dependencies = [
 jhin-db = { workspace = true }
 jhin-domain = { workspace = true }
 jhin-memory = { workspace = true }
+jhin-observability = { workspace = true }
 jhin-policy = { workspace = true }
 jhin-secrets = { workspace = true }
 

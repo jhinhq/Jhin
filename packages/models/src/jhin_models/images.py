@@ -9,7 +9,7 @@ caller must pass through the safe normalizer before storing or serving.
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict
 
@@ -69,5 +69,8 @@ class ImageGenerationClient(Protocol):
 def as_image_generation_client(client: ModelClient) -> ImageGenerationClient:
     if isinstance(client, ImageGenerationClient):
         return client
+    unwrap = getattr(client, "image_generation_client", None)
+    if callable(unwrap):
+        return cast(ImageGenerationClient, unwrap())
     provider = getattr(client, "provider_name", type(client).__name__)
     raise ImageGenerationUnsupported(f"{provider}: image generation is not supported")

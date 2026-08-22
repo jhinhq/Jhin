@@ -12,10 +12,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any
 from uuid import UUID
 
 import httpx
+from opentelemetry.trace import Tracer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio import activity
@@ -51,7 +53,7 @@ from jhin_models import (
     build_model_client,
 )
 from jhin_models.factory import ProviderConfigError
-from jhin_observability import get_logger
+from jhin_observability import JhinMetrics, get_logger
 from jhin_secrets import SecretStore
 from jhin_secrets.redaction import redact_text
 from jhin_workflows.avatar_generation import (
@@ -73,9 +75,16 @@ def _default_client_factory(
     base_url: str | None,
     api_key: str | None,
     transport: httpx.AsyncBaseTransport | None = None,
+    metrics: JhinMetrics,
+    tracer: Tracer,
 ) -> ModelClient:
     return build_model_client(
-        provider_type, base_url=base_url, api_key=api_key, transport=transport
+        provider_type,
+        base_url=base_url,
+        api_key=api_key,
+        transport=transport,
+        metrics=metrics,
+        tracer=tracer,
     )
 
 
@@ -89,7 +98,11 @@ class MediaActivities:
     ) -> None:
         self._resources = resources
         self._store: MediaStore = store or PostgresMediaStore()
-        self._client_factory: ClientFactory = client_factory or _default_client_factory
+        self._client_factory: ClientFactory = client_factory or partial(
+            _default_client_factory,
+            metrics=resources.runtime.metrics,
+            tracer=resources.runtime.tracer,
+        )
 
     async def _load_generation(
         self, session: AsyncSession, workspace_id: UUID, generation_id: UUID

@@ -26,7 +26,15 @@ from jhin_api.conversations.schemas import (
     TurnIn,
     TurnOut,
 )
-from jhin_api.deps import AdminCtx, DbSession, MemberCtx, TemporalDep, ViewerCtx, get_jetstream
+from jhin_api.deps import (
+    AdminCtx,
+    DbSession,
+    MemberCtx,
+    ObservabilityRuntimeDep,
+    TemporalDep,
+    ViewerCtx,
+    get_jetstream,
+)
 from jhin_api.deps import client_ip_hash as ip_hash
 from jhin_api.deps import get_request_id as req_id
 from jhin_api.security.csrf import csrf_protect
@@ -44,14 +52,16 @@ workspace_feed_router = APIRouter(
 )
 
 
-async def get_optional_publisher(request: Request) -> EventPublisher | None:
+async def get_optional_publisher(
+    request: Request, runtime: ObservabilityRuntimeDep
+) -> EventPublisher | None:
     """Event publishing is best-effort here: the database already holds the
     fact, so an unreachable backbone must never fail a chat turn."""
     try:
         js: JetStreamContext = await get_jetstream(request)
     except HTTPException:
         return None
-    return EventPublisher(js)
+    return EventPublisher(js, tracer=runtime.tracer)
 
 
 PublisherDep = Annotated[EventPublisher | None, Depends(get_optional_publisher)]

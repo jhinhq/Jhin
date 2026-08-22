@@ -17,6 +17,7 @@ COPY apps/api/pyproject.toml apps/api/
 COPY services/workflow_worker/pyproject.toml services/workflow_worker/
 COPY services/event_worker/pyproject.toml services/event_worker/
 COPY services/agent_worker/pyproject.toml services/agent_worker/
+COPY services/tool_worker/pyproject.toml services/tool_worker/
 COPY services/sandbox_runner/pyproject.toml services/sandbox_runner/
 COPY packages/db/pyproject.toml packages/db/
 COPY packages/domain/pyproject.toml packages/domain/
@@ -53,7 +54,8 @@ RUN if [ "$INSTALL_GIT" = "1" ]; then \
         && apt-get install -y --no-install-recommends git \
         && rm -rf /var/lib/apt/lists/*; \
     fi
-RUN useradd --create-home --uid 10001 jhin
+RUN groupadd --gid 10001 jhin \
+    && useradd --create-home --uid 10001 --gid 10001 jhin
 COPY --from=builder --chown=jhin:jhin /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1

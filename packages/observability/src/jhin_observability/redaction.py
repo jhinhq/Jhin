@@ -1,0 +1,134 @@
+"""Bounded structural redaction for all JSON-v1 log values."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, MutableMapping
+from typing import Any
+from urllib.parse import urlsplit, urlunsplit
+
+from structlog.typing import EventDict, WrappedLogger
+
+LOG_SCHEMA_VERSION = 1
+REDACTED = "[REDACTED]"
+MAX_LOG_DEPTH = 8
+MAX_LOG_ITEMS = 64
+MAX_LOG_STRING = 2_000
+MAX_TRACEBACK_FRAMES = 32
+SENSITIVE_KEYS = frozenset(
+    {
+        "authorization",
+        "cookie",
+        "password",
+        "secret",
+        "token",
+        "api_key",
+        "private_key",
+        "dsn",
+        "prompt",
+        "completion",
+        "sql",
+        "tool_input",
+        "tool_output",
+        "request_body",
+        "response_body",
+        "webhook_payload",
+        "secret_env",
+    }
+)
+SENSITIVE_KEY_SUFFIXES = (
+    "_authorization",
+    "_cookie",
+    "_password",
+    "_secret",
+    "_token",
+    "_api_key",
+    "_private_key",
+    "_dsn",
+)
+
+
+def _normalize_sensitive_key_name(value: str) -> str:
+    output: list[str] = []
+    separator_pending = False
+    value_length = len(value)
+    for index, character in enumerate(value):
+        is_upper = "A" <= character <= "Z"
+        is_lower = "a" <= character <= "z"
+        is_digit = "0" <= character <= "9"
+        if not (is_upper or is_lower or is_digit):
+            separator_pending = bool(output)
+            continue
+
+        previous = value[index - 1] if index else ""
+        following = value[index + 1] if index + 1 < value_length else ""
+        word_boundary = is_upper and (
+            "a" <= previous <= "z"
+            or "0" <= previous <= "9"
+            or ("A" <= previous <= "Z" and "a" <= following <= "z")
+        )
+        if output and (separator_pending or word_boundary):
+            output.append("_")
+        output.append(chr(ord(character) + 32) if is_upper else character)
+        separator_pending = False
+    return "".join(output)
+
+
+def is_sensitive_key_name(value: object) -> bool:
+    """Return whether a string is an exact sensitive key or suffix family."""
+    if type(value) is not str:
+        return False
+    normalized = _normalize_sensitive_key_name(value)
+    return normalized in SENSITIVE_KEYS or normalized.endswith(SENSITIVE_KEY_SUFFIXES)
+
+
+def sanitize_url(value: str) -> str:
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return value[:MAX_LOG_STRING]
+    host = parsed.hostname
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    if port is not None:
+        host = f"{host}:{port}"
+    return urlunsplit((parsed.scheme, host, parsed.path, "", ""))[:MAX_LOG_STRING]
+
+
+def structural_redaction(value: object, *, _depth: int = 0) -> object:
+    if _depth >= MAX_LOG_DEPTH:
+        return "[TRUNCATED]"
+    if isinstance(value, Mapping):
+        result: dict[str, object] = {}
+        for key, item in list(value.items())[:MAX_LOG_ITEMS]:
+            try:
+                safe_key = str(key)[:128]
+            except Exception:
+                safe_key = "[UNSUPPORTED]"
+            result[safe_key] = (
+                REDACTED
+                if is_sensitive_key_name(safe_key)
+                else structural_redaction(item, _depth=_depth + 1)
+            )
+        return result
+    if isinstance(value, (list, tuple)):
+        return [structural_redaction(item, _depth=_depth + 1) for item in value[:MAX_LOG_ITEMS]]
+    if isinstance(value, str):
+        candidate = sanitize_url(value) if "://" in value else value
+        return candidate[:MAX_LOG_STRING]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    try:
+        return str(value)[:MAX_LOG_STRING]
+    except Exception:
+        return "[UNSUPPORTED]"
+
+
+def structural_redaction_processor(
+    _logger: WrappedLogger,
+    _method_name: str,
+    event_dict: MutableMapping[str, Any],
+) -> EventDict:
+    """Apply structural bounds while values are still typed objects."""
+    redacted = structural_redaction(event_dict)
+    return redacted if isinstance(redacted, dict) else {}
