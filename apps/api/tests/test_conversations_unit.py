@@ -189,7 +189,8 @@ async def test_second_turn_after_completion_starts_a_new_task(
 
     assert second.mode == "new_task"
     assert second.task.id != first.task.id
-    assert second.task.title == conversation.title
+    # Each episode is titled after its own request, not the chat's first message.
+    assert second.task.title == "Now the budget"
     assert second.task.description == "Now the budget"
     assert len(temporal.started) == 2
     assert temporal.signals == []

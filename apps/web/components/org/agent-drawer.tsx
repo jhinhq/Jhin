@@ -1,7 +1,7 @@
 "use client";
 
 /** Agent profile drawer (plan 17.5): header + Overview / Instructions /
- * Settings tabs. Later-phase tabs are visible but disabled with their phase. */
+ * Settings tabs. Memory lives on the agent profile page. */
 
 import { useMutation } from "@tanstack/react-query";
 import { MessageSquare, Pause, Play, Trash2, X } from "lucide-react";
@@ -38,7 +38,6 @@ const TABS = [
   { id: "instructions", label: "Instructions" },
   { id: "model", label: "Model" },
   { id: "tools", label: "Tools & Access" },
-  { id: "memory", label: "Memory", phase: "Phase 6" },
   { id: "settings", label: "Settings" },
 ] as const;
 
@@ -169,27 +168,19 @@ export function AgentDrawer({
                 </div>
               </div>
               <nav className="mt-4 flex gap-1 overflow-x-auto">
-                {TABS.map((entry) => {
-                  const disabled = "phase" in entry;
-                  return (
-                    <button
-                      key={entry.id}
-                      disabled={disabled}
-                      title={disabled ? `Arrives in ${entry.phase}` : undefined}
-                      onClick={() => setTab(entry.id)}
-                      className={`whitespace-nowrap rounded-t-lg border-b-2 px-2.5 pb-2 text-[13px] transition-colors ${focusRing} ${
-                        tab === entry.id
-                          ? "border-accent font-medium text-ink"
-                          : disabled
-                            ? "cursor-not-allowed border-transparent text-faint"
-                            : "border-transparent text-dim hover:text-ink"
-                      }`}
-                    >
-                      {entry.label}
-                      {disabled ? <span className="ml-1 text-xs">({entry.phase})</span> : null}
-                    </button>
-                  );
-                })}
+                {TABS.map((entry) => (
+                  <button
+                    key={entry.id}
+                    onClick={() => setTab(entry.id)}
+                    className={`whitespace-nowrap rounded-t-lg border-b-2 px-2.5 pb-2 text-[13px] transition-colors ${focusRing} ${
+                      tab === entry.id
+                        ? "border-accent font-medium text-ink"
+                        : "border-transparent text-dim hover:text-ink"
+                    }`}
+                  >
+                    {entry.label}
+                  </button>
+                ))}
               </nav>
             </header>
 
@@ -483,7 +474,7 @@ function InstructionsTab({
   return (
     <div className="space-y-3">
       <p className="text-xs text-dim">
-        The system prompt composed into every run for this agent (plan 7.2). Role, team, and
+        The system prompt composed into every run for this agent. Role, team, and
         reporting context are appended automatically at runtime.
       </p>
       <Textarea
@@ -596,7 +587,7 @@ function SettingsTab({
             ))}
           </Select>
         </Field>
-        <Field label="Manager" hint="Cycles are rejected server-side.">
+        <Field label="Manager" hint="Who this agent reports to. An agent can't report to one of its own reports.">
           <Select value={managerId} onChange={(e) => setManagerId(e.target.value)}>
             <option value="">No manager</option>
             {agents
@@ -643,7 +634,7 @@ function SettingsTab({
       </div>
       <Field
         label="Max concurrent runs"
-        hint="Additional tasks queue and start automatically when a run finishes (plan 30)."
+        hint="Additional tasks queue and start automatically when a run finishes."
       >
         <Input
           type="number"

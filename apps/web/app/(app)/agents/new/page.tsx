@@ -35,6 +35,7 @@ import { PRESET_DESCRIPTIONS, PRESET_RULES, describeRule, riskTone } from "@/lib
 import type { Agent, ApprovalPreset, AutonomyLevel } from "@/lib/types";
 import {
   AGENT_TEMPLATES,
+  applyTemplate,
   canSubmit,
   EMPTY_WIZARD,
   toCreatePayload,
@@ -80,16 +81,16 @@ function StepRail({ current, onSelect }: { current: number; onSelect: (id: numbe
   );
 }
 
-function DisabledStep({ title, phase }: { title: string; phase: string }) {
+function DisabledStep({ title }: { title: string }) {
   return (
     <div className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-line-strong bg-surface/60 px-6 py-16 text-center">
       <Lock size={18} className="text-faint" />
       <div className="flex items-center gap-2">
         <p className="text-sm font-medium">{title}</p>
-        <Badge tone="accent">Arrives in {phase}</Badge>
+        <Badge tone="accent">Coming soon</Badge>
       </div>
       <p className="max-w-sm text-sm text-dim">
-        This step is part of a later phase. The agent is created with safe defaults you can
+        This step isn&apos;t available yet. The agent is created with safe defaults you can
         change afterwards.
       </p>
     </div>
@@ -145,9 +146,9 @@ function WizardInner() {
       });
       return agent;
     },
-    onSuccess: () => {
+    onSuccess: (agent) => {
       invalidate();
-      router.push("/organization");
+      router.push(`/agents/${agent.id}`);
     },
   });
 
@@ -188,7 +189,7 @@ function WizardInner() {
       </aside>
       <div className="max-w-2xl flex-1 space-y-5">
         {stepMeta.disabledPhase ? (
-          <DisabledStep title={stepMeta.title} phase={stepMeta.disabledPhase} />
+          <DisabledStep title={stepMeta.title} />
         ) : step === 1 ? (
           <div className="space-y-4">
             <Field label="Agent name">
@@ -226,13 +227,7 @@ function WizardInner() {
                   <button
                     key={template.id}
                     type="button"
-                    onClick={() =>
-                      patch({
-                        roleTitle: template.roleTitle,
-                        systemPrompt: template.systemPrompt,
-                        name: state.name || template.name,
-                      })
-                    }
+                    onClick={() => patch(applyTemplate(state, template))}
                     className={`rounded-xl border border-line bg-raised px-2 py-2 text-xs text-dim transition-colors hover:border-accent/50 hover:text-ink ${focusRing}`}
                   >
                     {template.name}
@@ -267,7 +262,7 @@ function WizardInner() {
             </Field>
             <Field
               label="Manager"
-              hint="Creates the reporting line. The server rejects cycles."
+              hint="Who this agent reports to on the org chart."
             >
               <Select
                 value={state.managerAgentId}
@@ -340,9 +335,11 @@ function WizardInner() {
                           <Badge tone={riskTone(tool.risk)}>{tool.risk}</Badge>
                         </span>
                         <span className="mt-0.5 block text-xs text-dim">{tool.description}</span>
-                        <code className="mt-1 block font-mono text-xs text-faint">
-                          {tool.required_capability}
-                        </code>
+                        {tool.required_capability !== tool.name ? (
+                          <code className="mt-1 block font-mono text-xs text-faint">
+                            {tool.required_capability}
+                          </code>
+                        ) : null}
                       </span>
                     </label>
                   );
@@ -384,7 +381,7 @@ function WizardInner() {
             </Field>
             <Field
               label="Approval policy"
-              hint="A preset expands to explicit rules stored on the agent (plan 42)."
+              hint="A preset expands to the explicit rules below, which are stored on the agent."
             >
               <div className="grid gap-2 pt-1 sm:grid-cols-3">
                 {(["autonomous", "balanced", "restricted"] as ApprovalPreset[]).map((preset) => {
@@ -476,7 +473,7 @@ function WizardInner() {
               />
               <ReviewRow
                 label="Budget"
-                value={<span className="text-faint">unlimited · enforcement in Phase 10</span>}
+                value={<span className="text-faint">unlimited · limits coming soon</span>}
               />
             </div>
             <ErrorNote

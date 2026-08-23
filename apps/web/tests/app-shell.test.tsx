@@ -70,13 +70,20 @@ describe("SidebarNav", () => {
     expect(screen.getByTestId("nav-badge").textContent).toBe("3");
   });
 
-  it("collapses and expands the Advanced group and remembers the choice", () => {
-    renderNav("/runs");
+  it("stays collapsed on a primary page until opened", () => {
+    renderNav("/chats");
     const toggle = screen.getByRole("button", { name: /Advanced/ });
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     expect(screen.queryByRole("link", { name: "Work queue" })).toBeNull();
-
     fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(localStorage.getItem("jhin-advanced-open")).toBe("true");
+  });
+
+  it("opens automatically on an Advanced page and remembers the choice", () => {
+    renderNav("/runs");
+    const toggle = screen.getByRole("button", { name: /Advanced/ });
+    // Landing on an Advanced route reveals the group so the active item is visible.
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
     expect(localStorage.getItem("jhin-advanced-open")).toBe("true");
     for (const label of [

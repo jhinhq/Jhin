@@ -590,8 +590,15 @@ export function useDirectory(
 ) {
   return useQuery({
     queryKey: ["directory", workspaceId, params],
-    queryFn: () =>
-      api<DirectoryEntry[]>(`/api/v1/workspaces/${workspaceId}/directory`, { params }),
+    queryFn: async () => {
+      // The API pages the directory as `{items, has_more}`; callers only
+      // need the entries.
+      const page = await api<{ items: DirectoryEntry[]; has_more: boolean }>(
+        `/api/v1/workspaces/${workspaceId}/directory`,
+        { params },
+      );
+      return page.items;
+    },
     placeholderData: (previous) => previous,
     enabled,
   });

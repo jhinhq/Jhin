@@ -7,6 +7,7 @@ import type { Agent, ToolInfo } from "@/lib/types";
 import { WorkspaceProvider } from "@/lib/workspace-context";
 import {
   AGENT_TEMPLATES,
+  applyTemplate,
   canSubmit,
   EMPTY_WIZARD,
   firstInvalidStep,
@@ -67,6 +68,30 @@ describe("wizard validation", () => {
   it("only step 7 (budget) remains stubbed — tools & autonomy are live in Phase 4", () => {
     const disabled = WIZARD_STEPS.filter((s) => s.disabledPhase).map((s) => s.id);
     expect(disabled).toEqual([7]);
+  });
+});
+
+describe("applyTemplate", () => {
+  const generic = AGENT_TEMPLATES.find((t) => t.id === "generic") ?? AGENT_TEMPLATES[0];
+  const cto = AGENT_TEMPLATES[0];
+
+  it("fills an empty role title and name", () => {
+    const next = applyTemplate({ name: "", roleTitle: "" }, generic);
+    expect(next.roleTitle).toBe(generic.roleTitle);
+    expect(next.name).toBe(generic.name);
+    expect(next.systemPrompt).toBe(generic.systemPrompt);
+  });
+
+  it("keeps a role title and name the user typed", () => {
+    const next = applyTemplate({ name: "Bisby", roleTitle: "Friendly assistant" }, generic);
+    expect(next.roleTitle).toBe("Friendly assistant");
+    expect(next.name).toBe("Bisby");
+    expect(next.systemPrompt).toBe(generic.systemPrompt);
+  });
+
+  it("replaces a role title that came from another template", () => {
+    const next = applyTemplate({ name: "Bisby", roleTitle: cto.roleTitle }, generic);
+    expect(next.roleTitle).toBe(generic.roleTitle);
   });
 });
 

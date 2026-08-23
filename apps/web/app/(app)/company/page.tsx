@@ -19,7 +19,7 @@ import { TeamDialog } from "@/components/org/team-dialog";
 import { AgentCard, TeamCard, TEAM_ICONS } from "@/components/org/tree";
 import { Button, EmptyState, ErrorNote, Spinner } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
-import { useInvalidateOrg, useOrgGraph } from "@/lib/hooks";
+import { useAgentAvatarMap, useInvalidateOrg, useOrgGraph } from "@/lib/hooks";
 import { buildOrgTree, countTeamAgents, type AgentTreeNode, type TeamTreeNode } from "@/lib/org-tree";
 import type { OrgAgentNode, OrgTeamNode } from "@/lib/types";
 import { useWorkspace } from "@/lib/workspace-context";
@@ -175,7 +175,22 @@ export default function CompanyPage() {
       ),
   });
 
-  const tree = useMemo(() => (graph.data ? buildOrgTree(graph.data) : null), [graph.data]);
+  // Org-graph nodes carry no avatar; merge the directory's avatars so the
+  // outline and map show the same picture as the profile page.
+  const avatars = useAgentAvatarMap(workspaceId);
+  const tree = useMemo(
+    () =>
+      graph.data
+        ? buildOrgTree({
+            ...graph.data,
+            agents: graph.data.agents.map((agent) => ({
+              ...agent,
+              avatar_url: avatars[agent.id] ?? agent.avatar_url ?? null,
+            })),
+          })
+        : null,
+    [graph.data, avatars],
+  );
   const agentById = useMemo(() => new Map((graph.data?.agents ?? []).map((agent) => [agent.id, agent])), [graph.data]);
   const managerName = (id: string | null) => (id ? agentById.get(id)?.name : undefined);
   const managerNameFor = (agent: OrgAgentNode) => managerName(agent.manager_agent_id);

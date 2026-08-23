@@ -172,7 +172,10 @@ export function describeGrant(
     if (verb) {
       action = nouns.length ? `${verb} ${nouns.map(pluralize).join(" ")}` : verb;
     } else if (matching.length === 1 && matching[0].description) {
-      action = matching[0].description.replace(/\.$/, "").toLowerCase();
+      // Keep acronyms like UTC or ISO-8601 intact; only the sentence-initial
+      // capital is dropped so it reads as a fragment after "System:".
+      const description = matching[0].description.replace(/\.$/, "");
+      action = description.charAt(0).toLowerCase() + description.slice(1);
     } else {
       action = `${humanizeSegment(verbRaw)}${nouns.length ? ` ${nouns.join(" ")}` : ""}`;
     }

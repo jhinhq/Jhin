@@ -2,7 +2,7 @@
 
 /** Left rail: new chat, search, pinned, and recent conversations. */
 
-import { Pin, Plus, Search, SquarePen } from "lucide-react";
+import { Archive, Pin, Plus, Search, SquarePen } from "lucide-react";
 import Link from "next/link";
 import { useDeferredValue, useMemo, useState } from "react";
 import { Avatar } from "@/components/avatar";
@@ -66,10 +66,12 @@ export function ConversationRailItem({
 export function ChatRail({ selectedId }: { selectedId: string | null }) {
   const { workspace } = useWorkspace();
   const [query, setQuery] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
   const deferredQuery = useDeferredValue(query);
   const avatars = useAgentAvatarMap(workspace.workspace_id);
   const conversations = useConversations(workspace.workspace_id, {
     q: deferredQuery.trim() || undefined,
+    status: showArchived ? "archived" : undefined,
     limit: 100,
   });
 
@@ -150,10 +152,10 @@ export function ChatRail({ selectedId }: { selectedId: string | null }) {
         ) : null}
 
         {recent.length > 0 ? (
-          <section aria-label="Recent">
-            {pinned.length > 0 ? (
+          <section aria-label={showArchived ? "Archived" : "Recent"}>
+            {pinned.length > 0 || showArchived ? (
               <h2 className="px-3 pb-1 pt-2 text-[11px] font-medium uppercase tracking-wider text-faint">
-                Recent
+                {showArchived ? "Archived" : "Recent"}
               </h2>
             ) : null}
             <ul className="space-y-0.5">
@@ -173,6 +175,8 @@ export function ChatRail({ selectedId }: { selectedId: string | null }) {
           <div className="px-3 py-8 text-center text-sm text-dim">
             {query.trim() ? (
               <p>No chats match “{query.trim()}”.</p>
+            ) : showArchived ? (
+              <p>No archived chats.</p>
             ) : (
               <>
                 <p>No chats yet.</p>
@@ -186,6 +190,18 @@ export function ChatRail({ selectedId }: { selectedId: string | null }) {
             )}
           </div>
         ) : null}
+      </div>
+
+      <div className="border-t border-line px-3 py-2">
+        <button
+          type="button"
+          aria-pressed={showArchived}
+          onClick={() => setShowArchived((value) => !value)}
+          className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg px-2 text-xs text-dim hover:bg-hover hover:text-ink"
+        >
+          <Archive size={13} aria-hidden />
+          {showArchived ? "Back to recent chats" : "Show archived chats"}
+        </button>
       </div>
     </nav>
   );

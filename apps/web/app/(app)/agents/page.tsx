@@ -15,6 +15,7 @@ import {
 } from "@/components/company/agent-helpers";
 import { LoadError, Segmented } from "@/components/company/bits";
 import { useWorkingAgentIds } from "@/components/company/use-working";
+import { FirstRunSteps } from "@/components/first-run-steps";
 import { Button, EmptyState, Input, Select, Spinner } from "@/components/ui";
 import { useAgents, useTeams } from "@/lib/hooks";
 import { useWorkspace } from "@/lib/workspace-context";
@@ -69,16 +70,8 @@ export default function AgentsPage() {
         ) : agents.data.length === 0 ? (
           <EmptyState
             title="No agents yet"
-            description="Agents are the teammates that do the work. Create your first one, give it a role, and start a chat."
-            action={
-              isAdmin ? (
-                <Link href="/agents/new">
-                  <Button variant="primary">
-                    <Plus size={14} /> Create your first agent
-                  </Button>
-                </Link>
-              ) : undefined
-            }
+            description="Agents are the teammates that do the work. Connect a model, create your first agent, and start a chat."
+            action={<FirstRunSteps workspaceId={workspaceId} isAdmin={isAdmin} />}
           />
         ) : (
           <>

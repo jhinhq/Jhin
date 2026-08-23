@@ -184,6 +184,21 @@ export function toCreatePayload(state: WizardState): Record<string, unknown> {
 }
 
 /** Toggle a capability in the wizard's grant list (pure, unit-tested). */
+/** Fields a template fills in. A role title the user typed themselves is
+ * kept; only an empty one or one set by another template is replaced. */
+export function applyTemplate(
+  state: Pick<WizardState, "name" | "roleTitle">,
+  template: AgentTemplate,
+): Pick<WizardState, "name" | "roleTitle" | "systemPrompt"> {
+  const ownTitle =
+    state.roleTitle.trim() !== "" && !AGENT_TEMPLATES.some((t) => t.roleTitle === state.roleTitle);
+  return {
+    name: state.name || template.name,
+    roleTitle: ownTitle ? state.roleTitle : template.roleTitle,
+    systemPrompt: template.systemPrompt,
+  };
+}
+
 export function toggleTool(state: WizardState, toolName: string): WizardState {
   const has = state.grantToolNames.includes(toolName);
   return {

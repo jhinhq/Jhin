@@ -214,6 +214,12 @@ export function SidebarNav({ pathname, rail = false }: { pathname: string; rail?
   const attentionCount = attention.data?.counts.total ?? 0;
   const [advancedOpen, setAdvancedOpen] = useAdvancedOpen();
   const advancedActive = ADVANCED_NAV.some((item) => isActive(pathname, item.href));
+  // Landing on an Advanced page (deep link, "Open in Advanced") should reveal
+  // where you are in the sidebar instead of leaving the group collapsed.
+  useEffect(() => {
+    if (advancedActive && !advancedOpen) setAdvancedOpen(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only react to navigation
+  }, [pathname, advancedActive]);
 
   return (
     <nav aria-label="Main" className={`flex-1 overflow-y-auto py-2 ${rail ? "px-3" : "px-3"}`}>
@@ -282,8 +288,8 @@ export function SidebarNav({ pathname, rail = false }: { pathname: string; rail?
   );
 }
 
-function MobileBars({ pathname }: { pathname: string }) {
-  const { workspace } = useWorkspace();
+function MobileBars({ pathname, onSignOut }: { pathname: string; onSignOut: () => void }) {
+  const { workspace, user } = useWorkspace();
   const attention = useAttention(workspace.workspace_id);
   const attentionCount = attention.data?.counts.total ?? 0;
   const [moreOpen, setMoreOpen] = useState(false);
@@ -393,6 +399,19 @@ function MobileBars({ pathname }: { pathname: string }) {
         <div className="mt-4 flex items-center justify-between border-t border-line pt-4">
           <span className="text-sm text-dim">Theme</span>
           <ThemeToggle showLabel />
+        </div>
+        <div className="mt-3 flex items-center justify-between">
+          <span className="truncate text-sm text-dim">Signed in as {user.display_name}</span>
+          <button
+            type="button"
+            onClick={() => {
+              closeMore();
+              onSignOut();
+            }}
+            className={`inline-flex min-h-10 items-center gap-2 rounded-xl border border-line px-3 text-sm text-ink hover:bg-hover ${focusRing}`}
+          >
+            <LogOut size={15} aria-hidden /> Sign out
+          </button>
         </div>
       </Dialog>
     </>
@@ -511,7 +530,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </aside>
 
         <div className="flex min-h-screen min-w-0 flex-1 flex-col md:ml-[72px] lg:ml-[260px]">
-          <MobileBars pathname={pathname} />
+          <MobileBars pathname={pathname} onSignOut={() => logout.mutate()} />
           <main id="main" className="flex min-w-0 flex-1 flex-col pb-16 md:pb-0">
             {children}
           </main>

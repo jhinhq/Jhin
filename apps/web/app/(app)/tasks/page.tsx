@@ -62,7 +62,7 @@ function TasksPageInner() {
   return (
     <>
       <PageHeader
-        title="Tasks"
+        title="Work queue"
         description="Work you have handed to agents, tracked from start to finish"
         actions={
           can("member") ? (

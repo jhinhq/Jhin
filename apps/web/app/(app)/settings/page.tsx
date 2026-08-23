@@ -117,7 +117,7 @@ export default function SettingsPage() {
           </form>
           <p className="mt-3 text-xs text-faint">
             Slug: <code className="font-mono">{workspaceQuery.data?.slug ?? workspace.workspace_slug}</code> · Default
-            model, timezone, and other settings arrive with later phases.
+            model, timezone, and other settings are coming later.
           </p>
         </Card>
 

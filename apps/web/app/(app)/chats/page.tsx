@@ -4,13 +4,13 @@
 
 import { useMutation } from "@tanstack/react-query";
 import { Sparkles } from "lucide-react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 import { AgentPicker } from "@/components/chat/agent-picker";
 import { Composer } from "@/components/chat/composer";
+import { FirstRunSteps } from "@/components/first-run-steps";
 import { LogoMark } from "@/components/brand/logo-mark";
-import { Button, EmptyState, ErrorNote, Spinner } from "@/components/ui";
+import { EmptyState, ErrorNote, Spinner } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import { LAST_AGENT_STORAGE_KEY, STARTER_PROMPTS, newTurn } from "@/lib/chat";
 import { useAgents, useInvalidateConversations } from "@/lib/hooks";
@@ -115,16 +115,8 @@ export default function ChatsHomePage() {
         ) : activeAgents.length === 0 ? (
           <EmptyState
             title="No agents yet"
-            description="Create your first agent to start a chat. It only takes a minute."
-            action={
-              can("admin") ? (
-                <Link href="/agents/new">
-                  <Button variant="primary">Create an agent</Button>
-                </Link>
-              ) : (
-                <p className="text-xs text-faint">Ask a workspace admin to add one.</p>
-              )
-            }
+            description="Two quick steps and your first chat is ready."
+            action={<FirstRunSteps workspaceId={workspaceId} isAdmin={can("admin")} />}
           />
         ) : (
           <div className="space-y-6">

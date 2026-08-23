@@ -707,9 +707,12 @@ async def _run_turn(
         )
         mode: TurnMode = "instruction"
     else:
+        # Each work episode is titled after the message that started it, so
+        # activity and the details panel describe what was actually asked
+        # rather than repeating the chat's (first-message) title.
         task = Task(
             workspace_id=ctx.workspace_id,
-            title=conversation.title[:500],
+            title=default_title(text, agent.name)[:500],
             description=text,
             assigned_agent_id=agent.id,
             conversation_id=conversation.id,

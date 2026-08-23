@@ -182,7 +182,11 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
                     <option value="">Choose a capability…</option>
                     {toolList.map((tool) => (
                       <option key={tool.name} value={tool.name}>
-                        {tool.name} — {tool.required_capability} ({tool.risk})
+                        {tool.name}
+                        {tool.required_capability !== tool.name
+                          ? ` — ${tool.required_capability}`
+                          : ""}{" "}
+                        ({tool.risk})
                       </option>
                     ))}
                   </Select>
@@ -283,8 +287,8 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
       <section>
         <h3 className="mb-1 font-display text-base font-semibold">Approval policy</h3>
         <p className="mb-3 text-sm text-dim">
-          Presets are shortcuts — the explicit rules below are what is persisted and enforced
-          (plan 42). Autonomy: <Badge tone="neutral">{agent.autonomy_level}</Badge>
+          Presets are shortcuts — the explicit rules below are what is saved and enforced.
+          Autonomy: <Badge tone="neutral">{agent.autonomy_level}</Badge>
         </p>
         <div className="grid gap-2 sm:grid-cols-3">
           {PRESETS.map((preset) => {

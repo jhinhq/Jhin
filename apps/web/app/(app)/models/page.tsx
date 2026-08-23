@@ -123,6 +123,9 @@ export default function ModelsPage() {
                   isAdmin={isAdmin}
                   workspaceId={workspaceId}
                   profileCount={profileList.filter((p) => p.provider_id === provider.id).length}
+                  isDefaultProvider={profileList.some(
+                    (p) => p.provider_id === provider.id && p.id === defaultProfileId,
+                  )}
                   onChanged={invalidate}
                   onError={setPageError}
                 />
@@ -204,6 +207,7 @@ function ProviderCard({
   isAdmin,
   workspaceId,
   profileCount,
+  isDefaultProvider,
   onChanged,
   onError,
 }: {
@@ -211,6 +215,7 @@ function ProviderCard({
   isAdmin: boolean;
   workspaceId: string;
   profileCount: number;
+  isDefaultProvider: boolean;
   onChanged: () => void;
   onError: (message: string | null) => void;
 }) {
@@ -327,7 +332,11 @@ function ProviderCard({
             className="ml-auto"
             disabled={remove.isPending}
             onClick={() => {
-              if (window.confirm(`Delete provider “${provider.display_name}”?`)) {
+              const extra =
+                profileCount > 0
+                  ? ` This also removes its ${profileCount === 1 ? "model profile" : `${profileCount} model profiles`}${isDefaultProvider ? " and clears the workspace default" : ""}.`
+                  : "";
+              if (window.confirm(`Delete provider “${provider.display_name}”?${extra}`)) {
                 remove.mutate();
               }
             }}
@@ -437,6 +446,26 @@ function ProfileRow({
   );
 }
 
+/** Save an API key under `baseName`, picking a numbered variant when a
+ * secret with that name already exists (e.g. a provider deleted and re-added
+ * with the same display name). Users never chose the name, so a conflict
+ * should not surface as an error. */
+async function storeApiKey(workspaceId: string, baseName: string, value: string): Promise<string> {
+  for (let attempt = 1; attempt <= 20; attempt += 1) {
+    const name = attempt === 1 ? baseName : `${baseName} (${attempt})`;
+    try {
+      const secret = await api<{ id: string }>(`/api/v1/workspaces/${workspaceId}/secrets`, {
+        method: "POST",
+        body: { name, value, type: "api_key" },
+      });
+      return secret.id;
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 409) throw error;
+    }
+  }
+  throw new ApiError(409, "Too many secrets share this name. Rename the provider and try again.");
+}
+
 function ProviderDialog({
   workspaceId,
   onClose,
@@ -490,18 +519,11 @@ function ProviderDialog({
       let resolvedSecretId: string | null = null;
       if (keyMode === "new" && apiKey.trim()) {
         // Store the key in the encrypted secret store first, then reference it.
-        const secret = await api<{ id: string }>(
-          `/api/v1/workspaces/${workspaceId}/secrets`,
-          {
-            method: "POST",
-            body: {
-              name: `${displayName.trim() || type} API key`,
-              value: apiKey.trim(),
-              type: "api_key",
-            },
-          },
+        resolvedSecretId = await storeApiKey(
+          workspaceId,
+          `${displayName.trim() || type} API key`,
+          apiKey.trim(),
         );
-        resolvedSecretId = secret.id;
       } else if (keyMode === "existing" && secretId) {
         resolvedSecretId = secretId;
       }
