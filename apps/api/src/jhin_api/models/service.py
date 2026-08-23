@@ -37,14 +37,16 @@ def _profile_not_found() -> HTTPException:
 
 
 def _build_verification_client(
-    provider: ModelProvider,
+    provider_type: str,
+    base_url: str | None,
     api_key: str | None,
     metrics: JhinMetrics,
     tracer: Tracer,
 ) -> ModelClient:
+    """The single factory call site for provider checks (audited by telemetry tests)."""
     return build_model_client(
-        provider.type,
-        base_url=provider.base_url,
+        provider_type,
+        base_url=base_url,
         api_key=api_key,
         metrics=metrics,
         tracer=tracer,
@@ -217,9 +219,7 @@ async def verify_draft(
         await _validate_secret(db, ctx.workspace_id, secret_id)
         key = await SecretStore(db, crypto).reveal(ctx.workspace_id, secret_id)
     try:
-        client = build_model_client(
-            provider_type, base_url=base_url, api_key=key, metrics=metrics, tracer=tracer
-        )
+        client = _build_verification_client(provider_type, base_url, key, metrics, tracer)
     except ProviderConfigError as exc:
         return False, str(exc)
     try:
@@ -251,7 +251,9 @@ async def list_provider_models(
         api_key = await SecretStore(db, crypto).reveal(ctx.workspace_id, provider.secret_id)
 
     try:
-        client = _build_verification_client(provider, api_key, metrics, tracer)
+        client = _build_verification_client(
+            provider.type, provider.base_url, api_key, metrics, tracer
+        )
     except ProviderConfigError as exc:
         return [], str(exc)
     try:
@@ -282,7 +284,9 @@ async def verify_provider(
 
     ok, detail = True, ""
     try:
-        client = _build_verification_client(provider, api_key, metrics, tracer)
+        client = _build_verification_client(
+            provider.type, provider.base_url, api_key, metrics, tracer
+        )
     except ProviderConfigError as exc:
         ok, detail = False, str(exc)
     else:
