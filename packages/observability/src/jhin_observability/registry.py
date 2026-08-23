@@ -180,6 +180,7 @@ _SPAN_ATTRIBUTE_VALUE_DATA: dict[str, frozenset[str]] = {
             "stream",
             "verify",
             "embed",
+            "list_models",
             "issue_comment_create",
             "execute_read",
             "execute_write",

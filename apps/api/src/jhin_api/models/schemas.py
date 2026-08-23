@@ -67,6 +67,13 @@ class ProviderVerifyResult(BaseModel):
     detail: str
 
 
+class ProviderModelsResult(BaseModel):
+    """Model identifiers a provider exposes, for the profile picker."""
+
+    models: list[str]
+    detail: str | None = None
+
+
 class ModelProfileCreate(BaseModel):
     provider_id: UUID
     model_name: str = Field(min_length=1, max_length=200)

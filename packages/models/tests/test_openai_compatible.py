@@ -154,3 +154,41 @@ async def test_verify_lists_models() -> None:
     )
     assert await client.verify() == "ok: 2 models visible"
     await client.close()
+
+
+async def test_list_models_returns_sorted_unique_ids() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/models")
+        return httpx.Response(
+            200,
+            json={"data": [{"id": "gpt-b"}, {"id": "gpt-a"}, {"id": "gpt-b"}, {"object": "x"}]},
+        )
+
+    client = OpenAICompatibleClient(
+        base_url="http://fake/v1", transport=httpx.MockTransport(handler)
+    )
+    assert await client.list_models() == ["gpt-a", "gpt-b"]
+    await client.close()
+
+
+async def test_list_models_http_error_is_a_provider_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": {"message": "bad key"}})
+
+    client = OpenAICompatibleClient(
+        base_url="http://fake/v1", transport=httpx.MockTransport(handler)
+    )
+    with pytest.raises(ModelProviderError) as excinfo:
+        await client.list_models()
+    await client.close()
+    assert excinfo.value.status_code == 401
+
+
+def test_describe_error_body_extracts_provider_message() -> None:
+    from jhin_models.base import describe_error_body
+
+    body = '{"error": {"message": "You exceeded your current quota", "type": "x"}}'
+    assert describe_error_body(body) == "You exceeded your current quota"
+    assert describe_error_body("plain text") == "plain text"
+    assert describe_error_body('{"message": "nested"}') == "nested"
+    assert len(describe_error_body("x" * 900)) == 500

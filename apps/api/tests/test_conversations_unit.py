@@ -572,3 +572,28 @@ async def test_legacy_message_agent_opens_a_conversation(
     assert conversation.primary_agent_id == agent.id
     seed = await session.scalar(select(Message).where(Message.task_id == task.id))
     assert seed is not None and seed.conversation_id == conversation_id
+
+
+async def test_failed_activity_card_explains_the_run_failure(
+    session: AsyncSession, admin_ctx: WorkspaceContext, temporal: FakeTemporal, agent: Agent
+) -> None:
+    ws = admin_ctx.workspace_id
+    _conversation, turn = await start(session, admin_ctx, temporal, agent, text="Say hi")
+    task = turn.task
+    task.state = TaskState.FAILED.value
+    session.add(
+        AgentRun(
+            workspace_id=ws,
+            agent_id=agent.id,
+            task_id=task.id,
+            status=RunStatus.FAILED.value,
+            error_code="step_failed",
+            error_message="openai: HTTP 429: You exceeded your current quota",
+        )
+    )
+    await session.commit()
+
+    feed = await service.list_activity(session, ws, kinds={ActivityKind.FAILED})
+    [card] = [c for c in feed.items if c.task_id == task.id]
+    assert card.summary.endswith("openai: HTTP 429: You exceeded your current quota")
+    assert card.detail_json["error_message"].startswith("openai: HTTP 429")

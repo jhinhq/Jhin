@@ -194,6 +194,38 @@ async def delete_provider(
     await db.commit()
 
 
+async def list_provider_models(
+    db: AsyncSession,
+    crypto: SecretCrypto,
+    ctx: WorkspaceContext,
+    provider_id: UUID,
+    metrics: JhinMetrics,
+    tracer: Tracer,
+) -> tuple[list[str], str | None]:
+    """Model identifiers from the provider, or an explanation when unavailable.
+
+    Read-only: nothing is stored on the provider row. A provider that cannot
+    list models (or rejects the credentials) yields an empty list plus a
+    redacted detail so the UI can fall back to free-text entry.
+    """
+    provider = await get_provider(db, ctx.workspace_id, provider_id)
+
+    api_key: str | None = None
+    if provider.secret_id is not None:
+        api_key = await SecretStore(db, crypto).reveal(ctx.workspace_id, provider.secret_id)
+
+    try:
+        client = _build_verification_client(provider, api_key, metrics, tracer)
+    except ProviderConfigError as exc:
+        return [], str(exc)
+    try:
+        return await client.list_models(), None
+    except ModelProviderError as exc:
+        return [], redact_text(str(exc))
+    finally:
+        await client.close()
+
+
 async def verify_provider(
     db: AsyncSession,
     crypto: SecretCrypto,

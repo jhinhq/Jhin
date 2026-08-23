@@ -472,6 +472,39 @@ class InstrumentedModelClient(ModelClient):
             )
             return result
 
+    async def list_models(self) -> list[str]:
+        with _attempt_span(
+            self._tracer,
+            provider_type=self._provider_type,
+            operation="list_models",
+        ) as span:
+            try:
+                result = await self._wrapped.list_models()
+            except asyncio.CancelledError:
+                _finish_attempt(
+                    self._metrics,
+                    span,
+                    provider_type=self._provider_type,
+                    outcome="cancelled",
+                )
+                raise
+            except Exception as error:
+                _finish_attempt(
+                    self._metrics,
+                    span,
+                    provider_type=self._provider_type,
+                    outcome="failed",
+                    error=error,
+                )
+                raise
+            _finish_attempt(
+                self._metrics,
+                span,
+                provider_type=self._provider_type,
+                outcome="ok",
+            )
+            return result
+
     async def close(self) -> None:
         await self._wrapped.close()
 

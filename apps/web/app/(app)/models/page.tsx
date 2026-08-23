@@ -25,6 +25,7 @@ import {
   useInvalidateModels,
   useModelProfiles,
   useModelProviders,
+  useProviderModels,
   useSecrets,
   useWorkspaceDetail,
 } from "@/lib/hooks";
@@ -572,6 +573,7 @@ function ProfileDialog({
   const [modelName, setModelName] = useState("");
   const [inputCost, setInputCost] = useState("");
   const [outputCost, setOutputCost] = useState("");
+  const providerModels = useProviderModels(workspaceId, providerId || null);
 
   const create = useMutation({
     mutationFn: () =>
@@ -623,14 +625,31 @@ function ProfileDialog({
             placeholder="GPT-5 mini (cheap default)"
           />
         </Field>
-        <Field label="Model name" hint="The exact model identifier the provider expects.">
+        <Field
+          label="Model"
+          hint={
+            providerModels.isPending
+              ? "Loading the provider's model list…"
+              : providerModels.data && providerModels.data.models.length > 0
+                ? `${providerModels.data.models.length} models available — pick one or type an identifier.`
+                : providerModels.data?.detail
+                  ? `Couldn't list models (${providerModels.data.detail}). Type the exact identifier.`
+                  : "The exact model identifier the provider expects."
+          }
+        >
           <Input
             required
             maxLength={200}
+            list="profile-model-options"
             value={modelName}
             onChange={(e) => setModelName(e.target.value)}
             placeholder="gpt-5-mini"
           />
+          <datalist id="profile-model-options">
+            {(providerModels.data?.models ?? []).map((model) => (
+              <option key={model} value={model} />
+            ))}
+          </datalist>
         </Field>
         <div className="grid grid-cols-2 gap-3">
           <Field label="Input $ / 1M tokens">

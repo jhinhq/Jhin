@@ -71,6 +71,29 @@ from jhin_workflows.work_request_task.shared import (
     work_request_workflow_id,
 )
 
+_GENERIC_FAILURE_TEXTS = frozenset({"Activity task failed", "Child workflow execution failed"})
+
+
+def _failure_message(exc: BaseException) -> str:
+    """Human-readable failure text for run records.
+
+    Temporal wraps activity failures in an ``ActivityError`` whose own message
+    is the generic "Activity task failed"; the provider or policy error the
+    user needs lives in the cause chain (``ApplicationError.message``). Walk
+    it and keep the most specific text.
+    """
+    message = str(exc)
+    current: BaseException | None = exc
+    for _ in range(8):
+        if current is None:
+            break
+        text = getattr(current, "message", None) or str(current)
+        if text and text not in _GENERIC_FAILURE_TEXTS:
+            message = text
+        current = getattr(current, "cause", None) or current.__cause__
+    return message[:2000]
+
+
 # Queue-admission poll cadence (plan 30). finalize_run signals queued
 # workflows when a slot frees (slot_available), so this timer is only the
 # correctness backstop against missed kicks.
@@ -210,7 +233,7 @@ class AgentTaskWorkflow:
                     run_id=None,
                     status="failed",
                     error_code="snapshot_failed",
-                    error_message=str(exc)[:2000],
+                    error_message=_failure_message(exc),
                 )
                 return AgentTaskResult(run_id=None, status="failed", steps_used=0)
             if not snapshot.queued:
@@ -346,7 +369,7 @@ class AgentTaskWorkflow:
                     )
             except Exception as exc:
                 error_code = "step_failed"
-                error_message = str(exc)[:2000]
+                error_message = _failure_message(exc)
                 break
             self._steps_used += 1
             totals.steps_used = self._steps_used
@@ -371,7 +394,7 @@ class AgentTaskWorkflow:
                     await self._run_delegation(params, snapshot.run_id, request)
                 except Exception as exc:
                     error_code = "delegation_failed"
-                    error_message = str(exc)[:2000]
+                    error_message = _failure_message(exc)
                     delegation_failed = True
                     break
             if delegation_failed:
@@ -444,7 +467,7 @@ class AgentTaskWorkflow:
                     )
                 except Exception as exc:
                     error_code = "review_resolution_failed"
-                    error_message = str(exc)[:2000]
+                    error_message = _failure_message(exc)
                     break
                 if reviewed.execution_unknown_tool_call_id is not None:
                     error_code = "tool_execution_unknown"
@@ -522,7 +545,7 @@ class AgentTaskWorkflow:
                         )
                 except Exception as exc:
                     error_code = "approval_resolution_failed"
-                    error_message = str(exc)[:2000]
+                    error_message = _failure_message(exc)
                     break
                 # Approved or rejected, the loop continues: the next reason
                 # step sees the tool result or the recorded denial.

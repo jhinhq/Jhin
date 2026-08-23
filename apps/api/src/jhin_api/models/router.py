@@ -21,6 +21,7 @@ from jhin_api.models.schemas import (
     ModelProviderCreate,
     ModelProviderOut,
     ModelProviderUpdate,
+    ProviderModelsResult,
     ProviderVerifyResult,
 )
 from jhin_api.security.csrf import csrf_protect
@@ -93,6 +94,20 @@ async def delete_provider(
     await service.delete_provider(
         db, ctx, provider_id, request_id=req_id(request), ip_hash=ip_hash(request)
     )
+
+
+@providers_router.get("/{provider_id}/models")
+async def list_provider_models(
+    provider_id: UUID,
+    ctx: AdminCtx,
+    db: DbSession,
+    crypto: SecretCryptoDep,
+    runtime: ObservabilityRuntimeDep,
+) -> ProviderModelsResult:
+    models, detail = await service.list_provider_models(
+        db, crypto, ctx, provider_id, runtime.metrics, runtime.tracer
+    )
+    return ProviderModelsResult(models=models, detail=detail)
 
 
 @providers_router.post("/{provider_id}/verify")

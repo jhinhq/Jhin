@@ -26,6 +26,7 @@ from jhin_models.base import (
     ModelToolCall,
     ModelUsage,
     classify_retryable,
+    describe_error_body,
 )
 from jhin_models.embeddings import MAX_EMBEDDING_BATCH, EmbeddingResult, bound_inputs
 from jhin_models.images import DEFAULT_IMAGE_SIZE, GeneratedImage
@@ -117,8 +118,9 @@ class OpenAICompatibleClient(ModelClient):
                 f"{self.provider_name}: network error: {type(exc).__name__}", retryable=True
             ) from exc
         if response.status_code >= 400:
+            detail = describe_error_body(response.text)
             raise ModelProviderError(
-                f"{self.provider_name}: HTTP {response.status_code}: {response.text[:500]}",
+                f"{self.provider_name}: HTTP {response.status_code}: {detail}",
                 status_code=response.status_code,
                 retryable=classify_retryable(response.status_code),
             )
@@ -170,8 +172,9 @@ class OpenAICompatibleClient(ModelClient):
             async with self._client.stream("POST", "/chat/completions", json=payload) as response:
                 if response.status_code >= 400:
                     text = (await response.aread()).decode(errors="replace")
+                    detail = describe_error_body(text)
                     raise ModelProviderError(
-                        f"{self.provider_name}: HTTP {response.status_code}: {text[:500]}",
+                        f"{self.provider_name}: HTTP {response.status_code}: {detail}",
                         status_code=response.status_code,
                         retryable=classify_retryable(response.status_code),
                     )
@@ -209,6 +212,29 @@ class OpenAICompatibleClient(ModelClient):
         body = response.json()
         count = len(body.get("data") or []) if isinstance(body, dict) else 0
         return f"ok: {count} models visible"
+
+    async def list_models(self) -> list[str]:
+        """Model identifiers from ``GET /models`` (sorted, deduplicated)."""
+        try:
+            response = await self._client.get("/models")
+        except httpx.HTTPError as exc:
+            raise ModelProviderError(
+                f"{self.provider_name}: network error: {type(exc).__name__}", retryable=True
+            ) from exc
+        if response.status_code >= 400:
+            raise ModelProviderError(
+                f"{self.provider_name}: listing models failed: HTTP {response.status_code}",
+                status_code=response.status_code,
+                retryable=classify_retryable(response.status_code),
+            )
+        body = response.json()
+        rows = body.get("data") if isinstance(body, dict) else None
+        ids = {
+            str(row["id"])
+            for row in (rows or [])
+            if isinstance(row, dict) and isinstance(row.get("id"), str) and row["id"]
+        }
+        return sorted(ids)
 
     async def generate_image(
         self, prompt: str, *, model: str, size: str = DEFAULT_IMAGE_SIZE

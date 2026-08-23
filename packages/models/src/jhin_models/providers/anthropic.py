@@ -24,6 +24,7 @@ from jhin_models.base import (
     ModelToolCall,
     ModelUsage,
     classify_retryable,
+    describe_error_body,
 )
 
 ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
@@ -124,8 +125,9 @@ class AnthropicClient(ModelClient):
             ) from exc
         latency_ms = int((time.monotonic() - started) * 1000)
         if response.status_code >= 400:
+            detail = describe_error_body(response.text)
             raise ModelProviderError(
-                f"anthropic: HTTP {response.status_code}: {response.text[:500]}",
+                f"anthropic: HTTP {response.status_code}: {detail}",
                 status_code=response.status_code,
                 retryable=classify_retryable(response.status_code),
             )
@@ -165,8 +167,9 @@ class AnthropicClient(ModelClient):
             async with self._client.stream("POST", "/messages", json=payload) as response:
                 if response.status_code >= 400:
                     text = (await response.aread()).decode(errors="replace")
+                    detail = describe_error_body(text)
                     raise ModelProviderError(
-                        f"anthropic: HTTP {response.status_code}: {text[:500]}",
+                        f"anthropic: HTTP {response.status_code}: {detail}",
                         status_code=response.status_code,
                         retryable=classify_retryable(response.status_code),
                     )
@@ -203,6 +206,29 @@ class AnthropicClient(ModelClient):
         body = response.json()
         count = len(body.get("data") or []) if isinstance(body, dict) else 0
         return f"ok: {count} models visible"
+
+    async def list_models(self) -> list[str]:
+        """Model identifiers from ``GET /models`` (sorted, deduplicated)."""
+        try:
+            response = await self._client.get("/models")
+        except httpx.HTTPError as exc:
+            raise ModelProviderError(
+                f"anthropic: network error: {type(exc).__name__}", retryable=True
+            ) from exc
+        if response.status_code >= 400:
+            raise ModelProviderError(
+                f"anthropic: listing models failed: HTTP {response.status_code}",
+                status_code=response.status_code,
+                retryable=classify_retryable(response.status_code),
+            )
+        body = response.json()
+        rows = body.get("data") if isinstance(body, dict) else None
+        ids = {
+            str(row["id"])
+            for row in (rows or [])
+            if isinstance(row, dict) and isinstance(row.get("id"), str) and row["id"]
+        }
+        return sorted(ids)
 
     async def close(self) -> None:
         await self._client.aclose()

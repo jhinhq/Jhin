@@ -212,6 +212,11 @@ export interface ModelProfile {
   updated_at: string;
 }
 
+export interface ProviderModels {
+  models: string[];
+  detail: string | null;
+}
+
 export interface WorkspaceDetail extends Workspace {
   default_model_profile_id: string | null;
 }

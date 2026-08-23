@@ -108,6 +108,31 @@ def classify_retryable(status_code: int) -> bool:
     return status_code in (408, 429) or status_code >= 500
 
 
+def describe_error_body(text: str, *, limit: int = 500) -> str:
+    """Human-readable detail from a provider error body.
+
+    OpenAI-compatible and Anthropic APIs wrap failures as
+    ``{"error": {"message": ...}}``; surface that message instead of the raw
+    JSON so run records and chat transcripts read naturally. Non-JSON bodies
+    are truncated as-is.
+    """
+    import json
+
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        return text[:limit]
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict) and isinstance(error.get("message"), str):
+            return str(error["message"]).strip()[:limit]
+        if isinstance(error, str):
+            return error.strip()[:limit]
+        if isinstance(payload.get("message"), str):
+            return str(payload["message"]).strip()[:limit]
+    return text[:limit]
+
+
 class ModelClient(ABC):
     """One provider connection. Implementations must be fully async."""
 
@@ -122,6 +147,10 @@ class ModelClient(ABC):
     @abstractmethod
     async def verify(self) -> str:
         """Cheap live credential/endpoint check. Returns a human summary."""
+
+    async def list_models(self) -> list[str]:
+        """Model identifiers the provider exposes, for pickers. Optional."""
+        raise ModelProviderError(f"{type(self).__name__}: listing models is not supported")
 
     @abstractmethod
     async def close(self) -> None:

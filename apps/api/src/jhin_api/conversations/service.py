@@ -999,6 +999,28 @@ def _message_card(message: Message) -> _CardDraft:
     )
 
 
+async def _latest_run_errors(
+    db: AsyncSession, workspace_id: UUID, task_ids: list[UUID]
+) -> dict[UUID, str]:
+    """Latest non-empty run error per failed task (already redacted upstream)."""
+    if not task_ids:
+        return {}
+    rows = await db.execute(
+        select(AgentRun.task_id, AgentRun.error_message)
+        .where(
+            AgentRun.workspace_id == workspace_id,
+            AgentRun.task_id.in_(task_ids),
+            AgentRun.error_message.is_not(None),
+        )
+        .order_by(AgentRun.task_id, AgentRun.created_at)
+    )
+    latest: dict[UUID, str] = {}
+    for task_id, message in rows.all():
+        if task_id is not None and message:
+            latest[task_id] = message  # later rows overwrite: last write wins
+    return latest
+
+
 def _task_cards(task: Task) -> list[_CardDraft]:
     detail = {
         "state": task.state,
@@ -1212,6 +1234,11 @@ async def list_activity(
             | {d.target_agent_id for d in drafts if d.target_agent_id}
         ),
     )
+    failure_reasons = await _latest_run_errors(
+        db,
+        workspace_id,
+        [d.task_id for d in drafts if d.kind is ActivityKind.FAILED and d.task_id is not None],
+    )
 
     items: list[ActivityCardOut] = []
     for draft in drafts:
@@ -1222,12 +1249,19 @@ async def list_activity(
             names.get(draft.target_agent_id) if draft.target_agent_id else None
         )
         summary = draft.summary
+        detail_json = draft.detail_json or {}
         if not summary and card_task is not None:
             template = _TASK_SUMMARY_TEMPLATES.get(draft.kind, "{agent}: “{title}”.")
-            summary = _truncate(
-                template.format(agent=actor_name or "An agent", title=card_task.title),
-                SUMMARY_CHARS,
+            summary = template.format(agent=actor_name or "An agent", title=card_task.title)
+            reason = (
+                failure_reasons.get(card_task.id) if draft.kind is ActivityKind.FAILED else None
             )
+            if reason:
+                # Plain-language reason (e.g. the provider's own message) so the
+                # card explains what went wrong without opening Advanced.
+                summary = f"{summary} {reason}"
+                detail_json = {**detail_json, "error_message": reason}
+            summary = _truncate(summary, SUMMARY_CHARS)
         elif not summary:
             summary = ACTIVITY_LABELS[draft.kind]
         items.append(
@@ -1251,7 +1285,7 @@ async def list_activity(
                 work_request_id=draft.work_request_id,
                 review_id=draft.review_id,
                 summary=summary,
-                detail_json=draft.detail_json or {},
+                detail_json=detail_json,
                 created_at=draft.created_at,
             )
         )

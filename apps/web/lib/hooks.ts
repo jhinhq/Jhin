@@ -29,6 +29,7 @@ import type {
   MeResponse,
   ModelProfile,
   ModelProvider,
+  ProviderModels,
   OrgGraph,
   RunEvent,
   RunList,
@@ -132,6 +133,20 @@ export function useModelProviders(workspaceId: string) {
   return useQuery({
     queryKey: ["model-providers", workspaceId],
     queryFn: () => api<ModelProvider[]>(`/api/v1/workspaces/${workspaceId}/model-providers`),
+  });
+}
+
+/** Model identifiers a provider exposes; empty with a detail when it cannot list. */
+export function useProviderModels(workspaceId: string, providerId: string | null) {
+  return useQuery({
+    queryKey: ["provider-models", workspaceId, providerId],
+    queryFn: () =>
+      api<ProviderModels>(
+        `/api/v1/workspaces/${workspaceId}/model-providers/${providerId}/models`,
+      ),
+    enabled: providerId !== null && providerId !== "",
+    staleTime: 60_000,
+    retry: false,
   });
 }
 
