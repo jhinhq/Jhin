@@ -57,6 +57,7 @@ export default function ModelsPage() {
 
   const [providerDialog, setProviderDialog] = useState(false);
   const [profileDialog, setProfileDialog] = useState(false);
+  const [editingProfile, setEditingProfile] = useState<ModelProfile | null>(null);
   const [pageError, setPageError] = useState<string | null>(null);
 
   if (providers.isPending || profiles.isPending) {
@@ -160,6 +161,7 @@ export default function ModelsPage() {
                       workspaceId={workspaceId}
                       onChanged={invalidate}
                       onError={setPageError}
+                      onEdit={setEditingProfile}
                     />
                   ))}
                 </tbody>
@@ -181,6 +183,15 @@ export default function ModelsPage() {
           workspaceId={workspaceId}
           providers={providerList}
           onClose={() => setProfileDialog(false)}
+          onCreated={invalidate}
+        />
+      ) : null}
+      {editingProfile ? (
+        <ProfileDialog
+          workspaceId={workspaceId}
+          providers={providerList}
+          existing={editingProfile}
+          onClose={() => setEditingProfile(null)}
           onCreated={invalidate}
         />
       ) : null}
@@ -331,6 +342,7 @@ function ProfileRow({
   workspaceId,
   onChanged,
   onError,
+  onEdit,
 }: {
   profile: ModelProfile;
   provider: ModelProvider | undefined;
@@ -339,6 +351,7 @@ function ProfileRow({
   workspaceId: string;
   onChanged: () => void;
   onError: (message: string | null) => void;
+  onEdit: (profile: ModelProfile) => void;
 }) {
   const makeDefault = useMutation({
     mutationFn: () =>
@@ -380,29 +393,39 @@ function ProfileRow({
         {cost(profile.output_cost_micros_per_million)}
       </td>
       <td className="px-4 py-3">
-        {isDefault ? (
-          <Badge tone="accent">workspace default</Badge>
-        ) : isAdmin ? (
-          <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {isDefault ? (
+            <Badge tone="accent">workspace default</Badge>
+          ) : isAdmin ? (
             <Button size="sm" variant="ghost" onClick={() => makeDefault.mutate()}>
               Make default
             </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              className="text-danger"
-              onClick={() => {
-                if (window.confirm(`Delete profile “${profile.display_name}”?`)) {
-                  remove.mutate();
-                }
-              }}
-            >
-              Delete
-            </Button>
-          </div>
-        ) : (
-          <span className="text-faint">—</span>
-        )}
+          ) : null}
+          {isAdmin ? (
+            <>
+              <Button size="sm" variant="ghost" onClick={() => onEdit(profile)}>
+                Edit
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="text-danger"
+                disabled={remove.isPending}
+                onClick={() => {
+                  const note = isDefault
+                    ? " It is the workspace default; agents will have no default model until you pick another."
+                    : "";
+                  if (window.confirm(`Delete profile “${profile.display_name}”?${note}`)) {
+                    remove.mutate();
+                  }
+                }}
+              >
+                Delete
+              </Button>
+            </>
+          ) : null}
+          {!isAdmin && !isDefault ? <span className="text-faint">—</span> : null}
+        </div>
       </td>
     </tr>
   );
@@ -427,8 +450,37 @@ function ProviderDialog({
 
   const typeMeta = PROVIDER_TYPES.find((t) => t.value === type)!;
 
+  // The provider can only be saved after a live check of exactly these inputs.
+  const draftKey = JSON.stringify({ type, baseUrl: baseUrl.trim(), keyMode, apiKey, secretId });
+  const [verified, setVerified] = useState<{ key: string; detail: string } | null>(null);
+  const verifiedForCurrent = verified?.key === draftKey;
+  const test = useMutation({
+    mutationFn: () =>
+      api<{ ok: boolean; detail: string }>(
+        `/api/v1/workspaces/${workspaceId}/model-providers/verify-draft`,
+        {
+          method: "POST",
+          body: {
+            type,
+            base_url: baseUrl.trim() || null,
+            api_key: keyMode === "new" && apiKey.trim() ? apiKey.trim() : null,
+            secret_id: keyMode === "existing" && secretId ? secretId : null,
+          },
+        },
+      ),
+    onSuccess: (result) => {
+      setVerified(result.ok ? { key: draftKey, detail: result.detail } : null);
+      setTestFailure(result.ok ? null : result.detail);
+    },
+    onError: (error) => setTestFailure(errText(error, "The connection test failed.")),
+  });
+  const [testFailure, setTestFailure] = useState<string | null>(null);
+
   const create = useMutation({
     mutationFn: async () => {
+      if (!verifiedForCurrent) {
+        throw new ApiError(400, "Test the connection before saving.");
+      }
       let resolvedSecretId: string | null = null;
       if (keyMode === "new" && apiKey.trim()) {
         // Store the key in the encrypted secret store first, then reference it.
@@ -447,15 +499,23 @@ function ProviderDialog({
       } else if (keyMode === "existing" && secretId) {
         resolvedSecretId = secretId;
       }
-      return api(`/api/v1/workspaces/${workspaceId}/model-providers`, {
-        method: "POST",
-        body: {
-          type,
-          display_name: displayName.trim(),
-          base_url: baseUrl.trim() || null,
-          secret_id: resolvedSecretId,
+      const provider = await api<ModelProvider>(
+        `/api/v1/workspaces/${workspaceId}/model-providers`,
+        {
+          method: "POST",
+          body: {
+            type,
+            display_name: displayName.trim(),
+            base_url: baseUrl.trim() || null,
+            secret_id: resolvedSecretId,
+          },
         },
-      });
+      );
+      // Stamp last_verified_at on the saved row (same check that just passed).
+      await api(`/api/v1/workspaces/${workspaceId}/model-providers/${provider.id}/verify`, {
+        method: "POST",
+      }).catch(() => undefined);
+      return provider;
     },
     onSuccess: () => {
       onCreated();
@@ -543,55 +603,102 @@ function ProviderDialog({
             ) : null}
           </div>
         </Field>
+        {verifiedForCurrent ? (
+          <p
+            role="status"
+            className="flex items-start gap-2 rounded-xl border border-ok/30 bg-ok-soft px-3 py-2 text-sm text-ok"
+          >
+            <CheckCircle2 size={16} className="mt-0.5 shrink-0" aria-hidden />
+            <span>Connection verified — {verified?.detail}</span>
+          </p>
+        ) : (
+          <ErrorNote message={testFailure} />
+        )}
         <ErrorNote message={errText(create.error, "Creating the provider failed.")} />
-        <div className="flex justify-end gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
           <Button type="button" variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button type="submit" variant="primary" disabled={create.isPending}>
+          <Button
+            type="button"
+            onClick={() => {
+              setTestFailure(null);
+              test.mutate();
+            }}
+            disabled={test.isPending || (keyMode === "new" && typeMeta.needsKey && !apiKey.trim())}
+          >
+            <ShieldCheck size={13} /> {test.isPending ? "Testing…" : "Test connection"}
+          </Button>
+          <Button
+            type="submit"
+            variant="primary"
+            disabled={create.isPending || !verifiedForCurrent}
+            title={verifiedForCurrent ? undefined : "Test the connection first"}
+          >
             {create.isPending ? "Adding…" : "Add provider"}
           </Button>
         </div>
+        {!verifiedForCurrent ? (
+          <p className="text-xs text-faint">
+            Run “Test connection” with these settings to enable saving. Changing any field
+            requires a new test.
+          </p>
+        ) : null}
       </form>
     </Dialog>
   );
 }
 
+const microsToDollars = (micros: number | null) =>
+  micros === null ? "" : String(micros / 1_000_000);
+
 function ProfileDialog({
   workspaceId,
   providers,
+  existing,
   onClose,
   onCreated,
 }: {
   workspaceId: string;
   providers: ModelProvider[];
+  /** When set, the dialog edits this profile (PATCH) instead of creating one. */
+  existing?: ModelProfile;
   onClose: () => void;
   onCreated: () => void;
 }) {
-  const [providerId, setProviderId] = useState(providers[0]?.id ?? "");
-  const [displayName, setDisplayName] = useState("");
-  const [modelName, setModelName] = useState("");
-  const [inputCost, setInputCost] = useState("");
-  const [outputCost, setOutputCost] = useState("");
+  const [providerId, setProviderId] = useState(existing?.provider_id ?? providers[0]?.id ?? "");
+  const [displayName, setDisplayName] = useState(existing?.display_name ?? "");
+  const [modelName, setModelName] = useState(existing?.model_name ?? "");
+  const [inputCost, setInputCost] = useState(
+    microsToDollars(existing?.input_cost_micros_per_million ?? null),
+  );
+  const [outputCost, setOutputCost] = useState(
+    microsToDollars(existing?.output_cost_micros_per_million ?? null),
+  );
   const providerModels = useProviderModels(workspaceId, providerId || null);
 
   const create = useMutation({
     mutationFn: () =>
-      api(`/api/v1/workspaces/${workspaceId}/model-profiles`, {
-        method: "POST",
-        body: {
-          provider_id: providerId,
-          display_name: displayName.trim(),
-          model_name: modelName.trim(),
-          // UI takes $ per 1M tokens; API stores micro-dollars per 1M.
-          input_cost_micros_per_million: inputCost
-            ? Math.round(Number(inputCost) * 1_000_000)
-            : null,
-          output_cost_micros_per_million: outputCost
-            ? Math.round(Number(outputCost) * 1_000_000)
-            : null,
+      api(
+        existing
+          ? `/api/v1/workspaces/${workspaceId}/model-profiles/${existing.id}`
+          : `/api/v1/workspaces/${workspaceId}/model-profiles`,
+        {
+          method: existing ? "PATCH" : "POST",
+          body: {
+            provider_id: providerId,
+            display_name: displayName.trim(),
+            model_name: modelName.trim(),
+            // UI takes $ per 1M tokens; API stores micro-dollars per 1M.
+            input_cost_micros_per_million: inputCost
+              ? Math.round(Number(inputCost) * 1_000_000)
+              : null,
+            output_cost_micros_per_million: outputCost
+              ? Math.round(Number(outputCost) * 1_000_000)
+              : null,
+          },
         },
-      }),
+      ),
     onSuccess: () => {
       onCreated();
       onClose();
@@ -599,7 +706,7 @@ function ProfileDialog({
   });
 
   return (
-    <Dialog title="New model profile" open onClose={onClose}>
+    <Dialog title={existing ? "Edit model profile" : "New model profile"} open onClose={onClose}>
       <form
         className="space-y-4"
         onSubmit={(event) => {
@@ -673,13 +780,15 @@ function ProfileDialog({
             />
           </Field>
         </div>
-        <ErrorNote message={errText(create.error, "Creating the profile failed.")} />
+        <ErrorNote
+          message={errText(create.error, existing ? "Saving the profile failed." : "Creating the profile failed.")}
+        />
         <div className="flex justify-end gap-2">
           <Button type="button" variant="ghost" onClick={onClose}>
             Cancel
           </Button>
           <Button type="submit" variant="primary" disabled={create.isPending}>
-            {create.isPending ? "Creating…" : "Create profile"}
+            {create.isPending ? "Saving…" : existing ? "Save changes" : "Create profile"}
           </Button>
         </div>
       </form>

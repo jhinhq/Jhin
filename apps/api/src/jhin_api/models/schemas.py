@@ -67,6 +67,15 @@ class ProviderVerifyResult(BaseModel):
     detail: str
 
 
+class ProviderDraftVerify(BaseModel):
+    """Credentials to test before a provider is saved. Nothing is persisted."""
+
+    type: ModelProviderType
+    base_url: str | None = Field(default=None, max_length=500)
+    api_key: str | None = Field(default=None, max_length=4000)
+    secret_id: UUID | None = None
+
+
 class ProviderModelsResult(BaseModel):
     """Model identifiers a provider exposes, for the profile picker."""
 

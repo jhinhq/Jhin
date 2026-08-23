@@ -21,6 +21,7 @@ from jhin_api.models.schemas import (
     ModelProviderCreate,
     ModelProviderOut,
     ModelProviderUpdate,
+    ProviderDraftVerify,
     ProviderModelsResult,
     ProviderVerifyResult,
 )
@@ -94,6 +95,28 @@ async def delete_provider(
     await service.delete_provider(
         db, ctx, provider_id, request_id=req_id(request), ip_hash=ip_hash(request)
     )
+
+
+@providers_router.post("/verify-draft")
+async def verify_draft(
+    payload: ProviderDraftVerify,
+    ctx: AdminCtx,
+    db: DbSession,
+    crypto: SecretCryptoDep,
+    runtime: ObservabilityRuntimeDep,
+) -> ProviderVerifyResult:
+    ok, detail = await service.verify_draft(
+        db,
+        crypto,
+        ctx,
+        provider_type=payload.type.value,
+        base_url=payload.base_url,
+        api_key=payload.api_key,
+        secret_id=payload.secret_id,
+        metrics=runtime.metrics,
+        tracer=runtime.tracer,
+    )
+    return ProviderVerifyResult(ok=ok, detail=detail)
 
 
 @providers_router.get("/{provider_id}/models")

@@ -194,6 +194,42 @@ async def delete_provider(
     await db.commit()
 
 
+async def verify_draft(
+    db: AsyncSession,
+    crypto: SecretCrypto,
+    ctx: WorkspaceContext,
+    *,
+    provider_type: str,
+    base_url: str | None,
+    api_key: str | None,
+    secret_id: UUID | None,
+    metrics: JhinMetrics,
+    tracer: Tracer,
+) -> tuple[bool, str]:
+    """Live credential check for a provider that has not been saved yet.
+
+    The key travels only through this request; nothing is written. When
+    ``secret_id`` is given instead, the stored secret is used (workspace
+    scoped, 422 when unknown).
+    """
+    key = api_key
+    if key is None and secret_id is not None:
+        await _validate_secret(db, ctx.workspace_id, secret_id)
+        key = await SecretStore(db, crypto).reveal(ctx.workspace_id, secret_id)
+    try:
+        client = build_model_client(
+            provider_type, base_url=base_url, api_key=key, metrics=metrics, tracer=tracer
+        )
+    except ProviderConfigError as exc:
+        return False, str(exc)
+    try:
+        return True, await client.verify()
+    except ModelProviderError as exc:
+        return False, redact_text(str(exc))
+    finally:
+        await client.close()
+
+
 async def list_provider_models(
     db: AsyncSession,
     crypto: SecretCrypto,
@@ -378,14 +414,18 @@ async def delete_profile(
     in_use_by_agent = await db.scalar(
         select(Agent.id).where(Agent.model_profile_id == profile.id).limit(1)
     )
-    in_use_as_default = await db.scalar(
-        select(Workspace.id).where(Workspace.default_model_profile_id == profile.id)
-    )
-    if in_use_by_agent or in_use_as_default:
+    if in_use_by_agent:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Profile is in use by agents or as the workspace default",
+            detail="Profile is in use by agents; change their model first",
         )
+    # Deleting the workspace default simply clears the default; agents fall
+    # back to "no default" until an admin picks another profile.
+    workspace = await db.scalar(
+        select(Workspace).where(Workspace.default_model_profile_id == profile.id)
+    )
+    if workspace is not None:
+        workspace.default_model_profile_id = None
     audit.record(
         db,
         action="model_profile.deleted",
