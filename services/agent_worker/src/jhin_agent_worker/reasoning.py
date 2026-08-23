@@ -452,7 +452,10 @@ async def _load_conversation_history(
             Message.workspace_id == task.workspace_id,
             Message.task_id.in_(earlier_tasks),
             Message.visibility == MessageVisibility.VISIBLE.value,
-            Message.message_type.not_in(("tool_call", "tool_result")),
+            # Internal transcript rows and operator notices (run failures,
+            # notes) are for humans; the model only sees the dialogue.
+            Message.message_type.not_in(("tool_call", "tool_result", "error", "note")),
+            Message.sender_type != SenderType.SYSTEM.value,
         )
         .order_by(Message.created_at, Message.id)
     )
@@ -1184,9 +1187,11 @@ class AgentReasoningActivities:
                     tools=to_model_tool_schemas(params.advertised_tools),
                 )
             except ModelProviderError as error:
+                # A stable provider error class (e.g. insufficient_funds)
+                # becomes the failure type so the run record can carry it.
                 raise ApplicationError(
                     redact_text(str(error))[:2_000],
-                    type="model_provider_error",
+                    type=error.error_code or "model_provider_error",
                     non_retryable=not error.retryable,
                 ) from None
             except Exception as error:

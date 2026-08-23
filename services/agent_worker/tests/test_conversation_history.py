@@ -249,3 +249,38 @@ async def test_marker_absent_when_nothing_dropped(world: World) -> None:
         await session.commit()
         turns = await load(world, session, current)
     assert turns == [("user", "text", "short")]
+
+
+async def test_system_notices_never_reach_the_model(world: World) -> None:
+    """Run-failure notices and notes are for humans; the model sees dialogue only."""
+    async with world.session_factory() as session:
+        earlier = make_task(world, seconds=0, description="First ask")
+        current = make_task(world, seconds=100, description="Second ask")
+        session.add_all([earlier, current])
+        await session.flush()
+        failure = make_message(
+            world, earlier, seconds=2, text="Run failed: openai: HTTP 429", agent=True
+        )
+        failure.sender_type = SenderType.SYSTEM.value
+        failure.sender_id = None
+        failure.message_type = MessageType.ERROR.value
+        session.add_all(
+            [
+                make_message(world, earlier, seconds=0, text="First ask"),
+                make_message(world, earlier, seconds=1, text="On it", agent=True),
+                failure,
+                make_message(
+                    world,
+                    earlier,
+                    seconds=3,
+                    text="operator note",
+                    agent=True,
+                    message_type=MessageType.NOTE.value,
+                ),
+                make_message(world, current, seconds=100, text="Second ask"),
+            ]
+        )
+        await session.commit()
+        turns = await load(world, session, current)
+
+    assert turns == [("user", "text", "First ask"), ("agent", "text", "On it")]

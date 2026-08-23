@@ -2,7 +2,7 @@
 
 /** Thread header: agent identity, editable title, pin/archive/details. */
 
-import { Archive, ArchiveRestore, ArrowLeft, PanelRight, Pencil, Pin, PinOff } from "lucide-react";
+import { Archive, ArchiveRestore, ArrowLeft, ListChecks, PanelRight, Pencil, Pin, PinOff } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { Avatar } from "@/components/avatar";
@@ -36,6 +36,8 @@ export function ChatHeader({
   canEdit,
   detailsOpen,
   onToggleDetails,
+  detailed,
+  onToggleDetailed,
   onRename,
   onTogglePin,
   onToggleArchive,
@@ -47,6 +49,9 @@ export function ChatHeader({
   canEdit: boolean;
   detailsOpen: boolean;
   onToggleDetails: () => void;
+  /** Show routine progress chips (Started working / Finished) in the transcript. */
+  detailed: boolean;
+  onToggleDetailed: () => void;
   onRename: (title: string) => void;
   onTogglePin: () => void;
   onToggleArchive: () => void;
@@ -158,6 +163,14 @@ export function ChatHeader({
             </IconButton>
           </>
         ) : null}
+        <IconButton
+          label={detailed ? "Hide progress updates" : "Show progress updates"}
+          active={detailed}
+          aria-pressed={detailed}
+          onClick={onToggleDetailed}
+        >
+          <ListChecks size={16} aria-hidden />
+        </IconButton>
         <IconButton
           label={detailsOpen ? "Hide details" : "Show details"}
           active={detailsOpen}

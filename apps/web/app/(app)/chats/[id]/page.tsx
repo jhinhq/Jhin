@@ -12,7 +12,7 @@ import { ContextPanel } from "@/components/chat/context-panel";
 import { Transcript } from "@/components/chat/transcript";
 import { Button, Dialog, ErrorNote, Spinner } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
-import { mergeTimeline, newTurn, statusLabelFor } from "@/lib/chat";
+import { CHAT_DETAILED_STORAGE_KEY, mergeTimeline, newTurn, statusLabelFor } from "@/lib/chat";
 import {
   useConversation,
   useConversationActivity,
@@ -60,6 +60,27 @@ export default function ChatThreadPage() {
 
   const [text, setText] = useState("");
   const [detailsOpen, setDetailsOpen] = useState(false);
+  // Routine "Started working / Finished" chips are off by default; the
+  // preference is remembered per browser.
+  const [detailed, setDetailed] = useState(() => {
+    if (typeof window === "undefined") return false;
+    try {
+      return window.localStorage.getItem(CHAT_DETAILED_STORAGE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggleDetailed = () => {
+    setDetailed((current) => {
+      const next = !current;
+      try {
+        window.localStorage.setItem(CHAT_DETAILED_STORAGE_KEY, next ? "1" : "0");
+      } catch {
+        // storage unavailable: keep the in-memory value
+      }
+      return next;
+    });
+  };
   const [sendError, setSendError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [optimistic, setOptimistic] = useState<ConversationMessage[]>([]);
@@ -94,8 +115,8 @@ export default function ChatThreadPage() {
     const pending = optimistic.filter(
       (message) => !known.has(String(message.content_json.client_turn_id)),
     );
-    return mergeTimeline([...server, ...pending], activity.data?.items ?? []);
-  }, [messages.data, optimistic, activity.data]);
+    return mergeTimeline([...server, ...pending], activity.data?.items ?? [], { detailed });
+  }, [messages.data, optimistic, activity.data, detailed]);
 
   const update = useMutation({
     mutationFn: (body: ConversationUpdate) =>
@@ -253,6 +274,8 @@ export default function ChatThreadPage() {
           canEdit={canWrite}
           detailsOpen={detailsOpen}
           onToggleDetails={() => setDetailsOpen((open) => !open)}
+          detailed={detailed}
+          onToggleDetailed={toggleDetailed}
           onRename={(title) => update.mutate({ title })}
           onTogglePin={() => update.mutate({ pinned: !conversation.pinned })}
           onToggleArchive={() => update.mutate({ status: archived ? "active" : "archived" })}

@@ -167,10 +167,24 @@ export type TimelineItem =
  * non-transcript kinds are dropped; duplicate ids are collapsed. On equal
  * timestamps messages come before activity so "Started working" follows the
  * user's request. */
+/** Chips shown even when the transcript is not in detailed mode: things the
+ * reader must act on or understand, never routine progress. */
+const ESSENTIAL_ACTIVITY_KINDS: ReadonlySet<ActivityKind> = new Set<ActivityKind>([
+  "queued",
+  "failed",
+  "paused",
+  "stopped",
+  "needs_review",
+]);
+
+export const CHAT_DETAILED_STORAGE_KEY = "jhin-chat-detailed";
+
 export function mergeTimeline(
   messages: readonly ConversationMessage[],
   activity: readonly ActivityCard[],
+  options: { detailed?: boolean } = {},
 ): TimelineItem[] {
+  const detailed = options.detailed ?? true;
   const seen = new Set<string>();
   const items: TimelineItem[] = [];
   const messageIds = new Set(messages.map((message) => message.id));
@@ -184,6 +198,7 @@ export function mergeTimeline(
 
   for (const card of activity) {
     if (!TRANSCRIPT_ACTIVITY_KINDS.has(card.kind)) continue;
+    if (!detailed && !ESSENTIAL_ACTIVITY_KINDS.has(card.kind)) continue;
     if (card.id.startsWith("msg:") && messageIds.has(card.id.slice(4))) continue;
     const id = `activity:${card.id}`;
     if (seen.has(id)) continue;

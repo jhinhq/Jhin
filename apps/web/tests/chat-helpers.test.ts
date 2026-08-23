@@ -176,3 +176,33 @@ describe("rail helpers", () => {
     expect(sortByActivity([older, base])[0]).toBe(base);
   });
 });
+
+
+describe("mergeTimeline detailed mode", () => {
+  const card = (kind: ActivityCard["kind"], id: string): ActivityCard => ({
+    id,
+    kind,
+    label: kind,
+    actor_type: "agent",
+    actor_agent_id: null,
+    actor_agent_name: null,
+    target_agent_id: null,
+    target_agent_name: null,
+    task_id: null,
+    task_title: null,
+    root_task_id: null,
+    conversation_id: null,
+    approval_id: null,
+    summary: "",
+    detail_json: {},
+    created_at: "2026-08-22T10:00:00Z",
+  });
+
+  it("hides routine progress chips unless detailed, keeping essential ones", () => {
+    const activity = [card("started", "a"), card("finished", "b"), card("failed", "c"), card("needs_review", "d")];
+    const quiet = mergeTimeline([], activity, { detailed: false }).map((i) => i.id);
+    expect(quiet).toEqual(["activity:c", "activity:d"]);
+    const full = mergeTimeline([], activity, { detailed: true }).map((i) => i.id);
+    expect(full).toEqual(["activity:a", "activity:b", "activity:c", "activity:d"]);
+  });
+});
