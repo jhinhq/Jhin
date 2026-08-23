@@ -760,7 +760,20 @@ export interface Attention {
   pending_reviews?: WorkReview[];
   /** Pending reviews an AI colleague is handling; a person can step in. */
   reviews_in_progress?: WorkReview[];
-  counts: { approvals: number; failures: number; reviews?: number; reviews_in_progress?: number; total: number };
+  /** Workspace model spend crossed the budget warning threshold. */
+  budget?: {
+    monthly_budget_micros: number;
+    spent_month_micros: number;
+    percent_used: number;
+  } | null;
+  counts: {
+    approvals: number;
+    failures: number;
+    reviews?: number;
+    reviews_in_progress?: number;
+    budget_warnings?: number;
+    total: number;
+  };
 }
 
 export interface AcknowledgeFailuresResult {

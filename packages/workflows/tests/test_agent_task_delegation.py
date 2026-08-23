@@ -86,8 +86,10 @@ class Stubs:
         *,
         queued_times: int = 0,
         steps: list[StepResult] | None = None,
+        denied_message: str = "",
     ) -> None:
         self.queued_times = queued_times
+        self.denied_message = denied_message
         self.steps = steps or [StepResult(done=True)]
         self.run_id = str(uuid.uuid4())
         self.resolve_calls = 0
@@ -99,6 +101,15 @@ class Stubs:
     @activity.defn(name=ACTIVITY_RESOLVE_SNAPSHOT)
     async def resolve(self, params: AgentTaskInput) -> SnapshotResult:
         self.resolve_calls += 1
+        if self.denied_message:
+            return SnapshotResult(
+                run_id="",
+                snapshot_json="",
+                snapshot_hash="",
+                max_steps=0,
+                denied_code="budget_exceeded",
+                denied_message=self.denied_message,
+            )
         if self.resolve_calls <= self.queued_times:
             return SnapshotResult(
                 run_id="",
@@ -229,6 +240,26 @@ async def test_queued_admission_retries_until_a_slot_frees() -> None:
     # time-skipping without real waiting).
     assert stubs.resolve_calls == 3
     assert stubs.finalize_calls[-1].status == "completed"
+
+
+async def test_budget_denied_admission_fails_visibly_without_queueing() -> None:
+    message = (
+        "Bisby reached its monthly budget ($5.00) — raise it in the agent's "
+        "settings or wait for next month."
+    )
+    stubs = Stubs(denied_message=message)
+    result = await run_workflow(stubs, make_input())
+    assert result.status == "failed"
+    assert result.run_id is None
+    # Budgets are hard stops: exactly one admission attempt, no queue loop,
+    # no reasoning step, and the finalize carries the friendly message.
+    assert stubs.resolve_calls == 1
+    assert stubs.step_calls == []
+    final = stubs.finalize_calls[-1]
+    assert final.status == "failed"
+    assert final.run_id is None
+    assert final.error_code == "budget_exceeded"
+    assert final.error_message == message
 
 
 async def test_admitted_immediately_when_slot_free() -> None:

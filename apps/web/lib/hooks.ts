@@ -51,7 +51,7 @@ import type {
   WorkspaceSpend,
 } from "@/lib/types";
 
-/** Poll cadence for live task/run views until SSE lands (plan 18). */
+/** Poll cadence for live task/run views. */
 const LIVE_POLL_MS = 2000;
 
 export function useMe() {

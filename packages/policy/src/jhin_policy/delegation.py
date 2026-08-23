@@ -148,8 +148,11 @@ def evaluate_delegation(
             "no delegation grant permits this target (relationship or agent pin mismatch)",
         )
 
-    # Budget check (plan 7.5 "budget permits work"): stub until the plan-15.5
-    # budget engine lands; grants + structural guards are the live controls.
+    # Budget (plan 7.5 "budget permits work"): monthly model budgets are
+    # enforced at the run seams (jhin_db.budget — admission and each
+    # reasoning step), so a delegated child's run is already bounded there.
+    # No separate per-delegation spend cap exists; grants + structural
+    # guards are the delegation-time controls.
     return DelegationDecision(
         allowed=True, code="granted", reason="delegation permitted by capability grant"
     )

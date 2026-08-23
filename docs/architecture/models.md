@@ -104,6 +104,13 @@ cache entry.
 and all time, a per-provider breakdown, and the optional budget; the Models
 page header tile and Settings → "Model spend and budget" render it.
 
+Budgets are enforced (plan 15.5): the agent worker refuses to admit a new run
+— and stops an in-flight run before its next reasoning step — once the
+month's tracked spend meets the agent's `monthly_budget_cents` or the
+workspace's `monthly_budget_micros` (`jhin_db.budget`, error code
+`budget_exceeded`). Crossing `warning_threshold` (default 0.8) surfaces a
+budget notice on the Attention page and a `budget.warning` log event.
+
 Tracked spend is an *estimate*: it only covers runs Jhin executed and uses
 the profile's configured prices, so it undercounts anything billed outside
 Jhin (other apps on the same key, image generation, embeddings without a

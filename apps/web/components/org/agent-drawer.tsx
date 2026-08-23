@@ -23,7 +23,7 @@ import {
 } from "@/components/ui";
 import { ToolsAccessTab } from "@/components/org/tools-access-tab";
 import { api, ApiError } from "@/lib/api";
-import { parseExpertise } from "@/lib/wizard";
+import { monthlyBudgetCents, parseExpertise } from "@/lib/wizard";
 import {
   useAgent,
   useInvalidateOrg,
@@ -533,6 +533,9 @@ function SettingsTab({
   const [maxSteps, setMaxSteps] = useState(String(agent.max_steps));
   const [maxRunMinutes, setMaxRunMinutes] = useState(String(agent.max_run_minutes));
   const [maxConcurrent, setMaxConcurrent] = useState(String(agent.max_concurrent_runs));
+  const [monthlyBudget, setMonthlyBudget] = useState(
+    agent.monthly_budget_cents == null ? "" : (agent.monthly_budget_cents / 100).toFixed(2),
+  );
 
   const save = useMutation({
     mutationFn: () =>
@@ -550,6 +553,7 @@ function SettingsTab({
           max_steps: Number(maxSteps),
           max_run_minutes: Number(maxRunMinutes),
           max_concurrent_runs: Number(maxConcurrent),
+          monthly_budget_cents: monthlyBudgetCents(monthlyBudget) ?? null,
         },
       }),
     onSuccess: onSaved,
@@ -666,6 +670,19 @@ function SettingsTab({
           required
           value={maxConcurrent}
           onChange={(e) => setMaxConcurrent(e.target.value)}
+        />
+      </Field>
+      <Field
+        label="Monthly budget ($)"
+        hint="Model spend this agent may use per calendar month. New runs are blocked and in-flight runs stop once it is reached. Blank = no budget."
+      >
+        <Input
+          type="number"
+          min={0}
+          step="0.01"
+          placeholder="No budget"
+          value={monthlyBudget}
+          onChange={(e) => setMonthlyBudget(e.target.value)}
         />
       </Field>
       <ErrorNote

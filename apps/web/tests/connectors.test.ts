@@ -11,7 +11,6 @@ import {
   configFieldsForAuth,
   findAuthScheme,
   missingRequiredScopeKeys,
-  UPCOMING_CONNECTORS,
   validateConnectionForm,
   webhookPayloadUrl,
 } from "@/lib/connectors";
@@ -155,13 +154,6 @@ describe("connector scope helpers", () => {
 });
 
 describe("gallery data", () => {
-  it("lists the roadmap connectors with phases", () => {
-    const types = UPCOMING_CONNECTORS.map((c) => c.connector_type);
-    expect(types).toEqual(["http"]);
-    expect(types).not.toContain("cli"); // live since Phase 6
-    expect(UPCOMING_CONNECTORS[0].phase).toBe("Future work");
-  });
-
   it("finds auth schemes and builds webhook URLs", () => {
     expect(findAuthScheme(GITHUB, "github_app")?.label).toBe("GitHub App");
     expect(findAuthScheme(GITHUB, "nope")).toBeUndefined();

@@ -10,6 +10,7 @@ explicitly reported "pass" passes.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
@@ -22,6 +23,7 @@ from temporalio.testing import ActivityEnvironment
 
 from jhin_agent_worker.activities import AgentActivities
 from jhin_db.base import Base
+from jhin_db.budget import month_start_utc
 from jhin_db.models import Agent, AgentRun, AuditEvent, Message, RunEvent, Task, Workspace
 from jhin_domain import MessageType, RunStatus, TaskState, new_uuid7
 from jhin_observability import noop_metrics, noop_tracer
@@ -528,3 +530,110 @@ async def test_completed_runs_do_not_hold_slots(world: World) -> None:
         await ActivityEnvironment().run(
             world.activities.resolve_snapshot_activity, snapshot_input(world, world.parent_task)
         )
+
+
+# --- budget admission (plan 15.5) ---
+
+
+async def add_completed_run_with_cost(
+    world: World, agent_id: UUID, cost_micros: int, created_at: datetime | None = None
+) -> None:
+    async with world.session_factory() as session:
+        run = AgentRun(
+            workspace_id=world.workspace.id,
+            agent_id=agent_id,
+            task_id=world.parent_task.id,
+            status=RunStatus.COMPLETED.value,
+            estimated_cost_micros=cost_micros,
+        )
+        if created_at is not None:
+            run.created_at = created_at
+        session.add(run)
+        await session.commit()
+
+
+async def set_agent_budget_cents(world: World, cents: int | None) -> None:
+    async with world.session_factory() as session:
+        agent = await session.get(Agent, world.swe.id)
+        assert agent is not None
+        agent.monthly_budget_cents = cents
+        await session.commit()
+
+
+async def test_agent_budget_blocks_admission_with_friendly_message(world: World) -> None:
+    await set_agent_budget_cents(world, 500)  # $5.00
+    await add_completed_run_with_cost(world, world.swe.id, 5_000_000)
+
+    result = await ActivityEnvironment().run(
+        world.activities.resolve_snapshot_activity, snapshot_input(world, world.parent_task)
+    )
+
+    assert result.denied_code == "budget_exceeded"
+    assert result.denied_message == (
+        "SWE reached its monthly budget ($5.00) — raise it in the agent's "
+        "settings or wait for next month."
+    )
+    assert result.queued is False
+    assert result.run_id == ""
+    async with world.session_factory() as session:
+        active = list(
+            await session.scalars(
+                select(AgentRun).where(AgentRun.status == RunStatus.RUNNING.value)
+            )
+        )
+    assert active == []  # no run row was created
+
+
+async def test_agent_budget_under_budget_admits(world: World) -> None:
+    await set_agent_budget_cents(world, 500)
+    await add_completed_run_with_cost(world, world.swe.id, 4_990_000)  # $4.99 of $5.00
+
+    # Past the budget check, admission proceeds into snapshot resolution,
+    # which fails here (no model profile seeded) — proving the check passed.
+    with pytest.raises(Exception, match=r"model profile|snapshot|default"):
+        await ActivityEnvironment().run(
+            world.activities.resolve_snapshot_activity, snapshot_input(world, world.parent_task)
+        )
+
+
+async def test_workspace_budget_blocks_admission_across_agents(world: World) -> None:
+    async with world.session_factory() as session:
+        workspace = await session.get(Workspace, world.workspace.id)
+        assert workspace is not None
+        workspace.settings_json = {"budget": {"monthly_budget_micros": 1_000_000}}
+        await session.commit()
+    await add_completed_run_with_cost(world, world.cto.id, 1_500_000)  # another agent spent it
+
+    result = await ActivityEnvironment().run(
+        world.activities.resolve_snapshot_activity, snapshot_input(world, world.parent_task)
+    )
+
+    assert result.denied_code == "budget_exceeded"
+    assert result.denied_message == (
+        "This workspace reached its monthly model budget ($1.00) — raise it "
+        "in workspace Settings or wait for next month."
+    )
+
+
+async def test_budget_counts_only_the_current_calendar_month(world: World) -> None:
+    await set_agent_budget_cents(world, 500)
+    last_month = month_start_utc() - timedelta(days=1)
+    await add_completed_run_with_cost(world, world.swe.id, 9_000_000, created_at=last_month)
+
+    # Last month's spend does not count: the check passes and admission
+    # proceeds into snapshot resolution (which fails on the empty world).
+    with pytest.raises(Exception, match=r"model profile|snapshot|default"):
+        await ActivityEnvironment().run(
+            world.activities.resolve_snapshot_activity, snapshot_input(world, world.parent_task)
+        )
+
+
+async def test_zero_budget_blocks_immediately(world: World) -> None:
+    await set_agent_budget_cents(world, 0)
+
+    result = await ActivityEnvironment().run(
+        world.activities.resolve_snapshot_activity, snapshot_input(world, world.parent_task)
+    )
+
+    assert result.denied_code == "budget_exceeded"
+    assert "$0.00" in result.denied_message

@@ -19,7 +19,6 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack
 from datetime import timedelta
 from typing import Any, cast
-from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from mcp import ClientSession
@@ -27,12 +26,7 @@ from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import InitializeResult
 
-from jhin_connectors.endpoints import (
-    EndpointPolicyError,
-    _host_is_local_or_private,
-    _normalize_origin,
-    _operator_origin_set,
-)
+from jhin_connectors.endpoints import validate_public_http_url
 from jhin_connectors.mcp.manifest import (
     AUTH_BEARER,
     AUTH_HEADER,
@@ -65,33 +59,10 @@ def validate_mcp_server_url(raw: str, *, allowlist_env: str = ALLOWLIST_ENV) -> 
     localhost, private/link-local hosts, IP literals that are not global)
     needs an exact operator allow-list entry. Userinfo and fragments are
     rejected; the path and query are preserved (MCP endpoints have paths).
+    The policy itself lives in :mod:`jhin_connectors.endpoints`, shared with
+    the generic HTTP connector.
     """
-    if not isinstance(raw, str) or not raw or raw != raw.strip():
-        raise EndpointPolicyError("MCP server URL is invalid")
-    try:
-        parsed = urlsplit(raw)
-    except ValueError:
-        raise EndpointPolicyError("MCP server URL is invalid") from None
-    if parsed.fragment or parsed.username is not None or parsed.password is not None:
-        raise EndpointPolicyError("MCP server URL must not contain credentials or a fragment")
-    if parsed.scheme.lower() not in {"http", "https"} or parsed.hostname is None:
-        raise EndpointPolicyError("MCP server URL is invalid")
-    host_for_origin = parsed.hostname
-    if ":" in host_for_origin:
-        host_for_origin = f"[{host_for_origin}]"
-    try:
-        port = parsed.port
-    except ValueError:
-        raise EndpointPolicyError("MCP server URL is invalid") from None
-    origin_candidate = f"{parsed.scheme}://{host_for_origin}" + (f":{port}" if port else "")
-    scheme, host, _port, origin = _normalize_origin(origin_candidate)
-    allowed = origin in _operator_origin_set(allowlist_env) or (
-        scheme == "https" and not _host_is_local_or_private(host)
-    )
-    if not allowed:
-        raise EndpointPolicyError("MCP server URL is not allowed")
-    path = parsed.path or "/"
-    return urlunsplit((scheme, origin.split("://", 1)[1], path, parsed.query, ""))
+    return validate_public_http_url(raw, kind="MCP server URL", allowlist_env=allowlist_env)
 
 
 def validate_header_name(name: object) -> str:

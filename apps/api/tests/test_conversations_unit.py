@@ -552,6 +552,65 @@ def _failed_task(ws: UUID, agent: Agent, title: str) -> Task:
     )
 
 
+async def test_attention_includes_a_budget_notice_at_the_warning_threshold(
+    session: AsyncSession, admin_ctx: WorkspaceContext, agent: Agent
+) -> None:
+    ws = admin_ctx.workspace_id
+    workspace = await session.get(Workspace, ws)
+    assert workspace is not None
+    workspace.settings_json = {"budget": {"monthly_budget_micros": 1_000_000}}
+    carrier = _failed_task(ws, agent, "Spend carrier")
+    session.add(carrier)
+    await session.flush()
+    session.add(
+        AgentRun(
+            workspace_id=ws,
+            agent_id=agent.id,
+            task_id=carrier.id,
+            status=RunStatus.COMPLETED.value,
+            estimated_cost_micros=840_000,
+        )
+    )
+    await session.commit()
+
+    out = await service.attention(session, ws)
+    assert out.budget is not None
+    assert out.budget.percent_used == 84
+    assert out.budget.monthly_budget_micros == 1_000_000
+    assert out.budget.spent_month_micros == 840_000
+    assert out.budget.warning_threshold == 0.8
+    assert out.counts.budget_warnings == 1
+    # Informational only: the badge total counts decisions (and failures),
+    # never the budget notice.
+    assert out.counts.total == out.counts.approvals + out.counts.failures + out.counts.reviews
+
+
+async def test_attention_omits_the_budget_notice_below_threshold(
+    session: AsyncSession, admin_ctx: WorkspaceContext, agent: Agent
+) -> None:
+    ws = admin_ctx.workspace_id
+    workspace = await session.get(Workspace, ws)
+    assert workspace is not None
+    workspace.settings_json = {"budget": {"monthly_budget_micros": 1_000_000}}
+    carrier = _failed_task(ws, agent, "Cheap month")
+    session.add(carrier)
+    await session.flush()
+    session.add(
+        AgentRun(
+            workspace_id=ws,
+            agent_id=agent.id,
+            task_id=carrier.id,
+            status=RunStatus.COMPLETED.value,
+            estimated_cost_micros=500_000,
+        )
+    )
+    await session.commit()
+
+    out = await service.attention(session, ws)
+    assert out.budget is None
+    assert out.counts.budget_warnings == 0
+
+
 async def test_acknowledged_failures_leave_attention(
     session: AsyncSession, admin_ctx: WorkspaceContext, agent: Agent
 ) -> None:

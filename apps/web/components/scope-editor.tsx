@@ -19,6 +19,7 @@ const LABELS: Record<string, string> = {
   command: "Command pattern",
   image: "Image",
   network: "Network",
+  method: "Method",
   path: "Path pattern",
   tool: "Tool pattern",
 };

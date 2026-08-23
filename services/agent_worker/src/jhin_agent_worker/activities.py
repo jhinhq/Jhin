@@ -35,6 +35,7 @@ from jhin_agent_worker.reasoning import AgentReasoningActivities
 from jhin_agent_worker.resources import Resources
 from jhin_agents import resolve_snapshot
 from jhin_agents.snapshot import SnapshotError
+from jhin_db.budget import budget_denial_message
 from jhin_db.models import Agent, AgentRun, AuditEvent, Message, RunEvent, Task, Workspace
 from jhin_domain import (
     RUN_ACTIVE_STATUSES,
@@ -114,6 +115,30 @@ class AgentActivities(AgentReasoningActivities, AgentProjectionActivities):
                 .with_for_update()
             )
             queue_reason = ""
+            if agent is not None:
+                # Budget admission (plan 15.5): a spent monthly budget is a
+                # hard stop, checked before any concurrency slot is claimed.
+                # The workflow fails the task visibly — budgets never queue.
+                denial = await budget_denial_message(
+                    session,
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    agent_name=agent.name,
+                    agent_budget_cents=agent.monthly_budget_cents,
+                    workspace_settings_json=(
+                        workspace.settings_json if workspace is not None else None
+                    ),
+                )
+                if denial is not None:
+                    await session.rollback()  # release the admission row locks
+                    return SnapshotResult(
+                        run_id="",
+                        snapshot_json="",
+                        snapshot_hash="",
+                        max_steps=0,
+                        denied_code="budget_exceeded",
+                        denied_message=denial,
+                    )
             if agent is not None:
                 agent_limit = max(1, agent.max_concurrent_runs)
                 active_agent = (

@@ -217,7 +217,10 @@ freshly started local stack:
 
 ## Deferred scope
 
-Delegation budget enforcement remains deferred until the later budget engine.
-Concurrency limits for connector calls, model providers, and sandboxes also
-belong to later phases; Phase 8 admission covers agent runs and the optional
-workspace-wide run ceiling only.
+Monthly model-spend budgets are enforced at the run seams (admission and each
+reasoning step — see docs/architecture/models.md), which also bounds delegated
+work: a child task's run is admitted against the same agent and workspace
+budgets. A separate per-delegation budget (a spend cap handed down with one
+delegation) remains out of scope. Concurrency limits for connector calls,
+model providers, and sandboxes also belong to later phases; admission covers
+agent runs and the optional workspace-wide run ceiling only.

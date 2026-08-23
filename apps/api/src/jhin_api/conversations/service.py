@@ -27,6 +27,7 @@ from jhin_api.conversations.schemas import (
     ActivityListOut,
     AttentionCounts,
     AttentionOut,
+    BudgetNoticeOut,
     ConversationAgentOut,
     ConversationDetailOut,
     ConversationMessageOut,
@@ -37,6 +38,7 @@ from jhin_api.deps import WorkspaceContext
 from jhin_api.public_payloads import public_tool_payload
 from jhin_api.tasks import service as tasks_service
 from jhin_api.tasks.schemas import TaskOut
+from jhin_db.budget import month_spend_micros, workspace_budget_settings
 from jhin_db.models import (
     Agent,
     AgentRun,
@@ -48,6 +50,7 @@ from jhin_db.models import (
     User,
     WorkRequest,
     WorkReview,
+    Workspace,
 )
 from jhin_domain import (
     ACTIVITY_LABELS,
@@ -1391,11 +1394,29 @@ async def attention(db: AsyncSession, workspace_id: UUID) -> AttentionOut:
     reviews_in_progress = [
         r for r in projected_reviews if r.reviewer_type == ReviewerType.AGENT.value
     ]
+    # Workspace budget notice (plan 15.5): one lightweight card when tracked
+    # month spend crossed the warning threshold. Informational — it never
+    # bumps ``total`` (the nav badge), unlike decisions waiting on a person.
+    budget_notice: BudgetNoticeOut | None = None
+    workspace = await db.get(Workspace, workspace_id)
+    budget_micros, threshold = workspace_budget_settings(
+        workspace.settings_json if workspace is not None else None
+    )
+    if budget_micros:
+        spent = await month_spend_micros(db, workspace_id)
+        if spent >= threshold * budget_micros:
+            budget_notice = BudgetNoticeOut(
+                monthly_budget_micros=budget_micros,
+                spent_month_micros=spent,
+                percent_used=int(spent * 100 / budget_micros),
+                warning_threshold=threshold,
+            )
     counts = AttentionCounts(
         approvals=len(approvals),
         failures=len(failed),
         reviews=len(pending_reviews),
         reviews_in_progress=len(reviews_in_progress),
+        budget_warnings=1 if budget_notice is not None else 0,
         total=len(approvals) + len(failed) + len(waiting) + len(pending_reviews),
     )
     return AttentionOut(
@@ -1404,5 +1425,6 @@ async def attention(db: AsyncSession, workspace_id: UUID) -> AttentionOut:
         waiting_conversations=waiting,
         pending_reviews=pending_reviews,
         reviews_in_progress=reviews_in_progress,
+        budget=budget_notice,
         counts=counts,
     )

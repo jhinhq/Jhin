@@ -564,8 +564,8 @@ async def set_agent_status(
     request_id: UUID,
     ip_hash: str,
 ) -> Agent:
-    """Pause/resume by flipping status; run control arrives with Temporal in
-    Phase 3+."""
+    """Pause/resume by flipping status; live runs are controlled through the
+    task endpoints (pause/resume/cancel signals to the Temporal workflow)."""
     agent = await get_agent(db, ctx.workspace_id, agent_id)
     previous = agent.status
     agent.status = new_status.value

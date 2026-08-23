@@ -11,7 +11,7 @@ import ipaddress
 import os
 import re
 from dataclasses import dataclass
-from urllib.parse import parse_qsl, unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit, urlunsplit
 
 _HOST_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
 _PROJECT_REF_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
@@ -126,6 +126,52 @@ def validate_http_origin(
     if normalized in _operator_origin_set(allowlist_env):
         return normalized
     raise EndpointPolicyError("HTTP origin is not allowed")
+
+
+def validate_public_http_url(
+    raw: str,
+    *,
+    kind: str = "HTTP URL",
+    allowlist_env: str = "JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS",
+) -> str:
+    """Return a normalized absolute URL when policy allows its origin.
+
+    Public ``https`` origins are accepted as-is. Any other origin (plain
+    ``http``, localhost, private/link-local hosts, IP literals that are not
+    global) needs an exact operator allow-list entry. Userinfo and fragments
+    are rejected; the path and query are preserved (unlike
+    :func:`validate_http_origin`, which forbids paths). Shared by the MCP
+    and generic HTTP connectors.
+    """
+    if not isinstance(raw, str) or not raw or raw != raw.strip():
+        raise EndpointPolicyError(f"{kind} is invalid")
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        raise EndpointPolicyError(f"{kind} is invalid") from None
+    if parsed.fragment or parsed.username is not None or parsed.password is not None:
+        raise EndpointPolicyError(f"{kind} must not contain credentials or a fragment")
+    if parsed.scheme.lower() not in {"http", "https"} or parsed.hostname is None:
+        raise EndpointPolicyError(f"{kind} is invalid")
+    host_for_origin = parsed.hostname
+    if ":" in host_for_origin:
+        host_for_origin = f"[{host_for_origin}]"
+    try:
+        port = parsed.port
+    except ValueError:
+        raise EndpointPolicyError(f"{kind} is invalid") from None
+    origin_candidate = f"{parsed.scheme}://{host_for_origin}" + (f":{port}" if port else "")
+    try:
+        scheme, host, _port, origin = _normalize_origin(origin_candidate)
+    except EndpointPolicyError:
+        raise EndpointPolicyError(f"{kind} is invalid") from None
+    allowed = origin in _operator_origin_set(allowlist_env) or (
+        scheme == "https" and not _host_is_local_or_private(host)
+    )
+    if not allowed:
+        raise EndpointPolicyError(f"{kind} is not allowed")
+    path = parsed.path or "/"
+    return urlunsplit((scheme, origin.split("://", 1)[1], path, parsed.query, ""))
 
 
 @dataclass(frozen=True)
@@ -277,4 +323,9 @@ def validate_postgres_target(
     raise EndpointPolicyError("PostgreSQL target is not allowed")
 
 
-__all__ = ["EndpointPolicyError", "validate_http_origin", "validate_postgres_target"]
+__all__ = [
+    "EndpointPolicyError",
+    "validate_http_origin",
+    "validate_postgres_target",
+    "validate_public_http_url",
+]

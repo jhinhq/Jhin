@@ -27,7 +27,18 @@ from jhin_agent_worker.reasoning import (
     manifest_calls_from_payload,
 )
 from jhin_agent_worker.resources import Resources
-from jhin_db.models import AgentRun, Approval, Message, RunEvent, Task, ToolCall, WorkReview
+from jhin_db.budget import MICROS_PER_CENT, month_spend_micros, workspace_budget_settings
+from jhin_db.models import (
+    Agent,
+    AgentRun,
+    Approval,
+    Message,
+    RunEvent,
+    Task,
+    ToolCall,
+    WorkReview,
+    Workspace,
+)
 from jhin_domain import (
     ApprovalStatus,
     MessageVisibility,
@@ -322,7 +333,7 @@ def _final_failure_class(status: str, error_code: str | None) -> str | None:
         return None
     if error_code == "tool_execution_unknown":
         return _AGENT_EXECUTION_UNKNOWN_VALUE
-    if error_code == "max_steps_exceeded":
+    if error_code in ("max_steps_exceeded", "budget_exceeded"):
         return _AGENT_BUDGET_VALUE
     return _AGENT_INTERNAL_VALUE
 
@@ -2078,6 +2089,42 @@ class AgentProjectionActivities:
             )
         if params.run_id is not None:
             await self._kick_queued(workspace_id, freed_agent_id)
+        if params.run_id is not None and owns_run_metrics:
+            await self._emit_budget_warning(workspace_id, freed_agent_id)
+
+    async def _emit_budget_warning(self, workspace_id: UUID, agent_id: UUID | None) -> None:
+        """One registered log line when this month's tracked spend crossed a
+        budget's warning threshold (plan 15.5). Best-effort by contract: the
+        terminal projection is already committed, and the attention view
+        computes the same ratio live, so nothing durable is written here."""
+        try:
+            async with self._resources.session_factory() as session:
+                workspace = await session.get(Workspace, workspace_id)
+                budget_micros, threshold = workspace_budget_settings(
+                    workspace.settings_json if workspace is not None else None
+                )
+                if budget_micros:
+                    spent = await month_spend_micros(session, workspace_id)
+                    if spent >= threshold * budget_micros:
+                        logger.info(
+                            "budget.warning",
+                            scope="workspace",
+                            percent_used=min(int(spent * 100 / budget_micros), 10_000),
+                        )
+                agent = await session.get(Agent, agent_id) if agent_id is not None else None
+                if agent is not None and agent.monthly_budget_cents:
+                    agent_budget = agent.monthly_budget_cents * MICROS_PER_CENT
+                    spent = await month_spend_micros(session, workspace_id, agent_id=agent_id)
+                    if spent >= threshold * agent_budget:
+                        logger.info(
+                            "budget.warning",
+                            scope="agent",
+                            percent_used=min(int(spent * 100 / agent_budget), 10_000),
+                        )
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            return
 
     async def _start_memory_maintenance(
         self,

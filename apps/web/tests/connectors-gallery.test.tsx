@@ -46,12 +46,27 @@ describe("ConnectorsGallery", () => {
     expect(screen.queryByRole("button", { name: "Connect" })).toBeNull();
   });
 
-  it("shows upcoming connectors greyed out with their phase", () => {
+  it("renders only live connectors — no roadmap or coming-soon cards", () => {
     render(<ConnectorsGallery connectors={[GITHUB]} canManage onConnect={() => {}} />);
-    expect(screen.getByText("HTTP")).toBeDefined();
-    // CLI is live since Phase 6 — no longer in the upcoming list.
-    expect(screen.queryByText("CLI")).toBeNull();
-    expect(screen.getAllByText(/Future work/).length).toBe(1);
+    expect(screen.queryByText(/Future work/)).toBeNull();
+    expect(screen.queryByText(/Coming soon/)).toBeNull();
+  });
+
+  it("renders the HTTP connector as an ordinary live card", () => {
+    const http: ConnectorInfo = {
+      ...GITHUB,
+      connector_type: "http",
+      display_name: "Any HTTP API",
+      icon: "http",
+      description: "Call any HTTP API from a fixed base URL.",
+      supports_webhooks: false,
+      webhook_secret_mode: "none",
+      capabilities: ["http.get", "http.request"],
+    };
+    render(<ConnectorsGallery connectors={[http]} canManage onConnect={() => {}} />);
+    expect(screen.getByText("Any HTTP API")).toBeDefined();
+    expect(screen.getByText("live")).toBeDefined();
+    expect(screen.getByText(/2 capabilities/)).toBeDefined();
   });
 
   it("renders Linear, Vercel, and Supabase exactly once when supplied live", () => {

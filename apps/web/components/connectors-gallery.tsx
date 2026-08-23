@@ -1,18 +1,17 @@
 "use client";
 
-/** Connector gallery (plan 17.9): live connectors are actionable, upcoming
- * ones are greyed out with their arrival phase. Pure presentational so it is
+/** Connector gallery (plan 17.9). Pure presentational so it is
  * component-testable. */
 
-import { Cable, GitBranch, Plug, Terminal } from "lucide-react";
+import { Cable, GitBranch, Globe, Plug, Terminal } from "lucide-react";
 import { Badge, Button } from "@/components/ui";
-import { UPCOMING_CONNECTORS } from "@/lib/connectors";
 import type { ConnectorInfo } from "@/lib/types";
 
 function ConnectorIcon({ icon }: { icon: string }) {
   if (icon === "github") return <GitBranch size={18} />;
   if (icon === "terminal") return <Terminal size={18} />;
   if (icon === "mcp") return <Cable size={18} />;
+  if (icon === "http") return <Globe size={18} />;
   return <Plug size={18} />;
 }
 
@@ -59,26 +58,6 @@ export function ConnectorsGallery({
               </Button>
             ) : null}
           </footer>
-        </article>
-      ))}
-      {UPCOMING_CONNECTORS.map((upcoming) => (
-        <article
-          key={upcoming.connector_type}
-          data-testid={`connector-${upcoming.connector_type}`}
-          className="flex flex-col gap-3 rounded-2xl border border-dashed border-line-strong bg-surface/60 px-5 py-4"
-        >
-          <header className="flex items-center gap-3">
-            <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-raised text-faint">
-              <Plug size={18} className="text-faint" />
-            </span>
-            <div className="min-w-0">
-              <h3 className="truncate font-display text-sm font-semibold text-dim">
-                {upcoming.display_name}
-              </h3>
-            </div>
-            <Badge tone="accent">{upcoming.phase}</Badge>
-          </header>
-          <p className="text-sm leading-relaxed text-faint">{upcoming.description}</p>
         </article>
       ))}
     </div>

@@ -135,7 +135,18 @@ class AttentionCounts(BaseModel):
     reviews: int = 0
     # Reviews an AI colleague is handling; informational, never in ``total``.
     reviews_in_progress: int = 0
+    # Workspace budget warning notices; informational, never in ``total``.
+    budget_warnings: int = 0
     total: int
+
+
+class BudgetNoticeOut(BaseModel):
+    """Workspace model spend crossed the budget warning threshold (plan 15.5)."""
+
+    monthly_budget_micros: int
+    spent_month_micros: int
+    percent_used: int
+    warning_threshold: float
 
 
 class AttentionOut(BaseModel):
@@ -147,6 +158,9 @@ class AttentionOut(BaseModel):
     # Pending reviews assigned to an AI reviewer. A person can still step in
     # (``POST /reviews/{id}/decide``, admin for AI-assigned reviews).
     reviews_in_progress: list[WorkReviewOut] = Field(default_factory=list)
+    # Set once (workspace-level) when tracked model spend crossed the
+    # budget warning threshold.
+    budget: BudgetNoticeOut | None = None
     counts: AttentionCounts
 
 

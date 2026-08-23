@@ -29,6 +29,17 @@ def test_insufficient_funds_type_becomes_the_error_code() -> None:
     assert _failure_message(wrapped) == message
 
 
+def test_budget_exceeded_type_becomes_the_error_code() -> None:
+    message = (
+        "Bisby reached its monthly budget ($5.00) — raise it in the agent's "
+        "settings or wait for next month."
+    )
+    cause = ApplicationError(message, type="budget_exceeded", non_retryable=True)
+    wrapped = _activity_error(cause)
+    assert _failure_code(wrapped, "step_failed") == "budget_exceeded"
+    assert _failure_message(wrapped) == message
+
+
 def test_other_types_keep_the_default_code() -> None:
     cause = ApplicationError("openai: HTTP 500", type="model_provider_error")
     assert _failure_code(_activity_error(cause), "step_failed") == "step_failed"

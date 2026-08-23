@@ -515,6 +515,16 @@
     "docs_url": "https://neon.com/docs/ai/neon-mcp-server"
   },
   {
+    "slug": "http",
+    "name": "Any HTTP API",
+    "category": "Developer tools",
+    "icon": "globe",
+    "description": "Generic HTTP requests against any API with a fixed base URL — bearer, custom-header, or basic auth.",
+    "connector_type": "http",
+    "auth_hint": "bearer",
+    "auth_note": "Pick the auth scheme the API expects when connecting; unauthenticated APIs work too."
+  },
+  {
     "slug": "fake",
     "name": "Fake MCP (dev)",
     "category": "Developer tools",

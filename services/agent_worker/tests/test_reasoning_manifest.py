@@ -262,6 +262,66 @@ async def test_reasoning_returns_count_after_atomic_lossless_bind(
     assert world.model.requests[0].tools[0].name == "system.echo"
 
 
+async def test_budget_exhausted_stops_before_the_model_call(world: ReasoningWorld) -> None:
+    """Mid-run enforcement (plan 15.5): the reasoning activity is the seam —
+    once the month's tracked spend meets a budget, the step fails as
+    ``budget_exceeded`` before any money is spent on a model call."""
+    async with world.sessions() as session:
+        agent = await session.get(Agent, UUID(world.params.agent_id))
+        assert agent is not None
+        agent.monthly_budget_cents = 100  # $1.00
+        run = await session.get(AgentRun, world.run_id)
+        assert run is not None
+        run.estimated_cost_micros = 1_000_000
+        await session.commit()
+
+    with pytest.raises(ApplicationError) as exc_info:
+        await world.reasoning.reason_agent_step_activity(world.params)
+
+    assert exc_info.value.type == "budget_exceeded"
+    assert exc_info.value.non_retryable is True
+    assert "Reasoner reached its monthly budget ($1.00)" in str(exc_info.value)
+    assert world.model.requests == []  # the model was never called
+    assert await world.count_events("agent.step.tool_manifest") == 0
+
+
+async def test_workspace_budget_also_stops_mid_run(world: ReasoningWorld) -> None:
+    async with world.sessions() as session:
+        workspace = await session.get(Workspace, world.workspace_id)
+        assert workspace is not None
+        workspace.settings_json = {"budget": {"monthly_budget_micros": 500_000}}
+        run = await session.get(AgentRun, world.run_id)
+        assert run is not None
+        run.estimated_cost_micros = 500_000
+        await session.commit()
+
+    with pytest.raises(ApplicationError) as exc_info:
+        await world.reasoning.reason_agent_step_activity(world.params)
+
+    assert exc_info.value.type == "budget_exceeded"
+    assert "workspace reached its monthly model budget ($0.50)" in str(exc_info.value)
+    assert world.model.requests == []
+
+
+async def test_budget_stop_never_reblocks_a_recorded_step(world: ReasoningWorld) -> None:
+    """Replay safety: a step whose manifest+reasoning pair is already
+    recorded returns the recorded result even when the budget is now spent —
+    a retried/replayed activity can never be re-blocked."""
+    world.model.responses.append(two_call_response())
+    first = await world.reasoning.reason_agent_step_activity(world.params)
+
+    async with world.sessions() as session:
+        agent = await session.get(Agent, UUID(world.params.agent_id))
+        assert agent is not None
+        agent.monthly_budget_cents = 0
+        await session.commit()
+
+    replay = await world.reasoning.reason_agent_step_activity(world.params)
+
+    assert replay == first
+    assert len(world.model.requests) == 1  # no second model call either
+
+
 async def test_new_reasoning_bind_rolls_back_manifest_and_reasoning_together(
     world: ReasoningWorld,
 ) -> None:

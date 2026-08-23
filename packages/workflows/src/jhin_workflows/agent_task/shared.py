@@ -76,6 +76,11 @@ class SnapshotResult:
     # workflow parks and retries — queue, don't reject.
     queued: bool = False
     queue_reason: str = ""
+    # Budget admission (plan 15.5): when a monthly budget is already spent
+    # the activity creates no run and returns a denial. Budgets are hard
+    # stops — the workflow fails the task visibly instead of queueing.
+    denied_code: str = ""
+    denied_message: str = ""
 
 
 @dataclass

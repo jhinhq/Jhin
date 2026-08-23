@@ -186,6 +186,7 @@ export function AttentionInbox({
   const { pending_approvals, failed_tasks, waiting_conversations } = data;
   const pending_reviews = data.pending_reviews ?? [];
   const reviews_in_progress = data.reviews_in_progress ?? [];
+  const budget = data.budget ?? null;
   const [reviewing, setReviewing] = useState<WorkReview | null>(null);
   const [replying, setReplying] = useState<{ request: WorkRequest; action: "decline" | "clarify" } | null>(null);
   const empty =
@@ -195,11 +196,28 @@ export function AttentionInbox({
     workRequests.length === 0 &&
     proposedMemories.length === 0 &&
     failed_tasks.length === 0 &&
-    waiting_conversations.length === 0;
+    waiting_conversations.length === 0 &&
+    budget === null;
   if (empty) return <AttentionAllClear />;
 
   return (
     <div className="space-y-5">
+      {budget ? (
+        <SectionCard
+          title="Budget"
+          description="Model spend is approaching this month's cap."
+        >
+          <p data-testid="budget-notice" className="text-sm text-ink">
+            Model spend is at {budget.percent_used}% of this month&apos;s budget ($
+            {(budget.spent_month_micros / 1_000_000).toFixed(2)} of $
+            {(budget.monthly_budget_micros / 1_000_000).toFixed(2)}).{" "}
+            <Link href="/settings" className="text-accent underline underline-offset-2">
+              Adjust it in Settings
+            </Link>
+            .
+          </p>
+        </SectionCard>
+      ) : null}
       {pending_approvals.length > 0 ? (
         <SectionCard
           title={`Waiting for your approval (${pending_approvals.length})`}

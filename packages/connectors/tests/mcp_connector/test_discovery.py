@@ -282,7 +282,9 @@ def test_registry_ships_mcp_and_catalog_is_well_formed() -> None:
     for native in ("github", "linear", "vercel", "supabase"):
         entry = next(item for item in entries if item.slug == native)
         assert entry.connector_type == native
-    assert all(entry.mcp_url or entry.url_unverified for entry in entries)
+    # Every entry offers a way to connect: a native connector, a known MCP
+    # endpoint, or an explicitly unverified URL the user supplies.
+    assert all(entry.connector_type or entry.mcp_url or entry.url_unverified for entry in entries)
     assert all(entry.setup_note for entry in entries if entry.stdio_only)
 
 

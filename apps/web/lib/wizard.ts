@@ -29,6 +29,12 @@ export interface WizardState {
   grantScopes: Record<string, ToolScopeValues>;
   approvalPreset: ApprovalPreset;
   autonomyLevel: AutonomyLevel;
+  /** Run limits (step 7), kept as input strings for the number fields. */
+  maxSteps: string;
+  maxRunMinutes: string;
+  maxConcurrentRuns: string;
+  /** Monthly model-spend budget in dollars; blank = no budget. */
+  monthlyBudgetDollars: string;
 }
 
 export const EMPTY_WIZARD: WizardState = {
@@ -47,6 +53,10 @@ export const EMPTY_WIZARD: WizardState = {
   grantScopes: {},
   approvalPreset: "balanced",
   autonomyLevel: "supervised",
+  maxSteps: "20",
+  maxRunMinutes: "30",
+  maxConcurrentRuns: "1",
+  monthlyBudgetDollars: "",
 };
 
 /** The shape avatar the new agent will get: an explicit pick, else a
@@ -64,8 +74,6 @@ export function effectiveAvatar(
 export interface WizardStep {
   id: number;
   title: string;
-  /** Steps delivered by a later phase are visible but not editable. */
-  disabledPhase?: string;
 }
 
 export const WIZARD_STEPS: WizardStep[] = [
@@ -75,9 +83,7 @@ export const WIZARD_STEPS: WizardStep[] = [
   { id: 4, title: "Model" },
   { id: 5, title: "Tools & connections" },
   { id: 6, title: "Autonomy & approvals" },
-  // Step/time limits are editable in the agent drawer today; budget
-  // *enforcement* arrives in Phase 10.
-  { id: 7, title: "Limits & budget", disabledPhase: "Phase 10" },
+  { id: 7, title: "Limits & budget" },
   { id: 8, title: "Review" },
 ];
 
@@ -205,21 +211,60 @@ function validateInstructions(state: WizardState): string[] {
   return errors;
 }
 
+function boundedInt(raw: string, min: number, max: number): number | null {
+  if (!/^\d+$/.test(raw.trim())) return null;
+  const value = Number(raw.trim());
+  return value >= min && value <= max ? value : null;
+}
+
+export const MAX_STEPS_MAX = 500;
+export const MAX_RUN_MINUTES_MAX = 1440;
+export const MAX_CONCURRENT_RUNS_MAX = 50;
+
+/** The budget field as an integer cent amount, or null for "no budget".
+ * Returns undefined when the input is not a usable dollar amount. */
+export function monthlyBudgetCents(raw: string): number | null | undefined {
+  const trimmed = raw.trim();
+  if (trimmed === "") return null;
+  if (!/^\d+(\.\d{1,2})?$/.test(trimmed)) return undefined;
+  return Math.round(Number(trimmed) * 100);
+}
+
+export function validateLimits(state: WizardState): string[] {
+  const errors: string[] = [];
+  if (boundedInt(state.maxSteps, 1, MAX_STEPS_MAX) === null) {
+    errors.push(`Max steps must be a whole number between 1 and ${MAX_STEPS_MAX}.`);
+  }
+  if (boundedInt(state.maxRunMinutes, 1, MAX_RUN_MINUTES_MAX) === null) {
+    errors.push(`Max run minutes must be a whole number between 1 and ${MAX_RUN_MINUTES_MAX}.`);
+  }
+  if (boundedInt(state.maxConcurrentRuns, 1, MAX_CONCURRENT_RUNS_MAX) === null) {
+    errors.push(
+      `Max concurrent runs must be a whole number between 1 and ${MAX_CONCURRENT_RUNS_MAX}.`,
+    );
+  }
+  if (monthlyBudgetCents(state.monthlyBudgetDollars) === undefined) {
+    errors.push("Monthly budget must be a dollar amount (e.g. 5 or 5.50), or blank for no budget.");
+  }
+  return errors;
+}
+
 export function validateStep(step: number, state: WizardState): string[] {
   switch (step) {
     case 1:
       return validateIdentity(state);
     case 2:
       return validateInstructions(state);
+    case 7:
+      return validateLimits(state);
     default:
       return [];
   }
 }
 
-/** A step is reachable when every prior editable step validates. */
+/** A step is reachable when every prior step validates. */
 export function firstInvalidStep(state: WizardState): number | null {
   for (const step of WIZARD_STEPS) {
-    if (step.disabledPhase) continue;
     if (step.id === 8) break;
     if (validateStep(step.id, state).length > 0) return step.id;
   }
@@ -247,6 +292,10 @@ export function toCreatePayload(state: WizardState): Record<string, unknown> {
     autonomy_level: state.autonomyLevel,
     avatar_shape: avatar.shape,
     avatar_color: avatar.color,
+    max_steps: Number(state.maxSteps),
+    max_run_minutes: Number(state.maxRunMinutes),
+    max_concurrent_runs: Number(state.maxConcurrentRuns),
+    monthly_budget_cents: monthlyBudgetCents(state.monthlyBudgetDollars) ?? null,
   };
 }
 

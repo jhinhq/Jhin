@@ -66,6 +66,9 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
         "error_type": FieldKind.ERROR_TYPE,
     },
     "concurrency.kick_failed": {"error_type": FieldKind.ERROR_TYPE},
+    # Budget enforcement (plan 15.5): tracked month spend crossed a budget's
+    # warning threshold when a run finished.
+    "budget.warning": {"scope": FieldKind.ENUM, "percent_used": FieldKind.COUNT},
     # Memory release (docs/architecture/memory.md).
     "memory.retrieval_failed": {"error_type": FieldKind.ERROR_TYPE},
     "memory.embedding_failed": {
@@ -272,6 +275,7 @@ FIELD_ENUM_VALUES: dict[str, frozenset[str]] = {
     ),
 }
 EVENT_FIELD_ENUM_VALUES: dict[tuple[str, str], frozenset[str]] = {
+    ("budget.warning", "scope"): frozenset({"agent", "workspace"}),
     ("telemetry.export_failed", "error_code"): frozenset({"export_timeout", "export_failed"}),
     ("rootless_transport.failed", "error_code"): frozenset(
         {"configuration_error", "upstream_unavailable"}

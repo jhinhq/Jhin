@@ -22,6 +22,22 @@ describe("AttentionInbox", () => {
     expect(screen.queryByRole("button")).toBeNull();
   });
 
+  it("shows the budget notice when spend crosses the warning threshold", () => {
+    const data: Attention = {
+      ...empty,
+      budget: {
+        monthly_budget_micros: 1_000_000,
+        spent_month_micros: 840_000,
+        percent_used: 84,
+      },
+    };
+    render(<AttentionInbox data={data} canDecide onDecide={vi.fn()} />);
+    expect(screen.queryByTestId("attention-all-clear")).toBeNull();
+    const notice = screen.getByTestId("budget-notice");
+    expect(notice.textContent).toContain("84% of this month");
+    expect(notice.textContent).toContain("$0.84 of $1.00");
+  });
+
   it("lists approvals, failed work, and waiting chats with the right links", () => {
     const onDecide = vi.fn();
     const data: Attention = {

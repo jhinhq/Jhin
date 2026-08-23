@@ -28,6 +28,7 @@ from jhin_agents import AgentExecutionSnapshot
 from jhin_agents.context import ConversationTurn, TaskContext
 from jhin_agents.graph import NodeTransition
 from jhin_agents.runtime import estimate_cost_micros, execute_step
+from jhin_db.budget import budget_denial_message
 from jhin_db.models import Agent, AgentRun, AuditEvent, Message, RunEvent, Task, Workspace
 from jhin_domain import (
     AGENT_MESSAGE_TYPES,
@@ -1061,6 +1062,28 @@ class AgentReasoningActivities:
                 raise ApplicationError(
                     "task correlation identity is invalid",
                     type="reasoning_identity_mismatch",
+                    non_retryable=True,
+                )
+
+            # Mid-run budget stop (plan 15.5). This activity is the seam:
+            # it runs once per step, right before money is spent on a model
+            # call, and — unlike workflow code — may read Postgres. Replay
+            # safety comes from the step-pair check above: a step that
+            # already reasoned returns its recorded result and is never
+            # re-blocked, so only a fresh model call can be stopped. The
+            # completed steps' work stays; the run ends as budget_exceeded.
+            budget_stop = await budget_denial_message(
+                session,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                agent_name=agent.name,
+                agent_budget_cents=agent.monthly_budget_cents,
+                workspace_settings_json=workspace.settings_json,
+            )
+            if budget_stop is not None:
+                raise ApplicationError(
+                    budget_stop,
+                    type="budget_exceeded",
                     non_retryable=True,
                 )
 

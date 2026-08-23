@@ -1,11 +1,10 @@
 "use client";
 
-/** Agent creation wizard (plan 17.6). Steps 1-6 (identity, instructions,
- * placement, model, tools, autonomy) and 8 (review) are live; step 7
- * (budget enforcement) arrives in Phase 10. */
+/** Agent creation wizard (plan 17.6): identity, instructions, placement,
+ * model, tools, autonomy, limits & budget, and review. */
 
 import { useMutation } from "@tanstack/react-query";
-import { Check, ChevronLeft, ChevronRight, Lock } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
 import { PageBody, PageHeader } from "@/components/app-shell";
@@ -45,6 +44,7 @@ import {
   TOOL_PRESETS,
   canSubmit,
   EMPTY_WIZARD,
+  monthlyBudgetCents,
   toCreatePayload,
   grantPayloadsForTools,
   parseExpertise,
@@ -60,7 +60,6 @@ function StepRail({ current, onSelect }: { current: number; onSelect: (id: numbe
     <ol className="space-y-1">
       {WIZARD_STEPS.map((step) => {
         const active = step.id === current;
-        const disabled = Boolean(step.disabledPhase);
         return (
           <li key={step.id}>
             <button
@@ -80,28 +79,11 @@ function StepRail({ current, onSelect }: { current: number; onSelect: (id: numbe
                 {step.id}
               </span>
               <span className="flex-1 truncate">{step.title}</span>
-              {disabled ? <Lock size={11} className="shrink-0 text-faint" /> : null}
             </button>
           </li>
         );
       })}
     </ol>
-  );
-}
-
-function DisabledStep({ title }: { title: string }) {
-  return (
-    <div className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-line-strong bg-surface/60 px-6 py-16 text-center">
-      <Lock size={18} className="text-faint" />
-      <div className="flex items-center gap-2">
-        <p className="text-sm font-medium">{title}</p>
-        <Badge tone="accent">Coming soon</Badge>
-      </div>
-      <p className="max-w-sm text-sm text-dim">
-        This step isn&apos;t available yet. The agent is created with safe defaults you can
-        change afterwards.
-      </p>
-    </div>
   );
 }
 
@@ -170,7 +152,6 @@ function WizardInner() {
 
   const teams = graph.data.teams;
   const agents = graph.data.agents;
-  const stepMeta = WIZARD_STEPS.find((s) => s.id === step)!;
   const errors = attempted ? validateStep(step, state) : [];
   const team = teams.find((t) => t.id === state.teamId);
   const manager = agents.find((a) => a.id === state.managerAgentId);
@@ -198,9 +179,7 @@ function WizardInner() {
         <StepRail current={step} onSelect={setStep} />
       </aside>
       <div className="max-w-2xl flex-1 space-y-5">
-        {stepMeta.disabledPhase ? (
-          <DisabledStep title={stepMeta.title} />
-        ) : step === 1 ? (
+        {step === 1 ? (
           <div className="space-y-4">
             <Field label="Agent name">
               <Input
@@ -534,6 +513,54 @@ function WizardInner() {
               </ul>
             </div>
           </div>
+        ) : step === 7 ? (
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <Field label="Max steps" hint="Model steps per run.">
+                <Input
+                  type="number"
+                  min={1}
+                  max={500}
+                  required
+                  value={state.maxSteps}
+                  onChange={(e) => patch({ maxSteps: e.target.value })}
+                />
+              </Field>
+              <Field label="Max run minutes" hint="Wall-clock cap per run.">
+                <Input
+                  type="number"
+                  min={1}
+                  max={1440}
+                  required
+                  value={state.maxRunMinutes}
+                  onChange={(e) => patch({ maxRunMinutes: e.target.value })}
+                />
+              </Field>
+              <Field label="Max concurrent runs" hint="Extra tasks queue until a run finishes.">
+                <Input
+                  type="number"
+                  min={1}
+                  max={50}
+                  required
+                  value={state.maxConcurrentRuns}
+                  onChange={(e) => patch({ maxConcurrentRuns: e.target.value })}
+                />
+              </Field>
+            </div>
+            <Field
+              label="Monthly budget ($)"
+              hint="Model spend this agent may use per calendar month. New runs are blocked and in-flight runs stop once the budget is reached. Blank = no budget."
+            >
+              <Input
+                type="number"
+                min={0}
+                step="0.01"
+                placeholder="No budget"
+                value={state.monthlyBudgetDollars}
+                onChange={(e) => patch({ monthlyBudgetDollars: e.target.value })}
+              />
+            </Field>
+          </div>
         ) : (
           <div className="space-y-4">
             <div className="rounded-2xl border border-line bg-surface px-5 py-2 shadow-card">
@@ -612,8 +639,18 @@ function WizardInner() {
                 value={<span className="capitalize">{state.approvalPreset}</span>}
               />
               <ReviewRow
+                label="Limits"
+                value={`${state.maxSteps} steps · ${state.maxRunMinutes} min · ${state.maxConcurrentRuns} concurrent`}
+              />
+              <ReviewRow
                 label="Budget"
-                value={<span className="text-faint">unlimited · limits coming soon</span>}
+                value={
+                  typeof monthlyBudgetCents(state.monthlyBudgetDollars) === "number" ? (
+                    `$${((monthlyBudgetCents(state.monthlyBudgetDollars) as number) / 100).toFixed(2)} / month`
+                  ) : (
+                    <span className="text-faint">no budget</span>
+                  )
+                }
               />
             </div>
             <ErrorNote

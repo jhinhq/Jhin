@@ -69,7 +69,7 @@ NATS `INGRESS` stream (`jhin.v1.<ws>.ingress.<type>.<event>`). The event
 worker's `IngressNormalizer` then calls `normalize_event` and publishes
 canonical events (`jhin.v1.<ws>.connector.<type>.…`) to the `EVENTS` stream
 with deterministic derived event ids, keeping the whole pipeline idempotent.
-The trigger engine that reacts to these events arrives in Phase 7.
+The trigger engine (see the Triggers page) reacts to these canonical events.
 
 ## Adding a connector
 

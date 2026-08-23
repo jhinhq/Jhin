@@ -2,7 +2,7 @@
 
 /** Task detail (plan 17.7 minimal): timeline + conversation + cost, with
  * pause/resume/cancel and mid-run instructions. Polls while the task is
- * active; SSE replaces polling in a later phase (plan 18). */
+ * active. */
 
 import { useMutation } from "@tanstack/react-query";
 import {

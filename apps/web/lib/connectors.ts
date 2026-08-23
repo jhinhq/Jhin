@@ -5,23 +5,6 @@
 
 import type { AuthSchemeSpec, ConfigFieldSpec, ConnectorInfo, ToolInfo } from "@/lib/types";
 
-/** Connectors on the roadmap, shown greyed-out in the gallery. */
-export interface UpcomingConnector {
-  connector_type: string;
-  display_name: string;
-  description: string;
-  phase: string;
-}
-
-export const UPCOMING_CONNECTORS: UpcomingConnector[] = [
-  {
-    connector_type: "http",
-    display_name: "HTTP",
-    description: "Generic authenticated HTTP requests.",
-    phase: "Future work",
-  },
-];
-
 export type ToolScopeValues = Record<string, string>;
 
 export function buildToolScope(tool: ToolInfo, values: ToolScopeValues): Record<string, string> {

@@ -77,7 +77,7 @@ _GENERIC_FAILURE_TEXTS = frozenset({"Activity task failed", "Child workflow exec
 
 # Failure types raised by activities that the run record should carry verbatim
 # (instead of the generic step_failed) so the UI can react to them.
-_SPECIFIC_FAILURE_CODES = frozenset({"insufficient_funds"})
+_SPECIFIC_FAILURE_CODES = frozenset({"insufficient_funds", "budget_exceeded"})
 
 
 def _failure_code(exc: BaseException, default: str) -> str:
@@ -287,6 +287,21 @@ class AgentTaskWorkflow:
                 )
                 return AgentTaskResult(run_id=None, status="cancelled", steps_used=0)
         self._waiting_reason = None
+
+        # Budget denial (plan 15.5): no run was created; fail the task with
+        # the activity's message so the chat card explains which budget was
+        # hit. Purely data-driven — old histories never set denied_code, so
+        # replays take the same path they always did.
+        if snapshot.denied_code:
+            self._status = "failed"
+            await self._finalize(
+                params,
+                run_id=None,
+                status="failed",
+                error_code=snapshot.denied_code,
+                error_message=snapshot.denied_message or "a monthly budget was reached",
+            )
+            return AgentTaskResult(run_id=None, status="failed", steps_used=0)
 
         totals.run_id = snapshot.run_id
         use_tool_worker = workflow.patched(PHASE10_TOOL_WORKER_PATCH)

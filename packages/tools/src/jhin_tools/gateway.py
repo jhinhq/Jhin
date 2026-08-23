@@ -1600,9 +1600,9 @@ class ToolGateway:
                 provider_call_id=safe_provider_call_id,
             )
 
-        # 6. Budget / rate limiting.
-        # TODO(Phase 10): enforce per-agent budget and rate limits here
-        # (plan 15.5). Phase 4 deliberately ships without enforcement.
+        # 6. Budgets (plan 15.5) are enforced at the run seams — admission
+        # and each reasoning step in the agent worker — where monthly spend
+        # is authoritative; a per-call gateway check would only duplicate it.
 
         # 7-8. Execute and sanitize.
         if invocation_id is not None:

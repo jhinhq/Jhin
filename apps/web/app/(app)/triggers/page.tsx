@@ -552,7 +552,7 @@ function TriggerBuilder({
           <div data-testid="workflow-template" className="space-y-3 border-t border-line pt-3">
             <Field
               label="Workflow"
-              hint="Standard runs the assigned agent once. The engineering template adds delegated QA review with a failure → fix → retest loop (Phase 8)."
+              hint="Standard runs the assigned agent once. The engineering template adds delegated QA review with a failure → fix → retest loop."
             >
               <Select
                 value={template}

@@ -16,6 +16,7 @@ import {
   canSubmit,
   EMPTY_WIZARD,
   firstInvalidStep,
+  monthlyBudgetCents,
   toCreatePayload,
   grantPayloadsForTools,
   parseExpertise,
@@ -68,15 +69,34 @@ describe("wizard validation", () => {
     expect(canSubmit(state)).toBe(true);
   });
 
-  it("disabled phase steps never validate-block", () => {
-    for (const step of WIZARD_STEPS.filter((s) => s.disabledPhase)) {
-      expect(validateStep(step.id, EMPTY_WIZARD)).toEqual([]);
-    }
+  it("step 7 accepts the defaults and rejects out-of-range limits", () => {
+    expect(validateStep(7, EMPTY_WIZARD)).toEqual([]);
+    expect(validateStep(7, { ...EMPTY_WIZARD, maxSteps: "0" })).toEqual([
+      "Max steps must be a whole number between 1 and 500.",
+    ]);
+    expect(validateStep(7, { ...EMPTY_WIZARD, maxSteps: "501" }).length).toBe(1);
+    expect(validateStep(7, { ...EMPTY_WIZARD, maxRunMinutes: "1441" }).length).toBe(1);
+    expect(validateStep(7, { ...EMPTY_WIZARD, maxConcurrentRuns: "2.5" }).length).toBe(1);
+    expect(firstInvalidStep({ ...EMPTY_WIZARD, name: "SWE", maxSteps: "" })).toBe(7);
   });
 
-  it("only step 7 (budget) remains stubbed — tools & autonomy are live in Phase 4", () => {
-    const disabled = WIZARD_STEPS.filter((s) => s.disabledPhase).map((s) => s.id);
-    expect(disabled).toEqual([7]);
+  it("budget accepts blank or dollar amounts only", () => {
+    expect(monthlyBudgetCents("")).toBeNull();
+    expect(monthlyBudgetCents("  ")).toBeNull();
+    expect(monthlyBudgetCents("5")).toBe(500);
+    expect(monthlyBudgetCents("5.50")).toBe(550);
+    expect(monthlyBudgetCents("0.01")).toBe(1);
+    expect(monthlyBudgetCents("-1")).toBeUndefined();
+    expect(monthlyBudgetCents("abc")).toBeUndefined();
+    expect(monthlyBudgetCents("5.555")).toBeUndefined();
+    expect(validateStep(7, { ...EMPTY_WIZARD, monthlyBudgetDollars: "abc" })).toEqual([
+      "Monthly budget must be a dollar amount (e.g. 5 or 5.50), or blank for no budget.",
+    ]);
+    expect(validateStep(7, { ...EMPTY_WIZARD, monthlyBudgetDollars: "5.50" })).toEqual([]);
+  });
+
+  it("no wizard step is stubbed", () => {
+    expect(WIZARD_STEPS.map((s) => s.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
   });
 });
 
@@ -133,6 +153,30 @@ describe("wizard payload", () => {
     expect(payload.team_id).toBe("team-1");
     expect(payload.manager_agent_id).toBe("agent-1");
     expect(payload.model_profile_id).toBe("profile-1");
+  });
+
+  it("carries run limits and converts the budget to cents", () => {
+    const defaults = toCreatePayload({ ...EMPTY_WIZARD, name: "SWE" });
+    expect(defaults).toMatchObject({
+      max_steps: 20,
+      max_run_minutes: 30,
+      max_concurrent_runs: 1,
+      monthly_budget_cents: null,
+    });
+    const custom = toCreatePayload({
+      ...EMPTY_WIZARD,
+      name: "SWE",
+      maxSteps: "40",
+      maxRunMinutes: "60",
+      maxConcurrentRuns: "3",
+      monthlyBudgetDollars: "5.50",
+    });
+    expect(custom).toMatchObject({
+      max_steps: 40,
+      max_run_minutes: 60,
+      max_concurrent_runs: 3,
+      monthly_budget_cents: 550,
+    });
   });
 
   it("carries the chosen autonomy level (defaults to supervised)", () => {
