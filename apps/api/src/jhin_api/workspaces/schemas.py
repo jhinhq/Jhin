@@ -30,11 +30,22 @@ class ConcurrencySettingsIn(BaseModel):
     max_concurrent_runs: int | None = Field(default=None, ge=1, le=200)
 
 
+class BudgetSettingsIn(BaseModel):
+    """Monthly model-spend budget (micro-dollars); null = no budget. The
+    warning threshold is the fraction of the budget at which the UI warns."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    monthly_budget_micros: int | None = Field(default=None, ge=0, le=10**15)
+    warning_threshold: float = Field(default=0.8, ge=0.0, le=1.0)
+
+
 class WorkspaceSettingsIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     delegation: DelegationSettingsIn | None = None
     concurrency: ConcurrencySettingsIn | None = None
+    budget: BudgetSettingsIn | None = None
 
 
 class WorkspaceUpdate(BaseModel):

@@ -1,14 +1,21 @@
 "use client";
 
-/** Workspace settings: rename (admin+) and member management (plan 20.2). */
+/** Workspace settings: rename (admin+), monthly model budget, and member
+ * management (plan 20.2). */
 
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Trash2, UserPlus } from "lucide-react";
 import { useState } from "react";
 import { PageBody, PageHeader } from "@/components/app-shell";
 import { Badge, Button, Card, ErrorNote, Field, Input, Select, Spinner } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
-import { useMembers } from "@/lib/hooks";
+import { useMembers, useWorkspaceSpend } from "@/lib/hooks";
+import {
+  dollarInputToMicros,
+  formatMicrosAsDollars,
+  microsToDollarInput,
+  summarizeBudget,
+} from "@/lib/models";
 import type { Member, Workspace, WorkspaceRole } from "@/lib/types";
 import { useWorkspace } from "@/lib/workspace-context";
 
@@ -121,6 +128,8 @@ export default function SettingsPage() {
           </p>
         </Card>
 
+        <BudgetCard workspaceId={workspaceId} isAdmin={isAdmin} />
+
         <Card as="section">
           <h2 className="mb-1 font-display text-base font-semibold">Members</h2>
           <p className="mb-4 text-sm text-dim">
@@ -226,5 +235,120 @@ export default function SettingsPage() {
         </Card>
       </PageBody>
     </>
+  );
+}
+
+/** Tracked model spend plus the monthly budget editor (stored under
+ * `settings_json.budget`; the Models page shows the same numbers). */
+function BudgetCard({ workspaceId, isAdmin }: { workspaceId: string; isAdmin: boolean }) {
+  const spend = useWorkspaceSpend(workspaceId);
+  const queryClient = useQueryClient();
+  const [budget, setBudget] = useState<string | null>(null);
+  const [threshold, setThreshold] = useState<string | null>(null);
+
+  const save = useMutation({
+    mutationFn: (payload: { monthly_budget_micros: number | null; warning_threshold: number }) =>
+      api<Workspace>(`/api/v1/workspaces/${workspaceId}`, {
+        method: "PATCH",
+        body: { settings: { budget: payload } },
+      }),
+    onSuccess: () => {
+      setBudget(null);
+      setThreshold(null);
+      void queryClient.invalidateQueries({ queryKey: ["workspace-spend", workspaceId] });
+      void queryClient.invalidateQueries({ queryKey: ["workspace", workspaceId] });
+    },
+  });
+
+  const data = spend.data;
+  const budgetValue = budget ?? microsToDollarInput(data?.monthly_budget_micros ?? null);
+  const thresholdValue =
+    threshold ?? String(Math.round((data?.warning_threshold ?? 0.8) * 100));
+  const summary = data
+    ? summarizeBudget(data.spent_month_micros, data.monthly_budget_micros, data.warning_threshold)
+    : null;
+
+  return (
+    <Card as="section" data-testid="budget-card">
+      <h2 className="mb-1 font-display text-base font-semibold">Model spend and budget</h2>
+      <p className="mb-4 text-sm text-dim">
+        Spend is tracked by Jhin from each run&apos;s token usage and the profile&apos;s prices. Set a
+        monthly budget to get a warning bar on the Models page.
+      </p>
+      {spend.isPending ? (
+        <Spinner />
+      ) : data ? (
+        <dl className="mb-4 grid gap-3 sm:grid-cols-3">
+          <div>
+            <dt className="text-xs uppercase tracking-wider text-faint">This month</dt>
+            <dd className="font-display text-xl font-semibold tabular-nums">
+              {formatMicrosAsDollars(data.spent_month_micros)}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs uppercase tracking-wider text-faint">All time</dt>
+            <dd className="font-display text-xl font-semibold tabular-nums">
+              {formatMicrosAsDollars(data.spent_total_micros)}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs uppercase tracking-wider text-faint">Budget</dt>
+            <dd className={`text-sm ${summary && summary.tone !== "ok" ? "text-danger" : "text-dim"}`}>
+              {summary ? summary.label : "Not set"}
+            </dd>
+          </div>
+        </dl>
+      ) : (
+        <ErrorNote message="Spend could not be loaded." />
+      )}
+      <form
+        className="flex flex-wrap items-end gap-3"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const percent = Number(thresholdValue);
+          save.mutate({
+            monthly_budget_micros: dollarInputToMicros(budgetValue),
+            warning_threshold: Number.isFinite(percent)
+              ? Math.min(Math.max(percent, 0), 100) / 100
+              : 0.8,
+          });
+        }}
+      >
+        <div className="w-44">
+          <Field label="Monthly budget ($)" hint="Leave empty for no budget.">
+            <Input
+              type="number"
+              min="0"
+              step="any"
+              value={budgetValue}
+              disabled={!isAdmin}
+              onChange={(event) => setBudget(event.target.value)}
+              placeholder="100"
+            />
+          </Field>
+        </div>
+        <div className="w-36">
+          <Field label="Warn at (%)">
+            <Input
+              type="number"
+              min="0"
+              max="100"
+              step="1"
+              value={thresholdValue}
+              disabled={!isAdmin}
+              onChange={(event) => setThreshold(event.target.value)}
+            />
+          </Field>
+        </div>
+        {isAdmin ? (
+          <Button type="submit" variant="primary" disabled={save.isPending}>
+            {save.isPending ? "Saving…" : "Save budget"}
+          </Button>
+        ) : null}
+      </form>
+      <ErrorNote
+        message={save.error ? (save.error instanceof ApiError ? save.error.detail : "Saving failed") : null}
+      />
+    </Card>
   );
 }

@@ -1,7 +1,7 @@
 """Request/response contracts for model providers and profiles (plan 6.7, 6.8)."""
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -38,6 +38,10 @@ class ModelProviderCreate(BaseModel):
     display_name: str = Field(min_length=1, max_length=200)
     base_url: str | None = Field(default=None, max_length=500)
     secret_id: UUID | None = None
+    # Optional billing/admin credential (OpenAI admin key) for spend reporting.
+    admin_secret_id: UUID | None = None
+    # Prepaid credit the admin loaded, in micro-dollars (for "≈ remaining").
+    credits_loaded_micros: int | None = Field(default=None, ge=0, le=10**15)
     enabled: bool = True
 
 
@@ -45,6 +49,8 @@ class ModelProviderUpdate(BaseModel):
     display_name: str | None = Field(default=None, min_length=1, max_length=200)
     base_url: str | None = Field(default=None, max_length=500)
     secret_id: UUID | None = None
+    admin_secret_id: UUID | None = None
+    credits_loaded_micros: int | None = Field(default=None, ge=0, le=10**15)
     enabled: bool | None = None
 
 
@@ -55,11 +61,56 @@ class ModelProviderOut(BaseModel):
     display_name: str
     base_url: str | None
     secret_id: UUID | None
+    credits_loaded_micros: int | None = None
+    has_admin_key: bool = False
     enabled: bool
     last_verified_at: datetime | None
     last_error: str | None
     created_at: datetime
     updated_at: datetime
+
+
+BalanceSource = Literal["openrouter", "openai_admin", "tracked"]
+
+
+class ProviderBalanceOut(BaseModel):
+    """Balance and spend for one provider.
+
+    ``tracked_*`` sums ``agent_run.estimated_cost_micros`` for runs on this
+    provider's profiles (Jhin's own bookkeeping). ``provider_*`` comes from
+    the provider's billing API when one exists and is reachable (cached for
+    a minute); otherwise ``source`` is ``"tracked"`` and ``detail`` explains.
+    """
+
+    tracked_spent_month_micros: int
+    tracked_spent_total_micros: int
+    provider_spent_month_micros: int | None
+    provider_remaining_micros: int | None
+    credits_loaded_micros: int | None
+    estimated_remaining_micros: int | None
+    source: BalanceSource
+    detail: str | None
+    fetched_at: datetime
+
+
+class ProviderSpendOut(BaseModel):
+    provider_id: UUID
+    display_name: str
+    type: ModelProviderType
+    spent_month_micros: int
+    spent_total_micros: int
+
+
+class WorkspaceSpendOut(BaseModel):
+    """Tracked spend across the workspace plus the optional monthly budget."""
+
+    spent_month_micros: int
+    spent_total_micros: int
+    period_start: datetime
+    providers: list[ProviderSpendOut]
+    monthly_budget_micros: int | None
+    warning_threshold: float
+    fetched_at: datetime
 
 
 class ProviderVerifyResult(BaseModel):
@@ -76,11 +127,22 @@ class ProviderDraftVerify(BaseModel):
     secret_id: UUID | None = None
 
 
-class ProviderModelsResult(BaseModel):
-    """Model identifiers a provider exposes, for the profile picker."""
+class ProviderModelEntry(BaseModel):
+    """One pickable model with pricing when the source knows it."""
 
-    models: list[str]
+    id: str
+    input_cost_micros_per_million: int | None = None
+    output_cost_micros_per_million: int | None = None
+    context_window: int | None = None
+    source: Literal["provider", "catalog"] | None = None
+
+
+class ProviderModelsResult(BaseModel):
+    """Models a provider exposes (with prices when known), for the picker."""
+
+    models: list[ProviderModelEntry]
     detail: str | None = None
+    catalog_updated: str | None = None
 
 
 class ModelProfileCreate(BaseModel):
@@ -131,3 +193,12 @@ class ModelProfileOut(BaseModel):
     config_json: dict[str, Any]
     created_at: datetime
     updated_at: datetime
+
+
+class ProfilePricingRefreshResult(BaseModel):
+    """Outcome of re-looking up a profile's prices."""
+
+    updated: bool
+    source: Literal["provider", "catalog"] | None
+    detail: str
+    profile: ModelProfileOut

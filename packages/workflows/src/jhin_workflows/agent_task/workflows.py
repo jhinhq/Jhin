@@ -73,6 +73,23 @@ from jhin_workflows.work_request_task.shared import (
 
 _GENERIC_FAILURE_TEXTS = frozenset({"Activity task failed", "Child workflow execution failed"})
 
+# Failure types raised by activities that the run record should carry verbatim
+# (instead of the generic step_failed) so the UI can react to them.
+_SPECIFIC_FAILURE_CODES = frozenset({"insufficient_funds"})
+
+
+def _failure_code(exc: BaseException, default: str) -> str:
+    """``default`` unless the cause chain carries one of the specific codes."""
+    current: BaseException | None = exc
+    for _ in range(8):
+        if current is None:
+            break
+        failure_type = getattr(current, "type", None)
+        if isinstance(failure_type, str) and failure_type in _SPECIFIC_FAILURE_CODES:
+            return failure_type
+        current = getattr(current, "cause", None) or current.__cause__
+    return default
+
 
 def _failure_message(exc: BaseException) -> str:
     """Human-readable failure text for run records.
@@ -368,7 +385,7 @@ class AgentTaskWorkflow:
                         retry_policy=_STEP_RETRY,
                     )
             except Exception as exc:
-                error_code = "step_failed"
+                error_code = _failure_code(exc, "step_failed")
                 error_message = _failure_message(exc)
                 break
             self._steps_used += 1

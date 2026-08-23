@@ -25,6 +25,7 @@ def build_model_client(
     *,
     base_url: str | None = None,
     api_key: str | None = None,
+    admin_api_key: str | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
     metrics: JhinMetrics | None = None,
     tracer: Tracer | None = None,
@@ -36,7 +37,10 @@ def build_model_client(
             if not api_key:
                 raise ProviderConfigError("OpenAI provider requires an API key secret")
             raw = OpenAIClient(
-                api_key=api_key, base_url=base_url or OPENAI_BASE_URL, transport=transport
+                api_key=api_key,
+                base_url=base_url or OPENAI_BASE_URL,
+                admin_api_key=admin_api_key,
+                transport=transport,
             )
         case ModelProviderType.ANTHROPIC:
             if not api_key:

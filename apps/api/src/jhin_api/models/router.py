@@ -21,12 +21,19 @@ from jhin_api.models.schemas import (
     ModelProviderCreate,
     ModelProviderOut,
     ModelProviderUpdate,
+    ProfilePricingRefreshResult,
+    ProviderBalanceOut,
     ProviderDraftVerify,
+    ProviderModelEntry,
     ProviderModelsResult,
+    ProviderSpendOut,
     ProviderVerifyResult,
+    WorkspaceSpendOut,
 )
 from jhin_api.security.csrf import csrf_protect
 from jhin_db.models import ModelProfile, ModelProvider
+from jhin_domain import ModelProviderType
+from jhin_models.pricing import CATALOG_UPDATED
 
 providers_router = APIRouter(
     prefix="/api/v1/workspaces/{workspace_id}/model-providers",
@@ -37,6 +44,12 @@ providers_router = APIRouter(
 profiles_router = APIRouter(
     prefix="/api/v1/workspaces/{workspace_id}/model-profiles",
     tags=["model-profiles"],
+    dependencies=[Depends(csrf_protect)],
+)
+
+spend_router = APIRouter(
+    prefix="/api/v1/workspaces/{workspace_id}/spend",
+    tags=["model-providers"],
     dependencies=[Depends(csrf_protect)],
 )
 
@@ -130,7 +143,48 @@ async def list_provider_models(
     models, detail = await service.list_provider_models(
         db, crypto, ctx, provider_id, runtime.metrics, runtime.tracer
     )
-    return ProviderModelsResult(models=models, detail=detail)
+    return ProviderModelsResult(
+        models=[ProviderModelEntry.model_validate(m, from_attributes=True) for m in models],
+        detail=detail,
+        catalog_updated=CATALOG_UPDATED,
+    )
+
+
+@providers_router.get("/{provider_id}/balance")
+async def provider_balance(
+    provider_id: UUID,
+    ctx: ViewerCtx,
+    db: DbSession,
+    crypto: SecretCryptoDep,
+    runtime: ObservabilityRuntimeDep,
+) -> ProviderBalanceOut:
+    balance = await service.get_provider_balance(
+        db, crypto, ctx, provider_id, runtime.metrics, runtime.tracer
+    )
+    return ProviderBalanceOut.model_validate(balance, from_attributes=True)
+
+
+@spend_router.get("")
+async def workspace_spend(ctx: ViewerCtx, db: DbSession) -> WorkspaceSpendOut:
+    spend = await service.get_workspace_spend(db, ctx.workspace_id)
+    return WorkspaceSpendOut(
+        spent_month_micros=spend.spent_month_micros,
+        spent_total_micros=spend.spent_total_micros,
+        period_start=spend.period_start,
+        providers=[
+            ProviderSpendOut(
+                provider_id=entry.provider.id,
+                display_name=entry.provider.display_name,
+                type=ModelProviderType(entry.provider.type),
+                spent_month_micros=entry.spent_month_micros,
+                spent_total_micros=entry.spent_total_micros,
+            )
+            for entry in spend.providers
+        ],
+        monthly_budget_micros=spend.monthly_budget_micros,
+        warning_threshold=spend.warning_threshold,
+        fetched_at=spend.fetched_at,
+    )
 
 
 @providers_router.post("/{provider_id}/verify")
@@ -192,6 +246,30 @@ async def update_profile(
         ip_hash=ip_hash(request),
     )
     return _profile_out(profile)
+
+
+@profiles_router.post("/{profile_id}/refresh-pricing")
+async def refresh_profile_pricing(
+    profile_id: UUID,
+    request: Request,
+    ctx: AdminCtx,
+    db: DbSession,
+    crypto: SecretCryptoDep,
+    runtime: ObservabilityRuntimeDep,
+) -> ProfilePricingRefreshResult:
+    profile, updated, source, detail = await service.refresh_profile_pricing(
+        db,
+        crypto,
+        ctx,
+        profile_id,
+        runtime.metrics,
+        runtime.tracer,
+        request_id=req_id(request),
+        ip_hash=ip_hash(request),
+    )
+    return ProfilePricingRefreshResult(
+        updated=updated, source=source, detail=detail, profile=_profile_out(profile)
+    )
 
 
 @profiles_router.delete("/{profile_id}", status_code=204)

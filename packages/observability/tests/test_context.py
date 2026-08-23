@@ -371,6 +371,7 @@ def test_stream_is_an_exact_registered_model_operation() -> None:
             "verify",
             "embed",
             "list_models",
+            "account_status",
             "issue_comment_create",
             "execute_read",
             "execute_write",

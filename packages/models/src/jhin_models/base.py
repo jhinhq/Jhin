@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from datetime import date
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -91,21 +93,129 @@ class ModelResponse(BaseModel):
     tool_calls: tuple[ModelToolCall, ...] = ()
 
 
+class ModelListing(BaseModel):
+    """One model a provider exposes, with pricing when the source knows it.
+
+    Costs are micro-dollars per million tokens (the profile's unit). ``source``
+    names where the price came from: ``"provider"`` (live from the provider's
+    model list), ``"catalog"`` (the static public price list in
+    :mod:`jhin_models.pricing`), or ``None`` when nothing is known.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    input_cost_micros_per_million: int | None = None
+    output_cost_micros_per_million: int | None = None
+    context_window: int | None = None
+    source: Literal["provider", "catalog"] | None = None
+
+
+@dataclass(frozen=True)
+class AccountStatus:
+    """Provider-neutral account balance/spend snapshot.
+
+    Every amount is in micro-dollars. A provider fills what its billing API
+    exposes: OpenRouter reports granted credits and usage (so ``remaining`` is
+    known); OpenAI's admin API reports month-to-date cost only (no balance
+    API exists). ``source`` names the origin (``"openrouter"``,
+    ``"openai_admin"``) and ``detail`` is a short human sentence for the UI.
+    """
+
+    remaining_micros: int | None = None
+    spent_month_micros: int | None = None
+    granted_micros: int | None = None
+    period_start: date | None = None
+    source: str = ""
+    detail: str = ""
+
+
+class AccountStatusUnsupported(Exception):
+    """The adapter cannot report balance/spend with its current credentials."""
+
+
+INSUFFICIENT_FUNDS = "insufficient_funds"
+_QUOTA_DASHBOARDS = {
+    "openai": "https://platform.openai.com/settings/organization/billing",
+    "openrouter": "https://openrouter.ai/settings/credits",
+    "anthropic": "https://console.anthropic.com/settings/billing",
+}
+_PROVIDER_LABELS = {
+    "openai": "OpenAI",
+    "openrouter": "OpenRouter",
+    "anthropic": "Anthropic",
+    "ollama": "Ollama",
+    "openai_compatible": "OpenAI-compatible",
+}
+
+
+def insufficient_funds_message(provider_name: str) -> str:
+    """The friendly out-of-credit sentence shown in run records and chat."""
+    label = _PROVIDER_LABELS.get(provider_name, provider_name)
+    dashboard = _QUOTA_DASHBOARDS.get(provider_name, "the provider's billing dashboard")
+    return f"Your {label} account is out of credit. Add funds at {dashboard}, then retry."
+
+
 class ModelProviderError(Exception):
     """Provider call failed.
 
     ``retryable`` classifies per plan 8.6: 408/429/5xx and network errors are
-    retryable; auth and validation failures are not.
+    retryable; auth and validation failures are not. ``error_code`` is a
+    stable machine-readable class when one is known (``"insufficient_funds"``
+    for out-of-credit responses) so run records and the chat can react.
     """
 
-    def __init__(self, message: str, *, status_code: int | None = None, retryable: bool = False):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retryable: bool = False,
+        error_code: str | None = None,
+    ):
         super().__init__(message)
         self.status_code = status_code
         self.retryable = retryable
+        self.error_code = error_code
 
 
 def classify_retryable(status_code: int) -> bool:
     return status_code in (408, 429) or status_code >= 500
+
+
+def _error_code_from_body(text: str) -> str | None:
+    import json
+
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    error = payload.get("error")
+    if isinstance(error, dict):
+        code = error.get("code") or error.get("type")
+        return str(code) if isinstance(code, str) else None
+    code = payload.get("code")
+    return str(code) if isinstance(code, str) else None
+
+
+def quota_error(provider_name: str, status_code: int, body: str) -> ModelProviderError | None:
+    """An ``insufficient_funds`` error when the response says the account is
+    out of credit: OpenAI's 429 with ``code == "insufficient_quota"`` or
+    OpenRouter's 402. Otherwise ``None`` (the caller raises its usual error).
+    """
+    out_of_credit = (
+        status_code == 429 and _error_code_from_body(body) == "insufficient_quota"
+    ) or (status_code == 402)
+    if not out_of_credit:
+        return None
+    return ModelProviderError(
+        insufficient_funds_message(provider_name),
+        status_code=status_code,
+        retryable=False,
+        error_code=INSUFFICIENT_FUNDS,
+    )
 
 
 def describe_error_body(text: str, *, limit: int = 500) -> str:
@@ -151,6 +261,19 @@ class ModelClient(ABC):
     async def list_models(self) -> list[str]:
         """Model identifiers the provider exposes, for pickers. Optional."""
         raise ModelProviderError(f"{type(self).__name__}: listing models is not supported")
+
+    async def list_models_detailed(self) -> list[ModelListing]:
+        """Models with pricing/context when known. Defaults to bare ids."""
+        return [ModelListing(id=model_id) for model_id in await self.list_models()]
+
+    async def get_account_status(self) -> AccountStatus | None:
+        """Balance/spend from the provider's billing API when it has one.
+
+        ``None`` means the provider has no such API (Anthropic, Ollama, generic
+        endpoints); :class:`AccountStatusUnsupported` means it exists but this
+        client lacks the credential for it (OpenAI without an admin key).
+        """
+        return None
 
     @abstractmethod
     async def close(self) -> None:

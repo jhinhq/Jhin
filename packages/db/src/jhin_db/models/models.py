@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from jhin_db.base import Base
@@ -31,9 +31,22 @@ class ModelProvider(Base, UuidPkMixin, TimestampMixin):
     secret_id: Mapped[UUID | None] = mapped_column(
         StdUuid, ForeignKey("secret.id", ondelete="SET NULL"), default=None
     )
+    # Optional billing/admin credential (OpenAI admin key) for spend reporting;
+    # stored exactly like the API key and never displayed.
+    admin_secret_id: Mapped[UUID | None] = mapped_column(
+        StdUuid, ForeignKey("secret.id", ondelete="SET NULL"), default=None
+    )
+    # User-entered prepaid credit (micro-dollars) for providers without a
+    # balance API; "remaining" is estimated against tracked/reported spend.
+    credits_loaded_micros: Mapped[int | None] = mapped_column(BigInteger, default=None)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     last_verified_at: Mapped[datetime | None] = mapped_column(UtcDateTime, default=None)
     last_error: Mapped[str | None] = mapped_column(Text, default=None)
+
+    @property
+    def has_admin_key(self) -> bool:
+        """Whether a billing/admin credential is attached (never its value)."""
+        return self.admin_secret_id is not None
 
 
 class ModelProfile(Base, UuidPkMixin, TimestampMixin):

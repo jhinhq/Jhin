@@ -106,7 +106,12 @@ async def test_factory_builds_each_adapter_behind_exactly_one_wrapper(
 
     assert [name for name, _kwargs, _raw in constructions] == [case[2] for case in cases]
     assert [kwargs for _name, kwargs, _raw in constructions] == [
-        {"api_key": "k", "base_url": OPENAI_BASE_URL, "transport": transport},
+        {
+            "api_key": "k",
+            "base_url": OPENAI_BASE_URL,
+            "admin_api_key": None,
+            "transport": transport,
+        },
         {
             "api_key": "k",
             "base_url": "https://api.anthropic.com/v1",
@@ -156,6 +161,7 @@ async def test_factory_preserves_explicit_adapter_configuration_and_falsey_handl
         {
             "api_key": "explicit-key",
             "base_url": "https://explicit.example/v1",
+            "admin_api_key": None,
             "transport": transport,
         }
     ]
@@ -218,6 +224,7 @@ def test_factory_public_signature_accepts_exact_injected_handles() -> None:
         "provider_type",
         "base_url",
         "api_key",
+        "admin_api_key",
         "transport",
         "metrics",
         "tracer",

@@ -32,7 +32,7 @@ flowchart LR
 | Component | Role | Authority | Document |
 |---|---|---|---|
 | `web` | Next.js UI; rewrites `/api/*` to the API so cookies stay same-origin | none (presentation) | [conversations](conversations.md), [coordination](coordination.md) |
-| `api` | FastAPI control plane: auth, workspaces, agents, grants, approvals, connections, triggers, webhooks, health | control-plane authority; the only writer of configuration | [delegation-and-teams](delegation-and-teams.md), [events](events.md) |
+| `api` | FastAPI control plane: auth, workspaces, agents, grants, approvals, connections, triggers, webhooks, health | control-plane authority; the only writer of configuration | [delegation-and-teams](delegation-and-teams.md), [events](events.md), [models](models.md) |
 | `workflow-worker` | Temporal worker for general workflows (triggered tasks, sample workflows) | executes durable workflows | [events](events.md) |
 | `agent-worker` | Temporal worker for `AgentTaskWorkflow`: model calls, reasoning record, delegation decisions | model reasoning only; never executes connector effects | [tool-worker-boundary](tool-worker-boundary.md) |
 | `tool-worker` | Temporal worker on the dedicated tool queue: gateway authorization, approval revalidation, secret resolution, connector calls, sanitization, audit | execution boundary for every deterministic effect | [tool-worker-boundary](tool-worker-boundary.md), [connectors](connectors.md) |

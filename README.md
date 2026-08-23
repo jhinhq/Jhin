@@ -542,7 +542,15 @@ the SWE, comment the outcome back on the issue).
 
 - **Models page** — add providers (API keys go into the encrypted secret
   store and are never displayed again), verify them with a live call, create
-  priced model profiles, and pick the workspace default profile. Agents use
+  priced model profiles, and pick the workspace default profile. Picking a
+  model auto-fills its prices (live from OpenRouter, or from a public price
+  catalog for OpenAI and Anthropic — editable), and each provider card shows
+  a Balance block: live remaining credit (OpenRouter), month-to-date spend
+  (OpenAI, with an optional admin key), or spend tracked by Jhin with an
+  optional "loaded credits" figure. A Spend tile and the Settings page show
+  the month's total against an optional monthly budget. Out-of-credit
+  failures surface as a friendly "add funds" message in the chat. Details:
+  [docs/architecture/models.md](docs/architecture/models.md). Agents use
   the workspace default unless a custom profile is set (wizard step 4 or the
   agent drawer's Model tab).
 - **Tasks page** — create a task and optionally assign it to an agent;

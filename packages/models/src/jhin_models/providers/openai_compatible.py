@@ -19,6 +19,7 @@ import httpx
 
 from jhin_models.base import (
     ModelClient,
+    ModelListing,
     ModelMessage,
     ModelProviderError,
     ModelRequest,
@@ -27,9 +28,11 @@ from jhin_models.base import (
     ModelUsage,
     classify_retryable,
     describe_error_body,
+    quota_error,
 )
 from jhin_models.embeddings import MAX_EMBEDDING_BATCH, EmbeddingResult, bound_inputs
 from jhin_models.images import DEFAULT_IMAGE_SIZE, GeneratedImage
+from jhin_models.pricing import lookup_price, per_token_usd_to_micros_per_million
 
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0)
 
@@ -110,6 +113,17 @@ class OpenAICompatibleClient(ModelClient):
         payload.update(request.extra)
         return payload
 
+    def _http_error(self, status_code: int, body: str) -> ModelProviderError:
+        """Classify a failed response: out-of-credit first, then generic."""
+        quota = quota_error(self.provider_name, status_code, body)
+        if quota is not None:
+            return quota
+        return ModelProviderError(
+            f"{self.provider_name}: HTTP {status_code}: {describe_error_body(body)}",
+            status_code=status_code,
+            retryable=classify_retryable(status_code),
+        )
+
     async def _post(self, path: str, payload: dict[str, Any]) -> httpx.Response:
         try:
             response = await self._client.post(path, json=payload)
@@ -118,12 +132,7 @@ class OpenAICompatibleClient(ModelClient):
                 f"{self.provider_name}: network error: {type(exc).__name__}", retryable=True
             ) from exc
         if response.status_code >= 400:
-            detail = describe_error_body(response.text)
-            raise ModelProviderError(
-                f"{self.provider_name}: HTTP {response.status_code}: {detail}",
-                status_code=response.status_code,
-                retryable=classify_retryable(response.status_code),
-            )
+            raise self._http_error(response.status_code, response.text)
         return response
 
     def _parse_usage(self, usage: dict[str, Any]) -> ModelUsage:
@@ -172,12 +181,7 @@ class OpenAICompatibleClient(ModelClient):
             async with self._client.stream("POST", "/chat/completions", json=payload) as response:
                 if response.status_code >= 400:
                     text = (await response.aread()).decode(errors="replace")
-                    detail = describe_error_body(text)
-                    raise ModelProviderError(
-                        f"{self.provider_name}: HTTP {response.status_code}: {detail}",
-                        status_code=response.status_code,
-                        retryable=classify_retryable(response.status_code),
-                    )
+                    raise self._http_error(response.status_code, text)
                 async for line in response.aiter_lines():
                     if not line.startswith("data:"):
                         continue
@@ -213,8 +217,8 @@ class OpenAICompatibleClient(ModelClient):
         count = len(body.get("data") or []) if isinstance(body, dict) else 0
         return f"ok: {count} models visible"
 
-    async def list_models(self) -> list[str]:
-        """Model identifiers from ``GET /models`` (sorted, deduplicated)."""
+    async def _model_rows(self) -> list[dict[str, Any]]:
+        """Raw ``GET /models`` entries (dicts with a non-empty string ``id``)."""
         try:
             response = await self._client.get("/models")
         except httpx.HTTPError as exc:
@@ -229,12 +233,57 @@ class OpenAICompatibleClient(ModelClient):
             )
         body = response.json()
         rows = body.get("data") if isinstance(body, dict) else None
-        ids = {
-            str(row["id"])
+        return [
+            row
             for row in (rows or [])
             if isinstance(row, dict) and isinstance(row.get("id"), str) and row["id"]
-        }
-        return sorted(ids)
+        ]
+
+    async def list_models(self) -> list[str]:
+        """Model identifiers from ``GET /models`` (sorted, deduplicated)."""
+        return sorted({str(row["id"]) for row in await self._model_rows()})
+
+    # Catalog used when the provider's model list carries no prices (the
+    # first-party OpenAI adapter sets "openai"); None means no catalog.
+    pricing_catalog: str | None = None
+
+    def _listing(self, row: dict[str, Any]) -> ModelListing:
+        """Pricing from the row's ``pricing`` block (OpenRouter shape: USD per
+        token strings), else the static catalog, else unknown."""
+        model_id = str(row["id"])
+        pricing = row.get("pricing")
+        context = row.get("context_length") or row.get("context_window")
+        context_window = int(context) if isinstance(context, int | float) and context > 0 else None
+        if isinstance(pricing, dict):
+            prompt = per_token_usd_to_micros_per_million(pricing.get("prompt"))
+            completion = per_token_usd_to_micros_per_million(pricing.get("completion"))
+            if prompt is not None or completion is not None:
+                return ModelListing(
+                    id=model_id,
+                    input_cost_micros_per_million=prompt,
+                    output_cost_micros_per_million=completion,
+                    context_window=context_window,
+                    source="provider",
+                )
+        if self.pricing_catalog is not None:
+            price = lookup_price(self.pricing_catalog, model_id)
+            if price is not None:
+                return ModelListing(
+                    id=model_id,
+                    input_cost_micros_per_million=price.input_cost_micros_per_million,
+                    output_cost_micros_per_million=price.output_cost_micros_per_million,
+                    context_window=context_window or price.context_window,
+                    source="catalog",
+                )
+        return ModelListing(id=model_id, context_window=context_window)
+
+    async def list_models_detailed(self) -> list[ModelListing]:
+        """Models with pricing: live from the list when present, else catalog."""
+        by_id: dict[str, ModelListing] = {}
+        for row in await self._model_rows():
+            listing = self._listing(row)
+            by_id.setdefault(listing.id, listing)
+        return [by_id[key] for key in sorted(by_id)]
 
     async def generate_image(
         self, prompt: str, *, model: str, size: str = DEFAULT_IMAGE_SIZE

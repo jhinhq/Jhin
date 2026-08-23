@@ -3,7 +3,10 @@
 Stdlib-only (``http.server``), so it runs anywhere jhin-models is installed:
 as a pytest fixture, on a dev host, or as a compose service
 (``python -m jhin_models.testing.fake_openai``). It implements just what the
-adapters use: ``GET /v1/models`` and ``POST /v1/chat/completions``.
+adapters use: ``GET /v1/models`` (with OpenRouter-style pricing),
+``POST /v1/chat/completions``, plus the two billing endpoints the balance
+feature reads — ``GET /v1/credits`` (OpenRouter shape) and
+``GET /v1/organization/costs`` (OpenAI Admin API shape) — with fixed numbers.
 
 Deterministic behavior tests rely on:
 
@@ -58,7 +61,69 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 FAIL_MODEL = "always-fails"
+# Returns OpenAI's out-of-credit shape (HTTP 429, code "insufficient_quota").
+NO_CREDIT_MODEL = "no-credit"
 DEFAULT_MODELS = ("fake-mini", "fake-pro")
+
+# Deterministic pricing advertised on ``GET /v1/models`` (OpenRouter shape:
+# USD per token as strings) so the profile picker can auto-fill prices from a
+# provider-supplied list, and context windows for the same rows.
+FAKE_MODEL_PRICING: dict[str, dict[str, Any]] = {
+    "fake-mini": {"prompt": "0.00000015", "completion": "0.0000006", "context_length": 128000},
+    "fake-pro": {"prompt": "0.0000025", "completion": "0.00001", "context_length": 200000},
+}
+
+# Deterministic billing figures (USD) for the two billing endpoints.
+FAKE_TOTAL_CREDITS = 50.0
+FAKE_TOTAL_USAGE = 12.5
+FAKE_DAILY_COST_USD = 1.25
+FAKE_COST_DAYS = 3
+
+
+def build_credits() -> dict[str, Any]:
+    """``GET /v1/credits`` — OpenRouter's shape."""
+    return {"data": {"total_credits": FAKE_TOTAL_CREDITS, "total_usage": FAKE_TOTAL_USAGE}}
+
+
+def build_organization_costs() -> dict[str, Any]:
+    """``GET /v1/organization/costs`` — OpenAI Admin API shape, one page."""
+    buckets = [
+        {
+            "object": "bucket",
+            "start_time": 86_400 * day,
+            "end_time": 86_400 * (day + 1),
+            "results": [
+                {
+                    "object": "organization.costs.result",
+                    "amount": {"value": FAKE_DAILY_COST_USD, "currency": "usd"},
+                    "line_item": None,
+                    "project_id": None,
+                }
+            ],
+        }
+        for day in range(FAKE_COST_DAYS)
+    ]
+    return {"object": "page", "data": buckets, "has_more": False, "next_page": None}
+
+
+def build_models() -> dict[str, Any]:
+    """``GET /v1/models`` with pricing/context for the default models."""
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": m,
+                "object": "model",
+                "pricing": {
+                    "prompt": FAKE_MODEL_PRICING[m]["prompt"],
+                    "completion": FAKE_MODEL_PRICING[m]["completion"],
+                },
+                "context_length": FAKE_MODEL_PRICING[m]["context_length"],
+            }
+            for m in DEFAULT_MODELS
+        ],
+    }
+
 
 # [[tool:<name> <flat-json-object>]] — payloads must not contain "]]".
 TOOL_MARKER_RE = re.compile(r"\[\[tool:([a-z0-9_.]+)\s+(\{.*?\})\]\]", re.DOTALL)
@@ -136,6 +201,14 @@ def build_completion(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     if model == FAIL_MODEL:
         error = {"message": "fake provider: simulated failure", "type": "server_error"}
         return 500, {"error": error}
+    if model == NO_CREDIT_MODEL:
+        return 429, {
+            "error": {
+                "message": "You exceeded your current quota, please check your plan and billing",
+                "type": "insufficient_quota",
+                "code": "insufficient_quota",
+            }
+        }
 
     messages = body.get("messages", [])
     prompt_chars = sum(len(str(m.get("content", ""))) for m in messages)
@@ -317,11 +390,13 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self) -> None:
-        if self.path.rstrip("/").endswith("/models"):
-            self._send_json(
-                200,
-                {"object": "list", "data": [{"id": m, "object": "model"} for m in DEFAULT_MODELS]},
-            )
+        path = self.path.split("?", 1)[0].rstrip("/")
+        if path.endswith("/models"):
+            self._send_json(200, build_models())
+        elif path.endswith("/credits"):
+            self._send_json(200, build_credits())
+        elif path.endswith("/organization/costs"):
+            self._send_json(200, build_organization_costs())
         else:
             self._send_json(404, {"error": {"message": f"no route {self.path}"}})
 

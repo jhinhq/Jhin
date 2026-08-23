@@ -26,7 +26,7 @@ from jhin_api.directory.router import router as directory_router
 from jhin_api.health.router import router as health_router
 from jhin_api.media.router import router as media_router
 from jhin_api.memory.router import router as memory_router
-from jhin_api.models.router import profiles_router, providers_router
+from jhin_api.models.router import profiles_router, providers_router, spend_router
 from jhin_api.org.router import router as org_router
 from jhin_api.policy.router import router as policy_router
 from jhin_api.secrets.router import router as secrets_router
@@ -301,6 +301,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(secrets_router)
     app.include_router(providers_router)
     app.include_router(profiles_router)
+    app.include_router(spend_router)
     app.include_router(tasks_router)
     app.include_router(runs_router)
     app.include_router(agent_actions_router)

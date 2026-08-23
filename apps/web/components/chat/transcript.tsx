@@ -5,6 +5,7 @@
  * is already there. */
 
 import { ArrowDown, ChevronDown, ChevronRight } from "lucide-react";
+import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApprovalCard } from "@/components/approval-card";
 import { Avatar } from "@/components/avatar";
@@ -20,6 +21,7 @@ import {
 } from "@/lib/chat";
 import { isWorkRequestMessage } from "@/lib/coordination";
 import { formatDateTime } from "@/lib/format";
+import { isInsufficientFunds } from "@/lib/models";
 import type { ActivityCard, Approval, ConversationMessage } from "@/lib/types";
 
 function Timestamp({ iso, className = "" }: { iso: string; className?: string }) {
@@ -158,6 +160,25 @@ function ActivityChip({ card }: { card: ActivityCard }) {
 function SystemChip({ message }: { message: ConversationMessage }) {
   const text = messageText(message);
   if (!text) return null;
+  if (isInsufficientFunds(message.content_json)) {
+    // Out-of-credit failures get a readable card with a way to fix it.
+    const friendly = text.replace(/^Run failed:\s*/i, "");
+    return (
+      <div data-testid="insufficient-funds" className="flex justify-center">
+        <div className="max-w-[min(90%,36rem)] rounded-2xl border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-ink">
+          <p className="font-medium text-danger">Out of credit</p>
+          <p className="mt-1 break-words text-dim">{friendly}</p>
+          <p className="mt-2 text-xs">
+            <Link href="/models" className="font-medium text-accent-strong underline-offset-2 hover:underline">
+              Advanced → Models
+            </Link>
+            <span className="text-faint"> to check the balance, then retry.</span>
+            <Timestamp iso={message.created_at} className="ml-2" />
+          </p>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="flex justify-center">
       <span className="inline-flex max-w-[80%] items-center gap-2 rounded-full border border-line bg-raised px-3 py-1 text-xs text-dim">

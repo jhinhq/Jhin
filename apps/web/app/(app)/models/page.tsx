@@ -5,8 +5,19 @@
  * stored once in the encrypted secret store and only referenced here. */
 
 import { useMutation } from "@tanstack/react-query";
-import { CheckCircle2, Cpu, KeyRound, Plus, ShieldCheck, XCircle } from "lucide-react";
-import { useState } from "react";
+import {
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  Cpu,
+  KeyRound,
+  Plus,
+  RefreshCw,
+  ShieldCheck,
+  Wallet,
+  XCircle,
+} from "lucide-react";
+import { useId, useState } from "react";
 import { PageBody, PageHeader } from "@/components/app-shell";
 import {
   Badge,
@@ -25,11 +36,27 @@ import {
   useInvalidateModels,
   useModelProfiles,
   useModelProviders,
+  useProviderBalance,
   useProviderModels,
   useSecrets,
   useWorkspaceDetail,
+  useWorkspaceSpend,
 } from "@/lib/hooks";
-import type { ModelProfile, ModelProvider, ModelProviderType } from "@/lib/types";
+import {
+  autofillForModel,
+  balanceSourceLabel,
+  dollarInputToMicros,
+  formatMicrosAsDollars,
+  microsToDollarInput,
+  summarizeBudget,
+} from "@/lib/models";
+import type {
+  ModelProfile,
+  ModelProvider,
+  ModelProviderType,
+  ProfilePricingRefresh,
+  WorkspaceSpend,
+} from "@/lib/types";
 import { useWorkspace } from "@/lib/workspace-context";
 
 const PROVIDER_TYPES: { value: ModelProviderType; label: string; needsKey: boolean }[] = [
@@ -53,6 +80,7 @@ export default function ModelsPage() {
   const providers = useModelProviders(workspaceId);
   const profiles = useModelProfiles(workspaceId);
   const detail = useWorkspaceDetail(workspaceId);
+  const spend = useWorkspaceSpend(workspaceId);
   const invalidate = useInvalidateModels(workspaceId);
 
   const [providerDialog, setProviderDialog] = useState(false);
@@ -99,6 +127,8 @@ export default function ModelsPage() {
       />
       <PageBody className="space-y-8">
         <ErrorNote message={pageError} />
+
+        {spend.data ? <SpendTile spend={spend.data} /> : null}
 
         <section>
           <h2 className="mb-3 font-display text-base font-semibold tracking-tight text-ink">Providers</h2>
@@ -321,6 +351,14 @@ function ProviderCard({
         </p>
       ) : null}
 
+      <BalanceBlock
+        provider={provider}
+        isAdmin={isAdmin}
+        workspaceId={workspaceId}
+        onChanged={onChanged}
+        onError={onError}
+      />
+
       {isAdmin ? (
         <footer className="mt-auto flex items-center gap-2 border-t border-line pt-3">
           <Button size="sm" onClick={() => verify.mutate()} disabled={verify.isPending}>
@@ -393,6 +431,21 @@ function ProfileRow({
     onError: (error) => onError(errText(error, "Delete failed.")),
   });
 
+  const [refreshNote, setRefreshNote] = useState<string | null>(null);
+  const refreshPrices = useMutation({
+    mutationFn: () =>
+      api<ProfilePricingRefresh>(
+        `/api/v1/workspaces/${workspaceId}/model-profiles/${profile.id}/refresh-pricing`,
+        { method: "POST" },
+      ),
+    onSuccess: (result) => {
+      onError(null);
+      setRefreshNote(result.detail);
+      if (result.updated) onChanged();
+    },
+    onError: (error) => onError(errText(error, "Refreshing prices failed.")),
+  });
+
   const cost = (micros: number | null) =>
     micros === null ? "—" : `$${(micros / 1_000_000).toFixed(2)}`;
 
@@ -406,6 +459,7 @@ function ProfileRow({
       <td className="px-4 py-3 tabular-nums text-dim">
         {cost(profile.input_cost_micros_per_million)} ·{" "}
         {cost(profile.output_cost_micros_per_million)}
+        {refreshNote ? <p className="mt-1 text-[11px] text-faint">{refreshNote}</p> : null}
       </td>
       <td className="px-4 py-3">
         <div className="flex flex-wrap items-center gap-2">
@@ -420,6 +474,16 @@ function ProfileRow({
             <>
               <Button size="sm" variant="ghost" onClick={() => onEdit(profile)}>
                 Edit
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                title="Look the price up again from the provider or the public price list"
+                disabled={refreshPrices.isPending}
+                onClick={() => refreshPrices.mutate()}
+              >
+                <RefreshCw size={12} className={refreshPrices.isPending ? "animate-spin" : ""} />{" "}
+                Refresh prices
               </Button>
               <Button
                 size="sm"
@@ -482,6 +546,7 @@ function ProviderDialog({
   const [keyMode, setKeyMode] = useState<"new" | "existing" | "none">("new");
   const [apiKey, setApiKey] = useState("");
   const [secretId, setSecretId] = useState("");
+  const [adminKey, setAdminKey] = useState("");
 
   const typeMeta = PROVIDER_TYPES.find((t) => t.value === type)!;
 
@@ -527,6 +592,14 @@ function ProviderDialog({
       } else if (keyMode === "existing" && secretId) {
         resolvedSecretId = secretId;
       }
+      let adminSecretId: string | null = null;
+      if (type === "openai" && adminKey.trim()) {
+        adminSecretId = await storeApiKey(
+          workspaceId,
+          `${displayName.trim() || type} admin key`,
+          adminKey.trim(),
+        );
+      }
       const provider = await api<ModelProvider>(
         `/api/v1/workspaces/${workspaceId}/model-providers`,
         {
@@ -536,6 +609,7 @@ function ProviderDialog({
             display_name: displayName.trim(),
             base_url: baseUrl.trim() || null,
             secret_id: resolvedSecretId,
+            admin_secret_id: adminSecretId,
           },
         },
       );
@@ -631,6 +705,20 @@ function ProviderDialog({
             ) : null}
           </div>
         </Field>
+        {type === "openai" ? (
+          <Field
+            label="Admin key (for spend reporting)"
+            hint={ADMIN_KEY_HINT}
+          >
+            <Input
+              type="password"
+              autoComplete="off"
+              value={adminKey}
+              onChange={(e) => setAdminKey(e.target.value)}
+              placeholder="sk-admin-… (optional)"
+            />
+          </Field>
+        ) : null}
         {verifiedForCurrent ? (
           <p
             role="status"
@@ -677,9 +765,6 @@ function ProviderDialog({
   );
 }
 
-const microsToDollars = (micros: number | null) =>
-  micros === null ? "" : String(micros / 1_000_000);
-
 function ProfileDialog({
   workspaceId,
   providers,
@@ -698,12 +783,50 @@ function ProfileDialog({
   const [displayName, setDisplayName] = useState(existing?.display_name ?? "");
   const [modelName, setModelName] = useState(existing?.model_name ?? "");
   const [inputCost, setInputCost] = useState(
-    microsToDollars(existing?.input_cost_micros_per_million ?? null),
+    microsToDollarInput(existing?.input_cost_micros_per_million ?? null),
   );
   const [outputCost, setOutputCost] = useState(
-    microsToDollars(existing?.output_cost_micros_per_million ?? null),
+    microsToDollarInput(existing?.output_cost_micros_per_million ?? null),
   );
+  const [contextWindow, setContextWindow] = useState(
+    existing?.context_window ? String(existing.context_window) : "",
+  );
+  const [pricingOpen, setPricingOpen] = useState(false);
+  const [pricingNote, setPricingNote] = useState<string | null>(null);
+  // The model the prices were last auto-filled for, so edits survive re-renders.
+  const [autofilledFor, setAutofilledFor] = useState<string | null>(null);
   const providerModels = useProviderModels(workspaceId, providerId || null);
+  const provider = providers.find((p) => p.id === providerId);
+  const providerType: ModelProviderType = provider?.type ?? "openai_compatible";
+  const entries = providerModels.data?.models;
+  const catalogUpdated = providerModels.data?.catalog_updated ?? null;
+  const pricingPanelId = useId();
+
+  // Auto-fill prices (and context window) whenever a listed model is picked:
+  // on typing/picking (handler) and when the model list arrives after the
+  // name was already typed (derived state adjusted during render).
+  const applyAutofill = (name: string, list: typeof entries) => {
+    const key = `${providerId}:${name.trim().toLowerCase()}`;
+    if (!name.trim() || !list || autofilledFor === key) return;
+    const listed = list.some((e) => e.id.toLowerCase() === name.trim().toLowerCase());
+    if (!listed) return;
+    const fill = autofillForModel(name, list, providerType, catalogUpdated);
+    setAutofilledFor(key);
+    setPricingNote(fill.note);
+    if (fill.known) {
+      setInputCost(fill.inputCost);
+      setOutputCost(fill.outputCost);
+    } else {
+      // Unknown price: open the disclosure so the user sees what to enter.
+      setPricingOpen(true);
+    }
+    if (fill.contextWindow) setContextWindow(fill.contextWindow);
+  };
+  const [seenEntries, setSeenEntries] = useState(entries);
+  if (seenEntries !== entries) {
+    setSeenEntries(entries);
+    applyAutofill(modelName, entries);
+  }
 
   const create = useMutation({
     mutationFn: () =>
@@ -717,13 +840,10 @@ function ProfileDialog({
             provider_id: providerId,
             display_name: displayName.trim(),
             model_name: modelName.trim(),
+            context_window: contextWindow.trim() ? Number(contextWindow) : null,
             // UI takes $ per 1M tokens; API stores micro-dollars per 1M.
-            input_cost_micros_per_million: inputCost
-              ? Math.round(Number(inputCost) * 1_000_000)
-              : null,
-            output_cost_micros_per_million: outputCost
-              ? Math.round(Number(outputCost) * 1_000_000)
-              : null,
+            input_cost_micros_per_million: dollarInputToMicros(inputCost),
+            output_cost_micros_per_million: dollarInputToMicros(outputCost),
           },
         },
       ),
@@ -732,6 +852,11 @@ function ProfileDialog({
       onClose();
     },
   });
+
+  const pricesKnown = Boolean(inputCost || outputCost);
+  const summary = pricesKnown
+    ? `$${inputCost || "0"} in · $${outputCost || "0"} out per 1M tokens`
+    : "No prices yet — runs will show $0.00 until you add them.";
 
   return (
     <Dialog title={existing ? "Edit model profile" : "New model profile"} open onClose={onClose}>
@@ -743,10 +868,17 @@ function ProfileDialog({
         }}
       >
         <Field label="Provider">
-          <Select value={providerId} onChange={(e) => setProviderId(e.target.value)} required>
-            {providers.map((provider) => (
-              <option key={provider.id} value={provider.id}>
-                {provider.display_name}
+          <Select
+            value={providerId}
+            onChange={(e) => {
+              setProviderId(e.target.value);
+              setAutofilledFor(null);
+            }}
+            required
+          >
+            {providers.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.display_name}
               </option>
             ))}
           </Select>
@@ -765,8 +897,8 @@ function ProfileDialog({
           hint={
             providerModels.isPending
               ? "Loading the provider's model list…"
-              : providerModels.data && providerModels.data.models.length > 0
-                ? `${providerModels.data.models.length} models available — pick one or type an identifier.`
+              : entries && entries.length > 0
+                ? `${entries.length} models available — pick one or type an identifier.`
                 : providerModels.data?.detail
                   ? `Couldn't list models (${providerModels.data.detail}). Type the exact identifier.`
                   : "The exact model identifier the provider expects."
@@ -777,37 +909,72 @@ function ProfileDialog({
             maxLength={200}
             list="profile-model-options"
             value={modelName}
-            onChange={(e) => setModelName(e.target.value)}
+            onChange={(e) => {
+              setModelName(e.target.value);
+              applyAutofill(e.target.value, entries);
+            }}
             placeholder="gpt-5-mini"
           />
           <datalist id="profile-model-options">
-            {(providerModels.data?.models ?? []).map((model) => (
-              <option key={model} value={model} />
+            {(entries ?? []).map((model) => (
+              <option key={model.id} value={model.id} />
             ))}
           </datalist>
         </Field>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Input $ / 1M tokens">
-            <Input
-              type="number"
-              min="0"
-              step="0.000001"
-              value={inputCost}
-              onChange={(e) => setInputCost(e.target.value)}
-              placeholder="0.15"
-            />
-          </Field>
-          <Field label="Output $ / 1M tokens">
-            <Input
-              type="number"
-              min="0"
-              step="0.000001"
-              value={outputCost}
-              onChange={(e) => setOutputCost(e.target.value)}
-              placeholder="0.60"
-            />
-          </Field>
+
+        <div className="rounded-xl border border-line">
+          <button
+            type="button"
+            className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-ink"
+            aria-expanded={pricingOpen}
+            aria-controls={pricingPanelId}
+            onClick={() => setPricingOpen((open) => !open)}
+          >
+            {pricingOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            <span className="font-medium">Pricing (auto-filled)</span>
+            <span className="ml-auto truncate text-xs text-dim">{summary}</span>
+          </button>
+          {pricingOpen ? (
+            <div id={pricingPanelId} className="space-y-3 border-t border-line px-3 py-3">
+              {pricingNote ? <p className="text-xs text-dim">{pricingNote}</p> : null}
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Input $ / 1M tokens">
+                  <Input
+                    type="number"
+                    min="0"
+                    step="0.000001"
+                    value={inputCost}
+                    onChange={(e) => setInputCost(e.target.value)}
+                    placeholder="0.15"
+                  />
+                </Field>
+                <Field label="Output $ / 1M tokens">
+                  <Input
+                    type="number"
+                    min="0"
+                    step="0.000001"
+                    value={outputCost}
+                    onChange={(e) => setOutputCost(e.target.value)}
+                    placeholder="0.60"
+                  />
+                </Field>
+              </div>
+              <Field label="Context window (tokens)" hint="Optional.">
+                <Input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={contextWindow}
+                  onChange={(e) => setContextWindow(e.target.value)}
+                  placeholder="128000"
+                />
+              </Field>
+            </div>
+          ) : pricingNote ? (
+            <p className="border-t border-line px-3 py-2 text-xs text-dim">{pricingNote}</p>
+          ) : null}
         </div>
+
         <ErrorNote
           message={errText(create.error, existing ? "Saving the profile failed." : "Creating the profile failed.")}
         />
@@ -821,5 +988,261 @@ function ProfileDialog({
         </div>
       </form>
     </Dialog>
+  );
+}
+
+const ADMIN_KEY_HINT =
+  "Optional. OpenAI has no balance API; an admin key lets Jhin read month-to-date spend. Create one in the OpenAI dashboard → Settings → Organization → Admin keys. Stored encrypted, never displayed.";
+
+/** Balance and spend for one provider: live remaining when the provider
+ * reports it, otherwise Jhin's tracked spend with an optional "loaded
+ * credits" figure so an estimated remaining amount can be shown. */
+function BalanceBlock({
+  provider,
+  isAdmin,
+  workspaceId,
+  onChanged,
+  onError,
+}: {
+  provider: ModelProvider;
+  isAdmin: boolean;
+  workspaceId: string;
+  onChanged: () => void;
+  onError: (message: string | null) => void;
+}) {
+  const balance = useProviderBalance(workspaceId, provider.id);
+  const [adminKeyDialog, setAdminKeyDialog] = useState(false);
+  const [credits, setCredits] = useState<string | null>(null);
+
+  const saveCredits = useMutation({
+    mutationFn: (micros: number | null) =>
+      api<ModelProvider>(`/api/v1/workspaces/${workspaceId}/model-providers/${provider.id}`, {
+        method: "PATCH",
+        body: { credits_loaded_micros: micros },
+      }),
+    onSuccess: () => {
+      onError(null);
+      setCredits(null);
+      onChanged();
+      void balance.refetch();
+    },
+    onError: (error) => onError(errText(error, "Saving the loaded credits failed.")),
+  });
+
+  if (balance.isPending) {
+    return (
+      <div data-testid="balance-block" className="rounded-xl bg-raised px-3 py-2 text-xs text-faint">
+        Loading balance…
+      </div>
+    );
+  }
+  const data = balance.data;
+  if (!data) {
+    return (
+      <div data-testid="balance-block" className="rounded-xl bg-raised px-3 py-2 text-xs text-faint">
+        Balance unavailable.
+      </div>
+    );
+  }
+
+  const live = data.provider_remaining_micros !== null;
+  const creditsValue = credits ?? microsToDollarInput(data.credits_loaded_micros);
+  const showAddAdminKey = provider.type === "openai" && !provider.has_admin_key && isAdmin;
+
+  return (
+    <div data-testid="balance-block" className="space-y-1.5 rounded-xl bg-raised px-3 py-2 text-xs">
+      <p className="flex items-center gap-1.5 font-medium text-ink">
+        <Wallet size={12} aria-hidden /> Balance
+      </p>
+      {live ? (
+        <p className="text-sm tabular-nums text-ink">
+          {formatMicrosAsDollars(data.provider_remaining_micros)}{" "}
+          <span className="text-xs text-dim">remaining</span>
+        </p>
+      ) : (
+        <p className="text-dim">
+          {data.source === "openai_admin" && data.provider_spent_month_micros !== null ? (
+            <>
+              Spent this month: <span className="tabular-nums text-ink">{formatMicrosAsDollars(data.provider_spent_month_micros)}</span>
+            </>
+          ) : (
+            <>
+              Spent this month through Jhin:{" "}
+              <span className="tabular-nums text-ink">{formatMicrosAsDollars(data.tracked_spent_month_micros)}</span>
+            </>
+          )}
+        </p>
+      )}
+      {!live ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="flex items-center gap-1 text-faint">
+            Loaded credits $
+            <input
+              type="number"
+              min="0"
+              step="any"
+              aria-label="Loaded credits in dollars"
+              className="h-6 w-24 rounded-md border border-line bg-surface px-1.5 text-xs tabular-nums text-ink"
+              value={creditsValue}
+              disabled={!isAdmin || saveCredits.isPending}
+              onChange={(e) => setCredits(e.target.value)}
+              onBlur={() => {
+                if (credits === null) return;
+                const micros = dollarInputToMicros(credits);
+                if (micros !== (data.credits_loaded_micros ?? null)) saveCredits.mutate(micros);
+                else setCredits(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  (e.target as HTMLInputElement).blur();
+                }
+              }}
+            />
+          </label>
+          {data.estimated_remaining_micros !== null ? (
+            <span className="tabular-nums text-ink">
+              ≈ {formatMicrosAsDollars(data.estimated_remaining_micros)} remaining
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+      <p className="text-faint" title={data.detail ?? undefined}>
+        {balanceSourceLabel(data.source)}
+        {data.source === "tracked" && data.detail && data.detail !== "Tracked by Jhin"
+          ? ` — ${data.detail}`
+          : ""}
+      </p>
+      {showAddAdminKey ? (
+        <Button size="sm" variant="ghost" onClick={() => setAdminKeyDialog(true)}>
+          <KeyRound size={12} /> Add admin key
+        </Button>
+      ) : null}
+      {adminKeyDialog ? (
+        <AdminKeyDialog
+          workspaceId={workspaceId}
+          provider={provider}
+          onClose={() => setAdminKeyDialog(false)}
+          onSaved={() => {
+            setAdminKeyDialog(false);
+            onChanged();
+            void balance.refetch();
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function AdminKeyDialog({
+  workspaceId,
+  provider,
+  onClose,
+  onSaved,
+}: {
+  workspaceId: string;
+  provider: ModelProvider;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [adminKey, setAdminKey] = useState("");
+  const save = useMutation({
+    mutationFn: async () => {
+      const secretId = await storeApiKey(workspaceId, `${provider.display_name} admin key`, adminKey.trim());
+      await api<ModelProvider>(`/api/v1/workspaces/${workspaceId}/model-providers/${provider.id}`, {
+        method: "PATCH",
+        body: { admin_secret_id: secretId },
+      });
+    },
+    onSuccess: onSaved,
+  });
+  return (
+    <Dialog title="Add OpenAI admin key" open onClose={onClose}>
+      <form
+        className="space-y-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          save.mutate();
+        }}
+      >
+        <Field label="Admin key" hint={ADMIN_KEY_HINT}>
+          <Input
+            type="password"
+            autoComplete="off"
+            required
+            value={adminKey}
+            onChange={(e) => setAdminKey(e.target.value)}
+            placeholder="sk-admin-…"
+          />
+        </Field>
+        <ErrorNote message={errText(save.error, "Saving the admin key failed.")} />
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" variant="primary" disabled={save.isPending || !adminKey.trim()}>
+            {save.isPending ? "Saving…" : "Save admin key"}
+          </Button>
+        </div>
+      </form>
+    </Dialog>
+  );
+}
+
+/** Month-to-date tracked spend across every provider, with the budget bar
+ * when a monthly budget is set (Settings → Budget). */
+export function SpendTile({ spend }: { spend: WorkspaceSpend }) {
+  const budget = summarizeBudget(
+    spend.spent_month_micros,
+    spend.monthly_budget_micros,
+    spend.warning_threshold,
+  );
+  const barTone =
+    budget?.tone === "over" ? "bg-danger" : budget?.tone === "warn" ? "bg-warn" : "bg-accent";
+  return (
+    <section
+      data-testid="spend-tile"
+      aria-label="Spend"
+      className="flex flex-col gap-2 rounded-2xl border border-line bg-surface px-5 py-4 shadow-card md:flex-row md:items-center md:gap-6"
+    >
+      <div>
+        <p className="text-xs font-medium uppercase tracking-wider text-faint">Spend this month</p>
+        <p className="font-display text-2xl font-semibold tabular-nums text-ink">
+          {formatMicrosAsDollars(spend.spent_month_micros)}
+        </p>
+        <p className="text-xs text-dim">
+          {formatMicrosAsDollars(spend.spent_total_micros)} all time · tracked by Jhin from run costs
+        </p>
+      </div>
+      <div className="flex-1">
+        {budget ? (
+          <div>
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-dim">Monthly budget</span>
+              <span className={budget.tone === "ok" ? "text-dim" : "text-danger"}>{budget.label}</span>
+            </div>
+            <div
+              role="progressbar"
+              aria-label="Budget used"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.min(budget.percent, 100)}
+              className="mt-1 h-2 overflow-hidden rounded-full bg-raised"
+            >
+              <div className={`h-full rounded-full ${barTone}`} style={{ width: `${budget.ratio * 100}%` }} />
+            </div>
+          </div>
+        ) : (
+          <p className="text-xs text-faint">No monthly budget set — add one under Settings to get a warning bar here.</p>
+        )}
+        {spend.providers.length > 1 ? (
+          <p className="mt-1 truncate text-xs text-faint">
+            {spend.providers
+              .map((p) => `${p.display_name} ${formatMicrosAsDollars(p.spent_month_micros)}`)
+              .join(" · ")}
+          </p>
+        ) : null}
+      </div>
+    </section>
   );
 }

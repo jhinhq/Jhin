@@ -44,7 +44,7 @@ async def test_verify_draft_checks_credentials_without_persisting(
     seen: list[tuple[str, str | None, str | None]] = []
     client = _FakeClient(fail=fail)
 
-    def build(provider_type, *, base_url, api_key, metrics, tracer):  # type: ignore[no-untyped-def]
+    def build(provider_type, *, base_url, api_key, metrics, tracer, admin_api_key=None):  # type: ignore[no-untyped-def]
         seen.append((provider_type, base_url, api_key))
         return client
 

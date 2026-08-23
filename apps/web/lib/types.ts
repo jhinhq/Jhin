@@ -189,6 +189,10 @@ export interface ModelProvider {
   display_name: string;
   base_url: string | null;
   secret_id: string | null;
+  /** Prepaid credit the admin entered, in micro-dollars (null = not set). */
+  credits_loaded_micros: number | null;
+  /** Whether a billing/admin credential is attached (its value is never shown). */
+  has_admin_key: boolean;
   enabled: boolean;
   last_verified_at: string | null;
   last_error: string | null;
@@ -212,13 +216,65 @@ export interface ModelProfile {
   updated_at: string;
 }
 
+export type PriceSource = "provider" | "catalog" | null;
+
+export interface ProviderModelEntry {
+  id: string;
+  input_cost_micros_per_million: number | null;
+  output_cost_micros_per_million: number | null;
+  context_window: number | null;
+  source: PriceSource;
+}
+
 export interface ProviderModels {
-  models: string[];
+  models: ProviderModelEntry[];
   detail: string | null;
+  /** Year-month marker of the static price catalog (e.g. "2026-01"). */
+  catalog_updated: string | null;
+}
+
+export type BalanceSource = "openrouter" | "openai_admin" | "tracked";
+
+export interface ProviderBalance {
+  tracked_spent_month_micros: number;
+  tracked_spent_total_micros: number;
+  provider_spent_month_micros: number | null;
+  provider_remaining_micros: number | null;
+  credits_loaded_micros: number | null;
+  estimated_remaining_micros: number | null;
+  source: BalanceSource;
+  detail: string | null;
+  fetched_at: string;
+}
+
+export interface ProviderSpend {
+  provider_id: string;
+  display_name: string;
+  type: ModelProviderType;
+  spent_month_micros: number;
+  spent_total_micros: number;
+}
+
+export interface WorkspaceSpend {
+  spent_month_micros: number;
+  spent_total_micros: number;
+  period_start: string;
+  providers: ProviderSpend[];
+  monthly_budget_micros: number | null;
+  warning_threshold: number;
+  fetched_at: string;
+}
+
+export interface ProfilePricingRefresh {
+  updated: boolean;
+  source: PriceSource;
+  detail: string;
+  profile: ModelProfile;
 }
 
 export interface WorkspaceDetail extends Workspace {
   default_model_profile_id: string | null;
+  settings_json?: Record<string, unknown>;
 }
 
 export type TaskState =

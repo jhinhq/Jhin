@@ -29,6 +29,7 @@ import type {
   MeResponse,
   ModelProfile,
   ModelProvider,
+  ProviderBalance,
   ProviderModels,
   OrgGraph,
   RunEvent,
@@ -44,6 +45,7 @@ import type {
   Trigger,
   TriggerInvocation,
   WorkspaceDetail,
+  WorkspaceSpend,
 } from "@/lib/types";
 
 /** Poll cadence for live task/run views until SSE lands (plan 18). */
@@ -147,6 +149,30 @@ export function useProviderModels(workspaceId: string, providerId: string | null
     enabled: providerId !== null && providerId !== "",
     staleTime: 60_000,
     retry: false,
+  });
+}
+
+/** Balance/spend for one provider; polls every minute (the API caches the
+ * provider's billing call for the same interval). */
+export function useProviderBalance(workspaceId: string, providerId: string, enabled = true) {
+  return useQuery({
+    queryKey: ["provider-balance", workspaceId, providerId],
+    queryFn: () =>
+      api<ProviderBalance>(
+        `/api/v1/workspaces/${workspaceId}/model-providers/${providerId}/balance`,
+      ),
+    enabled,
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+    retry: false,
+  });
+}
+
+export function useWorkspaceSpend(workspaceId: string) {
+  return useQuery({
+    queryKey: ["workspace-spend", workspaceId],
+    queryFn: () => api<WorkspaceSpend>(`/api/v1/workspaces/${workspaceId}/spend`),
+    staleTime: 30_000,
   });
 }
 
@@ -292,6 +318,8 @@ export function useInvalidateModels(workspaceId: string) {
     void queryClient.invalidateQueries({ queryKey: ["model-profiles", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["secrets", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["workspace", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["provider-balance", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["workspace-spend", workspaceId] });
   };
 }
 

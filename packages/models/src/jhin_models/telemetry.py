@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import math
 import sys
-from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from types import TracebackType
 from typing import Any, cast
@@ -14,7 +14,13 @@ from opentelemetry import trace
 from opentelemetry.trace import Span, SpanKind, Tracer
 
 from jhin_domain import ModelProviderType
-from jhin_models.base import ModelClient, ModelRequest, ModelResponse
+from jhin_models.base import (
+    AccountStatus,
+    ModelClient,
+    ModelListing,
+    ModelRequest,
+    ModelResponse,
+)
 from jhin_models.embeddings import EmbeddingClient, EmbeddingResult
 from jhin_models.images import ImageGenerationClient
 from jhin_observability import (
@@ -472,14 +478,15 @@ class InstrumentedModelClient(ModelClient):
             )
             return result
 
-    async def list_models(self) -> list[str]:
+    async def _simple_attempt[T](self, operation: str, call: Callable[[], Awaitable[T]]) -> T:
+        """One span + one metric point around a payload-free adapter call."""
         with _attempt_span(
             self._tracer,
             provider_type=self._provider_type,
-            operation="list_models",
+            operation=operation,
         ) as span:
             try:
-                result = await self._wrapped.list_models()
+                result = await call()
             except asyncio.CancelledError:
                 _finish_attempt(
                     self._metrics,
@@ -504,6 +511,15 @@ class InstrumentedModelClient(ModelClient):
                 outcome="ok",
             )
             return result
+
+    async def list_models(self) -> list[str]:
+        return await self._simple_attempt("list_models", self._wrapped.list_models)
+
+    async def list_models_detailed(self) -> list[ModelListing]:
+        return await self._simple_attempt("list_models", self._wrapped.list_models_detailed)
+
+    async def get_account_status(self) -> AccountStatus | None:
+        return await self._simple_attempt("account_status", self._wrapped.get_account_status)
 
     async def close(self) -> None:
         await self._wrapped.close()

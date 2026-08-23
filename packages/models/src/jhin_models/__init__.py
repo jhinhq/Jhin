@@ -6,7 +6,11 @@ platform sees only :class:`ModelClient`, :class:`ModelRequest`, and
 """
 
 from jhin_models.base import (
+    INSUFFICIENT_FUNDS,
+    AccountStatus,
+    AccountStatusUnsupported,
     ModelClient,
+    ModelListing,
     ModelMessage,
     ModelProviderError,
     ModelRequest,
@@ -32,6 +36,9 @@ from jhin_models.images import (
 )
 
 __all__ = [
+    "INSUFFICIENT_FUNDS",
+    "AccountStatus",
+    "AccountStatusUnsupported",
     "EmbeddingClient",
     "EmbeddingConfig",
     "EmbeddingResult",
@@ -41,6 +48,7 @@ __all__ = [
     "ImageGenerationConfig",
     "ImageGenerationUnsupported",
     "ModelClient",
+    "ModelListing",
     "ModelMessage",
     "ModelProviderError",
     "ModelRequest",

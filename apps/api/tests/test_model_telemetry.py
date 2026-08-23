@@ -306,7 +306,7 @@ async def test_real_lifespan_provider_verification_uses_exact_app_owned_handles_
         **kwargs: object,
     ) -> ModelClient:
         observed.append((provider_type, base_url, api_key, metrics, tracer))
-        assert kwargs == {}
+        assert kwargs == {"admin_api_key": None}
         return fake
 
     monkeypatch.setattr(model_service, "build_model_client", fake_build_model_client)
@@ -399,7 +399,7 @@ async def test_configuration_failure_preserves_detail_and_commits_failed_audit(
         **kwargs: object,
     ) -> ModelClient:
         observed.append((provider_type, base_url, api_key, metrics, tracer))
-        assert kwargs == {}
+        assert kwargs == {"admin_api_key": None}
         raise failure
 
     monkeypatch.setattr(model_service, "build_model_client", fail_build)
@@ -463,7 +463,7 @@ async def test_provider_failure_is_redacted_once_closed_and_committed_with_exact
         assert provider_type == ModelProviderType.OLLAMA.value
         assert base_url == "http://localhost:11434/v1"
         assert api_key is None
-        assert kwargs == {}
+        assert kwargs == {"admin_api_key": None}
         observed.append((metrics, tracer))
         return fake
 
@@ -639,7 +639,7 @@ async def test_close_failure_is_exact_terminal_authority_without_state_or_audit_
         assert provider_type == ModelProviderType.OLLAMA.value
         assert base_url == "http://localhost:11434/v1"
         assert api_key is None
-        assert kwargs == {}
+        assert kwargs == {"admin_api_key": None}
         observed.append((metrics, tracer))
         return fake
 
@@ -702,7 +702,7 @@ async def test_verification_cancellation_preserves_first_object_traceback_and_no
         assert provider_type == ModelProviderType.OLLAMA.value
         assert base_url == "http://localhost:11434/v1"
         assert api_key is None
-        assert kwargs == {}
+        assert kwargs == {"admin_api_key": None}
         observed.append((metrics, tracer))
         return fake
 

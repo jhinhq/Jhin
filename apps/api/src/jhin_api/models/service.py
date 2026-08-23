@@ -8,24 +8,41 @@ process redactor knows the value after decryption).
 
 from __future__ import annotations
 
+import asyncio
+import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import HTTPException, status
 from opentelemetry.trace import Tracer
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from jhin_api.audit import service as audit
 from jhin_api.deps import WorkspaceContext
-from jhin_db.models import Agent, ModelProfile, ModelProvider, Secret, Workspace
-from jhin_models import ModelClient, ModelProviderError, build_model_client
+from jhin_db.models import Agent, AgentRun, ModelProfile, ModelProvider, Secret, Workspace
+from jhin_models import (
+    AccountStatus,
+    AccountStatusUnsupported,
+    ModelClient,
+    ModelListing,
+    ModelProviderError,
+    build_model_client,
+)
 from jhin_models.factory import ProviderConfigError
+from jhin_models.pricing import CATALOG_UPDATED, lookup_price
 from jhin_observability import JhinMetrics
 from jhin_secrets import SecretCrypto, SecretStore
 from jhin_secrets.redaction import redact_text
+
+# Provider billing APIs are polled by the UI; one live call per provider per
+# minute is plenty and keeps us polite to the billing endpoints.
+ACCOUNT_STATUS_CACHE_TTL_SECONDS = 60.0
+# Best-effort: a slow billing API must not hold the balance request hostage.
+ACCOUNT_STATUS_TIMEOUT_SECONDS = 8.0
 
 
 def _provider_not_found() -> HTTPException:
@@ -42,14 +59,39 @@ def _build_verification_client(
     api_key: str | None,
     metrics: JhinMetrics,
     tracer: Tracer,
+    admin_api_key: str | None = None,
 ) -> ModelClient:
     """The single factory call site for provider checks (audited by telemetry tests)."""
     return build_model_client(
         provider_type,
         base_url=base_url,
         api_key=api_key,
+        admin_api_key=admin_api_key,
         metrics=metrics,
         tracer=tracer,
+    )
+
+
+async def _provider_client(
+    db: AsyncSession,
+    crypto: SecretCrypto,
+    workspace_id: UUID,
+    provider: ModelProvider,
+    metrics: JhinMetrics,
+    tracer: Tracer,
+    *,
+    with_admin_key: bool = False,
+) -> ModelClient:
+    """Adapter for a saved provider; credentials are revealed in memory only."""
+    store = SecretStore(db, crypto)
+    api_key: str | None = None
+    if provider.secret_id is not None:
+        api_key = await store.reveal(workspace_id, provider.secret_id)
+    admin_api_key: str | None = None
+    if with_admin_key and provider.admin_secret_id is not None:
+        admin_api_key = await store.reveal(workspace_id, provider.admin_secret_id)
+    return _build_verification_client(
+        provider.type, provider.base_url, api_key, metrics, tracer, admin_api_key=admin_api_key
     )
 
 
@@ -98,6 +140,7 @@ async def create_provider(
     ip_hash: str,
 ) -> ModelProvider:
     await _validate_secret(db, ctx.workspace_id, values.get("secret_id"))
+    await _validate_secret(db, ctx.workspace_id, values.get("admin_secret_id"))
     provider = ModelProvider(workspace_id=ctx.workspace_id, **values)
     db.add(provider)
     try:
@@ -134,8 +177,11 @@ async def update_provider(
     provider = await get_provider(db, ctx.workspace_id, provider_id)
     if "secret_id" in changes:
         await _validate_secret(db, ctx.workspace_id, changes["secret_id"])
+    if "admin_secret_id" in changes:
+        await _validate_secret(db, ctx.workspace_id, changes["admin_secret_id"])
     for field, value in changes.items():
         setattr(provider, field, value)
+    _ACCOUNT_STATUS_CACHE.pop(provider.id, None)  # credentials may have changed
     audit.record(
         db,
         action="provider.updated",
@@ -251,31 +297,237 @@ async def list_provider_models(
     provider_id: UUID,
     metrics: JhinMetrics,
     tracer: Tracer,
-) -> tuple[list[str], str | None]:
-    """Model identifiers from the provider, or an explanation when unavailable.
+) -> tuple[list[ModelListing], str | None]:
+    """Models (with prices when known) from the provider, or an explanation.
 
     Read-only: nothing is stored on the provider row. A provider that cannot
     list models (or rejects the credentials) yields an empty list plus a
     redacted detail so the UI can fall back to free-text entry.
     """
     provider = await get_provider(db, ctx.workspace_id, provider_id)
-
-    api_key: str | None = None
-    if provider.secret_id is not None:
-        api_key = await SecretStore(db, crypto).reveal(ctx.workspace_id, provider.secret_id)
-
     try:
-        client = _build_verification_client(
-            provider.type, provider.base_url, api_key, metrics, tracer
-        )
+        client = await _provider_client(db, crypto, ctx.workspace_id, provider, metrics, tracer)
     except ProviderConfigError as exc:
         return [], str(exc)
     try:
-        return await client.list_models(), None
+        return await client.list_models_detailed(), None
     except ModelProviderError as exc:
         return [], redact_text(str(exc))
     finally:
         await client.close()
+
+
+# --- Balance and spend ---
+
+
+@dataclass(frozen=True)
+class _CachedAccountStatus:
+    fetched_at: float
+    status: AccountStatus | None
+    error: str | None
+
+
+# provider id -> last live billing lookup (success or failure), see TTL above.
+_ACCOUNT_STATUS_CACHE: dict[UUID, _CachedAccountStatus] = {}
+
+
+def _clear_account_status_cache() -> None:
+    _ACCOUNT_STATUS_CACHE.clear()
+
+
+def month_start_utc(now: datetime | None = None) -> datetime:
+    current = now or datetime.now(UTC)
+    return current.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+async def _tracked_spend(
+    db: AsyncSession, workspace_id: UUID, *, since: datetime, provider_id: UUID | None = None
+) -> tuple[int, int]:
+    """(this period, all time) sum of ``agent_run.estimated_cost_micros``."""
+    base = (
+        select(
+            func.coalesce(
+                func.sum(AgentRun.estimated_cost_micros).filter(AgentRun.created_at >= since), 0
+            ),
+            func.coalesce(func.sum(AgentRun.estimated_cost_micros), 0),
+        )
+        .select_from(AgentRun)
+        .where(AgentRun.workspace_id == workspace_id)
+    )
+    if provider_id is not None:
+        base = base.join(ModelProfile, ModelProfile.id == AgentRun.model_profile_id).where(
+            ModelProfile.provider_id == provider_id
+        )
+    row = (await db.execute(base)).one()
+    return int(row[0] or 0), int(row[1] or 0)
+
+
+async def _live_account_status(
+    db: AsyncSession,
+    crypto: SecretCrypto,
+    workspace_id: UUID,
+    provider: ModelProvider,
+    metrics: JhinMetrics,
+    tracer: Tracer,
+) -> _CachedAccountStatus:
+    """Provider billing lookup, memoised per provider for the cache TTL."""
+    cached = _ACCOUNT_STATUS_CACHE.get(provider.id)
+    now = time.monotonic()
+    if cached is not None and now - cached.fetched_at < ACCOUNT_STATUS_CACHE_TTL_SECONDS:
+        return cached
+    status_value: AccountStatus | None = None
+    error: str | None = None
+    try:
+        client = await _provider_client(
+            db, crypto, workspace_id, provider, metrics, tracer, with_admin_key=True
+        )
+    except ProviderConfigError as exc:
+        error = str(exc)
+    else:
+        try:
+            status_value = await asyncio.wait_for(
+                client.get_account_status(), timeout=ACCOUNT_STATUS_TIMEOUT_SECONDS
+            )
+        except AccountStatusUnsupported as exc:
+            error = str(exc)
+        except TimeoutError:
+            error = "The provider's billing API did not answer in time"
+        except ModelProviderError as exc:
+            error = redact_text(str(exc))
+        finally:
+            await client.close()
+    result = _CachedAccountStatus(fetched_at=now, status=status_value, error=error)
+    _ACCOUNT_STATUS_CACHE[provider.id] = result
+    return result
+
+
+@dataclass(frozen=True)
+class ProviderBalance:
+    tracked_spent_month_micros: int
+    tracked_spent_total_micros: int
+    provider_spent_month_micros: int | None
+    provider_remaining_micros: int | None
+    credits_loaded_micros: int | None
+    estimated_remaining_micros: int | None
+    source: Literal["openrouter", "openai_admin", "tracked"]
+    detail: str | None
+    fetched_at: datetime
+
+
+def estimate_remaining(
+    *,
+    credits_loaded_micros: int | None,
+    provider_spent_month_micros: int | None,
+    tracked_spent_total_micros: int,
+) -> int | None:
+    """``credits - provider month spend`` when both known, else ``credits -
+    tracked total`` when credits are set, else unknown."""
+    if credits_loaded_micros is None:
+        return None
+    if provider_spent_month_micros is not None:
+        return credits_loaded_micros - provider_spent_month_micros
+    return credits_loaded_micros - tracked_spent_total_micros
+
+
+async def get_provider_balance(
+    db: AsyncSession,
+    crypto: SecretCrypto,
+    ctx: WorkspaceContext,
+    provider_id: UUID,
+    metrics: JhinMetrics,
+    tracer: Tracer,
+) -> ProviderBalance:
+    """Tracked spend plus a best-effort live balance/spend from the provider."""
+    provider = await get_provider(db, ctx.workspace_id, provider_id)
+    now = datetime.now(UTC)
+    month, total = await _tracked_spend(
+        db, ctx.workspace_id, since=month_start_utc(now), provider_id=provider.id
+    )
+    live = await _live_account_status(db, crypto, ctx.workspace_id, provider, metrics, tracer)
+
+    source: Literal["openrouter", "openai_admin", "tracked"] = "tracked"
+    detail: str | None = live.error
+    provider_spent: int | None = None
+    provider_remaining: int | None = None
+    if live.status is not None:
+        provider_spent = live.status.spent_month_micros
+        provider_remaining = live.status.remaining_micros
+        if live.status.source in ("openrouter", "openai_admin"):
+            source = live.status.source  # type: ignore[assignment]
+        detail = live.status.detail or None
+    elif detail is None:
+        detail = "Tracked by Jhin"
+    return ProviderBalance(
+        tracked_spent_month_micros=month,
+        tracked_spent_total_micros=total,
+        provider_spent_month_micros=provider_spent,
+        provider_remaining_micros=provider_remaining,
+        credits_loaded_micros=provider.credits_loaded_micros,
+        estimated_remaining_micros=estimate_remaining(
+            credits_loaded_micros=provider.credits_loaded_micros,
+            provider_spent_month_micros=provider_spent,
+            tracked_spent_total_micros=total,
+        ),
+        source=source,
+        detail=detail,
+        fetched_at=now,
+    )
+
+
+@dataclass(frozen=True)
+class ProviderSpend:
+    provider: ModelProvider
+    spent_month_micros: int
+    spent_total_micros: int
+
+
+@dataclass(frozen=True)
+class WorkspaceSpend:
+    spent_month_micros: int
+    spent_total_micros: int
+    period_start: datetime
+    providers: list[ProviderSpend]
+    monthly_budget_micros: int | None
+    warning_threshold: float
+    fetched_at: datetime
+
+
+def budget_from_settings(settings_json: dict[str, Any]) -> tuple[int | None, float]:
+    """``(monthly_budget_micros, warning_threshold)`` from ``settings_json.budget``."""
+    raw = settings_json.get("budget")
+    if not isinstance(raw, dict):
+        return None, 0.8
+    budget = raw.get("monthly_budget_micros")
+    threshold = raw.get("warning_threshold", 0.8)
+    budget_micros = int(budget) if isinstance(budget, int | float) and budget >= 0 else None
+    warning = float(threshold) if isinstance(threshold, int | float) else 0.8
+    return budget_micros, min(max(warning, 0.0), 1.0)
+
+
+async def get_workspace_spend(db: AsyncSession, workspace_id: UUID) -> WorkspaceSpend:
+    """Tracked spend this month / all time, per provider, plus the budget."""
+    now = datetime.now(UTC)
+    since = month_start_utc(now)
+    month, total = await _tracked_spend(db, workspace_id, since=since)
+    providers: list[ProviderSpend] = []
+    for provider in await list_providers(db, workspace_id):
+        p_month, p_total = await _tracked_spend(
+            db, workspace_id, since=since, provider_id=provider.id
+        )
+        providers.append(
+            ProviderSpend(provider=provider, spent_month_micros=p_month, spent_total_micros=p_total)
+        )
+    workspace = await db.get(Workspace, workspace_id)
+    budget, threshold = budget_from_settings(workspace.settings_json if workspace else {})
+    return WorkspaceSpend(
+        spent_month_micros=month,
+        spent_total_micros=total,
+        period_start=since,
+        providers=providers,
+        monthly_budget_micros=budget,
+        warning_threshold=threshold,
+        fetched_at=now,
+    )
 
 
 async def verify_provider(
@@ -292,15 +544,9 @@ async def verify_provider(
     """One cheap live call through the adapter; result stored on the row."""
     provider = await get_provider(db, ctx.workspace_id, provider_id)
 
-    api_key: str | None = None
-    if provider.secret_id is not None:
-        api_key = await SecretStore(db, crypto).reveal(ctx.workspace_id, provider.secret_id)
-
     ok, detail = True, ""
     try:
-        client = _build_verification_client(
-            provider.type, provider.base_url, api_key, metrics, tracer
-        )
+        client = await _provider_client(db, crypto, ctx.workspace_id, provider, metrics, tracer)
     except ProviderConfigError as exc:
         ok, detail = False, str(exc)
     else:
@@ -457,3 +703,72 @@ async def delete_profile(
     )
     await db.delete(profile)
     await db.commit()
+
+
+async def refresh_profile_pricing(
+    db: AsyncSession,
+    crypto: SecretCrypto,
+    ctx: WorkspaceContext,
+    profile_id: UUID,
+    metrics: JhinMetrics,
+    tracer: Tracer,
+    *,
+    request_id: UUID,
+    ip_hash: str,
+) -> tuple[ModelProfile, bool, Literal["provider", "catalog"] | None, str]:
+    """Re-look up the profile's prices (provider list first, then catalog)
+    and store them. Returns ``(profile, updated, source, detail)``."""
+    profile = await get_profile(db, ctx.workspace_id, profile_id)
+    provider = await get_provider(db, ctx.workspace_id, profile.provider_id)
+
+    listing: ModelListing | None = None
+    lookup_detail: str | None = None
+    try:
+        client = await _provider_client(db, crypto, ctx.workspace_id, provider, metrics, tracer)
+    except ProviderConfigError as exc:
+        lookup_detail = str(exc)
+    else:
+        try:
+            wanted = profile.model_name.strip().lower()
+            for entry in await client.list_models_detailed():
+                if entry.id.lower() == wanted and entry.source is not None:
+                    listing = entry
+                    break
+        except ModelProviderError as exc:
+            lookup_detail = redact_text(str(exc))
+        finally:
+            await client.close()
+    if listing is None:
+        price = lookup_price(provider.type, profile.model_name)
+        if price is not None:
+            listing = ModelListing(
+                id=profile.model_name,
+                input_cost_micros_per_million=price.input_cost_micros_per_million,
+                output_cost_micros_per_million=price.output_cost_micros_per_million,
+                context_window=price.context_window,
+                source="catalog",
+            )
+    if listing is None:
+        detail = "No price is known for this model"
+        if lookup_detail:
+            detail = f"{detail} ({lookup_detail})"
+        return profile, False, None, detail
+
+    changes: dict[str, Any] = {}
+    if profile.input_cost_micros_per_million != listing.input_cost_micros_per_million:
+        changes["input_cost_micros_per_million"] = listing.input_cost_micros_per_million
+    if profile.output_cost_micros_per_million != listing.output_cost_micros_per_million:
+        changes["output_cost_micros_per_million"] = listing.output_cost_micros_per_million
+    if listing.context_window is not None and profile.context_window != listing.context_window:
+        changes["context_window"] = listing.context_window
+    source_label = (
+        "the provider's model list"
+        if listing.source == "provider"
+        else f"the public price list (catalog updated {CATALOG_UPDATED})"
+    )
+    if not changes:
+        return profile, False, listing.source, f"Prices already match {source_label}"
+    await update_profile(
+        db, ctx, profile.id, changes=changes, request_id=request_id, ip_hash=ip_hash
+    )
+    return profile, True, listing.source, f"Prices updated from {source_label}"

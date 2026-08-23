@@ -17,6 +17,7 @@ import httpx
 
 from jhin_models.base import (
     ModelClient,
+    ModelListing,
     ModelMessage,
     ModelProviderError,
     ModelRequest,
@@ -26,6 +27,7 @@ from jhin_models.base import (
     classify_retryable,
     describe_error_body,
 )
+from jhin_models.pricing import lookup_price
 
 ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
 ANTHROPIC_VERSION = "2023-06-01"
@@ -229,6 +231,25 @@ class AnthropicClient(ModelClient):
             if isinstance(row, dict) and isinstance(row.get("id"), str) and row["id"]
         }
         return sorted(ids)
+
+    async def list_models_detailed(self) -> list[ModelListing]:
+        """Anthropic publishes no prices over the API: catalog lookup."""
+        listings: list[ModelListing] = []
+        for model_id in await self.list_models():
+            price = lookup_price("anthropic", model_id)
+            if price is None:
+                listings.append(ModelListing(id=model_id))
+                continue
+            listings.append(
+                ModelListing(
+                    id=model_id,
+                    input_cost_micros_per_million=price.input_cost_micros_per_million,
+                    output_cost_micros_per_million=price.output_cost_micros_per_million,
+                    context_window=price.context_window,
+                    source="catalog",
+                )
+            )
+        return listings
 
     async def close(self) -> None:
         await self._client.aclose()
