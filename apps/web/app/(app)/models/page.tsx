@@ -238,8 +238,8 @@ function ProviderCard({
       onError(null);
       onChanged();
     },
-    onError: (error) => onError(errText(error, "Delete failed.")),
   });
+  const removeError = errText(remove.error, "Deleting the provider failed.");
 
   const typeLabel =
     PROVIDER_TYPES.find((t) => t.value === provider.type)?.label ?? provider.type;
@@ -307,6 +307,12 @@ function ProviderCard({
       ) : provider.last_error ? (
         <p className="rounded-xl bg-danger-soft px-3 py-2 text-xs text-danger">
           {provider.last_error}
+        </p>
+      ) : null}
+
+      {removeError ? (
+        <p role="alert" className="rounded-xl bg-danger-soft px-3 py-2 text-xs text-danger">
+          {removeError}
         </p>
       ) : null}
 

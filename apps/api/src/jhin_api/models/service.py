@@ -170,17 +170,31 @@ async def delete_provider(
         await db.scalars(select(ModelProfile.id).where(ModelProfile.provider_id == provider.id))
     )
     if profile_ids:
-        in_use_by_agent = await db.scalar(
-            select(Agent.id).where(Agent.model_profile_id.in_(profile_ids)).limit(1)
+        # Agents pinned to one of this provider's profiles keep it alive; name
+        # them so the admin knows what to change. The workspace default is
+        # just cleared — profiles cascade away with the provider.
+        agent_names = list(
+            await db.scalars(
+                select(Agent.name)
+                .where(Agent.model_profile_id.in_(profile_ids))
+                .order_by(Agent.name)
+                .limit(5)
+            )
         )
-        in_use_as_default = await db.scalar(
-            select(Workspace.id).where(Workspace.default_model_profile_id.in_(profile_ids))
-        )
-        if in_use_by_agent or in_use_as_default:
+        if agent_names:
+            listed = ", ".join(agent_names)
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Provider profiles are in use by agents or as the workspace default",
+                detail=(
+                    f"Agents still use this provider's models ({listed}). "
+                    "Change their model first, then delete the provider."
+                ),
             )
+        workspace = await db.scalar(
+            select(Workspace).where(Workspace.default_model_profile_id.in_(profile_ids))
+        )
+        if workspace is not None:
+            workspace.default_model_profile_id = None
     audit.record(
         db,
         action="provider.deleted",

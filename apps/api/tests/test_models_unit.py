@@ -99,3 +99,46 @@ async def test_deleting_the_default_profile_clears_the_workspace_default(
     await session.refresh(workspace)
     assert workspace.default_model_profile_id is None
     assert await session.get(ModelProfile, profile.id) is None
+
+
+async def test_delete_provider_clears_default_but_refuses_when_agents_use_it(
+    session: AsyncSession, admin_ctx: WorkspaceContext
+) -> None:
+    from uuid import uuid4
+
+    from fastapi import HTTPException
+
+    from jhin_db.models import Agent
+    from jhin_domain import new_uuid7
+
+    ws = admin_ctx.workspace_id
+    provider = ModelProvider(workspace_id=ws, type="openai", display_name="OpenAI")
+    session.add(provider)
+    await session.flush()
+    profile = ModelProfile(
+        workspace_id=ws, provider_id=provider.id, model_name="gpt-5-mini", display_name="Mini"
+    )
+    session.add(profile)
+    await session.flush()
+    workspace = await session.get(Workspace, ws)
+    assert workspace is not None
+    workspace.default_model_profile_id = profile.id
+    agent = Agent(workspace_id=ws, name="Bisby", slug="bisby", model_profile_id=profile.id)
+    session.add(agent)
+    await session.commit()
+
+    with pytest.raises(HTTPException) as excinfo:
+        await service.delete_provider(
+            session, admin_ctx, provider.id, request_id=new_uuid7(), ip_hash=str(uuid4())
+        )
+    assert excinfo.value.status_code == 409
+    assert "Bisby" in str(excinfo.value.detail)
+
+    agent.model_profile_id = None
+    await session.commit()
+    await service.delete_provider(
+        session, admin_ctx, provider.id, request_id=new_uuid7(), ip_hash=str(uuid4())
+    )
+    await session.refresh(workspace)
+    assert workspace.default_model_profile_id is None
+    assert await session.get(ModelProvider, provider.id) is None
