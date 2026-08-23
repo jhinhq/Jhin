@@ -201,6 +201,149 @@ describe("AttentionInbox coordination sections", () => {
     expect(onMemoryDecide).toHaveBeenCalledWith("mem1", "approve");
   });
 
+  it("shows the parked tool call on a human review", () => {
+    render(
+      <AttentionInbox
+        data={{ ...data, pending_reviews: [{ ...review, parked_tool_name: "github.pull_request.merge", parked_tool_call_status: "pending_review" }] }}
+        canDecide
+        onDecide={vi.fn()}
+        onReviewDecide={vi.fn()}
+        now={now}
+      />,
+    );
+    expect(screen.getByTestId("review-parked-rv1").textContent).toContain("before it can use github pull request merge");
+  });
+
+  it("lists reviews an agent is handling and lets an admin decide instead", () => {
+    const onReviewDecide = vi.fn();
+    const byAgent: WorkReview = {
+      ...review,
+      id: "rv2",
+      reviewer_type: "agent",
+      reviewer_agent_id: "agent-9",
+      reviewer_agent_name: "Ada",
+      parked_tool_name: "github.pull_request.merge",
+      parked_tool_call_status: "pending_review",
+      requested_at: "2026-08-21T11:30:00Z",
+    };
+    const { unmount } = render(
+      <AttentionInbox
+        data={{ ...data, pending_reviews: [], reviews_in_progress: [byAgent], counts: { approvals: 0, failures: 0, reviews: 0, reviews_in_progress: 1, total: 0 } }}
+        canDecide
+        isAdmin
+        onDecide={vi.fn()}
+        onReviewDecide={onReviewDecide}
+        now={now}
+      />,
+    );
+    expect(screen.getByText("Being reviewed by an agent (1)")).toBeDefined();
+    const card = screen.getByTestId("review-in-progress-rv2");
+    expect(card.textContent).toContain("Ada is reviewing: Release Engineer wants to use github pull request merge");
+    expect(card.textContent).toContain("30m ago");
+    expect(screen.getByTestId("review-in-progress-parked-rv2").textContent).toContain(
+      "Release Engineer is paused until github pull request merge is reviewed.",
+    );
+    expect(screen.queryByTestId("attention-all-clear")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Decide instead" }));
+    fireEvent.click(screen.getByRole("button", { name: "Looks good" }));
+    expect(onReviewDecide).toHaveBeenCalledWith("rv2", "approve", "");
+    unmount();
+
+    // Members see the section but cannot override an AI reviewer.
+    render(
+      <AttentionInbox
+        data={{ ...data, pending_reviews: [], reviews_in_progress: [byAgent], counts: { approvals: 0, failures: 0, reviews: 0, reviews_in_progress: 1, total: 0 } }}
+        canDecide
+        isAdmin={false}
+        onDecide={vi.fn()}
+        onReviewDecide={vi.fn()}
+        now={now}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "Decide instead" })).toBeNull();
+    expect(screen.getByText(/An admin can step in/)).toBeDefined();
+  });
+
+  it("dismisses one failure or all of them", () => {
+    const onDismissFailure = vi.fn();
+    const onDismissAllFailures = vi.fn();
+    const failedTask = (id: string, title: string) => ({
+      id,
+      title,
+      description: "",
+      state: "failed" as const,
+      priority: "normal",
+      assigned_agent_id: "agent-1",
+      temporal_workflow_id: null,
+      external_source: null,
+      external_id: null,
+      trigger_id: null,
+      parent_task_id: null,
+      metadata_json: { conversation_id: `conv-${id}` },
+      created_at: "2026-08-21T11:00:00Z",
+      updated_at: "2026-08-21T11:50:00Z",
+    });
+    render(
+      <AttentionInbox
+        data={{
+          ...data,
+          pending_reviews: [],
+          failed_tasks: [failedTask("t1", "Deploy broke"), failedTask("t2", "Tests timed out")],
+          counts: { approvals: 0, failures: 2, reviews: 0, total: 2 },
+        }}
+        canDecide
+        onDecide={vi.fn()}
+        onDismissFailure={onDismissFailure}
+        onDismissAllFailures={onDismissAllFailures}
+        now={now}
+      />,
+    );
+    expect(screen.getByText("Ran into a problem (2)")).toBeDefined();
+    expect(screen.getByRole("link", { name: /Deploy broke/ }).getAttribute("href")).toBe("/chats/conv-t1");
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss “Deploy broke”" }));
+    expect(onDismissFailure).toHaveBeenCalledWith("t1");
+    fireEvent.click(screen.getByTestId("dismiss-all-failures"));
+    expect(onDismissAllFailures).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides dismiss controls from viewers", () => {
+    render(
+      <AttentionInbox
+        data={{
+          ...data,
+          pending_reviews: [],
+          failed_tasks: [
+            {
+              id: "t1",
+              title: "Deploy broke",
+              description: "",
+              state: "failed",
+              priority: "normal",
+              assigned_agent_id: null,
+              temporal_workflow_id: null,
+              external_source: null,
+              external_id: null,
+              trigger_id: null,
+              parent_task_id: null,
+              metadata_json: {},
+              created_at: "2026-08-21T11:00:00Z",
+              updated_at: "2026-08-21T11:50:00Z",
+            },
+          ],
+          counts: { approvals: 0, failures: 1, reviews: 0, total: 1 },
+        }}
+        canDecide={false}
+        onDecide={vi.fn()}
+        onDismissFailure={vi.fn()}
+        onDismissAllFailures={vi.fn()}
+        now={now}
+      />,
+    );
+    expect(screen.queryByTestId("dismiss-all-failures")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Dismiss/ })).toBeNull();
+  });
+
   it("stays all-clear when every list is empty", () => {
     render(
       <AttentionInbox

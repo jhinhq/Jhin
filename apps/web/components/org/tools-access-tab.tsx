@@ -9,7 +9,14 @@ import { useState } from "react";
 import { Badge, Button, ErrorNote, Field, focusRing, Select, Spinner, StatusLabel } from "@/components/ui";
 import { ScopeEditor } from "@/components/scope-editor";
 import { api, ApiError } from "@/lib/api";
-import { buildToolScope, missingRequiredScopeKeys, type ToolScopeValues } from "@/lib/connectors";
+import { describeRisk } from "@/lib/apps";
+import {
+  buildToolScope,
+  mcpServerSlug,
+  mcpWildcardCapability,
+  missingRequiredScopeKeys,
+  type ToolScopeValues,
+} from "@/lib/connectors";
 import {
   useAgentGrants,
   useAgentPolicy,
@@ -57,9 +64,15 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
   const [delegationPin, setDelegationPin] = useState("");
   const [error, setError] = useState<string | null>(null);
 
+  const [wholeServer, setWholeServer] = useState(false);
+
   const toolList = tools.data ?? [];
   const selectedTool = toolList.find((tool) => tool.name === toolName);
-  const capability = selectedTool?.required_capability ?? "";
+  const selectedServerSlug = selectedTool ? mcpServerSlug(selectedTool.name) : null;
+  const capability =
+    selectedServerSlug && wholeServer
+      ? mcpWildcardCapability(selectedServerSlug)
+      : selectedTool?.required_capability ?? "";
   const isDelegate = capability === "organization.delegate";
   const matchingConnections = (connections.data ?? []).filter(
     (connection) => connection.connector_type === selectedTool?.name.split(".", 1)[0],
@@ -87,6 +100,7 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
       setToolName("");
       setScopeValues({});
       setDelegationPin("");
+      setWholeServer(false);
       invalidate();
     },
     onError: (err) => setError(err instanceof ApiError ? err.detail : "Adding the grant failed."),
@@ -269,6 +283,23 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
                 data-testid={selectedTool.name.startsWith("cli.") ? "cli-scope" : "connector-scope"}
                 className="rounded-xl border border-line bg-surface px-3 py-2.5"
               >
+                {selectedServerSlug ? (
+                  <label className="mb-3 flex items-start gap-2 text-sm" data-testid="mcp-whole-server">
+                    <input
+                      type="checkbox"
+                      aria-label="Every tool on this server"
+                      checked={wholeServer}
+                      onChange={(event) => setWholeServer(event.target.checked)}
+                    />
+                    <span>
+                      Every tool on this MCP server
+                      <span className="block text-xs text-dim">
+                        Grants <code className="font-mono">{mcpWildcardCapability(selectedServerSlug)}</code> instead of just this
+                        tool. Narrow it with the tool pattern below (for example <code className="font-mono">get_*</code>).
+                      </span>
+                    </span>
+                  </label>
+                ) : null}
                 <ScopeEditor
                   tool={selectedTool}
                   connections={matchingConnections}
@@ -310,6 +341,9 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
                   </span>
                 </div>
                 <p className="mt-1 text-xs text-dim">{tool.description}</p>
+                {mcpServerSlug(tool.name) ? (
+                  <p className="text-[11px] text-faint">{describeRisk(tool.risk)} · from the “{mcpServerSlug(tool.name)}” MCP server</p>
+                ) : null}
               </li>
             );
           })}

@@ -22,6 +22,7 @@ from jhin_api.policy.schemas import (
 )
 from jhin_api.security.csrf import csrf_protect
 from jhin_connectors import build_default_definition_catalog
+from jhin_connectors.mcp import workspace_mcp_tool_definitions
 
 router = APIRouter(
     prefix="/api/v1/workspaces/{workspace_id}",
@@ -31,8 +32,11 @@ router = APIRouter(
 
 
 @router.get("/tools")
-async def list_tools(ctx: ViewerCtx) -> list[ToolOut]:
-    """The registered tool catalog: system built-ins plus connector tools."""
+async def list_tools(ctx: ViewerCtx, db: DbSession) -> list[ToolOut]:
+    """The registered tool catalog: system built-ins, connector tools, and
+    the tools discovered from this workspace's MCP connections."""
+    definitions = list(build_default_definition_catalog().definitions())
+    definitions.extend(await workspace_mcp_tool_definitions(db, ctx.workspace_id))
     return [
         ToolOut(
             name=definition.name,
@@ -44,7 +48,7 @@ async def list_tools(ctx: ViewerCtx) -> list[ToolOut]:
             required_grant_scope_keys=definition.required_grant_scope_keys,
             input_schema=definition.input_json_schema(),
         )
-        for definition in build_default_definition_catalog().definitions()
+        for definition in definitions
     ]
 
 

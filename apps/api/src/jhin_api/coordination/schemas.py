@@ -154,6 +154,9 @@ class WorkReviewOut(BaseModel):
     subject_agent_name: str | None = None
     reviewer_agent_name: str | None = None
     task_title: str | None = None
+    # The tool call parked on this review (pre-action gates), if any.
+    parked_tool_name: str | None = None
+    parked_tool_call_status: str | None = None
 
 
 class WorkReviewListOut(BaseModel):

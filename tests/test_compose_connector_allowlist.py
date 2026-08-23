@@ -8,7 +8,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 DEV_CONNECTOR_ORIGINS = (
     "http://fake-github:8080,http://fake-linear:8080,"
-    "http://fake-vercel:8080,http://fake-supabase:8080"
+    "http://fake-vercel:8080,http://fake-supabase:8080,http://fake-mcp:8080"
 )
 
 

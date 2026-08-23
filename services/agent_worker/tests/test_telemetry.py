@@ -2958,10 +2958,13 @@ async def test_non_lossless_manifest_failure_commits_product_state_without_usage
     world.raw_model.responses.append(
         world.response(
             tool_calls=(
+                # A tool name past the provider-text cap cannot be stored
+                # losslessly (malformed arguments, by contrast, bind as a
+                # retryable placeholder and no longer fail the step).
                 ModelToolCall(
                     id="private-provider-call",
-                    name="private-tool-name",
-                    arguments_json="[]",
+                    name="private-tool-name-" + "n" * 200,
+                    arguments_json='{"value": 1}',
                 ),
             )
         )

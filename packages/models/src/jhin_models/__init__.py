@@ -34,6 +34,7 @@ from jhin_models.images import (
     ImageGenerationUnsupported,
     as_image_generation_client,
 )
+from jhin_models.tool_arguments import normalize_tool_arguments
 
 __all__ = [
     "INSUFFICIENT_FUNDS",
@@ -59,4 +60,5 @@ __all__ = [
     "as_embedding_client",
     "as_image_generation_client",
     "build_model_client",
+    "normalize_tool_arguments",
 ]

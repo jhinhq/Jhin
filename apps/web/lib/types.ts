@@ -746,7 +746,14 @@ export interface Attention {
   /** Work reviews assigned to a human (coordination release). Optional so
    * older payloads keep working. */
   pending_reviews?: WorkReview[];
-  counts: { approvals: number; failures: number; reviews?: number; total: number };
+  /** Pending reviews an AI colleague is handling; a person can step in. */
+  reviews_in_progress?: WorkReview[];
+  counts: { approvals: number; failures: number; reviews?: number; reviews_in_progress?: number; total: number };
+}
+
+export interface AcknowledgeFailuresResult {
+  acknowledged: number;
+  task_ids: string[];
 }
 
 // --- Memory (docs/architecture/memory.md) ---
@@ -995,6 +1002,9 @@ export interface WorkReview {
   subject_agent_name?: string | null;
   reviewer_agent_name?: string | null;
   task_title?: string | null;
+  /** The tool call parked on this review (pre-action gates), if any. */
+  parked_tool_name?: string | null;
+  parked_tool_call_status?: string | null;
 }
 
 interface RollupReport {
@@ -1048,4 +1058,51 @@ export interface ManagerRollup {
   queue: RollupQueue;
   source_ids: string[];
   truncated: boolean;
+}
+
+// --- Apps library and per-connection tools (docs/architecture/mcp.md) ---
+
+export type CatalogAuthHint = "none" | "bearer" | "header" | "oauth";
+
+export interface CatalogApp {
+  slug: string;
+  name: string;
+  category: string;
+  icon: string;
+  description: string;
+  /** Native Jhin connector type when one exists (github, linear, …). */
+  connector_type: string | null;
+  /** Official remote MCP endpoint when known. */
+  mcp_url: string | null;
+  url_unverified: boolean;
+  transport: "streamable_http" | "sse" | "unknown";
+  auth_hint: CatalogAuthHint;
+  auth_note: string;
+  docs_url: string;
+  setup_note: string;
+  stdio_only: boolean;
+}
+
+export interface ConnectionToolInfo {
+  name: string;
+  provider_name: string | null;
+  description: string;
+  risk: RiskLevel;
+  derived_risk: RiskLevel | null;
+  risk_override: RiskLevel | null;
+  annotations: Record<string, unknown>;
+  input_schema: Record<string, unknown>;
+  schema_truncated: boolean;
+  supports_approval: boolean;
+  scope_keys: string[];
+}
+
+export interface ConnectionToolsOut {
+  connection_id: string;
+  connector_type: string;
+  /** True when tools are discovered per connection (MCP). */
+  dynamic: boolean;
+  capability_pattern: string | null;
+  discovered_at: string | null;
+  tools: ConnectionToolInfo[];
 }

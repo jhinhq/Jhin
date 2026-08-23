@@ -21,8 +21,10 @@ import type {
   ApprovalList,
   AuditEventPage,
   BootstrapStatus,
+  CatalogApp,
   ConnectionInfo,
   ConnectionAccessSummaryOut,
+  ConnectionToolsOut,
   ConnectorInfo,
   Grant,
   Member,
@@ -369,7 +371,32 @@ export function useInvalidateConnections(workspaceId: string) {
     void queryClient.invalidateQueries({ queryKey: ["connections", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["connection-tool-calls", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["connection-access-summary", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["connection-tools", workspaceId] });
+    // Discovered MCP tools are part of the workspace tool catalog.
+    void queryClient.invalidateQueries({ queryKey: ["tools", workspaceId] });
   };
+}
+
+/** The curated Apps library (static public data; docs/architecture/mcp.md). */
+export function useAppCatalog() {
+  return useQuery({
+    queryKey: ["app-catalog"],
+    queryFn: () => api<CatalogApp[]>("/api/v1/connectors/catalog"),
+    staleTime: 60_000,
+  });
+}
+
+/** Tools reachable through one connection with their enforced risk (admin). */
+export function useConnectionTools(workspaceId: string, connectionId: string | null) {
+  return useQuery({
+    queryKey: ["connection-tools", workspaceId, connectionId],
+    queryFn: () =>
+      api<ConnectionToolsOut>(
+        `/api/v1/workspaces/${workspaceId}/connections/${connectionId}/tools`,
+      ),
+    enabled: connectionId !== null,
+    retry: false,
+  });
 }
 
 /** Apply the write response synchronously so UI state never waits on refetch. */
@@ -585,6 +612,9 @@ export function useAvatarGeneration(workspaceId: string, agentId: string | null,
       const status = query.state.data?.status;
       return status === "queued" || status === "running" ? LIVE_POLL_MS : false;
     },
+    // A generation takes seconds and people switch tabs while they wait;
+    // keep polling in the background so the picture lands without a refocus.
+    refetchIntervalInBackground: true,
   });
 }
 

@@ -70,7 +70,11 @@ from jhin_observability import (
 from jhin_secrets import SecretStore
 from jhin_secrets.redaction import redact_text
 from jhin_tools import AGENT_BEFORE_BIND, MAX_TOOL_CALLS_PER_STEP, PHASE9_AFTER_MANIFEST
-from jhin_tools.sanitize import sanitize_payload, strict_json_loads
+from jhin_tools.sanitize import (
+    invalid_tool_arguments_json,
+    sanitize_payload,
+    strict_json_loads,
+)
 from jhin_workflows.agent_task.shared import (
     ACTIVITY_REASON_AGENT_STEP,
     AdvertisedTool,
@@ -205,32 +209,50 @@ def _recursively_unchanged(value: Any) -> bool:
 
 
 def _step_tool_manifest(tool_calls: tuple[ModelToolCall, ...]) -> dict[str, Any]:
-    """Build the provider-independent, secret-safe binding for one call set."""
+    """Build the provider-independent, secret-safe binding for one call set.
+
+    Arguments that are not one strict JSON object (malformed, truncated,
+    duplicate keys, a bare list, ...) are a model mistake, not a storage
+    problem: the call is bound with a self-describing placeholder so the
+    gateway denies it as ``invalid_input`` and the model reads why on its
+    next step. Only calls that cannot be stored safely at all (secret
+    material, oversized) remain non-lossless and stop the run.
+    """
     calls: list[dict[str, Any]] = []
     for ordinal, call in enumerate(tool_calls):
-        valid_json_object = False
         reason: str | None = None
         detail: str | None = None
+        manifest_arguments: Any
         try:
             decoded = strict_json_loads(call.arguments_json)
-            valid_json_object = isinstance(decoded, dict)
-            if not valid_json_object:
+        except (json.JSONDecodeError, TypeError, ValueError) as error:
+            reason = "arguments_not_strict_json"
+            # Parser messages carry positions / key names, never argument
+            # content, so they are safe to keep alongside the reason.
+            detail = redact_text(str(error))[:200]
+        else:
+            if not isinstance(decoded, dict):
                 reason = "arguments_not_object"
+                detail = f"got JSON {type(decoded).__name__}"
+        if reason is None:
+            manifest_arguments = decoded
             canonical_arguments = json.dumps(
                 decoded,
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
             )
-            manifest_arguments: Any = decoded
-        except (json.JSONDecodeError, TypeError, ValueError) as error:
-            valid_json_object = False
-            reason = "arguments_not_strict_json"
-            # Parser messages carry positions / key names, never argument
-            # content, so they are safe to keep alongside the reason.
-            detail = redact_text(str(error))[:200]
-            canonical_arguments = call.arguments_json
-            manifest_arguments = call.arguments_json
+        else:
+            logger.warning(
+                "agent.step.invalid_tool_arguments",
+                reason=reason,
+                detail=detail,
+                argument_chars=len(call.arguments_json),
+            )
+            canonical_arguments = invalid_tool_arguments_json(reason=reason, detail=detail)
+            manifest_arguments = json.loads(canonical_arguments)
+            reason = None
+            detail = None
         sanitized = sanitize_payload(
             {
                 "tool_name": call.name,
@@ -239,23 +261,20 @@ def _step_tool_manifest(tool_calls: tuple[ModelToolCall, ...]) -> dict[str, Any]
         )
         # The first failing check names the reason (a fixed code, never
         # content) so a non-lossless step is diagnosable from the run record.
-        if reason is None and (
-            sanitized.get("tool_name") != call.name
-            or not _recursively_unchanged(manifest_arguments)
+        if sanitized.get("tool_name") != call.name or not _recursively_unchanged(
+            manifest_arguments
         ):
             reason = "secret_material_in_call"
-        elif reason is None and sanitized.get("arguments") != manifest_arguments:
+        elif sanitized.get("arguments") != manifest_arguments:
             reason = "arguments_truncated"
-        elif reason is None and len(call.name) > _MAX_PROVIDER_TEXT_CHARS:
+        elif len(call.name) > _MAX_PROVIDER_TEXT_CHARS:
             reason = "tool_name_too_long"
-        elif reason is None and len(canonical_arguments) > _MAX_ARGUMENTS_CHARS:
+        elif len(canonical_arguments) > _MAX_ARGUMENTS_CHARS:
             reason = "arguments_too_long"
         lossless = reason is None
         entry: dict[str, Any] = {"ordinal": ordinal, "lossless": lossless}
         if reason is not None:
             entry["reason"] = reason
-        if detail is not None:
-            entry["detail"] = detail
         if lossless:
             entry.update(
                 {

@@ -52,6 +52,15 @@ operations UI.
   jobs in ephemeral non-root containers, with fake services for
   credential-free development (`/apps`,
   [connector SDK](docs/architecture/connectors.md)).
+- **Apps library and any MCP server.** The Apps page is a searchable library
+  of ~45 well-known apps (Notion, Slack, Stripe, Sentry, Figma, …) that
+  connect either through a native connector or through the app's Model
+  Context Protocol server — and a generic "Any MCP server" card takes any
+  remote MCP URL. Discovered tools get risk levels from the server's
+  annotations (read / write / destructive), admins can override them per
+  tool, agents are granted `mcp.<server>.*` or single tools, and every call
+  flows through the same gateway, approvals, and sanitization
+  ([MCP security model](docs/architecture/mcp.md)).
 - **Automations.** Signed webhooks in, WHEN/IF/THEN triggers with dry-run
   explanations, durable task creation out (`/automations`,
   [Events and triggers](docs/architecture/events.md)).

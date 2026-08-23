@@ -68,7 +68,7 @@ class StubImageClient:
         self.closed = True
 
     async def generate_image(
-        self, prompt: str, *, model: str, size: str = "1024x1024"
+        self, prompt: str, *, model: str, size: str = "1024x1024", quality: str | None = None
     ) -> GeneratedImage:
         self.prompts.append(prompt)
         if self.error is not None:

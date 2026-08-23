@@ -64,6 +64,7 @@ from jhin_tools.reviews import GateResult, ReviewError, ToolCallIntent, check_re
 from jhin_tools.sanitize import (
     MAX_DOCUMENT_BYTES,
     StrictJSONError,
+    invalid_tool_arguments,
     sanitize_payload,
     strict_json_loads,
 )
@@ -151,6 +152,33 @@ class GatewayOutcome(BaseModel):
             },
             ensure_ascii=False,
         )
+
+
+_MAX_SCHEMA_ERRORS_NAMED = 6
+
+
+def _schema_error_summary(exc: ValidationError) -> str:
+    """Name the offending fields and pydantic error types (schema-defined
+    identifiers only — never the submitted values) so the model can fix the
+    call: ``project_ref: missing; sql: string_too_long``."""
+    parts: list[str] = []
+    for error in exc.errors(include_url=False, include_input=False)[:_MAX_SCHEMA_ERRORS_NAMED]:
+        location = ".".join(str(piece) for piece in error.get("loc", ())) or "<root>"
+        parts.append(f"{location}: {error.get('type', 'invalid')}")
+    remaining = exc.error_count() - len(parts)
+    summary = "; ".join(parts)
+    if remaining > 0:
+        summary += f"; and {remaining} more"
+    return f"{exc.error_count()} error(s) — {summary}"
+
+
+def denial_output(code: str, reason: str) -> dict[str, str]:
+    """The sanitized output stored on a denied call: the error code plus the
+    gateway's own bounded reason (never provider or secret material)."""
+    return {"error": code, "reason": reason[:MAX_DENIAL_REASON_CHARS]}
+
+
+MAX_DENIAL_REASON_CHARS = 400
 
 
 class ToolGateway:
@@ -317,7 +345,11 @@ class ToolGateway:
             tool_name=tool_name,
             connection_id=connection_id,
             sanitized_input_json=sanitized_input,
-            sanitized_output_json={},
+            # The bounded reason rides with the row so the agent worker's
+            # projection can show the model *why* (it never sees the
+            # in-memory outcome); reasons are gateway-authored, never
+            # provider text.
+            sanitized_output_json=denial_output(code, reason),
             status=status.value,
             started_at=now,
             completed_at=now,
@@ -840,7 +872,7 @@ class ToolGateway:
                 tool_name=tool_name,
                 connection_id=connection_id,
                 sanitized_input_json=sanitized_input,
-                sanitized_output_json={},
+                sanitized_output_json=denial_output(code, reason),
                 status=ToolCallStatus.DENIED.value,
                 started_at=now,
                 completed_at=now,
@@ -1145,13 +1177,19 @@ class ToolGateway:
                     tool_call_id,
                     risk=definition.risk.value,
                 )
-            # Only the validated, bounded code crosses the gateway boundary;
-            # provider exception messages are never persisted or observed.
-            output = self._sanitize({"error": exc.code})
+            # Only the validated, bounded code (plus the connector's static
+            # retry hint) crosses the gateway boundary; provider exception
+            # messages are never persisted or observed.
+            failure: dict[str, Any] = {"error": exc.code}
+            if exc.hint:
+                failure["hint"] = exc.hint
+            output = self._sanitize(failure)
             status = "failed"
             error_code = exc.code
             decision_code = exc.code
-            decision_reason = "the tool failed before any external effect"
+            decision_reason = "the tool failed before any external effect" + (
+                f": {exc.hint}" if exc.hint else ""
+            )
         except Exception as exc:
             if commit_terminal:
                 # Once a claimed mutation was dispatched, a timeout or
@@ -1314,14 +1352,25 @@ class ToolGateway:
         validated: BaseModel | None = None
         try:
             arguments = strict_json_loads(arguments_json)
+            placeholder = invalid_tool_arguments(arguments)
             if not isinstance(arguments, dict):
                 parse_error = "arguments must be a JSON object"
+            elif placeholder is not None:
+                # The model's original arguments never reached the run (see
+                # ``invalid_tool_arguments_json``); tell it exactly why so
+                # the next attempt is a single well-formed object.
+                detail = placeholder.get("detail")
+                parse_error = (
+                    "your tool call arguments were not one valid JSON object"
+                    + (f" ({detail})" if detail else "")
+                    + "; call the tool again with exactly one JSON object that matches its schema"
+                )
             else:
                 validated = definition.input_model.model_validate(arguments)
         except (json.JSONDecodeError, StrictJSONError):
             parse_error = "arguments are not valid JSON"
         except ValidationError as exc:
-            parse_error = f"arguments do not match the tool schema: {exc.error_count()} error(s)"
+            parse_error = f"arguments do not match the tool schema: {_schema_error_summary(exc)}"
 
         if validated is None:
             raw = self._sanitize({"_raw_arguments": arguments_json})

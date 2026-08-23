@@ -4,7 +4,7 @@
  * ones are greyed out with their arrival phase. Pure presentational so it is
  * component-testable. */
 
-import { GitBranch, Plug, Terminal } from "lucide-react";
+import { Cable, GitBranch, Plug, Terminal } from "lucide-react";
 import { Badge, Button } from "@/components/ui";
 import { UPCOMING_CONNECTORS } from "@/lib/connectors";
 import type { ConnectorInfo } from "@/lib/types";
@@ -12,6 +12,7 @@ import type { ConnectorInfo } from "@/lib/types";
 function ConnectorIcon({ icon }: { icon: string }) {
   if (icon === "github") return <GitBranch size={18} />;
   if (icon === "terminal") return <Terminal size={18} />;
+  if (icon === "mcp") return <Cable size={18} />;
   return <Plug size={18} />;
 }
 
@@ -47,7 +48,9 @@ export function ConnectorsGallery({
           <p className="text-sm leading-relaxed text-dim">{connector.description}</p>
           <footer className="mt-auto flex items-center justify-between border-t border-line pt-3">
             <span className="text-xs text-faint">
-              {connector.capabilities.length} capabilities
+              {connector.connector_type === "mcp"
+                ? "tools discovered after connecting"
+                : `${connector.capabilities.length} capabilities`}
               {connector.supports_webhooks ? " · webhooks" : ""}
             </span>
             {canManage ? (

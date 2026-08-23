@@ -21,7 +21,7 @@ import {
   useWorkRequests,
 } from "@/lib/hooks";
 import { memoryErrorMessage } from "@/lib/memory";
-import type { ReviewVerdict } from "@/lib/types";
+import type { AcknowledgeFailuresResult, Attention, ReviewVerdict } from "@/lib/types";
 import { useWorkspace } from "@/lib/workspace-context";
 
 export default function AttentionPage() {
@@ -92,6 +92,67 @@ export default function AttentionPage() {
       setError(err instanceof ApiError ? memoryErrorMessage(err.status, err.detail) : "Saving your decision failed. Try again."),
   });
 
+  const attentionKey = ["attention", workspaceId] as const;
+  /** Optimistically drop failures from the cached inbox so the card and the
+   * badge counts update before the server answers. */
+  const removeFailures = (ids: string[] | "all") =>
+    queryClient.setQueryData<Attention>(attentionKey, (current) => {
+      if (!current) return current;
+      const kept = ids === "all" ? [] : current.failed_tasks.filter((task) => !ids.includes(task.id));
+      const removed = current.failed_tasks.length - kept.length;
+      return {
+        ...current,
+        failed_tasks: kept,
+        counts: {
+          ...current.counts,
+          failures: Math.max(0, current.counts.failures - removed),
+          total: Math.max(0, current.counts.total - removed),
+        },
+      };
+    });
+
+  const dismissFailure = useMutation({
+    mutationFn: ({ id }: { id: string }) =>
+      api(`/api/v1/workspaces/${workspaceId}/tasks/${id}/acknowledge`, { method: "POST" }),
+    onMutate: async ({ id }) => {
+      setBusyId(id);
+      await queryClient.cancelQueries({ queryKey: attentionKey });
+      const previous = queryClient.getQueryData<Attention>(attentionKey);
+      removeFailures([id]);
+      return { previous };
+    },
+    onError: (err, _vars, context) => {
+      if (context?.previous) queryClient.setQueryData(attentionKey, context.previous);
+      failed(err, "Dismissing the problem failed");
+    },
+    onSuccess: () => setError(null),
+    onSettled: () => {
+      setBusyId(null);
+      void queryClient.invalidateQueries({ queryKey: attentionKey });
+    },
+  });
+
+  const dismissAllFailures = useMutation({
+    mutationFn: () =>
+      api<AcknowledgeFailuresResult>(`/api/v1/workspaces/${workspaceId}/attention/acknowledge-failures`, { method: "POST" }),
+    onMutate: async () => {
+      setBusyId("failures:all");
+      await queryClient.cancelQueries({ queryKey: attentionKey });
+      const previous = queryClient.getQueryData<Attention>(attentionKey);
+      removeFailures("all");
+      return { previous };
+    },
+    onError: (err, _vars, context) => {
+      if (context?.previous) queryClient.setQueryData(attentionKey, context.previous);
+      failed(err, "Dismissing the problems failed");
+    },
+    onSuccess: () => setError(null),
+    onSettled: () => {
+      setBusyId(null);
+      void queryClient.invalidateQueries({ queryKey: attentionKey });
+    },
+  });
+
   const pendingRequests = workRequests.data?.items ?? [];
   const proposedMemories = proposed.data?.items ?? [];
   const total = (attention.data?.counts.total ?? 0) + pendingRequests.length + proposedMemories.length;
@@ -117,6 +178,8 @@ export default function AttentionPage() {
             avatars={avatars}
             onDecide={(id, decision) => decide.mutate({ id, decision })}
             onReviewDecide={(id, verdict, feedback) => decideReview.mutate({ id, verdict, feedback })}
+            onDismissFailure={(id) => dismissFailure.mutate({ id })}
+            onDismissAllFailures={() => dismissAllFailures.mutate()}
             workRequests={pendingRequests}
             onWorkRequest={(id, action, response) => answerRequest.mutate({ id, action, response })}
             proposedMemories={proposedMemories}

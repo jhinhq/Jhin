@@ -48,6 +48,10 @@ class ImageGenerationConfig(BaseModel):
     enabled: bool = False
     model: str = ""
     size: str = DEFAULT_IMAGE_SIZE
+    # Provider quality tier (e.g. OpenAI ``low`` / ``medium`` / ``high``);
+    # ``None`` leaves the provider default. Operators set the cheapest tier
+    # that still yields a usable avatar.
+    quality: str | None = None
     cost_micros: int | None = None
 
     @classmethod
@@ -61,7 +65,12 @@ class ImageGenerationConfig(BaseModel):
 @runtime_checkable
 class ImageGenerationClient(Protocol):
     async def generate_image(
-        self, prompt: str, *, model: str, size: str = DEFAULT_IMAGE_SIZE
+        self,
+        prompt: str,
+        *,
+        model: str,
+        size: str = DEFAULT_IMAGE_SIZE,
+        quality: str | None = None,
     ) -> GeneratedImage:
         """Render one still image for ``prompt``. Never fetches caller URLs."""
 

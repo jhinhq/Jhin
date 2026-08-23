@@ -2235,7 +2235,8 @@ async def test_supabase_database_read_is_bounded_and_sql_is_fail_closed(
             )
             assert call["status"] == "failed", call
             assert call["error_code"] == "database_sql_not_allowed"
-            assert call["sanitized_output_json"] == {"error": "database_sql_not_allowed"}
+            assert call["sanitized_output_json"]["error"] == "database_sql_not_allowed"
+            assert "COUNT(*)" in call["sanitized_output_json"]["hint"]
             assert sql not in json.dumps(call)
         assert (
             await _fixture_value(PHASE9_DB_ADMIN_DSN, "SELECT count(*) FROM private.side_effects")

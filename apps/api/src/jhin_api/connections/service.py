@@ -33,10 +33,21 @@ from jhin_connectors import (
     default_registry,
     normalize_config,
 )
+from jhin_connectors.mcp import (
+    DISCOVERY_KEY,
+    MCP_CONNECTOR_TYPE,
+    OVERRIDES_KEY,
+    capability_pattern_for,
+    effective_risk,
+    stored_overrides,
+    stored_tools,
+    tool_name_for,
+)
+from jhin_connectors.mcp.discovery import discovered_at as mcp_discovered_at
 from jhin_db.models import Agent, AgentCapabilityGrant, Connection, ToolCall
 from jhin_db.models.connection import new_public_id
 from jhin_domain import ConnectionStatus, SecretType
-from jhin_policy import ToolDefinition, capability_matches, scope_matches
+from jhin_policy import RiskLevel, ToolDefinition, capability_matches, scope_matches
 from jhin_secrets import (
     SecretCrypto,
     SecretMaterialError,
@@ -62,10 +73,11 @@ class _ProviderOutputLimitError(ValueError):
 @dataclass
 class _ProviderOutputBudget:
     items: int = 0
+    limit: int = _MAX_PROVIDER_OUTPUT_ITEMS
 
     def consume_item(self) -> None:
         self.items += 1
-        if self.items > _MAX_PROVIDER_OUTPUT_ITEMS:
+        if self.items > self.limit:
             raise _ProviderOutputLimitError("provider output exceeds the item limit")
 
 
@@ -308,9 +320,12 @@ async def get_connection(db: AsyncSession, workspace_id: UUID, connection_id: UU
 
 
 def _connection_tools(connection: Connection) -> tuple[ToolDefinition, ...]:
-    """The selected connector's registered tools, in a stable display order."""
+    """The tools reachable through this connection, in a stable display order.
+
+    Static connectors expose their registered tools; connectors with
+    per-connection discovery (MCP) derive them from the stored discovery."""
     connector = get_connector(connection.connector_type)
-    definitions = (definition for definition, _executor in connector.tools())
+    definitions = connector.connection_tool_definitions(connection.config_json)
     return tuple(sorted(definitions, key=lambda tool: tool.name))
 
 
@@ -802,6 +817,22 @@ async def verify_connection(
     if health.ok:
         connection.status = ConnectionStatus.ACTIVE.value
         connection.last_error = None
+        # Per-connection discovery (e.g. an MCP server's tool list) rides
+        # along with a successful verification so the tools an admin sees are
+        # the tools the gateway enforces. A failed refresh keeps the last
+        # good discovery; it never fails the verification itself.
+        try:
+            discovery = await connector.refresh_discovery(
+                VerifyContext(
+                    auth_type=connection.auth_type,
+                    credentials=credentials,
+                    config=dict(connection.config_json),
+                )
+            )
+        except Exception:
+            discovery = None
+        if discovery:
+            connection.config_json = {**connection.config_json, **discovery}
     else:
         connection.status = ConnectionStatus.ERROR.value
         connection.last_error = health.message[:2000]
@@ -965,3 +996,192 @@ async def recent_tool_calls(
         .limit(min(limit, 100))
     )
     return list(rows)
+
+
+# --- Per-connection tools (docs/architecture/mcp.md) ---
+
+_MAX_TOOL_LISTING_ITEMS = 50_000
+_VALID_RISKS = frozenset(risk.value for risk in RiskLevel)
+
+
+def _safe_tool_document(value: object) -> object:
+    """Redact + bound provider-controlled tool metadata (descriptions and
+    JSON schemas). Larger budgets than verify/metadata because discovery is
+    already capped at 200 tools x 16 KiB schemas."""
+    try:
+        return _sanitize_provider_value(
+            value, budget=_ProviderOutputBudget(limit=_MAX_TOOL_LISTING_ITEMS)
+        )
+    except _ProviderOutputLimitError:
+        raise _unsafe_provider_output() from None
+
+
+def _is_dynamic(connection: Connection) -> bool:
+    return connection.connector_type == MCP_CONNECTOR_TYPE
+
+
+def _tools_listing(connection: Connection) -> dict[str, object]:
+    config = dict(connection.config_json)
+    if _is_dynamic(connection):
+        server_slug = str(config.get("server_slug", ""))
+        overrides = stored_overrides(config)
+        tools: list[dict[str, object]] = []
+        for tool in stored_tools(config):
+            risk = effective_risk(tool, overrides)
+            override = overrides.get(tool.slug)
+            tools.append(
+                {
+                    "name": tool_name_for(server_slug, tool.slug),
+                    "provider_name": tool.name,
+                    "description": tool.description,
+                    "risk": risk.value,
+                    "derived_risk": tool.derived_risk.value,
+                    "risk_override": override.value if override is not None else None,
+                    "annotations": tool.annotations.model_dump(mode="json"),
+                    "input_schema": tool.input_schema,
+                    "schema_truncated": tool.schema_truncated,
+                    "supports_approval": True,
+                    "scope_keys": ["connection_id", "tool"],
+                }
+            )
+        listing: dict[str, object] = {
+            "connection_id": connection.id,
+            "connector_type": connection.connector_type,
+            "dynamic": True,
+            "capability_pattern": capability_pattern_for(server_slug) if server_slug else None,
+            "discovered_at": mcp_discovered_at(config),
+            "tools": _safe_tool_document(tools),
+        }
+        return listing
+    definitions = _connection_tools(connection)
+    return {
+        "connection_id": connection.id,
+        "connector_type": connection.connector_type,
+        "dynamic": False,
+        "capability_pattern": f"{connection.connector_type}.*",
+        "discovered_at": None,
+        "tools": [
+            {
+                "name": definition.name,
+                "provider_name": None,
+                "description": definition.description,
+                "risk": definition.risk.value,
+                "derived_risk": None,
+                "risk_override": None,
+                "annotations": {},
+                "input_schema": definition.input_json_schema(),
+                "schema_truncated": False,
+                "supports_approval": definition.supports_approval,
+                "scope_keys": list(definition.scope_keys),
+            }
+            for definition in definitions
+        ],
+    }
+
+
+async def list_connection_tools(
+    db: AsyncSession,
+    crypto: SecretCrypto,
+    ctx: WorkspaceContext,
+    connection_id: UUID,
+    *,
+    refresh: bool = False,
+    request_id: UUID,
+    ip_hash: str,
+) -> dict[str, object]:
+    """Tools reachable through one connection, with their risk levels.
+
+    For discovery-based connectors the stored discovery is returned; when
+    none exists yet (or ``refresh`` is requested) the provider is asked once
+    and the result persisted, so a freshly created MCP connection lists its
+    tools without a separate verify step."""
+    connection = await get_connection(db, ctx.workspace_id, connection_id)
+    connector = get_connector(connection.connector_type)
+    needs_discovery = _is_dynamic(connection) and (
+        refresh or DISCOVERY_KEY not in connection.config_json
+    )
+    if needs_discovery:
+        if connection.encrypted_secret_id is None:
+            raise _bad_request("Connection has no stored credential")
+        if connection.status == ConnectionStatus.DISABLED.value:
+            raise _bad_request("Connection is disabled")
+        store = SecretStore(db, crypto)
+        plaintext = await store.reveal(ctx.workspace_id, connection.encrypted_secret_id)
+        credentials = _decode_stored_credentials(plaintext)
+        try:
+            discovery = await connector.refresh_discovery(
+                VerifyContext(
+                    auth_type=connection.auth_type,
+                    credentials=credentials,
+                    config=dict(connection.config_json),
+                )
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Provider tool discovery failed: {type(exc).__name__}",
+            ) from None
+        if discovery:
+            connection.config_json = {**connection.config_json, **discovery}
+            audit.record(
+                db,
+                action="connection.tools_discovered",
+                target_type="connection",
+                target_id=connection.id,
+                workspace_id=ctx.workspace_id,
+                actor_id=ctx.user.id,
+                request_id=request_id,
+                ip_hash=ip_hash,
+                metadata={"tool_count": len(stored_tools(connection.config_json))},
+            )
+            await db.commit()
+    return _tools_listing(connection)
+
+
+async def update_tool_risk_overrides(
+    db: AsyncSession,
+    ctx: WorkspaceContext,
+    connection_id: UUID,
+    *,
+    overrides: dict[str, str | None],
+    request_id: UUID,
+    ip_hash: str,
+) -> dict[str, object]:
+    """Merge admin risk overrides for discovered tools (None removes one).
+
+    Only slugs present in the stored discovery are accepted; the override is
+    the risk the gateway enforces from the next call on, and the executor
+    still refuses a tool whose live annotations report a *higher* risk than
+    the one reviewed here."""
+    connection = await get_connection(db, ctx.workspace_id, connection_id)
+    if not _is_dynamic(connection):
+        raise _bad_request("Connector has no per-tool risk overrides")
+    known = {tool.slug for tool in stored_tools(connection.config_json)}
+    current = {slug: risk.value for slug, risk in stored_overrides(connection.config_json).items()}
+    changed: list[str] = []
+    for slug, risk in overrides.items():
+        if slug not in known:
+            raise _bad_request("Unknown tool for this connection")
+        if risk is None:
+            if current.pop(slug, None) is not None:
+                changed.append(slug)
+            continue
+        if risk not in _VALID_RISKS:
+            raise _bad_request("Invalid risk level")
+        if current.get(slug) != risk:
+            current[slug] = risk
+            changed.append(slug)
+    connection.config_json = {**connection.config_json, OVERRIDES_KEY: current}
+    audit.record(
+        db,
+        action="connection.tool_risk_overrides_updated",
+        target_type="connection",
+        target_id=connection.id,
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user.id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        metadata={"changed": sorted(changed), "overrides": dict(current)},
+    )
+    await db.commit()
+    return _tools_listing(connection)

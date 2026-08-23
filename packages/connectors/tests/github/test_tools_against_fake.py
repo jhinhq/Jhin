@@ -6,6 +6,7 @@ from collections.abc import Iterator
 import pytest
 
 from jhin_connectors.github.auth import InstallationTokenCache, resolve_access_token
+from jhin_connectors.github.client import GitHubApiError
 from jhin_connectors.github.connector import GitHubConnector
 from jhin_connectors.github.schemas import (
     BranchCreateInput,
@@ -89,6 +90,24 @@ async def test_branch_create_then_pull_request_flow(
     )
     assert isinstance(branch, BranchCreateOutput)
     assert branch.ref == "refs/heads/agent/fix-login"
+
+    # Like GitHub, the fake refuses a pull request whose head has no commits
+    # beyond the base (the branch was only created, never pushed to).
+    with pytest.raises(GitHubApiError):
+        await EXECUTORS["github.pull_request.create"](
+            context,
+            PullRequestCreateInput(
+                connection_id=str(github_connection.id),
+                repository="octo/alpha",
+                title="Fix login",
+                head="agent/fix-login",
+                base="main",
+                body="Automated fix.",
+            ),
+        )
+    # Simulate the agent's push landing a commit on the branch.
+    with fake_github.state.lock:
+        fake_github.state.repos["octo/alpha"]["branches"]["agent/fix-login"] = "f1x" * 13 + "0"
 
     pull = await EXECUTORS["github.pull_request.create"](
         context,

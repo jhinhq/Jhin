@@ -72,6 +72,12 @@ def _supabase() -> Connector:
     return SupabaseConnector()
 
 
+def _mcp() -> Connector:
+    from jhin_connectors.mcp.connector import McpConnector
+
+    return McpConnector()
+
+
 # One factory per shipped connector. Factories keep import cost lazy and are
 # the single line a contributor adds for a new connector (plan 36.5).
 DEFAULT_CONNECTORS: tuple[Callable[[], Connector], ...] = (
@@ -80,6 +86,7 @@ DEFAULT_CONNECTORS: tuple[Callable[[], Connector], ...] = (
     _linear,
     _vercel,
     _supabase,
+    _mcp,
 )
 
 
@@ -96,9 +103,16 @@ def build_default_catalog(registry: ConnectorRegistry | None = None) -> ToolCata
     every installed connector. The catalog enforces unique tool names and
     refuses self-modification capabilities exactly as for built-ins."""
     catalog = build_builtin_catalog()
-    for connector in registry if registry is not None else default_registry():
+    active = registry if registry is not None else default_registry()
+    for connector in active:
         for definition, executor in connector.tools():
             catalog.register(definition, executor)
+    if active.get("mcp") is not None:
+        # MCP tools are discovered per connection; the tool worker resolves
+        # them per workspace via ``catalog.for_workspace`` (never at startup).
+        from jhin_connectors.mcp.source import McpToolSource
+
+        catalog.add_dynamic_source(McpToolSource())
     return catalog
 
 

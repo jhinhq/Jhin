@@ -35,8 +35,16 @@ from jhin_models.base import (
 from jhin_models.embeddings import MAX_EMBEDDING_BATCH, EmbeddingResult, bound_inputs
 from jhin_models.images import DEFAULT_IMAGE_SIZE, GeneratedImage
 from jhin_models.pricing import lookup_price, per_token_usd_to_micros_per_million
+from jhin_models.tool_arguments import normalize_tool_arguments
 
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0)
+
+
+def _always_inline_image_model(model: str) -> bool:
+    """OpenAI's ``gpt-image-*`` / ``chatgpt-image-*`` models return base64
+    inline unconditionally and 400 on an explicit ``response_format``."""
+    name = model.strip().lower()
+    return name.startswith(("gpt-image", "chatgpt-image"))
 
 
 def _sniff_image_content_type(data: bytes) -> str:
@@ -168,7 +176,7 @@ class OpenAICompatibleClient(ModelClient):
                 ModelToolCall(
                     id=str(raw["id"]),
                     name=tool_name_from_wire(str(name), known_tools),
-                    arguments_json=str(function.get("arguments") or "{}"),
+                    arguments_json=normalize_tool_arguments(function.get("arguments")),
                 )
             )
         return ModelResponse(
@@ -292,25 +300,34 @@ class OpenAICompatibleClient(ModelClient):
         return [by_id[key] for key in sorted(by_id)]
 
     async def generate_image(
-        self, prompt: str, *, model: str, size: str = DEFAULT_IMAGE_SIZE
+        self,
+        prompt: str,
+        *,
+        model: str,
+        size: str = DEFAULT_IMAGE_SIZE,
+        quality: str | None = None,
     ) -> GeneratedImage:
         """OpenAI Images API (``POST /images/generations``), base64 response.
 
         ``b64_json`` is requested explicitly so the adapter never follows a
         provider-supplied URL; the bytes come back inline and are handed to
-        the caller for safe normalization.
+        the caller for safe normalization. The ``gpt-image-*`` family always
+        answers inline and rejects ``response_format`` outright, so the
+        parameter is only sent to models that need it (DALL·E and most
+        OpenAI-compatible gateways).
         """
         started = time.perf_counter()
-        response = await self._post(
-            "/images/generations",
-            {
-                "model": model,
-                "prompt": prompt,
-                "n": 1,
-                "size": size,
-                "response_format": "b64_json",
-            },
-        )
+        payload: dict[str, Any] = {
+            "model": model,
+            "prompt": prompt,
+            "n": 1,
+            "size": size,
+        }
+        if not _always_inline_image_model(model):
+            payload["response_format"] = "b64_json"
+        if quality:
+            payload["quality"] = quality
+        response = await self._post("/images/generations", payload)
         body = response.json()
         entries = body.get("data") or []
         encoded = entries[0].get("b64_json") if entries else None

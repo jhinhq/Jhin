@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import cast
+from typing import Protocol, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -69,17 +69,60 @@ ToolValidator = Callable[
 ]
 
 
+class DynamicToolSource(Protocol):
+    """A provider of workspace-scoped tools that are not known at process
+    start (e.g. tools discovered from a connected MCP server). Sources load
+    definitions from durable workspace state only — never from model output —
+    and the resulting definitions pass through exactly the same registry
+    guards, grants, scopes, policy, and sanitization as static tools."""
+
+    async def load(
+        self, session: AsyncSession, workspace_id: UUID
+    ) -> Sequence[tuple[ToolDefinition, ToolExecutor]]: ...
+
+
 class ToolCatalog:
     """Tool definitions plus their executors (and optional validators).
 
     Wraps a :class:`CapabilityRegistry`, so the same guards apply (no
     duplicate names, no self-modification capabilities).
+
+    A catalog may also carry :class:`DynamicToolSource`s; ``for_workspace``
+    materializes a per-workspace view that adds their tools. Static tools
+    always win name collisions, so a dynamic source can never shadow a
+    built-in or connector tool.
     """
 
     def __init__(self) -> None:
         self.registry = CapabilityRegistry()
         self._executors: dict[str, ToolExecutor] = {}
         self._validators: dict[str, ToolValidator] = {}
+        self._dynamic_sources: list[DynamicToolSource] = []
+
+    def add_dynamic_source(self, source: DynamicToolSource) -> None:
+        self._dynamic_sources.append(source)
+
+    @property
+    def has_dynamic_sources(self) -> bool:
+        return bool(self._dynamic_sources)
+
+    async def for_workspace(self, session: AsyncSession, workspace_id: UUID) -> ToolCatalog:
+        """The catalog as seen from one workspace: static tools plus every
+        dynamic source's tools for that workspace. Returns ``self`` when no
+        dynamic source is registered, so static deployments pay nothing."""
+        if not self._dynamic_sources:
+            return self
+        view = ToolCatalog()
+        for definition in self.registry:
+            view.register(
+                definition, self._executors[definition.name], self._validators.get(definition.name)
+            )
+        for source in self._dynamic_sources:
+            for definition, executor in await source.load(session, workspace_id):
+                if view.registry.get(definition.name) is not None:
+                    continue
+                view.register(definition, executor)
+        return view
 
     def register(
         self,

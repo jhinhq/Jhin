@@ -5,7 +5,7 @@ services:
   api:
     environment:
       APP_ENV: dev
-      JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS: http://fake-github:8080,http://fake-linear:8080,http://fake-vercel:8080,http://fake-supabase:8080
+      JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS: http://fake-github:8080,http://fake-linear:8080,http://fake-vercel:8080,http://fake-supabase:8080,http://fake-mcp:8080
       JHIN_CONNECTOR_ALLOWED_DB_HOSTS: fake-supabase-db:5432
 
   agent-worker:
@@ -20,7 +20,7 @@ services:
   tool-worker:
     environment:
       APP_ENV: ${APP_ENV:-dev}
-      JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS: http://fake-github:8080,http://fake-linear:8080,http://fake-vercel:8080,http://fake-supabase:8080
+      JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS: http://fake-github:8080,http://fake-linear:8080,http://fake-vercel:8080,http://fake-supabase:8080,http://fake-mcp:8080
       JHIN_CONNECTOR_ALLOWED_DB_HOSTS: fake-supabase-db:5432
       JHIN_TEST_CRASH_BARRIER_DIR: ${JHIN_TEST_CRASH_BARRIER_DIR:-}
       JHIN_TEST_CRASH_BARRIER_NAME: ${JHIN_TEST_CRASH_BARRIER_NAME:-}
@@ -142,6 +142,37 @@ services:
       FAKE_LINEAR_API_KEY: ${FAKE_LINEAR_API_KEY:-fake-linear-api-key}
     ports:
       - "127.0.0.1:${FAKE_LINEAR_DEV_PORT:-8092}:8080"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8080/_state', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks: [data]
+    restart: unless-stopped
+
+  # Dev/test-only fake MCP server (Streamable HTTP at /mcp, SSE at /sse) so
+  # the generic MCP connector runs with zero real credentials. Connect it from
+  # the Apps library ("Fake MCP (dev)") with the bearer token below; the
+  # in-network URL is http://fake-mcp:8080/mcp (see jhin_connectors.testing.fake_mcp).
+  fake-mcp:
+    build:
+      context: .
+      dockerfile: docker/python.Dockerfile
+      args:
+        SERVICE_PACKAGE: jhin-tool-worker
+    command: ["python", "-m", "jhin_connectors.testing.fake_mcp"]
+    environment:
+      FAKE_MCP_PORT: "8080"
+      FAKE_MCP_TOKEN: ${FAKE_MCP_TOKEN:-fake-mcp-token}
+    ports:
+      - "127.0.0.1:${FAKE_MCP_DEV_PORT:-8096}:8080"
     healthcheck:
       test:
         [

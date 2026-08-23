@@ -39,6 +39,7 @@ EXPECTED_ROOTFUL_SERVICES = {
     "event-worker",
     "fake-github",
     "fake-linear",
+    "fake-mcp",
     "fake-provider",
     "fake-supabase",
     "fake-supabase-db",

@@ -224,7 +224,7 @@ def test_compose_ps_parser_accepts_array_object_and_ndjson() -> None:
         {"api"},
     )
     assert set(parsed_one) == {"api"}
-    assert len(EXPECTED_ROOTFUL_SERVICES) == 17
+    assert len(EXPECTED_ROOTFUL_SERVICES) == 18  # fake-mcp joined the dev overlay
     assert EXPECTED_ROOTFUL_SERVICES | {"rootless-docker-transport"} == EXPECTED_ROOTLESS_SERVICES
 
 

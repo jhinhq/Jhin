@@ -61,6 +61,38 @@ def strict_json_loads(document: str) -> Any:
     )
 
 
+# A tool call whose arguments were not one strict JSON object is still bound
+# into the step manifest — as this self-describing placeholder — so the
+# gateway records an ``invalid_input`` denial the model can read and retry,
+# instead of the run failing as "not lossless" (plan 21.4).
+INVALID_TOOL_ARGUMENTS_KEY = "__invalid_tool_arguments__"
+_INVALID_DETAIL_CHARS = 200
+
+
+def invalid_tool_arguments_json(*, reason: str, detail: str | None = None) -> str:
+    """Canonical placeholder arguments for a call whose arguments were unusable.
+    ``detail`` is a parser message (positions / key names), never content."""
+    payload: dict[str, str] = {"reason": reason}
+    if detail:
+        payload["detail"] = detail[:_INVALID_DETAIL_CHARS]
+    return json.dumps(
+        {INVALID_TOOL_ARGUMENTS_KEY: payload},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def invalid_tool_arguments(arguments: object) -> dict[str, str] | None:
+    """The placeholder payload when ``arguments`` is one, else ``None``."""
+    if not isinstance(arguments, dict) or set(arguments) != {INVALID_TOOL_ARGUMENTS_KEY}:
+        return None
+    payload = arguments[INVALID_TOOL_ARGUMENTS_KEY]
+    if not isinstance(payload, dict) or not isinstance(payload.get("reason"), str):
+        return None
+    return {str(key): str(value) for key, value in payload.items()}
+
+
 def _truncate_string(value: str, max_chars: int) -> str:
     if len(value) <= max_chars:
         return value

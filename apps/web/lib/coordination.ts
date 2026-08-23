@@ -122,7 +122,7 @@ export function reviewSubject(review: Pick<WorkReview, "subject_agent_name" | "t
   return `${who}'s work needs a check`;
 }
 
-function humanizeToolName(tool: string): string {
+export function humanizeToolName(tool: string): string {
   return tool.replace(/[._]/g, " ");
 }
 

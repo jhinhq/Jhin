@@ -22,7 +22,7 @@ from jhin_domain import RunStatus, new_uuid7
 from jhin_models import ModelRequest, ModelResponse, ModelToolCall, ModelUsage
 from jhin_observability import noop_metrics, noop_tracer
 from jhin_secrets import get_redactor
-from jhin_tools import MAX_TOOL_CALLS_PER_STEP
+from jhin_tools import MAX_TOOL_CALLS_PER_STEP, invalid_tool_arguments
 from jhin_workflows.agent_task.shared import AdvertisedTool, ReasonAgentStepInput
 
 _TOOL_NAME = "test.external.write"
@@ -274,33 +274,38 @@ async def test_invalid_json_with_escaped_secret_never_reaches_durable_state(
     get_redactor().register(secret)
     phase9_world.client.responses.append(_response(f'{{"value":"{escaped_secret}"'))
 
-    with pytest.raises(ApplicationError) as error:
-        await phase9_world.reasoning.reason_agent_step_activity(phase9_world.params)
-
-    assert error.value.type == "tool_step_manifest_not_lossless"
+    # Malformed arguments bind as a placeholder (parser detail only): the
+    # model's text — and the secret inside it — never reaches durable state.
+    await _assert_bound_as_placeholder(phase9_world, "arguments_not_strict_json")
     async with phase9_world.sessions() as session:
         run = await session.get(AgentRun, phase9_world.run_id)
         audits = list(await session.scalars(select(AuditEvent)))
+        events = await phase9_world.event_payloads()
         assert run is not None
         persisted = json.dumps(
-            {"error": run.error_message, "audits": [audit.metadata_json for audit in audits]},
+            {
+                "error": run.error_message,
+                "audits": [audit.metadata_json for audit in audits],
+                "events": events,
+            },
             ensure_ascii=False,
         )
     assert secret not in persisted
     assert escaped_secret not in persisted
-    assert await phase9_world.event_payloads() == []
-    await phase9_world.assert_no_execution_artifacts()
+    assert "invalid-json-secret" not in persisted
 
 
 async def test_nonlossless_retry_rethrows_original_failure_without_model_or_effect(
     phase9_world: _World,
 ) -> None:
-    phase9_world.client.responses.extend(
-        [
-            _response('["not-an-object"]'),
-            _response('{"value":"valid-later"}'),
-        ]
+    too_long = _response().model_copy(
+        update={
+            "tool_calls": tuple(
+                call.model_copy(update={"name": "n" * 201}) for call in _response().tool_calls
+            )
+        }
     )
+    phase9_world.client.responses.extend([too_long, _response('{"value":"valid-later"}')])
 
     with pytest.raises(ApplicationError) as first:
         await phase9_world.reasoning.reason_agent_step_activity(phase9_world.params)
@@ -325,19 +330,28 @@ async def test_nonlossless_retry_rethrows_original_failure_without_model_or_effe
         assert await session.scalar(select(func.count(AuditEvent.id))) == 1
 
 
+async def _assert_bound_as_placeholder(phase9_world: _World, *reasons: str) -> None:
+    """The step binds (manifest + reasoning), the call is a self-describing
+    placeholder the gateway will deny as invalid_input, and nothing ran."""
+    result = await phase9_world.reasoning.reason_agent_step_activity(phase9_world.params)
+    assert result.call_count == 1
+    payloads = await phase9_world.event_payloads()
+    manifests = [p for p in payloads if "manifest" in p]
+    assert len(manifests) == 1
+    entry = manifests[0]["manifest"]["calls"][0]
+    assert entry["lossless"] is True and entry["tool_name"] == _TOOL_NAME
+    placeholder = invalid_tool_arguments(json.loads(entry["arguments_json"]))
+    assert placeholder is not None and placeholder["reason"] in reasons
+    await phase9_world.assert_no_execution_artifacts()
+
+
 @pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity", "1e999", "-1e999"])
-async def test_nonstandard_json_number_stops_before_manifest(
+async def test_nonstandard_json_number_binds_as_invalid_arguments(
     phase9_world: _World,
     constant: str,
 ) -> None:
     phase9_world.client.responses.append(_response(f'{{"value":{constant}}}'))
-
-    with pytest.raises(ApplicationError) as error:
-        await phase9_world.reasoning.reason_agent_step_activity(phase9_world.params)
-
-    assert error.value.type == "tool_step_manifest_not_lossless"
-    assert await phase9_world.event_payloads() == []
-    await phase9_world.assert_no_execution_artifacts()
+    await _assert_bound_as_placeholder(phase9_world, "arguments_not_strict_json")
 
 
 @pytest.mark.parametrize(
@@ -350,18 +364,14 @@ async def test_nonstandard_json_number_stops_before_manifest(
         "null",
     ],
 )
-async def test_duplicate_or_non_object_arguments_stop_before_manifest(
+async def test_duplicate_or_non_object_arguments_bind_as_invalid_arguments(
     phase9_world: _World,
     arguments_json: str,
 ) -> None:
     phase9_world.client.responses.append(_response(arguments_json))
-
-    with pytest.raises(ApplicationError) as error:
-        await phase9_world.reasoning.reason_agent_step_activity(phase9_world.params)
-
-    assert error.value.type == "tool_step_manifest_not_lossless"
-    assert await phase9_world.event_payloads() == []
-    await phase9_world.assert_no_execution_artifacts()
+    await _assert_bound_as_placeholder(
+        phase9_world, "arguments_not_strict_json", "arguments_not_object"
+    )
 
 
 async def test_tool_call_limit_fails_before_manifest(

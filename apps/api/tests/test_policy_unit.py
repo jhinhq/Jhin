@@ -94,6 +94,8 @@ async def test_exact_duplicate_scoped_grant_still_conflicts(
 
 async def test_tool_catalog_exposes_declared_and_required_scope_keys(
     monkeypatch: pytest.MonkeyPatch,
+    session: AsyncSession,
+    admin_ctx: WorkspaceContext,
 ) -> None:
     assert {"scope_keys", "required_grant_scope_keys"} <= set(ToolOut.model_fields)
 
@@ -112,7 +114,7 @@ async def test_tool_catalog_exposes_declared_and_required_scope_keys(
     )
     monkeypatch.setattr(router, "build_default_definition_catalog", lambda: catalog)
 
-    tools = await list_tools(ctx=None)  # type: ignore[arg-type]
+    tools = await list_tools(ctx=admin_ctx, db=session)
     scoped = next(tool for tool in tools if tool.name == "test.scoped_catalog")
     assert scoped.scope_keys == ("connection_id",)
     assert scoped.required_grant_scope_keys == ("connection_id",)
@@ -120,6 +122,8 @@ async def test_tool_catalog_exposes_declared_and_required_scope_keys(
 
 async def test_tools_endpoint_uses_definition_only_catalog(
     monkeypatch: pytest.MonkeyPatch,
+    session: AsyncSession,
+    admin_ctx: WorkspaceContext,
 ) -> None:
     monkeypatch.setattr(
         jhin_connectors.registry,
@@ -127,6 +131,6 @@ async def test_tools_endpoint_uses_definition_only_catalog(
         lambda: pytest.fail("API attempted executable catalog construction"),
     )
 
-    tools = await list_tools(ctx=None)  # type: ignore[arg-type]
+    tools = await list_tools(ctx=admin_ctx, db=session)
 
     assert {tool.name for tool in tools} >= {"system.echo", "linear.issue.read"}

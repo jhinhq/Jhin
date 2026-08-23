@@ -10,7 +10,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 DEV_HTTP_ORIGINS = (
     "http://fake-github:8080,http://fake-linear:8080,"
-    "http://fake-vercel:8080,http://fake-supabase:8080"
+    "http://fake-vercel:8080,http://fake-supabase:8080,http://fake-mcp:8080"
 )
 FAKE_SERVICES = {
     "fake-vercel": {
@@ -100,7 +100,7 @@ def test_phase9_http_origins_extend_existing_dev_allowlist_only() -> None:
 
 def test_connector_fakes_use_tool_worker_image_and_provider_uses_agent_image() -> None:
     services = _render_compose("compose.yaml", "compose.dev.yaml")["services"]
-    for name in ("fake-github", "fake-linear", "fake-vercel", "fake-supabase"):
+    for name in ("fake-github", "fake-linear", "fake-vercel", "fake-supabase", "fake-mcp"):
         assert services[name]["build"]["args"]["SERVICE_PACKAGE"] == "jhin-tool-worker"
     assert services["fake-provider"]["build"]["args"]["SERVICE_PACKAGE"] == ("jhin-agent-worker")
 

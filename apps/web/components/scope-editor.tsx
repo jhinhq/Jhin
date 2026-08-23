@@ -20,6 +20,7 @@ const LABELS: Record<string, string> = {
   image: "Image",
   network: "Network",
   path: "Path pattern",
+  tool: "Tool pattern",
 };
 
 export function ScopeEditor({

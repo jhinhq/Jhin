@@ -268,3 +268,85 @@ export function grantPayloadsForTools(
     return [{ capability: tool.required_capability, scope, effect: "allow" as const }];
   });
 }
+
+/** A one-click bundle of tool grants for a common job (plan 12.3). Scopes
+ * that need a connection are filled from the workspace's connections when
+ * exactly one matching connection exists; the user can still edit them. */
+export interface ToolPreset {
+  id: string;
+  label: string;
+  description: string;
+  /** Tool name → scope values (the connection id is filled in separately). */
+  tools: Record<string, ToolScopeValues>;
+}
+
+export const TOOL_PRESETS: ToolPreset[] = [
+  {
+    id: "code-editing",
+    label: "Code editing",
+    description:
+      "Clone a repository into the sandbox, read and edit files, run tests, commit and push with git, and open pull requests. Needs a CLI Sandbox connection and a GitHub connection.",
+    tools: {
+      "cli.repository.checkout": { repository: "*" },
+      "cli.file.read": { path: "*" },
+      "cli.file.write": { path: "*" },
+      "cli.test.run": { command: "*" },
+      "cli.command.execute": { command: "git *" },
+      "github.repository.read": { repository: "*" },
+      "github.pull_request.read": { repository: "*" },
+      "github.pull_request.create": { repository: "*" },
+    },
+  },
+];
+
+/** The slice of a workspace connection a preset needs. */
+export interface PresetConnection {
+  id: string;
+  connector_type: string;
+  status: string;
+}
+
+/** The connection a preset scope should pin for a tool: the only active
+ * connection of the tool's connector type, else nothing (left to the user). */
+export function presetConnectionFor(
+  toolName: string,
+  connections: PresetConnection[],
+): string {
+  const type = toolName.split(".", 1)[0];
+  const matching = connections.filter((c) => c.connector_type === type && c.status === "active");
+  return matching.length === 1 ? matching[0].id : "";
+}
+
+export function applyToolPreset(
+  state: WizardState,
+  preset: ToolPreset,
+  tools: Pick<ToolInfo, "name" | "scope_keys">[],
+  connections: PresetConnection[],
+): WizardState {
+  const catalog = new Map(tools.map((tool) => [tool.name, tool]));
+  const names = [...state.grantToolNames];
+  const scopes: Record<string, ToolScopeValues> = { ...state.grantScopes };
+  for (const [toolName, presetScope] of Object.entries(preset.tools)) {
+    const tool = catalog.get(toolName);
+    if (!tool) continue;
+    if (!names.includes(toolName)) names.push(toolName);
+    const values: ToolScopeValues = { ...(scopes[toolName] ?? {}) };
+    for (const key of tool.scope_keys) {
+      if (values[key]) continue;
+      if (key === "connection_id") {
+        const id = presetConnectionFor(toolName, connections);
+        if (id) values[key] = id;
+      } else if (presetScope[key]) {
+        values[key] = presetScope[key];
+      }
+    }
+    scopes[toolName] = values;
+  }
+  return { ...state, grantToolNames: names, grantScopes: scopes };
+}
+
+/** Preset tools missing from the catalog (e.g. a connector not installed). */
+export function presetMissingTools(preset: ToolPreset, tools: Pick<ToolInfo, "name">[]): string[] {
+  const known = new Set(tools.map((tool) => tool.name));
+  return Object.keys(preset.tools).filter((name) => !known.has(name));
+}

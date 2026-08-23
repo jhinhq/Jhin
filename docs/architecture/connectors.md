@@ -103,6 +103,32 @@ The UI (gallery, connection create form, grant scoping) and the API
 (connections CRUD, verify, webhook ingress) are entirely manifest-driven, so
 a new connector appears there automatically.
 
+## MCP connections
+
+The `mcp` connector (`jhin_connectors/mcp/`) is the one connector whose
+tools are not static: it connects to any remote Model Context Protocol
+server over Streamable HTTP (SSE fallback), discovers the server's tools at
+verification time, and registers them **per connection** as
+`mcp.<server_slug>.<tool>`. Three SDK hooks exist for this and default to
+no-ops for every other connector:
+
+| Hook | Purpose |
+| --- | --- |
+| `Connector.refresh_discovery(ctx)` | Called after a successful `verify_connection` (and by `GET …/connections/{id}/tools`); returns keys to merge into `config_json` (bounded, display-safe, never secrets). |
+| `Connector.connection_tool_definitions(config)` | Definitions as seen through one stored connection; the access summary and the per-connection Tools tab use it. Pure, no I/O. |
+| `ToolCatalog.add_dynamic_source(source)` / `for_workspace(session, workspace_id)` | `build_default_catalog()` registers `McpToolSource`; the tool worker materializes a per-workspace catalog before advertising or executing. |
+
+Risk is derived from the server's annotations (`readOnlyHint` → read,
+`destructiveHint` → destructive, otherwise write), admins can override it
+per tool, and the executor refuses a tool whose live annotations now report
+a higher risk than the reviewed one. Outputs are text-only projections with
+binary blocks stripped and hard size caps. MCP connections have **no
+webhooks**. The full security model — URL policy, discovery bounds,
+approval binding, prompt-injection posture — is in
+[mcp.md](mcp.md). The curated Apps library (`jhin_connectors/catalog.py`,
+`catalog.json`, `GET /api/v1/connectors/catalog`) maps well-known apps to
+either a native connector or an MCP endpoint.
+
 ## Security invariants (non-negotiable)
 
 - Plaintext credentials are accepted exactly once (connection create /

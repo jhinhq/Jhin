@@ -938,13 +938,16 @@ class ToolActivities:
                     str(connection.id): f"{connection.name} ({connection.connector_type})"
                     for connection in connections
                 }
+            # Workspace-scoped view: static tools plus tools discovered from
+            # this workspace's MCP connections (docs/architecture/mcp.md).
+            catalog = await self._catalog.for_workspace(session, workspace_id)
         return [
             AdvertisedTool(
                 name=definition.name,
                 description=advertised_description(definition, grants, connection_labels),
                 parameters=definition.input_json_schema(),
             )
-            for definition in allowed_tool_definitions(self._catalog, grants)
+            for definition in allowed_tool_definitions(catalog, grants)
         ]
 
     @activity.defn(name=ACTIVITY_EXECUTE_BOUND_TOOL)
@@ -970,6 +973,7 @@ class ToolActivities:
                 run_id=run_id,
             )
             invocation_id = stable_tool_invocation_id(run_id, params.step_index, params.ordinal)
+            catalog = await self._catalog.for_workspace(session, workspace_id)
             scope = _ToolSpanScope(self._tracer, _TOOL_EXECUTE_SPAN_NAME)
             try:
                 gateway = ToolGateway(
@@ -984,7 +988,7 @@ class ToolActivities:
                         session_factory=self._resources.session_factory,
                         test_barrier=self._resources.test_barrier,
                     ),
-                    self._catalog,
+                    catalog,
                 )
                 try:
                     outcome = await gateway.request(
@@ -1089,12 +1093,13 @@ class ToolActivities:
                 )
             approval, tool_call, _run, agent, _task = durable
             expected_tool_call_id = tool_call.id
+            catalog = await self._catalog.for_workspace(session, workspace_id)
             manifest_step_index, entry = await _validate_approval_manifest_binding(
                 session,
                 workspace_id=workspace_id,
                 run_id=run_id,
                 tool_call=tool_call,
-                catalog=self._catalog,
+                catalog=catalog,
             )
             if approval.status == ApprovalStatus.PENDING.value:
                 raise ApplicationError("approval still pending", type="approval_pending")
@@ -1122,7 +1127,7 @@ class ToolActivities:
                         session_factory=self._resources.session_factory,
                         test_barrier=self._resources.test_barrier,
                     ),
-                    self._catalog,
+                    catalog,
                 )
                 try:
                     if approval_status == ApprovalStatus.APPROVED.value:
@@ -1238,12 +1243,13 @@ class ToolActivities:
                 )
             review, tool_call, _run, agent, _task = durable
             expected_tool_call_id = tool_call.id
+            catalog = await self._catalog.for_workspace(session, workspace_id)
             manifest_step_index, entry = await _validate_approval_manifest_binding(
                 session,
                 workspace_id=workspace_id,
                 run_id=run_id,
                 tool_call=tool_call,
-                catalog=self._catalog,
+                catalog=catalog,
             )
             if review.status == WorkReviewStatus.PENDING.value:
                 raise ApplicationError("review still pending", type="review_pending")
@@ -1262,7 +1268,7 @@ class ToolActivities:
                         session_factory=self._resources.session_factory,
                         test_barrier=self._resources.test_barrier,
                     ),
-                    self._catalog,
+                    catalog,
                 )
                 try:
                     outcome = await gateway.resolve_review(review_id)

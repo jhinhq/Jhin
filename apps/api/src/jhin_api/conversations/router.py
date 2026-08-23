@@ -15,6 +15,7 @@ from nats.js import JetStreamContext
 
 from jhin_api.conversations import service
 from jhin_api.conversations.schemas import (
+    AcknowledgeFailuresOut,
     ActivityListOut,
     AttentionOut,
     ConversationCreate,
@@ -241,3 +242,13 @@ async def workspace_activity(
 @workspace_feed_router.get("/attention")
 async def workspace_attention(ctx: ViewerCtx, db: DbSession) -> AttentionOut:
     return await service.attention(db, ctx.workspace_id)
+
+
+@workspace_feed_router.post("/attention/acknowledge-failures")
+async def acknowledge_attention_failures(
+    request: Request, ctx: MemberCtx, db: DbSession
+) -> AcknowledgeFailuresOut:
+    """Dismiss every failed task the inbox currently lists."""
+    return await service.acknowledge_failures(
+        db, ctx, request_id=req_id(request), ip_hash=ip_hash(request)
+    )

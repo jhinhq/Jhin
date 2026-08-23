@@ -154,3 +154,61 @@ class VerifyOut(BaseModel):
     message: str
     status: str
     details: dict[str, str] = {}
+
+
+# --- Per-connection tools and the app catalog (docs/architecture/mcp.md) ---
+
+RiskName = Literal["read", "write", "elevated", "destructive"]
+
+
+class ConnectionToolOut(BaseModel):
+    """One tool reachable through a connection, with its enforced risk."""
+
+    name: str
+    provider_name: str | None = None
+    description: str = ""
+    risk: str
+    derived_risk: str | None = None
+    risk_override: str | None = None
+    annotations: dict[str, Any] = {}
+    input_schema: dict[str, Any] = {}
+    schema_truncated: bool = False
+    supports_approval: bool = False
+    scope_keys: list[str] = []
+
+
+class ConnectionToolsOut(BaseModel):
+    connection_id: UUID
+    connector_type: str
+    # True when tools are discovered per connection (MCP) rather than static.
+    dynamic: bool
+    capability_pattern: str | None = None
+    discovered_at: str | None = None
+    tools: list[ConnectionToolOut] = []
+
+
+class ToolRiskOverridesWrite(BaseModel):
+    """Admin risk overrides keyed by tool slug; null removes an override."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    tool_risk_overrides: dict[str, RiskName | None] = Field(max_length=200)
+
+
+class CatalogAppOut(BaseModel):
+    """One Apps-library entry (public identity only; no secrets, no state)."""
+
+    slug: str
+    name: str
+    category: str
+    icon: str
+    description: str
+    connector_type: str | None = None
+    mcp_url: str | None = None
+    url_unverified: bool = False
+    transport: str = "unknown"
+    auth_hint: str = "bearer"
+    auth_note: str = ""
+    docs_url: str = ""
+    setup_note: str = ""
+    stdio_only: bool = False

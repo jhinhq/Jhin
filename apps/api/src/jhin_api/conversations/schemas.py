@@ -133,6 +133,8 @@ class AttentionCounts(BaseModel):
     approvals: int
     failures: int
     reviews: int = 0
+    # Reviews an AI colleague is handling; informational, never in ``total``.
+    reviews_in_progress: int = 0
     total: int
 
 
@@ -142,4 +144,12 @@ class AttentionOut(BaseModel):
     waiting_conversations: list[ConversationOut]
     # Work reviews waiting on a human decision (coordination release).
     pending_reviews: list[WorkReviewOut] = Field(default_factory=list)
+    # Pending reviews assigned to an AI reviewer. A person can still step in
+    # (``POST /reviews/{id}/decide``, admin for AI-assigned reviews).
+    reviews_in_progress: list[WorkReviewOut] = Field(default_factory=list)
     counts: AttentionCounts
+
+
+class AcknowledgeFailuresOut(BaseModel):
+    acknowledged: int
+    task_ids: list[UUID]

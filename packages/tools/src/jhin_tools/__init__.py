@@ -3,6 +3,7 @@ agent tool call (plan section 12) — plus the Phase 4 built-in system tools."""
 
 from jhin_tools.builtin import (
     BUILTIN_TOOLS,
+    DynamicToolSource,
     ToolCatalog,
     ToolDefinitionCatalog,
     ToolExecutionContext,
@@ -28,8 +29,11 @@ from jhin_tools.invocation import (
     stable_tool_invocation_id,
 )
 from jhin_tools.sanitize import (
+    INVALID_TOOL_ARGUMENTS_KEY,
     MAX_DOCUMENT_BYTES,
     MAX_STRING_CHARS,
+    invalid_tool_arguments,
+    invalid_tool_arguments_json,
     sanitize_payload,
 )
 from jhin_tools.test_barriers import (
@@ -49,6 +53,7 @@ from jhin_tools.test_barriers import (
 __all__ = [
     "AGENT_BEFORE_BIND",
     "BUILTIN_TOOLS",
+    "INVALID_TOOL_ARGUMENTS_KEY",
     "MAX_DOCUMENT_BYTES",
     "MAX_STRING_CHARS",
     "MAX_TOOL_CALLS_PER_STEP",
@@ -66,6 +71,7 @@ __all__ = [
     "CrashBarrier",
     "CrashBarrierConfig",
     "CrashBarrierName",
+    "DynamicToolSource",
     "GatewayOutcome",
     "GatewayStateError",
     "ToolCatalog",
@@ -77,6 +83,8 @@ __all__ = [
     "allowed_tool_definitions",
     "build_builtin_catalog",
     "builtin_tool_definitions",
+    "invalid_tool_arguments",
+    "invalid_tool_arguments_json",
     "release_barrier",
     "sanitize_payload",
     "stable_sync_invocation_id",

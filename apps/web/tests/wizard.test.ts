@@ -8,6 +8,10 @@ import { WorkspaceProvider } from "@/lib/workspace-context";
 import {
   AGENT_TEMPLATES,
   applyTemplate,
+  applyToolPreset,
+  presetConnectionFor,
+  presetMissingTools,
+  TOOL_PRESETS,
   canSubmit,
   EMPTY_WIZARD,
   firstInvalidStep,
@@ -406,5 +410,95 @@ describe("delegationScope", () => {
       targets: "team",
       target_agent_id: "agent-1",
     });
+  });
+});
+
+describe("wizard tool presets", () => {
+  const catalog = [
+    { name: "cli.repository.checkout", scope_keys: ["connection_id", "repository", "image"] },
+    { name: "cli.file.read", scope_keys: ["connection_id", "path"] },
+    { name: "cli.file.write", scope_keys: ["connection_id", "path"] },
+    { name: "cli.test.run", scope_keys: ["connection_id", "command", "image"] },
+    { name: "cli.command.execute", scope_keys: ["connection_id", "command", "image", "network"] },
+    { name: "github.repository.read", scope_keys: ["connection_id", "repository"] },
+    { name: "github.pull_request.read", scope_keys: ["connection_id", "repository"] },
+    { name: "github.pull_request.create", scope_keys: ["connection_id", "repository"] },
+    { name: "github.pull_request.merge", scope_keys: ["connection_id", "repository"] },
+  ];
+  const connections = [
+    { id: "cli-1", connector_type: "cli", status: "active" },
+    { id: "gh-1", connector_type: "github", status: "active" },
+    { id: "gh-old", connector_type: "github", status: "disabled" },
+  ];
+  const preset = TOOL_PRESETS.find((entry) => entry.id === "code-editing")!;
+
+  it("grants the code-editing bundle with least-privilege scopes and pinned connections", () => {
+    const next = applyToolPreset(EMPTY_WIZARD, preset, catalog, connections);
+    expect(next.grantToolNames).toEqual([
+      "cli.repository.checkout",
+      "cli.file.read",
+      "cli.file.write",
+      "cli.test.run",
+      "cli.command.execute",
+      "github.repository.read",
+      "github.pull_request.read",
+      "github.pull_request.create",
+    ]);
+    expect(next.grantScopes["cli.command.execute"]).toEqual({ connection_id: "cli-1", command: "git *" });
+    expect(next.grantScopes["cli.file.write"]).toEqual({ connection_id: "cli-1", path: "*" });
+    expect(next.grantScopes["github.pull_request.create"]).toEqual({ connection_id: "gh-1", repository: "*" });
+    // Merge is deliberately not part of editing.
+    expect(next.grantToolNames).not.toContain("github.pull_request.merge");
+    // The payloads are complete grants.
+    const payloads = grantPayloadsForTools(next, catalog.map((tool) => ({
+      ...tool,
+      description: "",
+      risk: "write" as const,
+      required_capability: tool.name,
+      supports_approval: true,
+      required_grant_scope_keys: [],
+      input_schema: {},
+    })));
+    expect(payloads).toHaveLength(8);
+    expect(payloads.find((p) => p.capability === "cli.repository.checkout")?.scope).toEqual({
+      connection_id: "cli-1",
+      repository: "*",
+    });
+  });
+
+  it("keeps scopes the user already typed and is idempotent", () => {
+    const seeded = {
+      ...EMPTY_WIZARD,
+      grantToolNames: ["cli.file.write"],
+      grantScopes: { "cli.file.write": { connection_id: "cli-1", path: "docs/*" } },
+    };
+    const once = applyToolPreset(seeded, preset, catalog, connections);
+    expect(once.grantScopes["cli.file.write"]).toEqual({ connection_id: "cli-1", path: "docs/*" });
+    const twice = applyToolPreset(once, preset, catalog, connections);
+    expect(twice.grantToolNames).toEqual(once.grantToolNames);
+    expect(twice.grantScopes).toEqual(once.grantScopes);
+  });
+
+  it("leaves the connection blank when it is ambiguous or missing", () => {
+    expect(presetConnectionFor("cli.file.read", [])).toBe("");
+    expect(
+      presetConnectionFor("github.repository.read", [
+        { id: "a", connector_type: "github", status: "active" },
+        { id: "b", connector_type: "github", status: "active" },
+      ]),
+    ).toBe("");
+    const next = applyToolPreset(EMPTY_WIZARD, preset, catalog, []);
+    expect(next.grantScopes["cli.file.read"]).toEqual({ path: "*" });
+  });
+
+  it("skips tools the catalog does not offer and reports them", () => {
+    const partial = catalog.filter((tool) => tool.name.startsWith("cli."));
+    expect(presetMissingTools(preset, partial)).toEqual([
+      "github.repository.read",
+      "github.pull_request.read",
+      "github.pull_request.create",
+    ]);
+    const next = applyToolPreset(EMPTY_WIZARD, preset, partial, connections);
+    expect(next.grantToolNames.every((name) => name.startsWith("cli."))).toBe(true);
   });
 });

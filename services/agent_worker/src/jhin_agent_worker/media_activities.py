@@ -187,7 +187,10 @@ class MediaActivities:
                 ) from None
             try:
                 generated = await images.generate_image(
-                    generation.prompt, model=config.model, size=config.size
+                    generation.prompt,
+                    model=config.model,
+                    size=config.size,
+                    quality=config.quality,
                 )
             except ModelProviderError as exc:
                 raise ApplicationError(

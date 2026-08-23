@@ -40,6 +40,9 @@ from jhin_workflows.agent_task import AgentTaskInput
 
 MAX_PAGE_SIZE = 200
 ACTIVE_TASK_STATES = (TaskState.QUEUED.value, TaskState.RUNNING.value, TaskState.PAUSED.value)
+# metadata_json key stamped when a person dismisses a failed task from the
+# attention inbox; the failure stays on the task, it just stops nagging.
+ATTENTION_ACKNOWLEDGED_KEY = "attention_acknowledged_at"
 
 
 def _task_not_found() -> HTTPException:
@@ -474,6 +477,52 @@ async def signal_task(
         ip_hash=ip_hash,
     )
     await db.commit()
+    return task
+
+
+def is_attention_acknowledged(task: Task) -> bool:
+    return bool((task.metadata_json or {}).get(ATTENTION_ACKNOWLEDGED_KEY))
+
+
+def mark_attention_acknowledged(task: Task, *, at: datetime | None = None) -> bool:
+    """Stamp the task in memory; returns False when it was already stamped.
+    The caller owns the transaction (and the audit row)."""
+    if is_attention_acknowledged(task):
+        return False
+    stamped = dict(task.metadata_json or {})
+    stamped[ATTENTION_ACKNOWLEDGED_KEY] = (at or datetime.now(UTC)).isoformat()
+    task.metadata_json = stamped
+    return True
+
+
+async def acknowledge_task(
+    db: AsyncSession,
+    ctx: WorkspaceContext,
+    task_id: UUID,
+    *,
+    request_id: UUID,
+    ip_hash: str,
+) -> Task:
+    """A member dismisses a failed task from the attention inbox. Idempotent:
+    a second call returns the task unchanged without a second audit row."""
+    task = await get_task(db, ctx.workspace_id, task_id)
+    if task.state != TaskState.FAILED.value:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Only failed tasks can be dismissed (task is {task.state})",
+        )
+    if mark_attention_acknowledged(task):
+        audit.record(
+            db,
+            action="task.acknowledged",
+            target_type="task",
+            target_id=task.id,
+            workspace_id=ctx.workspace_id,
+            actor_id=ctx.user.id,
+            request_id=request_id,
+            ip_hash=ip_hash,
+        )
+        await db.commit()
     return task
 
 

@@ -444,7 +444,10 @@ CLI_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor], ...] = (
             description=(
                 "Run a shell command inside an ephemeral sandbox container. The "
                 "workspace (and any repository checkout at /workspace/repo) "
-                "persists across calls within one run."
+                "persists across calls within one run. Use it to commit and push "
+                "sandbox edits: `git add -A && git commit -m '...' && git push -u "
+                "origin HEAD` with network='internet' (the checkout's credential "
+                "is injected automatically)."
             ),
             risk=RiskLevel.WRITE,
             input_model=CommandExecuteInput,
@@ -460,7 +463,11 @@ CLI_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor], ...] = (
             name="cli.repository.checkout",
             description=(
                 "Clone a repository into the sandbox workspace using a short-lived "
-                "credential and create a working branch (default: agent/<task>-<repo>)."
+                "credential and create a working branch (default: agent/<task>-<repo>). "
+                "Edit files with cli.file.write, then commit and push that branch with "
+                "cli.command.execute (network='internet') and open the pull request "
+                "from it; do not create the branch through the GitHub API, that would "
+                "give the pull request no changes."
             ),
             risk=RiskLevel.WRITE,
             input_model=RepositoryCheckoutInput,
@@ -500,7 +507,11 @@ CLI_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor], ...] = (
     (
         ToolDefinition(
             name="cli.file.write",
-            description="Write one file in the sandbox workspace (path relative to the checkout).",
+            description=(
+                "Write one file in the sandbox workspace (path relative to the checkout). "
+                "The change exists only in the sandbox until you commit and push it with "
+                "cli.command.execute (git add/commit/push, network='internet')."
+            ),
             risk=RiskLevel.WRITE,
             input_model=FileWriteInput,
             output_model=FileWriteOutput,

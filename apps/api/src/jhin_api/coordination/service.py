@@ -538,6 +538,15 @@ async def project_reviews(
             )
         )
         titles = {row[0]: row[1] for row in result.all()}
+    call_ids = [r.tool_call_id for r in rows if r.tool_call_id]
+    parked: dict[UUID, tuple[str, str]] = {}
+    if call_ids:
+        result = await db.execute(
+            select(ToolCall.id, ToolCall.tool_name, ToolCall.status).where(
+                ToolCall.workspace_id == workspace_id, ToolCall.id.in_(call_ids)
+            )
+        )
+        parked = {row[0]: (row[1], row[2]) for row in result.all()}
     out: list[WorkReviewOut] = []
     for row in rows:
         item = WorkReviewOut.model_validate(row)
@@ -546,6 +555,9 @@ async def project_reviews(
             names.get(row.reviewer_agent_id) if row.reviewer_agent_id else None
         )
         item.task_title = titles.get(row.task_id) if row.task_id else None
+        call = parked.get(row.tool_call_id) if row.tool_call_id else None
+        if call is not None:
+            item.parked_tool_name, item.parked_tool_call_status = call
         out.append(item)
     return out
 

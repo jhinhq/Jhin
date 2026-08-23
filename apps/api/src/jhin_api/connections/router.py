@@ -14,12 +14,15 @@ from pydantic import BaseModel
 
 from jhin_api.connections import service
 from jhin_api.connections.schemas import (
+    CatalogAppOut,
     ConnectionAccessSummaryOut,
     ConnectionCreate,
     ConnectionCreated,
     ConnectionOut,
+    ConnectionToolsOut,
     ConnectorOut,
     CredentialsRotate,
+    ToolRiskOverridesWrite,
     VerifyOut,
     WebhookSecretWrite,
     WebhookSetupOut,
@@ -30,6 +33,7 @@ from jhin_api.deps import get_request_id as req_id
 from jhin_api.security.csrf import csrf_protect
 from jhin_api.tasks.schemas import ToolCallOut
 from jhin_connectors import default_registry
+from jhin_connectors.catalog import load_catalog
 from jhin_db.models import Connection
 from jhin_tools.sanitize import strict_json_loads
 
@@ -113,6 +117,13 @@ async def list_connectors(_auth: CurrentAuth) -> list[ConnectorOut]:
         ConnectorOut.model_validate(connector.manifest.model_dump())
         for connector in default_registry()
     ]
+
+
+@catalog_router.get("/catalog")
+async def list_catalog(_auth: CurrentAuth) -> list[CatalogAppOut]:
+    """The curated Apps library: known apps with native connectors or MCP
+    endpoints (docs/architecture/mcp.md). Static public data."""
+    return [CatalogAppOut.model_validate(entry.model_dump()) for entry in load_catalog()]
 
 
 def _out(connection: Connection) -> ConnectionOut:
@@ -203,6 +214,52 @@ async def connection_tool_calls(
     await service.get_connection(db, ctx.workspace_id, connection_id)
     rows = await service.recent_tool_calls(db, ctx.workspace_id, connection_id)
     return [ToolCallOut.model_validate(row, from_attributes=True) for row in rows]
+
+
+@router.get("/{connection_id}/tools")
+async def connection_tools(
+    connection_id: UUID,
+    request: Request,
+    ctx: AdminCtx,
+    db: DbSession,
+    crypto: SecretCryptoDep,
+    refresh: bool = False,
+) -> ConnectionToolsOut:
+    """Tools reachable through this connection with their enforced risk.
+    MCP connections list their discovered tools (discovering once when no
+    discovery is stored yet, or again with ``?refresh=true``)."""
+    return ConnectionToolsOut.model_validate(
+        await service.list_connection_tools(
+            db,
+            crypto,
+            ctx,
+            connection_id,
+            refresh=refresh,
+            request_id=req_id(request),
+            ip_hash=ip_hash(request),
+        )
+    )
+
+
+@router.patch("/{connection_id}/tools")
+async def update_tool_risk_overrides(
+    connection_id: UUID,
+    payload: ToolRiskOverridesWrite,
+    request: Request,
+    ctx: AdminCtx,
+    db: DbSession,
+) -> ConnectionToolsOut:
+    """Raise or lower the risk level of individual discovered tools."""
+    return ConnectionToolsOut.model_validate(
+        await service.update_tool_risk_overrides(
+            db,
+            ctx,
+            connection_id,
+            overrides=dict(payload.tool_risk_overrides),
+            request_id=req_id(request),
+            ip_hash=ip_hash(request),
+        )
+    )
 
 
 @router.get("/{connection_id}/metadata")

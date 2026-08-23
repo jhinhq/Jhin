@@ -243,6 +243,41 @@ not a plaintext credential. Deny-by-default remains in force. A grant that
 pins `image` or `network` matches only a call that explicitly carries that
 field; relying on a connection default does not broaden the grant.
 
+## Giving an agent file editing
+
+An agent edits code only inside a sandbox job, and the change reaches the
+repository only through `git push` from that sandbox. The minimum setup is:
+
+1. **Connections.** A `github` connection (PAT or app) for the repository, and
+   a `cli` connection (auth type `none`) whose `git_connection_id` points at it.
+   Leave the CLI connection's `default_network` at `none`; pushes opt into the
+   bridge per call.
+2. **Grants** (Tools & Access on the agent, or the wizard's **Code editing**
+   preset which issues exactly these with `*` scopes):
+
+   | Capability | Scope | Why |
+   | --- | --- | --- |
+   | `cli.repository.checkout` | `connection_id`, `repository` | clone + create the `agent/<task>-<repo>` branch |
+   | `cli.file.read` | `connection_id`, `path` | read files in the checkout |
+   | `cli.file.write` | `connection_id`, `path` | edit files in the checkout |
+   | `cli.test.run` | `connection_id`, `command` | run the test command |
+   | `cli.command.execute` | `connection_id`, `command: "git *"` | `git add/commit/push` with `network: "internet"` |
+   | `github.repository.read` | `connection_id`, `repository` | inspect the repository |
+   | `github.pull_request.create` | `connection_id`, `repository` | open the PR from the pushed branch |
+
+   Do not pin `network` in the `cli.command.execute` grant unless every call
+   carries it; the agent passes `network: "internet"` only for the push.
+3. **Step budget.** A checkout → read → write → test → commit+push → PR →
+   report flow takes seven or more steps; give the agent at least 12.
+
+What the agent sees: the checkout returns the working branch; `cli.file.write`
+reminds it that the change is sandbox-only until pushed; the fake GitHub (like
+real GitHub) refuses a pull request whose head has no commits beyond the base,
+so a branch created through the refs API without a push cannot produce an
+empty PR. The credential for the push is the GitHub connection's short-lived
+token, injected as job-scoped `GIT_TOKEN` and consumed by the askpass helper —
+it is never written to the workspace or the run record.
+
 ## Configuration ownership
 
 | Variable | Owner | Meaning |

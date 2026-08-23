@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from jhin_api.conversations import service
 from jhin_api.deps import WorkspaceContext
+from jhin_api.tasks import service as tasks_service
 from jhin_db.models import (
     Agent,
     AgentRun,
@@ -22,7 +23,9 @@ from jhin_db.models import (
     Conversation,
     Message,
     Task,
+    ToolCall,
     User,
+    WorkReview,
     Workspace,
 )
 from jhin_domain import (
@@ -32,9 +35,12 @@ from jhin_domain import (
     MessageType,
     MessageVisibility,
     RecipientType,
+    ReviewerType,
     RunStatus,
     SenderType,
     TaskState,
+    ToolCallStatus,
+    WorkReviewStatus,
     WorkspaceRole,
     new_uuid7,
     structured_content,
@@ -534,6 +540,190 @@ async def test_attention_summary_counts(
     assert [c.id for c in out.waiting_conversations] == [waiting.id]
     assert out.waiting_conversations[0].active_run_status == RunStatus.WAITING_APPROVAL.value
     assert out.counts.approvals == 1 and out.counts.failures == 1 and out.counts.total == 3
+
+
+def _failed_task(ws: UUID, agent: Agent, title: str) -> Task:
+    return Task(
+        workspace_id=ws,
+        title=title,
+        state=TaskState.FAILED.value,
+        assigned_agent_id=agent.id,
+        correlation_id=new_uuid7(),
+    )
+
+
+async def test_acknowledged_failures_leave_attention(
+    session: AsyncSession, admin_ctx: WorkspaceContext, agent: Agent
+) -> None:
+    """Dismissing a failure stamps the task, audits once, and drops it from
+    the inbox; the task itself keeps its failed state."""
+    ws = admin_ctx.workspace_id
+    first = _failed_task(ws, agent, "Broken A")
+    second = _failed_task(ws, agent, "Broken B")
+    running = Task(
+        workspace_id=ws,
+        title="Still going",
+        state=TaskState.RUNNING.value,
+        assigned_agent_id=agent.id,
+        correlation_id=new_uuid7(),
+    )
+    session.add_all([first, second, running])
+    await session.commit()
+
+    before = await service.attention(session, ws)
+    assert {t.id for t in before.failed_tasks} == {first.id, second.id}
+    assert before.counts.failures == 2
+
+    task = await tasks_service.acknowledge_task(
+        session, admin_ctx, first.id, request_id=new_uuid7(), ip_hash="h"
+    )
+    assert task.state == TaskState.FAILED.value
+    stamped = task.metadata_json[tasks_service.ATTENTION_ACKNOWLEDGED_KEY]
+    assert isinstance(stamped, str) and stamped
+
+    # Idempotent: same stamp, no second audit row.
+    again = await tasks_service.acknowledge_task(
+        session, admin_ctx, first.id, request_id=new_uuid7(), ip_hash="h"
+    )
+    assert again.metadata_json[tasks_service.ATTENTION_ACKNOWLEDGED_KEY] == stamped
+    audits = list(
+        await session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.action == "task.acknowledged", AuditEvent.target_id == first.id
+            )
+        )
+    )
+    assert len(audits) == 1 and audits[0].actor_id == admin_ctx.user.id
+
+    after = await service.attention(session, ws)
+    assert [t.id for t in after.failed_tasks] == [second.id]
+    assert after.counts.failures == 1 and after.counts.total == 1
+
+    # Only failed tasks can be dismissed.
+    with pytest.raises(HTTPException) as excinfo:
+        await tasks_service.acknowledge_task(
+            session, admin_ctx, running.id, request_id=new_uuid7(), ip_hash="h"
+        )
+    assert excinfo.value.status_code == 409
+
+
+async def test_acknowledge_failures_in_bulk(
+    session: AsyncSession, admin_ctx: WorkspaceContext, agent: Agent
+) -> None:
+    ws = admin_ctx.workspace_id
+    listed = [_failed_task(ws, agent, f"Broken {i}") for i in range(3)]
+    stale = _failed_task(ws, agent, "Ancient")
+    stale.created_at = T0 - timedelta(days=30)
+    stale.updated_at = T0 - timedelta(days=30)
+    session.add_all([*listed, stale])
+    await session.commit()
+    # One is already dismissed; the bulk call must not re-audit it.
+    await tasks_service.acknowledge_task(
+        session, admin_ctx, listed[0].id, request_id=new_uuid7(), ip_hash="h"
+    )
+
+    out = await service.acknowledge_failures(
+        session, admin_ctx, request_id=new_uuid7(), ip_hash="h"
+    )
+    assert out.acknowledged == 2
+    assert set(out.task_ids) == {listed[1].id, listed[2].id}
+    audits = list(
+        await session.scalars(select(AuditEvent).where(AuditEvent.action == "task.acknowledged"))
+    )
+    assert len(audits) == 3
+    assert sum(1 for a in audits if a.metadata_json.get("bulk")) == 2
+    after = await service.attention(session, ws)
+    assert after.failed_tasks == [] and after.counts.failures == 0
+    # The stale failure outside the window was never in the inbox, so it is untouched.
+    await session.refresh(stale)
+    assert not tasks_service.is_attention_acknowledged(stale)
+    # A second bulk call is a no-op.
+    assert (
+        await service.acknowledge_failures(session, admin_ctx, request_id=new_uuid7(), ip_hash="h")
+    ).acknowledged == 0
+
+
+async def test_attention_lists_agent_reviews_in_progress(
+    session: AsyncSession, admin_ctx: WorkspaceContext, agent: Agent
+) -> None:
+    """Reviews an AI colleague is handling are listed separately (with the
+    reviewer and the parked tool call) and never counted as needing a human."""
+    ws = admin_ctx.workspace_id
+    reviewer = Agent(workspace_id=ws, name="Ada", slug="ada", role_title="CTO")
+    session.add(reviewer)
+    task = Task(
+        workspace_id=ws,
+        title="Ship the thing",
+        state=TaskState.RUNNING.value,
+        assigned_agent_id=agent.id,
+        correlation_id=new_uuid7(),
+    )
+    session.add(task)
+    await session.flush()
+    run = AgentRun(
+        workspace_id=ws, agent_id=agent.id, task_id=task.id, status=RunStatus.RUNNING.value
+    )
+    session.add(run)
+    await session.flush()
+    call = ToolCall(
+        workspace_id=ws,
+        run_id=run.id,
+        agent_id=agent.id,
+        tool_name="github.pull_request.create",
+        status=ToolCallStatus.PENDING_REVIEW.value,
+    )
+    session.add(call)
+    await session.flush()
+    by_agent = WorkReview(
+        workspace_id=ws,
+        task_id=task.id,
+        run_id=run.id,
+        tool_call_id=call.id,
+        subject_agent_id=agent.id,
+        trigger_key="agent-review",
+        mode="pre_action",
+        reviewer_type=ReviewerType.AGENT.value,
+        reviewer_agent_id=reviewer.id,
+        status=WorkReviewStatus.PENDING.value,
+        requested_at=at(5),
+    )
+    by_human = WorkReview(
+        workspace_id=ws,
+        task_id=task.id,
+        subject_agent_id=agent.id,
+        trigger_key="human-review",
+        mode="before_close",
+        reviewer_type=ReviewerType.HUMAN.value,
+        status=WorkReviewStatus.PENDING.value,
+        requested_at=at(6),
+    )
+    decided = WorkReview(
+        workspace_id=ws,
+        task_id=task.id,
+        subject_agent_id=agent.id,
+        trigger_key="done-review",
+        mode="pre_action",
+        reviewer_type=ReviewerType.AGENT.value,
+        reviewer_agent_id=reviewer.id,
+        status=WorkReviewStatus.APPROVED.value,
+        verdict="approve",
+        requested_at=at(1),
+    )
+    session.add_all([by_agent, by_human, decided])
+    await session.commit()
+
+    out = await service.attention(session, ws)
+    assert [r.id for r in out.pending_reviews] == [by_human.id]
+    assert [r.id for r in out.reviews_in_progress] == [by_agent.id]
+    in_progress = out.reviews_in_progress[0]
+    assert in_progress.reviewer_agent_name == "Ada"
+    assert in_progress.subject_agent_name == "Atlas"
+    assert in_progress.task_title == "Ship the thing"
+    assert in_progress.parked_tool_name == "github.pull_request.create"
+    assert in_progress.parked_tool_call_status == ToolCallStatus.PENDING_REVIEW.value
+    assert out.counts.reviews == 1
+    assert out.counts.reviews_in_progress == 1
+    assert out.counts.total == 1
 
 
 async def test_delete_keeps_tasks_and_unlinks(

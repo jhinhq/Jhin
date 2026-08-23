@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from collections.abc import AsyncIterator
 from copy import deepcopy
@@ -980,3 +981,27 @@ async def test_failed_run_does_not_start_memory_maintenance(world: ProjectionWor
     await _finalize(world, RunStatus.FAILED.value)
 
     assert recorder.calls == []
+
+
+async def test_failed_call_observation_carries_the_connector_hint(world: ProjectionWorld) -> None:
+    """A pre-effect failure's static hint (stored on the row by the gateway)
+    reaches the model's observation so it can correct the call."""
+    await world.seed_step(
+        statuses=[ToolCallStatus.FAILED.value],
+        outputs=[{"error": "database_sql_not_allowed", "hint": "use one SELECT with a LIMIT"}],
+    )
+    await world.projections.commit_agent_step_activity(world.commit_params())
+    async with world.sessions() as session:
+        results = [
+            message.content_json
+            for message in await session.scalars(
+                select(Message).where(
+                    Message.run_id == world.run_id, Message.message_type == "tool_result"
+                )
+            )
+        ]
+    assert len(results) == 1
+    observation = json.loads(str(results[0]["result"]))
+    # The seeded row carries no error_code, so the status names the error.
+    assert observation["error"] == "failed"
+    assert observation["detail"] == "tool execution failed: use one SELECT with a LIMIT"

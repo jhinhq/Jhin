@@ -36,6 +36,9 @@ import type { Agent, ApprovalPreset, AutonomyLevel } from "@/lib/types";
 import {
   AGENT_TEMPLATES,
   applyTemplate,
+  applyToolPreset,
+  presetMissingTools,
+  TOOL_PRESETS,
   canSubmit,
   EMPTY_WIZARD,
   toCreatePayload,
@@ -332,6 +335,30 @@ function WizardInner() {
           </div>
         ) : step === 5 ? (
           <div className="space-y-4">
+            <Field label="Presets" hint="One click grants a bundle of tools with sensible scopes. You can adjust every grant below.">
+              <div className="flex flex-wrap gap-2 pt-1">
+                {TOOL_PRESETS.map((preset) => {
+                  const missing = presetMissingTools(preset, tools.data ?? []);
+                  const applied = Object.keys(preset.tools).every((name) => state.grantToolNames.includes(name));
+                  return (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      data-testid={`tool-preset-${preset.id}`}
+                      title={preset.description}
+                      disabled={tools.isPending || missing.length === Object.keys(preset.tools).length}
+                      onClick={() => setState(applyToolPreset(state, preset, tools.data ?? [], connections.data ?? []))}
+                      className={`rounded-xl border px-3 py-2 text-left text-sm transition-colors disabled:opacity-50 ${
+                        applied ? "border-accent bg-accent-soft" : "border-line bg-raised hover:border-line-strong"
+                      }`}
+                    >
+                      <span className="block font-medium">{preset.label}</span>
+                      <span className="block text-xs text-dim">{preset.description}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </Field>
             <Field
               label="Tool access"
               hint="Deny-by-default: the agent can only call tools you grant here."

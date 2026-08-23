@@ -22,6 +22,7 @@ from temporalio.client import Client as TemporalClient
 from jhin_api.approvals.schemas import ApprovalOut
 from jhin_api.audit import service as audit
 from jhin_api.conversations.schemas import (
+    AcknowledgeFailuresOut,
     ActivityCardOut,
     ActivityListOut,
     AttentionCounts,
@@ -1299,6 +1300,51 @@ async def list_activity(
 # --- Attention ---
 
 
+async def _recent_failures(db: AsyncSession, workspace_id: UUID) -> list[Task]:
+    """Failed tasks from the last week that nobody has dismissed yet."""
+    rows = await db.scalars(
+        select(Task)
+        .where(
+            Task.workspace_id == workspace_id,
+            Task.state == TaskState.FAILED.value,
+            Task.updated_at >= _now() - FAILED_TASK_WINDOW,
+        )
+        .order_by(Task.updated_at.desc())
+        .limit(MAX_PAGE_SIZE)
+    )
+    return [t for t in rows if not tasks_service.is_attention_acknowledged(t)]
+
+
+async def acknowledge_failures(
+    db: AsyncSession,
+    ctx: WorkspaceContext,
+    *,
+    request_id: UUID,
+    ip_hash: str,
+) -> AcknowledgeFailuresOut:
+    """Dismiss every failure the inbox currently lists, in one transaction."""
+    stamped_at = _now()
+    acknowledged: list[UUID] = []
+    for task in await _recent_failures(db, ctx.workspace_id):
+        if not tasks_service.mark_attention_acknowledged(task, at=stamped_at):
+            continue
+        acknowledged.append(task.id)
+        audit.record(
+            db,
+            action="task.acknowledged",
+            target_type="task",
+            target_id=task.id,
+            workspace_id=ctx.workspace_id,
+            actor_id=ctx.user.id,
+            request_id=request_id,
+            ip_hash=ip_hash,
+            metadata={"bulk": True},
+        )
+    if acknowledged:
+        await db.commit()
+    return AcknowledgeFailuresOut(acknowledged=len(acknowledged), task_ids=acknowledged)
+
+
 async def attention(db: AsyncSession, workspace_id: UUID) -> AttentionOut:
     approvals = list(
         await db.scalars(
@@ -1311,18 +1357,7 @@ async def attention(db: AsyncSession, workspace_id: UUID) -> AttentionOut:
             .limit(MAX_PAGE_SIZE)
         )
     )
-    failed = list(
-        await db.scalars(
-            select(Task)
-            .where(
-                Task.workspace_id == workspace_id,
-                Task.state == TaskState.FAILED.value,
-                Task.updated_at >= _now() - FAILED_TASK_WINDOW,
-            )
-            .order_by(Task.updated_at.desc())
-            .limit(MAX_PAGE_SIZE)
-        )
-    )
+    failed = await _recent_failures(db, workspace_id)
     active_conversations = list(
         await db.scalars(
             select(Conversation)
@@ -1337,24 +1372,30 @@ async def attention(db: AsyncSession, workspace_id: UUID) -> AttentionOut:
     projected = await project_conversations(db, workspace_id, active_conversations)
     waiting = [c for c in projected if c.active_run_status == RunStatus.WAITING_APPROVAL.value]
     # Work reviews assigned to a human (including fail-closed mandatory
-    # reviews with no resolvable AI reviewer) need a person now.
+    # reviews with no resolvable AI reviewer) need a person now; the ones an
+    # AI colleague is handling are listed so a person can step in.
     review_rows = list(
         await db.scalars(
             select(WorkReview)
             .where(
                 WorkReview.workspace_id == workspace_id,
                 WorkReview.status == WorkReviewStatus.PENDING.value,
-                WorkReview.reviewer_type == ReviewerType.HUMAN.value,
+                WorkReview.reviewer_type.in_((ReviewerType.HUMAN.value, ReviewerType.AGENT.value)),
             )
             .order_by(WorkReview.requested_at.desc())
             .limit(MAX_PAGE_SIZE)
         )
     )
-    pending_reviews = await coordination.project_reviews(db, workspace_id, review_rows)
+    projected_reviews = await coordination.project_reviews(db, workspace_id, review_rows)
+    pending_reviews = [r for r in projected_reviews if r.reviewer_type == ReviewerType.HUMAN.value]
+    reviews_in_progress = [
+        r for r in projected_reviews if r.reviewer_type == ReviewerType.AGENT.value
+    ]
     counts = AttentionCounts(
         approvals=len(approvals),
         failures=len(failed),
         reviews=len(pending_reviews),
+        reviews_in_progress=len(reviews_in_progress),
         total=len(approvals) + len(failed) + len(waiting) + len(pending_reviews),
     )
     return AttentionOut(
@@ -1362,5 +1403,6 @@ async def attention(db: AsyncSession, workspace_id: UUID) -> AttentionOut:
         failed_tasks=[TaskOut.model_validate(t) for t in failed],
         waiting_conversations=waiting,
         pending_reviews=pending_reviews,
+        reviews_in_progress=reviews_in_progress,
         counts=counts,
     )

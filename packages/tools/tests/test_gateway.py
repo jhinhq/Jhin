@@ -39,7 +39,7 @@ from jhin_tools.builtin import (
 )
 from jhin_tools.errors import ToolExecutionError
 from jhin_tools.gateway import GatewayOutcome, GatewayStateError, ToolGateway
-from jhin_tools.sanitize import MAX_STRING_CHARS
+from jhin_tools.sanitize import MAX_STRING_CHARS, invalid_tool_arguments_json
 from jhin_tools.test_barriers import (
     TOOL_AFTER_CLAIM,
     TOOL_AFTER_EFFECT,
@@ -451,6 +451,31 @@ async def test_nonstandard_json_number_is_denied_before_executor(
     assert executions == 0
 
 
+async def test_invalid_arguments_placeholder_is_denied_with_guidance(
+    gateway: ToolGateway,
+    session: AsyncSession,
+    context: ToolExecutionContext,
+) -> None:
+    """The agent worker binds unparseable model arguments as a placeholder;
+    the gateway must deny it as invalid_input with a model-facing hint and
+    never execute the tool (even when its input has no required fields)."""
+    await _grant(session, context, "system.echo")
+    placeholder = invalid_tool_arguments_json(
+        reason="arguments_not_strict_json",
+        detail="Expecting ',' delimiter: line 1 column 12 (char 11)",
+    )
+
+    outcome = await gateway.request("system.echo", placeholder)
+
+    assert outcome.status == "denied"
+    assert outcome.decision_code == "invalid_input"
+    assert "not one valid JSON object" in outcome.decision_reason
+    assert "Expecting ',' delimiter" in outcome.decision_reason
+    assert "exactly one JSON object" in outcome.decision_reason
+    row = await session.scalar(select(ToolCall).where(ToolCall.tool_name == "system.echo"))
+    assert row is not None and row.status == "denied"
+
+
 async def test_hostile_model_metadata_is_redacted_before_truncation(
     gateway: ToolGateway,
     session: AsyncSession,
@@ -627,6 +652,60 @@ async def test_uncertain_runtime_invocation_never_reexecutes_auto_mutation(
     assert row is not None
     assert row.status == ToolCallStatus.EXECUTION_UNKNOWN.value
     assert executions == 1
+
+
+async def test_pre_effect_failure_hint_reaches_the_model_but_not_the_message(
+    session: AsyncSession, context: ToolExecutionContext
+) -> None:
+    """A connector may attach static retry guidance to a bounded failure; it
+    rides on the decision reason (the model's observation) while the
+    provider message still never crosses the gateway."""
+    await _persist_execution_context(session, context)
+    await _grant(session, context, "test.hinted_read")
+    await session.commit()
+    context = _with_isolated_sessions(context)
+    exception_secret = "provider-exception-secret-must-not-persist"
+
+    async def executor(executor_ctx: ToolExecutionContext, payload: BaseModel) -> _ApprovalOutput:
+        raise ToolExecutionError(
+            exception_secret,
+            code="sql_not_allowed",
+            side_effect_possible=False,
+            hint="use one SELECT over schema-qualified tables with a LIMIT",
+        )
+
+    catalog = ToolCatalog()
+    catalog.register(
+        ToolDefinition(
+            name="test.hinted_read",
+            description="Policy failure with guidance",
+            risk=RiskLevel.READ,
+            input_model=_WideApprovalInput,
+            output_model=_ApprovalOutput,
+            required_capability="test.hinted_read",
+        ),
+        executor,
+    )
+    outcome = await ToolGateway(context, catalog).request(
+        "test.hinted_read", '{"label": "count"}', invocation_id=new_uuid7()
+    )
+
+    assert outcome.status == "failed" and outcome.error_code == "sql_not_allowed"
+    assert outcome.sanitized_output == {
+        "error": "sql_not_allowed",
+        "hint": "use one SELECT over schema-qualified tables with a LIMIT",
+    }
+    assert outcome.decision_reason == (
+        "the tool failed before any external effect: "
+        "use one SELECT over schema-qualified tables with a LIMIT"
+    )
+    assert exception_secret not in outcome.decision_reason
+    persisted = json.dumps(
+        [outcome.model_dump(mode="json")]
+        + [audit.metadata_json for audit in await session.scalars(select(AuditEvent))],
+        default=str,
+    )
+    assert exception_secret not in persisted
 
 
 async def test_pre_effect_runtime_failure_persists_provider_code_and_replays(
@@ -1572,3 +1651,20 @@ async def test_output_is_redacted_and_size_capped(
         assert len(text) <= 8_192
     finally:
         get_redactor().clear()
+
+
+async def test_schema_denial_names_the_offending_fields(
+    gateway: ToolGateway, session: AsyncSession, context: ToolExecutionContext
+) -> None:
+    """The model is told *which* fields are wrong (schema identifiers and
+    pydantic error types only — never the submitted values)."""
+    await _grant(session, context, "system.echo")
+    outcome = await gateway.request("system.echo", '{"text": 12345, "extra": "secret-value"}')
+    assert outcome.status == "denied" and outcome.decision_code == "invalid_input"
+    assert outcome.decision_reason.startswith("arguments do not match the tool schema: ")
+    assert "text: string_type" in outcome.decision_reason
+    assert "secret-value" not in outcome.decision_reason
+    row = await session.scalar(select(ToolCall).where(ToolCall.tool_name == "system.echo"))
+    assert row is not None
+    assert row.sanitized_output_json["error"] == "invalid_input"
+    assert "text: string_type" in row.sanitized_output_json["reason"]

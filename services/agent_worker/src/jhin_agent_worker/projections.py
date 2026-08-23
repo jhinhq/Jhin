@@ -673,6 +673,15 @@ class AgentProjectionActivities:
             reason = redact_text(approval.reason)[:_MAX_REASON_CHARS]
         else:
             reason = _SAFE_STATUS_REASONS[status]
+            # Denials and pre-effect failures carry the gateway's bounded
+            # reason / the connector's static retry hint on the row; surface
+            # it so the model can correct its call instead of guessing.
+            if status in ("failed", "denied"):
+                guidance = row.sanitized_output_json.get("hint") or row.sanitized_output_json.get(
+                    "reason"
+                )
+                if isinstance(guidance, str) and guidance:
+                    reason = f"{reason}: {redact_text(guidance)[:_MAX_REASON_CHARS]}"
         if status == "needs_approval":
             decision_code = "approval_required"
         elif status == "executed":

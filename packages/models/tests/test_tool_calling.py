@@ -4,8 +4,15 @@ import json
 from typing import Any
 
 import httpx
+import pytest
 
-from jhin_models import ModelMessage, ModelRequest, ModelToolCall, ToolSchema
+from jhin_models import (
+    ModelMessage,
+    ModelRequest,
+    ModelToolCall,
+    ToolSchema,
+    normalize_tool_arguments,
+)
 from jhin_models.providers.anthropic import AnthropicClient
 from jhin_models.providers.openai_compatible import OpenAICompatibleClient
 
@@ -227,3 +234,62 @@ async def test_openai_compatible_encodes_dotted_tool_names_on_the_wire() -> None
     )
     assert seen["body"]["tools"][0]["function"]["name"] == "organization__delegate_task"
     assert response.tool_calls[0].name == "organization.delegate_task"
+
+
+def _openai_response_with_arguments(arguments: Any) -> dict[str, Any]:
+    body = _tool_call_response()
+    body["choices"][0]["message"]["tool_calls"] = [
+        {
+            "id": "call_0",
+            "type": "function",
+            "function": {"name": "system.echo", "arguments": arguments},
+        }
+    ]
+    return body
+
+
+@pytest.mark.parametrize(
+    ("wire_arguments", "expected"),
+    [
+        # Recorded shapes seen from OpenAI-compatible gateways / models:
+        ('{"text": "hi"}', '{"text": "hi"}'),  # the documented JSON string
+        ({"text": "hi"}, '{"text": "hi"}'),  # gateway already parsed it
+        ('"{\\"text\\": \\"hi\\"}"', '{"text": "hi"}'),  # double-encoded
+        ('  {"text": "hi"}\n', '{"text": "hi"}'),  # padded
+        ("", "{}"),
+        (None, "{}"),
+        # Not repairable without guessing: passed through for the manifest
+        # to turn into an invalid_input observation.
+        ('{"text": "hi"', '{"text": "hi"'),
+        ('{"text":"a"}{"text":"b"}', '{"text":"a"}{"text":"b"}'),
+        ('{"a": 1, "a": 2}', '{"a": 1, "a": 2}'),
+        ("[1, 2]", "[1, 2]"),
+        ('"just a string"', '"just a string"'),
+    ],
+)
+async def test_openai_compatible_normalizes_argument_shapes(
+    wire_arguments: Any, expected: str
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_openai_response_with_arguments(wire_arguments))
+
+    client = OpenAICompatibleClient(
+        base_url="http://fake/v1", transport=httpx.MockTransport(handler)
+    )
+    response = await client.generate(
+        ModelRequest(
+            model="fake-mini",
+            messages=[ModelMessage(role="user", content="call the tool")],
+            tools=[ECHO_TOOL],
+        )
+    )
+    assert len(response.tool_calls) == 1
+    assert response.tool_calls[0].arguments_json == expected
+
+
+def test_normalize_tool_arguments_never_invents_an_object() -> None:
+    assert normalize_tool_arguments(42) == "42"
+    assert normalize_tool_arguments(["x"]) == '["x"]'
+    # Triple-encoded stops unwrapping at the depth limit and is passed through.
+    nested = json.dumps(json.dumps(json.dumps({"text": "hi"})))
+    assert normalize_tool_arguments(nested) == nested

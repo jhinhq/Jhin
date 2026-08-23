@@ -12,6 +12,8 @@ dependencies = [
     # GitHub App authentication: RS256 app JWTs (plan 11.2).
     "pyjwt>=2.10",
     "cryptography>=44.0",
+    # Model Context Protocol client/server SDK (Streamable HTTP + SSE transports).
+    "mcp>=1.29,<2",
     "jhin-db",
     "jhin-domain",
     "jhin-policy",

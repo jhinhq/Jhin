@@ -105,6 +105,13 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
         "generation_id": FieldKind.ID,
     },
     "model.client_close_failed": {"error_type": FieldKind.ERROR_TYPE},
+    # A model tool call whose arguments were not one strict JSON object; it
+    # is bound as a placeholder and denied as invalid_input (plan 21.4).
+    "agent.step.invalid_tool_arguments": {
+        "reason": FieldKind.ENUM,
+        "detail": FieldKind.ERROR,
+        "argument_chars": FieldKind.COUNT,
+    },
     "sandbox.workspace_cleanup": {"deleted": FieldKind.BOOL},
     "sandbox.network_created": {"network_policy": FieldKind.ENUM},
     "sandbox.network_ensure_failed": {"error_type": FieldKind.ERROR_TYPE},

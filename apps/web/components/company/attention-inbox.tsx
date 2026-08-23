@@ -5,7 +5,7 @@
  * tasks, and chats waiting on the user. Pure props so the all-clear and
  * populated states are component-testable. */
 
-import { AlertTriangle, CheckCircle2, ExternalLink, MessageSquare } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ExternalLink, MessageSquare, X } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
 import { ApprovalCard } from "@/components/approval-card";
@@ -13,7 +13,7 @@ import { Avatar } from "@/components/avatar";
 import { Chip, SectionCard, StatusPill } from "@/components/company/bits";
 import { Button, Dialog, Field, Textarea } from "@/components/ui";
 import { timeAgo } from "@/lib/activity";
-import { matchedConditionLabels, REVIEW_MODE_LABELS, reviewSubject } from "@/lib/coordination";
+import { humanizeToolName, matchedConditionLabels, REVIEW_MODE_LABELS, reviewSubject } from "@/lib/coordination";
 import { formatDateTime } from "@/lib/format";
 import { kindLabel, scopeLabel } from "@/lib/memory";
 import type { Attention, MemoryRecord, ReviewVerdict, WorkRequest, WorkReview } from "@/lib/types";
@@ -155,6 +155,8 @@ export function AttentionInbox({
   decidingId,
   onDecide,
   onReviewDecide,
+  onDismissFailure,
+  onDismissAllFailures,
   workRequests = [],
   onWorkRequest,
   proposedMemories = [],
@@ -168,6 +170,9 @@ export function AttentionInbox({
   decidingId?: string | null;
   onDecide: (approvalId: string, decision: "approve" | "reject") => void;
   onReviewDecide?: (reviewId: string, verdict: ReviewVerdict, feedback: string) => void;
+  /** Dismiss one failed task / every listed failure from the inbox. */
+  onDismissFailure?: (taskId: string) => void;
+  onDismissAllFailures?: () => void;
   /** Pending work requests (admins see accept/decline/clarify). */
   workRequests?: WorkRequest[];
   onWorkRequest?: (requestId: string, action: WorkRequestAction, response: string) => void;
@@ -179,11 +184,13 @@ export function AttentionInbox({
 }) {
   const { pending_approvals, failed_tasks, waiting_conversations } = data;
   const pending_reviews = data.pending_reviews ?? [];
+  const reviews_in_progress = data.reviews_in_progress ?? [];
   const [reviewing, setReviewing] = useState<WorkReview | null>(null);
   const [replying, setReplying] = useState<{ request: WorkRequest; action: "decline" | "clarify" } | null>(null);
   const empty =
     pending_approvals.length === 0 &&
     pending_reviews.length === 0 &&
+    reviews_in_progress.length === 0 &&
     workRequests.length === 0 &&
     proposedMemories.length === 0 &&
     failed_tasks.length === 0 &&
@@ -236,7 +243,9 @@ export function AttentionInbox({
                       </p>
                       {review.tool_call_id ? (
                         <p className="mt-1 text-xs text-warn" data-testid={`review-parked-${review.id}`}>
-                          The agent is waiting for this review before it continues.
+                          {review.parked_tool_name
+                            ? `The agent is waiting for this review before it can use ${humanizeToolName(review.parked_tool_name)}.`
+                            : "The agent is waiting for this review before it continues."}
                         </p>
                       ) : review.mode === "pre_action" || review.mode === "before_close" ? (
                         <p className="mt-1 text-xs text-warn">The agent is paused until someone decides.</p>
@@ -252,6 +261,67 @@ export function AttentionInbox({
                     {canDecide && onReviewDecide ? (
                       <Button size="sm" variant="primary" onClick={() => setReviewing(review)} disabled={decidingId === review.id}>
                         Decide
+                      </Button>
+                    ) : null}
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </SectionCard>
+      ) : null}
+
+      {reviews_in_progress.length > 0 ? (
+        <SectionCard
+          title={`Being reviewed by an agent (${reviews_in_progress.length})`}
+          description={
+            isAdmin
+              ? "A colleague is reviewing this work. Nothing is needed from you unless you want to decide it yourself."
+              : "A colleague is reviewing this work. An admin can step in and decide instead."
+          }
+        >
+          <ul className="space-y-2">
+            {reviews_in_progress.map((review) => {
+              const reasons = matchedConditionLabels(review.evidence_json ?? {});
+              return (
+                <li key={review.id} data-testid={`review-in-progress-${review.id}`} className="rounded-xl border border-line bg-raised px-4 py-3">
+                  <div className="flex items-start gap-3">
+                    <Avatar
+                      name={review.reviewer_agent_name ?? "Reviewer"}
+                      size="sm"
+                      src={review.reviewer_agent_id ? avatars?.[review.reviewer_agent_id] : null}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium text-ink">
+                        {review.reviewer_agent_name ?? "An agent"} is reviewing: {reviewSubject(review)}
+                      </p>
+                      <p className="mt-0.5 text-xs text-dim">
+                        {REVIEW_MODE_LABELS[review.mode] ?? review.mode}
+                        {reasons.length ? ` · ${reasons.join(", ")}` : ""}
+                        {" · waiting "}
+                        <time dateTime={review.requested_at} title={formatDateTime(review.requested_at)}>
+                          {timeAgo(review.requested_at, now)}
+                        </time>
+                      </p>
+                      {review.tool_call_id ? (
+                        <p className="mt-1 text-xs text-dim" data-testid={`review-in-progress-parked-${review.id}`}>
+                          {review.parked_tool_name
+                            ? `${review.subject_agent_name ?? "The agent"} is paused until ${humanizeToolName(review.parked_tool_name)} is reviewed.`
+                            : `${review.subject_agent_name ?? "The agent"} is paused until this is reviewed.`}
+                        </p>
+                      ) : null}
+                      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                        {review.reviewer_agent_id ? <Chip href={`/agents/${review.reviewer_agent_id}`}>{review.reviewer_agent_name ?? "Reviewer"}</Chip> : null}
+                        {review.task_id ? (
+                          <Chip href={`/tasks/${review.task_id}`}>
+                            <ExternalLink size={12} className="mr-1" aria-hidden /> Open in Advanced
+                          </Chip>
+                        ) : null}
+                      </div>
+                    </div>
+                    {isAdmin && onReviewDecide ? (
+                      <Button size="sm" onClick={() => setReviewing(review)} disabled={decidingId === review.id}>
+                        Decide instead
                       </Button>
                     ) : null}
                   </div>
@@ -349,7 +419,14 @@ export function AttentionInbox({
       {failed_tasks.length > 0 ? (
         <SectionCard
           title={`Ran into a problem (${failed_tasks.length})`}
-          description="These pieces of work stopped. Open the chat to see what happened and ask the agent to try again."
+          description="These pieces of work stopped. Open the chat to see what happened and ask the agent to try again, or dismiss the ones you have dealt with."
+          action={
+            canDecide && onDismissAllFailures ? (
+              <Button size="sm" variant="ghost" onClick={onDismissAllFailures} disabled={decidingId === "failures:all"} data-testid="dismiss-all-failures">
+                Dismiss all
+              </Button>
+            ) : undefined
+          }
         >
           <ul className="space-y-2">
             {failed_tasks.map((task) => {
@@ -359,19 +436,30 @@ export function AttentionInbox({
                   : null;
               const href = conversationId ? `/chats/${conversationId}` : `/tasks/${task.id}`;
               return (
-                <li key={task.id} data-testid={`failed-${task.id}`}>
-                  <Link
-                    href={href}
-                    className="flex items-start gap-3 rounded-xl border border-danger/30 bg-danger-soft px-4 py-3 transition-colors hover:border-danger/60"
-                  >
-                    <AlertTriangle size={16} className="mt-0.5 shrink-0 text-danger" aria-hidden />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-sm font-medium">{task.title}</span>
-                      <span className="block text-xs text-dim">
-                        Stopped {timeAgo(task.updated_at, now)} · {conversationId ? "Open the chat" : "Open in Advanced"}
-                      </span>
+                <li
+                  key={task.id}
+                  data-testid={`failed-${task.id}`}
+                  className="flex items-start gap-3 rounded-xl border border-danger/30 bg-danger-soft px-4 py-3"
+                >
+                  <AlertTriangle size={16} className="mt-0.5 shrink-0 text-danger" aria-hidden />
+                  <Link href={href} className="min-w-0 flex-1 transition-colors hover:text-accent-strong">
+                    <span className="block truncate text-sm font-medium">{task.title}</span>
+                    <span className="block text-xs text-dim">
+                      Stopped {timeAgo(task.updated_at, now)} · {conversationId ? "Open the chat" : "Open in Advanced"}
                     </span>
                   </Link>
+                  {canDecide && onDismissFailure ? (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      aria-label={`Dismiss “${task.title}”`}
+                      title="Dismiss from this list"
+                      onClick={() => onDismissFailure(task.id)}
+                      disabled={decidingId === task.id || decidingId === "failures:all"}
+                    >
+                      <X size={14} aria-hidden /> Dismiss
+                    </Button>
+                  ) : null}
                 </li>
               );
             })}

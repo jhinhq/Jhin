@@ -145,12 +145,26 @@ class SupabaseDatabaseError(ToolExecutionError):
         *,
         code: str = "database_execution_failed",
         side_effect_possible: bool = True,
+        hint: str = "",
     ) -> None:
         super().__init__(
             message,
             code=code,
+            hint=hint,
             side_effect_possible=side_effect_possible,
         )
+
+
+# Static, model-facing retry guidance per error code (never provider text).
+_SQL_POLICY_HINT = (
+    "the SQL policy accepts exactly one statement over schema-qualified tables "
+    "(e.g. SELECT id FROM public.widgets LIMIT 200); functions and aggregates "
+    "such as COUNT(*), window functions, unqualified table names, catalog tables "
+    "and multiple statements are rejected. To count rows, SELECT one column with "
+    "LIMIT 200 (the connection's maximum) and report row_count; if truncated is "
+    "true the table has more rows than that"
+)
+_HINTS: dict[str, str] = {"database_sql_not_allowed": _SQL_POLICY_HINT}
 
 
 def _error(
@@ -163,6 +177,7 @@ def _error(
         message,
         code=code,
         side_effect_possible=side_effect_possible,
+        hint=_HINTS.get(code, ""),
     ) from None
 
 
@@ -1229,7 +1244,14 @@ def _tool(
 SUPABASE_DATABASE_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor], ...] = (
     _tool(
         name="supabase.database.read",
-        description="Read bounded rows from explicitly scoped Supabase tables.",
+        description=(
+            "Read bounded rows from explicitly scoped Supabase tables with one "
+            "SELECT over schema-qualified tables, e.g. SELECT id, name FROM "
+            "public.widgets LIMIT 50. Functions and aggregates (COUNT, SUM, ...), "
+            "window functions and unqualified table names are rejected by policy. "
+            "To count rows, SELECT one column with LIMIT 200 (the maximum) and "
+            "report row_count; truncated=true means the table has more rows."
+        ),
         risk=RiskLevel.READ,
         input_model=DatabaseReadInput,
         output_model=DatabaseReadOutput,

@@ -22,6 +22,7 @@ from jhin_db.models import Agent, AgentRun, MemoryRecord, RunEvent, Task, ToolCa
 from jhin_domain import MemoryScope, MemoryStatus, RunStatus, new_uuid7
 from jhin_models import ModelRequest, ModelResponse, ModelToolCall, ModelUsage
 from jhin_observability import noop_metrics, noop_tracer
+from jhin_tools import invalid_tool_arguments
 from jhin_workflows.agent_task.shared import (
     AdvertisedTool,
     ReasonAgentStepInput,
@@ -276,16 +277,52 @@ async def test_new_reasoning_bind_rolls_back_manifest_and_reasoning_together(
     assert world.effect.count == 0
 
 
-@pytest.mark.parametrize("lossy_kind", ["nonobject", "long_name", "secret"])
+@pytest.mark.parametrize(
+    "arguments_json",
+    [
+        "[]",
+        '{"a": 1, "a": 2}',
+        '{"value": "truncated',
+        '{"value":"first"}{"value":"second"}',
+        "NaN",
+    ],
+)
+async def test_invalid_arguments_bind_as_a_retryable_placeholder(
+    world: ReasoningWorld, arguments_json: str
+) -> None:
+    """Arguments that are not one strict JSON object are a model mistake:
+    the step still binds (manifest + reasoning), with a placeholder the
+    gateway turns into an ``invalid_input`` observation — the run goes on."""
+    response = two_call_response()
+    call = response.tool_calls[0].model_copy(update={"arguments_json": arguments_json})
+    world.model.responses.append(response.model_copy(update={"tool_calls": (call,)}))
+
+    result = await world.reasoning.reason_agent_step_activity(world.params)
+
+    assert result.call_count == 1
+    manifest = (await world.load_event("agent.step.tool_manifest")).payload_json["manifest"]
+    entry = manifest["calls"][0]
+    assert entry["lossless"] is True and entry["tool_name"] == "system.echo"
+    bound = json.loads(entry["arguments_json"])
+    placeholder = invalid_tool_arguments(bound)
+    assert placeholder is not None
+    assert placeholder["reason"] in {"arguments_not_strict_json", "arguments_not_object"}
+    # Parser detail only — never the model's argument content.
+    assert "first" not in entry["arguments_json"] and "truncated" not in entry["arguments_json"]
+    assert await world.count_events("agent.step.reasoning") == 1
+    async with world.sessions() as session:
+        run = await session.get(AgentRun, world.run_id)
+        assert run is not None and run.status != RunStatus.FAILED.value
+
+
+@pytest.mark.parametrize("lossy_kind", ["long_name", "secret"])
 async def test_nonlossless_reasoning_fails_before_effects(
     world: ReasoningWorld,
     lossy_kind: str,
 ) -> None:
     response = two_call_response()
     call = response.tool_calls[0]
-    if lossy_kind == "nonobject":
-        call = call.model_copy(update={"arguments_json": "[]"})
-    elif lossy_kind == "long_name":
+    if lossy_kind == "long_name":
         call = call.model_copy(update={"name": "n" * 201})
     else:
         from jhin_secrets import get_redactor
@@ -462,20 +499,27 @@ async def test_step_prompt_carries_roster_and_manager_rollup(world: ReasoningWor
     assert "Team status rollup" in system
 
 
-def test_non_lossless_manifest_entries_name_their_reason() -> None:
-    """A step that cannot be stored losslessly records a fixed reason code
-    (never content) so the failure is diagnosable from the run record."""
+def test_manifest_entries_bind_invalid_arguments_and_name_storage_failures() -> None:
+    """Invalid arguments bind as a placeholder (lossless, diagnosable from the
+    placeholder's parser detail); only storage problems stay non-lossless and
+    record a fixed reason code (never content)."""
     calls = (
         ModelToolCall(id="c0", name="system.echo", arguments_json='{"text": "fine"}'),
         ModelToolCall(id="c1", name="system.echo", arguments_json='{"a": 1, "a": 2}'),
         ModelToolCall(id="c2", name="system.echo", arguments_json='["not", "an", "object"]'),
         ModelToolCall(id="c3", name="system.echo", arguments_json=json.dumps({"text": "x" * 9000})),
+        ModelToolCall(id="c4", name="system.echo", arguments_json='{"text": "x"'),
     )
     manifest = reasoning_module._step_tool_manifest(calls)
     entries = manifest["calls"]
     assert entries[0]["lossless"] is True and "reason" not in entries[0]
-    assert entries[1]["reason"] == "arguments_not_strict_json"
-    assert entries[1]["lossless"] is False
-    assert "duplicate JSON object key" in entries[1]["detail"]
-    assert entries[2] == {"ordinal": 2, "lossless": False, "reason": "arguments_not_object"}
+    duplicate = invalid_tool_arguments(json.loads(entries[1]["arguments_json"]))
+    assert entries[1]["lossless"] is True and duplicate is not None
+    assert duplicate["reason"] == "arguments_not_strict_json"
+    assert "duplicate JSON object key" in duplicate["detail"]
+    bare_list = invalid_tool_arguments(json.loads(entries[2]["arguments_json"]))
+    assert bare_list == {"reason": "arguments_not_object", "detail": "got JSON list"}
     assert entries[3] == {"ordinal": 3, "lossless": False, "reason": "arguments_truncated"}
+    truncated = invalid_tool_arguments(json.loads(entries[4]["arguments_json"]))
+    assert truncated is not None and truncated["reason"] == "arguments_not_strict_json"
+    assert "Expecting" in truncated["detail"]

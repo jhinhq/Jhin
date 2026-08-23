@@ -108,3 +108,40 @@ class TestGitSmartHttp:
         )
         assert passing.returncode == 0
         assert "tests passed" in passing.stdout
+
+    def test_pull_request_needs_commits_between_base_and_head(
+        self, server: FakeGitHubServer, tmp_path: Path
+    ) -> None:
+        """Like GitHub, a PR from a branch that merely points at the base
+        commit (e.g. created through the refs API, never pushed to) is
+        rejected — an agent cannot 'succeed' with an empty pull request."""
+        headers = {"Authorization": f"Bearer {TOKEN}"}
+        main_sha = httpx.get(f"{server.base_url}/_state").json()["repos"]["octo/alpha"]["branches"][
+            "main"
+        ]
+        created = httpx.post(
+            f"{server.base_url}/repos/octo/alpha/git/refs",
+            headers=headers,
+            json={"ref": "refs/heads/empty-branch", "sha": main_sha},
+        )
+        assert created.status_code == 201, created.text
+        empty = httpx.post(
+            f"{server.base_url}/repos/octo/alpha/pulls",
+            headers=headers,
+            json={"title": "Nothing", "head": "empty-branch", "base": "main", "body": ""},
+        )
+        assert empty.status_code == 422
+        assert "No commits between main and empty-branch" in empty.json()["message"]
+
+        work = tmp_path / "clone3"
+        assert run_git("clone", authed_url(server), str(work)).returncode == 0
+        assert run_git("checkout", "-b", "agent/real", cwd=work).returncode == 0
+        (work / "README.md").write_text("# Seeded\n\n## Getting started\n")
+        assert run_git("commit", "-am", "docs", cwd=work).returncode == 0
+        assert run_git("push", "origin", "agent/real", cwd=work).returncode == 0
+        real = httpx.post(
+            f"{server.base_url}/repos/octo/alpha/pulls",
+            headers=headers,
+            json={"title": "Docs", "head": "agent/real", "base": "main", "body": ""},
+        )
+        assert real.status_code == 201, real.text

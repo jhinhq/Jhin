@@ -157,3 +157,14 @@ export function buildCliScope(
 export function webhookPayloadUrl(urlPath: string, origin: string): string {
   return `${origin.replace(/\/$/, "")}${urlPath}`;
 }
+
+/** Server slug of an MCP tool name like "mcp.fake.echo" (null otherwise). */
+export function mcpServerSlug(toolName: string): string | null {
+  const parts = toolName.split(".");
+  return parts.length === 3 && parts[0] === "mcp" && parts[1] ? parts[1] : null;
+}
+
+/** The grant pattern covering every tool on one MCP server. */
+export function mcpWildcardCapability(serverSlug: string): string {
+  return `mcp.${serverSlug}.*`;
+}

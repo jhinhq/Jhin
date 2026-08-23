@@ -118,6 +118,21 @@ class Connector(ABC):
     def tool_definitions(self) -> tuple[ToolDefinition, ...]:
         """Tool definitions without executor callables."""
 
+    def connection_tool_definitions(self, config: Mapping[str, Any]) -> tuple[ToolDefinition, ...]:
+        """Tool definitions as seen through one stored connection.
+
+        Static connectors return ``tool_definitions()``. Connectors whose
+        tools are discovered per connection (MCP) derive them from the
+        connection's durable ``config_json`` instead. Never performs I/O."""
+        return self.tool_definitions()
+
+    async def refresh_discovery(self, ctx: VerifyContext) -> dict[str, Any] | None:
+        """Re-discover per-connection state to persist into ``config_json``
+        after a successful verification (e.g. an MCP server's tool list).
+        Returns the keys to merge, or None when the connector has nothing to
+        discover. Values must be display-safe and bounded — never secrets."""
+        return None
+
     def webhook_events(self) -> tuple[str, ...]:
         """Provider event names accepted at the webhook endpoint."""
         return self.manifest.webhook_events

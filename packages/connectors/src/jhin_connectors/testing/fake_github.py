@@ -262,6 +262,13 @@ def handle_request(
         with state.lock:
             if head not in repo["branches"] or base not in repo["branches"]:
                 return 422, {"message": "Validation Failed: head or base branch missing"}
+            if repo["branches"][head] == repo["branches"][base]:
+                # GitHub refuses a pull request with nothing to merge; the
+                # fake must too, or an agent that never pushed its commits
+                # "succeeds" with an empty PR.
+                return 422, {
+                    "message": f"Validation Failed: No commits between {base} and {head}",
+                }
             number = repo["next_pull"]
             repo["next_pull"] += 1
             pull = {

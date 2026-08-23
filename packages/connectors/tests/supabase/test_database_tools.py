@@ -211,6 +211,9 @@ async def test_ddl_policy_failure_is_pre_effect_and_never_connects(
 
     assert exc_info.value.code == "database_sql_not_allowed"
     assert exc_info.value.side_effect_possible is False
+    # The model gets fixed policy guidance (never the parser's view of the SQL).
+    assert "COUNT(*)" in exc_info.value.hint and "LIMIT" in exc_info.value.hint
+    assert "ALTER" not in exc_info.value.hint
     assert connected is False
 
 

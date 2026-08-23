@@ -185,6 +185,17 @@ async def cancel_task(
     return TaskOut.model_validate(task)
 
 
+@tasks_router.post("/{task_id}/acknowledge")
+async def acknowledge_task(
+    task_id: UUID, request: Request, ctx: MemberCtx, db: DbSession
+) -> TaskOut:
+    """Dismiss a failed task from the attention inbox (the failure is kept)."""
+    task = await service.acknowledge_task(
+        db, ctx, task_id, request_id=req_id(request), ip_hash=ip_hash(request)
+    )
+    return TaskOut.model_validate(task)
+
+
 @tasks_router.post("/{task_id}/instruction")
 async def task_instruction(
     task_id: UUID,
