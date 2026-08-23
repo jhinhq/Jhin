@@ -177,6 +177,11 @@ class Agent(Base, UuidPkMixin, TimestampMixin):
         ),
         default=None,
     )
+    # Free brand-cube avatar (``avatar_kind == "shape"``): one of
+    # ``jhin_domain.AVATAR_SHAPES`` plus a palette hex from ``AVATAR_COLORS``.
+    # Validity is enforced at the API boundary, like the other string enums.
+    avatar_shape: Mapped[str | None] = mapped_column(String(32), default=None)
+    avatar_color: Mapped[str | None] = mapped_column(String(16), default=None)
 
     @validates("expertise_json")
     def _validate_expertise_json(self, _key: str, value: list[str]) -> list[str]:

@@ -2,12 +2,17 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  dayLabel,
+  exchangeLabel,
+  exchangeSuffix,
   filterConversations,
   friendlyMessageLabel,
+  groupExchanges,
   mergeTimeline,
   relativeTime,
   sortByActivity,
   statusLabelFor,
+  withDaySeparators,
 } from "@/lib/chat";
 import type { ActivityCard, Conversation, ConversationMessage } from "@/lib/types";
 
@@ -177,6 +182,148 @@ describe("rail helpers", () => {
   });
 });
 
+
+describe("groupExchanges", () => {
+  const opts = { primaryAgentId: "a1", primaryAgentName: "Scout" };
+  const delegation = message({
+    id: "d1",
+    message_type: "delegation",
+    sender_id: "a1",
+    agent_id: "a1",
+    sender_name: "Scout",
+    content_json: { summary: "Please handle this", target_agent_id: "a2", target_agent_name: "Linus" },
+    created_at: "2026-08-21T10:00:00Z",
+  });
+  const reported = message({
+    id: "r1",
+    message_type: "result",
+    sender_id: "a2",
+    agent_id: "a2",
+    sender_name: "Linus",
+    content_json: { summary: "All done", from_agent_id: "a2", from_agent_name: "Linus" },
+    created_at: "2026-08-21T10:05:00Z",
+  });
+
+  it("collapses a delegation/result run between the same pair, preserving order", () => {
+    const grouped = groupExchanges(mergeTimeline([delegation, reported], []), opts);
+    expect(grouped).toHaveLength(1);
+    const exchange = grouped[0];
+    expect(exchange.kind).toBe("exchange");
+    if (exchange.kind !== "exchange") return;
+    expect(exchange.count).toBe(2);
+    expect(exchange.withName).toBe("Linus");
+    expect(exchange.withAgentId).toBe("a2");
+    expect(exchange.outcome).toBe("ok");
+    expect(exchange.items.map((item) => item.id)).toEqual(["message:d1", "message:r1"]);
+    expect(exchangeLabel(exchange)).toBe("2 updates with Linus");
+    expect(exchangeSuffix(exchange.outcome)).toBe("");
+  });
+
+  it("an interleaved user message breaks the group", () => {
+    const user = message({
+      id: "u1",
+      sender_type: "user",
+      sender_id: "person",
+      agent_id: null,
+      sender_name: "Ada",
+      message_type: "text",
+      content_json: { text: "How is it going?" },
+      created_at: "2026-08-21T10:02:00Z",
+    });
+    const grouped = groupExchanges(mergeTimeline([delegation, user, reported], []), opts);
+    expect(grouped.map((item) => item.kind)).toEqual(["exchange", "message", "exchange"]);
+  });
+
+  it("absorbs related progress chips but keeps needs_review chips visible", () => {
+    const started = card({
+      id: "task:t2:started",
+      kind: "started",
+      actor_agent_id: "a2",
+      actor_agent_name: "Linus",
+      task_id: "t2",
+      created_at: "2026-08-21T10:01:00Z",
+    });
+    const review = card({ id: "approval:x", kind: "needs_review", created_at: "2026-08-21T10:06:00Z" });
+    const grouped = groupExchanges(mergeTimeline([delegation, reported], [started, review]), opts);
+    expect(grouped).toHaveLength(2);
+    expect(grouped[0].kind).toBe("exchange");
+    if (grouped[0].kind === "exchange") expect(grouped[0].count).toBe(3);
+    expect(grouped[1].kind).toBe("activity");
+  });
+
+  it("flags a failed outcome from the last item", () => {
+    const failed = card({
+      id: "task:t2:failed",
+      kind: "failed",
+      actor_agent_id: "a2",
+      task_id: "t2",
+      created_at: "2026-08-21T10:06:00Z",
+    });
+    const grouped = groupExchanges(mergeTimeline([delegation, reported], [failed]), opts);
+    expect(grouped).toHaveLength(1);
+    if (grouped[0].kind === "exchange") {
+      expect(grouped[0].outcome).toBe("problem");
+      expect(exchangeSuffix(grouped[0].outcome)).toBe(" · ran into a problem");
+    }
+  });
+
+  it("keeps plain agent bubbles ungrouped and labels single updates friendly", () => {
+    const bubble = message({ id: "m9", message_type: "text", content_json: { text: "hello" } });
+    const grouped = groupExchanges(mergeTimeline([bubble], []), opts);
+    expect(grouped[0].kind).toBe("message");
+    const single = groupExchanges(mergeTimeline([reported], []), opts);
+    expect(single[0].kind).toBe("exchange");
+    if (single[0].kind === "exchange") {
+      expect(single[0].count).toBe(1);
+      expect(exchangeLabel(single[0])).toBe("Linus reported back");
+    }
+  });
+});
+
+describe("withDaySeparators", () => {
+  // Everything is built from *local* date components so the assertions hold
+  // in any timezone (labels derive from the viewer's local date).
+  const now = new Date(2026, 7, 21, 12, 0);
+  const localIso = (day: number, hour: number, minute = 0) =>
+    new Date(2026, 7, day, hour, minute).toISOString();
+  const item = (id: string, at: string) => ({ id, at });
+
+  it("inserts one marker per day change with friendly labels", () => {
+    const items = [
+      item("a", localIso(19, 9, 30)),
+      item("b", localIso(19, 11, 0)),
+      item("c", localIso(20, 18, 0)),
+      item("d", localIso(21, 8, 5)),
+    ];
+    const result = withDaySeparators(items, now);
+    const days = result.filter((entry) => "kind" in entry && entry.kind === "day");
+    expect(days).toHaveLength(3);
+    expect(result.map((entry) => entry.id)).toEqual([
+      "day:2026-08-19",
+      "a",
+      "b",
+      "day:2026-08-20",
+      "c",
+      "day:2026-08-21",
+      "d",
+    ]);
+    const labels = days.map((day) => ("label" in day ? day.label : ""));
+    expect(labels[0]).toMatch(/19/);
+    expect(labels[1]).toBe("Yesterday");
+    expect(labels[2]).toBe("Today");
+    for (const day of days) {
+      if ("time" in day) expect(day.time.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("skips unparseable timestamps and older years keep the year", () => {
+    const result = withDaySeparators([item("junk", "nope")], now);
+    expect(result.map((entry) => entry.id)).toEqual(["junk"]);
+    expect(dayLabel(new Date(2025, 0, 5), now)).toMatch(/2025/);
+    expect(dayLabel(new Date(2026, 7, 21, 23, 59), now)).toBe("Today");
+    expect(dayLabel(new Date(2026, 7, 20, 0, 0), now)).toBe("Yesterday");
+  });
+});
 
 describe("mergeTimeline detailed mode", () => {
   const card = (kind: ActivityCard["kind"], id: string): ActivityCard => ({

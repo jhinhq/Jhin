@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConversationRailItem } from "@/components/chat/chat-rail";
 import { Composer } from "@/components/chat/composer";
 import { Transcript } from "@/components/chat/transcript";
-import { mergeTimeline } from "@/lib/chat";
+import { groupExchanges, mergeTimeline, withDaySeparators } from "@/lib/chat";
 import type { ActivityCard, Conversation, ConversationMessage } from "@/lib/types";
 
 vi.mock("@/lib/hooks", () => ({
@@ -156,6 +156,81 @@ describe("Transcript", () => {
       />,
     );
     expect(screen.getByTestId("working-indicator").textContent).toContain("Scout is working…");
+  });
+});
+
+describe("Transcript quiet exchanges", () => {
+  const delegation = message({
+    id: "d1",
+    message_type: "delegation",
+    content_json: { summary: "Handing this off", target_agent_id: "a2", target_agent_name: "Linus" },
+    created_at: "2026-08-21T10:00:00Z",
+  });
+  const reported = message({
+    id: "r1",
+    message_type: "result",
+    sender_id: "a2",
+    agent_id: "a2",
+    sender_name: "Linus",
+    content_json: { summary: "All done", from_agent_id: "a2", from_agent_name: "Linus" },
+    created_at: "2026-08-21T10:05:00Z",
+  });
+  const grouping = { primaryAgentId: "a1", primaryAgentName: "Scout" };
+  const items = groupExchanges(mergeTimeline([delegation, reported], []), grouping);
+
+  it("collapses agent↔agent runs into a quiet row that expands inline", () => {
+    render(<Transcript items={items} agentName="Scout" userName="Ada" />);
+    const toggle = screen.getByRole("button", { name: /2 updates with Linus/ });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByTestId("work-card")).toBeNull();
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getAllByTestId("work-card")).toHaveLength(2);
+
+    fireEvent.click(toggle);
+    expect(screen.queryByTestId("work-card")).toBeNull();
+  });
+
+  it("expands exchanges by default when the detailed toggle is on", () => {
+    render(<Transcript items={items} agentName="Scout" userName="Ada" expandExchanges />);
+    expect(screen.getAllByTestId("work-card")).toHaveLength(2);
+  });
+
+  it("appends an outcome suffix when the exchange ran into a problem", () => {
+    const escalated = message({
+      id: "e1",
+      message_type: "escalation",
+      sender_id: "a2",
+      agent_id: "a2",
+      sender_name: "Linus",
+      content_json: { summary: "Stuck on credentials", from_agent_id: "a2", from_agent_name: "Linus" },
+      created_at: "2026-08-21T10:06:00Z",
+    });
+    const failedItems = groupExchanges(mergeTimeline([delegation, escalated], []), grouping);
+    render(<Transcript items={failedItems} agentName="Scout" userName="Ada" />);
+    expect(screen.getByRole("button", { name: /ran into a problem/ })).toBeTruthy();
+  });
+
+  it("renders centered date separators when the day changes", () => {
+    // Local-component dates so the labels hold in any timezone.
+    const now = new Date(2026, 7, 21, 12, 0);
+    const older = message({
+      id: "m-old",
+      content_json: { text: "From yesterday" },
+      created_at: new Date(2026, 7, 20, 9, 0).toISOString(),
+    });
+    const today = message({
+      id: "m-new",
+      content_json: { text: "From today" },
+      created_at: new Date(2026, 7, 21, 8, 30).toISOString(),
+    });
+    const dayItems = withDaySeparators(mergeTimeline([older, today], []), now);
+    render(<Transcript items={dayItems} agentName="Scout" userName="Ada" />);
+    const separators = screen.getAllByTestId("day-separator");
+    expect(separators).toHaveLength(2);
+    expect(separators[0].textContent).toContain("Yesterday");
+    expect(separators[1].textContent).toContain("Today");
   });
 });
 

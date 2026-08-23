@@ -7,6 +7,7 @@ import { api, ApiError } from "@/lib/api";
 import type {
   ActivityList,
   Agent,
+  AgentAvatar,
   AgentPolicy,
   Attention,
   AvatarGenerationOut,
@@ -630,12 +631,19 @@ export function useInvalidateAvatar(workspaceId: string, agentId: string) {
   };
 }
 
-/** Agent id → avatar url for screens whose payloads only carry agent names
- * (conversations, messages, activity cards). Backed by the cached agent list. */
-export function useAgentAvatarMap(workspaceId: string): Record<string, string | null> {
+/** Agent id → avatar visuals (image url, shape, color) for screens whose
+ * payloads only carry agent names (conversations, messages, activity cards).
+ * Backed by the cached agent list; spread into `Avatar` via `avatarProps`. */
+export function useAgentAvatarMap(workspaceId: string): Record<string, AgentAvatar> {
   const agents = useAgents(workspaceId);
-  const map: Record<string, string | null> = {};
-  for (const agent of agents.data ?? []) map[agent.id] = agent.avatar_url ?? null;
+  const map: Record<string, AgentAvatar> = {};
+  for (const agent of agents.data ?? []) {
+    map[agent.id] = {
+      url: agent.avatar_url ?? null,
+      shape: agent.avatar_shape ?? null,
+      color: agent.avatar_color ?? null,
+    };
+  }
   return map;
 }
 

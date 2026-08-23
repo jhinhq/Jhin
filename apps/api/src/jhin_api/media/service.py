@@ -59,6 +59,8 @@ def avatar_out(agent: Agent) -> AvatarOut:
         avatar_kind=AvatarKind(agent.avatar_kind),
         active_avatar_asset_id=agent.active_avatar_asset_id,
         avatar_url=avatar_url_for(agent.workspace_id, agent.active_avatar_asset_id),
+        avatar_shape=agent.avatar_shape,
+        avatar_color=agent.avatar_color,
         initials=initials_for(agent.name),
     )
 
@@ -139,6 +141,49 @@ async def upload_avatar(
     return agent
 
 
+async def set_shape_avatar(
+    db: AsyncSession,
+    ctx: WorkspaceContext,
+    store: MediaStore,
+    agent_id: UUID,
+    *,
+    shape: str,
+    color: str,
+    request_id: UUID,
+    ip_hash: str,
+) -> Agent:
+    """Switch the agent to a free brand-cube avatar (no stored image).
+
+    Any active uploaded/generated asset is retired in the same transaction so
+    the pointer never dangles; DELETE still resets everything to initials.
+    """
+    await get_agent(db, ctx.workspace_id, agent_id)
+    agent, previous_asset_id = await clear_avatar(
+        db, store, workspace_id=ctx.workspace_id, agent_id=agent_id
+    )
+    agent.avatar_kind = AvatarKind.SHAPE.value
+    agent.avatar_shape = shape
+    agent.avatar_color = color
+    await db.flush()
+    audit.record(
+        db,
+        action="agent.avatar.shape_set",
+        target_type="agent",
+        target_id=agent.id,
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user.id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        metadata={
+            "shape": shape,
+            "color": color,
+            "removed_asset_id": str(previous_asset_id) if previous_asset_id else None,
+        },
+    )
+    await db.commit()
+    return agent
+
+
 async def remove_avatar(
     db: AsyncSession,
     ctx: WorkspaceContext,
@@ -152,6 +197,10 @@ async def remove_avatar(
     agent, previous_asset_id = await clear_avatar(
         db, store, workspace_id=ctx.workspace_id, agent_id=agent_id
     )
+    # A shape avatar is also "removed": back to initials, nothing stale kept.
+    agent.avatar_shape = None
+    agent.avatar_color = None
+    await db.flush()
     audit.record(
         db,
         action="agent.avatar.removed",

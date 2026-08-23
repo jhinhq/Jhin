@@ -4,7 +4,7 @@
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { Avatar, initialsOf } from "@/components/avatar";
-import { avatarErrorMessage, avatarSrc, validateAvatarFile } from "@/lib/media";
+import { avatarErrorMessage, avatarProps, avatarSrc, identityAvatarProps, validateAvatarFile } from "@/lib/media";
 
 afterEach(cleanup);
 
@@ -39,6 +39,47 @@ describe("Avatar", () => {
     const root = container.firstElementChild as HTMLElement;
     expect(root.getAttribute("role")).toBe("img");
     expect(root.getAttribute("aria-label")).toBe("Ada's avatar");
+  });
+});
+
+describe("Avatar shapes", () => {
+  it("renders the brand-cube shape when set and there is no image", () => {
+    const { container } = render(<Avatar name="Bisby" shape="jay" color="#7371fc" />);
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.getAttribute("data-avatar")).toBe("shape");
+    const svg = container.querySelector("svg");
+    expect(svg).not.toBeNull();
+    expect(svg?.getAttribute("data-shape")).toBe("jay");
+    // 4 cubes × (3 faces + 1 top edge stroke)
+    expect(container.querySelectorAll("polygon")).toHaveLength(16);
+  });
+
+  it("an uploaded or generated picture always wins over the shape", () => {
+    const { container } = render(
+      <Avatar name="Bisby" shape="jay" color="#7371fc" src="/api/v1/workspaces/ws/media/asset" />,
+    );
+    expect((container.firstElementChild as HTMLElement).getAttribute("data-avatar")).toBe("image");
+  });
+
+  it("falls back to initials for unknown shapes or a missing color", () => {
+    const { container: unknownShape } = render(<Avatar name="Bisby" shape="hexagon" color="#7371fc" />);
+    expect((unknownShape.firstElementChild as HTMLElement).getAttribute("data-avatar")).toBe("initials");
+    const { container: noColor } = render(<Avatar name="Bisby" shape="jay" />);
+    expect((noColor.firstElementChild as HTMLElement).getAttribute("data-avatar")).toBe("initials");
+  });
+
+  it("avatarProps and identityAvatarProps spread map entries and payloads", () => {
+    expect(avatarProps({ url: "/m/a", shape: "jay", color: "#7371fc" })).toEqual({
+      src: "/m/a",
+      shape: "jay",
+      color: "#7371fc",
+    });
+    expect(avatarProps(null)).toEqual({ src: null, shape: null, color: null });
+    expect(identityAvatarProps({ avatar_shape: "quad", avatar_color: "#3ecf8e" })).toEqual({
+      src: null,
+      shape: "quad",
+      color: "#3ecf8e",
+    });
   });
 });
 

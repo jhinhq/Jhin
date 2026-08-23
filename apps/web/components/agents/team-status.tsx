@@ -12,7 +12,8 @@ import { Spinner } from "@/components/ui";
 import { timeAgo } from "@/lib/activity";
 import { rollupItemTitle, rollupStatusText } from "@/lib/coordination";
 import { useAgentRollup } from "@/lib/hooks";
-import type { ManagerRollup, RollupItem } from "@/lib/types";
+import { avatarProps } from "@/lib/media";
+import type { AgentAvatar, ManagerRollup, RollupItem } from "@/lib/types";
 
 function ItemRow({
   item,
@@ -22,13 +23,13 @@ function ItemRow({
 }: {
   item: RollupItem;
   now?: number;
-  avatars?: Record<string, string | null>;
+  avatars?: Record<string, AgentAvatar | null>;
   showAdvanced: boolean;
 }) {
   const status = rollupStatusText(item.status);
   return (
     <li className="flex items-start gap-3 rounded-xl border border-line bg-raised px-3 py-2.5">
-      <Avatar name={item.agent_name ?? "Agent"} size="sm" src={item.agent_id ? avatars?.[item.agent_id] : null} />
+      <Avatar name={item.agent_name ?? "Agent"} size="sm" {...avatarProps(item.agent_id ? avatars?.[item.agent_id] : null)} />
       <div className="min-w-0 flex-1">
         <p className="text-sm font-medium text-ink">{rollupItemTitle(item)}</p>
         {item.summary && item.summary !== item.title ? (
@@ -68,7 +69,7 @@ function ItemSection({
   items: RollupItem[];
   empty: string;
   now?: number;
-  avatars?: Record<string, string | null>;
+  avatars?: Record<string, AgentAvatar | null>;
   showAdvanced: boolean;
 }) {
   return (
@@ -94,7 +95,7 @@ function TeamStatusView({
 }: {
   rollup: ManagerRollup;
   now?: number;
-  avatars?: Record<string, string | null>;
+  avatars?: Record<string, AgentAvatar | null>;
   showAdvanced?: boolean;
 }) {
   const { queue } = rollup;
@@ -118,7 +119,7 @@ function TeamStatusView({
                   href={`/agents/${report.agent_id}`}
                   className="flex items-center gap-3 rounded-xl border border-line bg-raised px-3 py-2.5 transition-colors hover:border-line-strong"
                 >
-                  <Avatar name={report.name} size="sm" src={avatars?.[report.agent_id]} />
+                  <Avatar name={report.name} size="sm" {...avatarProps(avatars?.[report.agent_id])} />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm font-medium">{report.name}</span>
                     <span className="block truncate text-xs text-dim">
@@ -157,7 +158,7 @@ export function TeamStatus({
 }: {
   workspaceId: string;
   agentId: string;
-  avatars?: Record<string, string | null>;
+  avatars?: Record<string, AgentAvatar | null>;
   showAdvanced: boolean;
 }) {
   const rollup = useAgentRollup(workspaceId, agentId);

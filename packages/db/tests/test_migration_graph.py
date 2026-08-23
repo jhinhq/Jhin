@@ -81,10 +81,18 @@ def test_review_parking_directly_follows_0018() -> None:
     assert parking.down_revision == "0018"
 
 
-def test_provider_billing_directly_follows_0019_and_is_the_head() -> None:
+def test_provider_billing_directly_follows_0019() -> None:
     scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
     billing = scripts.get_revision("0020")
 
     assert billing is not None
     assert billing.down_revision == "0019"
-    assert scripts.get_heads() == ["0020"]
+
+
+def test_shape_avatars_directly_follows_0020_and_is_the_head() -> None:
+    scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
+    shapes = scripts.get_revision("0021")
+
+    assert shapes is not None
+    assert shapes.down_revision == "0020"
+    assert scripts.get_heads() == ["0021"]

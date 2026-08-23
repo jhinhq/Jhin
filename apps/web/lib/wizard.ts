@@ -5,6 +5,7 @@
 
 import type { ApprovalPreset, AutonomyLevel, ToolInfo } from "@/lib/types";
 import { buildToolScope, type ToolScopeValues } from "@/lib/connectors";
+import { defaultShapeFor } from "@/lib/shapes";
 
 export interface WizardState {
   name: string;
@@ -19,6 +20,10 @@ export interface WizardState {
   managerAgentId: string;
   /** Empty string = use the workspace default profile (plan 15.2). */
   modelProfileId: string;
+  /** Free brand-cube avatar; empty strings = derive from the name hash so
+   * new agents start as colorful cubes rather than initials. */
+  avatarShape: string;
+  avatarColor: string;
   /** Capabilities to allow-grant right after creation (plan 12.3). */
   grantToolNames: string[];
   grantScopes: Record<string, ToolScopeValues>;
@@ -36,11 +41,25 @@ export const EMPTY_WIZARD: WizardState = {
   teamId: "",
   managerAgentId: "",
   modelProfileId: "",
+  avatarShape: "",
+  avatarColor: "",
   grantToolNames: [],
   grantScopes: {},
   approvalPreset: "balanced",
   autonomyLevel: "supervised",
 };
+
+/** The shape avatar the new agent will get: an explicit pick, else a
+ * deterministic default derived from the agent's name. */
+export function effectiveAvatar(
+  state: Pick<WizardState, "name" | "avatarShape" | "avatarColor">,
+): { shape: string; color: string } {
+  const derived = defaultShapeFor(state.name);
+  return {
+    shape: state.avatarShape || derived.shape,
+    color: state.avatarColor || derived.color,
+  };
+}
 
 export interface WizardStep {
   id: number;
@@ -211,8 +230,10 @@ export function canSubmit(state: WizardState): boolean {
   return firstInvalidStep(state) === null;
 }
 
-/** Request body for POST /agents from the wizard state. */
+/** Request body for POST /agents from the wizard state. Always includes the
+ * free shape avatar (picked or name-derived) so new agents are cubes. */
 export function toCreatePayload(state: WizardState): Record<string, unknown> {
+  const avatar = effectiveAvatar(state);
   return {
     name: state.name.trim(),
     role_title: state.roleTitle.trim(),
@@ -224,6 +245,8 @@ export function toCreatePayload(state: WizardState): Record<string, unknown> {
     manager_agent_id: state.managerAgentId || null,
     model_profile_id: state.modelProfileId || null,
     autonomy_level: state.autonomyLevel,
+    avatar_shape: avatar.shape,
+    avatar_color: avatar.color,
   };
 }
 

@@ -9,6 +9,7 @@ import {
   AGENT_TEMPLATES,
   applyTemplate,
   applyToolPreset,
+  effectiveAvatar,
   presetConnectionFor,
   presetMissingTools,
   TOOL_PRESETS,
@@ -24,6 +25,7 @@ import {
   validateStep,
   WIZARD_STEPS,
 } from "@/lib/wizard";
+import { AVATAR_PALETTE, AVATAR_SHAPES } from "@/lib/shapes";
 import { delegationScope } from "@/components/org/tools-access-tab";
 
 const navigation = vi.hoisted(() => ({ push: vi.fn() }));
@@ -138,6 +140,33 @@ describe("wizard payload", () => {
     expect(
       toCreatePayload({ ...EMPTY_WIZARD, name: "SWE", autonomyLevel: "manual" }).autonomy_level,
     ).toBe("manual");
+  });
+});
+
+describe("wizard shape avatar", () => {
+  it("derives a deterministic default from the name and honors explicit picks", () => {
+    const derived = effectiveAvatar({ name: "Bisby", avatarShape: "", avatarColor: "" });
+    expect(derived).toEqual(effectiveAvatar({ name: "Bisby", avatarShape: "", avatarColor: "" }));
+    expect(AVATAR_SHAPES.some((shape) => shape.id === derived.shape)).toBe(true);
+    expect(AVATAR_PALETTE.some((color) => color.hex === derived.color)).toBe(true);
+    expect(effectiveAvatar({ name: "Bisby", avatarShape: "quad", avatarColor: "#3ecf8e" })).toEqual({
+      shape: "quad",
+      color: "#3ecf8e",
+    });
+  });
+
+  it("always includes a shape avatar in the create payload", () => {
+    const explicit = toCreatePayload({
+      ...EMPTY_WIZARD,
+      name: "Bisby",
+      avatarShape: "tee",
+      avatarColor: "#b44351",
+    });
+    expect(explicit.avatar_shape).toBe("tee");
+    expect(explicit.avatar_color).toBe("#b44351");
+    const derived = toCreatePayload({ ...EMPTY_WIZARD, name: "Bisby" });
+    expect(AVATAR_SHAPES.some((shape) => shape.id === derived.avatar_shape)).toBe(true);
+    expect(AVATAR_PALETTE.some((color) => color.hex === derived.avatar_color)).toBe(true);
   });
 });
 

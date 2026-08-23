@@ -18,7 +18,12 @@ from jhin_api.deps import AdminCtx, DbSession, TemporalDep, ViewerCtx
 from jhin_api.deps import client_ip_hash as ip_hash
 from jhin_api.deps import get_request_id as req_id
 from jhin_api.media import service
-from jhin_api.media.schemas import AvatarGenerateRequest, AvatarGenerationOut, AvatarOut
+from jhin_api.media.schemas import (
+    AvatarGenerateRequest,
+    AvatarGenerationOut,
+    AvatarOut,
+    AvatarShapeRequest,
+)
 from jhin_api.media.urls import DEFAULT_AVATAR_SIZE
 from jhin_api.security.csrf import csrf_protect
 from jhin_media import MAX_UPLOAD_BYTES, MediaStore, PostgresMediaStore
@@ -76,6 +81,29 @@ async def upload_avatar(
         agent_id,
         data=data,
         declared_content_type=file.content_type,
+        request_id=req_id(request),
+        ip_hash=ip_hash(request),
+    )
+    return service.avatar_out(agent)
+
+
+@router.put("/agents/{agent_id}/avatar/shape")
+async def set_shape_avatar(
+    agent_id: UUID,
+    payload: AvatarShapeRequest,
+    request: Request,
+    ctx: AdminCtx,
+    db: DbSession,
+    store: MediaStoreDep,
+) -> AvatarOut:
+    """Set a free brand-cube avatar (fixed shape + palette color)."""
+    agent = await service.set_shape_avatar(
+        db,
+        ctx,
+        store,
+        agent_id,
+        shape=payload.shape,
+        color=payload.color,
         request_id=req_id(request),
         ip_hash=ip_hash(request),
     )

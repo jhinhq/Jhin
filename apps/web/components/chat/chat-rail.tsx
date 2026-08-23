@@ -11,20 +11,21 @@ import { ErrorNote, Spinner } from "@/components/ui";
 import { ApiError } from "@/lib/api";
 import { filterConversations, relativeTime, sortByActivity } from "@/lib/chat";
 import { useAgentAvatarMap, useConversations } from "@/lib/hooks";
-import type { Conversation } from "@/lib/types";
+import { avatarProps } from "@/lib/media";
+import type { AgentAvatar, Conversation } from "@/lib/types";
 import { useWorkspace } from "@/lib/workspace-context";
 
 export function ConversationRailItem({
   conversation,
   selected,
   now,
-  avatarUrl,
+  avatar,
 }: {
   conversation: Conversation;
   selected: boolean;
   now?: Date;
-  /** The primary agent's `avatar_url`, when known. */
-  avatarUrl?: string | null;
+  /** The primary agent's avatar visuals, when known. */
+  avatar?: AgentAvatar | null;
 }) {
   const agentName = conversation.agent_name ?? "Agent";
   const preview = conversation.last_message_preview?.trim();
@@ -38,7 +39,7 @@ export function ConversationRailItem({
           selected ? "bg-accent-soft" : "hover:bg-hover"
         }`}
       >
-        <Avatar name={agentName} size="sm" className="mt-0.5" src={avatarUrl} />
+        <Avatar name={agentName} size="sm" className="mt-0.5" {...avatarProps(avatar)} />
         <span className="min-w-0 flex-1">
           <span className="flex items-baseline justify-between gap-2">
             <span className="truncate text-sm font-medium text-ink">{conversation.title}</span>
@@ -144,7 +145,7 @@ export function ChatRail({ selectedId }: { selectedId: string | null }) {
                   key={conversation.id}
                   conversation={conversation}
                   selected={conversation.id === selectedId}
-                  avatarUrl={conversation.primary_agent_id ? avatars[conversation.primary_agent_id] : null}
+                  avatar={conversation.primary_agent_id ? avatars[conversation.primary_agent_id] : null}
                 />
               ))}
             </ul>
@@ -164,7 +165,7 @@ export function ChatRail({ selectedId }: { selectedId: string | null }) {
                   key={conversation.id}
                   conversation={conversation}
                   selected={conversation.id === selectedId}
-                  avatarUrl={conversation.primary_agent_id ? avatars[conversation.primary_agent_id] : null}
+                  avatar={conversation.primary_agent_id ? avatars[conversation.primary_agent_id] : null}
                 />
               ))}
             </ul>

@@ -12,7 +12,7 @@ import { Button, EmptyState, Field, Select, Spinner } from "@/components/ui";
 import { api } from "@/lib/api";
 import { ACTIVITY_GROUP_LABELS, kindsParam, type ActivityGroup } from "@/lib/activity";
 import { useActivity, useAgents } from "@/lib/hooks";
-import type { ActivityCard as ActivityCardData, ActivityList } from "@/lib/types";
+import type { ActivityCard as ActivityCardData, ActivityList, AgentAvatar } from "@/lib/types";
 
 const PAGE_SIZE = 30;
 
@@ -51,7 +51,17 @@ export function ActivityFeed({
   };
   const agents = useAgents(workspaceId);
   const avatarMap = useMemo(
-    () => Object.fromEntries((agents.data ?? []).map((agent) => [agent.id, agent.avatar_url ?? null])),
+    (): Record<string, AgentAvatar> =>
+      Object.fromEntries(
+        (agents.data ?? []).map((agent) => [
+          agent.id,
+          {
+            url: agent.avatar_url ?? null,
+            shape: agent.avatar_shape ?? null,
+            color: agent.avatar_color ?? null,
+          },
+        ]),
+      ),
     [agents.data],
   );
   const first = useActivity(workspaceId, baseParams);
@@ -118,7 +128,7 @@ function PagedList({
   firstPage: ActivityList;
   params: Record<string, string | number | undefined>;
   compact: boolean;
-  avatars: Record<string, string | null>;
+  avatars: Record<string, AgentAvatar>;
 }) {
   const [extra, setExtra] = useState<ActivityCardData[]>([]);
   const [nextBefore, setNextBefore] = useState<string | null | undefined>(undefined);

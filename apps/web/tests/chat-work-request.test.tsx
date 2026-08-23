@@ -113,7 +113,7 @@ describe("Transcript work-request cards", () => {
         items={mergeTimeline([asked, accepted, reported, reviewed], [])}
         agentName="CTO"
         userName="Ada"
-        agentAvatars={{ a1: "/m/cto", a2: null }}
+        agentAvatars={{ a1: { url: "/m/cto", shape: null, color: null }, a2: null }}
       />,
     );
     const cards = screen.getAllByTestId("work-request-card");

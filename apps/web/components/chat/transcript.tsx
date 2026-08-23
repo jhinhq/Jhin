@@ -1,8 +1,9 @@
 "use client";
 
-/** The chat transcript: bubbles, work cards, system chips, inline approvals,
- * and the working indicator. Scroll sticks to the bottom only when the reader
- * is already there. */
+/** The chat transcript: bubbles, work cards, system chips, quiet
+ * agent-to-agent exchange rows, date separators, inline approvals, and the
+ * working indicator. Scroll sticks to the bottom only when the reader is
+ * already there. */
 
 import { ArrowDown, ChevronDown, ChevronRight } from "lucide-react";
 import Link from "next/link";
@@ -11,18 +12,24 @@ import { ApprovalCard } from "@/components/approval-card";
 import { Avatar } from "@/components/avatar";
 import { MessageTypeBadge, StructuredMessageBody } from "@/components/task-bits";
 import {
+  exchangeLabel,
+  exchangeSuffix,
   friendlyMessageLabel,
   isWorkCard,
   messageText,
   relativeTime,
   workRequestDetailLines,
+  type DaySeparatorItem,
+  type ExchangeItem,
   type LiveStatus,
   type TimelineItem,
+  type TranscriptItem,
 } from "@/lib/chat";
 import { isWorkRequestMessage } from "@/lib/coordination";
 import { formatDateTime } from "@/lib/format";
+import { avatarProps } from "@/lib/media";
 import { isInsufficientFunds } from "@/lib/models";
-import type { ActivityCard, Approval, ConversationMessage } from "@/lib/types";
+import type { ActivityCard, AgentAvatar, Approval, ConversationMessage } from "@/lib/types";
 
 function Timestamp({ iso, className = "" }: { iso: string; className?: string }) {
   return (
@@ -56,16 +63,16 @@ function UserBubble({ message, name }: { message: ConversationMessage; name: str
 function AgentBubble({
   message,
   name,
-  avatarUrl,
+  avatar,
 }: {
   message: ConversationMessage;
   name: string;
-  avatarUrl?: string | null;
+  avatar?: AgentAvatar | null;
 }) {
   const text = messageText(message);
   return (
     <div data-testid="agent-message" className="flex items-end gap-2.5">
-      <Avatar name={name} size="sm" className="mb-5" src={avatarUrl} />
+      <Avatar name={name} size="sm" className="mb-5" {...avatarProps(avatar)} />
       <div className="max-w-[min(85%,40rem)]">
         <div className="rounded-2xl rounded-bl-md border border-line bg-surface px-4 py-2.5 text-[15px] leading-relaxed text-ink shadow-[var(--card-shadow)]">
           <p className="whitespace-pre-wrap break-words">{text}</p>
@@ -82,11 +89,11 @@ function AgentBubble({
 function WorkCard({
   message,
   name,
-  avatarUrl,
+  avatar,
 }: {
   message: ConversationMessage;
   name: string;
-  avatarUrl?: string | null;
+  avatar?: AgentAvatar | null;
 }) {
   const [open, setOpen] = useState(false);
   const label = friendlyMessageLabel(message);
@@ -97,7 +104,7 @@ function WorkCard({
   const extraLines = workRequest ? workRequestDetailLines(message) : [];
   return (
     <div data-testid={workRequest ? "work-request-card" : "work-card"} className="flex items-start gap-2.5">
-      <Avatar name={name} size="sm" src={avatarUrl} />
+      <Avatar name={name} size="sm" {...avatarProps(avatar)} />
       <div className="min-w-0 max-w-[min(85%,40rem)] flex-1 rounded-2xl border border-line bg-raised px-4 py-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <p className="text-sm font-medium text-ink">{label}</p>
@@ -189,19 +196,77 @@ function SystemChip({ message }: { message: ConversationMessage }) {
   );
 }
 
+/** Centered faint "Today · 10:04 AM" marker when the day changes. */
+function DaySeparator({ item }: { item: DaySeparatorItem }) {
+  return (
+    <div data-testid="day-separator" className="flex items-center justify-center py-1">
+      <span className="inline-flex items-center gap-1.5 text-[11px] text-faint">
+        <span className="font-medium">{item.label}</span>
+        <span aria-hidden>·</span>
+        <time dateTime={item.at}>{item.time}</time>
+      </span>
+    </div>
+  );
+}
+
+/** A collapsed run of agent↔agent traffic: one subtle centered row that
+ * expands inline to the full cards. State lives per exchange and is not
+ * persisted; `defaultOpen` follows the transcript's "detailed" toggle. */
+function ExchangeRow({
+  exchange,
+  agentAvatars,
+  defaultOpen = false,
+  renderItem,
+}: {
+  exchange: ExchangeItem;
+  agentAvatars?: Record<string, AgentAvatar | null>;
+  defaultOpen?: boolean;
+  renderItem: (item: TimelineItem) => React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  const regionId = `exchange-${exchange.at}-${exchange.count}`;
+  const avatar = exchange.withAgentId ? agentAvatars?.[exchange.withAgentId] : null;
+  return (
+    <div data-testid="exchange" className="flex flex-col gap-4">
+      <div className="flex justify-center">
+        <button
+          type="button"
+          aria-expanded={open}
+          aria-controls={regionId}
+          onClick={() => setOpen((value) => !value)}
+          className="inline-flex min-h-[32px] max-w-[85%] items-center gap-2 rounded-full px-3 py-1 text-xs text-faint transition-colors hover:bg-hover hover:text-dim"
+        >
+          <Avatar name={exchange.withName} size="xs" {...avatarProps(avatar)} />
+          <span className="truncate">
+            {exchangeLabel(exchange)}
+            {exchangeSuffix(exchange.outcome)}
+          </span>
+          <Timestamp iso={exchange.at} className="opacity-80" />
+          {open ? <ChevronDown size={12} aria-hidden /> : <ChevronRight size={12} aria-hidden />}
+        </button>
+      </div>
+      {open ? (
+        <div id={regionId} className="flex flex-col gap-4">
+          {exchange.items.map(renderItem)}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function WorkingIndicator({
   status,
   name,
-  avatarUrl,
+  avatar,
 }: {
   status: LiveStatus;
   name: string;
-  avatarUrl?: string | null;
+  avatar?: AgentAvatar | null;
 }) {
   if (status.kind === "working") {
     return (
       <div data-testid="working-indicator" className="flex items-center gap-2.5 text-sm text-dim">
-        <Avatar name={name} size="sm" src={avatarUrl} />
+        <Avatar name={name} size="sm" {...avatarProps(avatar)} />
         <span className="inline-flex items-center gap-2 rounded-2xl rounded-bl-md border border-line bg-surface px-4 py-2.5">
           <span aria-hidden className="flex items-center gap-1">
             {[0, 1, 2].map((index) => (
@@ -242,9 +307,10 @@ export function Transcript({
   liveStatus = null,
   loading = false,
   agentAvatars,
-  agentAvatarUrl,
+  agentAvatar,
+  expandExchanges = false,
 }: {
-  items: TimelineItem[];
+  items: TranscriptItem[];
   agentName: string;
   userName: string;
   pendingApprovals?: Approval[];
@@ -254,10 +320,12 @@ export function Transcript({
   onReject?: (id: string) => void;
   liveStatus?: LiveStatus | null;
   loading?: boolean;
-  /** Agent id → avatar url for messages from other agents. */
-  agentAvatars?: Record<string, string | null>;
+  /** Agent id → avatar visuals for messages from other agents. */
+  agentAvatars?: Record<string, AgentAvatar | null>;
   /** The primary agent's avatar (working indicator, unnamed senders). */
-  agentAvatarUrl?: string | null;
+  agentAvatar?: AgentAvatar | null;
+  /** True (the "detailed" toggle) expands collapsed exchanges by default. */
+  expandExchanges?: boolean;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const atBottomRef = useRef(true);
@@ -299,6 +367,23 @@ export function Transcript({
     else setHasNew(true);
   }, [contentKey, scrollToBottom]);
 
+  const renderTimelineItem = (item: TimelineItem) => {
+    if (item.kind === "activity") return <ActivityChip key={item.id} card={item.card} />;
+    const message = item.message;
+    if (message.sender_type === "user") {
+      return <UserBubble key={item.id} message={message} name={userName} />;
+    }
+    if (message.sender_type === "system") {
+      return <SystemChip key={item.id} message={message} />;
+    }
+    const name = message.sender_name ?? agentName;
+    const avatar = message.agent_id ? (agentAvatars?.[message.agent_id] ?? null) : agentAvatar;
+    if (isWorkCard(message)) {
+      return <WorkCard key={item.id} message={message} name={name} avatar={avatar} />;
+    }
+    return <AgentBubble key={item.id} message={message} name={name} avatar={avatar} />;
+  };
+
   return (
     <div className="relative min-h-0 flex-1">
       <div
@@ -312,20 +397,19 @@ export function Transcript({
       >
         <div className="mx-auto flex max-w-3xl flex-col gap-4">
           {items.map((item) => {
-            if (item.kind === "activity") return <ActivityChip key={item.id} card={item.card} />;
-            const message = item.message;
-            if (message.sender_type === "user") {
-              return <UserBubble key={item.id} message={message} name={userName} />;
+            if (item.kind === "day") return <DaySeparator key={item.id} item={item} />;
+            if (item.kind === "exchange") {
+              return (
+                <ExchangeRow
+                  key={`${item.id}:${expandExchanges ? "open" : "closed"}`}
+                  exchange={item}
+                  agentAvatars={agentAvatars}
+                  defaultOpen={expandExchanges}
+                  renderItem={renderTimelineItem}
+                />
+              );
             }
-            if (message.sender_type === "system") {
-              return <SystemChip key={item.id} message={message} />;
-            }
-            const name = message.sender_name ?? agentName;
-            const avatarUrl = message.agent_id ? (agentAvatars?.[message.agent_id] ?? null) : agentAvatarUrl;
-            if (isWorkCard(message)) {
-              return <WorkCard key={item.id} message={message} name={name} avatarUrl={avatarUrl} />;
-            }
-            return <AgentBubble key={item.id} message={message} name={name} avatarUrl={avatarUrl} />;
+            return renderTimelineItem(item);
           })}
 
           {pendingApprovals.length > 0 ? (
@@ -343,7 +427,7 @@ export function Transcript({
             </ul>
           ) : null}
 
-          {liveStatus ? <WorkingIndicator status={liveStatus} name={agentName} avatarUrl={agentAvatarUrl} /> : null}
+          {liveStatus ? <WorkingIndicator status={liveStatus} name={agentName} avatar={agentAvatar} /> : null}
 
           {!loading && items.length === 0 && !liveStatus ? (
             <p className="py-10 text-center text-sm text-dim">

@@ -9,7 +9,8 @@ import { Chip, Disclosure } from "@/components/company/bits";
 import { Badge } from "@/components/ui";
 import { actorNameOf, detailText, friendlyDetailLines, timeAgo, toneForKind } from "@/lib/activity";
 import { formatDateTime } from "@/lib/format";
-import type { ActivityCard as ActivityCardData } from "@/lib/types";
+import { avatarProps } from "@/lib/media";
+import type { ActivityCard as ActivityCardData, AgentAvatar } from "@/lib/types";
 
 export function ActivityCard({
   card,
@@ -21,8 +22,8 @@ export function ActivityCard({
   /** Injectable clock for deterministic tests. */
   now?: number;
   showAdvanced?: boolean;
-  /** Agent id → avatar url, when the caller has the agent list. */
-  avatars?: Record<string, string | null>;
+  /** Agent id → avatar visuals, when the caller has the agent list. */
+  avatars?: Record<string, AgentAvatar | null>;
 }) {
   const actor = actorNameOf(card);
   const details = detailText(card.detail_json);
@@ -33,7 +34,7 @@ export function ActivityCard({
         name={actor}
         size="sm"
         kind={card.actor_type === "user" ? "user" : "agent"}
-        src={card.actor_agent_id ? avatars?.[card.actor_agent_id] : null}
+        {...avatarProps(card.actor_agent_id ? avatars?.[card.actor_agent_id] : null)}
       />
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">

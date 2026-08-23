@@ -7,7 +7,8 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { Avatar } from "@/components/avatar";
 import { LiveStatusPill } from "@/components/chat/status-pill";
-import type { Conversation, ConversationAgentSummary } from "@/lib/types";
+import { avatarProps } from "@/lib/media";
+import type { AgentAvatar, Conversation, ConversationAgentSummary } from "@/lib/types";
 
 function IconButton({
   label,
@@ -32,7 +33,7 @@ function IconButton({
 export function ChatHeader({
   conversation,
   agent,
-  avatarUrl,
+  avatar,
   canEdit,
   detailsOpen,
   onToggleDetails,
@@ -45,7 +46,7 @@ export function ChatHeader({
 }: {
   conversation: Conversation;
   agent: ConversationAgentSummary | null;
-  avatarUrl?: string | null;
+  avatar?: AgentAvatar | null;
   canEdit: boolean;
   detailsOpen: boolean;
   onToggleDetails: () => void;
@@ -93,7 +94,7 @@ export function ChatHeader({
       >
         <ArrowLeft size={18} />
       </Link>
-      <Avatar name={agentName} size="md" src={avatarUrl} />
+      <Avatar name={agentName} size="md" {...avatarProps(avatar)} />
       <div className="min-w-0 flex-1">
         {editing ? (
           <input

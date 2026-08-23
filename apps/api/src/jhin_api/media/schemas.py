@@ -6,9 +6,9 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-from jhin_domain import AvatarGenerationStatus, AvatarKind
+from jhin_domain import AVATAR_COLORS, AVATAR_SHAPES, AvatarGenerationStatus, AvatarKind
 from jhin_media import MAX_PROMPT_HINT_LENGTH
 
 AvatarVariantSize = Literal[64, 128, 256]
@@ -21,8 +21,33 @@ class AvatarOut(BaseModel):
     active_avatar_asset_id: UUID | None
     # Relative authenticated path; append ``?size=64|128|256``.
     avatar_url: str | None
+    # Free brand-cube avatar (kind == "shape"); both null otherwise.
+    avatar_shape: str | None
+    avatar_color: str | None
     # Accessible fallback when no asset is active (or while it loads).
     initials: str
+
+
+class AvatarShapeRequest(BaseModel):
+    """Free brand-cube avatar: a fixed shape plus a fixed palette color."""
+
+    shape: str
+    color: str
+
+    @field_validator("shape")
+    @classmethod
+    def shape_is_known(cls, value: str) -> str:
+        if value not in AVATAR_SHAPES:
+            raise ValueError(f"shape must be one of: {', '.join(AVATAR_SHAPES)}")
+        return value
+
+    @field_validator("color")
+    @classmethod
+    def color_is_in_palette(cls, value: str) -> str:
+        normalized = value.lower()
+        if normalized not in AVATAR_COLORS:
+            raise ValueError("color must be one of the fixed palette hex values")
+        return normalized
 
 
 class AvatarGenerateRequest(BaseModel):

@@ -331,6 +331,39 @@ class AvatarKind(StrEnum):
     INITIALS = "initials"
     UPLOAD = "upload"
     GENERATED = "generated"
+    # A free brand-cube avatar (shape + palette color) rendered client-side.
+    SHAPE = "shape"
+
+
+# Fixed lists for the free brand-cube avatars (``AvatarKind.SHAPE``). The web
+# client renders these locally as SVG (apps/web/lib/shapes.ts mirrors both
+# lists); the API rejects anything outside them.
+AVATAR_SHAPES: tuple[str, ...] = (
+    "cube",
+    "column",
+    "jay",
+    "ell",
+    "ess",
+    "tee",
+    "quad",
+    "step",
+)
+
+# Pastel Skies palette (lowercase hex; the API normalizes input to lowercase).
+AVATAR_COLORS: tuple[str, ...] = (
+    "#7371fc",  # slate blue
+    "#a594f9",  # periwinkle
+    "#cdc1ff",  # lavender
+    "#5a58e8",  # indigo
+    "#2e7558",  # sage
+    "#316f98",  # sky
+    "#c96f43",  # peach
+    "#985b08",  # amber
+    "#b44351",  # coral
+    "#221e38",  # charcoal
+    "#8f89b3",  # silver
+    "#3ecf8e",  # mint
+)
 
 
 class MediaAssetStatus(StrEnum):

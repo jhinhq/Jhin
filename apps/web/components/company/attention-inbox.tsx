@@ -15,8 +15,9 @@ import { Button, Dialog, Field, Textarea } from "@/components/ui";
 import { timeAgo } from "@/lib/activity";
 import { humanizeToolName, matchedConditionLabels, REVIEW_MODE_LABELS, reviewSubject } from "@/lib/coordination";
 import { formatDateTime } from "@/lib/format";
+import { avatarProps } from "@/lib/media";
 import { kindLabel, scopeLabel } from "@/lib/memory";
-import type { Attention, MemoryRecord, ReviewVerdict, WorkRequest, WorkReview } from "@/lib/types";
+import type { AgentAvatar, Attention, MemoryRecord, ReviewVerdict, WorkRequest, WorkReview } from "@/lib/types";
 
 export type WorkRequestAction = "accept" | "decline" | "clarify";
 
@@ -179,7 +180,7 @@ export function AttentionInbox({
   /** Proposed team/company memories waiting for an admin. */
   proposedMemories?: MemoryRecord[];
   onMemoryDecide?: (memoryId: string, decision: "approve" | "reject") => void;
-  avatars?: Record<string, string | null>;
+  avatars?: Record<string, AgentAvatar | null>;
   now?: number;
 }) {
   const { pending_approvals, failed_tasks, waiting_conversations } = data;
@@ -230,7 +231,7 @@ export function AttentionInbox({
               return (
                 <li key={review.id} data-testid={`review-${review.id}`} className="rounded-xl border border-warn/30 bg-warn-soft/60 px-4 py-3">
                   <div className="flex items-start gap-3">
-                    <Avatar name={review.subject_agent_name ?? "Agent"} size="sm" src={review.subject_agent_id ? avatars?.[review.subject_agent_id] : null} />
+                    <Avatar name={review.subject_agent_name ?? "Agent"} size="sm" {...avatarProps(review.subject_agent_id ? avatars?.[review.subject_agent_id] : null)} />
                     <div className="min-w-0 flex-1">
                       <p className="text-sm font-medium text-ink">{reviewSubject(review)}</p>
                       <p className="mt-0.5 text-xs text-dim">
@@ -289,7 +290,7 @@ export function AttentionInbox({
                     <Avatar
                       name={review.reviewer_agent_name ?? "Reviewer"}
                       size="sm"
-                      src={review.reviewer_agent_id ? avatars?.[review.reviewer_agent_id] : null}
+                      {...avatarProps(review.reviewer_agent_id ? avatars?.[review.reviewer_agent_id] : null)}
                     />
                     <div className="min-w-0 flex-1">
                       <p className="text-sm font-medium text-ink">
@@ -341,7 +342,7 @@ export function AttentionInbox({
             {workRequests.map((request) => (
               <li key={request.id} data-testid={`work-request-${request.id}`} className="rounded-xl border border-line bg-raised px-4 py-3">
                 <div className="flex items-start gap-3">
-                  <Avatar name={request.requester_agent_name ?? "Agent"} size="sm" src={avatars?.[request.requester_agent_id]} />
+                  <Avatar name={request.requester_agent_name ?? "Agent"} size="sm" {...avatarProps(avatars?.[request.requester_agent_id])} />
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-medium text-ink">
                       {request.requester_agent_name ?? "An agent"} asked {request.target_agent_name ?? "a colleague"}: {request.title}
@@ -482,7 +483,7 @@ export function AttentionInbox({
                   <Avatar
                     name={conversation.agent_name ?? "Agent"}
                     size="sm"
-                    src={conversation.primary_agent_id ? avatars?.[conversation.primary_agent_id] : null}
+                    {...avatarProps(conversation.primary_agent_id ? avatars?.[conversation.primary_agent_id] : null)}
                   />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm font-medium">{conversation.title}</span>

@@ -1,7 +1,31 @@
-/** Pure helpers for avatars: URL sizing, upload validation, and the friendly
- * wording for API rejection codes. */
+/** Pure helpers for avatars: URL sizing, upload validation, spreadable
+ * `Avatar` props, and the friendly wording for API rejection codes. */
 
-import type { AvatarVariantSize } from "@/lib/types";
+import type { AgentAvatar, AvatarVariantSize } from "@/lib/types";
+
+interface AvatarVisualProps {
+  src: string | null;
+  shape: string | null;
+  color: string | null;
+}
+
+/** Spreadable `Avatar` props from an avatar-map entry (`useAgentAvatarMap`). */
+export function avatarProps(entry?: AgentAvatar | null): AvatarVisualProps {
+  return { src: entry?.url ?? null, shape: entry?.shape ?? null, color: entry?.color ?? null };
+}
+
+/** Spreadable `Avatar` props straight from an agent-shaped payload. */
+export function identityAvatarProps(agent: {
+  avatar_url?: string | null;
+  avatar_shape?: string | null;
+  avatar_color?: string | null;
+}): AvatarVisualProps {
+  return {
+    src: agent.avatar_url ?? null,
+    shape: agent.avatar_shape ?? null,
+    color: agent.avatar_color ?? null,
+  };
+}
 
 const AVATAR_MAX_BYTES = 8 * 1024 * 1024;
 const AVATAR_ACCEPTED_TYPES = ["image/png", "image/jpeg", "image/webp"] as const;

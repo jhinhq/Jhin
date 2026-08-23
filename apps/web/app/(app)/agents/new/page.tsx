@@ -9,7 +9,9 @@ import { Check, ChevronLeft, ChevronRight, Lock } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
 import { PageBody, PageHeader } from "@/components/app-shell";
+import { Avatar } from "@/components/avatar";
 import { ScopeEditor } from "@/components/scope-editor";
+import { ShapeAvatar } from "@/components/shape-avatar";
 import {
   Badge,
   Button,
@@ -32,11 +34,13 @@ import {
   useWorkspaceDetail,
 } from "@/lib/hooks";
 import { PRESET_DESCRIPTIONS, PRESET_RULES, describeRule, riskTone } from "@/lib/policy";
+import { AVATAR_PALETTE, AVATAR_SHAPES } from "@/lib/shapes";
 import type { Agent, ApprovalPreset, AutonomyLevel } from "@/lib/types";
 import {
   AGENT_TEMPLATES,
   applyTemplate,
   applyToolPreset,
+  effectiveAvatar,
   presetMissingTools,
   TOOL_PRESETS,
   canSubmit,
@@ -176,6 +180,8 @@ function WizardInner() {
   );
   const chosenProfile = profileList.find((p) => p.id === state.modelProfileId);
 
+  const avatarPreview = effectiveAvatar(state);
+
   const goNext = () => {
     const validation = validateStep(step, state);
     if (validation.length > 0) {
@@ -243,6 +249,63 @@ function WizardInner() {
                 onChange={(e) => patch({ expertise: e.target.value })}
                 placeholder="python, github, testing"
               />
+            </Field>
+            <Field
+              label="Avatar"
+              hint="A free brand-cube avatar, picked from the name. You can upload a picture or generate an illustration later."
+            >
+              <div className="flex flex-wrap items-start gap-4 pt-1">
+                <Avatar
+                  name={state.name || "Agent"}
+                  size="lg"
+                  shape={avatarPreview.shape}
+                  color={avatarPreview.color}
+                  label="Avatar preview"
+                />
+                <div className="min-w-0 flex-1 space-y-2">
+                  <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label="Avatar shape">
+                    {AVATAR_SHAPES.map((spec) => {
+                      const active = avatarPreview.shape === spec.id;
+                      return (
+                        <button
+                          key={spec.id}
+                          type="button"
+                          role="radio"
+                          aria-checked={active}
+                          aria-label={spec.label}
+                          title={spec.label}
+                          onClick={() => patch({ avatarShape: spec.id })}
+                          className={`flex h-10 w-10 items-center justify-center rounded-xl border transition-colors ${focusRing} ${
+                            active ? "border-accent bg-accent-soft" : "border-line bg-raised hover:border-line-strong"
+                          }`}
+                        >
+                          <ShapeAvatar shape={spec.id} color={avatarPreview.color} className="h-6 w-6" />
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label="Avatar color">
+                    {AVATAR_PALETTE.map((color) => {
+                      const active = avatarPreview.color === color.hex;
+                      return (
+                        <button
+                          key={color.hex}
+                          type="button"
+                          role="radio"
+                          aria-checked={active}
+                          aria-label={color.label}
+                          title={color.label}
+                          onClick={() => patch({ avatarColor: color.hex })}
+                          className={`h-7 w-7 rounded-full border transition-transform ${focusRing} ${
+                            active ? "scale-110 border-ink" : "border-line"
+                          }`}
+                          style={{ backgroundColor: color.hex }}
+                        />
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
             </Field>
           </div>
         ) : step === 2 ? (
@@ -474,6 +537,18 @@ function WizardInner() {
         ) : (
           <div className="space-y-4">
             <div className="rounded-2xl border border-line bg-surface px-5 py-2 shadow-card">
+              <ReviewRow
+                label="Avatar"
+                value={
+                  <Avatar
+                    name={state.name || "Agent"}
+                    size="sm"
+                    shape={avatarPreview.shape}
+                    color={avatarPreview.color}
+                    label="Chosen avatar"
+                  />
+                }
+              />
               <ReviewRow label="Name" value={state.name || "—"} />
               <ReviewRow label="Role title" value={state.roleTitle || "—"} />
               <ReviewRow label="Purpose" value={state.publicPurpose.trim() || "—"} />

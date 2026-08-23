@@ -24,7 +24,7 @@ from jhin_db.models import (
     ModelProfile,
     Team,
 )
-from jhin_domain import AgentStatus
+from jhin_domain import AgentStatus, AvatarKind
 
 
 async def list_agents(db: AsyncSession, workspace_id: UUID) -> list[Agent]:
@@ -415,6 +415,10 @@ async def create_agent(
     values = dict(values)
     secondary_team_ids: list[UUID] = values.pop("secondary_team_ids", [])
     primary_team_id: UUID | None = values.get("team_id")
+    # A shape avatar chosen at creation flips the kind; the schema already
+    # guarantees shape and color arrive together and from the fixed lists.
+    if values.get("avatar_shape") is not None:
+        values["avatar_kind"] = AvatarKind.SHAPE.value
     await _validate_team(db, ctx.workspace_id, primary_team_id)
     _validate_membership_duplicates(primary_team_id, secondary_team_ids)
     await _validate_membership_teams(db, ctx.workspace_id, primary_team_id, secondary_team_ids)

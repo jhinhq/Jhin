@@ -44,8 +44,9 @@ import {
   useOrgGraph,
   useTools,
 } from "@/lib/hooks";
+import { avatarProps, identityAvatarProps } from "@/lib/media";
 import { formatScope } from "@/lib/policy";
-import type { Agent } from "@/lib/types";
+import type { Agent, AgentAvatar } from "@/lib/types";
 import { useWorkspace } from "@/lib/workspace-context";
 
 type TabId = "about" | "colleagues" | "team" | "memory" | "access" | "activity" | "chats";
@@ -65,13 +66,13 @@ function PersonRow({
   name,
   role,
   note,
-  avatarUrl,
+  avatar,
 }: {
   id: string;
   name: string;
   role: string;
   note?: string;
-  avatarUrl?: string | null;
+  avatar?: AgentAvatar | null;
 }) {
   return (
     <li>
@@ -79,7 +80,7 @@ function PersonRow({
         href={`/agents/${id}`}
         className="flex items-center gap-3 rounded-xl border border-line bg-raised px-3 py-2.5 transition-colors hover:border-line-strong"
       >
-        <Avatar name={name} size="sm" src={avatarUrl} />
+        <Avatar name={name} size="sm" {...avatarProps(avatar)} />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-medium">{name}</span>
           <span className="block truncate text-xs text-dim">{role || "Agent"}</span>
@@ -178,7 +179,7 @@ export default function AgentProfilePage() {
       <div className="space-y-5 px-4 py-5 sm:px-8 sm:py-6">
         <section className="rounded-2xl border border-line bg-surface p-5 sm:p-6">
           <div className="flex flex-col gap-5 sm:flex-row sm:items-start">
-            <Avatar name={agent.name} size="xl" label={`${agent.name} avatar`} src={agent.avatar_url} />
+            <Avatar name={agent.name} size="xl" label={`${agent.name} avatar`} {...identityAvatarProps(agent)} />
             <div className="min-w-0 flex-1">
               <h2 className="font-display text-2xl font-semibold tracking-tight">{agent.name}</h2>
               <p className="text-base text-dim">{agent.role_title || "Agent"}</p>
@@ -302,12 +303,12 @@ export default function AgentProfilePage() {
               ) : (
                 <ul className="space-y-2">
                   {manager ? (
-                    <PersonRow id={manager.id} name={manager.name} role={manager.role_title} note="Manager" avatarUrl={avatars[manager.id]} />
+                    <PersonRow id={manager.id} name={manager.name} role={manager.role_title} note="Manager" avatar={avatars[manager.id]} />
                   ) : (
                     <li className="text-sm text-dim">No manager — works independently.</li>
                   )}
                   {reports.map((report) => (
-                    <PersonRow key={report.id} id={report.id} name={report.name} role={report.role_title} note="Reports here" avatarUrl={avatars[report.id]} />
+                    <PersonRow key={report.id} id={report.id} name={report.name} role={report.role_title} note="Reports here" avatar={avatars[report.id]} />
                   ))}
                 </ul>
               )}
@@ -338,7 +339,7 @@ export default function AgentProfilePage() {
                         name={other?.name ?? "Another agent"}
                         role={relationship.purpose || other?.role_title || ""}
                         note={relationshipLabel(relationship, agent.id)}
-                        avatarUrl={avatars[otherId]}
+                        avatar={avatars[otherId]}
                       />
                     );
                   })}

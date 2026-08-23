@@ -86,9 +86,21 @@ export interface AgentIdentity {
   /** Relative authenticated media path (append `?size=64|128|256`) or null
    * for initials. Optional so org-graph nodes and fixtures still type-check. */
   avatar_url?: string | null;
+  /** Free brand-cube avatar (avatar_kind === "shape"): a fixed shape id and
+   * palette hex. Both null/absent unless a shape avatar is set. */
+  avatar_shape?: string | null;
+  avatar_color?: string | null;
 }
 
-type AvatarKind = "initials" | "upload" | "generated";
+/** Everything needed to draw one agent's avatar (image, shape, or initials).
+ * The value type of `useAgentAvatarMap`. */
+export interface AgentAvatar {
+  url: string | null;
+  shape: string | null;
+  color: string | null;
+}
+
+type AvatarKind = "initials" | "upload" | "generated" | "shape";
 
 export interface Agent extends AgentIdentity {
   id: string;
@@ -817,6 +829,8 @@ export interface AvatarOut {
   avatar_kind: AvatarKind;
   active_avatar_asset_id: string | null;
   avatar_url: string | null;
+  avatar_shape: string | null;
+  avatar_color: string | null;
   initials: string;
 }
 

@@ -7,7 +7,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from jhin_api.media.urls import avatar_url_for
-from jhin_domain import AgentStatus, AutonomyLevel, AvatarKind
+from jhin_domain import AVATAR_COLORS, AVATAR_SHAPES, AgentStatus, AutonomyLevel, AvatarKind
 
 Discoverability = Literal["discoverable", "hidden"]
 Availability = Literal["available", "unavailable"]
@@ -76,6 +76,10 @@ class AgentCreate(BaseModel):
     max_concurrent_runs: int = Field(default=1, ge=1, le=50)
     monthly_budget_cents: int | None = Field(default=None, ge=0)
     metadata_json: dict[str, Any] = Field(default_factory=dict)
+    # Free brand-cube avatar at creation (both or neither). When set, the
+    # agent starts with ``avatar_kind == "shape"`` instead of initials.
+    avatar_shape: str | None = None
+    avatar_color: str | None = None
 
     @field_validator("expertise_json")
     @classmethod
@@ -83,6 +87,29 @@ class AgentCreate(BaseModel):
         if len(value) != len(set(value)):
             raise ValueError("expertise_json tags must be unique")
         return value
+
+    @field_validator("avatar_shape")
+    @classmethod
+    def shape_is_known(cls, value: str | None) -> str | None:
+        if value is not None and value not in AVATAR_SHAPES:
+            raise ValueError(f"avatar_shape must be one of: {', '.join(AVATAR_SHAPES)}")
+        return value
+
+    @field_validator("avatar_color")
+    @classmethod
+    def color_is_in_palette(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        normalized = value.lower()
+        if normalized not in AVATAR_COLORS:
+            raise ValueError("avatar_color must be one of the fixed palette hex values")
+        return normalized
+
+    @model_validator(mode="after")
+    def shape_and_color_together(self) -> Self:
+        if (self.avatar_shape is None) != (self.avatar_color is None):
+            raise ValueError("avatar_shape and avatar_color must be set together")
+        return self
 
 
 class AgentUpdate(BaseModel):
@@ -149,6 +176,9 @@ class AgentOut(BaseModel):
     avatar_kind: AvatarKind = AvatarKind.INITIALS
     active_avatar_asset_id: UUID | None = None
     avatar_url: str | None = None
+    # Free brand-cube avatar (kind == "shape"); both null otherwise.
+    avatar_shape: str | None = None
+    avatar_color: str | None = None
     created_at: datetime
     updated_at: datetime
 

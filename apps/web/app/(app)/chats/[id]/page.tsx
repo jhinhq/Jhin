@@ -12,7 +12,14 @@ import { ContextPanel } from "@/components/chat/context-panel";
 import { Transcript } from "@/components/chat/transcript";
 import { Button, Dialog, ErrorNote, Spinner } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
-import { CHAT_DETAILED_STORAGE_KEY, mergeTimeline, newTurn, statusLabelFor } from "@/lib/chat";
+import {
+  CHAT_DETAILED_STORAGE_KEY,
+  groupExchanges,
+  mergeTimeline,
+  newTurn,
+  statusLabelFor,
+  withDaySeparators,
+} from "@/lib/chat";
 import {
   useConversation,
   useConversationActivity,
@@ -102,7 +109,10 @@ export default function ChatThreadPage() {
   const messages = useConversationMessages(workspaceId, conversationId, live);
   const activity = useConversationActivity(workspaceId, conversationId, live);
 
-  // Hide optimistic bubbles once the server echoes them back.
+  // Hide optimistic bubbles once the server echoes them back. Agent↔agent
+  // exchanges collapse into quiet rows; date markers appear on day changes.
+  const primaryAgentId = conversation?.primary_agent_id ?? null;
+  const primaryAgentName = conversation?.agent_name ?? null;
   const timeline = useMemo(() => {
     const server = messages.data ?? [];
     const known = new Set(
@@ -115,8 +125,9 @@ export default function ChatThreadPage() {
     const pending = optimistic.filter(
       (message) => !known.has(String(message.content_json.client_turn_id)),
     );
-    return mergeTimeline([...server, ...pending], activity.data?.items ?? [], { detailed });
-  }, [messages.data, optimistic, activity.data, detailed]);
+    const merged = mergeTimeline([...server, ...pending], activity.data?.items ?? [], { detailed });
+    return withDaySeparators(groupExchanges(merged, { primaryAgentId, primaryAgentName }));
+  }, [messages.data, optimistic, activity.data, detailed, primaryAgentId, primaryAgentName]);
 
   const update = useMutation({
     mutationFn: (body: ConversationUpdate) =>
@@ -270,7 +281,7 @@ export default function ChatThreadPage() {
         <ChatHeader
           conversation={conversation}
           agent={agent}
-          avatarUrl={agent ? avatars[agent.id] : null}
+          avatar={agent ? avatars[agent.id] : null}
           canEdit={canWrite}
           detailsOpen={detailsOpen}
           onToggleDetails={() => setDetailsOpen((open) => !open)}
@@ -299,7 +310,8 @@ export default function ChatThreadPage() {
           liveStatus={liveStatus}
           loading={messages.isPending}
           agentAvatars={avatars}
-          agentAvatarUrl={agent ? avatars[agent.id] : null}
+          agentAvatar={agent ? avatars[agent.id] : null}
+          expandExchanges={detailed}
         />
 
         <div className="border-t border-line bg-bg px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3 sm:px-8">

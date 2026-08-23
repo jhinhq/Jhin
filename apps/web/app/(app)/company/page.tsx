@@ -13,6 +13,7 @@ import { useMemo, useState, useSyncExternalStore } from "react";
 import { PageHeader } from "@/components/app-shell";
 import { Avatar } from "@/components/avatar";
 import { statusTextOf } from "@/components/company/agent-helpers";
+import { identityAvatarProps } from "@/lib/media";
 import { LoadError, Segmented, StatTile, StatusPill } from "@/components/company/bits";
 import { useWorkingAgentIds } from "@/components/company/use-working";
 import { TeamDialog } from "@/components/org/team-dialog";
@@ -74,7 +75,7 @@ function OutlineAgent({ node, working }: { node: AgentTreeNode; working: Set<str
         href={`/agents/${agent.id}`}
         className="flex items-center gap-3 rounded-xl px-2 py-2 transition-colors hover:bg-hover"
       >
-        <Avatar name={agent.name} size="sm" src={agent.avatar_url} />
+        <Avatar name={agent.name} size="sm" {...identityAvatarProps(agent)} />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-medium">{agent.name}</span>
           <span className="block truncate text-xs text-dim">{agent.role_title || "Agent"}</span>
@@ -185,7 +186,9 @@ export default function CompanyPage() {
             ...graph.data,
             agents: graph.data.agents.map((agent) => ({
               ...agent,
-              avatar_url: avatars[agent.id] ?? agent.avatar_url ?? null,
+              avatar_url: avatars[agent.id]?.url ?? agent.avatar_url ?? null,
+              avatar_shape: avatars[agent.id]?.shape ?? agent.avatar_shape ?? null,
+              avatar_color: avatars[agent.id]?.color ?? agent.avatar_color ?? null,
             })),
           })
         : null,

@@ -13,6 +13,7 @@ import {
   type AgentLike,
 } from "@/components/company/agent-helpers";
 import { Chip, StatusPill } from "@/components/company/bits";
+import { identityAvatarProps } from "@/lib/media";
 
 export function chatHref(agentId: string): string {
   return `/chats?agent=${encodeURIComponent(agentId)}`;
@@ -36,7 +37,7 @@ export function AgentDirectoryCard({
       className="flex flex-col gap-3 rounded-2xl border border-line bg-surface p-5 transition-colors hover:border-line-strong"
     >
       <div className="flex items-start gap-3">
-        <Avatar name={agent.name} size="lg" src={agent.avatar_url} />
+        <Avatar name={agent.name} size="lg" {...identityAvatarProps(agent)} />
         <div className="min-w-0 flex-1">
           <h3 className="truncate font-display text-base font-semibold tracking-tight">
             <Link href={`/agents/${agent.id}`} className="hover:underline">

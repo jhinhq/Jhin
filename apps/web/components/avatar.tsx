@@ -1,13 +1,16 @@
 "use client";
 
 /** Accessible avatar for agents and people. Renders the agent's picture when
- * `src` is given and falls back to initials when there is none or the image
- * fails to load. Always render next to a visible name; the avatar itself is
- * decorative (aria-hidden) unless a label is passed. Color is derived from
- * the name so an agent keeps the same hue everywhere. */
+ * `src` is given, else a free brand-cube shape when `shape` + `color` are
+ * set, and falls back to initials otherwise (or when the image fails to
+ * load). Always render next to a visible name; the avatar itself is
+ * decorative (aria-hidden) unless a label is passed. Initials color is
+ * derived from the name so an agent keeps the same hue everywhere. */
 
 import { useState } from "react";
+import { ShapeAvatar } from "@/components/shape-avatar";
 import { avatarSrc, AVATAR_VARIANT_FOR_SIZE } from "@/lib/media";
+import { hexWithAlpha, shapeById } from "@/lib/shapes";
 
 const HUES = [
   "bg-[#7371fc] text-white",
@@ -50,6 +53,8 @@ export function Avatar({
   label,
   className = "",
   src,
+  shape,
+  color,
 }: {
   name: string;
   size?: AvatarSize;
@@ -60,6 +65,10 @@ export function Avatar({
   /** The agent's `avatar_url` (relative media path) or a full image URL.
    * `?size=` is appended to match the rendered size. */
   src?: string | null;
+  /** Free brand-cube avatar: fixed shape id + palette hex. Shown when there
+   * is no image (an uploaded/generated picture always wins). */
+  shape?: string | null;
+  color?: string | null;
 }) {
   const resolved = src && src.includes("size=") ? src : avatarSrc(src, AVATAR_VARIANT_FOR_SIZE[size]);
   // Remember which source failed so a new source gets a fresh try.
@@ -67,15 +76,18 @@ export function Avatar({
   const failed = failedSrc !== null && failedSrc === resolved;
 
   const tone = kind === "user" ? "bg-raised text-dim border border-line" : HUES[hueIndex(name)];
-  const shape = kind === "user" ? "rounded-full" : "rounded-xl";
+  const rounding = kind === "user" ? "rounded-full" : "rounded-xl";
   const showImage = Boolean(resolved) && !failed;
+  const shapeSpec = !showImage && color ? shapeById(shape) : null;
+  const showShape = shapeSpec !== null && typeof color === "string" && color.length > 0;
   return (
     <span
       aria-hidden={label ? undefined : true}
       aria-label={label}
       role={label ? "img" : undefined}
-      data-avatar={showImage ? "image" : "initials"}
-      className={`inline-flex shrink-0 select-none items-center justify-center overflow-hidden font-display font-semibold ${shape} ${SIZES[size]} ${showImage ? "bg-raised" : tone} ${className}`}
+      data-avatar={showImage ? "image" : showShape ? "shape" : "initials"}
+      className={`inline-flex shrink-0 select-none items-center justify-center overflow-hidden font-display font-semibold ${rounding} ${SIZES[size]} ${showImage || showShape ? "bg-raised" : tone} ${className}`}
+      style={showShape && color ? { backgroundColor: hexWithAlpha(color, 0.12) } : undefined}
     >
       {showImage ? (
         // eslint-disable-next-line @next/next/no-img-element -- authenticated same-origin media; next/image can't proxy cookies
@@ -86,6 +98,8 @@ export function Avatar({
           className="h-full w-full object-cover"
           onError={() => setFailedSrc(resolved)}
         />
+      ) : showShape && shapeSpec && color ? (
+        <ShapeAvatar shape={shapeSpec.id} color={color} className="h-[68%] w-[68%]" />
       ) : (
         initialsOf(name)
       )}

@@ -10,6 +10,8 @@ import { Avatar } from "@/components/avatar";
 import { Chip, LoadError, SectionCard } from "@/components/company/bits";
 import { Input, Spinner } from "@/components/ui";
 import { useDirectory } from "@/lib/hooks";
+import { avatarProps } from "@/lib/media";
+import type { AgentAvatar } from "@/lib/types";
 
 export function HelpDirectory({
   workspaceId,
@@ -20,7 +22,7 @@ export function HelpDirectory({
   workspaceId: string;
   agentId: string;
   agentName: string;
-  avatars?: Record<string, string | null>;
+  avatars?: Record<string, AgentAvatar | null>;
 }) {
   const [query, setQuery] = useState("");
   const deferred = useDeferredValue(query.trim());
@@ -51,7 +53,7 @@ export function HelpDirectory({
                 href={`/agents/${entry.id}`}
                 className="flex items-center gap-3 rounded-xl border border-line bg-raised px-3 py-2.5 transition-colors hover:border-line-strong"
               >
-                <Avatar name={entry.name} size="sm" src={avatars?.[entry.id]} />
+                <Avatar name={entry.name} size="sm" {...avatarProps(avatars?.[entry.id])} />
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-sm font-medium">{entry.name}</span>
                   <span className="block truncate text-xs text-dim">
