@@ -4,8 +4,8 @@
 
 import { useMutation } from "@tanstack/react-query";
 import { Sparkles } from "lucide-react";
-import { useRouter } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useMemo, useState } from "react";
 import { AgentPicker } from "@/components/chat/agent-picker";
 import { Composer } from "@/components/chat/composer";
 import { FirstRunSteps } from "@/components/first-run-steps";
@@ -33,8 +33,11 @@ function rememberAgent(id: string) {
   }
 }
 
-export default function ChatsHomePage() {
+function ChatsHome() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  // Profile "Chat" buttons and directory cards deep-link with ?agent=<id>.
+  const requestedAgentId = searchParams.get("agent");
   const { workspace, user, can } = useWorkspace();
   const workspaceId = workspace.workspace_id;
   const agents = useAgents(workspaceId);
@@ -51,12 +54,15 @@ export default function ChatsHomePage() {
     [agents.data],
   );
 
-  // Selection falls back to the remembered agent, then the first active one.
+  // Selection: an explicit pick, then the deep-linked agent, then the
+  // remembered one, then the first active agent.
   const agentId = useMemo(() => {
-    if (chosenAgentId && activeAgents.some((agent) => agent.id === chosenAgentId)) return chosenAgentId;
-    if (rememberedId && activeAgents.some((agent) => agent.id === rememberedId)) return rememberedId;
+    const isActive = (id: string | null) => Boolean(id && activeAgents.some((agent) => agent.id === id));
+    if (isActive(chosenAgentId)) return chosenAgentId;
+    if (isActive(requestedAgentId)) return requestedAgentId;
+    if (isActive(rememberedId)) return rememberedId;
     return activeAgents[0]?.id ?? null;
-  }, [chosenAgentId, rememberedId, activeAgents]);
+  }, [chosenAgentId, requestedAgentId, rememberedId, activeAgents]);
 
   const create = useMutation({
     mutationFn: (body: { agent_id: string; text: string; client_turn_id: string }) =>
@@ -180,5 +186,14 @@ export default function ChatsHomePage() {
         )}
       </div>
     </main>
+  );
+}
+
+export default function ChatsHomePage() {
+  // useSearchParams needs a Suspense boundary for static prerendering.
+  return (
+    <Suspense fallback={<Spinner />}>
+      <ChatsHome />
+    </Suspense>
   );
 }

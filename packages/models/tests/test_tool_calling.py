@@ -66,7 +66,7 @@ async def test_openai_compatible_sends_tools_and_parses_tool_calls() -> None:
 
     sent_tool = seen["body"]["tools"][0]
     assert sent_tool["type"] == "function"
-    assert sent_tool["function"]["name"] == "system.echo"
+    assert sent_tool["function"]["name"] == "system__echo"
     assert sent_tool["function"]["parameters"]["properties"]["text"]["type"] == "string"
 
     assert response.finish_reason == "tool_calls"
@@ -116,7 +116,7 @@ async def test_openai_compatible_serializes_tool_exchange_messages() -> None:
     await client.close()
 
     assistant_wire = seen["body"]["messages"][1]
-    assert assistant_wire["tool_calls"][0]["function"]["name"] == "system.echo"
+    assert assistant_wire["tool_calls"][0]["function"]["name"] == "system__echo"
     tool_wire = seen["body"]["messages"][2]
     assert tool_wire["role"] == "tool"
     assert tool_wire["tool_call_id"] == "call_0"
@@ -181,3 +181,49 @@ async def test_anthropic_maps_tools_and_tool_use_blocks() -> None:
     assert len(response.tool_calls) == 1
     assert response.tool_calls[0].name == "system.echo"
     assert json.loads(response.tool_calls[0].arguments_json) == {"text": "hi"}
+
+
+def test_wire_tool_names_round_trip() -> None:
+    """Providers only accept ``^[a-zA-Z0-9_-]+$``; dotted registry names are
+    encoded on the wire and decoded back from the model's tool calls."""
+    from jhin_models.base import tool_name_from_wire, wire_tool_name
+
+    assert wire_tool_name("organization.delegate_task") == "organization__delegate_task"
+    assert wire_tool_name("system.note.append") == "system__note__append"
+    known = ["organization.delegate_task", "system.note.append"]
+    assert tool_name_from_wire("organization__delegate_task", known) == "organization.delegate_task"
+    assert tool_name_from_wire("system__note__append", known) == "system.note.append"
+    # Fakes that echo the dotted name untouched still resolve.
+    assert tool_name_from_wire("system.note.append", known) == "system.note.append"
+    # Unknown names are never invented.
+    assert tool_name_from_wire("made__up", known) == "made__up"
+
+
+async def test_openai_compatible_encodes_dotted_tool_names_on_the_wire() -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        body = _tool_call_response()
+        body["choices"][0]["message"]["tool_calls"][0]["function"]["name"] = (
+            "organization__delegate_task"
+        )
+        return httpx.Response(200, json=body)
+
+    client = OpenAICompatibleClient(
+        base_url="http://fake/v1", transport=httpx.MockTransport(handler)
+    )
+    tool = ToolSchema(
+        name="organization.delegate_task",
+        description="Delegate.",
+        parameters={"type": "object", "properties": {}},
+    )
+    response = await client.generate(
+        ModelRequest(
+            model="fake-mini",
+            messages=(ModelMessage(role="user", content="go"),),
+            tools=(tool,),
+        )
+    )
+    assert seen["body"]["tools"][0]["function"]["name"] == "organization__delegate_task"
+    assert response.tool_calls[0].name == "organization.delegate_task"

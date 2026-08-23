@@ -10,6 +10,10 @@ export interface WizardState {
   name: string;
   roleTitle: string;
   description: string;
+  /** Public purpose shown to colleagues in the directory and chat context. */
+  publicPurpose: string;
+  /** Comma-separated expertise tags (parsed with {@link parseExpertise}). */
+  expertise: string;
   systemPrompt: string;
   teamId: string;
   managerAgentId: string;
@@ -26,6 +30,8 @@ export const EMPTY_WIZARD: WizardState = {
   name: "",
   roleTitle: "",
   description: "",
+  publicPurpose: "",
+  expertise: "",
   systemPrompt: "",
   teamId: "",
   managerAgentId: "",
@@ -125,6 +131,41 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
 const NAME_MAX = 200;
 const ROLE_TITLE_MAX = 200;
 const PROMPT_MAX = 100_000;
+export const PURPOSE_MAX = 1000;
+export const EXPERTISE_MAX_TAGS = 20;
+export const EXPERTISE_TAG_MAX = 64;
+
+/** Turn a comma/newline-separated tag string into the unique, trimmed list
+ * the API expects for `expertise_json`. */
+export function parseExpertise(input: string): string[] {
+  const seen = new Set<string>();
+  const tags: string[] = [];
+  for (const raw of input.split(/[,\n]/)) {
+    const tag = raw.trim();
+    if (!tag) continue;
+    const key = tag.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    tags.push(tag);
+  }
+  return tags;
+}
+
+/** Validation shared by the wizard and the agent settings form. */
+export function validatePublicIdentity(publicPurpose: string, expertise: string): string[] {
+  const errors: string[] = [];
+  if (publicPurpose.length > PURPOSE_MAX) {
+    errors.push(`Purpose must be at most ${PURPOSE_MAX} characters.`);
+  }
+  const tags = parseExpertise(expertise);
+  if (tags.length > EXPERTISE_MAX_TAGS) {
+    errors.push(`At most ${EXPERTISE_MAX_TAGS} expertise tags.`);
+  }
+  if (tags.some((tag) => tag.length > EXPERTISE_TAG_MAX)) {
+    errors.push(`Each expertise tag must be at most ${EXPERTISE_TAG_MAX} characters.`);
+  }
+  return errors;
+}
 
 export function validateIdentity(state: WizardState): string[] {
   const errors: string[] = [];
@@ -133,6 +174,7 @@ export function validateIdentity(state: WizardState): string[] {
   if (state.roleTitle.length > ROLE_TITLE_MAX) {
     errors.push(`Role title must be at most ${ROLE_TITLE_MAX} characters.`);
   }
+  errors.push(...validatePublicIdentity(state.publicPurpose, state.expertise));
   return errors;
 }
 
@@ -175,6 +217,8 @@ export function toCreatePayload(state: WizardState): Record<string, unknown> {
     name: state.name.trim(),
     role_title: state.roleTitle.trim(),
     description: state.description.trim(),
+    public_purpose: state.publicPurpose.trim(),
+    expertise_json: parseExpertise(state.expertise),
     system_prompt: state.systemPrompt,
     team_id: state.teamId || null,
     manager_agent_id: state.managerAgentId || null,

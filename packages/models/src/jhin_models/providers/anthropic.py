@@ -26,6 +26,8 @@ from jhin_models.base import (
     ModelUsage,
     classify_retryable,
     describe_error_body,
+    tool_name_from_wire,
+    wire_tool_name,
 )
 from jhin_models.pricing import lookup_price
 
@@ -83,7 +85,12 @@ class AnthropicClient(ModelClient):
                 except json.JSONDecodeError:
                     arguments = {}
                 blocks.append(
-                    {"type": "tool_use", "id": call.id, "name": call.name, "input": arguments}
+                    {
+                        "type": "tool_use",
+                        "id": call.id,
+                        "name": wire_tool_name(call.name),
+                        "input": arguments,
+                    }
                 )
             return {"role": "assistant", "content": blocks}
         return {"role": message.role, "content": message.content}
@@ -102,7 +109,7 @@ class AnthropicClient(ModelClient):
         if request.tools:
             payload["tools"] = [
                 {
-                    "name": tool.name,
+                    "name": wire_tool_name(tool.name),
                     "description": tool.description,
                     "input_schema": tool.parameters or {"type": "object", "properties": {}},
                 }
@@ -139,10 +146,11 @@ class AnthropicClient(ModelClient):
             for block in body.get("content") or []
             if block.get("type") == "text"
         )
+        known_tools = [tool.name for tool in request.tools]
         tool_calls = tuple(
             ModelToolCall(
                 id=str(block["id"]),
-                name=str(block["name"]),
+                name=tool_name_from_wire(str(block["name"]), known_tools),
                 arguments_json=json.dumps(block.get("input") or {}),
             )
             for block in body.get("content") or []

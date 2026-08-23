@@ -29,6 +29,8 @@ from jhin_models.base import (
     classify_retryable,
     describe_error_body,
     quota_error,
+    tool_name_from_wire,
+    wire_tool_name,
 )
 from jhin_models.embeddings import MAX_EMBEDDING_BATCH, EmbeddingResult, bound_inputs
 from jhin_models.images import DEFAULT_IMAGE_SIZE, GeneratedImage
@@ -80,7 +82,10 @@ class OpenAICompatibleClient(ModelClient):
                 {
                     "id": call.id,
                     "type": "function",
-                    "function": {"name": call.name, "arguments": call.arguments_json},
+                    "function": {
+                        "name": wire_tool_name(call.name),
+                        "arguments": call.arguments_json,
+                    },
                 }
                 for call in message.tool_calls
             ]
@@ -99,7 +104,7 @@ class OpenAICompatibleClient(ModelClient):
                 {
                     "type": "function",
                     "function": {
-                        "name": tool.name,
+                        "name": wire_tool_name(tool.name),
                         "description": tool.description,
                         "parameters": tool.parameters,
                     },
@@ -152,6 +157,7 @@ class OpenAICompatibleClient(ModelClient):
         if not choices:
             raise ModelProviderError(f"{self.provider_name}: response contained no choices")
         message = choices[0].get("message") or {}
+        known_tools = [tool.name for tool in request.tools]
         tool_calls = []
         for raw in message.get("tool_calls") or []:
             function = raw.get("function") or {}
@@ -161,7 +167,7 @@ class OpenAICompatibleClient(ModelClient):
             tool_calls.append(
                 ModelToolCall(
                     id=str(raw["id"]),
-                    name=str(name),
+                    name=tool_name_from_wire(str(name), known_tools),
                     arguments_json=str(function.get("arguments") or "{}"),
                 )
             )

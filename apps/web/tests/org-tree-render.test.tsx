@@ -252,7 +252,7 @@ describe("ToolsAccessTab", () => {
     await waitFor(() => expect((capabilityPicker as HTMLSelectElement).value).toBe(""));
     fireEvent.change(capabilityPicker, { target: { value: "organization.delegate_task" } });
     const delegation = screen.getByTestId("delegation-scope");
-    fireEvent.change(within(delegation).getByRole("combobox"), {
+    fireEvent.change(within(delegation).getAllByRole("combobox")[0], {
       target: { value: "team" },
     });
     fireEvent.click(add);

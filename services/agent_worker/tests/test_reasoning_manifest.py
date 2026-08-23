@@ -460,3 +460,22 @@ async def test_step_prompt_carries_roster_and_manager_rollup(world: ReasoningWor
     assert "Company directory" in system
     assert "Junior" in system
     assert "Team status rollup" in system
+
+
+def test_non_lossless_manifest_entries_name_their_reason() -> None:
+    """A step that cannot be stored losslessly records a fixed reason code
+    (never content) so the failure is diagnosable from the run record."""
+    calls = (
+        ModelToolCall(id="c0", name="system.echo", arguments_json='{"text": "fine"}'),
+        ModelToolCall(id="c1", name="system.echo", arguments_json='{"a": 1, "a": 2}'),
+        ModelToolCall(id="c2", name="system.echo", arguments_json='["not", "an", "object"]'),
+        ModelToolCall(id="c3", name="system.echo", arguments_json=json.dumps({"text": "x" * 9000})),
+    )
+    manifest = reasoning_module._step_tool_manifest(calls)
+    entries = manifest["calls"]
+    assert entries[0]["lossless"] is True and "reason" not in entries[0]
+    assert entries[1]["reason"] == "arguments_not_strict_json"
+    assert entries[1]["lossless"] is False
+    assert "duplicate JSON object key" in entries[1]["detail"]
+    assert entries[2] == {"ordinal": 2, "lossless": False, "reason": "arguments_not_object"}
+    assert entries[3] == {"ordinal": 3, "lossless": False, "reason": "arguments_truncated"}

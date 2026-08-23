@@ -15,7 +15,7 @@ from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import WorkflowAlreadyStartedError
+from temporalio.exceptions import ActivityError, ApplicationError, WorkflowAlreadyStartedError
 from temporalio.workflow import ParentClosePolicy
 
 from jhin_workflows.agent_task.shared import (
@@ -33,6 +33,7 @@ from jhin_workflows.agent_task.shared import (
     ACTIVITY_RESOLVE_BOUND_TOOL_REVIEW,
     ACTIVITY_RESOLVE_SNAPSHOT,
     ACTIVITY_RUN_AGENT_STEP,
+    ORDINARY_TOOL_FAILURE_MESSAGE,
     PHASE10_TOOL_WORKER_PATCH,
     SIGNAL_REVIEW_DECISION,
     AdvertisedTool,
@@ -58,6 +59,7 @@ from jhin_workflows.agent_task.shared import (
     SnapshotResult,
     StepResult,
     WorkRequestStart,
+    bound_tool_call_id,
 )
 from jhin_workflows.delegated_task.shared import (
     ACTIVITY_DELIVER_DELEGATION_RESULT,
@@ -89,6 +91,22 @@ def _failure_code(exc: BaseException, default: str) -> str:
             return failure_type
         current = getattr(current, "cause", None) or current.__cause__
     return default
+
+
+def _is_ordinary_tool_failure(exc: BaseException) -> bool:
+    """True when the tool worker reported a durably recorded denied /
+    rejected / failed outcome (see ``ORDINARY_TOOL_FAILURE_MESSAGE``)."""
+    current: BaseException | None = exc
+    for _ in range(8):
+        if current is None:
+            break
+        if (
+            isinstance(current, ApplicationError)
+            and current.message == ORDINARY_TOOL_FAILURE_MESSAGE
+        ):
+            return True
+        current = getattr(current, "cause", None) or current.__cause__
+    return False
 
 
 def _failure_message(exc: BaseException) -> str:
@@ -323,19 +341,33 @@ class AgentTaskWorkflow:
                     for ordinal in range(reasoned.call_count):
                         if self._cancel_requested():
                             break
-                        bound = await workflow.execute_activity(
-                            ACTIVITY_EXECUTE_BOUND_TOOL,
-                            ExecuteBoundToolInput(
-                                workspace_id=params.workspace_id,
-                                run_id=snapshot.run_id,
-                                step_index=self._steps_used,
-                                ordinal=ordinal,
-                            ),
-                            result_type=BoundToolResult,
-                            task_queue=TOOL_TASK_QUEUE,
-                            start_to_close_timeout=timedelta(minutes=10),
-                            retry_policy=_STEP_RETRY,
-                        )
+                        try:
+                            bound = await workflow.execute_activity(
+                                ACTIVITY_EXECUTE_BOUND_TOOL,
+                                ExecuteBoundToolInput(
+                                    workspace_id=params.workspace_id,
+                                    run_id=snapshot.run_id,
+                                    step_index=self._steps_used,
+                                    ordinal=ordinal,
+                                ),
+                                result_type=BoundToolResult,
+                                task_queue=TOOL_TASK_QUEUE,
+                                start_to_close_timeout=timedelta(minutes=10),
+                                retry_policy=_STEP_RETRY,
+                            )
+                        except ActivityError as exc:
+                            if not _is_ordinary_tool_failure(exc):
+                                raise
+                            # The gateway durably recorded a denied / rejected /
+                            # failed outcome for this ordinal. That is a usable
+                            # observation for the model (its instructions say to
+                            # explain and carry on), not a run failure: bind the
+                            # canonical id so the commit step projects it, and
+                            # keep executing the rest of the manifest.
+                            tool_ids.append(
+                                bound_tool_call_id(snapshot.run_id, self._steps_used, ordinal)
+                            )
+                            continue
                         tool_ids.append(bound.tool_call_id)
                         if bound.stop_reason is not None:
                             stopped_for_durable_outcome = True

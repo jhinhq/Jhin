@@ -8,7 +8,7 @@ provider-specific leaks out of this package.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Literal
@@ -16,6 +16,31 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 Role = Literal["system", "user", "assistant", "tool"]
+
+
+# Provider APIs (OpenAI, Anthropic) only accept ``^[a-zA-Z0-9_-]+$`` as a
+# function/tool name, while Jhin's registry uses dotted names such as
+# ``organization.delegate_task``. Adapters encode names for the wire and
+# decode the model's tool calls back to registry names.
+_WIRE_DOT = "__"
+
+
+def wire_tool_name(name: str) -> str:
+    """Registry tool name → provider-safe wire name (``a.b`` → ``a__b``)."""
+    return name.replace(".", _WIRE_DOT)
+
+
+def tool_name_from_wire(wire_name: str, known_names: Iterable[str] = ()) -> str:
+    """Wire name → registry name.
+
+    A name the request already offered is returned unchanged (covers fakes
+    that echo dotted names); otherwise the encoding is reversed.
+    """
+    known = set(known_names)
+    if wire_name in known:
+        return wire_name
+    decoded = wire_name.replace(_WIRE_DOT, ".")
+    return decoded if decoded in known or not known else wire_name
 
 
 class ModelToolCall(BaseModel):

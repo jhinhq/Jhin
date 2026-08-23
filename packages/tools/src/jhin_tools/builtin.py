@@ -11,7 +11,7 @@ credentials.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import cast
@@ -366,3 +366,54 @@ def allowed_tool_definitions(
             for pattern in allow_patterns
         )
     )
+
+
+def connection_hints(
+    definition: ToolDefinition,
+    grants: Sequence[Grant],
+    connection_labels: Mapping[str, str],
+) -> str:
+    """Describe, for the model, which connections a connector tool may use.
+
+    Connector tools take a ``connection_id`` the model cannot know on its
+    own (it is a workspace UUID), so every allow grant for this tool that
+    pins a *known* connection is rendered as ``label — connection_id=…`` plus
+    the other scope values the grant fixes (e.g. ``repository=octo/alpha``).
+    This is prompt context only: the gateway still decides every call.
+    """
+    if "connection_id" not in definition.scope_keys:
+        return ""
+    lines: list[str] = []
+    seen: set[str] = set()
+    for grant in grants:
+        if grant.effect is not GrantEffect.ALLOW:
+            continue
+        if not capability_matches(grant.capability, definition.required_capability):
+            continue
+        connection_id = str(grant.scope.get("connection_id", ""))
+        label = connection_labels.get(connection_id)
+        if label is None:
+            continue
+        extras = ", ".join(
+            f"{key}={grant.scope[key]}"
+            for key in definition.scope_keys
+            if key != "connection_id" and key in grant.scope
+        )
+        line = f"{label} — connection_id={connection_id}" + (f" ({extras})" if extras else "")
+        if line in seen:
+            continue
+        seen.add(line)
+        lines.append(line)
+    if not lines:
+        return ""
+    return "Connections you may use (pass the connection_id exactly as given): " + "; ".join(lines)
+
+
+def advertised_description(
+    definition: ToolDefinition,
+    grants: Sequence[Grant],
+    connection_labels: Mapping[str, str],
+) -> str:
+    """Tool description for the model: the registry text plus connection hints."""
+    hints = connection_hints(definition, grants, connection_labels)
+    return f"{definition.description} {hints}".strip() if hints else definition.description

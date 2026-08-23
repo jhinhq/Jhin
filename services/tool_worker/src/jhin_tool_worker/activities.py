@@ -24,12 +24,13 @@ from jhin_db.models import (
     AgentCapabilityGrant,
     AgentRun,
     Approval,
+    Connection,
     RunEvent,
     Task,
     ToolCall,
     WorkReview,
 )
-from jhin_domain import ApprovalStatus, ToolCallStatus, WorkReviewStatus
+from jhin_domain import ApprovalStatus, ConnectionStatus, ToolCallStatus, WorkReviewStatus
 from jhin_observability import (
     MetricName,  # noqa: F401 - referenced by metric literal type comments
     SafeError,
@@ -48,6 +49,7 @@ from jhin_tools import (
     ToolCatalog,
     ToolExecutionContext,
     ToolGateway,
+    advertised_description,
     allowed_tool_definitions,
     stable_tool_invocation_id,
 )
@@ -61,6 +63,7 @@ from jhin_workflows.agent_task.shared import (
     ACTIVITY_RESOLVE_ADVERTISED_TOOLS,
     ACTIVITY_RESOLVE_BOUND_TOOL_APPROVAL,
     ACTIVITY_RESOLVE_BOUND_TOOL_REVIEW,
+    ORDINARY_TOOL_FAILURE_MESSAGE,
     AdvertisedTool,
     BoundToolResult,
     ExecuteBoundToolInput,
@@ -490,7 +493,7 @@ def _raise_ordinary_failure(outcome: GatewayOutcome) -> None:
         )
     if outcome.status in {"denied", "failed", "rejected"}:
         raise _non_retryable(
-            "bound tool execution was rejected before a usable outcome",
+            ORDINARY_TOOL_FAILURE_MESSAGE,
             error_type=outcome.error_code or "bound_tool_execution_failed",
         )
 
@@ -911,10 +914,34 @@ class ToolActivities:
                     )
                 except (ValueError, ValidationError):
                     continue
+            # Connector tools need a workspace connection id the model cannot
+            # guess; label the ones the agent's grants pin so the description
+            # can spell them out (prompt context only — never authorization).
+            pinned_ids: set[UUID] = set()
+            for grant in grants:
+                raw = grant.scope.get("connection_id")
+                if isinstance(raw, str):
+                    try:
+                        pinned_ids.add(UUID(raw))
+                    except ValueError:
+                        continue
+            connection_labels: dict[str, str] = {}
+            if pinned_ids:
+                connections = await session.scalars(
+                    select(Connection).where(
+                        Connection.workspace_id == workspace_id,
+                        Connection.id.in_(pinned_ids),
+                        Connection.status == ConnectionStatus.ACTIVE.value,
+                    )
+                )
+                connection_labels = {
+                    str(connection.id): f"{connection.name} ({connection.connector_type})"
+                    for connection in connections
+                }
         return [
             AdvertisedTool(
                 name=definition.name,
-                description=definition.description,
+                description=advertised_description(definition, grants, connection_labels),
                 parameters=definition.input_json_schema(),
             )
             for definition in allowed_tool_definitions(self._catalog, grants)

@@ -209,9 +209,13 @@ def _step_tool_manifest(tool_calls: tuple[ModelToolCall, ...]) -> dict[str, Any]
     calls: list[dict[str, Any]] = []
     for ordinal, call in enumerate(tool_calls):
         valid_json_object = False
+        reason: str | None = None
+        detail: str | None = None
         try:
             decoded = strict_json_loads(call.arguments_json)
             valid_json_object = isinstance(decoded, dict)
+            if not valid_json_object:
+                reason = "arguments_not_object"
             canonical_arguments = json.dumps(
                 decoded,
                 ensure_ascii=False,
@@ -219,7 +223,12 @@ def _step_tool_manifest(tool_calls: tuple[ModelToolCall, ...]) -> dict[str, Any]
                 separators=(",", ":"),
             )
             manifest_arguments: Any = decoded
-        except (json.JSONDecodeError, TypeError, ValueError):
+        except (json.JSONDecodeError, TypeError, ValueError) as error:
+            valid_json_object = False
+            reason = "arguments_not_strict_json"
+            # Parser messages carry positions / key names, never argument
+            # content, so they are safe to keep alongside the reason.
+            detail = redact_text(str(error))[:200]
             canonical_arguments = call.arguments_json
             manifest_arguments = call.arguments_json
         sanitized = sanitize_payload(
@@ -228,15 +237,25 @@ def _step_tool_manifest(tool_calls: tuple[ModelToolCall, ...]) -> dict[str, Any]
                 "arguments": manifest_arguments,
             }
         )
-        lossless = (
-            valid_json_object
-            and sanitized.get("tool_name") == call.name
-            and sanitized.get("arguments") == manifest_arguments
-            and _recursively_unchanged(manifest_arguments)
-            and len(call.name) <= _MAX_PROVIDER_TEXT_CHARS
-            and len(canonical_arguments) <= _MAX_ARGUMENTS_CHARS
-        )
+        # The first failing check names the reason (a fixed code, never
+        # content) so a non-lossless step is diagnosable from the run record.
+        if reason is None and (
+            sanitized.get("tool_name") != call.name
+            or not _recursively_unchanged(manifest_arguments)
+        ):
+            reason = "secret_material_in_call"
+        elif reason is None and sanitized.get("arguments") != manifest_arguments:
+            reason = "arguments_truncated"
+        elif reason is None and len(call.name) > _MAX_PROVIDER_TEXT_CHARS:
+            reason = "tool_name_too_long"
+        elif reason is None and len(canonical_arguments) > _MAX_ARGUMENTS_CHARS:
+            reason = "arguments_too_long"
+        lossless = reason is None
         entry: dict[str, Any] = {"ordinal": ordinal, "lossless": lossless}
+        if reason is not None:
+            entry["reason"] = reason
+        if detail is not None:
+            entry["detail"] = detail
         if lossless:
             entry.update(
                 {
@@ -1348,11 +1367,19 @@ class AgentReasoningActivities:
 
             manifest_is_lossless = all(bool(entry.get("lossless")) for entry in manifest["calls"])
             if not manifest_is_lossless:
+                lossy_reasons = sorted(
+                    {
+                        str(entry.get("reason") or "unknown")
+                        + (f": {entry['detail']}" if entry.get("detail") else "")
+                        for entry in manifest["calls"]
+                        if not entry.get("lossless")
+                    }
+                )
                 run.status = RunStatus.FAILED.value
                 run.error_code = "tool_step_manifest_not_lossless"
                 run.error_message = (
-                    f"tool call set for step {params.step_index} could not be stored safely; "
-                    "manual reconciliation is required"
+                    f"tool call set for step {params.step_index} could not be stored safely "
+                    f"({', '.join(lossy_reasons)}); manual reconciliation is required"
                 )
                 session.add(
                     AuditEvent(
@@ -1366,6 +1393,7 @@ class AgentReasoningActivities:
                             "task_id": str(task_id),
                             "step": params.step_index,
                             "call_count": manifest["count"],
+                            "reasons": lossy_reasons,
                         },
                     )
                 )

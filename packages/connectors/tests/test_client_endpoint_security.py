@@ -464,3 +464,30 @@ async def test_legacy_linear_connection_cannot_bypass_endpoint_policy(
         )
 
     assert requests == []
+
+
+def test_github_api_error_classifies_side_effects() -> None:
+    """Reads and definitively rejected writes are ordinary failures; only a
+    transport failure or 5xx on a write leaves the outcome unknown."""
+    read_404 = GitHubApiError("missing", status_code=404, method="GET")
+    assert read_404.code == "github_http_404"
+    assert read_404.side_effect_possible is False
+    write_422 = GitHubApiError("rejected", status_code=422, method="POST")
+    assert write_422.side_effect_possible is False
+    write_502 = GitHubApiError("upstream", status_code=502, method="POST")
+    assert write_502.side_effect_possible is True
+    write_network = GitHubApiError("network", method="POST")
+    assert write_network.code == "github_request_failed"
+    assert write_network.side_effect_possible is True
+
+
+def test_linear_api_error_classifies_side_effects() -> None:
+    assert LinearApiError("x", status_code=404).side_effect_possible is False
+    assert (
+        LinearApiError(
+            "x", status_code=200, mutation=True, code="linear_graphql_error"
+        ).side_effect_possible
+        is False
+    )
+    assert LinearApiError("x", mutation=True).side_effect_possible is True
+    assert LinearApiError("x", status_code=503, mutation=True).side_effect_possible is True

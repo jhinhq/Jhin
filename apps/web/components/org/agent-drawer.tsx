@@ -23,6 +23,7 @@ import {
 } from "@/components/ui";
 import { ToolsAccessTab } from "@/components/org/tools-access-tab";
 import { api, ApiError } from "@/lib/api";
+import { parseExpertise } from "@/lib/wizard";
 import {
   useAgent,
   useInvalidateOrg,
@@ -524,6 +525,8 @@ function SettingsTab({
   const [name, setName] = useState(agent.name);
   const [roleTitle, setRoleTitle] = useState(agent.role_title);
   const [description, setDescription] = useState(agent.description);
+  const [publicPurpose, setPublicPurpose] = useState(agent.public_purpose ?? "");
+  const [expertise, setExpertise] = useState((agent.expertise_json ?? []).join(", "));
   const [teamId, setTeamId] = useState(agent.team_id ?? "");
   const [managerId, setManagerId] = useState(agent.manager_agent_id ?? "");
   const [autonomy, setAutonomy] = useState<AutonomyLevel>(agent.autonomy_level);
@@ -539,6 +542,8 @@ function SettingsTab({
           name,
           role_title: roleTitle,
           description,
+          public_purpose: publicPurpose.trim(),
+          expertise_json: parseExpertise(expertise),
           team_id: teamId || null,
           manager_agent_id: managerId || null,
           autonomy_level: autonomy,
@@ -574,6 +579,24 @@ function SettingsTab({
           maxLength={4000}
           value={description}
           onChange={(e) => setDescription(e.target.value)}
+        />
+      </Field>
+      <Field
+        label="Purpose"
+        hint="What colleagues see when they look this agent up. Falls back to the description."
+      >
+        <Textarea
+          rows={2}
+          maxLength={1000}
+          value={publicPurpose}
+          onChange={(e) => setPublicPurpose(e.target.value)}
+        />
+      </Field>
+      <Field label="Expertise" hint="Comma-separated tags other agents search by.">
+        <Input
+          value={expertise}
+          onChange={(e) => setExpertise(e.target.value)}
+          placeholder="python, github, testing"
         />
       </Field>
       <div className="grid grid-cols-2 gap-3">

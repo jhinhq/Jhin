@@ -28,6 +28,7 @@ from jhin_workflows.agent_task.shared import (
     ACTIVITY_RESOLVE_BOUND_TOOL_APPROVAL,
     ACTIVITY_RESOLVE_SNAPSHOT,
     ACTIVITY_RUN_AGENT_STEP,
+    ORDINARY_TOOL_FAILURE_MESSAGE,
     AdvertisedTool,
     BoundToolResult,
     CleanupRunWorkspaceInput,
@@ -44,6 +45,7 @@ from jhin_workflows.agent_task.shared import (
     RunStepInput,
     SnapshotResult,
     StepResult,
+    bound_tool_call_id,
 )
 
 _APPROVAL_ID = "018f4d52-8b93-7d41-8ac7-7f190f092222"
@@ -137,6 +139,8 @@ class TwoQueueWorld:
             return ReasonAgentStepResult(call_count=0)
         if self._scenario == "one_step":
             return ReasonAgentStepResult(call_count=1)
+        if self._scenario == "ordinary_failure":
+            return ReasonAgentStepResult(call_count=2)
         return ReasonAgentStepResult(call_count=3)
 
     @activity.defn(name=ACTIVITY_EXECUTE_BOUND_TOOL)
@@ -146,6 +150,12 @@ class TwoQueueWorld:
         if self._scenario == "cancellation" and params.ordinal == 0:
             self._first_execute_started.set()
             await self._release_first_execute.wait()
+        if self._scenario == "ordinary_failure" and params.ordinal == 0:
+            raise ApplicationError(
+                ORDINARY_TOOL_FAILURE_MESSAGE,
+                type="github_http_404",
+                non_retryable=True,
+            )
         if self._scenario == "approval":
             return BoundToolResult(
                 tool_call_id=_TOOL_CALL_ID,
@@ -491,3 +501,29 @@ async def test_approval_resolution_crosses_tool_then_agent_boundaries(
             tool_call_id=_TOOL_CALL_ID,
         )
     ]
+
+
+async def test_ordinary_tool_failure_is_an_observation_not_a_run_failure(
+    two_queue_world: TwoQueueWorld,
+) -> None:
+    """A denied / rejected / failed bound call was durably recorded by the
+    gateway; the workflow binds its canonical id, keeps executing the rest of
+    the manifest, commits the step, and the run continues to completion."""
+    result = await two_queue_world.run_scenario("ordinary_failure")
+
+    assert result.status == "completed"
+    assert two_queue_world.executed_ordinals == [0, 1]
+    first_commit = two_queue_world.commit_calls[0]
+    assert first_commit.gateway_tool_call_ids == [
+        bound_tool_call_id(two_queue_world.run_id, 0, 0),
+        _TOOL_CALL_ID,
+    ]
+    assert first_commit.cancelled_after_tool_call_id is None
+    assert two_queue_world.finalize_calls[-1].status == "completed"
+
+
+def test_bound_tool_call_id_mirrors_the_gateway_identity() -> None:
+    from jhin_tools import stable_tool_invocation_id
+
+    run_id = uuid.uuid4()
+    assert bound_tool_call_id(str(run_id), 3, 1) == str(stable_tool_invocation_id(run_id, 3, 1))

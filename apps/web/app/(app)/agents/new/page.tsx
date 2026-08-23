@@ -40,6 +40,7 @@ import {
   EMPTY_WIZARD,
   toCreatePayload,
   grantPayloadsForTools,
+  parseExpertise,
   toggleTool,
   validateStep,
   WIZARD_STEPS,
@@ -216,6 +217,28 @@ function WizardInner() {
                 value={state.description}
                 onChange={(e) => patch({ description: e.target.value })}
                 placeholder="What this agent is responsible for"
+              />
+            </Field>
+            <Field
+              label="Purpose"
+              hint="What colleagues see when they look this agent up. Falls back to the description."
+            >
+              <Textarea
+                rows={2}
+                maxLength={1000}
+                value={state.publicPurpose}
+                onChange={(e) => patch({ publicPurpose: e.target.value })}
+                placeholder="Builds features and fixes bugs in the product repos"
+              />
+            </Field>
+            <Field
+              label="Expertise"
+              hint="Comma-separated tags other agents search by (e.g. python, github, testing)."
+            >
+              <Input
+                value={state.expertise}
+                onChange={(e) => patch({ expertise: e.target.value })}
+                placeholder="python, github, testing"
               />
             </Field>
           </div>
@@ -426,6 +449,21 @@ function WizardInner() {
             <div className="rounded-2xl border border-line bg-surface px-5 py-2 shadow-card">
               <ReviewRow label="Name" value={state.name || "—"} />
               <ReviewRow label="Role title" value={state.roleTitle || "—"} />
+              <ReviewRow label="Purpose" value={state.publicPurpose.trim() || "—"} />
+              <ReviewRow
+                label="Expertise"
+                value={
+                  parseExpertise(state.expertise).length > 0 ? (
+                    <span className="flex flex-wrap justify-end gap-1">
+                      {parseExpertise(state.expertise).map((tag) => (
+                        <Badge key={tag}>{tag}</Badge>
+                      ))}
+                    </span>
+                  ) : (
+                    "—"
+                  )
+                }
+              />
               <ReviewRow label="Team" value={team?.name ?? "No team"} />
               <ReviewRow label="Manager" value={manager?.name ?? "No manager"} />
               <ReviewRow
@@ -454,9 +492,9 @@ function WizardInner() {
                 label="Tools"
                 value={
                   state.grantToolNames.length > 0 ? (
-                    <span className="text-xs">
+                    <span className="flex flex-wrap justify-end gap-x-1.5 gap-y-0.5 text-xs">
                       {state.grantToolNames.map((toolName) => (
-                        <code key={toolName} className="ml-1.5 font-mono text-xs">
+                        <code key={toolName} className="font-mono text-xs">
                           {toolName}
                         </code>
                       ))}

@@ -14,6 +14,7 @@ import httpx
 
 from jhin_connectors.endpoints import EndpointPolicyError, validate_http_origin
 from jhin_connectors.http_client import ProviderHTTPError, send_bounded_json
+from jhin_tools.errors import ToolExecutionError
 
 # Pinned GitHub REST API version (docs.github.com, current as of 2026).
 API_VERSION = "2026-03-10"
@@ -23,11 +24,43 @@ USER_AGENT = "jhin-connector-github"
 _TIMEOUT_SECONDS = 30.0
 
 
-class GitHubApiError(Exception):
-    """One failed GitHub API call, with a display-safe message."""
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
-        super().__init__(message)
+
+def _api_error_code(prefix: str, status_code: int | None) -> str:
+    return f"{prefix}_http_{status_code}" if status_code is not None else f"{prefix}_request_failed"
+
+
+def _side_effect_possible(method: str, status_code: int | None) -> bool:
+    """Reads never have side effects; a mutation the provider definitively
+    rejected (4xx) did not happen either. Only transport failures and 5xx on
+    a mutation leave the outcome genuinely unknown."""
+    if method.upper() in _SAFE_METHODS:
+        return False
+    return status_code is None or status_code >= 500
+
+
+class GitHubApiError(ToolExecutionError):
+    """One failed GitHub API call, with a display-safe message.
+
+    A ``ToolExecutionError`` so the gateway records an ordinary ``failed``
+    outcome (e.g. ``github_http_404``) the model can act on, instead of an
+    execution-unknown reconciliation that aborts the run.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        method: str = "GET",
+        code: str | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            code=code or _api_error_code("github", status_code),
+            side_effect_possible=_side_effect_possible(method, status_code),
+        )
         self.status_code = status_code
 
 
@@ -36,7 +69,9 @@ def validate_github_base_url(base_url: str) -> str:
     try:
         return validate_http_origin(base_url, official_origins=(DEFAULT_BASE_URL,))
     except EndpointPolicyError:
-        raise GitHubApiError("GitHub API target is not allowed") from None
+        raise GitHubApiError(
+            "GitHub API target is not allowed", code="github_target_not_allowed"
+        ) from None
 
 
 def github_headers(token: str) -> dict[str, str]:
@@ -77,9 +112,10 @@ async def github_request(
         raise GitHubApiError(
             message,
             status_code=exc.status_code,
+            method=method,
         ) from None
     except Exception:
-        raise GitHubApiError("GitHub API request failed") from None
+        raise GitHubApiError("GitHub API request failed", method=method) from None
     if payload is None:
         return {}
     return payload

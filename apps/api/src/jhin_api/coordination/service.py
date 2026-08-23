@@ -27,12 +27,13 @@ from jhin_api.coordination.schemas import (
     WorkReviewOut,
 )
 from jhin_api.deps import WorkspaceContext
-from jhin_db.models import Agent, ReviewPolicy, Task, WorkRequest, WorkReview, Workspace
+from jhin_db.models import Agent, ReviewPolicy, Task, ToolCall, WorkRequest, WorkReview, Workspace
 from jhin_domain import (
     ActorType,
     ReviewerType,
     ReviewMode,
     TaskState,
+    ToolCallStatus,
     WorkReviewStatus,
     WorkspaceRole,
     role_satisfies,
@@ -668,7 +669,10 @@ async def signal_review_workflow(
     try:
         await handle.signal(SIGNAL_REVIEW_DECISION, args=[str(review.id), review.status])
     except (RPCError, TemporalError, OSError) as exc:
-        if review.tool_call_id is None:
+        if review.tool_call_id is None or not await _review_parks_a_tool_call(db, review):
+            # Nothing is waiting on this decision (e.g. a before-close review
+            # whose run already finished): the durable decision is the whole
+            # outcome, so a closed workflow is not an error.
             return
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -677,6 +681,20 @@ async def signal_review_workflow(
                 "could not be signaled (it may have already finished)"
             ),
         ) from exc
+
+
+async def _review_parks_a_tool_call(db: AsyncSession, review: WorkReview) -> bool:
+    """False once the review's tool call has a recorded terminal outcome
+    (e.g. an explicit before-close request whose run already finished);
+    true while it is parked — or when no call row is visible, to stay
+    conservative."""
+    status_value = await db.scalar(
+        select(ToolCall.status).where(
+            ToolCall.id == review.tool_call_id,
+            ToolCall.workspace_id == review.workspace_id,
+        )
+    )
+    return status_value is None or status_value == ToolCallStatus.PENDING_REVIEW.value
 
 
 # --- rollups ---

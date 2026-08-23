@@ -13,11 +13,14 @@ import {
   firstInvalidStep,
   toCreatePayload,
   grantPayloadsForTools,
+  parseExpertise,
   toggleTool,
   validateIdentity,
+  validatePublicIdentity,
   validateStep,
   WIZARD_STEPS,
 } from "@/lib/wizard";
+import { delegationScope } from "@/components/org/tools-access-tab";
 
 const navigation = vi.hoisted(() => ({ push: vi.fn() }));
 vi.mock("next/navigation", () => ({
@@ -356,5 +359,52 @@ describe("templates", () => {
       expect(template.systemPrompt.length).toBeGreaterThan(20);
       expect(template.roleTitle.length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("public identity (purpose & expertise)", () => {
+  it("parses comma/newline separated tags, trimming and de-duplicating", () => {
+    expect(parseExpertise(" python, GitHub ,,\n testing, python ")).toEqual([
+      "python",
+      "GitHub",
+      "testing",
+    ]);
+    expect(parseExpertise("")).toEqual([]);
+  });
+
+  it("sends purpose and expertise in the create payload", () => {
+    const payload = toCreatePayload({
+      ...EMPTY_WIZARD,
+      name: "SWE",
+      publicPurpose: "  Builds things  ",
+      expertise: "python, github",
+    });
+    expect(payload).toMatchObject({
+      public_purpose: "Builds things",
+      expertise_json: ["python", "github"],
+    });
+  });
+
+  it("rejects oversized purpose and tags on the identity step", () => {
+    expect(validatePublicIdentity("x".repeat(1001), "")).toEqual([
+      "Purpose must be at most 1000 characters.",
+    ]);
+    expect(validatePublicIdentity("", "y".repeat(65))).toEqual([
+      "Each expertise tag must be at most 64 characters.",
+    ]);
+    expect(
+      validatePublicIdentity("", Array.from({ length: 21 }, (_, i) => `t${i}`).join(",")),
+    ).toEqual(["At most 20 expertise tags."]);
+    expect(validateIdentity({ ...EMPTY_WIZARD, name: "ok", expertise: "a, b" })).toEqual([]);
+  });
+});
+
+describe("delegationScope", () => {
+  it("adds the pin only when a colleague is chosen", () => {
+    expect(delegationScope("subordinates", "")).toEqual({ targets: "subordinates" });
+    expect(delegationScope("team", "agent-1")).toEqual({
+      targets: "team",
+      target_agent_id: "agent-1",
+    });
   });
 });

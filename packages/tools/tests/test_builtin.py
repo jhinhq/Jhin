@@ -15,8 +15,10 @@ from jhin_tools.builtin import (
     BUILTIN_TOOLS,
     EchoInput,
     EchoOutput,
+    advertised_description,
     allowed_tool_definitions,
     build_builtin_catalog,
+    connection_hints,
 )
 
 
@@ -82,3 +84,54 @@ def test_allowed_definitions_expand_wildcards() -> None:
 
 def test_no_grants_means_nothing_advertised() -> None:
     assert allowed_tool_definitions(build_builtin_catalog(), []) == ()
+
+
+def _connector_definition() -> ToolDefinition:
+    return ToolDefinition(
+        name="github.repository.read",
+        description="Read repository metadata.",
+        risk=RiskLevel.READ,
+        input_model=EchoInput,
+        output_model=EchoOutput,
+        required_capability="github.repository.read",
+        scope_keys=("connection_id", "repository"),
+        required_grant_scope_keys=("connection_id",),
+    )
+
+
+def test_connection_hints_spell_out_pinned_connections() -> None:
+    definition = _connector_definition()
+    conn = "01a02d06-7971-7280-9511-0e579bd4d0a0"
+    grants = [
+        Grant(
+            capability="github.repository.read",
+            scope={"connection_id": conn, "repository": "octo/alpha"},
+            effect=GrantEffect.ALLOW,
+        ),
+        # Unknown connection ids (disabled / foreign) and denies add nothing.
+        Grant(
+            capability="github.repository.read",
+            scope={"connection_id": "11111111-1111-7111-8111-111111111111"},
+            effect=GrantEffect.ALLOW,
+        ),
+        Grant(capability="github.*", scope={"connection_id": conn}, effect=GrantEffect.DENY),
+    ]
+    labels = {conn: "GitHub (dev fake) (github)"}
+    hints = connection_hints(definition, grants, labels)
+    assert hints == (
+        "Connections you may use (pass the connection_id exactly as given): "
+        f"GitHub (dev fake) (github) — connection_id={conn} (repository=octo/alpha)"
+    )
+    assert advertised_description(definition, grants, labels).startswith(
+        "Read repository metadata. Connections you may use"
+    )
+
+
+def test_connection_hints_are_empty_without_connection_scope() -> None:
+    definition = _connector_definition()
+    assert connection_hints(definition, [], {}) == ""
+    entry = build_builtin_catalog().get("system.echo")
+    assert entry is not None
+    echo = entry[0]
+    grants = [Grant(capability="system.echo", scope={}, effect=GrantEffect.ALLOW)]
+    assert advertised_description(echo, grants, {}) == echo.description

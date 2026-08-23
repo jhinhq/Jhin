@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+from uuid import UUID, uuid5
 
 ACTIVITY_RESOLVE_SNAPSHOT = "resolve_snapshot"
 ACTIVITY_RUN_AGENT_STEP = "run_agent_step"
@@ -25,6 +26,23 @@ ACTIVITY_RESOLVE_ADVERTISED_TOOLS = "resolve_advertised_tools"
 ACTIVITY_REASON_AGENT_STEP = "reason_agent_step"
 ACTIVITY_EXECUTE_BOUND_TOOL = "execute_bound_tool"
 ACTIVITY_COMMIT_AGENT_STEP = "commit_agent_step"
+
+# The tool worker raises this (non-retryable) when the gateway durably
+# recorded a denied / rejected / failed outcome for a bound call. The
+# outcome row already exists, so the workflow treats it as the call's
+# observation (the model reads it on the next step) rather than a run failure.
+ORDINARY_TOOL_FAILURE_MESSAGE = "bound tool execution was rejected before a usable outcome"
+
+# Mirror of ``jhin_tools.stable_tool_invocation_id`` (kept stdlib-only so the
+# workflow sandbox never imports the tool runtime); a test pins equality.
+_TOOL_INVOCATION_NAMESPACE = UUID("4f0ac960-eab4-5f17-9b65-9f9bcbf3e0a8")
+
+
+def bound_tool_call_id(run_id: str, step_index: int, ordinal: int) -> str:
+    """The canonical tool_call id the gateway used for one step ordinal."""
+    return str(uuid5(_TOOL_INVOCATION_NAMESPACE, f"v1:{UUID(run_id).hex}:{step_index}:{ordinal}"))
+
+
 ACTIVITY_RESOLVE_BOUND_TOOL_APPROVAL = "resolve_bound_tool_approval"
 ACTIVITY_COMMIT_APPROVAL_PROJECTION = "commit_approval_projection"
 ACTIVITY_CLEANUP_RUN_WORKSPACE = "cleanup_run_workspace"

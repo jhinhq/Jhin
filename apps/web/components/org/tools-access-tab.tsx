@@ -15,6 +15,7 @@ import {
   useAgentPolicy,
   useConnections,
   useInvalidateAgentAccess,
+  useOrgGraph,
   useTools,
 } from "@/lib/hooks";
 import {
@@ -31,6 +32,14 @@ import { useWorkspace } from "@/lib/workspace-context";
 
 const PRESETS: ApprovalPreset[] = ["autonomous", "balanced", "restricted"];
 
+/** Scope for an `organization.delegate` grant: relationship targets plus an
+ * optional pin to one colleague (both must match at delegation time). */
+export function delegationScope(targets: string, pinAgentId: string): Record<string, string> {
+  const scope: Record<string, string> = { targets };
+  if (pinAgentId) scope.target_agent_id = pinAgentId;
+  return scope;
+}
+
 export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: boolean }) {
   const { workspace, can } = useWorkspace();
   const workspaceId = workspace.workspace_id;
@@ -38,12 +47,14 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
   const policy = useAgentPolicy(workspaceId, agent.id);
   const tools = useTools(workspaceId);
   const connections = useConnections(workspaceId, can("admin"));
+  const graph = useOrgGraph(workspaceId);
   const invalidate = useInvalidateAgentAccess(workspaceId, agent.id);
 
   const [toolName, setToolName] = useState("");
   const [effect, setEffect] = useState<GrantEffect>("allow");
   const [scopeValues, setScopeValues] = useState<ToolScopeValues>({});
   const [delegationTargets, setDelegationTargets] = useState("subordinates");
+  const [delegationPin, setDelegationPin] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   const toolList = tools.data ?? [];
@@ -64,7 +75,7 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
         body: {
           capability,
           scope: isDelegate
-            ? { targets: delegationTargets }
+            ? delegationScope(delegationTargets, delegationPin)
             : selectedTool
               ? buildToolScope(selectedTool, scopeValues)
               : {},
@@ -75,6 +86,7 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
       setError(null);
       setToolName("");
       setScopeValues({});
+      setDelegationPin("");
       invalidate();
     },
     onError: (err) => setError(err instanceof ApiError ? err.detail : "Adding the grant failed."),
@@ -229,6 +241,26 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
                     </option>
                     <option value="team">Team — agents on the same team</option>
                     <option value="any">Any agent in the workspace</option>
+                  </Select>
+                </Field>
+                <Field
+                  label="Pin to one colleague (optional)"
+                  hint="Narrows the grant further: only this colleague can be delegated to, and they must also match the relationship above."
+                >
+                  <Select
+                    value={delegationPin}
+                    onChange={(e) => setDelegationPin(e.target.value)}
+                    data-testid="delegation-pin"
+                  >
+                    <option value="">Anyone matching the relationship</option>
+                    {(graph.data?.agents ?? [])
+                      .filter((candidate) => candidate.id !== agent.id)
+                      .map((candidate) => (
+                        <option key={candidate.id} value={candidate.id}>
+                          {candidate.name}
+                          {candidate.role_title ? ` — ${candidate.role_title}` : ""}
+                        </option>
+                      ))}
                   </Select>
                 </Field>
               </div>
