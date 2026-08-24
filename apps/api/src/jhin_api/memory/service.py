@@ -31,7 +31,9 @@ from jhin_domain import (
     role_satisfies,
 )
 from jhin_memory import (
+    MAX_DEDUP_ADJUDICATED_PAIRS,
     ActorFacts,
+    AdjudicationPair,
     MemoryCandidate,
     SourceFacts,
     apply_candidates,
@@ -40,6 +42,7 @@ from jhin_memory import (
     create_version,
     derive_source_facts,
     forget_record,
+    resolve_memory_adjudicator,
     resolve_memory_embedder,
 )
 from jhin_observability import JhinMetrics
@@ -515,17 +518,24 @@ async def deduplicate_memories(
     session: AsyncSession,
     ctx: WorkspaceContext,
     *,
+    deps: EmbeddingDeps | None = None,
     request_id: UUID | None = None,
     ip_hash: str | None = None,
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, int, bool]:
     """Admin retroactive cleanup: cluster ACTIVE records per (scope, scope_id)
     with the shared near-duplicate rule (embedding cosine when both sides
     carry a same-model vector, lexical token overlap, subject key), keep the
     best record of each cluster (pinned first, then highest confidence, then
     newest), and mark the rest superseded (content preserved as history).
 
-    Returns ``(clusters_merged, superseded, remaining_active)``. Audited as
-    ``memory.deduplicated`` (content-free).
+    When the workspace has a chat-capable default profile (and ``deps`` is
+    given), *uncertain* pairs — gray-zone paraphrases the rule cannot match —
+    are adjudicated SAME/DIFFERENT by that model, bounded to
+    ``MAX_DEDUP_ADJUDICATED_PAIRS`` per call; failure means DIFFERENT, so the
+    pass stays idempotent and never merges on doubt.
+
+    Returns ``(clusters_merged, superseded, remaining_active, adjudicated,
+    llm)``. Audited as ``memory.deduplicated`` (content-free).
     """
     if not role_satisfies(ctx.role, WorkspaceRole.ADMIN):
         raise HTTPException(
@@ -546,17 +556,16 @@ async def deduplicate_memories(
     groups: dict[tuple[str, UUID], list[MemoryRecord]] = {}
     for row in rows:
         groups.setdefault((row.scope, row.scope_id), []).append(row)
+    group_list = [group for group in groups.values() if len(group) >= 2]
 
-    now = datetime.now(UTC)
-    clusters_merged = 0
-    superseded_total = 0
-    for group in groups.values():
-        count = len(group)
-        if count < 2:
-            continue
-        parent = list(range(count))
-        for i in range(count):
-            for j in range(i + 1, count):
+    # Pass 1: union rule-detected near duplicates; collect uncertain pairs.
+    parents: list[list[int]] = []
+    uncertain: list[tuple[int, int, int, float]] = []
+    for g_index, group in enumerate(group_list):
+        parent = list(range(len(group)))
+        parents.append(parent)
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
                 a, b = group[i], group[j]
                 verdict = compare_contents(
                     a.content,
@@ -570,7 +579,55 @@ async def deduplicate_memories(
                 )
                 if verdict.near_duplicate:
                     parent[_find_root(parent, i)] = _find_root(parent, j)
+                elif verdict.classification == "uncertain":
+                    uncertain.append((g_index, i, j, verdict.score))
 
+    # Pass 2: gray-zone adjudication (best-effort, bounded); SAME unions.
+    adjudicated = 0
+    llm = False
+    if uncertain and deps is not None:
+        adjudicator = await resolve_memory_adjudicator(
+            session,
+            deps.crypto,
+            workspace_id=ctx.workspace_id,
+            metrics=deps.metrics,
+            tracer=deps.tracer,
+        )
+        if adjudicator is not None:
+            llm = True
+            try:
+                uncertain.sort(key=lambda item: (-item[3], item[0], item[1], item[2]))
+                picked: list[tuple[int, int, int]] = []
+                for g_index, i, j, _score in uncertain:
+                    if len(picked) >= MAX_DEDUP_ADJUDICATED_PAIRS:
+                        break
+                    if _find_root(parents[g_index], i) == _find_root(parents[g_index], j):
+                        continue  # already merged through the rule
+                    picked.append((g_index, i, j))
+                if picked:
+                    pairs = [
+                        AdjudicationPair(
+                            content_a=group_list[g][i].content,
+                            content_b=group_list[g][j].content,
+                            subject_a=group_list[g][i].subject,
+                            subject_b=group_list[g][j].subject,
+                        )
+                        for g, i, j in picked
+                    ]
+                    verdicts = await adjudicator.adjudicate(pairs, workspace_id=ctx.workspace_id)
+                    adjudicated = len(pairs)
+                    for (g, i, j), same in zip(picked, verdicts, strict=True):
+                        if same:
+                            parent = parents[g]
+                            parent[_find_root(parent, i)] = _find_root(parent, j)
+            finally:
+                await adjudicator.close()
+
+    now = datetime.now(UTC)
+    clusters_merged = 0
+    superseded_total = 0
+    for g_index, group in enumerate(group_list):
+        parent = parents[g_index]
         clusters: dict[int, list[MemoryRecord]] = {}
         for index, row in enumerate(group):
             clusters.setdefault(_find_root(parent, index), []).append(row)
@@ -616,10 +673,12 @@ async def deduplicate_memories(
             "clusters": clusters_merged,
             "superseded": superseded_total,
             "remaining_active": remaining_active,
+            "adjudicated": adjudicated,
+            "llm": llm,
         },
     )
     await session.commit()
-    return clusters_merged, superseded_total, remaining_active
+    return clusters_merged, superseded_total, remaining_active, adjudicated, llm
 
 
 async def embed_missing(

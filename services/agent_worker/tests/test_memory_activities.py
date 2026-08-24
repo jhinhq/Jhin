@@ -39,6 +39,8 @@ from jhin_domain import (
     TaskState,
     new_uuid7,
 )
+from jhin_memory import adjudication as adjudication_module
+from jhin_memory import content_hash
 from jhin_memory import embedding as embedding_module
 from jhin_models import (
     EmbeddingResult,
@@ -497,6 +499,56 @@ class TestApply:
             apply_input(world, source_id=str(new_uuid7())),
         )
         assert not missing.ok and missing.error == "source_not_found"
+
+    async def test_gray_zone_paraphrase_is_adjudicated_and_merged(
+        self, world: World, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Different subjects, Jaccard 0.5 — the deterministic rule cannot
+        # merge this pair; the workspace default chat model answers SAME.
+        existing = "The release day is every other Thursday."
+        async with world.session_factory() as session:
+            session.add(
+                MemoryRecord(
+                    workspace_id=world.workspace.id,
+                    scope="agent",
+                    scope_id=world.agent.id,
+                    kind="fact",
+                    subject="release.day",
+                    content=existing,
+                    content_hash=content_hash(existing),
+                    visibility="agent",
+                    status=MemoryStatus.ACTIVE.value,
+                    created_by_type="agent",
+                )
+            )
+            await session.commit()
+        client = StubClient('{"verdicts": ["SAME"]}')
+        monkeypatch.setattr(adjudication_module, "build_model_client", lambda *a, **k: client)
+
+        result = await ActivityEnvironment().run(
+            world.activities.apply_memory_candidates_activity,
+            apply_input(
+                world,
+                candidates_json=[
+                    {"content": "We deploy every other Thursday.", "subject": "deploy.days"}
+                ],
+            ),
+        )
+        assert result.ok
+        assert result.activated == 0 and result.duplicates == 1
+        assert client.closed
+        assert client.requests[0].messages[0].role == "system"
+        async with world.session_factory() as session:
+            rows = list(await session.scalars(select(MemoryRecord)))
+            active = [r for r in rows if r.status == MemoryStatus.ACTIVE.value]
+            assert len(active) == 1
+            assert active[0].content == existing
+            assert active[0].policy_json.get("confirmations") == 1
+            audit = await session.scalar(
+                select(AuditEvent).where(AuditEvent.action == "memory.maintained")
+            )
+            assert audit is not None
+            assert audit.metadata_json["adjudicated"] == 1
 
 
 class TestApplyEmbeds:

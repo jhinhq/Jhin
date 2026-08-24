@@ -23,7 +23,13 @@ from jhin_domain import (
     MemoryStatus,
     MessageVisibility,
 )
+from jhin_memory.adjudication import (
+    MAX_APPLY_ADJUDICATED_PAIRS,
+    AdjudicationPair,
+    PairAdjudicator,
+)
 from jhin_memory.policy import content_hash, evaluate_candidate, normalize_subject
+from jhin_memory.similarity import compare_contents
 from jhin_memory.types import (
     ActorFacts,
     ExistingRecord,
@@ -47,6 +53,8 @@ _LIVE_STATUSES = (
 class ApplyResult:
     created: list[MemoryRecord] = field(default_factory=list)
     decisions: list[MemoryDecision] = field(default_factory=list)
+    # Gray-zone pairs sent to LLM adjudication during this apply (bounded).
+    adjudicated: int = 0
 
     @property
     def rejected(self) -> int:
@@ -79,6 +87,7 @@ class ApplyResult:
             "duplicates": self.duplicates,
             "confirmed": self.confirmed,
             "superseded": self.superseded,
+            "adjudicated": self.adjudicated,
             "reasons": sorted({reason for d in self.decisions for reason in d.reasons}),
         }
 
@@ -273,6 +282,8 @@ async def apply_candidates(
     candidate_embeddings: Sequence[Sequence[float] | None] | None = None,
     embedding_model: str | None = None,
     agent_name: str = "",
+    adjudicator: PairAdjudicator | None = None,
+    max_adjudicated_pairs: int = MAX_APPLY_ADJUDICATED_PAIRS,
 ) -> ApplyResult:
     """Run policy over ``candidates`` and persist the survivors.
 
@@ -281,11 +292,18 @@ async def apply_candidates(
     they need no second embedding call. A near-duplicate that adds nothing
     bumps the stored record (confirmation count, importance, tag union); a
     meaningfully better one becomes the next version of the stored record.
+
+    ``adjudicator`` (best-effort, bounded to ``max_adjudicated_pairs`` per
+    call) settles *uncertain* candidate↔existing pairs — the same fact in
+    different words that the deterministic rule cannot match — by asking the
+    workspace default chat model SAME/DIFFERENT; SAME feeds the existing
+    duplicate/supersede handling, and any failure means DIFFERENT.
     """
     now = now or datetime.now(UTC)
     result = ApplyResult()
     cache: dict[tuple[str, UUID], list[MemoryRecord]] = {}
     pending_vectors: list[tuple[MemoryRecord, Sequence[float]]] = []
+    pair_budget = max_adjudicated_pairs if adjudicator is not None else 0
 
     for index, candidate in enumerate(candidates):
         vector: Sequence[float] | None = None
@@ -318,6 +336,57 @@ async def apply_candidates(
             embedding_model=embedding_model,
             agent_name=agent_name,
         )
+        if (
+            adjudicator is not None
+            and pair_budget > 0
+            and decision.outcome in ("activate", "propose")
+            and decision.supersedes is None
+        ):
+            # The rule found no near duplicate; adjudicate the gray zone.
+            subject = normalize_subject(candidate.subject)
+            scored: list[tuple[float, MemoryRecord]] = []
+            for row in existing_rows:
+                if not row.content:
+                    continue
+                verdict = compare_contents(
+                    decision.content,
+                    row.content,
+                    subject_a=subject,
+                    subject_b=row.subject,
+                    embedding_a=vector,
+                    embedding_b=row.embedding_json,
+                    embedding_model_a=embedding_model,
+                    embedding_model_b=row.embedding_model,
+                )
+                if verdict.classification == "uncertain":
+                    scored.append((verdict.score, row))
+            if scored:
+                scored.sort(key=lambda item: -item[0])
+                picked = [row for _, row in scored[:pair_budget]]
+                pairs = [
+                    AdjudicationPair(
+                        content_a=decision.content,
+                        content_b=row.content,
+                        subject_a=subject,
+                        subject_b=row.subject,
+                    )
+                    for row in picked
+                ]
+                verdicts = await adjudicator.adjudicate(pairs, workspace_id=source.workspace_id)
+                pair_budget -= len(pairs)
+                result.adjudicated += len(pairs)
+                same_ids = {row.id for row, same in zip(picked, verdicts, strict=True) if same}
+                if same_ids:
+                    decision = evaluate_candidate(
+                        candidate,
+                        source,
+                        actor,
+                        [_as_existing(r) for r in existing_rows],
+                        candidate_embedding=vector,
+                        embedding_model=embedding_model,
+                        agent_name=agent_name,
+                        adjudicated_same=same_ids,
+                    )
         result.decisions.append(decision)
         if decision.outcome == "duplicate" and decision.duplicate_of is not None:
             # Confirmation: the same fact came up again. Strengthen the

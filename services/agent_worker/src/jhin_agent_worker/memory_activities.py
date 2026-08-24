@@ -45,12 +45,14 @@ from jhin_domain import (
 from jhin_memory import (
     ActorFacts,
     ExtractionResult,
+    MemoryAdjudicator,
     MemoryCandidate,
     MemoryEmbedder,
     agent_team_ids,
     apply_candidates,
     derive_source_facts,
     extract_candidates,
+    resolve_memory_adjudicator,
     resolve_memory_embedder,
 )
 from jhin_models import build_model_client
@@ -420,6 +422,16 @@ class MemoryActivities:
                 metrics=self._metrics,
                 tracer=self._tracer,
             )
+            # Gray-zone adjudication (best-effort, bounded): the workspace
+            # default chat profile settles paraphrase pairs the deterministic
+            # rule cannot match; None when no default profile exists.
+            adjudicator: MemoryAdjudicator | None = await resolve_memory_adjudicator(
+                session,
+                self._resources.crypto,
+                workspace_id=workspace_id,
+                metrics=self._metrics,
+                tracer=self._tracer,
+            )
             vectors: list[list[float]] | None = None
             try:
                 if embedder is not None:
@@ -434,6 +446,7 @@ class MemoryActivities:
                     candidate_embeddings=vectors,
                     embedding_model=embedder.model if embedder is not None else None,
                     agent_name=agent.name,
+                    adjudicator=adjudicator,
                 )
                 summary: dict[str, Any] = applied.summary()
                 embedded = sum(1 for r in applied.created if r.embedding_json)
@@ -447,6 +460,8 @@ class MemoryActivities:
             finally:
                 if embedder is not None:
                     await embedder.close()
+                if adjudicator is not None:
+                    await adjudicator.close()
             session.add(
                 AuditEvent(
                     workspace_id=workspace_id,

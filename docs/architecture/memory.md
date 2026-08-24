@@ -119,6 +119,20 @@ in order:
    scope. The apply path embeds candidates *before* apply (one best-effort
    call) so semantic comparison works at write time; the same vectors are
    attached to the created records.
+   **Gray zone** (`jhin_memory.adjudication`): every pair additionally gets
+   a three-way classification — `duplicate` (the rule fired), `distinct`
+   (different subjects, Jaccard < 0.25, and cosine < 0.70 when comparable
+   vectors exist), else `uncertain`. Uncertain candidate↔existing pairs are
+   adjudicated SAME/DIFFERENT by the workspace **default** chat profile
+   (`resolve_memory_adjudicator`): one compact request for all pairs,
+   temperature 0, strict `{"verdicts": ["SAME"|"DIFFERENT", ...]}` parsing,
+   at most 5 pairs per apply. SAME feeds the near-duplicate handling above
+   (extra reason `adjudicated_same`); any failure — no default profile,
+   disabled provider, provider error, unparseable output — means DIFFERENT
+   (never merge on doubt). Best-effort by contract: failures log the
+   registered `memory.adjudication_failed` event, successes
+   `memory.adjudicated` (counts only), and only the pair texts + subjects
+   (already model-visible workspace content) are sent to the model.
 5. **Contradiction**: same normalized `subject` in the same scope with a
    different hash (and no near-duplicate match — a changed *value* keeps
    this path) → the new record and the existing active ones become
@@ -248,7 +262,11 @@ CHANGED facts — cheaper than post-hoc dedup and it reduces churn. The fake
 provider (`jhin_models.testing.fake_openai`) implements the extraction
 contract deterministically (`user:` lines containing "remember", delegation
 exchange lines; ≥0.6 token-containment overlap with a known memory is
-skipped), so the memory feature is exercisable offline.
+skipped), so the memory feature is exercisable offline. It also answers the
+dedup **adjudication** contract deterministically: a pair is SAME when the
+two statements' value tokens (weekday names / tokens with digits) are equal
+and non-empty, DIFFERENT otherwise — so gray-zone dedup is testable offline
+too.
 
 ## Maintenance workflow (`jhin_workflows.memory_maintenance`)
 
@@ -273,9 +291,11 @@ MemoryMaintenanceInput(workspace_id, agent_id, source_kind, source_id,
   `MemoryMaintenanceResult(status=extraction_failed|apply_failed|nothing_to_remember|applied)`.
   **It never raises**, and it is started detached, so memory failure never
   fails the originating chat turn or task.
-- Apply embeds the created live records best-effort (see *Embeddings*) and
-  writes an audit row `memory.maintained` (counts and ids only, including
-  `embedded`).
+- Apply embeds the created live records best-effort (see *Embeddings*),
+  adjudicates gray-zone candidate↔existing pairs through the workspace
+  default chat profile (≤5 pairs per apply, best-effort, failure =
+  DIFFERENT), and writes an audit row `memory.maintained` (counts and ids
+  only, including `embedded` and `adjudicated`).
 
 ```text
 start_memory_maintenance(client, params, *, task_queue=AGENT_TASK_QUEUE)
@@ -378,13 +398,14 @@ require admin.
 | POST | `/{id}/approve` | admin | proposed → active |
 | POST | `/{id}/reject` | admin | proposed → rejected |
 | POST | `/embed-missing` | admin | `EmbedMissingIn {limit: 1..500 = 100}` → `EmbedMissingOut {embedded, remaining, model, dimensions}`; 409 `embeddings_unsupported` when no profile enables embeddings |
-| POST | `/deduplicate` | admin | → `DeduplicateOut {clusters, superseded, remaining_active}`: clusters active near-duplicates per `(scope, scope_id)` with the shared similarity rule, keeps the best of each cluster (pinned, then confidence, then newest; tag union + confirmation count), supersedes the rest (content kept as history) |
+| POST | `/deduplicate` | admin | → `DeduplicateOut {clusters, superseded, remaining_active, adjudicated, llm}`: clusters active near-duplicates per `(scope, scope_id)` with the shared similarity rule, keeps the best of each cluster (pinned, then confidence, then newest; tag union + confirmation count), supersedes the rest (content kept as history). Uncertain (gray-zone) pairs are adjudicated by the workspace default chat profile when one exists — at most 20 pairs per call, highest similarity first, failure = DIFFERENT; `adjudicated` counts the pairs sent, `llm` whether smart matching ran (uncertain pairs existed and a chat-capable default profile was resolved). Idempotent. |
 
 Audit actions (content-free): `memory.created` (includes `embedded`),
 `memory.edited`, `memory.pinned`, `memory.unpinned`, `memory.contested`,
 `memory.forgotten` (metadata: `forgotten_ids`, `scope`), `memory.approved`,
 `memory.rejected`, `memory.embed_missing`, `memory.deduplicated`
-(metadata: `scanned`, `clusters`, `superseded`, `remaining_active`).
+(metadata: `scanned`, `clusters`, `superseded`, `remaining_active`,
+`adjudicated`, `llm`).
 
 ### Schemas
 
@@ -426,3 +447,8 @@ MemoryUpdate { content?, kind?, subject?, tags?, confidence?, importance?, expir
 - Embedding is best-effort everywhere: a missing profile or provider failure
   degrades retrieval to lexical (`degraded=true`) and never blocks a write.
   Embeddings from a different model or dimension count are never compared.
+- Adjudication is best-effort and fail-safe: without a chat-capable default
+  profile the system behaves exactly as before, a provider failure or
+  unparseable reply counts every pair as DIFFERENT (nothing is ever merged
+  on doubt), pair budgets are hard caps (5 per apply, 20 per dedup call),
+  and only pair texts + subjects are ever sent to the model.

@@ -3271,6 +3271,7 @@ def test_exact_production_model_factory_owners_supply_semantic_handles() -> None
                     "tracer",
                 ),
                 "packages/memory/src/jhin_memory/embedding.py": ("metrics", "tracer"),
+                "packages/memory/src/jhin_memory/adjudication.py": ("metrics", "tracer"),
             },
         )
         == []

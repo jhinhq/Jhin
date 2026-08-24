@@ -129,3 +129,58 @@ def test_ordinary_chat_is_not_intercepted() -> None:
     assert status == 200
     reply = envelope["choices"][0]["message"]["content"]  # type: ignore[index]
     assert reply.startswith("[fake-mini] Completed:")
+
+
+# --- deterministic dedup adjudication (jhin_memory.adjudication contract) ---
+
+_ADJUDICATION_SYSTEM = (
+    "You compare pairs of remembered statements from one workspace and decide "
+    "whether the two statements in each pair record the SAME real-world fact."
+)
+
+
+def _adjudication_body(pairs: list[tuple[str, str]]) -> dict[str, object]:
+    lines: list[str] = []
+    for index, (a, b) in enumerate(pairs, start=1):
+        lines.append(f"Pair {index} (subjects: - | -)")
+        lines.append(f"A: {a}")
+        lines.append(f"B: {b}")
+    user = "Decide SAME or DIFFERENT for each pair.\n\n" + "\n".join(lines)
+    return {
+        "model": "fake-mini",
+        "messages": [
+            {"role": "system", "content": _ADJUDICATION_SYSTEM},
+            {"role": "user", "content": user},
+        ],
+    }
+
+
+def test_adjudication_shares_value_token_means_same() -> None:
+    status, payload = build_completion(
+        _adjudication_body(
+            [
+                ("We deploy every other Thursday.", "The release day is every other Thursday."),
+                ("We deploy every other Thursday.", "We deploy every Friday."),
+                ("The office is closed.", "The kitchen is closed."),
+            ]
+        )
+    )
+    assert status == 200
+    reply = json.loads(payload["choices"][0]["message"]["content"])
+    # Same weekday → SAME; conflicting weekday → DIFFERENT; no value tokens
+    # at all → DIFFERENT (never merge on doubt).
+    assert reply == {"verdicts": ["SAME", "DIFFERENT", "DIFFERENT"]}
+
+
+def test_adjudication_numbers_count_as_value_tokens() -> None:
+    status, payload = build_completion(
+        _adjudication_body(
+            [
+                ("The retry limit is 3.", "We retry at most 3 times."),
+                ("The retry limit is 3.", "The retry limit is 5."),
+            ]
+        )
+    )
+    assert status == 200
+    reply = json.loads(payload["choices"][0]["message"]["content"])
+    assert reply == {"verdicts": ["SAME", "DIFFERENT"]}

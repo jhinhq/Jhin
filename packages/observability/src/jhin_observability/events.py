@@ -77,6 +77,14 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
         "count": FieldKind.COUNT,
     },
     "memory.embedded": {"workspace_id": FieldKind.ID, "count": FieldKind.COUNT},
+    # Gray-zone dedup adjudication (docs/architecture/memory.md): failures
+    # mean every pair counts as DIFFERENT (never merge on doubt).
+    "memory.adjudicated": {"workspace_id": FieldKind.ID, "count": FieldKind.COUNT},
+    "memory.adjudication_failed": {
+        "error_type": FieldKind.ERROR_TYPE,
+        "workspace_id": FieldKind.ID,
+        "count": FieldKind.COUNT,
+    },
     "memory.maintenance_start": {
         "status": FieldKind.ENUM,
         "task_id": FieldKind.ID,

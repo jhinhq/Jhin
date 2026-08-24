@@ -19,6 +19,16 @@ A pair is a *near duplicate* when any of these holds:
   ≥ 0.75 (wording variants of the same keyed fact; a genuinely different
   *value* for the subject keeps failing this and stays on the contradiction
   path).
+
+On top of the boolean rule every pair gets a three-way **classification**:
+
+- ``duplicate`` — the near-duplicate rule fired;
+- ``distinct`` — clearly unrelated: different subjects, Jaccard below
+  :data:`DISTINCT_JACCARD_FLOOR` (0.25), and cosine below
+  :data:`DISTINCT_COSINE_FLOOR` (0.70) when comparable vectors exist;
+- ``uncertain`` — the gray zone in between. Uncertain pairs are candidates
+  for LLM adjudication (:mod:`jhin_memory.adjudication`); adjudication
+  failure means DIFFERENT, so the classification alone never merges.
 """
 
 from __future__ import annotations
@@ -27,11 +37,18 @@ import math
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 SEMANTIC_DUPLICATE_COSINE = 0.90
 LEXICAL_DUPLICATE_JACCARD = 0.6
 SUBJECT_NEAR_JACCARD = 0.4
 SUBJECT_NEAR_CONTAINMENT = 0.75
+# Below both floors (and with different subjects) a pair is clearly distinct
+# and never worth adjudicating.
+DISTINCT_JACCARD_FLOOR = 0.25
+DISTINCT_COSINE_FLOOR = 0.70
+
+PairClassification = Literal["duplicate", "distinct", "uncertain"]
 
 _TOKEN_RE = re.compile(r"[a-z0-9]{2,}")
 _STOPWORDS = frozenset(
@@ -126,6 +143,7 @@ class SimilarityVerdict:
     jaccard: float
     cosine: float | None
     subject_match: bool
+    classification: PairClassification = "uncertain"
 
     @property
     def score(self) -> float:
@@ -165,6 +183,21 @@ def compare_contents(
             and containment(tokens_a, tokens_b) >= SUBJECT_NEAR_CONTAINMENT
         )
     )
+    classification: PairClassification
+    if near:
+        classification = "duplicate"
+    elif (
+        not subject_match
+        and jac < DISTINCT_JACCARD_FLOOR
+        and (cos is None or cos < DISTINCT_COSINE_FLOOR)
+    ):
+        classification = "distinct"
+    else:
+        classification = "uncertain"
     return SimilarityVerdict(
-        near_duplicate=near, jaccard=jac, cosine=cos, subject_match=subject_match
+        near_duplicate=near,
+        jaccard=jac,
+        cosine=cos,
+        subject_match=subject_match,
+        classification=classification,
     )

@@ -128,8 +128,14 @@ class EmbedMissingOut(BaseModel):
 
 
 class DeduplicateOut(BaseModel):
-    """Result of the admin retroactive dedup pass."""
+    """Result of the admin retroactive dedup pass.
+
+    ``adjudicated`` counts the gray-zone pairs sent to LLM adjudication;
+    ``llm`` says whether smart matching ran during this pass (there were
+    uncertain pairs and a chat-capable default profile existed)."""
 
     clusters: int
     superseded: int
     remaining_active: int
+    adjudicated: int = 0
+    llm: bool = False

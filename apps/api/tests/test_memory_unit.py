@@ -3,7 +3,9 @@ contest, forget tombstones, and promotion review — against SQLite."""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
+from uuid import UUID
 
 import pytest
 from fastapi import HTTPException
@@ -15,7 +17,14 @@ from jhin_api.memory import service
 from jhin_api.memory.schemas import MemoryCreate, MemoryUpdate
 from jhin_db.models import Agent, AuditEvent, MemoryRecord, Team, User, Workspace
 from jhin_domain import ActorType, MemoryScope, MemoryStatus, WorkspaceRole, new_uuid7
-from jhin_memory import ActorFacts, MemoryCandidate, SourceFacts, apply_candidates, content_hash
+from jhin_memory import (
+    ActorFacts,
+    AdjudicationPair,
+    MemoryCandidate,
+    SourceFacts,
+    apply_candidates,
+    content_hash,
+)
 
 
 class World:
@@ -452,8 +461,11 @@ class TestDeduplicate:
         session.add_all(rows)
         await session.flush()
 
-        clusters, superseded, remaining = await service.deduplicate_memories(session, admin_ctx)
+        clusters, superseded, remaining, adjudicated, llm = await service.deduplicate_memories(
+            session, admin_ctx
+        )
         assert (clusters, superseded, remaining) == (1, 2, 2)
+        assert (adjudicated, llm) == (0, False)  # no deps → no smart matching
         keeper = await session.get(MemoryRecord, rows[2].id)
         assert keeper is not None
         assert keeper.status == MemoryStatus.ACTIVE.value  # highest confidence wins
@@ -468,7 +480,7 @@ class TestDeduplicate:
         assert untouched is not None and untouched.status == MemoryStatus.ACTIVE.value
         assert (await audit_actions(session))[-1] == "memory.deduplicated"
         # Idempotent: a second pass has nothing left to merge.
-        assert await service.deduplicate_memories(session, admin_ctx) == (0, 0, 2)
+        assert await service.deduplicate_memories(session, admin_ctx) == (0, 0, 2, 0, False)
 
     async def test_semantic_cluster_via_stored_embeddings(
         self, session: AsyncSession, admin_ctx: WorkspaceContext, world: World
@@ -493,7 +505,9 @@ class TestDeduplicate:
         ]
         session.add_all(rows)
         await session.flush()
-        clusters, superseded, remaining = await service.deduplicate_memories(session, admin_ctx)
+        clusters, superseded, remaining, _, _ = await service.deduplicate_memories(
+            session, admin_ctx
+        )
         assert (clusters, superseded, remaining) == (1, 1, 1)
         keeper = await session.get(MemoryRecord, rows[0].id)
         assert keeper is not None and keeper.status == MemoryStatus.ACTIVE.value
@@ -504,3 +518,142 @@ class TestDeduplicate:
         with pytest.raises(HTTPException) as exc:
             await service.deduplicate_memories(session, member_ctx)
         assert exc.value.status_code == 403
+
+
+class WeekdayAdjudicator:
+    """SAME when both statements name the same weekday, DIFFERENT otherwise —
+    the deterministic analogue of the fake provider's adjudication rule."""
+
+    def __init__(self) -> None:
+        self.pairs: list[AdjudicationPair] = []
+        self.closed = False
+
+    async def adjudicate(
+        self, pairs: Sequence[AdjudicationPair], *, workspace_id: UUID
+    ) -> list[bool]:
+        self.pairs.extend(pairs)
+        days = ("monday", "tuesday", "wednesday", "thursday", "friday")
+        verdicts: list[bool] = []
+        for pair in pairs:
+            values_a = {d for d in days if d in pair.content_a.casefold()}
+            values_b = {d for d in days if d in pair.content_b.casefold()}
+            verdicts.append(bool(values_a) and values_a == values_b)
+        return verdicts
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class TestDeduplicateAdjudication:
+    """Gray-zone pairs the rule cannot match are settled by the workspace
+    default chat model (monkeypatched resolver) — SAME merges, a changed
+    value stays split, and everything remains idempotent and audited."""
+
+    def _patch(self, monkeypatch: pytest.MonkeyPatch) -> WeekdayAdjudicator:
+        stub = WeekdayAdjudicator()
+
+        async def fake_resolver(*args: Any, **kwargs: Any) -> WeekdayAdjudicator:
+            return stub
+
+        monkeypatch.setattr(service, "resolve_memory_adjudicator", fake_resolver)
+        return stub
+
+    async def test_live_paraphrase_pair_is_merged(
+        self,
+        session: AsyncSession,
+        admin_ctx: WorkspaceContext,
+        world: World,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        stub = self._patch(monkeypatch)
+        rows = [
+            _active_record(
+                admin_ctx,
+                world,
+                "We deploy every other Thursday.",
+                subject="deploy.days",
+                confidence=0.9,
+            ),
+            _active_record(
+                admin_ctx,
+                world,
+                "The release day is every other Thursday.",
+                subject="release.day",
+                confidence=1.0,
+            ),
+        ]
+        session.add_all(rows)
+        await session.flush()
+
+        result = await service.deduplicate_memories(
+            session, admin_ctx, deps=service.EmbeddingDeps(crypto=None)
+        )
+        assert result == (1, 1, 1, 1, True)
+        assert len(stub.pairs) == 1 and stub.closed
+        keeper = await session.get(MemoryRecord, rows[1].id)
+        assert keeper is not None and keeper.status == MemoryStatus.ACTIVE.value
+        loser = await session.get(MemoryRecord, rows[0].id)
+        assert loser is not None
+        assert loser.status == MemoryStatus.SUPERSEDED.value
+        assert loser.policy_json["deduplicated_into"] == str(rows[1].id)
+        events = list(
+            await session.scalars(
+                select(AuditEvent).where(AuditEvent.action == "memory.deduplicated")
+            )
+        )
+        assert events[-1].metadata_json["adjudicated"] == 1
+        assert events[-1].metadata_json["llm"] is True
+        # Idempotent: nothing left to merge — and with no uncertain pairs the
+        # adjudicator is never even resolved (llm=False: no smart matching ran).
+        assert await service.deduplicate_memories(
+            session, admin_ctx, deps=service.EmbeddingDeps(crypto=None)
+        ) == (0, 0, 1, 0, False)
+
+    async def test_value_change_stays_distinct(
+        self,
+        session: AsyncSession,
+        admin_ctx: WorkspaceContext,
+        world: World,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._patch(monkeypatch)
+        session.add_all(
+            [
+                _active_record(
+                    admin_ctx, world, "We deploy every other Thursday.", subject="deploy.day"
+                ),
+                _active_record(admin_ctx, world, "We deploy every Friday.", subject="deploy.day"),
+            ]
+        )
+        await session.flush()
+        result = await service.deduplicate_memories(
+            session, admin_ctx, deps=service.EmbeddingDeps(crypto=None)
+        )
+        assert result == (0, 0, 2, 1, True)
+
+    async def test_without_default_profile_behaves_as_today(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext, world: World
+    ) -> None:
+        # No monkeypatch: the real resolver finds no default profile in this
+        # workspace, so the pass runs rule-only and reports llm=False.
+        session.add_all(
+            [
+                _active_record(
+                    admin_ctx,
+                    world,
+                    "We deploy every other Thursday.",
+                    subject="deploy.days",
+                ),
+                _active_record(
+                    admin_ctx,
+                    world,
+                    "The release day is every other Thursday.",
+                    subject="release.day",
+                ),
+            ]
+        )
+        await session.flush()
+        result = await service.deduplicate_memories(
+            session, admin_ctx, deps=service.EmbeddingDeps(crypto=None)
+        )
+        assert result == (0, 0, 2, 0, False)

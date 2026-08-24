@@ -128,11 +128,23 @@ async def deduplicate(request: Request, ctx: AdminCtx, db: DbSession) -> Dedupli
     """Retroactive cleanup: collapse active near-duplicates per scope (admin).
 
     Keeps the best record of each duplicate cluster and supersedes the rest;
+    gray-zone paraphrase pairs are adjudicated by the workspace default chat
+    model when one exists (``llm`` reports whether smart matching ran);
     audited content-free as ``memory.deduplicated``."""
-    clusters, superseded, remaining = await service.deduplicate_memories(
-        db, ctx, request_id=req_id(request), ip_hash=ip_hash(request)
+    clusters, superseded, remaining, adjudicated, llm = await service.deduplicate_memories(
+        db,
+        ctx,
+        deps=_embedding_deps(request),
+        request_id=req_id(request),
+        ip_hash=ip_hash(request),
     )
-    return DeduplicateOut(clusters=clusters, superseded=superseded, remaining_active=remaining)
+    return DeduplicateOut(
+        clusters=clusters,
+        superseded=superseded,
+        remaining_active=remaining,
+        adjudicated=adjudicated,
+        llm=llm,
+    )
 
 
 @router.get("/{memory_id}")

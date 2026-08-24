@@ -151,7 +151,7 @@ function renderPanel(props: { canWrite: boolean; isAdmin: boolean }) {
 
 describe("MemoryPanel duplicates cleanup", () => {
   it("lets an admin merge duplicates and shows the result", async () => {
-    vi.mocked(api).mockResolvedValue({ clusters: 1, superseded: 2, remaining_active: 3 });
+    vi.mocked(api).mockResolvedValue({ clusters: 1, superseded: 2, remaining_active: 3, adjudicated: 0, llm: false });
     renderPanel({ canWrite: true, isAdmin: true });
     fireEvent.click(screen.getByRole("button", { name: /Clean up duplicates/ }));
     const status = await screen.findByRole("status");
@@ -159,8 +159,17 @@ describe("MemoryPanel duplicates cleanup", () => {
     expect(api).toHaveBeenCalledWith("/api/v1/workspaces/ws-1/memories/deduplicate", { method: "POST" });
   });
 
+  it("mentions smart matching when the model compared wordings", async () => {
+    vi.mocked(api).mockResolvedValue({ clusters: 1, superseded: 1, remaining_active: 3, adjudicated: 2, llm: true });
+    renderPanel({ canWrite: true, isAdmin: true });
+    fireEvent.click(screen.getByRole("button", { name: /Clean up duplicates/ }));
+    expect((await screen.findByRole("status")).textContent).toBe(
+      "Merged 1 duplicate into 1 memory. Smart matching was used to compare wordings.",
+    );
+  });
+
   it("reports when nothing needed merging", async () => {
-    vi.mocked(api).mockResolvedValue({ clusters: 0, superseded: 0, remaining_active: 5 });
+    vi.mocked(api).mockResolvedValue({ clusters: 0, superseded: 0, remaining_active: 5, adjudicated: 0, llm: false });
     renderPanel({ canWrite: true, isAdmin: true });
     fireEvent.click(screen.getByRole("button", { name: /Clean up duplicates/ }));
     expect((await screen.findByRole("status")).textContent).toBe("No duplicates found.");

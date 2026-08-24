@@ -195,6 +195,53 @@ def _pending_tool_marker(messages: list[dict[str, Any]]) -> tuple[int, str, str]
     return None
 
 
+# --- deterministic dedup adjudication (jhin_memory.adjudication contract) ---
+
+# Distinctive phrase of jhin_memory.adjudication.ADJUDICATION_SYSTEM_PROMPT.
+ADJUDICATION_PROMPT_MARKER = "You compare pairs of remembered statements"
+_ADJUDICATION_PAIR_RE = re.compile(r"^A: (.*)\nB: (.*)$", re.MULTILINE)
+# Unlike the generic token regex, single digits ("retry limit is 3") count.
+_ADJUDICATION_TOKEN_RE = re.compile(r"[a-z]{2,}|[0-9]+")
+_WEEKDAYS = frozenset(
+    ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+)
+
+
+def _adjudication_value_tokens(text: str) -> set[str]:
+    """The "rare" value-bearing tokens of a statement: weekday names and
+    tokens carrying digits."""
+    return {
+        token
+        for token in _ADJUDICATION_TOKEN_RE.findall(text.casefold())
+        if token in _WEEKDAYS or any(c.isdigit() for c in token)
+    }
+
+
+def _adjudication_reply(messages: list[dict[str, Any]]) -> str | None:
+    """Deterministic strict-JSON verdicts for a dedup-adjudication request.
+
+    Real models answer SAME/DIFFERENT per pair; the fake mirrors the contract
+    so gray-zone dedup is exercisable offline: a pair is SAME when the two
+    statements share at least one value token (weekday / number) and have no
+    conflicting value tokens — i.e. their value-token sets are equal and
+    non-empty ("every other Thursday" ↔ "every other Thursday" is SAME,
+    "Thursday" vs "Friday" is DIFFERENT, and value-free pairs stay DIFFERENT).
+    """
+    system = next((str(m.get("content", "")) for m in messages if m.get("role") == "system"), "")
+    if ADJUDICATION_PROMPT_MARKER not in system:
+        return None
+    user = next(
+        (str(m.get("content", "")) for m in reversed(messages) if m.get("role") == "user"), ""
+    )
+    verdicts: list[str] = []
+    for a, b in _ADJUDICATION_PAIR_RE.findall(user):
+        value_a = _adjudication_value_tokens(a)
+        value_b = _adjudication_value_tokens(b)
+        same = bool(value_a) and value_a == value_b
+        verdicts.append("SAME" if same else "DIFFERENT")
+    return json.dumps({"verdicts": verdicts})
+
+
 # --- deterministic memory extraction (jhin_memory.extraction contract) ---
 
 # Distinctive phrase of jhin_memory.extraction.EXTRACTION_SYSTEM_PROMPT.
@@ -311,14 +358,15 @@ def build_completion(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         "usage": usage,
     }
 
-    memory_reply = _memory_extraction_reply(messages)
-    if memory_reply is not None:
-        usage["completion_tokens"] = _estimate_tokens(memory_reply)
+    for structured_reply in (_adjudication_reply(messages), _memory_extraction_reply(messages)):
+        if structured_reply is None:
+            continue
+        usage["completion_tokens"] = _estimate_tokens(structured_reply)
         usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
         envelope["choices"] = [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": memory_reply},
+                "message": {"role": "assistant", "content": structured_reply},
                 "finish_reason": "stop",
             }
         ]

@@ -290,16 +290,17 @@ export function MemoryPanel({
 
   const dedupe = useMutation({
     mutationFn: () =>
-      api<{ clusters: number; superseded: number; remaining_active: number }>(
+      api<{ clusters: number; superseded: number; remaining_active: number; adjudicated: number; llm: boolean }>(
         `/api/v1/workspaces/${workspaceId}/memories/deduplicate`,
         { method: "POST" },
       ),
     onSuccess: (result) => {
       setError(null);
+      const smart = result.llm ? " Smart matching was used to compare wordings." : "";
       setNotice(
         result.superseded === 0
-          ? "No duplicates found."
-          : `Merged ${result.superseded} duplicate${result.superseded === 1 ? "" : "s"} into ${result.clusters} ${result.clusters === 1 ? "memory" : "memories"}.`,
+          ? `No duplicates found.${smart}`
+          : `Merged ${result.superseded} duplicate${result.superseded === 1 ? "" : "s"} into ${result.clusters} ${result.clusters === 1 ? "memory" : "memories"}.${smart}`,
       );
       invalidate();
     },

@@ -26,7 +26,7 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from uuid import UUID
 
 from jhin_domain import (
@@ -98,6 +98,7 @@ def evaluate_candidate(
     candidate_embedding: Sequence[float] | None = None,
     embedding_model: str | None = None,
     agent_name: str = "",
+    adjudicated_same: Collection[UUID] = frozenset(),
 ) -> MemoryDecision:
     reasons: list[str] = []
     human_explicit = actor.explicit and actor.actor_type is ActorType.USER
@@ -172,6 +173,9 @@ def evaluate_candidate(
     # better wording/value of a keyed fact). Never two active near-duplicates
     # in one scope: the weaker one is skipped (and the stored record
     # confirmed), a meaningfully better one becomes the next VERSION.
+    # ``adjudicated_same`` carries record ids an LLM adjudication pass judged
+    # to state the same fact (jhin_memory.adjudication); they are treated
+    # exactly like rule-detected near duplicates.
     best: tuple[SimilarityVerdict, ExistingRecord] | None = None
     for record in in_scope:
         if not record.content:
@@ -186,12 +190,16 @@ def evaluate_candidate(
             embedding_model_a=embedding_model,
             embedding_model_b=record.embedding_model,
         )
-        if verdict.near_duplicate and (best is None or verdict.score > best[0].score):
+        if (verdict.near_duplicate or record.id in adjudicated_same) and (
+            best is None or verdict.score > best[0].score
+        ):
             best = (verdict, record)
 
     supersedes: UUID | None = None
     if best is not None:
         near = best[1]
+        if not best[0].near_duplicate:
+            reasons.append("adjudicated_same")
         candidate_tokens = token_set(screened.content)
         near_tokens = token_set(near.content)
         more_specific = bool(candidate_tokens - near_tokens) and len(candidate_tokens) > len(
