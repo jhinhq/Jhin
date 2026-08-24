@@ -31,6 +31,7 @@ function item(overrides: Partial<AgentSkillInfo> = {}): AgentSkillInfo {
     name: "release-notes",
     description: "Write release notes.",
     source: "built_in",
+    category: "Engineering",
     enabled: true,
     enabled_for_agent: false,
     ...overrides,
@@ -105,5 +106,14 @@ describe("SkillsPanel", () => {
     renderPanel([item()], [], false);
     const checkbox = screen.getByRole("checkbox", { name: "Use release-notes" });
     expect((checkbox as HTMLInputElement).disabled).toBe(true);
+  });
+
+  it("shows a category badge for each skill", () => {
+    renderPanel(
+      [item({ category: "Engineering" }), item({ skill_id: "s2", name: "meeting-notes", category: "Communication" })],
+      [grant("skills.read")],
+    );
+    expect(screen.getByText("Engineering")).toBeTruthy();
+    expect(screen.getByText("Communication")).toBeTruthy();
   });
 });

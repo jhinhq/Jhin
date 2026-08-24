@@ -112,3 +112,20 @@ def test_skill_authorship_directly_follows_0022_and_the_graph_stays_linear() -> 
     assert authorship is not None
     assert authorship.down_revision == "0022"
     assert len(scripts.get_heads()) == 1, "the migration graph must stay linear"
+
+
+def test_skill_category_directly_follows_0023() -> None:
+    scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
+    category = scripts.get_revision("0024")
+
+    assert category is not None
+    assert category.down_revision == "0023"
+
+
+def test_skill_category_backfill_directly_follows_0024_and_the_graph_stays_linear() -> None:
+    scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
+    backfill = scripts.get_revision("0025")
+
+    assert backfill is not None
+    assert backfill.down_revision == "0024"
+    assert len(scripts.get_heads()) == 1, "the migration graph must stay linear"

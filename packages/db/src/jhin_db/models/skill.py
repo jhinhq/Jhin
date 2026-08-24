@@ -30,7 +30,9 @@ class Skill(Base, UuidPkMixin, TimestampMixin):
     )
     # Slug per the open format: lowercase letters/digits/hyphens, <= 64.
     name: Mapped[str] = mapped_column(String(64))
-    description: Mapped[str] = mapped_column(String(500))
+    # 2000, not 500: real-world skills (anthropics/skills' docx/pptx/xlsx)
+    # legitimately exceed 500. The prompt truncates to 300 regardless.
+    description: Mapped[str] = mapped_column(String(2000))
     # The SKILL.md markdown body (<= 64 KB, enforced by jhin_skills).
     content: Mapped[str] = mapped_column(Text, default="")
     # Extra reference files: [{"path": str, "content": str}, ...]
@@ -41,6 +43,10 @@ class Skill(Base, UuidPkMixin, TimestampMixin):
     # built_in | imported | custom | agent_authored
     source: Mapped[str] = mapped_column(String(16), default="custom")
     source_url: Mapped[str] = mapped_column(String(500), default="", server_default=text("''"))
+    # Nullable display grouping (docs/architecture/skills.md): "General" when
+    # unset. Derived from repo folder structure on a browse install, hand
+    # assigned for built-ins, "General" (editable) everywhere else.
+    category: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
     version: Mapped[int] = mapped_column(Integer, default=1, server_default=text("1"))
     # Set only for source="agent_authored": the agent whose skills.create call

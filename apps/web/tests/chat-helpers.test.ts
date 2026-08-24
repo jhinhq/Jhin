@@ -2,12 +2,14 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  composerHintFor,
   dayLabel,
   exchangeLabel,
   exchangeSuffix,
   filterConversations,
   friendlyMessageLabel,
   groupExchanges,
+  instructionDeliveryState,
   mergeTimeline,
   relativeTime,
   sortByActivity,
@@ -351,5 +353,147 @@ describe("mergeTimeline detailed mode", () => {
     expect(quiet).toEqual(["activity:c", "activity:d"]);
     const full = mergeTimeline([], activity, { detailed: true }).map((i) => i.id);
     expect(full).toEqual(["activity:a", "activity:b", "activity:c", "activity:d"]);
+  });
+});
+
+describe("instructionDeliveryState", () => {
+  const sent = { created_at: "2026-08-21T10:00:00Z", task_id: "t1" };
+
+  it("is queued with no later activity", () => {
+    expect(instructionDeliveryState(sent, [])).toBe("queued");
+  });
+
+  it("stays queued when the only later-looking item is actually earlier or simultaneous", () => {
+    expect(
+      instructionDeliveryState(sent, [
+        { created_at: "2026-08-21T09:59:00Z", task_id: "t1" },
+        { created_at: "2026-08-21T10:00:00Z", task_id: "t1" },
+      ]),
+    ).toBe("queued");
+  });
+
+  it("stays queued when the only later item belongs to a different task", () => {
+    expect(instructionDeliveryState(sent, [{ created_at: "2026-08-21T10:01:00Z", task_id: "t2" }])).toBe(
+      "queued",
+    );
+  });
+
+  it("is delivered once an agent message or activity item on the same task lands after it", () => {
+    expect(instructionDeliveryState(sent, [{ created_at: "2026-08-21T10:01:00Z", task_id: "t1" }])).toBe(
+      "delivered",
+    );
+  });
+
+  it("treats evidence without a task id as a match (activity cards may omit it)", () => {
+    expect(instructionDeliveryState(sent, [{ created_at: "2026-08-21T10:01:00Z", task_id: null }])).toBe(
+      "delivered",
+    );
+  });
+
+  it("is queued for an unparseable timestamp", () => {
+    expect(instructionDeliveryState({ created_at: "nope", task_id: "t1" }, [])).toBe("queued");
+  });
+
+  it("resolves multiple pending instructions independently", () => {
+    const first = { created_at: "2026-08-21T10:00:00Z", task_id: "t1" };
+    const second = { created_at: "2026-08-21T10:00:05Z", task_id: "t1" };
+    // Only one step has run since the first instruction was sent, landing
+    // between the two: it proves the first was delivered but not the second.
+    const laterItems = [{ created_at: "2026-08-21T10:00:02Z", task_id: "t1" }];
+    expect(instructionDeliveryState(first, laterItems)).toBe("delivered");
+    expect(instructionDeliveryState(second, laterItems)).toBe("queued");
+  });
+});
+
+describe("composerHintFor", () => {
+  it("is null when nothing is active", () => {
+    expect(composerHintFor(null, "Scout")).toBeNull();
+  });
+
+  it("names the agent and is concrete about what sending does while working", () => {
+    expect(composerHintFor({ label: "Working…", tone: "accent", kind: "working" }, "Scout")).toBe(
+      "Scout is working — this will steer it at the next step.",
+    );
+  });
+
+  it("has a distinct message while queued", () => {
+    const hint = composerHintFor({ label: "Waiting for a free slot", tone: "neutral", kind: "queued" }, "Scout");
+    expect(hint).toContain("Scout");
+    expect(hint).not.toBe(composerHintFor({ label: "Working…", tone: "accent", kind: "working" }, "Scout"));
+  });
+
+  it("is null for review/waiting_review/paused (not steerable by sending a message)", () => {
+    expect(composerHintFor({ label: "Needs your review", tone: "warn", kind: "review" }, "Scout")).toBeNull();
+    expect(
+      composerHintFor({ label: "Waiting for a review", tone: "neutral", kind: "waiting_review" }, "Scout"),
+    ).toBeNull();
+    expect(composerHintFor({ label: "Paused", tone: "warn", kind: "paused" }, "Scout")).toBeNull();
+  });
+});
+
+describe("groupExchanges never hides a user/instruction message (regression)", () => {
+  const opts = { primaryAgentId: "a1", primaryAgentName: "Scout" };
+
+  it("keeps an ordinary user message ungrouped even between agent↔agent traffic", () => {
+    const delegation = message({
+      id: "d1",
+      message_type: "delegation",
+      sender_id: "a1",
+      agent_id: "a1",
+      sender_name: "Scout",
+      content_json: { summary: "Please handle this", target_agent_id: "a2", target_agent_name: "Linus" },
+      created_at: "2026-08-21T10:00:00Z",
+    });
+    const instruction = message({
+      id: "u1",
+      sender_type: "user",
+      sender_id: "person",
+      agent_id: null,
+      sender_name: "Ada",
+      message_type: "instruction",
+      content_json: { text: "Also check the staging env" },
+      created_at: "2026-08-21T10:01:00Z",
+    });
+    const reported = message({
+      id: "r1",
+      message_type: "result",
+      sender_id: "a2",
+      agent_id: "a2",
+      sender_name: "Linus",
+      content_json: { summary: "All done", from_agent_id: "a2", from_agent_name: "Linus" },
+      created_at: "2026-08-21T10:02:00Z",
+    });
+    const grouped = groupExchanges(mergeTimeline([delegation, instruction, reported], []), opts);
+    // The instruction always breaks the exchange and appears as its own
+    // "message" item — groupExchanges only ever collapses agent↔agent runs.
+    expect(grouped.map((item) => item.kind)).toEqual(["exchange", "message", "exchange"]);
+    const userItem = grouped.find((item) => item.kind === "message");
+    expect(userItem && userItem.kind === "message" ? userItem.message.id : null).toBe("u1");
+  });
+
+  it("never folds a user message into an exchange even when detailed mode is off", () => {
+    const delegation = message({
+      id: "d2",
+      message_type: "delegation",
+      sender_id: "a1",
+      agent_id: "a1",
+      sender_name: "Scout",
+      content_json: { target_agent_id: "a2", target_agent_name: "Linus" },
+      created_at: "2026-08-21T10:00:00Z",
+    });
+    const instruction = message({
+      id: "u2",
+      sender_type: "user",
+      sender_id: "person",
+      agent_id: null,
+      message_type: "instruction",
+      content_json: { text: "Steer it" },
+      created_at: "2026-08-21T10:00:30Z",
+    });
+    const merged = mergeTimeline([delegation, instruction], [], { detailed: false });
+    const grouped = groupExchanges(merged, opts);
+    const kinds = grouped.map((item) => item.kind);
+    expect(kinds).toContain("message");
+    expect(grouped.some((item) => item.kind === "message" && item.message.id === "u2")).toBe(true);
   });
 });

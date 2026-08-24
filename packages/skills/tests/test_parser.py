@@ -6,6 +6,7 @@ import pytest
 
 from jhin_skills import (
     MAX_CONTENT_BYTES,
+    MAX_DESCRIPTION_CHARS,
     SkillParseError,
     find_secret,
     is_valid_skill_name,
@@ -92,8 +93,14 @@ class TestRejections:
             parse_skill_md(doc(f"name: {name}\ndescription: D."))
 
     def test_description_too_long(self) -> None:
-        with pytest.raises(SkillParseError, match="500"):
-            parse_skill_md(doc(f"name: x2\ndescription: {'d' * 501}"))
+        with pytest.raises(SkillParseError, match=str(MAX_DESCRIPTION_CHARS)):
+            parse_skill_md(doc(f"name: x2\ndescription: {'d' * (MAX_DESCRIPTION_CHARS + 1)}"))
+
+    def test_a_real_world_long_description_is_accepted(self) -> None:
+        """anthropics/skills' xlsx description is 952 chars — under the old
+        500-char cap these skills were rejected outright."""
+        parsed = parse_skill_md(doc(f"name: xlsx\ndescription: {'d' * 952}"))
+        assert len(parsed.description) == 952
 
     def test_body_too_large(self) -> None:
         body = "x" * (MAX_CONTENT_BYTES + 1)
@@ -126,3 +133,81 @@ class TestSecretsAndPaths:
     def test_invalid_file_paths(self, path: str) -> None:
         with pytest.raises(SkillParseError):
             validate_file_path(path)
+
+
+class TestBlockScalars:
+    """YAML block scalars in real frontmatter.
+
+    Every sample here is the shape of an actual SKILL.md in the browse
+    catalog: ``anthropics/skills``' academy-guide and discernment-nudge use
+    ``description: >``, and its claude-api skill uses ``description: |-``.
+    Before block-scalar support these parsed to the literal ">" / "|-".
+    """
+
+    def test_folded_scalar_joins_lines_with_spaces(self) -> None:
+        parsed = parse_skill_md(
+            doc(
+                "name: academy-guide\n"
+                "description: >\n"
+                "  Stop and check this skill before finishing any reply\n"
+                "  about how to use Claude or a Claude product.\n"
+                "license: Complete terms in LICENSE.txt"
+            )
+        )
+        assert parsed.description == (
+            "Stop and check this skill before finishing any reply "
+            "about how to use Claude or a Claude product."
+        )
+        assert parsed.license == "Complete terms in LICENSE.txt"
+
+    def test_literal_scalar_keeps_its_newlines(self) -> None:
+        parsed = parse_skill_md(doc("name: n\ndescription: |\n  first line\n  second line"))
+        assert parsed.description == "first line\nsecond line"
+
+    def test_strip_chomping_indicator(self) -> None:
+        parsed = parse_skill_md(doc("name: n\ndescription: |-\n  only line\n"))
+        assert parsed.description == "only line"
+
+    def test_folded_with_strip_chomping(self) -> None:
+        parsed = parse_skill_md(doc("name: n\ndescription: >-\n  a\n  b\n"))
+        assert parsed.description == "a b"
+
+    def test_keep_chomping_indicator(self) -> None:
+        fields = parse_frontmatter("name: n\ndescription: |+\n  line\n\n")
+        assert fields["description"] == "line\n"
+
+    def test_blank_line_is_a_paragraph_break_when_folded(self) -> None:
+        parsed = parse_skill_md(doc("name: n\ndescription: >\n  para one\n\n  para two\n"))
+        assert parsed.description == "para one\n\npara two"
+
+    def test_a_following_top_level_key_ends_the_block(self) -> None:
+        fields = parse_frontmatter("name: n\ndescription: >\n  folded text\nlicense: MIT\n")
+        assert fields["description"] == "folded text\n"
+        assert fields["license"] == "MIT"
+
+    def test_explicit_indent_indicator(self) -> None:
+        fields = parse_frontmatter("description: |2\n    indented by four\n")
+        assert fields["description"] == "  indented by four\n"
+
+    def test_block_scalar_still_respects_the_frontmatter_size_cap(self) -> None:
+        huge = "\n".join("  padding padding padding" for _ in range(1000))
+        with pytest.raises(SkillParseError):
+            parse_frontmatter(f"description: >\n{huge}")
+
+
+class TestQuotedScalarEscapes:
+    """anthropics/skills' pptx/xlsx descriptions embed escaped quotes."""
+
+    def test_double_quoted_escapes_are_unescaped(self) -> None:
+        parsed = parse_skill_md(
+            doc('name: pptx\ndescription: "Trigger on \\"deck,\\" or \\"slides.\\""')
+        )
+        assert parsed.description == 'Trigger on "deck," or "slides."'
+
+    def test_single_quoted_doubling_is_unescaped(self) -> None:
+        fields = parse_frontmatter("description: 'it''s fine'")
+        assert fields["description"] == "it's fine"
+
+    def test_a_plain_scalar_is_untouched(self) -> None:
+        fields = parse_frontmatter("description: plain text, no quotes")
+        assert fields["description"] == "plain text, no quotes"

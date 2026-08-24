@@ -102,6 +102,7 @@ export function SkillsPanel({
                     <span className="flex flex-wrap items-center gap-2">
                       <code className="font-mono text-[13px] font-medium">{item.name}</code>
                       <Badge>{SOURCE_LABELS[item.source]}</Badge>
+                      <Badge tone="neutral">{item.category}</Badge>
                       {!item.enabled ? <Badge tone="warn">Off in library</Badge> : null}
                     </span>
                     <span className="mt-0.5 block text-xs text-dim">{item.description}</span>

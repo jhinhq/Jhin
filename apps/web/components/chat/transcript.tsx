@@ -7,7 +7,7 @@
 
 import { ArrowDown, ChevronDown, ChevronRight } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApprovalCard } from "@/components/approval-card";
 import { Avatar } from "@/components/avatar";
 import { MessageTypeBadge, StructuredMessageBody } from "@/components/task-bits";
@@ -15,11 +15,13 @@ import {
   exchangeLabel,
   exchangeSuffix,
   friendlyMessageLabel,
+  instructionDeliveryState,
   isWorkCard,
   messageText,
   relativeTime,
   workRequestDetailLines,
   type DaySeparatorItem,
+  type DeliveryEvidence,
   type ExchangeItem,
   type LiveStatus,
   type TimelineItem,
@@ -39,22 +41,57 @@ function Timestamp({ iso, className = "" }: { iso: string; className?: string })
   );
 }
 
-function UserBubble({ message, name }: { message: ConversationMessage; name: string }) {
+function UserBubble({
+  message,
+  name,
+  agentName,
+  deliveryState,
+}: {
+  message: ConversationMessage;
+  name: string;
+  agentName: string;
+  /** For `message_type: "instruction"` turns sent while a task was active:
+   * "queued" until later activity on the same task proves it was picked up,
+   * then "delivered". Undefined for ordinary messages. */
+  deliveryState?: "queued" | "delivered";
+}) {
   const text = messageText(message);
   const instruction = message.message_type === "instruction";
   return (
     <div data-testid="user-message" className="flex justify-end">
       <div className="max-w-[min(85%,40rem)]">
-        {instruction ? (
-          <p className="mb-1 text-right text-[11px] text-faint">Added while the agent was working</p>
-        ) : null}
         <div className="rounded-2xl rounded-br-md bg-accent-soft px-4 py-2.5 text-[15px] leading-relaxed text-ink">
           <p className="whitespace-pre-wrap break-words">{text}</p>
         </div>
-        <p className="mt-1 text-right">
-          <span className="sr-only">{name}, </span>
-          <Timestamp iso={message.created_at} />
-        </p>
+        {instruction && deliveryState === "queued" ? (
+          <p className="mt-1 flex justify-end">
+            <span
+              data-testid="instruction-status"
+              data-state="queued"
+              className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-accent/30 bg-accent-soft px-2.5 py-0.5 text-[11px] font-medium text-accent-strong"
+            >
+              <span
+                aria-hidden
+                className="h-1.5 w-1.5 shrink-0 rounded-full bg-current motion-safe:animate-pulse"
+              />
+              <span className="truncate">Queued — will steer {agentName} at its next step</span>
+            </span>
+          </p>
+        ) : instruction && deliveryState === "delivered" ? (
+          <p
+            data-testid="instruction-status"
+            data-state="delivered"
+            className="mt-1 text-right text-[11px] text-faint"
+          >
+            <span className="sr-only">{name}, </span>
+            Steered {agentName} · <Timestamp iso={message.created_at} className="inline" />
+          </p>
+        ) : (
+          <p className="mt-1 text-right">
+            <span className="sr-only">{name}, </span>
+            <Timestamp iso={message.created_at} />
+          </p>
+        )}
       </div>
     </div>
   );
@@ -144,6 +181,9 @@ const CHIP_TONES: Partial<Record<ActivityCard["kind"], string>> = {
   needs_review: "border-warn/30 bg-warn/10 text-warn",
   finished: "border-ok/30 bg-ok/10 text-ok",
   paused: "border-warn/30 bg-warn/10 text-warn",
+  // Distinct from "failed" (red, "Ran into a problem"): a stop was
+  // requested, not an error.
+  stopped: "border-line-strong bg-hover text-ink",
 };
 
 function ActivityChip({ card }: { card: ActivityCard }) {
@@ -295,6 +335,30 @@ function WorkingIndicator({
   );
 }
 
+/** Flatten the rendered timeline (unwrapping collapsed exchanges) into the
+ * evidence pool `instructionDeliveryState` checks each queued instruction
+ * against: every agent message and activity chip, in whatever order they
+ * appear. */
+function collectDeliveryEvidence(items: readonly TranscriptItem[]): DeliveryEvidence[] {
+  const evidence: DeliveryEvidence[] = [];
+  const consider = (entry: TimelineItem) => {
+    if (entry.kind === "activity") {
+      evidence.push({ created_at: entry.card.created_at, task_id: entry.card.task_id });
+    } else if (entry.message.sender_type === "agent") {
+      evidence.push({ created_at: entry.message.created_at, task_id: entry.message.task_id });
+    }
+  };
+  for (const item of items) {
+    if (item.kind === "day") continue;
+    if (item.kind === "exchange") {
+      for (const sub of item.items) consider(sub);
+      continue;
+    }
+    consider(item);
+  }
+  return evidence;
+}
+
 export function Transcript({
   items,
   agentName,
@@ -367,11 +431,25 @@ export function Transcript({
     else setHasNew(true);
   }, [contentKey, scrollToBottom]);
 
+  const deliveryEvidence = useMemo(() => collectDeliveryEvidence(items), [items]);
+
   const renderTimelineItem = (item: TimelineItem) => {
     if (item.kind === "activity") return <ActivityChip key={item.id} card={item.card} />;
     const message = item.message;
     if (message.sender_type === "user") {
-      return <UserBubble key={item.id} message={message} name={userName} />;
+      const deliveryState =
+        message.message_type === "instruction"
+          ? instructionDeliveryState(message, deliveryEvidence)
+          : undefined;
+      return (
+        <UserBubble
+          key={item.id}
+          message={message}
+          name={userName}
+          agentName={agentName}
+          deliveryState={deliveryState}
+        />
+      );
     }
     if (message.sender_type === "system") {
       return <SystemChip key={item.id} message={message} />;

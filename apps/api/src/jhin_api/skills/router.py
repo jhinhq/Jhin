@@ -3,6 +3,8 @@
 /api/v1/workspaces/{workspace_id}/skills                 library CRUD,
                                                         install-builtins,
                                                         import (GitHub / zip)
+/api/v1/workspaces/{workspace_id}/skill-sources           browse catalog:
+                                                        defaults + custom
 /api/v1/workspaces/{workspace_id}/agents/{id}/skills     per-agent enablement
 """
 
@@ -13,7 +15,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 
-from jhin_api.deps import AdminCtx, CurrentAuth, DbSession, ViewerCtx
+from jhin_api.deps import AdminCtx, DbSession, ViewerCtx
 from jhin_api.deps import client_ip_hash as ip_hash
 from jhin_api.deps import get_request_id as req_id
 from jhin_api.security.csrf import csrf_protect
@@ -34,11 +36,13 @@ from jhin_api.skills.schemas import (
     SkillImportOut,
     SkillListOut,
     SkillOut,
+    SkillSourceCreateIn,
     SkillSourceOut,
     SkillUpdate,
 )
 from jhin_db.models import Skill
 from jhin_skills import (
+    DEFAULT_CATEGORY,
     MAX_ZIP_BYTES,
     BundleError,
     SkillImportError,
@@ -46,7 +50,11 @@ from jhin_skills import (
     load_zip,
 )
 
-skill_sources_router = APIRouter(prefix="/api/v1/skill-sources", tags=["skills"])
+skill_sources_router = APIRouter(
+    prefix="/api/v1/workspaces/{workspace_id}/skill-sources",
+    tags=["skills"],
+    dependencies=[Depends(csrf_protect)],
+)
 
 skills_router = APIRouter(
     prefix="/api/v1/workspaces/{workspace_id}/skills",
@@ -62,16 +70,43 @@ agent_skills_router = APIRouter(
 
 
 @skill_sources_router.get("")
-async def list_skill_sources(_auth: CurrentAuth) -> list[SkillSourceOut]:
-    """The hardcoded catalog of known skill repositories to browse
-    (docs/architecture/skills.md) — where to look, not the skills
+async def list_skill_sources(ctx: ViewerCtx, db: DbSession) -> list[SkillSourceOut]:
+    """The hardcoded default catalog plus this workspace's own custom
+    additions (docs/architecture/skills.md) — where to look, not the skills
     themselves."""
-    return [SkillSourceOut.model_validate(entry) for entry in service.list_skill_sources()]
+    entries = await service.list_skill_sources(db, ctx.workspace_id)
+    return [SkillSourceOut.model_validate(entry) for entry in entries]
+
+
+@skill_sources_router.post("", status_code=status.HTTP_201_CREATED)
+async def add_skill_source(
+    payload: SkillSourceCreateIn, request: Request, ctx: AdminCtx, db: DbSession
+) -> SkillSourceOut:
+    """Add a workspace-custom browse source (admin); validated live before
+    it is persisted."""
+    entry = await service.add_custom_source(
+        db, ctx, payload, request_id=req_id(request), ip_hash=ip_hash(request)
+    )
+    return SkillSourceOut.model_validate(entry)
+
+
+@skill_sources_router.delete("/{source:path}", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_skill_source(source: str, request: Request, ctx: AdminCtx, db: DbSession) -> None:
+    """Remove one of this workspace's own custom sources (admin); a default
+    source can never be removed this way."""
+    await service.remove_custom_source(
+        db, ctx, source, request_id=req_id(request), ip_hash=ip_hash(request)
+    )
 
 
 def _out(record: Skill) -> SkillOut:
     out = SkillOut.model_validate(record)
-    return out.model_copy(update={"file_count": len(record.files_json)})
+    return out.model_copy(
+        update={
+            "file_count": len(record.files_json),
+            "category": record.category or DEFAULT_CATEGORY,
+        }
+    )
 
 
 def _detail_out(record: Skill) -> SkillDetailOut:
@@ -79,6 +114,7 @@ def _detail_out(record: Skill) -> SkillDetailOut:
     return out.model_copy(
         update={
             "file_count": len(record.files_json),
+            "category": record.category or DEFAULT_CATEGORY,
             "content": record.content,
             "files": [SkillFile.model_validate(entry) for entry in record.files_json],
         }
@@ -91,11 +127,12 @@ async def list_skills(
     db: DbSession,
     q: str | None = None,
     source: str | None = None,
+    category: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> SkillListOut:
     items, total = await service.list_skills(
-        db, ctx.workspace_id, q=q, source=source, limit=limit, offset=offset
+        db, ctx.workspace_id, q=q, source=source, category=category, limit=limit, offset=offset
     )
     return SkillListOut(items=[_out(record) for record in items], total=total)
 
@@ -244,6 +281,7 @@ def _agent_out(pairs: list[tuple[Skill, bool]]) -> list[AgentSkillOut]:
             name=skill.name,
             description=skill.description,
             source=skill.source,
+            category=skill.category or DEFAULT_CATEGORY,
             enabled=skill.enabled,
             enabled_for_agent=enabled_for_agent,
         )

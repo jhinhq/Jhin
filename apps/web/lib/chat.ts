@@ -512,7 +512,56 @@ export const STARTER_PROMPTS = [
   "Review the latest pull request and tell me if it's safe to merge.",
 ];
 
+/** Composer hint shown while a task is active on this conversation: concrete
+ * about what sending now actually does, not a vague status echo. Null when
+ * nothing is active (the caller falls back to the default "Enter to
+ * send…" hint). */
+export function composerHintFor(liveStatus: LiveStatus | null, agentName: string): string | null {
+  if (!liveStatus) return null;
+  if (liveStatus.kind === "working") {
+    return `${agentName} is working — this will steer it at the next step.`;
+  }
+  if (liveStatus.kind === "queued") {
+    return `${agentName} hasn't started yet — this will steer it once it does.`;
+  }
+  return null;
+}
+
 /** Build the body for a new turn. */
 export function newTurn(text: string): { text: string; client_turn_id: string } {
   return { text: text.trim(), client_turn_id: crypto.randomUUID() };
+}
+
+/* ------------------------------------------------------------------ */
+/* Queued-instruction delivery state                                    */
+/* ------------------------------------------------------------------ */
+
+/** Enough of an agent message or activity card to serve as evidence that a
+ * queued instruction was actually delivered to the running workflow. */
+export interface DeliveryEvidence {
+  created_at: string;
+  task_id?: string | null;
+}
+
+/**
+ * Whether a mid-run "instruction" turn has already been picked up by the
+ * workflow. The mechanism (packages/workflows agent_task) delivers all
+ * pending instructions as text at the start of the *next* step, so there is
+ * no direct "delivered" event — instead, any agent message or activity item
+ * on the same task that landed strictly after the instruction was sent is
+ * treated as proof a step ran and included it. Pure and unit-tested.
+ */
+export function instructionDeliveryState(
+  message: Pick<ConversationMessage, "created_at" | "task_id">,
+  laterItems: readonly DeliveryEvidence[],
+): "queued" | "delivered" {
+  const sentAt = new Date(message.created_at).getTime();
+  if (Number.isNaN(sentAt)) return "queued";
+  const delivered = laterItems.some((item) => {
+    const at = new Date(item.created_at).getTime();
+    if (Number.isNaN(at) || at <= sentAt) return false;
+    if (message.task_id && item.task_id && item.task_id !== message.task_id) return false;
+    return true;
+  });
+  return delivered ? "delivered" : "queued";
 }

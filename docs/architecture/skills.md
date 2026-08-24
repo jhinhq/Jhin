@@ -29,19 +29,21 @@ Two deliberate deviations:
   bounds-checked) on every creation path, including the `skills.create`
   gateway tool below, but never persisted — nothing in Jhin stores it.
 - Frontmatter parsing is a minimal, bounded reader of the flat
-  `key: value` mappings the format uses (flow and block lists included),
-  capped at 8 KB. No YAML engine, no tags, no anchors — block scalars
-  (`description: |-`) are not understood, so a real-world skill using one
-  (e.g. `anthropics/skills`' `claude-api`) treats everything after the
-  scalar's opening line as unmodeled frontmatter and often ends up with an
-  over-long body that trips the 64 KB content cap. This is a pre-existing,
-  accepted limitation of the parser, not something the browse gallery works
-  around: a skill that fails to parse is skipped (with a warning, where the
-  caller surfaces warnings) exactly as an import would skip it.
+  `key: value` mappings the format uses — flow lists (`[a, b]`), block
+  lists, **block scalars** (folded `>` and literal `|`, with chomping
+  (`>-`, `|+`) and explicit-indent indicators), and the backslash escapes a
+  double-quoted scalar uses — capped at 8 KB. No YAML engine, no tags, no
+  anchors. A skill that still fails to parse is skipped (with a warning,
+  where the caller surfaces warnings) exactly as an import would skip it.
+
+  Block-scalar support was added after live verification showed it was
+  silently corrupting real skills: `anthropics/skills`' `academy-guide` and
+  `discernment-nudge` use `description: >` and were landing with the literal
+  description `">"`.
 
 Validation (`jhin_skills.parser`): `name` is a slug (lowercase letters,
 digits, hyphens, ≤ 64 chars; defaults to the folder name), `description`
-is required and ≤ 500 chars, the body is ≤ 64 KB, each reference file is
+is required and ≤ 2000 chars, the body is ≤ 64 KB, each reference file is
 ≤ 64 KB, a skill totals ≤ 256 KB across ≤ 20 files, and obviously
 credential-like content (private keys, provider API keys, tokens) is
 rejected outright. Every creation path — the plain create API, a GitHub
@@ -49,7 +51,7 @@ import, a browse-gallery install, and the `skills.create` gateway tool —
 runs the same `jhin_skills` primitives, so an agent-authored skill obeys
 exactly the same rules as a human-authored or imported one.
 
-## Data model (migration `0022`, extended by `0023`)
+## Data model (migration `0022`, extended by `0023`, `0024`, `0025`)
 
 ### `skill`
 
@@ -58,24 +60,105 @@ exactly the same rules as a human-authored or imported one.
 | `id` | uuid pk | UUIDv7 |
 | `workspace_id` | uuid fk workspace (cascade) | indexed |
 | `name` | varchar(64) | slug; unique per workspace |
-| `description` | varchar(500) | shown to agents in the prompt |
+| `description` | varchar(2000) | shown to agents in the prompt (the prompt block truncates to 300; widened from 500 in `0025`) |
 | `content` | text | the SKILL.md markdown body (frontmatter stripped) |
 | `files_json` | json list | `[{"path", "content"}, ...]` reference files |
 | `source` | varchar(16) | `built_in` / `imported` / `custom` / `agent_authored` |
 | `source_url` | varchar(500) | provenance for imports and browse installs (`""` otherwise) |
+| `category` | varchar(64), nullable | display grouping; `NULL` reads as "General" (added in `0024`, see below) |
 | `enabled` | boolean | workspace-level switch |
 | `version` | integer | bumped on content/file edits |
 | `created_by_agent_id` | uuid fk agent (set null), nullable, indexed | set only for `source="agent_authored"` — which agent's `skills.create` call made this skill (added in `0023`) |
 | `created_at`, `updated_at` | timestamptz | |
 
-### `agent_skill`
+## Category taxonomy
 
-The per-agent enablement join table (`workspace_id`, `agent_id`,
-`skill_id`, unique on agent + skill). Deny-by-default: no row means the
-skill does not appear in that agent's prompt. Creating a skill — by any
-path, including `skills.create` — never adds this row for anyone; an admin
-(or, for `skills.update`, the authoring agent revising its own content)
-still decides which agents carry it.
+Every skill carries a `category` used to group and filter the library. It is
+never required at creation time — a missing value reads as `"General"`
+(`jhin_skills.DEFAULT_CATEGORY`) — and it is always editable afterward via
+`PATCH /skills/{id}`.
+
+### How a browse install derives one
+
+`jhin_skills.category.derive_category` runs a three-step cascade,
+most-authoritative first. The first step that produces something wins:
+
+1. **A category the skill declares itself** — a `category` key in the
+   SKILL.md frontmatter, humanized. No repository in the current catalog
+   ships one, but honoring it costs nothing and is the most accurate signal
+   available when a repository does.
+2. **The nearest meaningful ancestor folder** — walking up from the skill's
+   own folder, skipping *generic container* segments
+   (`GENERIC_FOLDER_SEGMENTS`: `skills/`, `src/`, `packages/`, `examples/`,
+   `.github/`, `template/`, …), humanized. This is what gives a genuinely
+   categorized repository its own categories:
+   `document-skills/pdf` → "Document skills", `legal/skills/contracts` →
+   "Legal".
+3. **A small fixed keyword taxonomy** over the skill's name and description
+   (`CATEGORY_KEYWORDS`): Documents, Data & analysis, Design & creative,
+   Testing & QA, Security, Operations, AI & agents, Engineering,
+   Communication, Product & planning, Learning & enablement. Every entry is
+   scored — a keyword hit in the *name* counts triple, since the name is the
+   stronger signal — and the highest scorer wins, ties going to the earlier
+   (more specific) entry. Matching is **whole-word** (with tolerance for
+   `s`/`es`/`ing`/`ed` inflections), not substring: plain substring matching
+   put "art" inside "artifacts" and "test" inside "latest".
+
+Anything still unmatched falls back to `"General"`.
+
+**Why step 3 exists.** Deriving purely from folder structure — the obvious
+rule — is useless against the actual repositories in the catalog. Both
+`anthropics/skills` and `obra/superpowers` nest *every* skill under one
+generic `skills/` wrapper, so "humanize the parent folder" put all of them
+in a single bucket named "Skills". Step 2 deliberately refuses to return a
+generic wrapper, and step 3 then classifies from the only real signal a flat
+repository carries: the name and description.
+
+The distribution this actually produces, measured against the live
+repositories:
+
+| source | skills | categories produced |
+| --- | --- | --- |
+| `anthropics/skills` | 19 | Design & creative 6, Documents 4, AI & agents 2, Engineering 2, Learning & enablement 2, Communication 1, Testing & QA 1, Data & analysis 1 |
+| `obra/superpowers` | 14 | Engineering 5, AI & agents 4, Product & planning 3, Testing & QA 2 |
+
+### Everywhere else
+
+- **Built-in starters** carry hand-picked categories:
+  `writing-clear-updates` → Communication, `code-review-checklist` →
+  Engineering, `bug-report-triage` → Support, `meeting-notes-summary` →
+  Communication, `release-notes` → Engineering.
+- **Manual create, a raw GitHub/zip import, and agent authoring
+  (`skills.create`)** all default to `"General"`, editable afterward.
+  Deriving from a repository is limited to the browse gallery, where the
+  admin is choosing a specific folder inside a known repository.
+
+### Repairing existing workspaces
+
+A workspace whose starters were installed before the `category` column
+existed carries `NULL` on all five, which reads as "General". Two paths fix
+that without any manual editing:
+
+- migration `0025` backfills the five starters' categories, scoped to rows
+  that are still `source = 'built_in'` and still `NULL`;
+- `POST /skills/install-builtins` ("install missing defaults") doubles as
+  "repair the defaults": alongside installing whatever is missing, it
+  corrects the category of a starter that is present but mis-categorized.
+  It only ever touches a row that is still `source = 'built_in'`, and only
+  its `category` — an admin who replaced a starter with their own skill of
+  the same name keeps everything, category included.
+
+This is a deliberate, narrow exception to the rule that a migration never
+retroactively changes a workspace's skills: a display grouping on a
+Jhin-shipped starter is metadata, not content.
+
+There is no separate `GET /skills/categories` endpoint: `GET /skills`
+already returns every skill's `category`, so the web app derives the
+distinct-category list and groupings client-side
+(`apps/web/lib/skills.ts`'s `categoriesOf` / `groupByCategory`) rather than
+paying a second round trip for data already in hand. The browse gallery does
+the same over its listing response.
+
 
 ## Progressive disclosure at runtime
 
@@ -120,13 +203,78 @@ the (missing, at creation time) admin-permission check differ.
 
 ## The browse gallery: a live, searchable skills catalog
 
-`GET /api/v1/skill-sources` returns a small **hardcoded catalog** of known
-public skill repositories (`jhin_api.skills.service.SKILL_SOURCES`) —
-currently just `anthropics/skills`, the official public library. This is
-only "where to look": no skill content is bundled or vendored into Jhin: on
-every browse call, the actual repository is fetched live over the exact
-same `codeload.github.com` zip mechanism `POST /skills/import` already
-uses (`jhin_skills.fetch_github_repo_zip` + `load_zip`).
+`GET /api/v1/workspaces/{workspace_id}/skill-sources` returns the
+**hardcoded default catalog** (`jhin_api.skills.service.SKILL_SOURCES`) plus
+this workspace's own **custom sources** (see below). This is only "where to
+look": no skill content is bundled or vendored into Jhin: on every browse
+call, the actual repository is fetched live over the exact same
+`codeload.github.com` zip mechanism `POST /skills/import` already uses
+(`jhin_skills.fetch_github_repo_zip` + `load_zip`).
+
+### The default catalog
+
+Every entry below was verified live during development — fetched over the
+real `codeload.github.com` zip endpoint, loaded through
+`jhin_skills.bundle.load_zip`, and confirmed to parse at least one valid
+`SKILL.md` with the app's actual (bounded, non-YAML) frontmatter parser —
+never added on the strength of a description alone:
+
+| source | what it is | verified |
+| --- | --- | --- |
+| `anthropics/skills` | Anthropic's official public Agent Skills library | 19 skills parse cleanly (16 before block-scalar support and the widened description cap); `claude-api` remains out — see below |
+| `obra/superpowers` | An agentic skills framework and software-development methodology (TDD, systematic debugging, code review, git worktrees, …) — referenced by this codebase's own `docs/superpowers` naming convention, and a real, independently-verified public repository | 14 skills parse cleanly, zero warnings |
+| `addyosmani/agent-skills` | Production-grade engineering skills for AI coding agents | 24 skills parse cleanly, zero warnings |
+| `jamestorrevillas/dev-skills` | A modular skill library for software engineers — technical, soft, and career skills | 37 skills parse cleanly, zero warnings (nested under `.github/skills/`) |
+| `avizmarlon/agent-skills` | Portable agent skills shared across Claude Code, Codex, Cursor, and Gemini | 31 skills parse cleanly, zero warnings |
+
+One skill in `anthropics/skills` is still not installable:
+**`claude-api`**, whose SKILL.md is 75 707 bytes — its *body alone* is
+74 542 bytes, past the 64 KB `MAX_CONTENT_BYTES` cap. That is a genuine
+size limit, not a parser gap: block-scalar support fixed its frontmatter but
+cannot shrink its body. It is dropped at the zip-entry level, before it ever
+becomes a skill folder, so it produces no warning.
+
+Candidates that were checked live and **rejected**, for the record — every
+one failed one of this app's own real, enforced constraints, not a
+subjective judgment call:
+
+- `TerminalSkills/skills` — real and skill-rich (1019 `SKILL.md` files), but
+  its zip archive is ~8 MB, over the 5 MB cap `fetch_github_repo_zip`
+  enforces (the same cap a live install would hit) — not fetchable through
+  this app as a whole-repo source.
+- `bregman-arie/devops-sre-skills` — real and fetchable, but every one of
+  its 17 `SKILL.md` files uses a Title Case `name:` (e.g. `"Triage AWS
+  AccessDenied"`); the parser's slug rule rejects all of them, so it yields
+  **zero** usable skills.
+- `ComposioHQ/awesome-claude-skills` and `ellmos-ai/skills` — real, but one
+  holds over the 50-skills-per-bundle cap (`load_zip` refuses a whole-repo
+  browse outright) and the other's archive is ~35 MB, over the 5 MB fetch
+  cap.
+
+Extend `SKILL_SOURCES` with the same care as adding a new built-in — every
+entry here is treated as maintainer-reviewed, which is what lets a browse
+install skip the "review and enable" queue (see below).
+
+### Workspace-custom sources
+
+An admin can add their own source directly from the Browse library tab
+("Add a source"): `owner/repo`, optionally `/path`. It is **validated
+live** the moment it's added — fetched via the same `fetch_github_repo_zip`
++ `load_zip` path a browse already uses, and rejected with a clear reason
+if it doesn't fetch or contains no `SKILL.md` this parser accepts — so
+nothing unfetchable or empty is ever persisted.
+
+Custom sources are stored per workspace at
+`workspace.settings_json["skill_sources"]`: a small JSON list
+(`{"source", "label", "description", "url", "added_by", "added_at"}` per
+entry) rather than a dedicated table, matching how other low-cardinality,
+admin-curated workspace configuration (budgets, coordination limits)
+already lives there. `POST /skill-sources` (admin) validates and appends
+one; `DELETE /skill-sources/{source}` (admin) removes one — only a custom
+entry can be removed; a default is not stored per-workspace and 404s. A
+workspace-custom source is treated exactly like a default one everywhere
+else — `GET /skills/browse`, `POST /skills/browse/install`, and category
+derivation all work identically over it.
 
 `GET /skills/browse?source=<owner/repo>&q=<text>` (viewer+) fetches that
 source's zip once, parses every `SKILL.md` found anywhere in the tree
@@ -159,9 +307,10 @@ not seen the content yet, and importing pulls in everything the repo
 contains sight-unseen. A browse-gallery install is different on both axes
 that make review necessary:
 
-- **the source is curated**, not arbitrary — only repositories in the
-  hardcoded `SKILL_SOURCES` catalog (a maintainer-reviewed public library,
-  today just Anthropic's own) can be browsed or installed from at all;
+- **the source is a known, single entity, not arbitrary** — only sources in
+  `GET /skill-sources` (the hardcoded catalog, a maintainer-reviewed public
+  library, plus this workspace's own custom additions) can be browsed or
+  installed from at all;
 - **the admin already read it** — browsing shows the name and description
   before any action, and install targets exactly the one skill folder the
   admin picked, never a bulk import of the whole repo.
@@ -170,10 +319,17 @@ Given both, gating the result behind a second manual "review and enable"
 step would add friction without adding safety, so a browse install is
 `enabled=True` from the moment it lands (`source="imported"`,
 `source_url` pointing at the specific skill folder, audited as
-`skill.browse_installed`). Extending `SKILL_SOURCES` to a repository that
-is not genuinely maintainer-curated would silently change this trust
-posture — treat additions to that tuple with the same care as adding a new
-built-in.
+`skill.browse_installed`). This applies equally to a workspace-custom
+source: it carries a weaker trust claim than a hardcoded default (an admin
+picked it, not a Jhin maintainer), but the same admin who could add it
+could equally run a raw `owner/repo` import and review it manually — and
+browsing already shows the exact skill before install, same as the default
+catalog. Extending `SKILL_SOURCES` (the hardcoded, maintainer-reviewed
+tuple) to a repository that isn't genuinely maintainer-curated would
+silently change what "default" implies — treat additions to that tuple
+with the same care as adding a new built-in; workspace-custom additions are
+explicitly a lower, admin-scoped trust tier and are labeled "(custom)" in
+the web UI so that distinction stays visible.
 
 ## Agents can author skills through chat
 
@@ -253,15 +409,19 @@ full JSON, without touching what is actually persisted or replayed.
 - **Audit**: `skill.created` / `skill.updated` / `skill.enabled` /
   `skill.disabled` / `skill.deleted` / `skill.builtins_installed` (with a
   `source: "default" | "manual"` distinction) / `skill.imported` /
-  `skill.browse_installed` / `agent.skills_updated`, all content-free.
+  `skill.browse_installed` / `agent.skills_updated` /
+  `skill_source.added` / `skill_source.removed`, all content-free.
 
 ## API
 
 Under `/api/v1/workspaces/{workspace_id}`:
 
-- `GET /skills`, `GET /skills/{id}` — viewer+; list returns summaries,
-  detail includes body and files.
+- `GET /skills`, `GET /skills/{id}` — viewer+; list returns summaries
+  (including `category`), detail includes body and files. `GET /skills`
+  takes an optional `category` filter alongside `q` and `source`.
 - `POST /skills`, `PATCH /skills/{id}`, `DELETE /skills/{id}` — admin.
+  Create and update both accept an optional free-text `category` (defaults
+  to `"General"` on create; omitted on update means "leave unchanged").
 - `POST /skills/install-builtins` — admin; idempotently installs whichever
   of the five shipped starters (`writing-clear-updates`,
   `code-review-checklist`, `bug-report-triage`, `meeting-notes-summary`,
@@ -271,23 +431,43 @@ Under `/api/v1/workspaces/{workspace_id}`:
   ones.
 - `POST /skills/import`, `POST /skills/import-zip` — admin; see above.
 - `GET /skills/browse`, `POST /skills/browse/install` — the browse
-  gallery, see above (viewer / admin respectively).
+  gallery, see above (viewer / admin respectively); browse entries carry a
+  computed `category` too.
 - `GET|PUT /agents/{agent_id}/skills` — viewer reads, admin replaces the
-  agent's enabled set (`{"skill_ids": [...]}`).
+  agent's enabled set (`{"skill_ids": [...]}`); each entry carries the
+  skill's `category`.
+- `GET /skill-sources` (viewer+), `POST /skill-sources` (admin, live
+  validated), `DELETE /skill-sources/{source}` (admin, custom only) — the
+  browse catalog: defaults plus this workspace's own additions (see
+  above).
 
-Outside any workspace: `GET /api/v1/skill-sources` — any authenticated
-user; the hardcoded browse catalog.
+There is no top-level, cross-workspace `/api/v1/skill-sources` any more —
+custom sources are per-workspace, so the catalog moved under the workspace
+prefix alongside everything else skills-related.
 
 ## Web
 
 The **Skills** page (primary navigation, after Apps) has two sections:
-**Library** — install starters, import from GitHub or a zip, create and
-edit skills, toggle and delete (imported skills carry a "review and
-enable" banner) — and **Browse library**, a search box over the live
-gallery with one-click Install cards (already-installed skills show
-disabled, labeled "Installed"; GitHub being unreachable shows a friendly
-inline error, not a crash). The agent profile's **Skills** tab lets admins
-pick which library skills the agent carries, with a hint when the agent
-lacks a `skills.read` grant. The wizard's Tools & Access step offers two
-skills-related presets: "Skills" (`skills.read`, read-only) and "Skill
+
+- **Library** — install starters, import from GitHub or a zip, create and
+  edit skills, toggle and delete (imported skills carry a "review and
+  enable" banner). Skills are grouped into collapsible sections by
+  `category` (an "General" bucket last), with a chip row above the list to
+  filter down to one category at a time. The editor dialog has a free-text
+  Category field with autocomplete (a `<datalist>`) built from the
+  workspace's existing categories — type an existing one or a new one.
+- **Browse library** — a source picker (the default catalog plus any
+  workspace-custom sources, each labeled "(custom)"), an "Add a source"
+  action that validates a new `owner/repo[/path]` live and gives a friendly
+  error on failure, and a search box over the live gallery. Admins can
+  remove a selected custom source. Results are grouped into the same
+  category sections as the library, computed for display without
+  installing anything (already-installed skills show disabled, labeled
+  "Installed"; GitHub being unreachable shows a friendly inline error, not
+  a crash).
+
+The agent profile's **Skills** tab lets admins pick which library skills
+the agent carries, with a category badge per skill and a hint when the
+agent lacks a `skills.read` grant. The wizard's Tools & Access step offers
+two skills-related presets: "Skills" (`skills.read`, read-only) and "Skill
 authoring" (`skills.create` + `skills.update`, elevated/approval-gated).

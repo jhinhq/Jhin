@@ -8,11 +8,14 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from jhin_skills import (
+    DEFAULT_CATEGORY,
     MAX_DESCRIPTION_CHARS,
     MAX_FILES,
     MAX_NAME_CHARS,
     is_valid_skill_name,
 )
+
+MAX_CATEGORY_CHARS = 64
 
 
 class SkillFile(BaseModel):
@@ -36,6 +39,9 @@ class SkillOut(BaseModel):
     enabled: bool
     version: int
     file_count: int = 0
+    # The stored value is nullable ("General" when unset); the router
+    # coalesces it before returning, the same way it fills in file_count.
+    category: str | None = None
     created_by_agent_id: UUID | None = None
     created_at: datetime
     updated_at: datetime
@@ -60,16 +66,31 @@ def _validate_name(value: str) -> str:
     return value
 
 
+def _clean_category(value: str | None) -> str | None:
+    """Free-text category: trimmed, empty means "unset" (-> General)."""
+    if value is None:
+        return None
+    trimmed = value.strip()
+    return trimmed or None
+
+
 class SkillCreate(BaseModel):
     name: str = Field(min_length=1, max_length=MAX_NAME_CHARS)
     description: str = Field(min_length=1, max_length=MAX_DESCRIPTION_CHARS)
     content: str = ""
     files: list[SkillFile] = Field(default_factory=list, max_length=MAX_FILES)
+    # Free text; defaults to "General" (DEFAULT_CATEGORY) when omitted or blank.
+    category: str | None = Field(default=None, max_length=MAX_CATEGORY_CHARS)
 
     @field_validator("name")
     @classmethod
     def _name(cls, value: str) -> str:
         return _validate_name(value)
+
+    @field_validator("category")
+    @classmethod
+    def _category(cls, value: str | None) -> str | None:
+        return _clean_category(value)
 
 
 class SkillUpdate(BaseModel):
@@ -79,6 +100,12 @@ class SkillUpdate(BaseModel):
     content: str | None = None
     files: list[SkillFile] | None = Field(default=None, max_length=MAX_FILES)
     enabled: bool | None = None
+    category: str | None = Field(default=None, max_length=MAX_CATEGORY_CHARS)
+
+    @field_validator("category")
+    @classmethod
+    def _category(cls, value: str | None) -> str | None:
+        return _clean_category(value)
 
 
 class SkillImportIn(BaseModel):
@@ -113,12 +140,33 @@ class InstallBuiltinsOut(BaseModel):
 
 
 class SkillSourceOut(BaseModel):
-    """One hardcoded, browsable skill repository (`GET /api/v1/skill-sources`)."""
+    """One browsable skill repository: either one of the maintainer-reviewed
+    defaults, or a workspace admin's own custom addition
+    (`GET /skill-sources`)."""
 
     source: str
     label: str
     description: str
     url: str
+    # False for the hardcoded defaults; True for a workspace's own addition
+    # (only a custom entry can be removed with DELETE).
+    custom: bool = False
+
+
+class SkillSourceCreateIn(BaseModel):
+    """Add a workspace-custom browse source (admin). Validated live against
+    GitHub before it is persisted — see `service.add_custom_source`."""
+
+    source: str = Field(
+        min_length=3,
+        max_length=300,
+        description=(
+            "owner/repo, optionally /path — e.g. anthropics/skills or "
+            "anthropics/skills/document-skills"
+        ),
+    )
+    label: str = Field(default="", max_length=200)
+    description: str = Field(default="", max_length=500)
 
 
 class BrowseSkillOut(BaseModel):
@@ -129,6 +177,9 @@ class BrowseSkillOut(BaseModel):
     description: str
     path: str
     installed: bool
+    # Computed the same way an install would derive it, for display/filter
+    # purposes only — nothing is written until the skill is installed.
+    category: str = DEFAULT_CATEGORY
 
 
 class BrowseListOut(BaseModel):
@@ -154,6 +205,7 @@ class AgentSkillOut(BaseModel):
     name: str
     description: str
     source: str
+    category: str = DEFAULT_CATEGORY
     enabled: bool
     enabled_for_agent: bool
 

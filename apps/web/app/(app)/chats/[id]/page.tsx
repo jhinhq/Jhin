@@ -14,6 +14,7 @@ import { Button, Dialog, ErrorNote, Spinner } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import {
   CHAT_DETAILED_STORAGE_KEY,
+  composerHintFor,
   groupExchanges,
   mergeTimeline,
   newTurn,
@@ -257,11 +258,13 @@ export default function ChatThreadPage() {
   else if (agent.status === "paused") disabledReason = `${agent.name} is paused by an admin, so messages can't be sent right now.`;
   else if (agent.status === "disabled") disabledReason = `${agent.name} is turned off, so messages can't be sent right now.`;
 
-  const composerHint = liveStatus
-    ? liveStatus.kind === "working" || liveStatus.kind === "queued"
-      ? `${agentName} is busy with your request — anything you send now is added as an instruction.`
-      : null
-    : null;
+  const composerHint = composerHintFor(liveStatus, agentName);
+
+  const activeTaskState = conversation.active_task_state;
+  const canStopTask =
+    canWrite &&
+    activeTaskId !== null &&
+    (activeTaskState === "running" || activeTaskState === "queued" || activeTaskState === "paused");
 
   const panel = (
     <ContextPanel
@@ -327,6 +330,10 @@ export default function ChatThreadPage() {
               disabledReason={disabledReason}
               placeholder={`Message ${agentName}…`}
               hint={composerHint}
+              canStop={canStopTask}
+              onStop={() => setConfirmStop(true)}
+              stopping={taskAction.isPending}
+              stopLabel={`Stop ${agentName}`}
             />
           </div>
         </div>
@@ -346,10 +353,10 @@ export default function ChatThreadPage() {
         </Dialog>
       ) : null}
 
-      <Dialog title="Stop this work?" open={confirmStop} onClose={() => setConfirmStop(false)}>
+      <Dialog title={`Stop ${agentName}?`} open={confirmStop} onClose={() => setConfirmStop(false)}>
         <p className="text-sm text-dim">
-          {agentName} will stop what it&apos;s doing on this request. You can always send a new
-          message to start again.
+          It&apos;ll finish the current step, then stop. You can always send a new message to start
+          again.
         </p>
         <div className="mt-4 flex justify-end gap-2">
           <Button onClick={() => setConfirmStop(false)}>Keep going</Button>
@@ -360,7 +367,7 @@ export default function ChatThreadPage() {
               if (activeTaskId) taskAction.mutate({ taskId: activeTaskId, action: "cancel" });
             }}
           >
-            Stop work
+            Stop {agentName}
           </Button>
         </div>
       </Dialog>

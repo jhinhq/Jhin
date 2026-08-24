@@ -2,7 +2,7 @@
 
 /** Autosizing chat composer. Enter sends, Shift+Enter adds a newline. */
 
-import { SendHorizontal } from "lucide-react";
+import { SendHorizontal, Square } from "lucide-react";
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef } from "react";
 
 export interface ComposerHandle {
@@ -24,6 +24,17 @@ export const Composer = forwardRef<
     /** "large" is the home hero; "docked" sits at the bottom of a thread. */
     variant?: "large" | "docked";
     hint?: string | null;
+    /** Show a Stop control: there's an active task (running/queued/paused)
+     * on this conversation that can be cancelled. */
+    canStop?: boolean;
+    /** Opens the stop confirmation. Reuses the same cancel mutation and
+     * confirm dialog as the header/Details controls. */
+    onStop?: () => void;
+    /** True while a pause/resume/cancel request is in flight — disables the
+     * Stop button so it can't be double-fired. */
+    stopping?: boolean;
+    /** Accessible name for the Stop button, e.g. "Stop Scout". */
+    stopLabel?: string;
   }
 >(function Composer(
   {
@@ -37,6 +48,10 @@ export const Composer = forwardRef<
     autoFocus = false,
     variant = "docked",
     hint = null,
+    canStop = false,
+    onStop,
+    stopping = false,
+    stopLabel = "Stop",
   },
   ref,
 ) {
@@ -117,6 +132,20 @@ export const Composer = forwardRef<
             className={`block w-full resize-none bg-transparent leading-relaxed text-ink placeholder:text-faint outline-none disabled:cursor-not-allowed ${pad}`}
           />
         </label>
+        {canStop ? (
+          <button
+            type="button"
+            data-testid="composer-stop"
+            aria-label={stopLabel}
+            title={stopLabel}
+            disabled={stopping}
+            onClick={onStop}
+            className="my-2 inline-flex h-10 shrink-0 items-center gap-1.5 rounded-xl border border-line-strong px-3 text-xs font-medium text-dim transition-colors hover:border-danger/40 hover:bg-danger/10 hover:text-danger disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Square size={13} aria-hidden fill="currentColor" />
+            Stop
+          </button>
+        ) : null}
         <button
           type="submit"
           aria-label="Send message"

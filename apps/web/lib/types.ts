@@ -1155,6 +1155,9 @@ export interface Skill {
   enabled: boolean;
   version: number;
   file_count: number;
+  // The API always coalesces a missing/null category to "General" before
+  // returning it, so this is never blank in a response.
+  category: string;
   created_by_agent_id: string | null;
   created_at: string;
   updated_at: string;
@@ -1193,6 +1196,7 @@ export interface InstallBuiltinsResult {
 export interface AgentSkillInfo {
   skill_id: string;
   name: string;
+  category: string;
   description: string;
   source: SkillSource;
   enabled: boolean;
@@ -1206,6 +1210,15 @@ export interface SkillSourceInfo {
   label: string;
   description: string;
   url: string;
+  // False for the hardcoded defaults; true for a workspace admin's own
+  // addition (only a custom entry can be removed).
+  custom: boolean;
+}
+
+export interface SkillSourceCreateInput {
+  source: string;
+  label?: string;
+  description?: string;
 }
 
 export interface BrowseSkillEntry {
@@ -1214,6 +1227,8 @@ export interface BrowseSkillEntry {
   description: string;
   path: string;
   installed: boolean;
+  // Computed the same way an install would derive it — display/filter only.
+  category: string;
 }
 
 export interface BrowseListResult {

@@ -49,6 +49,7 @@ from jhin_policy import (
     ToolDefinition,
 )
 from jhin_skills import (
+    DEFAULT_CATEGORY,
     MAX_CONTENT_BYTES,
     MAX_DESCRIPTION_CHARS,
     MAX_FILE_BYTES,
@@ -332,6 +333,7 @@ async def _skills_create(ctx: ToolExecutionContext, payload: BaseModel) -> BaseM
         content=data.content,
         files_json=files,
         source="agent_authored",
+        category=DEFAULT_CATEGORY,
         enabled=True,
         created_by_agent_id=ctx.agent_id,
     )

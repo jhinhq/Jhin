@@ -13,10 +13,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from jhin_api.deps import WorkspaceContext
 from jhin_api.skills import service
-from jhin_api.skills.schemas import SkillCreate, SkillFile, SkillUpdate
+from jhin_api.skills.schemas import (
+    SkillCreate,
+    SkillFile,
+    SkillSourceCreateIn,
+    SkillUpdate,
+)
 from jhin_db.models import Agent, AgentSkill, AuditEvent, Skill, User
 from jhin_domain import WorkspaceRole, new_uuid7
-from jhin_skills import SkillImportError, load_zip
+from jhin_skills import DEFAULT_CATEGORY, SkillImportError, load_zip
 
 GOOD_SKILL = "---\nname: {name}\ndescription: Description of {name}.\n---\n\nInstructions.\n"
 
@@ -332,10 +337,171 @@ def fake_fetch(zip_bytes: bytes) -> FakeFetch:
 
 
 class TestSkillSources:
-    def test_catalog_includes_anthropics_skills(self) -> None:
-        sources = service.list_skill_sources()
-        assert any(entry["source"] == ANTHROPICS_SOURCE for entry in sources)
-        assert all({"source", "label", "description", "url"} <= entry.keys() for entry in sources)
+    async def test_catalog_includes_the_verified_defaults(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext
+    ) -> None:
+        sources = await service.list_skill_sources(session, admin_ctx.workspace_id)
+        by_source = {entry["source"]: entry for entry in sources}
+        assert ANTHROPICS_SOURCE in by_source
+        # Every other default catalog entry added alongside the category
+        # taxonomy (docs/architecture/skills.md) — each verified live during
+        # development against the real codeload zip mechanism.
+        for extra in (
+            "obra/superpowers",
+            "addyosmani/agent-skills",
+            "jamestorrevillas/dev-skills",
+            "avizmarlon/agent-skills",
+        ):
+            assert extra in by_source
+            assert by_source[extra]["custom"] is False
+        assert all(
+            {"source", "label", "description", "url", "custom"} <= entry.keys() for entry in sources
+        )
+
+    async def test_workspace_custom_sources_are_appended(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            service, "fetch_github_repo_zip", fake_fetch(make_anthropics_like_zip())
+        )
+        await service.add_custom_source(
+            session, admin_ctx, SkillSourceCreateIn(source="someone/other-repo")
+        )
+        sources = await service.list_skill_sources(session, admin_ctx.workspace_id)
+        custom = [entry for entry in sources if entry["custom"]]
+        assert [entry["source"] for entry in custom] == ["someone/other-repo"]
+
+
+class TestCustomSources:
+    def setup_method(self) -> None:
+        service.reset_browse_cache()
+
+    def teardown_method(self) -> None:
+        service.reset_browse_cache()
+
+    async def test_add_validates_live_and_persists(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fetch = fake_fetch(make_anthropics_like_zip())
+        monkeypatch.setattr(service, "fetch_github_repo_zip", fetch)
+        entry = await service.add_custom_source(
+            session,
+            admin_ctx,
+            SkillSourceCreateIn(source="someone/other-repo", label="Other repo"),
+        )
+        assert entry["source"] == "someone/other-repo"
+        assert entry["label"] == "Other repo"
+        assert entry["custom"] is True
+        assert fetch.calls == ["someone/other-repo"]
+        assert "skill_source.added" in await audit_actions(session)
+
+    async def test_add_rejects_a_source_with_no_parseable_skill(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bad_zip = make_zip({"repo-HEAD/skills/bad/SKILL.md": "not a skill file at all"})
+        monkeypatch.setattr(service, "fetch_github_repo_zip", fake_fetch(bad_zip))
+        with pytest.raises(HTTPException) as exc:
+            await service.add_custom_source(
+                session, admin_ctx, SkillSourceCreateIn(source="someone/empty-repo")
+            )
+        assert exc.value.status_code == 422
+        assert await session.scalar(select(Skill)) is None
+
+    async def test_add_rejects_an_unreachable_source(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def _boom(ref: str) -> tuple[bytes, str, str]:
+            raise SkillImportError(f"could not reach GitHub for {ref}")
+
+        monkeypatch.setattr(service, "fetch_github_repo_zip", _boom)
+        with pytest.raises(HTTPException) as exc:
+            await service.add_custom_source(
+                session, admin_ctx, SkillSourceCreateIn(source="someone/gone")
+            )
+        assert exc.value.status_code == 422
+
+    async def test_add_rejects_an_already_known_default(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext
+    ) -> None:
+        with pytest.raises(HTTPException) as exc:
+            await service.add_custom_source(
+                session, admin_ctx, SkillSourceCreateIn(source=ANTHROPICS_SOURCE)
+            )
+        assert exc.value.status_code == 409
+
+    async def test_add_rejects_a_duplicate_custom_source(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            service, "fetch_github_repo_zip", fake_fetch(make_anthropics_like_zip())
+        )
+        await service.add_custom_source(
+            session, admin_ctx, SkillSourceCreateIn(source="someone/other-repo")
+        )
+        with pytest.raises(HTTPException) as exc:
+            await service.add_custom_source(
+                session, admin_ctx, SkillSourceCreateIn(source="someone/other-repo")
+            )
+        assert exc.value.status_code == 409
+
+    async def test_member_cannot_add(
+        self, session: AsyncSession, member_ctx: WorkspaceContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            service, "fetch_github_repo_zip", fake_fetch(make_anthropics_like_zip())
+        )
+        with pytest.raises(HTTPException) as exc:
+            await service.add_custom_source(
+                session, member_ctx, SkillSourceCreateIn(source="someone/other-repo")
+            )
+        assert exc.value.status_code == 403
+
+    async def test_remove_deletes_only_the_matching_custom_entry(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            service, "fetch_github_repo_zip", fake_fetch(make_anthropics_like_zip())
+        )
+        await service.add_custom_source(
+            session, admin_ctx, SkillSourceCreateIn(source="someone/other-repo")
+        )
+        await service.remove_custom_source(session, admin_ctx, "someone/other-repo")
+        sources = await service.list_skill_sources(session, admin_ctx.workspace_id)
+        assert not any(entry["custom"] for entry in sources)
+        assert "skill_source.removed" in await audit_actions(session)
+
+    async def test_remove_unknown_source_is_404(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext
+    ) -> None:
+        with pytest.raises(HTTPException) as exc:
+            await service.remove_custom_source(session, admin_ctx, "never/added")
+        assert exc.value.status_code == 404
+
+    async def test_remove_a_default_source_is_404(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext
+    ) -> None:
+        with pytest.raises(HTTPException) as exc:
+            await service.remove_custom_source(session, admin_ctx, ANTHROPICS_SOURCE)
+        assert exc.value.status_code == 404
+
+    async def test_browse_and_install_work_against_a_custom_source(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fetch = fake_fetch(make_anthropics_like_zip())
+        monkeypatch.setattr(service, "fetch_github_repo_zip", fetch)
+        await service.add_custom_source(
+            session, admin_ctx, SkillSourceCreateIn(source="someone/other-repo")
+        )
+        service.reset_browse_cache()
+        entries = await service.browse_source(
+            session, admin_ctx.workspace_id, source="someone/other-repo"
+        )
+        assert {entry["name"] for entry in entries} == {"pdf", "docx", "template-skill"}
+        record, created = await service.install_from_browse(
+            session, admin_ctx, source="someone/other-repo", skill_path="skills/pdf"
+        )
+        assert created is True
+        assert record.name == "pdf"
 
 
 class TestBrowse:
@@ -547,3 +713,158 @@ class TestNewWorkspaceDefaults:
         installed_again, skipped_again = await service.install_builtins(session, admin_ctx)
         assert installed_again == []
         assert len(skipped_again) == 5
+
+
+class TestCategory:
+    """Category taxonomy (docs/architecture/skills.md, section 1)."""
+
+    async def test_manual_create_defaults_to_general(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext
+    ) -> None:
+        record = await service.create_skill(session, admin_ctx, payload())
+        assert record.category == DEFAULT_CATEGORY
+
+    async def test_manual_create_accepts_an_explicit_category(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext
+    ) -> None:
+        record = await service.create_skill(session, admin_ctx, payload(category="Legal"))
+        assert record.category == "Legal"
+
+    async def test_update_changes_the_category(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext
+    ) -> None:
+        record = await service.create_skill(session, admin_ctx, payload())
+        updated = await service.update_skill(
+            session, admin_ctx, record.id, SkillUpdate(category="Sales")
+        )
+        assert updated.category == "Sales"
+
+    async def test_a_real_category_subfolder_beats_the_taxonomy(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A repo that *does* categorize by folder keeps its own categories."""
+        service.reset_browse_cache()
+        categorized = make_zip(
+            {
+                "repo-HEAD/document-skills/pdf/SKILL.md": GOOD_SKILL.format(name="pdf"),
+                "repo-HEAD/legal-skills/contracts/SKILL.md": GOOD_SKILL.format(name="contracts"),
+            }
+        )
+        monkeypatch.setattr(service, "fetch_github_repo_zip", fake_fetch(categorized))
+        entries = await service.browse_source(
+            session, admin_ctx.workspace_id, source=ANTHROPICS_SOURCE
+        )
+        assert {entry["name"]: entry["category"] for entry in entries} == {
+            "pdf": "Document skills",
+            "contracts": "Legal skills",
+        }
+
+    async def test_builtins_get_hand_assigned_categories(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext
+    ) -> None:
+        await service.install_builtins(session, admin_ctx)
+        rows = {row.name: row.category for row in await session.scalars(select(Skill))}
+        assert rows == {
+            "writing-clear-updates": "Communication",
+            "code-review-checklist": "Engineering",
+            "bug-report-triage": "Support",
+            "meeting-notes-summary": "Communication",
+            "release-notes": "Engineering",
+        }
+
+    async def test_github_import_defaults_to_general(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext
+    ) -> None:
+        bundle = load_zip(make_zip({"blog/SKILL.md": GOOD_SKILL.format(name="blog")}))
+        await service.import_bundle(session, admin_ctx, bundle, source_url="")
+        record = await session.scalar(select(Skill))
+        assert record is not None
+        assert record.category == DEFAULT_CATEGORY
+
+    async def test_browse_listing_shows_a_derived_category(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        service.reset_browse_cache()
+        monkeypatch.setattr(
+            service, "fetch_github_repo_zip", fake_fetch(make_anthropics_like_zip())
+        )
+        entries = await service.browse_source(
+            session, admin_ctx.workspace_id, source=ANTHROPICS_SOURCE
+        )
+        by_name = {entry["name"]: entry["category"] for entry in entries}
+        # anthropics/skills nests everything under one generic "skills/"
+        # wrapper, so the folder yields nothing and the keyword taxonomy
+        # classifies each skill by name/description instead — which is the
+        # whole point of the cascade (docs/architecture/skills.md).
+        assert by_name["pdf"] == "Documents"
+        assert by_name["docx"] == "Documents"
+        assert len(set(by_name.values())) >= 1
+        assert "Skills" not in set(by_name.values())
+
+    async def test_browse_install_persists_the_derived_category(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        service.reset_browse_cache()
+        monkeypatch.setattr(
+            service, "fetch_github_repo_zip", fake_fetch(make_anthropics_like_zip())
+        )
+        pdf, _ = await service.install_from_browse(
+            session, admin_ctx, source=ANTHROPICS_SOURCE, skill_path="skills/pdf"
+        )
+        template, _ = await service.install_from_browse(
+            session, admin_ctx, source=ANTHROPICS_SOURCE, skill_path="template"
+        )
+        assert pdf.category == "Documents"
+        # The repo-root "template" skill has no folder signal at all; its
+        # generic name/description gives the taxonomy nothing either.
+        assert template.category is not None
+
+    async def test_install_builtins_repairs_a_stale_builtin_category(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext
+    ) -> None:
+        """Starters installed before the taxonomy existed carry NULL. The
+        idempotent "install missing defaults" action repairs them in place —
+        existing workspaces must end up correct without manual editing."""
+        await service.install_builtins(session, admin_ctx)
+        stale = await session.scalar(select(Skill).where(Skill.name == "release-notes"))
+        assert stale is not None
+        stale.category = None  # what a pre-0024 workspace looks like
+        await session.flush()
+
+        installed, skipped = await service.install_builtins(session, admin_ctx)
+        assert installed == []
+        assert len(skipped) == 5
+        repaired = await session.scalar(select(Skill).where(Skill.name == "release-notes"))
+        assert repaired is not None
+        assert repaired.category == "Engineering"
+
+    async def test_repair_never_touches_a_non_builtin_skill(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext
+    ) -> None:
+        """An admin who replaced a starter with their own skill of the same
+        name keeps their category — only a still-built_in row is repaired."""
+        await service.create_skill(
+            session, admin_ctx, payload(name="release-notes", category="Mine")
+        )
+        await service.install_builtins(session, admin_ctx)
+        mine = await session.scalar(select(Skill).where(Skill.name == "release-notes"))
+        assert mine is not None
+        assert mine.source == "custom"
+        assert mine.category == "Mine"
+
+    async def test_list_skills_filters_by_category(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext
+    ) -> None:
+        await service.create_skill(session, admin_ctx, payload(name="a", category="Legal"))
+        await service.create_skill(session, admin_ctx, payload(name="b", category="Legal"))
+        await service.create_skill(session, admin_ctx, payload(name="c"))
+        legal_items, legal_total = await service.list_skills(
+            session, admin_ctx.workspace_id, category="Legal"
+        )
+        assert legal_total == 2
+        assert {item.name for item in legal_items} == {"a", "b"}
+        general_items, general_total = await service.list_skills(
+            session, admin_ctx.workspace_id, category=DEFAULT_CATEGORY
+        )
+        assert general_total == 1
+        assert general_items[0].name == "c"

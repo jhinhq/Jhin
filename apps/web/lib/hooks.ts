@@ -724,12 +724,12 @@ export function useInvalidateCoordination(workspaceId: string) {
 
 // --- Skills (docs/architecture/skills.md) ---
 
-export function useSkills(workspaceId: string, q = "") {
+export function useSkills(workspaceId: string, q = "", category = "") {
   return useQuery({
-    queryKey: ["skills", workspaceId, q],
+    queryKey: ["skills", workspaceId, q, category],
     queryFn: () =>
       api<SkillList>(`/api/v1/workspaces/${workspaceId}/skills`, {
-        params: { q: q || undefined, limit: 100 },
+        params: { q: q || undefined, category: category || undefined, limit: 100 },
       }),
     placeholderData: (previous) => previous,
   });
@@ -751,11 +751,11 @@ export function useAgentSkills(workspaceId: string, agentId: string) {
   });
 }
 
-/** The hardcoded catalog of known skill repositories to browse. */
-export function useSkillSources() {
+/** The default catalog plus this workspace's own custom additions. */
+export function useSkillSources(workspaceId: string) {
   return useQuery({
-    queryKey: ["skill-sources"],
-    queryFn: () => api<SkillSourceInfo[]>("/api/v1/skill-sources"),
+    queryKey: ["skill-sources", workspaceId],
+    queryFn: () => api<SkillSourceInfo[]>(`/api/v1/workspaces/${workspaceId}/skill-sources`),
     staleTime: 5 * 60_000,
   });
 }
@@ -779,5 +779,12 @@ export function useInvalidateSkills(workspaceId: string) {
     void queryClient.invalidateQueries({ queryKey: ["skills", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["skill", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["agent-skills", workspaceId] });
+  };
+}
+
+export function useInvalidateSkillSources(workspaceId: string) {
+  const queryClient = useQueryClient();
+  return () => {
+    void queryClient.invalidateQueries({ queryKey: ["skill-sources", workspaceId] });
   };
 }

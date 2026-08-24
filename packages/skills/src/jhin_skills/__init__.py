@@ -15,6 +15,13 @@ from jhin_skills.bundle import (
     load_directory,
     load_zip,
 )
+from jhin_skills.category import (
+    DEFAULT_CATEGORY,
+    category_from_path,
+    category_from_text,
+    derive_category,
+    humanize_folder_name,
+)
 from jhin_skills.github import (
     SkillImportError,
     fetch_github_repo_zip,
@@ -22,6 +29,7 @@ from jhin_skills.github import (
     source_url_for,
 )
 from jhin_skills.parser import (
+    MAX_CATEGORY_CHARS,
     MAX_CONTENT_BYTES,
     MAX_DESCRIPTION_CHARS,
     MAX_FILE_BYTES,
@@ -37,6 +45,8 @@ from jhin_skills.parser import (
 )
 
 __all__ = [
+    "DEFAULT_CATEGORY",
+    "MAX_CATEGORY_CHARS",
     "MAX_CONTENT_BYTES",
     "MAX_DESCRIPTION_CHARS",
     "MAX_FILES",
@@ -52,8 +62,12 @@ __all__ = [
     "SkillFile",
     "SkillImportError",
     "SkillParseError",
+    "category_from_path",
+    "category_from_text",
+    "derive_category",
     "fetch_github_repo_zip",
     "find_secret",
+    "humanize_folder_name",
     "is_valid_skill_name",
     "load_builtin_skills",
     "load_directory",

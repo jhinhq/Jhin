@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -19,10 +20,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from jhin_api.audit import service as audit
 from jhin_api.deps import WorkspaceContext
-from jhin_api.skills.schemas import SkillCreate, SkillFile, SkillUpdate
-from jhin_db.models import Agent, AgentSkill, Skill
+from jhin_api.skills.schemas import SkillCreate, SkillFile, SkillSourceCreateIn, SkillUpdate
+from jhin_db.models import Agent, AgentSkill, Skill, Workspace
 from jhin_domain import WorkspaceRole, role_satisfies
 from jhin_skills import (
+    DEFAULT_CATEGORY,
     MAX_CONTENT_BYTES,
     MAX_FILE_BYTES,
     MAX_TOTAL_BYTES,
@@ -30,6 +32,7 @@ from jhin_skills import (
     BundleResult,
     SkillImportError,
     SkillParseError,
+    derive_category,
     fetch_github_repo_zip,
     find_secret,
     load_builtin_skills,
@@ -63,9 +66,59 @@ SKILL_SOURCES: tuple[dict[str, str], ...] = (
         ),
         "url": "https://github.com/anthropics/skills",
     },
+    {
+        "source": "obra/superpowers",
+        "label": "Superpowers",
+        "description": (
+            "An agentic skills framework and software-development methodology: "
+            "TDD, systematic debugging, code review, git worktrees, and more."
+        ),
+        "url": "https://github.com/obra/superpowers",
+    },
+    {
+        "source": "addyosmani/agent-skills",
+        "label": "Addy Osmani's agent skills",
+        "description": "Production-grade engineering skills for AI coding agents.",
+        "url": "https://github.com/addyosmani/agent-skills",
+    },
+    {
+        "source": "jamestorrevillas/dev-skills",
+        "label": "Dev skills",
+        "description": (
+            "A modular skill library for software engineers — technical, soft, and career skills."
+        ),
+        "url": "https://github.com/jamestorrevillas/dev-skills",
+    },
+    {
+        "source": "avizmarlon/agent-skills",
+        "label": "Portable agent skills",
+        "description": (
+            "Portable agent skills for AI coding tools — one SKILL.md library "
+            "shared across Claude Code, Codex, Cursor, and Gemini."
+        ),
+        "url": "https://github.com/avizmarlon/agent-skills",
+    },
 )
 
 _KNOWN_SOURCES = {entry["source"] for entry in SKILL_SOURCES}
+
+# Every workspace's own custom browse sources live at
+# workspace.settings_json["skill_sources"]: a small JSON list rather than a
+# dedicated table, since it is admin-curated, low-cardinality, per-workspace
+# configuration with no need for its own relational identity (the same
+# reasoning that already puts budgets and coordination limits there). Each
+# entry: {"source", "label", "description", "url", "added_by", "added_at"}.
+_CUSTOM_SOURCES_KEY = "skill_sources"
+
+# Hand-picked categories for the shipped starters (docs/architecture/skills.md
+# section 1) — every other creation path derives or defaults its category.
+_BUILTIN_CATEGORIES: dict[str, str] = {
+    "writing-clear-updates": "Communication",
+    "code-review-checklist": "Engineering",
+    "bug-report-triage": "Support",
+    "meeting-notes-summary": "Communication",
+    "release-notes": "Engineering",
+}
 
 # In-process cache of a source's parsed skill listing, keyed by "owner/repo".
 # A short TTL keeps repeated keystrokes in the search box from re-fetching
@@ -158,6 +211,7 @@ async def list_skills(
     *,
     q: str | None = None,
     source: str | None = None,
+    category: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[Skill], int]:
@@ -171,6 +225,11 @@ async def list_skills(
         )
     if source is not None:
         query = query.where(Skill.source == source)
+    if category is not None:
+        if category == DEFAULT_CATEGORY:
+            query = query.where((Skill.category == DEFAULT_CATEGORY) | (Skill.category.is_(None)))
+        else:
+            query = query.where(Skill.category == category)
     total = await db.scalar(select(func.count()).select_from(query.subquery())) or 0
     rows = await db.scalars(
         query.order_by(Skill.name).limit(min(limit, MAX_PAGE_SIZE)).offset(offset)
@@ -216,6 +275,7 @@ async def create_skill(
         content=payload.content,
         files_json=_validated_files(payload.files, content=payload.content),
         source="custom",
+        category=payload.category or DEFAULT_CATEGORY,
         enabled=True,
     )
     db.add(record)
@@ -247,6 +307,8 @@ async def update_skill(
     changed_body = False
     if payload.description is not None and payload.description != record.description:
         record.description = payload.description
+    if payload.category is not None and payload.category != record.category:
+        record.category = payload.category
     new_content = payload.content if payload.content is not None else record.content
     new_files = (
         _validated_files(payload.files, content=new_content)
@@ -332,13 +394,27 @@ async def _install_builtins_core(
 
     Stages the rows and the audit event in the caller's transaction —
     does not commit — so a caller building a workspace can install its
-    starters atomically with the rest of workspace creation. Returns
-    ``(installed_names, skipped_names)``.
+    starters atomically with the rest of workspace creation. Also repairs
+    the category of a starter that is already present but mis-categorized
+    (see below). Returns ``(installed_names, skipped_names)``.
     """
     installed: list[str] = []
     skipped: list[str] = []
+    repaired: list[str] = []
     for loaded in load_builtin_skills():
-        if await _name_taken(db, workspace_id, loaded.skill.name):
+        wanted_category = _BUILTIN_CATEGORIES.get(loaded.skill.name, DEFAULT_CATEGORY)
+        existing = await db.scalar(
+            select(Skill).where(Skill.workspace_id == workspace_id, Skill.name == loaded.skill.name)
+        )
+        if existing is not None:
+            # "Install missing defaults" doubles as "repair the defaults":
+            # a starter installed before the category taxonomy existed has a
+            # NULL category and would otherwise read as "General" forever.
+            # Only a still-built_in skill is touched, and only its category —
+            # never content an admin may have edited.
+            if existing.source == "built_in" and existing.category != wanted_category:
+                existing.category = wanted_category
+                repaired.append(loaded.skill.name)
             skipped.append(loaded.skill.name)
             continue
         record = Skill(
@@ -348,6 +424,7 @@ async def _install_builtins_core(
             content=loaded.skill.content,
             files_json=[{"path": file.path, "content": file.content} for file in loaded.files],
             source="built_in",
+            category=wanted_category,
             enabled=True,
         )
         db.add(record)
@@ -361,7 +438,12 @@ async def _install_builtins_core(
         actor_id=actor_id,
         request_id=request_id,
         ip_hash=ip_hash,
-        metadata={"installed": len(installed), "skipped": len(skipped), "source": source},
+        metadata={
+            "installed": len(installed),
+            "skipped": len(skipped),
+            "repaired": len(repaired),
+            "source": source,
+        },
     )
     return installed, skipped
 
@@ -452,6 +534,10 @@ async def import_bundle(
             files_json=[{"path": file.path, "content": file.content} for file in loaded.files],
             source="imported",
             source_url=source_url[:500],
+            # A raw admin-typed GitHub/zip import defaults to General — only
+            # a browse-gallery install derives category from folder structure
+            # (docs/architecture/skills.md). Editable afterward either way.
+            category=DEFAULT_CATEGORY,
             enabled=False,
         )
         db.add(record)
@@ -478,15 +564,39 @@ async def import_bundle(
     return results, created, skipped
 
 
-def list_skill_sources() -> list[dict[str, str]]:
-    """The hardcoded catalog of known skill repositories (viewer+)."""
-    return [dict(entry) for entry in SKILL_SOURCES]
+def _workspace_custom_sources(workspace: Workspace) -> list[dict[str, Any]]:
+    raw = workspace.settings_json.get(_CUSTOM_SOURCES_KEY, [])
+    return [dict(entry) for entry in raw] if isinstance(raw, list) else []
 
 
-def _require_known_source(source: str) -> None:
-    if source not in _KNOWN_SOURCES:
+async def _get_workspace(db: AsyncSession, workspace_id: UUID) -> Workspace:
+    workspace = await db.get(Workspace, workspace_id)
+    if workspace is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Workspace not found")
+    return workspace
+
+
+async def list_skill_sources(db: AsyncSession, workspace_id: UUID) -> list[dict[str, Any]]:
+    """The hardcoded default catalog plus this workspace's own custom
+    additions (viewer+)."""
+    workspace = await _get_workspace(db, workspace_id)
+    defaults = [{**entry, "custom": False} for entry in SKILL_SOURCES]
+    custom = [{**entry, "custom": True} for entry in _workspace_custom_sources(workspace)]
+    return [*defaults, *custom]
+
+
+async def _known_sources_for_workspace(db: AsyncSession, workspace_id: UUID) -> set[str]:
+    workspace = await _get_workspace(db, workspace_id)
+    custom = {entry["source"] for entry in _workspace_custom_sources(workspace)}
+    return _KNOWN_SOURCES | custom
+
+
+def _require_known_source(source: str, known: set[str]) -> None:
+    if source not in known:
         raise HTTPException(
-            422, f"{source!r} is not a known skill source; see GET /api/v1/skill-sources"
+            422,
+            f"{source!r} is not a known skill source; browse it via GET /skill-sources or add "
+            "it as a custom source first",
         )
 
 
@@ -515,8 +625,12 @@ async def browse_source(
 ) -> list[dict[str, Any]]:
     """List one known source's skills (name/description parsed from each
     SKILL.md) without importing anything. Marks skills already installed in
-    this workspace (matched by name + source_url) as ``installed: True``."""
-    _require_known_source(source)
+    this workspace (matched by name + source_url) as ``installed: True``, and
+    computes each skill's category the same way an install would derive it
+    (docs/architecture/skills.md) — purely for display/filtering, nothing is
+    written until the skill is actually installed."""
+    known = await _known_sources_for_workspace(db, workspace_id)
+    _require_known_source(source, known)
     owner, repo, _ = parse_github_ref(source)
     bundle = await _fetch_cached_bundle(source)
 
@@ -547,6 +661,12 @@ async def browse_source(
             "description": loaded.skill.description,
             "path": loaded.folder,
             "installed": urls[loaded.skill.name] in installed_urls,
+            "category": derive_category(
+                loaded.folder,
+                name=loaded.skill.name,
+                description=loaded.skill.description,
+                declared=loaded.skill.category,
+            ),
         }
         for loaded in matches
     ]
@@ -572,7 +692,8 @@ async def install_from_browse(
     duplicating. Returns ``(skill, created)``.
     """
     _require_admin(ctx)
-    _require_known_source(source)
+    known = await _known_sources_for_workspace(db, ctx.workspace_id)
+    _require_known_source(source, known)
     ref = f"{source}/{skill_path}".strip("/")
     try:
         data, path_prefix, source_url = await fetch_github_repo_zip(ref)
@@ -606,6 +727,12 @@ async def install_from_browse(
         files_json=[{"path": file.path, "content": file.content} for file in loaded.files],
         source="imported",
         source_url=source_url[:500],
+        category=derive_category(
+            loaded.folder,
+            name=loaded.skill.name,
+            description=loaded.skill.description,
+            declared=loaded.skill.category,
+        ),
         enabled=True,
     )
     db.add(record)
@@ -621,6 +748,94 @@ async def install_from_browse(
     )
     await db.commit()
     return record, True
+
+
+async def add_custom_source(
+    db: AsyncSession,
+    ctx: WorkspaceContext,
+    payload: SkillSourceCreateIn,
+    *,
+    request_id: UUID | None = None,
+    ip_hash: str | None = None,
+) -> dict[str, Any]:
+    """Add a workspace-custom browse source (admin).
+
+    Validated live, over the exact same codeload mechanism a browse or
+    install already uses: the source must fetch and contain at least one
+    skill this parser accepts, or the add is rejected with a clear reason —
+    nothing is persisted on a failed validation.
+    """
+    _require_admin(ctx)
+    owner, repo, path = parse_github_ref(payload.source)
+    source = f"{owner}/{repo}/{path}".rstrip("/") if path else f"{owner}/{repo}"
+    if source in _KNOWN_SOURCES:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"{source!r} is already a default source")
+    workspace = await _get_workspace(db, ctx.workspace_id)
+    existing = _workspace_custom_sources(workspace)
+    if any(entry["source"] == source for entry in existing):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"{source!r} has already been added to this workspace"
+        )
+    bundle = await _fetch_cached_bundle(source)  # raises 422 on fetch/zip failure
+    if not bundle.skills:
+        reason = "; ".join(bundle.warnings[:3]) or "no SKILL.md files were found"
+        raise HTTPException(
+            422, f"{source!r} was reachable but had no valid skill this app could parse ({reason})"
+        )
+    entry = {
+        "source": source,
+        "label": payload.label.strip() or source,
+        "description": payload.description.strip(),
+        "url": source_url_for(owner, repo, path),
+        "added_by": str(ctx.user.id),
+        "added_at": datetime.now(UTC).isoformat(),
+    }
+    workspace.settings_json = {
+        **workspace.settings_json,
+        _CUSTOM_SOURCES_KEY: [*existing, entry],
+    }
+    _audit(
+        db,
+        ctx,
+        "skill_source.added",
+        None,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        metadata={"source": source, "skills_found": len(bundle.skills)},
+    )
+    await db.commit()
+    return {**entry, "custom": True}
+
+
+async def remove_custom_source(
+    db: AsyncSession,
+    ctx: WorkspaceContext,
+    source: str,
+    *,
+    request_id: UUID | None = None,
+    ip_hash: str | None = None,
+) -> None:
+    """Remove one of this workspace's own custom sources (admin). A default
+    source is never a valid target — it is not stored per-workspace."""
+    _require_admin(ctx)
+    workspace = await _get_workspace(db, ctx.workspace_id)
+    existing = _workspace_custom_sources(workspace)
+    remaining = [entry for entry in existing if entry["source"] != source]
+    if len(remaining) == len(existing):
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, f"{source!r} is not a custom source in this workspace"
+        )
+    workspace.settings_json = {**workspace.settings_json, _CUSTOM_SOURCES_KEY: remaining}
+    _audit(
+        db,
+        ctx,
+        "skill_source.removed",
+        None,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        metadata={"source": source},
+    )
+    await db.commit()
 
 
 async def _require_agent(db: AsyncSession, workspace_id: UUID, agent_id: UUID) -> Agent:

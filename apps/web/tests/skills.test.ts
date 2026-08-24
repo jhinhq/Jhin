@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   canReadSkills,
+  categoriesOf,
+  DEFAULT_CATEGORY,
+  groupByCategory,
   isValidGithubRef,
   isValidSkillName,
   needsReviewCount,
@@ -30,6 +33,7 @@ function skill(overrides: Partial<Skill> = {}): Skill {
     enabled: true,
     version: 1,
     file_count: 0,
+    category: DEFAULT_CATEGORY,
     created_by_agent_id: null,
     created_at: "2026-08-23T00:00:00Z",
     updated_at: "2026-08-23T00:00:00Z",
@@ -95,5 +99,49 @@ describe("SOURCE_LABELS", () => {
     expect(SOURCE_LABELS.built_in).toBe("Starter");
     expect(SOURCE_LABELS.imported).toBe("Imported");
     expect(SOURCE_LABELS.custom).toBe("Custom");
+  });
+});
+
+describe("categoriesOf", () => {
+  it("sorts categories alphabetically with General last", () => {
+    expect(
+      categoriesOf([
+        skill({ category: "Engineering" }),
+        skill({ category: "Communication" }),
+        skill({ category: DEFAULT_CATEGORY }),
+        skill({ category: "Engineering" }),
+      ]),
+    ).toEqual(["Communication", "Engineering", DEFAULT_CATEGORY]);
+  });
+
+  it("omits General entirely when nothing is uncategorized", () => {
+    expect(categoriesOf([skill({ category: "Support" })])).toEqual(["Support"]);
+  });
+
+  it("is empty for an empty list", () => {
+    expect(categoriesOf([])).toEqual([]);
+  });
+});
+
+describe("groupByCategory", () => {
+  it("groups items and sorts General last", () => {
+    const groups = groupByCategory([
+      skill({ id: "s1", category: DEFAULT_CATEGORY }),
+      skill({ id: "s2", category: "Engineering" }),
+      skill({ id: "s3", category: "Communication" }),
+      skill({ id: "s4", category: "Engineering" }),
+    ]);
+    expect(groups.map(([category]) => category)).toEqual([
+      "Communication",
+      "Engineering",
+      DEFAULT_CATEGORY,
+    ]);
+    const engineering = groups.find(([category]) => category === "Engineering");
+    expect(engineering?.[1].map((item) => item.id)).toEqual(["s2", "s4"]);
+  });
+
+  it("treats a blank category as General", () => {
+    const groups = groupByCategory([skill({ category: "" })]);
+    expect(groups).toEqual([[DEFAULT_CATEGORY, [skill({ category: "" })]]]);
   });
 });

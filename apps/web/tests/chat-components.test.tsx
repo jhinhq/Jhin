@@ -234,6 +234,103 @@ describe("Transcript quiet exchanges", () => {
   });
 });
 
+describe("Transcript queued instructions", () => {
+  it("shows a queued pill for an instruction with no later activity yet", () => {
+    const items = mergeTimeline(
+      [
+        message({
+          id: "u1",
+          sender_type: "user",
+          message_type: "instruction",
+          content_json: { text: "Also check staging" },
+          created_at: "2026-08-21T10:05:00Z",
+          task_id: "t1",
+        }),
+      ],
+      [],
+    );
+    render(<Transcript items={items} agentName="Scout" userName="Ada" />);
+    const status = screen.getByTestId("instruction-status");
+    expect(status.getAttribute("data-state")).toBe("queued");
+    expect(status.textContent).toContain("Queued");
+    expect(status.textContent).toContain("Scout");
+  });
+
+  it("swaps to a delivered note once a later agent message on the same task appears", () => {
+    const items = mergeTimeline(
+      [
+        message({
+          id: "u1",
+          sender_type: "user",
+          message_type: "instruction",
+          content_json: { text: "Also check staging" },
+          created_at: "2026-08-21T10:05:00Z",
+          task_id: "t1",
+        }),
+        message({
+          id: "a1",
+          sender_type: "agent",
+          message_type: "text",
+          content_json: { text: "Checked staging, looks fine." },
+          created_at: "2026-08-21T10:06:00Z",
+          task_id: "t1",
+        }),
+      ],
+      [],
+    );
+    render(<Transcript items={items} agentName="Scout" userName="Ada" />);
+    const status = screen.getByTestId("instruction-status");
+    expect(status.getAttribute("data-state")).toBe("delivered");
+    expect(status.textContent).toContain("Steered Scout");
+  });
+
+  it("resolves two back-to-back queued instructions independently", () => {
+    const items = mergeTimeline(
+      [
+        message({
+          id: "u1",
+          sender_type: "user",
+          message_type: "instruction",
+          content_json: { text: "First" },
+          created_at: "2026-08-21T10:05:00Z",
+          task_id: "t1",
+        }),
+        message({
+          id: "a1",
+          sender_type: "agent",
+          message_type: "text",
+          content_json: { text: "Working on it" },
+          created_at: "2026-08-21T10:06:00Z",
+          task_id: "t1",
+        }),
+        message({
+          id: "u2",
+          sender_type: "user",
+          message_type: "instruction",
+          content_json: { text: "Second" },
+          created_at: "2026-08-21T10:07:00Z",
+          task_id: "t1",
+        }),
+      ],
+      [],
+    );
+    render(<Transcript items={items} agentName="Scout" userName="Ada" />);
+    const statuses = screen.getAllByTestId("instruction-status");
+    expect(statuses).toHaveLength(2);
+    expect(statuses[0].getAttribute("data-state")).toBe("delivered");
+    expect(statuses[1].getAttribute("data-state")).toBe("queued");
+  });
+
+  it("does not render an instruction-status pill for ordinary user messages", () => {
+    const items = mergeTimeline(
+      [message({ id: "u1", sender_type: "user", content_json: { text: "hi" } })],
+      [],
+    );
+    render(<Transcript items={items} agentName="Scout" userName="Ada" />);
+    expect(screen.queryByTestId("instruction-status")).toBeNull();
+  });
+});
+
 describe("Composer", () => {
   it("sends on Enter and inserts a newline on Shift+Enter", () => {
     const onSend = vi.fn();
@@ -267,5 +364,36 @@ describe("Composer", () => {
     fireEvent.keyDown(screen.getByRole("textbox", { name: "Message" }), { key: "Enter" });
     expect(onSend).not.toHaveBeenCalled();
     expect(screen.getAllByText("This chat is archived.").length).toBeGreaterThan(0);
+  });
+
+  it("hides the Stop button when nothing is active", () => {
+    render(<Composer value="" onChange={() => {}} onSend={() => {}} />);
+    expect(screen.queryByTestId("composer-stop")).toBeNull();
+  });
+
+  it("shows a Stop button while a task is active and calls onStop when clicked", () => {
+    const onStop = vi.fn();
+    render(
+      <Composer
+        value=""
+        onChange={() => {}}
+        onSend={() => {}}
+        canStop
+        onStop={onStop}
+        stopLabel="Stop Scout"
+      />,
+    );
+    const stop = screen.getByTestId("composer-stop");
+    expect(stop.getAttribute("aria-label")).toBe("Stop Scout");
+    expect((stop as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(stop);
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
+
+  it("disables the Stop button while a stop/pause/resume request is in flight", () => {
+    render(
+      <Composer value="" onChange={() => {}} onSend={() => {}} canStop stopping onStop={() => {}} />,
+    );
+    expect((screen.getByTestId("composer-stop") as HTMLButtonElement).disabled).toBe(true);
   });
 });

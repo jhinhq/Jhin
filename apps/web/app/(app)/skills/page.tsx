@@ -5,7 +5,7 @@
  * own, or import from GitHub / a zip — imports stay off until reviewed. */
 
 import { useMutation } from "@tanstack/react-query";
-import { BookOpen, Download, Pencil, Plus, Search, Trash2, Upload } from "lucide-react";
+import { BookOpen, Download, Pencil, Plus, Search, Trash2, Upload, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { PageBody, PageHeader } from "@/components/app-shell";
 import { SkillsBrowseGallery } from "@/components/skills-browse-gallery";
@@ -16,6 +16,7 @@ import {
   EmptyState,
   ErrorNote,
   Field,
+  focusRing,
   Input,
   Select,
   Spinner,
@@ -25,12 +26,16 @@ import {
 import { api, ApiError, apiUpload } from "@/lib/api";
 import {
   useBrowseSkills,
+  useInvalidateSkillSources,
   useInvalidateSkills,
   useSkill,
   useSkills,
   useSkillSources,
 } from "@/lib/hooks";
 import {
+  categoriesOf,
+  DEFAULT_CATEGORY,
+  groupByCategory,
   isValidGithubRef,
   isValidSkillName,
   needsReviewCount,
@@ -43,8 +48,109 @@ import type {
   Skill,
   SkillDetail,
   SkillImportResult,
+  SkillSourceInfo,
 } from "@/lib/types";
 import { useWorkspace } from "@/lib/workspace-context";
+
+/** A row of toggleable category chips; `null` category means "All". */
+function CategoryChips({
+  categories,
+  active,
+  onChange,
+}: {
+  categories: string[];
+  active: string | null;
+  onChange: (category: string | null) => void;
+}) {
+  if (categories.length === 0) return null;
+  const chip = (label: string, value: string | null) => {
+    const isActive = active === value;
+    return (
+      <button
+        key={label}
+        type="button"
+        aria-pressed={isActive}
+        onClick={() => onChange(isActive ? null : value)}
+        className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${focusRing} ${
+          isActive
+            ? "border-accent bg-accent-soft text-accent-strong"
+            : "border-line bg-surface text-dim hover:text-ink"
+        }`}
+      >
+        {label}
+      </button>
+    );
+  };
+  return (
+    <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Filter by category">
+      {chip("All", null)}
+      {categories.map((category) => chip(category, category))}
+    </div>
+  );
+}
+
+function SkillRow({
+  skill,
+  isAdmin,
+  onToggle,
+  toggling,
+  onEdit,
+  onDelete,
+  removing,
+}: {
+  skill: Skill;
+  isAdmin: boolean;
+  onToggle: () => void;
+  toggling: boolean;
+  onEdit: () => void;
+  onDelete: () => void;
+  removing: boolean;
+}) {
+  return (
+    <li className="flex flex-wrap items-start gap-3 rounded-2xl border border-line bg-raised px-4 py-3">
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <code className="font-mono text-sm font-medium">{skill.name}</code>
+          <Badge>{SOURCE_LABELS[skill.source]}</Badge>
+          {skill.source === "imported" && !skill.enabled ? (
+            <Badge tone="warn">Review and enable</Badge>
+          ) : !skill.enabled ? (
+            <Badge tone="neutral">Off</Badge>
+          ) : null}
+          {skill.file_count > 0 ? (
+            <span className="text-xs text-faint">
+              {skill.file_count} {skill.file_count === 1 ? "file" : "files"}
+            </span>
+          ) : null}
+        </div>
+        <p className="mt-1 text-sm text-dim">{skill.description}</p>
+      </div>
+      {isAdmin ? (
+        <div className="flex shrink-0 items-center gap-1.5">
+          <Button
+            size="sm"
+            onClick={onToggle}
+            disabled={toggling}
+            aria-label={`${skill.enabled ? "Disable" : "Enable"} ${skill.name}`}
+          >
+            {skill.enabled ? "Disable" : "Enable"}
+          </Button>
+          <Button size="sm" onClick={onEdit} aria-label={`Edit ${skill.name}`}>
+            <Pencil size={14} />
+          </Button>
+          <Button
+            size="sm"
+            onClick={onDelete}
+            disabled={removing}
+            aria-label={`Delete ${skill.name}`}
+          >
+            <Trash2 size={14} />
+          </Button>
+        </div>
+      ) : null}
+    </li>
+  );
+}
 
 function errorText(error: unknown, fallback: string): string {
   return error instanceof ApiError ? error.detail : fallback;
@@ -72,6 +178,7 @@ export default function SkillsPage() {
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
 
   const install = useMutation({
     mutationFn: () =>
@@ -110,6 +217,9 @@ export default function SkillsPage() {
 
   const items = skills.data?.items ?? [];
   const reviewCount = needsReviewCount(items);
+  const categories = categoriesOf(items);
+  const visibleItems = categoryFilter ? items.filter((item) => item.category === categoryFilter) : items;
+  const groups = groupByCategory(visibleItems);
 
   return (
     <>
@@ -179,52 +289,33 @@ export default function SkillsPage() {
                 }
               />
             ) : null}
-            <ul className="space-y-2">
-              {items.map((skill) => (
-                <li
-                  key={skill.id}
-                  className="flex flex-wrap items-start gap-3 rounded-2xl border border-line bg-surface px-4 py-3"
+            {items.length > 0 ? (
+              <CategoryChips categories={categories} active={categoryFilter} onChange={setCategoryFilter} />
+            ) : null}
+            <div className="space-y-3">
+              {groups.map(([category, group]) => (
+                <details
+                  key={category}
+                  open
+                  className="rounded-2xl border border-line bg-surface"
+                  data-testid={`skill-category-${category}`}
                 >
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <code className="font-mono text-sm font-medium">{skill.name}</code>
-                      <Badge>{SOURCE_LABELS[skill.source]}</Badge>
-                      {skill.source === "imported" && !skill.enabled ? (
-                        <Badge tone="warn">Review and enable</Badge>
-                      ) : !skill.enabled ? (
-                        <Badge tone="neutral">Off</Badge>
-                      ) : null}
-                      {skill.file_count > 0 ? (
-                        <span className="text-xs text-faint">
-                          {skill.file_count} {skill.file_count === 1 ? "file" : "files"}
-                        </span>
-                      ) : null}
-                    </div>
-                    <p className="mt-1 text-sm text-dim">{skill.description}</p>
-                  </div>
-                  {isAdmin ? (
-                    <div className="flex shrink-0 items-center gap-1.5">
-                      <Button
-                        size="sm"
-                        onClick={() => toggle.mutate(skill)}
-                        disabled={toggle.isPending}
-                        aria-label={`${skill.enabled ? "Disable" : "Enable"} ${skill.name}`}
-                      >
-                        {skill.enabled ? "Disable" : "Enable"}
-                      </Button>
-                      <Button
-                        size="sm"
-                        onClick={() => {
+                  <summary className="cursor-pointer list-none px-4 py-2.5 text-sm font-semibold text-ink">
+                    {category} <span className="font-normal text-faint">({group.length})</span>
+                  </summary>
+                  <ul className="space-y-2 border-t border-line px-4 py-3">
+                    {group.map((skill) => (
+                      <SkillRow
+                        key={skill.id}
+                        skill={skill}
+                        isAdmin={isAdmin}
+                        onToggle={() => toggle.mutate(skill)}
+                        toggling={toggle.isPending}
+                        onEdit={() => {
                           setEditingId(skill.id);
                           setEditorOpen(true);
                         }}
-                        aria-label={`Edit ${skill.name}`}
-                      >
-                        <Pencil size={14} />
-                      </Button>
-                      <Button
-                        size="sm"
-                        onClick={() => {
+                        onDelete={() => {
                           if (
                             window.confirm(
                               `Delete the skill “${skill.name}”? Agents lose it immediately.`,
@@ -233,16 +324,13 @@ export default function SkillsPage() {
                             remove.mutate(skill);
                           }
                         }}
-                        disabled={remove.isPending}
-                        aria-label={`Delete ${skill.name}`}
-                      >
-                        <Trash2 size={14} />
-                      </Button>
-                    </div>
-                  ) : null}
-                </li>
+                        removing={remove.isPending}
+                      />
+                    ))}
+                  </ul>
+                </details>
               ))}
-            </ul>
+            </div>
           </div>
         ) : (
           <BrowseLibrarySection workspaceId={workspaceId} isAdmin={isAdmin} onInstalled={invalidate} />
@@ -259,6 +347,7 @@ export default function SkillsPage() {
         <EditorDialog
           workspaceId={workspaceId}
           skillId={editingId}
+          existingCategories={categories}
           onClose={() => setEditorOpen(false)}
           onSaved={invalidate}
         />
@@ -276,12 +365,15 @@ function BrowseLibrarySection({
   isAdmin: boolean;
   onInstalled: () => void;
 }) {
-  const sources = useSkillSources();
+  const sources = useSkillSources(workspaceId);
+  const invalidateSources = useInvalidateSkillSources(workspaceId);
   const [source, setSource] = useState("");
   const [query, setQuery] = useState("");
   const debouncedQuery = useDebounced(query, 300);
+  const [browseCategory, setBrowseCategory] = useState<string | null>(null);
   const [installError, setInstallError] = useState<string | null>(null);
   const [installingPath, setInstallingPath] = useState<string | null>(null);
+  const [addSourceOpen, setAddSourceOpen] = useState(false);
 
   const activeSource = source || sources.data?.[0]?.source || "";
   const browse = useBrowseSkills(workspaceId, activeSource, debouncedQuery);
@@ -302,8 +394,26 @@ function BrowseLibrarySection({
     onSettled: () => setInstallingPath(null),
   });
 
-  const activeLabel =
-    sources.data?.find((entry) => entry.source === activeSource)?.label ?? activeSource;
+  const removeSource = useMutation({
+    mutationFn: (target: string) =>
+      api<void>(`/api/v1/workspaces/${workspaceId}/skill-sources/${target}`, {
+        method: "DELETE",
+      }),
+    onSuccess: () => {
+      setInstallError(null);
+      setSource("");
+      invalidateSources();
+    },
+    onError: (error) => setInstallError(errorText(error, "Removing the source failed.")),
+  });
+
+  const activeEntry = sources.data?.find((entry) => entry.source === activeSource);
+  const activeLabel = activeEntry?.label ?? activeSource;
+  const allSkills = browse.data?.skills ?? [];
+  const skillCategories = categoriesOf(allSkills);
+  const visibleSkills = browseCategory
+    ? allSkills.filter((entry) => entry.category === browseCategory)
+    : allSkills;
 
   return (
     <div className="space-y-4">
@@ -318,16 +428,34 @@ function BrowseLibrarySection({
           <Select
             aria-label="Skill source"
             value={activeSource}
-            onChange={(event) => setSource(event.target.value)}
+            onChange={(event) => {
+              setSource(event.target.value);
+              setBrowseCategory(null);
+            }}
           >
             {sources.data.map((entry) => (
               <option key={entry.source} value={entry.source}>
                 {entry.label}
+                {entry.custom ? " (custom)" : ""}
               </option>
             ))}
           </Select>
         ) : sources.data?.[0] ? (
           <Badge>{sources.data[0].label}</Badge>
+        ) : null}
+        {isAdmin && activeEntry?.custom ? (
+          <Button
+            size="sm"
+            onClick={() => {
+              if (window.confirm(`Remove the source “${activeLabel}”?`)) {
+                removeSource.mutate(activeSource);
+              }
+            }}
+            disabled={removeSource.isPending}
+            aria-label={`Remove source ${activeLabel}`}
+          >
+            <X size={14} /> Remove source
+          </Button>
         ) : null}
         <div className="relative min-w-[220px] flex-1">
           <Search
@@ -343,7 +471,15 @@ function BrowseLibrarySection({
             aria-label="Search skills"
           />
         </div>
+        {isAdmin ? (
+          <Button size="sm" onClick={() => setAddSourceOpen(true)}>
+            <Plus size={14} /> Add a source
+          </Button>
+        ) : null}
       </div>
+      {skillCategories.length > 0 ? (
+        <CategoryChips categories={skillCategories} active={browseCategory} onChange={setBrowseCategory} />
+      ) : null}
       <ErrorNote message={installError} />
       {browse.isPending && activeSource ? <Spinner label="Loading skills…" /> : null}
       {browse.isError ? (
@@ -353,14 +489,101 @@ function BrowseLibrarySection({
       ) : null}
       {browse.data ? (
         <SkillsBrowseGallery
-          entries={browse.data.skills}
+          entries={visibleSkills}
           sourceLabel={activeLabel}
           canInstall={isAdmin}
           installingPath={installingPath}
           onInstall={(entry) => install.mutate(entry)}
         />
       ) : null}
+      <AddSourceDialog
+        workspaceId={workspaceId}
+        open={addSourceOpen}
+        onClose={() => setAddSourceOpen(false)}
+        onAdded={(addedSource) => {
+          invalidateSources();
+          setSource(addedSource);
+          setAddSourceOpen(false);
+        }}
+      />
     </div>
+  );
+}
+
+function AddSourceDialog({
+  workspaceId,
+  open,
+  onClose,
+  onAdded,
+}: {
+  workspaceId: string;
+  open: boolean;
+  onClose: () => void;
+  onAdded: (source: string) => void;
+}) {
+  const [ref, setRef] = useState("");
+  const [label, setLabel] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const add = useMutation({
+    mutationFn: () =>
+      api<SkillSourceInfo>(`/api/v1/workspaces/${workspaceId}/skill-sources`, {
+        method: "POST",
+        body: { source: ref.trim(), label: label.trim() },
+      }),
+    onSuccess: (created) => {
+      setError(null);
+      setRef("");
+      setLabel("");
+      onAdded(created.source);
+    },
+    onError: (mutationError) =>
+      setError(
+        errorText(
+          mutationError,
+          "Could not add this source — check it's a public repo with at least one SKILL.md.",
+        ),
+      ),
+  });
+
+  const close = () => {
+    setError(null);
+    onClose();
+  };
+
+  return (
+    <Dialog
+      title="Add a source"
+      description="A public GitHub repository of skill folders. It's checked live before it's added — the same way an import is."
+      open={open}
+      onClose={close}
+    >
+      <div className="space-y-4">
+        <Field label="Repository" hint="owner/repo, optionally /path — e.g. obra/superpowers">
+          <Input
+            value={ref}
+            onChange={(event) => setRef(event.target.value)}
+            placeholder="owner/repo or owner/repo/path"
+          />
+        </Field>
+        <Field label="Label (optional)" hint="A friendly name shown in the source picker.">
+          <Input value={label} onChange={(event) => setLabel(event.target.value)} placeholder="" />
+        </Field>
+        <ErrorNote message={error} />
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" onClick={close}>
+            Cancel
+          </Button>
+          <Button
+            variant="primary"
+            disabled={!isValidGithubRef(ref) || add.isPending}
+            onClick={() => add.mutate()}
+          >
+            {add.isPending ? "Checking…" : "Add source"}
+          </Button>
+        </div>
+      </div>
+    </Dialog>
   );
 }
 
@@ -487,11 +710,13 @@ function ImportDialog({
 function EditorDialog({
   workspaceId,
   skillId,
+  existingCategories,
   onClose,
   onSaved,
 }: {
   workspaceId: string;
   skillId: string | null;
+  existingCategories: string[];
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -513,6 +738,7 @@ function EditorDialog({
       workspaceId={workspaceId}
       skillId={skillId}
       initial={detail.data ?? null}
+      existingCategories={existingCategories}
       onClose={onClose}
       onSaved={onSaved}
     />
@@ -523,18 +749,21 @@ function EditorForm({
   workspaceId,
   skillId,
   initial,
+  existingCategories,
   onClose,
   onSaved,
 }: {
   workspaceId: string;
   skillId: string | null;
   initial: SkillDetail | null;
+  existingCategories: string[];
   onClose: () => void;
   onSaved: () => void;
 }) {
   const [name, setName] = useState(initial?.name ?? "");
   const [description, setDescription] = useState(initial?.description ?? "");
   const [content, setContent] = useState(initial?.content ?? "");
+  const [category, setCategory] = useState(initial?.category ?? DEFAULT_CATEGORY);
   const [error, setError] = useState<string | null>(null);
   const creating = skillId === null;
 
@@ -543,11 +772,20 @@ function EditorForm({
       creating
         ? api<SkillDetail>(`/api/v1/workspaces/${workspaceId}/skills`, {
             method: "POST",
-            body: { name: name.trim(), description: description.trim(), content },
+            body: {
+              name: name.trim(),
+              description: description.trim(),
+              content,
+              category: category.trim() || undefined,
+            },
           })
         : api<SkillDetail>(`/api/v1/workspaces/${workspaceId}/skills/${skillId}`, {
             method: "PATCH",
-            body: { description: description.trim(), content },
+            body: {
+              description: description.trim(),
+              content,
+              category: category.trim() || undefined,
+            },
           }),
     onSuccess: () => {
       onSaved();
@@ -580,6 +818,19 @@ function EditorForm({
               onChange={(event) => setDescription(event.target.value)}
               placeholder="Write user-facing release notes from a list of changes. Use when announcing a release."
             />
+          </Field>
+          <Field label="Category" hint="Groups this skill on the library page. Pick an existing one or type a new one.">
+            <Input
+              list="skill-category-options"
+              value={category}
+              onChange={(event) => setCategory(event.target.value)}
+              placeholder={DEFAULT_CATEGORY}
+            />
+            <datalist id="skill-category-options">
+              {existingCategories.map((option) => (
+                <option key={option} value={option} />
+              ))}
+            </datalist>
           </Field>
           <Field label="Instructions (markdown)" hint="The full playbook the agent reads on demand.">
             <Textarea

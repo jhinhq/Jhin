@@ -15,6 +15,7 @@ function entry(overrides: Partial<BrowseSkillEntry> = {}): BrowseSkillEntry {
     description: "Work with PDF files.",
     path: "skills/pdf",
     installed: false,
+    category: "Skills",
     ...overrides,
   };
 }
@@ -94,6 +95,24 @@ describe("SkillsBrowseGallery", () => {
     expect(screen.getByRole("button", { name: "Install docx" }).textContent).not.toContain(
       "Installing",
     );
+  });
+
+  it("groups cards into sections by category", () => {
+    render(
+      <SkillsBrowseGallery
+        entries={[
+          entry({ name: "pdf", category: "Document skills" }),
+          entry({ name: "docx", path: "skills/docx", category: "Document skills" }),
+          entry({ name: "brainstorming", path: "skills/brainstorming", category: "Skills" }),
+        ]}
+        sourceLabel="Anthropic's official skills library"
+        canInstall
+        installingPath={null}
+        onInstall={() => {}}
+      />,
+    );
+    expect(screen.getByTestId("browse-category-Document skills")).toBeTruthy();
+    expect(screen.getByTestId("browse-category-Skills")).toBeTruthy();
   });
 
   it("hides the install button for non-admins", () => {

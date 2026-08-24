@@ -14,6 +14,7 @@ vi.mock("@/lib/hooks", () => ({
   useSkills: vi.fn(),
   useSkill: vi.fn(() => ({ data: undefined, isPending: false })),
   useInvalidateSkills: () => () => undefined,
+  useInvalidateSkillSources: () => () => undefined,
   useSkillSources: vi.fn(() => ({ data: [] as SkillSourceInfo[], isError: false })),
   useBrowseSkills: vi.fn(() => ({
     data: undefined,
@@ -45,6 +46,7 @@ function skill(overrides: Partial<Skill> = {}): Skill {
     enabled: true,
     version: 1,
     file_count: 1,
+    category: "General",
     created_by_agent_id: null,
     created_at: "2026-08-23T00:00:00Z",
     updated_at: "2026-08-23T00:00:00Z",
@@ -136,6 +138,18 @@ function browseEntry(overrides: Partial<BrowseSkillEntry> = {}): BrowseSkillEntr
     description: "Work with PDF files.",
     path: "skills/pdf",
     installed: false,
+    category: "Skills",
+    ...overrides,
+  };
+}
+
+function sourceInfo(overrides: Partial<SkillSourceInfo> = {}): SkillSourceInfo {
+  return {
+    source: "anthropics/skills",
+    label: "Anthropic's official skills library",
+    description: "",
+    url: "https://github.com/anthropics/skills",
+    custom: false,
     ...overrides,
   };
 }
@@ -143,14 +157,7 @@ function browseEntry(overrides: Partial<BrowseSkillEntry> = {}): BrowseSkillEntr
 describe("SkillsPage — Browse library", () => {
   it("shows a search box and results after switching tabs", () => {
     vi.mocked(useSkillSources).mockReturnValue({
-      data: [
-        {
-          source: "anthropics/skills",
-          label: "Anthropic's official skills library",
-          description: "",
-          url: "https://github.com/anthropics/skills",
-        },
-      ],
+      data: [sourceInfo()],
       isError: false,
     } as ReturnType<typeof useSkillSources>);
     vi.mocked(useBrowseSkills).mockReturnValue({
@@ -169,14 +176,7 @@ describe("SkillsPage — Browse library", () => {
 
   it("installs a browsed skill", async () => {
     vi.mocked(useSkillSources).mockReturnValue({
-      data: [
-        {
-          source: "anthropics/skills",
-          label: "Anthropic's official skills library",
-          description: "",
-          url: "https://github.com/anthropics/skills",
-        },
-      ],
+      data: [sourceInfo()],
       isError: false,
     } as ReturnType<typeof useSkillSources>);
     vi.mocked(useBrowseSkills).mockReturnValue({
@@ -200,14 +200,7 @@ describe("SkillsPage — Browse library", () => {
 
   it("shows a friendly error when GitHub is unreachable", () => {
     vi.mocked(useSkillSources).mockReturnValue({
-      data: [
-        {
-          source: "anthropics/skills",
-          label: "Anthropic's official skills library",
-          description: "",
-          url: "https://github.com/anthropics/skills",
-        },
-      ],
+      data: [sourceInfo()],
       isError: false,
     } as ReturnType<typeof useSkillSources>);
     vi.mocked(useBrowseSkills).mockReturnValue({
@@ -226,14 +219,7 @@ describe("SkillsPage — Browse library", () => {
 
   it("hides the install action from non-admins", () => {
     vi.mocked(useSkillSources).mockReturnValue({
-      data: [
-        {
-          source: "anthropics/skills",
-          label: "Anthropic's official skills library",
-          description: "",
-          url: "https://github.com/anthropics/skills",
-        },
-      ],
+      data: [sourceInfo()],
       isError: false,
     } as ReturnType<typeof useSkillSources>);
     vi.mocked(useBrowseSkills).mockReturnValue({
@@ -246,5 +232,99 @@ describe("SkillsPage — Browse library", () => {
     renderPage([skill()], "member");
     fireEvent.click(screen.getByRole("tab", { name: "Browse library" }));
     expect(screen.queryByRole("button", { name: "Install pdf" })).toBeNull();
+  });
+
+  it("shows an Add a source button for admins and adds one live-validated source", async () => {
+    vi.mocked(useSkillSources).mockReturnValue({
+      data: [sourceInfo()],
+      isError: false,
+    } as ReturnType<typeof useSkillSources>);
+    vi.mocked(useBrowseSkills).mockReturnValue({
+      data: { source: "anthropics/skills", skills: [browseEntry()] },
+      isPending: false,
+      isError: false,
+      error: null,
+      refetch: () => undefined,
+    } as unknown as ReturnType<typeof useBrowseSkills>);
+    vi.mocked(api).mockResolvedValue(sourceInfo({ source: "obra/superpowers", custom: true }));
+    renderPage([skill()]);
+    fireEvent.click(screen.getByRole("tab", { name: "Browse library" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add a source" }));
+    fireEvent.change(screen.getByPlaceholderText("owner/repo or owner/repo/path"), {
+      target: { value: "obra/superpowers" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add source" }));
+    await waitFor(() =>
+      expect(api).toHaveBeenCalledWith("/api/v1/workspaces/w1/skill-sources", {
+        method: "POST",
+        body: { source: "obra/superpowers", label: "" },
+      }),
+    );
+  });
+
+  it("hides Add a source from non-admins", () => {
+    vi.mocked(useSkillSources).mockReturnValue({
+      data: [sourceInfo()],
+      isError: false,
+    } as ReturnType<typeof useSkillSources>);
+    vi.mocked(useBrowseSkills).mockReturnValue({
+      data: { source: "anthropics/skills", skills: [browseEntry()] },
+      isPending: false,
+      isError: false,
+      error: null,
+      refetch: () => undefined,
+    } as unknown as ReturnType<typeof useBrowseSkills>);
+    renderPage([skill()], "member");
+    fireEvent.click(screen.getByRole("tab", { name: "Browse library" }));
+    expect(screen.queryByRole("button", { name: "Add a source" })).toBeNull();
+  });
+
+  it("groups browse results into category sections", () => {
+    vi.mocked(useSkillSources).mockReturnValue({
+      data: [sourceInfo()],
+      isError: false,
+    } as ReturnType<typeof useSkillSources>);
+    vi.mocked(useBrowseSkills).mockReturnValue({
+      data: {
+        source: "anthropics/skills",
+        skills: [browseEntry(), browseEntry({ name: "template-skill", category: "General" })],
+      },
+      isPending: false,
+      isError: false,
+      error: null,
+      refetch: () => undefined,
+    } as unknown as ReturnType<typeof useBrowseSkills>);
+    renderPage([skill()]);
+    fireEvent.click(screen.getByRole("tab", { name: "Browse library" }));
+    expect(screen.getByTestId("browse-category-Skills")).toBeTruthy();
+    expect(screen.getByTestId("browse-category-General")).toBeTruthy();
+  });
+});
+
+describe("SkillsPage — category grouping and filter", () => {
+  it("groups the library into collapsible category sections", () => {
+    renderPage([
+      skill({ id: "s1", name: "release-notes", category: "Engineering" }),
+      skill({ id: "s2", name: "meeting-notes", category: "Communication" }),
+      skill({ id: "s3", name: "misc-thing", category: "General" }),
+    ]);
+    expect(screen.getByTestId("skill-category-Engineering")).toBeTruthy();
+    expect(screen.getByTestId("skill-category-Communication")).toBeTruthy();
+    expect(screen.getByTestId("skill-category-General")).toBeTruthy();
+  });
+
+  it("filters the library to one category via the chip row", () => {
+    renderPage([
+      skill({ id: "s1", name: "release-notes", category: "Engineering" }),
+      skill({ id: "s2", name: "meeting-notes", category: "Communication" }),
+    ]);
+    expect(screen.getByText("release-notes")).toBeTruthy();
+    expect(screen.getByText("meeting-notes")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Communication" }));
+    expect(screen.queryByText("release-notes")).toBeNull();
+    expect(screen.getByText("meeting-notes")).toBeTruthy();
+    // Clicking the active chip again clears the filter.
+    fireEvent.click(screen.getByRole("button", { name: "Communication" }));
+    expect(screen.getByText("release-notes")).toBeTruthy();
   });
 });
