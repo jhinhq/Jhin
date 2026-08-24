@@ -1138,7 +1138,7 @@ export interface ConnectionToolsOut {
 
 // --- Agent Skills (docs/architecture/skills.md) ---
 
-export type SkillSource = "built_in" | "imported" | "custom";
+export type SkillSource = "built_in" | "imported" | "custom" | "agent_authored";
 
 export interface SkillFileEntry {
   path: string;
@@ -1155,6 +1155,7 @@ export interface Skill {
   enabled: boolean;
   version: number;
   file_count: number;
+  created_by_agent_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -1196,4 +1197,31 @@ export interface AgentSkillInfo {
   source: SkillSource;
   enabled: boolean;
   enabled_for_agent: boolean;
+}
+
+// --- Skills browse gallery (docs/architecture/skills.md) ---
+
+export interface SkillSourceInfo {
+  source: string;
+  label: string;
+  description: string;
+  url: string;
+}
+
+export interface BrowseSkillEntry {
+  source: string;
+  name: string;
+  description: string;
+  path: string;
+  installed: boolean;
+}
+
+export interface BrowseListResult {
+  source: string;
+  skills: BrowseSkillEntry[];
+}
+
+export interface BrowseInstallResult {
+  skill: Skill;
+  status: "installed" | "already_installed";
 }

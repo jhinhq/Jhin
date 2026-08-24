@@ -644,3 +644,27 @@ describe("web access preset", () => {
     expect(next.grantScopes["web.fetch"]).toEqual({ domain: "*" });
   });
 });
+
+describe("skill authoring preset", () => {
+  const catalog = [
+    { name: "skills.create", scope_keys: [] },
+    { name: "skills.update", scope_keys: [] },
+  ];
+  const preset = TOOL_PRESETS.find((entry) => entry.id === "skill-authoring")!;
+
+  it("grants both skills.create and skills.update", () => {
+    const next = applyToolPreset(EMPTY_WIZARD, preset, catalog, []);
+    expect(next.grantToolNames).toEqual(["skills.create", "skills.update"]);
+  });
+
+  it("does not also grant skills.read", () => {
+    const next = applyToolPreset(EMPTY_WIZARD, preset, catalog, []);
+    expect(next.grantToolNames).not.toContain("skills.read");
+  });
+
+  it("is distinct from the read-only skills preset", () => {
+    const readPreset = TOOL_PRESETS.find((entry) => entry.id === "skills")!;
+    expect(preset.id).not.toBe(readPreset.id);
+    expect(Object.keys(preset.tools)).not.toEqual(Object.keys(readPreset.tools));
+  });
+});

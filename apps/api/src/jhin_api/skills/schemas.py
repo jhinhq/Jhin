@@ -36,6 +36,7 @@ class SkillOut(BaseModel):
     enabled: bool
     version: int
     file_count: int = 0
+    created_by_agent_id: UUID | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -109,6 +110,41 @@ class InstallBuiltinsOut(BaseModel):
     installed: int
     skipped: int
     names: list[str]
+
+
+class SkillSourceOut(BaseModel):
+    """One hardcoded, browsable skill repository (`GET /api/v1/skill-sources`)."""
+
+    source: str
+    label: str
+    description: str
+    url: str
+
+
+class BrowseSkillOut(BaseModel):
+    """One skill found while browsing a source, parsed but not imported."""
+
+    source: str
+    name: str
+    description: str
+    path: str
+    installed: bool
+
+
+class BrowseListOut(BaseModel):
+    source: str
+    skills: list[BrowseSkillOut]
+
+
+class BrowseInstallIn(BaseModel):
+    source: str = Field(min_length=3, max_length=300)
+    skill_path: str = Field(min_length=1, max_length=500)
+
+
+class BrowseInstallOut(BaseModel):
+    skill: SkillOut
+    # "installed": newly created; "already_installed": idempotent replay.
+    status: str
 
 
 class AgentSkillOut(BaseModel):

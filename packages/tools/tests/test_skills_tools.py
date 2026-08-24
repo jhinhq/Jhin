@@ -6,14 +6,27 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from jhin_db.base import Base
-from jhin_db.models import Agent, AgentCapabilityGrant, AgentSkill, Skill, Task, Workspace
-from jhin_domain import TaskState, new_uuid7
+from jhin_db.models import (
+    Agent,
+    AgentCapabilityGrant,
+    AgentRun,
+    AgentSkill,
+    Approval,
+    AuditEvent,
+    Skill,
+    Task,
+    Workspace,
+)
+from jhin_domain import ApprovalStatus, TaskState, new_uuid7
+from jhin_skills import MAX_CONTENT_BYTES
 from jhin_tools.builtin import ToolExecutionContext, build_builtin_catalog
 from jhin_tools.gateway import GatewayOutcome, ToolGateway
 from jhin_tools.skills_tools import MAX_READ_CHARS
@@ -25,8 +38,8 @@ class Org:
     other: Agent
     task: Task
 
-    def gateway(self, session: AsyncSession, agent: Agent) -> ToolGateway:
-        ctx = ToolExecutionContext(
+    def ctx(self, session: AsyncSession, agent: Agent) -> ToolExecutionContext:
+        return ToolExecutionContext(
             session=session,
             workspace_id=self.workspace.id,
             task_id=self.task.id,
@@ -34,6 +47,9 @@ class Org:
             agent_id=agent.id,
             agent_name=agent.name,
         )
+
+    def gateway(self, session: AsyncSession, agent: Agent) -> ToolGateway:
+        ctx = self.ctx(session, agent)
         return ToolGateway(ctx, build_builtin_catalog())
 
 
@@ -201,3 +217,263 @@ class TestSkillsRead:
             "skills.read", json.dumps({"name": "release-notes", "extra": True})
         )
         assert outcome.status != "executed"
+
+
+# --- skills.create / skills.update ------------------------------------------
+
+
+async def grant_manage(session: AsyncSession, org: Org, agent: Agent) -> None:
+    session.add(
+        AgentCapabilityGrant(
+            workspace_id=org.workspace.id,
+            agent_id=agent.id,
+            capability="skills.manage",
+            scope_json={},
+            effect="allow",
+        )
+    )
+    await session.flush()
+
+
+async def approve_and_execute(
+    gateway: ToolGateway, session: AsyncSession, outcome: GatewayOutcome
+) -> GatewayOutcome:
+    assert outcome.status == "needs_approval", (outcome.decision_code, outcome.decision_reason)
+    assert outcome.approval_id is not None
+    approval = await session.get(Approval, outcome.approval_id)
+    assert approval is not None
+    approval.status = ApprovalStatus.APPROVED.value
+    approval.decided_at = datetime.now(UTC)
+    await session.flush()
+    return await gateway.resolve_approved(outcome.approval_id)
+
+
+def create_args(**overrides: Any) -> str:
+    body: dict[str, Any] = {
+        "name": "team-standup-notes",
+        "description": "Write a crisp daily standup summary from raw notes.",
+        "content": "# Standup notes\n\nSummarize blockers first, then progress.",
+    }
+    body.update(overrides)
+    return json.dumps(body)
+
+
+class TestSkillsCreate:
+    async def test_denied_without_grant(self, session: AsyncSession, org: Org) -> None:
+        gateway = org.gateway(session, org.me)
+        outcome = await gateway.request("skills.create", create_args())
+        assert outcome.status == "denied"
+        assert await session.scalar(select(Skill).where(Skill.name == "team-standup-notes")) is None
+
+    async def test_is_approval_gated_and_creates_nothing_before_approval(
+        self, session: AsyncSession, org: Org
+    ) -> None:
+        await grant_manage(session, org, org.me)
+        gateway = org.gateway(session, org.me)
+        outcome = await gateway.request("skills.create", create_args())
+        assert outcome.status == "needs_approval"
+        assert outcome.risk == "elevated"
+        # zero side effect pre-approval
+        assert await session.scalar(select(Skill).where(Skill.name == "team-standup-notes")) is None
+
+        # The approval card payload reads well: name and a short preview.
+        approval = await session.get(Approval, outcome.approval_id)
+        assert approval is not None
+        payload = approval.action_payload_sanitized
+        assert payload["input"]["name"] == "team-standup-notes"
+        assert "Summarize blockers" in payload["input"]["content"]
+
+    async def test_approval_creates_enabled_agent_authored_skill(
+        self, session: AsyncSession, org: Org
+    ) -> None:
+        await grant_manage(session, org, org.me)
+        gateway = org.gateway(session, org.me)
+        parked = await gateway.request("skills.create", create_args())
+        outcome = await approve_and_execute(gateway, session, parked)
+        assert outcome.status == "executed", outcome.decision_reason
+        output = outcome.sanitized_output or {}
+        assert output["name"] == "team-standup-notes"
+        assert output["version"] == 1
+
+        record = await session.scalar(select(Skill).where(Skill.name == "team-standup-notes"))
+        assert record is not None
+        assert record.workspace_id == org.workspace.id
+        assert record.enabled is True  # the human already approved the call
+        assert record.source == "agent_authored"
+        assert record.created_by_agent_id == org.me.id
+
+        audit = await session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.action == "skill.created", AuditEvent.target_id == record.id
+            )
+        )
+        assert audit is not None
+        assert audit.actor_id == org.me.id
+        assert audit.metadata_json["created_via"] == "skills.create"
+
+    async def test_duplicate_name_is_rejected(self, session: AsyncSession, org: Org) -> None:
+        await grant_manage(session, org, org.me)
+        gateway = org.gateway(session, org.me)
+        first = await approve_and_execute(
+            gateway, session, await gateway.request("skills.create", create_args())
+        )
+        assert first.status == "executed"
+        second_parked = await gateway.request(
+            "skills.create", create_args(description="A different pitch entirely.")
+        )
+        second = await approve_and_execute(gateway, session, second_parked)
+        assert second.status != "executed"
+
+    async def test_secret_content_is_rejected(self, session: AsyncSession, org: Org) -> None:
+        await grant_manage(session, org, org.me)
+        gateway = org.gateway(session, org.me)
+        parked = await gateway.request(
+            "skills.create", create_args(content="token ghp_" + "a" * 36)
+        )
+        outcome = await approve_and_execute(gateway, session, parked)
+        assert outcome.status != "executed"
+        assert await session.scalar(select(Skill).where(Skill.name == "team-standup-notes")) is None
+
+    async def test_oversize_content_is_rejected(self, session: AsyncSession, org: Org) -> None:
+        # A body this large also exceeds the gateway's own lossless-approval
+        # bound (8,192 chars/string), so it is denied outright rather than
+        # ever reaching a human approval — still never executed either way.
+        await grant_manage(session, org, org.me)
+        gateway = org.gateway(session, org.me)
+        outcome = await gateway.request(
+            "skills.create", create_args(content="x" * (MAX_CONTENT_BYTES + 1))
+        )
+        assert outcome.status != "executed"
+        assert await session.scalar(select(Skill).where(Skill.name == "team-standup-notes")) is None
+
+    async def test_bad_name_is_schema_rejected(self, session: AsyncSession, org: Org) -> None:
+        await grant_manage(session, org, org.me)
+        outcome = await org.gateway(session, org.me).request(
+            "skills.create", create_args(name="Not A Slug")
+        )
+        assert outcome.status != "executed"
+        assert outcome.status != "needs_approval"
+
+    async def test_retried_invocation_creates_exactly_one_skill(
+        self, session: AsyncSession, org: Org
+    ) -> None:
+        await grant_manage(session, org, org.me)
+        ctx = org.ctx(session, org.me)
+        session.add(
+            AgentRun(
+                id=ctx.run_id,
+                workspace_id=ctx.workspace_id,
+                task_id=ctx.task_id,
+                agent_id=ctx.agent_id,
+            )
+        )
+        await session.flush()
+        await session.commit()
+        gateway = ToolGateway(ctx, build_builtin_catalog())
+        invocation_id = new_uuid7()
+        args = create_args()
+
+        parked = await gateway.request("skills.create", args, invocation_id=invocation_id)
+        await session.commit()
+        outcome = await approve_and_execute(gateway, session, parked)
+        await session.commit()
+
+        replay = await gateway.request("skills.create", args, invocation_id=invocation_id)
+        assert replay.status == "executed"
+        assert replay.tool_call_id == outcome.tool_call_id
+        count = await session.scalar(
+            select(func.count()).select_from(Skill).where(Skill.name == "team-standup-notes")
+        )
+        assert count == 1
+
+
+class TestSkillsUpdate:
+    async def test_denied_without_grant(self, session: AsyncSession, org: Org) -> None:
+        outcome = await org.gateway(session, org.me).request(
+            "skills.update", json.dumps({"name": "does-not-exist", "description": "x"})
+        )
+        assert outcome.status == "denied"
+
+    async def test_updates_own_authored_skill(self, session: AsyncSession, org: Org) -> None:
+        await grant_manage(session, org, org.me)
+        gateway = org.gateway(session, org.me)
+        created = await approve_and_execute(
+            gateway, session, await gateway.request("skills.create", create_args())
+        )
+        assert created.status == "executed"
+
+        parked = await gateway.request(
+            "skills.update",
+            json.dumps({"name": "team-standup-notes", "content": "# v2\n\nNew body."}),
+        )
+        outcome = await approve_and_execute(gateway, session, parked)
+        assert outcome.status == "executed", outcome.decision_reason
+        output = outcome.sanitized_output or {}
+        assert output["updated_fields"] == ["content"]
+        assert output["version"] == 2
+
+        record = await session.scalar(select(Skill).where(Skill.name == "team-standup-notes"))
+        assert record is not None
+        assert record.content == "# v2\n\nNew body."
+        assert record.version == 2
+
+    async def test_cannot_update_a_skill_authored_by_another_agent(
+        self, session: AsyncSession, org: Org
+    ) -> None:
+        await grant_manage(session, org, org.me)
+        await grant_manage(session, org, org.other)
+        gateway_me = org.gateway(session, org.me)
+        created = await approve_and_execute(
+            gateway_me, session, await gateway_me.request("skills.create", create_args())
+        )
+        assert created.status == "executed"
+
+        gateway_other = org.gateway(session, org.other)
+        outcome = await gateway_other.request(
+            "skills.update",
+            json.dumps({"name": "team-standup-notes", "description": "Hijacked."}),
+        )
+        assert outcome.status == "denied"
+        assert outcome.decision_code == "not_skill_author"
+        record = await session.scalar(select(Skill).where(Skill.name == "team-standup-notes"))
+        assert record is not None
+        assert record.description != "Hijacked."
+
+    async def test_cannot_update_a_human_authored_skill(
+        self, session: AsyncSession, org: Org
+    ) -> None:
+        await grant_manage(session, org, org.me)
+        session.add(
+            Skill(
+                workspace_id=org.workspace.id,
+                name="human-made",
+                description="Written by a person.",
+                content="# Human made\n",
+                source="custom",
+                enabled=True,
+            )
+        )
+        await session.flush()
+        outcome = await org.gateway(session, org.me).request(
+            "skills.update",
+            json.dumps({"name": "human-made", "description": "Agent hijack attempt."}),
+        )
+        assert outcome.status == "denied"
+        assert outcome.decision_code == "not_skill_author"
+
+    async def test_unknown_skill_fails_without_side_effect(
+        self, session: AsyncSession, org: Org
+    ) -> None:
+        await grant_manage(session, org, org.me)
+        outcome = await org.gateway(session, org.me).request(
+            "skills.update", json.dumps({"name": "does-not-exist", "description": "x"})
+        )
+        assert outcome.status != "executed"
+
+    async def test_no_fields_is_schema_rejected(self, session: AsyncSession, org: Org) -> None:
+        await grant_manage(session, org, org.me)
+        outcome = await org.gateway(session, org.me).request(
+            "skills.update", json.dumps({"name": "team-standup-notes"})
+        )
+        assert outcome.status != "executed"
+        assert outcome.status != "needs_approval"

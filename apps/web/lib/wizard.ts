@@ -398,6 +398,13 @@ export const TOOL_PRESETS: ToolPreset[] = [
       "Let this agent read the workspace skills library — the playbooks your admins curate. Grants the skills.read tool for every skill.",
     tools: { "skills.read": { name: "*" } },
   },
+  {
+    id: "skill-authoring",
+    label: "Skill authoring",
+    description:
+      "Let this agent write new playbooks to the skills library and revise ones it wrote, through skills.create and skills.update. Every call needs your approval first, and it can only ever touch skills it authored itself — never anyone else's.",
+    tools: { "skills.create": {}, "skills.update": {} },
+  },
 ];
 
 /** The slice of a workspace connection a preset needs. */

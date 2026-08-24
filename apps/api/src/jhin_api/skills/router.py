@@ -13,7 +13,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 
-from jhin_api.deps import AdminCtx, DbSession, ViewerCtx
+from jhin_api.deps import AdminCtx, CurrentAuth, DbSession, ViewerCtx
 from jhin_api.deps import client_ip_hash as ip_hash
 from jhin_api.deps import get_request_id as req_id
 from jhin_api.security.csrf import csrf_protect
@@ -21,6 +21,10 @@ from jhin_api.skills import service
 from jhin_api.skills.schemas import (
     AgentSkillOut,
     AgentSkillsUpdate,
+    BrowseInstallIn,
+    BrowseInstallOut,
+    BrowseListOut,
+    BrowseSkillOut,
     ImportedSkillOut,
     InstallBuiltinsOut,
     SkillCreate,
@@ -30,6 +34,7 @@ from jhin_api.skills.schemas import (
     SkillImportOut,
     SkillListOut,
     SkillOut,
+    SkillSourceOut,
     SkillUpdate,
 )
 from jhin_db.models import Skill
@@ -40,6 +45,8 @@ from jhin_skills import (
     fetch_github_repo_zip,
     load_zip,
 )
+
+skill_sources_router = APIRouter(prefix="/api/v1/skill-sources", tags=["skills"])
 
 skills_router = APIRouter(
     prefix="/api/v1/workspaces/{workspace_id}/skills",
@@ -52,6 +59,14 @@ agent_skills_router = APIRouter(
     tags=["skills"],
     dependencies=[Depends(csrf_protect)],
 )
+
+
+@skill_sources_router.get("")
+async def list_skill_sources(_auth: CurrentAuth) -> list[SkillSourceOut]:
+    """The hardcoded catalog of known skill repositories to browse
+    (docs/architecture/skills.md) — where to look, not the skills
+    themselves."""
+    return [SkillSourceOut.model_validate(entry) for entry in service.list_skill_sources()]
 
 
 def _out(record: Skill) -> SkillOut:
@@ -161,6 +176,42 @@ async def import_from_zip(
         skipped=skipped,
         skills=[ImportedSkillOut.model_validate(entry) for entry in results],
         warnings=list(bundle.warnings),
+    )
+
+
+@skills_router.get("/browse")
+async def browse_skills(
+    ctx: ViewerCtx,
+    db: DbSession,
+    source: str,
+    q: str | None = None,
+) -> BrowseListOut:
+    """List a known source's skills (name/description parsed live from each
+    SKILL.md) without importing anything; marks ones already installed in
+    this workspace."""
+    entries = await service.browse_source(db, ctx.workspace_id, source=source, q=q)
+    return BrowseListOut(
+        source=source, skills=[BrowseSkillOut.model_validate(entry) for entry in entries]
+    )
+
+
+@skills_router.post("/browse/install")
+async def install_from_browse(
+    payload: BrowseInstallIn, request: Request, ctx: AdminCtx, db: DbSession
+) -> BrowseInstallOut:
+    """Install exactly one skill folder found while browsing a known source
+    (admin). Enabled immediately — see docs/architecture/skills.md for why
+    that differs from a raw GitHub import."""
+    record, created = await service.install_from_browse(
+        db,
+        ctx,
+        source=payload.source,
+        skill_path=payload.skill_path,
+        request_id=req_id(request),
+        ip_hash=ip_hash(request),
+    )
+    return BrowseInstallOut(
+        skill=_out(record), status="installed" if created else "already_installed"
     )
 
 

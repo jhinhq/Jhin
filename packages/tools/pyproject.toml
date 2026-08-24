@@ -12,6 +12,7 @@ dependencies = [
     "jhin-observability",
     "jhin-policy",
     "jhin-secrets",
+    "jhin-skills",
 ]
 
 [tool.uv.sources]
@@ -21,6 +22,7 @@ jhin-memory = { workspace = true }
 jhin-observability = { workspace = true }
 jhin-policy = { workspace = true }
 jhin-secrets = { workspace = true }
+jhin-skills = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

@@ -6,14 +6,22 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import SkillsPage from "@/app/(app)/skills/page";
 import { api } from "@/lib/api";
-import { useSkills } from "@/lib/hooks";
-import type { Skill } from "@/lib/types";
+import { useBrowseSkills, useSkills, useSkillSources } from "@/lib/hooks";
+import type { BrowseSkillEntry, Skill, SkillSourceInfo } from "@/lib/types";
 import { WorkspaceProvider } from "@/lib/workspace-context";
 
 vi.mock("@/lib/hooks", () => ({
   useSkills: vi.fn(),
   useSkill: vi.fn(() => ({ data: undefined, isPending: false })),
   useInvalidateSkills: () => () => undefined,
+  useSkillSources: vi.fn(() => ({ data: [] as SkillSourceInfo[], isError: false })),
+  useBrowseSkills: vi.fn(() => ({
+    data: undefined,
+    isPending: false,
+    isError: false,
+    error: null,
+    refetch: () => undefined,
+  })),
 }));
 
 vi.mock("@/lib/api", async () => {
@@ -37,6 +45,7 @@ function skill(overrides: Partial<Skill> = {}): Skill {
     enabled: true,
     version: 1,
     file_count: 1,
+    created_by_agent_id: null,
     created_at: "2026-08-23T00:00:00Z",
     updated_at: "2026-08-23T00:00:00Z",
     ...overrides,
@@ -117,5 +126,125 @@ describe("SkillsPage", () => {
     renderPage([skill()], "member");
     expect(screen.queryByRole("button", { name: /Install starter skills/ })).toBeNull();
     expect(screen.queryByRole("button", { name: "Disable release-notes" })).toBeNull();
+  });
+});
+
+function browseEntry(overrides: Partial<BrowseSkillEntry> = {}): BrowseSkillEntry {
+  return {
+    source: "anthropics/skills",
+    name: "pdf",
+    description: "Work with PDF files.",
+    path: "skills/pdf",
+    installed: false,
+    ...overrides,
+  };
+}
+
+describe("SkillsPage — Browse library", () => {
+  it("shows a search box and results after switching tabs", () => {
+    vi.mocked(useSkillSources).mockReturnValue({
+      data: [
+        {
+          source: "anthropics/skills",
+          label: "Anthropic's official skills library",
+          description: "",
+          url: "https://github.com/anthropics/skills",
+        },
+      ],
+      isError: false,
+    } as ReturnType<typeof useSkillSources>);
+    vi.mocked(useBrowseSkills).mockReturnValue({
+      data: { source: "anthropics/skills", skills: [browseEntry(), browseEntry({ name: "docx" })] },
+      isPending: false,
+      isError: false,
+      error: null,
+      refetch: () => undefined,
+    } as unknown as ReturnType<typeof useBrowseSkills>);
+    renderPage([skill()]);
+    fireEvent.click(screen.getByRole("tab", { name: "Browse library" }));
+    expect(screen.getByLabelText("Search skills")).toBeTruthy();
+    expect(screen.getByText("pdf")).toBeTruthy();
+    expect(screen.getByText("docx")).toBeTruthy();
+  });
+
+  it("installs a browsed skill", async () => {
+    vi.mocked(useSkillSources).mockReturnValue({
+      data: [
+        {
+          source: "anthropics/skills",
+          label: "Anthropic's official skills library",
+          description: "",
+          url: "https://github.com/anthropics/skills",
+        },
+      ],
+      isError: false,
+    } as ReturnType<typeof useSkillSources>);
+    vi.mocked(useBrowseSkills).mockReturnValue({
+      data: { source: "anthropics/skills", skills: [browseEntry()] },
+      isPending: false,
+      isError: false,
+      error: null,
+      refetch: () => undefined,
+    } as unknown as ReturnType<typeof useBrowseSkills>);
+    vi.mocked(api).mockResolvedValue({ skill: skill({ name: "pdf" }), status: "installed" });
+    renderPage([skill()]);
+    fireEvent.click(screen.getByRole("tab", { name: "Browse library" }));
+    fireEvent.click(screen.getByRole("button", { name: "Install pdf" }));
+    await waitFor(() =>
+      expect(api).toHaveBeenCalledWith("/api/v1/workspaces/w1/skills/browse/install", {
+        method: "POST",
+        body: { source: "anthropics/skills", skill_path: "skills/pdf" },
+      }),
+    );
+  });
+
+  it("shows a friendly error when GitHub is unreachable", () => {
+    vi.mocked(useSkillSources).mockReturnValue({
+      data: [
+        {
+          source: "anthropics/skills",
+          label: "Anthropic's official skills library",
+          description: "",
+          url: "https://github.com/anthropics/skills",
+        },
+      ],
+      isError: false,
+    } as ReturnType<typeof useSkillSources>);
+    vi.mocked(useBrowseSkills).mockReturnValue({
+      data: undefined,
+      isPending: false,
+      isError: true,
+      error: new Error("could not reach GitHub"),
+      refetch: () => undefined,
+    } as unknown as ReturnType<typeof useBrowseSkills>);
+    renderPage([skill()]);
+    fireEvent.click(screen.getByRole("tab", { name: "Browse library" }));
+    expect(screen.queryByText(/No skills found/)).toBeNull();
+    // An ErrorNote renders — the page does not crash and shows some message.
+    expect(document.body.textContent).toMatch(/could not reach|GitHub/i);
+  });
+
+  it("hides the install action from non-admins", () => {
+    vi.mocked(useSkillSources).mockReturnValue({
+      data: [
+        {
+          source: "anthropics/skills",
+          label: "Anthropic's official skills library",
+          description: "",
+          url: "https://github.com/anthropics/skills",
+        },
+      ],
+      isError: false,
+    } as ReturnType<typeof useSkillSources>);
+    vi.mocked(useBrowseSkills).mockReturnValue({
+      data: { source: "anthropics/skills", skills: [browseEntry()] },
+      isPending: false,
+      isError: false,
+      error: null,
+      refetch: () => undefined,
+    } as unknown as ReturnType<typeof useBrowseSkills>);
+    renderPage([skill()], "member");
+    fireEvent.click(screen.getByRole("tab", { name: "Browse library" }));
+    expect(screen.queryByRole("button", { name: "Install pdf" })).toBeNull();
   });
 });

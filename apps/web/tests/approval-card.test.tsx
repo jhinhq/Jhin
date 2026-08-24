@@ -82,6 +82,38 @@ describe("ApprovalCard", () => {
     expect(screen.queryByRole("button", { name: /Approve/ })).toBeNull();
   });
 
+  it("shows a name + short content preview for skills.create, not the raw payload", () => {
+    const longBody = "x".repeat(500);
+    const skillApproval: Approval = {
+      ...pendingApproval,
+      action_type: "skills.create",
+      action_payload_sanitized: {
+        tool_name: "skills.create",
+        capability: "skills.manage",
+        risk: "elevated",
+        input: {
+          name: "team-standup-notes",
+          description: "Write a crisp daily standup summary.",
+          content: longBody,
+        },
+      },
+    };
+    render(
+      <ul>
+        <ApprovalCard
+          approval={skillApproval}
+          canDecide
+          onApprove={() => {}}
+          onReject={() => {}}
+        />
+      </ul>,
+    );
+    expect(screen.getByText("team-standup-notes")).toBeDefined();
+    // Truncated: the 500-char body is not shown in full.
+    expect(screen.queryByText(longBody)).toBeNull();
+    expect(screen.queryByText(/"description"/)).toBeNull();
+  });
+
   it("hides decision buttons once decided and shows the status", () => {
     render(
       <ul>

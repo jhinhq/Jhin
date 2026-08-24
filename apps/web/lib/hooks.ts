@@ -39,8 +39,10 @@ import type {
   RunList,
   SecretOut,
   AgentSkillInfo,
+  BrowseListResult,
   SkillDetail,
   SkillList,
+  SkillSourceInfo,
   TaskDetail,
   TaskList,
   TaskMessage,
@@ -746,6 +748,28 @@ export function useAgentSkills(workspaceId: string, agentId: string) {
     queryKey: ["agent-skills", workspaceId, agentId],
     queryFn: () =>
       api<AgentSkillInfo[]>(`/api/v1/workspaces/${workspaceId}/agents/${agentId}/skills`),
+  });
+}
+
+/** The hardcoded catalog of known skill repositories to browse. */
+export function useSkillSources() {
+  return useQuery({
+    queryKey: ["skill-sources"],
+    queryFn: () => api<SkillSourceInfo[]>("/api/v1/skill-sources"),
+    staleTime: 5 * 60_000,
+  });
+}
+
+/** One source's parsed skill listing, filtered by `q`; server-cached ~10 min. */
+export function useBrowseSkills(workspaceId: string, source: string, q: string) {
+  return useQuery({
+    queryKey: ["skills-browse", workspaceId, source, q],
+    queryFn: () =>
+      api<BrowseListResult>(`/api/v1/workspaces/${workspaceId}/skills/browse`, {
+        params: { source, q: q || undefined },
+      }),
+    enabled: source !== "",
+    placeholderData: (previous) => previous,
   });
 }
 

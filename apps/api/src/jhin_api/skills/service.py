@@ -8,6 +8,8 @@ created ``enabled=False`` — the admin reviews and enables them explicitly.
 
 from __future__ import annotations
 
+import time
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
@@ -24,17 +26,65 @@ from jhin_skills import (
     MAX_CONTENT_BYTES,
     MAX_FILE_BYTES,
     MAX_TOTAL_BYTES,
+    BundleError,
     BundleResult,
+    SkillImportError,
     SkillParseError,
+    fetch_github_repo_zip,
     find_secret,
     load_builtin_skills,
+    load_zip,
+    parse_github_ref,
+    source_url_for,
     validate_file_path,
 )
 
 MAX_PAGE_SIZE = 100
 TARGET_TYPE = "skill"
 
-_SOURCES = ("built_in", "imported", "custom")
+_SOURCES = ("built_in", "imported", "custom", "agent_authored")
+
+# --- the skill sources catalog (browse gallery) -----------------------------
+#
+# A small, hardcoded list of public GitHub repositories worth browsing for
+# skills — this is only "where to look", never the skills themselves (no
+# bundling, no vendoring). Every entry here is treated as maintainer-reviewed:
+# installing a single skill from one of these repos through the browse flow
+# enables it immediately instead of landing in the "review and enable" queue
+# that a raw `owner/repo` GitHub import uses (docs/architecture/skills.md
+# explains the reasoning). Extend this tuple to add a source to the gallery.
+SKILL_SOURCES: tuple[dict[str, str], ...] = (
+    {
+        "source": "anthropics/skills",
+        "label": "Anthropic's official skills library",
+        "description": (
+            "The public Agent Skills library published by Anthropic — the "
+            "same open format Jhin uses."
+        ),
+        "url": "https://github.com/anthropics/skills",
+    },
+)
+
+_KNOWN_SOURCES = {entry["source"] for entry in SKILL_SOURCES}
+
+# In-process cache of a source's parsed skill listing, keyed by "owner/repo".
+# A short TTL keeps repeated keystrokes in the search box from re-fetching
+# and re-parsing the whole repo zip on every request.
+_BROWSE_CACHE_TTL_SECONDS = 600.0
+
+
+@dataclass
+class _CachedBundle:
+    bundle: BundleResult
+    fetched_at: float
+
+
+_browse_cache: dict[str, _CachedBundle] = {}
+
+
+def reset_browse_cache() -> None:
+    """Test hook: drop every cached browse listing."""
+    _browse_cache.clear()
 
 
 def _require_admin(ctx: WorkspaceContext) -> None:
@@ -269,26 +319,30 @@ async def delete_skill(
     await db.commit()
 
 
-async def install_builtins(
+async def _install_builtins_core(
     db: AsyncSession,
-    ctx: WorkspaceContext,
+    workspace_id: UUID,
     *,
-    request_id: UUID | None = None,
-    ip_hash: str | None = None,
+    actor_id: UUID | None,
+    request_id: UUID | None,
+    ip_hash: str | None,
+    source: str,
 ) -> tuple[list[str], list[str]]:
     """Install the shipped starter skills; existing names are left alone.
 
-    Returns ``(installed_names, skipped_names)``.
+    Stages the rows and the audit event in the caller's transaction —
+    does not commit — so a caller building a workspace can install its
+    starters atomically with the rest of workspace creation. Returns
+    ``(installed_names, skipped_names)``.
     """
-    _require_admin(ctx)
     installed: list[str] = []
     skipped: list[str] = []
     for loaded in load_builtin_skills():
-        if await _name_taken(db, ctx.workspace_id, loaded.skill.name):
+        if await _name_taken(db, workspace_id, loaded.skill.name):
             skipped.append(loaded.skill.name)
             continue
         record = Skill(
-            workspace_id=ctx.workspace_id,
+            workspace_id=workspace_id,
             name=loaded.skill.name,
             description=loaded.skill.description,
             content=loaded.skill.content,
@@ -299,17 +353,65 @@ async def install_builtins(
         db.add(record)
         installed.append(loaded.skill.name)
     await db.flush()
-    _audit(
+    audit.record(
         db,
-        ctx,
-        "skill.builtins_installed",
-        None,
+        action="skill.builtins_installed",
+        target_type=TARGET_TYPE,
+        workspace_id=workspace_id,
+        actor_id=actor_id,
         request_id=request_id,
         ip_hash=ip_hash,
-        metadata={"installed": len(installed), "skipped": len(skipped)},
+        metadata={"installed": len(installed), "skipped": len(skipped), "source": source},
+    )
+    return installed, skipped
+
+
+async def install_builtins(
+    db: AsyncSession,
+    ctx: WorkspaceContext,
+    *,
+    request_id: UUID | None = None,
+    ip_hash: str | None = None,
+) -> tuple[list[str], list[str]]:
+    """Admin action ("Install starter skills" / "Install missing defaults"):
+    idempotently install any of the five starters this workspace is still
+    missing. Safe to call on a workspace that already has some or all of
+    them — those names are skipped, never duplicated or overwritten."""
+    _require_admin(ctx)
+    installed, skipped = await _install_builtins_core(
+        db,
+        ctx.workspace_id,
+        actor_id=ctx.user.id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        source="manual",
     )
     await db.commit()
     return installed, skipped
+
+
+async def install_builtins_for_new_workspace(
+    db: AsyncSession,
+    workspace_id: UUID,
+    *,
+    actor_id: UUID,
+    request_id: UUID | None = None,
+    ip_hash: str | None = None,
+) -> tuple[list[str], list[str]]:
+    """Called by workspace creation (docs/architecture/skills.md): every new
+    workspace starts with the five starter skills already installed and
+    enabled, not proposed. No admin check — the caller is still building the
+    workspace and its owner membership in the same transaction; this never
+    runs against an *existing* workspace (that stays the explicit,
+    idempotent ``install_builtins`` admin action above)."""
+    return await _install_builtins_core(
+        db,
+        workspace_id,
+        actor_id=actor_id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        source="default",
+    )
 
 
 async def import_bundle(
@@ -374,6 +476,151 @@ async def import_bundle(
     )
     await db.commit()
     return results, created, skipped
+
+
+def list_skill_sources() -> list[dict[str, str]]:
+    """The hardcoded catalog of known skill repositories (viewer+)."""
+    return [dict(entry) for entry in SKILL_SOURCES]
+
+
+def _require_known_source(source: str) -> None:
+    if source not in _KNOWN_SOURCES:
+        raise HTTPException(
+            422, f"{source!r} is not a known skill source; see GET /api/v1/skill-sources"
+        )
+
+
+async def _fetch_cached_bundle(source: str) -> BundleResult:
+    """The parsed skill listing for a whole repo, cached briefly in-process
+    so rapid search keystrokes don't re-fetch and re-parse the zip."""
+    cached = _browse_cache.get(source)
+    now = time.monotonic()
+    if cached is not None and now - cached.fetched_at < _BROWSE_CACHE_TTL_SECONDS:
+        return cached.bundle
+    try:
+        data, path_prefix, _source_url = await fetch_github_repo_zip(source)
+        bundle = load_zip(data, path_prefix=path_prefix)
+    except (SkillImportError, BundleError) as error:
+        raise HTTPException(422, str(error)) from None
+    _browse_cache[source] = _CachedBundle(bundle=bundle, fetched_at=now)
+    return bundle
+
+
+async def browse_source(
+    db: AsyncSession,
+    workspace_id: UUID,
+    *,
+    source: str,
+    q: str | None = None,
+) -> list[dict[str, Any]]:
+    """List one known source's skills (name/description parsed from each
+    SKILL.md) without importing anything. Marks skills already installed in
+    this workspace (matched by name + source_url) as ``installed: True``."""
+    _require_known_source(source)
+    owner, repo, _ = parse_github_ref(source)
+    bundle = await _fetch_cached_bundle(source)
+
+    needle = q.strip().lower() if q else ""
+    matches = [
+        loaded
+        for loaded in bundle.skills
+        if not needle
+        or needle in loaded.skill.name.lower()
+        or needle in loaded.skill.description.lower()
+    ]
+    if not matches:
+        return []
+
+    urls = {loaded.skill.name: source_url_for(owner, repo, loaded.folder) for loaded in matches}
+    installed_urls = set(
+        await db.scalars(
+            select(Skill.source_url).where(
+                Skill.workspace_id == workspace_id,
+                Skill.source_url.in_(urls.values()),
+            )
+        )
+    )
+    return [
+        {
+            "source": source,
+            "name": loaded.skill.name,
+            "description": loaded.skill.description,
+            "path": loaded.folder,
+            "installed": urls[loaded.skill.name] in installed_urls,
+        }
+        for loaded in matches
+    ]
+
+
+async def install_from_browse(
+    db: AsyncSession,
+    ctx: WorkspaceContext,
+    *,
+    source: str,
+    skill_path: str,
+    request_id: UUID | None = None,
+    ip_hash: str | None = None,
+) -> tuple[Skill, bool]:
+    """Install exactly one skill folder from a known source (admin).
+
+    Reuses the single-skill GitHub fetch/parse path — not the whole-repo
+    import flow — and, because every source here is a curated, hardcoded
+    public library (not an arbitrary admin-typed repo), enables the skill
+    immediately instead of landing it in the "review and enable" queue a raw
+    GitHub import uses. Idempotent: retrying an already-installed
+    source + skill_path returns the existing record instead of erroring or
+    duplicating. Returns ``(skill, created)``.
+    """
+    _require_admin(ctx)
+    _require_known_source(source)
+    ref = f"{source}/{skill_path}".strip("/")
+    try:
+        data, path_prefix, source_url = await fetch_github_repo_zip(ref)
+        bundle = load_zip(data, path_prefix=path_prefix)
+    except (SkillImportError, BundleError) as error:
+        raise HTTPException(422, str(error)) from None
+    wanted_folder = skill_path.strip("/")
+    exact = [loaded for loaded in bundle.skills if loaded.folder == wanted_folder]
+    if not exact and len(bundle.skills) == 1:
+        exact = list(bundle.skills)
+    if not exact:
+        raise HTTPException(422, f"no skill found at {source}/{skill_path}")
+    loaded = exact[0]
+
+    existing = await db.scalar(
+        select(Skill).where(Skill.workspace_id == ctx.workspace_id, Skill.name == loaded.skill.name)
+    )
+    if existing is not None:
+        if existing.source_url != source_url:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"a skill named {loaded.skill.name!r} already exists from a different source",
+            )
+        return existing, False
+
+    record = Skill(
+        workspace_id=ctx.workspace_id,
+        name=loaded.skill.name,
+        description=loaded.skill.description,
+        content=loaded.skill.content,
+        files_json=[{"path": file.path, "content": file.content} for file in loaded.files],
+        source="imported",
+        source_url=source_url[:500],
+        enabled=True,
+    )
+    db.add(record)
+    await db.flush()
+    _audit(
+        db,
+        ctx,
+        "skill.browse_installed",
+        record.id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        metadata={"name": record.name, "source": source, "path": skill_path},
+    )
+    await db.commit()
+    return record, True
 
 
 async def _require_agent(db: AsyncSession, workspace_id: UUID, agent_id: UUID) -> Agent:

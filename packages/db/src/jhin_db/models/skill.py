@@ -38,11 +38,17 @@ class Skill(Base, UuidPkMixin, TimestampMixin):
     files_json: Mapped[list[dict[str, Any]]] = mapped_column(
         JsonList, default=list, server_default=text("'[]'")
     )
-    # built_in | imported | custom
+    # built_in | imported | custom | agent_authored
     source: Mapped[str] = mapped_column(String(16), default="custom")
     source_url: Mapped[str] = mapped_column(String(500), default="", server_default=text("''"))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
     version: Mapped[int] = mapped_column(Integer, default=1, server_default=text("1"))
+    # Set only for source="agent_authored": the agent whose skills.create call
+    # made this skill (docs/architecture/skills.md). SET NULL on delete so a
+    # removed agent does not take its authored skills down with it.
+    created_by_agent_id: Mapped[UUID | None] = mapped_column(
+        StdUuid, ForeignKey("agent.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
 
 class AgentSkill(Base, UuidPkMixin, CreatedAtMixin):

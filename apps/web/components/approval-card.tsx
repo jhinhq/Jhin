@@ -17,6 +17,28 @@ const STATUS_TONES: Record<string, "neutral" | "ok" | "warn" | "danger" | "accen
   cancelled: "neutral",
 };
 
+// skills.create/skills.update carry a full skill body (up to 64 KB) in
+// `input.content`; the raw JSON dump reads poorly on an approval card, so
+// these two actions get a compact name + short preview instead
+// (docs/architecture/skills.md, "Approval card readability").
+const SKILL_CONTENT_PREVIEW_ACTIONS = new Set(["skills.create", "skills.update"]);
+const SKILL_PREVIEW_CHARS = 200;
+
+function skillContentPreview(input: unknown): { name: string; preview: string } | null {
+  if (typeof input !== "object" || input === null) return null;
+  const record = input as Record<string, unknown>;
+  const name = typeof record.name === "string" ? record.name : null;
+  const content = typeof record.content === "string" ? record.content : null;
+  if (name === null && content === null) return null;
+  const preview =
+    content === null
+      ? ""
+      : content.length > SKILL_PREVIEW_CHARS
+        ? `${content.slice(0, SKILL_PREVIEW_CHARS)}…`
+        : content;
+  return { name: name ?? "(unchanged)", preview };
+}
+
 export function ApprovalCard({
   approval,
   canDecide,
@@ -34,6 +56,9 @@ export function ApprovalCard({
   const risk = typeof payload.risk === "string" ? payload.risk : null;
   const input = payload.input;
   const pending = approval.status === "pending";
+  const skillPreview = SKILL_CONTENT_PREVIEW_ACTIONS.has(approval.action_type)
+    ? skillContentPreview(input)
+    : null;
 
   return (
     <li
@@ -67,7 +92,16 @@ export function ApprovalCard({
         ) : null}
       </div>
 
-      {input !== undefined && input !== null ? (
+      {skillPreview ? (
+        <div className="mt-3 rounded-xl border border-line bg-raised px-3.5 py-2.5">
+          <code className="font-mono text-xs font-medium text-ink">{skillPreview.name}</code>
+          {skillPreview.preview ? (
+            <p className="mt-1.5 whitespace-pre-wrap font-mono text-xs leading-relaxed text-dim">
+              {skillPreview.preview}
+            </p>
+          ) : null}
+        </div>
+      ) : input !== undefined && input !== null ? (
         <pre className="mt-3 overflow-x-auto rounded-xl border border-line bg-raised px-3.5 py-2.5 font-mono text-xs leading-relaxed text-dim">
           {JSON.stringify(input, null, 2)}
         </pre>

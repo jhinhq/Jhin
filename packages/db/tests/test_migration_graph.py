@@ -97,10 +97,18 @@ def test_shape_avatars_directly_follows_0020() -> None:
     assert shapes.down_revision == "0020"
 
 
-def test_skills_directly_follows_0021_and_the_graph_stays_linear() -> None:
+def test_skills_directly_follows_0021() -> None:
     scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
     skills = scripts.get_revision("0022")
 
     assert skills is not None
     assert skills.down_revision == "0021"
+
+
+def test_skill_authorship_directly_follows_0022_and_the_graph_stays_linear() -> None:
+    scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
+    authorship = scripts.get_revision("0023")
+
+    assert authorship is not None
+    assert authorship.down_revision == "0022"
     assert len(scripts.get_heads()) == 1, "the migration graph must stay linear"

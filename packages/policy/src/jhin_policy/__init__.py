@@ -58,6 +58,7 @@ from jhin_policy.reviews import (
 from jhin_policy.risk import RiskLevel, RuleAction
 from jhin_policy.skills import (
     SKILLS_CAPABILITIES,
+    SKILLS_MANAGE_CAPABILITY,
     SKILLS_READ_CAPABILITY,
 )
 from jhin_policy.work_requests import (
@@ -78,6 +79,7 @@ __all__ = [
     "PRESET_RULES",
     "REVIEW_REQUEST_CAPABILITY",
     "SKILLS_CAPABILITIES",
+    "SKILLS_MANAGE_CAPABILITY",
     "SKILLS_READ_CAPABILITY",
     "WORK_REQUEST_CAPABILITY",
     "WORK_RESPOND_CAPABILITY",

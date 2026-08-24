@@ -16,7 +16,7 @@ from jhin_api.skills import service
 from jhin_api.skills.schemas import SkillCreate, SkillFile, SkillUpdate
 from jhin_db.models import Agent, AgentSkill, AuditEvent, Skill, User
 from jhin_domain import WorkspaceRole, new_uuid7
-from jhin_skills import load_zip
+from jhin_skills import SkillImportError, load_zip
 
 GOOD_SKILL = "---\nname: {name}\ndescription: Description of {name}.\n---\n\nInstructions.\n"
 
@@ -283,3 +283,267 @@ class TestListing:
         assert total == 0
         with pytest.raises(HTTPException):
             await service.list_skills(session, admin_ctx.workspace_id, source="nope")
+
+
+# --- Browse gallery (docs/architecture/skills.md) ---------------------------
+#
+# The fixture below mirrors the *real* top-level layout of
+# github.com/anthropics/skills as of this writing, confirmed with one live
+# codeload fetch during development: a wrapped "{repo}-{ref}/" root, an
+# inner "skills/" folder holding one subfolder per skill, and a lone
+# "template/SKILL.md" at the repo root. Fixturing it here keeps the tests
+# offline and fast.
+ANTHROPICS_SOURCE = "anthropics/skills"
+
+
+def make_anthropics_like_zip() -> bytes:
+    return make_zip(
+        {
+            "skills-HEAD/README.md": "# skills\n",
+            "skills-HEAD/skills/pdf/SKILL.md": GOOD_SKILL.format(name="pdf"),
+            "skills-HEAD/skills/pdf/reference.md": "## PDF forms\n",
+            "skills-HEAD/skills/docx/SKILL.md": GOOD_SKILL.format(name="docx"),
+            "skills-HEAD/template/SKILL.md": GOOD_SKILL.format(name="template-skill"),
+        }
+    )
+
+
+class FakeFetch:
+    """A stand-in for ``jhin_skills.fetch_github_repo_zip`` that returns the
+    fixture zip for any ref under ``anthropics/skills``, computing the real
+    (path_prefix, source_url) the live function would from the ref — so the
+    service's path-prefix filtering and source_url provenance are exercised
+    exactly as they would be against the real repository."""
+
+    def __init__(self, zip_bytes: bytes) -> None:
+        self.zip_bytes = zip_bytes
+        self.calls: list[str] = []
+
+    async def __call__(self, ref: str) -> tuple[bytes, str, str]:
+        from jhin_skills import parse_github_ref, source_url_for
+
+        self.calls.append(ref)
+        owner, repo, path = parse_github_ref(ref)
+        return self.zip_bytes, path, source_url_for(owner, repo, path)
+
+
+def fake_fetch(zip_bytes: bytes) -> FakeFetch:
+    return FakeFetch(zip_bytes)
+
+
+class TestSkillSources:
+    def test_catalog_includes_anthropics_skills(self) -> None:
+        sources = service.list_skill_sources()
+        assert any(entry["source"] == ANTHROPICS_SOURCE for entry in sources)
+        assert all({"source", "label", "description", "url"} <= entry.keys() for entry in sources)
+
+
+class TestBrowse:
+    def setup_method(self) -> None:
+        service.reset_browse_cache()
+
+    def teardown_method(self) -> None:
+        service.reset_browse_cache()
+
+    async def test_lists_parsed_skills_without_creating_any(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            service, "fetch_github_repo_zip", fake_fetch(make_anthropics_like_zip())
+        )
+        entries = await service.browse_source(
+            session, admin_ctx.workspace_id, source=ANTHROPICS_SOURCE
+        )
+        names = {entry["name"] for entry in entries}
+        assert names == {"pdf", "docx", "template-skill"}
+        assert all(entry["installed"] is False for entry in entries)
+        assert await session.scalar(select(Skill)) is None  # browsing never creates skills
+
+    async def test_search_filters_name_and_description(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            service, "fetch_github_repo_zip", fake_fetch(make_anthropics_like_zip())
+        )
+        entries = await service.browse_source(
+            session, admin_ctx.workspace_id, source=ANTHROPICS_SOURCE, q="pdf"
+        )
+        assert [entry["name"] for entry in entries] == ["pdf"]
+        empty = await service.browse_source(
+            session, admin_ctx.workspace_id, source=ANTHROPICS_SOURCE, q="nothing-matches-this"
+        )
+        assert empty == []
+
+    async def test_unknown_source_is_rejected(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext
+    ) -> None:
+        with pytest.raises(HTTPException) as exc:
+            await service.browse_source(
+                session, admin_ctx.workspace_id, source="someone/other-repo"
+            )
+        assert exc.value.status_code == 422
+
+    async def test_unreachable_github_is_a_friendly_422(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def _boom(ref: str) -> tuple[bytes, str, str]:
+            raise SkillImportError(f"could not reach GitHub for {ref}")
+
+        monkeypatch.setattr(service, "fetch_github_repo_zip", _boom)
+        with pytest.raises(HTTPException) as exc:
+            await service.browse_source(session, admin_ctx.workspace_id, source=ANTHROPICS_SOURCE)
+        assert exc.value.status_code == 422
+        assert "could not reach GitHub" in exc.value.detail
+
+    async def test_repeated_browse_hits_the_cache(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fetch = fake_fetch(make_anthropics_like_zip())
+        monkeypatch.setattr(service, "fetch_github_repo_zip", fetch)
+        await service.browse_source(session, admin_ctx.workspace_id, source=ANTHROPICS_SOURCE)
+        await service.browse_source(
+            session, admin_ctx.workspace_id, source=ANTHROPICS_SOURCE, q="p"
+        )
+        assert fetch.calls == [ANTHROPICS_SOURCE]  # second call served from cache
+
+    async def test_expired_cache_entry_is_refetched(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fetch = fake_fetch(make_anthropics_like_zip())
+        monkeypatch.setattr(service, "fetch_github_repo_zip", fetch)
+        await service.browse_source(session, admin_ctx.workspace_id, source=ANTHROPICS_SOURCE)
+        cached = service._browse_cache[ANTHROPICS_SOURCE]
+        cached.fetched_at -= service._BROWSE_CACHE_TTL_SECONDS + 1
+        await service.browse_source(session, admin_ctx.workspace_id, source=ANTHROPICS_SOURCE)
+        assert fetch.calls == [ANTHROPICS_SOURCE, ANTHROPICS_SOURCE]
+
+    async def test_previously_installed_skill_is_marked(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            service, "fetch_github_repo_zip", fake_fetch(make_anthropics_like_zip())
+        )
+        await service.install_from_browse(
+            session, admin_ctx, source=ANTHROPICS_SOURCE, skill_path="skills/pdf"
+        )
+        service.reset_browse_cache()
+        entries = await service.browse_source(
+            session, admin_ctx.workspace_id, source=ANTHROPICS_SOURCE
+        )
+        by_name = {entry["name"]: entry for entry in entries}
+        assert by_name["pdf"]["installed"] is True
+        assert by_name["docx"]["installed"] is False
+
+
+class TestBrowseInstall:
+    async def test_installs_one_skill_enabled_and_audited(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fetch = fake_fetch(make_anthropics_like_zip())
+        monkeypatch.setattr(service, "fetch_github_repo_zip", fetch)
+        record, created = await service.install_from_browse(
+            session, admin_ctx, source=ANTHROPICS_SOURCE, skill_path="skills/pdf"
+        )
+        assert created is True
+        assert record.name == "pdf"
+        assert record.source == "imported"
+        assert record.enabled is True  # curated source: enabled immediately, no review queue
+        assert record.source_url == "https://github.com/anthropics/skills/tree/HEAD/skills/pdf"
+        assert fetch.calls == ["anthropics/skills/skills/pdf"]
+        assert "skill.browse_installed" in await audit_actions(session)
+
+    async def test_retry_is_idempotent(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            service, "fetch_github_repo_zip", fake_fetch(make_anthropics_like_zip())
+        )
+        first, first_created = await service.install_from_browse(
+            session, admin_ctx, source=ANTHROPICS_SOURCE, skill_path="skills/pdf"
+        )
+        second, second_created = await service.install_from_browse(
+            session, admin_ctx, source=ANTHROPICS_SOURCE, skill_path="skills/pdf"
+        )
+        assert first_created is True
+        assert second_created is False
+        assert second.id == first.id
+        rows = list(await session.scalars(select(Skill)))
+        assert len(rows) == 1  # no duplicate
+
+    async def test_member_cannot_install(
+        self, session: AsyncSession, member_ctx: WorkspaceContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            service, "fetch_github_repo_zip", fake_fetch(make_anthropics_like_zip())
+        )
+        with pytest.raises(HTTPException) as exc:
+            await service.install_from_browse(
+                session, member_ctx, source=ANTHROPICS_SOURCE, skill_path="skills/pdf"
+            )
+        assert exc.value.status_code == 403
+
+    async def test_unknown_source_is_rejected(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext
+    ) -> None:
+        with pytest.raises(HTTPException) as exc:
+            await service.install_from_browse(
+                session, admin_ctx, source="someone/other-repo", skill_path="skills/pdf"
+            )
+        assert exc.value.status_code == 422
+
+    async def test_name_collision_from_a_different_source_conflicts(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        await service.create_skill(session, admin_ctx, payload(name="pdf"))
+        monkeypatch.setattr(
+            service, "fetch_github_repo_zip", fake_fetch(make_anthropics_like_zip())
+        )
+        with pytest.raises(HTTPException) as exc:
+            await service.install_from_browse(
+                session, admin_ctx, source=ANTHROPICS_SOURCE, skill_path="skills/pdf"
+            )
+        assert exc.value.status_code == 409
+
+
+class TestNewWorkspaceDefaults:
+    async def test_installs_five_active_starters(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext
+    ) -> None:
+        installed, skipped = await service.install_builtins_for_new_workspace(
+            session, admin_ctx.workspace_id, actor_id=admin_ctx.user.id
+        )
+        await session.commit()
+        assert len(installed) == 5
+        assert skipped == []
+        rows = list(await session.scalars(select(Skill)))
+        assert len(rows) == 5
+        assert all(row.enabled and row.source == "built_in" for row in rows)
+        event = await session.scalar(
+            select(AuditEvent).where(AuditEvent.action == "skill.builtins_installed")
+        )
+        assert event is not None
+        assert event.metadata_json["source"] == "default"
+
+    async def test_install_missing_defaults_only_adds_what_is_missing(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext
+    ) -> None:
+        await service.create_skill(session, admin_ctx, payload(name="release-notes"))
+        installed, skipped = await service.install_builtins(session, admin_ctx)
+        assert "release-notes" not in installed
+        assert "release-notes" in skipped
+        assert len(installed) == 4
+        rows = list(await session.scalars(select(Skill)))
+        assert len(rows) == 5
+        event = await session.scalar(
+            select(AuditEvent).where(AuditEvent.action == "skill.builtins_installed")
+        )
+        assert event is not None
+        assert event.metadata_json["source"] == "manual"
+
+    async def test_install_missing_defaults_is_idempotent(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext
+    ) -> None:
+        await service.install_builtins(session, admin_ctx)
+        installed_again, skipped_again = await service.install_builtins(session, admin_ctx)
+        assert installed_again == []
+        assert len(skipped_again) == 5

@@ -19,6 +19,7 @@ from jhin_api.audit import service as audit
 from jhin_api.security.passwords import hash_password, verify_password
 from jhin_api.security.rate_limit import LoginRateLimiter
 from jhin_api.security.tokens import hash_token, new_session_token
+from jhin_api.skills import service as skills_service
 from jhin_api.slugs import slugify
 from jhin_db.models import User, UserSession, Workspace, WorkspaceMembership
 from jhin_domain import ActorType, UserStatus, WorkspaceRole
@@ -124,6 +125,15 @@ async def bootstrap_owner(
         request_id=request_id,
         ip_hash=ip_hash,
         metadata={"name": workspace.name, "slug": workspace.slug},
+    )
+    # Every new workspace starts with the five starter skills already
+    # installed and enabled (docs/architecture/skills.md).
+    await skills_service.install_builtins_for_new_workspace(
+        db,
+        workspace.id,
+        actor_id=user.id,
+        request_id=request_id,
+        ip_hash=ip_hash,
     )
 
     token = await _create_session(

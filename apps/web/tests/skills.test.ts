@@ -30,6 +30,7 @@ function skill(overrides: Partial<Skill> = {}): Skill {
     enabled: true,
     version: 1,
     file_count: 0,
+    created_by_agent_id: null,
     created_at: "2026-08-23T00:00:00Z",
     updated_at: "2026-08-23T00:00:00Z",
     ...overrides,

@@ -8,6 +8,7 @@ export const SOURCE_LABELS: Record<SkillSource, string> = {
   built_in: "Starter",
   imported: "Imported",
   custom: "Custom",
+  agent_authored: "Agent-authored",
 };
 
 const GITHUB_REF_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(\/[A-Za-z0-9_./-]+)?$/;

@@ -5,9 +5,10 @@
  * own, or import from GitHub / a zip — imports stay off until reviewed. */
 
 import { useMutation } from "@tanstack/react-query";
-import { BookOpen, Download, Pencil, Plus, Trash2, Upload } from "lucide-react";
-import { useRef, useState } from "react";
+import { BookOpen, Download, Pencil, Plus, Search, Trash2, Upload } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { PageBody, PageHeader } from "@/components/app-shell";
+import { SkillsBrowseGallery } from "@/components/skills-browse-gallery";
 import {
   Badge,
   Button,
@@ -16,11 +17,19 @@ import {
   ErrorNote,
   Field,
   Input,
+  Select,
   Spinner,
+  Tabs,
   Textarea,
 } from "@/components/ui";
 import { api, ApiError, apiUpload } from "@/lib/api";
-import { useInvalidateSkills, useSkill, useSkills } from "@/lib/hooks";
+import {
+  useBrowseSkills,
+  useInvalidateSkills,
+  useSkill,
+  useSkills,
+  useSkillSources,
+} from "@/lib/hooks";
 import {
   isValidGithubRef,
   isValidSkillName,
@@ -28,6 +37,8 @@ import {
   SOURCE_LABELS,
 } from "@/lib/skills";
 import type {
+  BrowseInstallResult,
+  BrowseSkillEntry,
   InstallBuiltinsResult,
   Skill,
   SkillDetail,
@@ -39,10 +50,21 @@ function errorText(error: unknown, fallback: string): string {
   return error instanceof ApiError ? error.detail : fallback;
 }
 
+/** Debounce a fast-changing value (the search box) before it drives a query. */
+function useDebounced<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delayMs);
+    return () => clearTimeout(timer);
+  }, [value, delayMs]);
+  return debounced;
+}
+
 export default function SkillsPage() {
   const { workspace, can } = useWorkspace();
   const workspaceId = workspace.workspace_id;
   const isAdmin = can("admin");
+  const [tab, setTab] = useState<"library" | "browse">("library");
   const skills = useSkills(workspaceId);
   const invalidate = useInvalidateSkills(workspaceId);
 
@@ -118,93 +140,113 @@ export default function SkillsPage() {
         }
       />
       <PageBody className="space-y-4">
-        {reviewCount > 0 ? (
-          <p
-            data-testid="review-banner"
-            className="rounded-xl border border-warn/30 bg-warn-soft px-3.5 py-2.5 text-sm text-warn"
-          >
-            {reviewCount} imported {reviewCount === 1 ? "skill is" : "skills are"} waiting for
-            review. Read {reviewCount === 1 ? "it" : "them"} below and turn{" "}
-            {reviewCount === 1 ? "it" : "them"} on when you trust the content.
-          </p>
-        ) : null}
-        <ErrorNote message={actionError} />
-        {skills.isPending ? <Spinner label="Loading skills…" /> : null}
-        {skills.isError ? <ErrorNote message="Could not load the skills library." /> : null}
-        {skills.data && items.length === 0 ? (
-          <EmptyState
-            icon={<BookOpen size={20} aria-hidden />}
-            title="No skills yet"
-            description="Skills are short instruction packs agents read on demand. Install the starters to see how they look, then write your own."
-            action={
-              isAdmin ? (
-                <Button variant="primary" size="sm" onClick={() => install.mutate()}>
-                  <Download size={14} /> Install starter skills
-                </Button>
-              ) : undefined
-            }
-          />
-        ) : null}
-        <ul className="space-y-2">
-          {items.map((skill) => (
-            <li
-              key={skill.id}
-              className="flex flex-wrap items-start gap-3 rounded-2xl border border-line bg-surface px-4 py-3"
-            >
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <code className="font-mono text-sm font-medium">{skill.name}</code>
-                  <Badge>{SOURCE_LABELS[skill.source]}</Badge>
-                  {skill.source === "imported" && !skill.enabled ? (
-                    <Badge tone="warn">Review and enable</Badge>
-                  ) : !skill.enabled ? (
-                    <Badge tone="neutral">Off</Badge>
+        <Tabs
+          label="Skills sections"
+          tabs={[
+            { id: "library", label: "Library" },
+            { id: "browse", label: "Browse library" },
+          ]}
+          value={tab}
+          onChange={(id) => setTab(id as "library" | "browse")}
+        />
+
+        {tab === "library" ? (
+          <div className="space-y-4">
+            {reviewCount > 0 ? (
+              <p
+                data-testid="review-banner"
+                className="rounded-xl border border-warn/30 bg-warn-soft px-3.5 py-2.5 text-sm text-warn"
+              >
+                {reviewCount} imported {reviewCount === 1 ? "skill is" : "skills are"} waiting for
+                review. Read {reviewCount === 1 ? "it" : "them"} below and turn{" "}
+                {reviewCount === 1 ? "it" : "them"} on when you trust the content.
+              </p>
+            ) : null}
+            <ErrorNote message={actionError} />
+            {skills.isPending ? <Spinner label="Loading skills…" /> : null}
+            {skills.isError ? <ErrorNote message="Could not load the skills library." /> : null}
+            {skills.data && items.length === 0 ? (
+              <EmptyState
+                icon={<BookOpen size={20} aria-hidden />}
+                title="No skills yet"
+                description="Skills are short instruction packs agents read on demand. Install the starters to see how they look, then write your own."
+                action={
+                  isAdmin ? (
+                    <Button variant="primary" size="sm" onClick={() => install.mutate()}>
+                      <Download size={14} /> Install starter skills
+                    </Button>
+                  ) : undefined
+                }
+              />
+            ) : null}
+            <ul className="space-y-2">
+              {items.map((skill) => (
+                <li
+                  key={skill.id}
+                  className="flex flex-wrap items-start gap-3 rounded-2xl border border-line bg-surface px-4 py-3"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <code className="font-mono text-sm font-medium">{skill.name}</code>
+                      <Badge>{SOURCE_LABELS[skill.source]}</Badge>
+                      {skill.source === "imported" && !skill.enabled ? (
+                        <Badge tone="warn">Review and enable</Badge>
+                      ) : !skill.enabled ? (
+                        <Badge tone="neutral">Off</Badge>
+                      ) : null}
+                      {skill.file_count > 0 ? (
+                        <span className="text-xs text-faint">
+                          {skill.file_count} {skill.file_count === 1 ? "file" : "files"}
+                        </span>
+                      ) : null}
+                    </div>
+                    <p className="mt-1 text-sm text-dim">{skill.description}</p>
+                  </div>
+                  {isAdmin ? (
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      <Button
+                        size="sm"
+                        onClick={() => toggle.mutate(skill)}
+                        disabled={toggle.isPending}
+                        aria-label={`${skill.enabled ? "Disable" : "Enable"} ${skill.name}`}
+                      >
+                        {skill.enabled ? "Disable" : "Enable"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={() => {
+                          setEditingId(skill.id);
+                          setEditorOpen(true);
+                        }}
+                        aria-label={`Edit ${skill.name}`}
+                      >
+                        <Pencil size={14} />
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={() => {
+                          if (
+                            window.confirm(
+                              `Delete the skill “${skill.name}”? Agents lose it immediately.`,
+                            )
+                          ) {
+                            remove.mutate(skill);
+                          }
+                        }}
+                        disabled={remove.isPending}
+                        aria-label={`Delete ${skill.name}`}
+                      >
+                        <Trash2 size={14} />
+                      </Button>
+                    </div>
                   ) : null}
-                  {skill.file_count > 0 ? (
-                    <span className="text-xs text-faint">
-                      {skill.file_count} {skill.file_count === 1 ? "file" : "files"}
-                    </span>
-                  ) : null}
-                </div>
-                <p className="mt-1 text-sm text-dim">{skill.description}</p>
-              </div>
-              {isAdmin ? (
-                <div className="flex shrink-0 items-center gap-1.5">
-                  <Button
-                    size="sm"
-                    onClick={() => toggle.mutate(skill)}
-                    disabled={toggle.isPending}
-                    aria-label={`${skill.enabled ? "Disable" : "Enable"} ${skill.name}`}
-                  >
-                    {skill.enabled ? "Disable" : "Enable"}
-                  </Button>
-                  <Button
-                    size="sm"
-                    onClick={() => {
-                      setEditingId(skill.id);
-                      setEditorOpen(true);
-                    }}
-                    aria-label={`Edit ${skill.name}`}
-                  >
-                    <Pencil size={14} />
-                  </Button>
-                  <Button
-                    size="sm"
-                    onClick={() => {
-                      if (window.confirm(`Delete the skill “${skill.name}”? Agents lose it immediately.`)) {
-                        remove.mutate(skill);
-                      }
-                    }}
-                    disabled={remove.isPending}
-                    aria-label={`Delete ${skill.name}`}
-                  >
-                    <Trash2 size={14} />
-                  </Button>
-                </div>
-              ) : null}
-            </li>
-          ))}
-        </ul>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : (
+          <BrowseLibrarySection workspaceId={workspaceId} isAdmin={isAdmin} onInstalled={invalidate} />
+        )}
       </PageBody>
 
       <ImportDialog
@@ -222,6 +264,103 @@ export default function SkillsPage() {
         />
       ) : null}
     </>
+  );
+}
+
+function BrowseLibrarySection({
+  workspaceId,
+  isAdmin,
+  onInstalled,
+}: {
+  workspaceId: string;
+  isAdmin: boolean;
+  onInstalled: () => void;
+}) {
+  const sources = useSkillSources();
+  const [source, setSource] = useState("");
+  const [query, setQuery] = useState("");
+  const debouncedQuery = useDebounced(query, 300);
+  const [installError, setInstallError] = useState<string | null>(null);
+  const [installingPath, setInstallingPath] = useState<string | null>(null);
+
+  const activeSource = source || sources.data?.[0]?.source || "";
+  const browse = useBrowseSkills(workspaceId, activeSource, debouncedQuery);
+
+  const install = useMutation({
+    mutationFn: (entry: BrowseSkillEntry) =>
+      api<BrowseInstallResult>(`/api/v1/workspaces/${workspaceId}/skills/browse/install`, {
+        method: "POST",
+        body: { source: entry.source, skill_path: entry.path },
+      }),
+    onMutate: (entry: BrowseSkillEntry) => setInstallingPath(entry.path),
+    onSuccess: () => {
+      setInstallError(null);
+      onInstalled();
+      void browse.refetch();
+    },
+    onError: (error) => setInstallError(errorText(error, "Installing the skill failed.")),
+    onSettled: () => setInstallingPath(null),
+  });
+
+  const activeLabel =
+    sources.data?.find((entry) => entry.source === activeSource)?.label ?? activeSource;
+
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-dim">
+        Search public skill libraries and install what you need with one click.
+      </p>
+      {sources.isError ? (
+        <ErrorNote message="Could not reach the skill sources catalog." />
+      ) : null}
+      <div className="flex flex-wrap items-center gap-2">
+        {sources.data && sources.data.length > 1 ? (
+          <Select
+            aria-label="Skill source"
+            value={activeSource}
+            onChange={(event) => setSource(event.target.value)}
+          >
+            {sources.data.map((entry) => (
+              <option key={entry.source} value={entry.source}>
+                {entry.label}
+              </option>
+            ))}
+          </Select>
+        ) : sources.data?.[0] ? (
+          <Badge>{sources.data[0].label}</Badge>
+        ) : null}
+        <div className="relative min-w-[220px] flex-1">
+          <Search
+            size={14}
+            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-faint"
+            aria-hidden
+          />
+          <Input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search skills by name or description…"
+            className="pl-8"
+            aria-label="Search skills"
+          />
+        </div>
+      </div>
+      <ErrorNote message={installError} />
+      {browse.isPending && activeSource ? <Spinner label="Loading skills…" /> : null}
+      {browse.isError ? (
+        <ErrorNote
+          message={errorText(browse.error, "Could not reach GitHub for this source right now.")}
+        />
+      ) : null}
+      {browse.data ? (
+        <SkillsBrowseGallery
+          entries={browse.data.skills}
+          sourceLabel={activeLabel}
+          canInstall={isAdmin}
+          installingPath={installingPath}
+          onInstall={(entry) => install.mutate(entry)}
+        />
+      ) : null}
+    </div>
   );
 }
 

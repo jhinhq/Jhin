@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from jhin_api.audit import service as audit
 from jhin_api.deps import WorkspaceContext
+from jhin_api.skills import service as skills_service
 from jhin_api.slugs import slugify, with_suffix
 from jhin_db.models import ModelProfile, User, Workspace, WorkspaceMembership
 from jhin_domain import WorkspaceRole
@@ -66,6 +67,16 @@ async def create(
         request_id=request_id,
         ip_hash=ip_hash,
         metadata={"name": workspace.name, "slug": workspace.slug},
+    )
+    # Every new workspace starts with the five starter skills already
+    # installed and enabled (docs/architecture/skills.md) — staged in this
+    # same transaction, not a separate follow-up call.
+    await skills_service.install_builtins_for_new_workspace(
+        db,
+        workspace.id,
+        actor_id=creator_id,
+        request_id=request_id,
+        ip_hash=ip_hash,
     )
     await db.commit()
     return workspace
