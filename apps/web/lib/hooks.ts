@@ -38,6 +38,9 @@ import type {
   RunEvent,
   RunList,
   SecretOut,
+  AgentSkillInfo,
+  SkillDetail,
+  SkillList,
   TaskDetail,
   TaskList,
   TaskMessage,
@@ -714,5 +717,43 @@ export function useInvalidateCoordination(workspaceId: string) {
     void queryClient.invalidateQueries({ queryKey: ["attention", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["activity", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["tasks", workspaceId] });
+  };
+}
+
+// --- Skills (docs/architecture/skills.md) ---
+
+export function useSkills(workspaceId: string, q = "") {
+  return useQuery({
+    queryKey: ["skills", workspaceId, q],
+    queryFn: () =>
+      api<SkillList>(`/api/v1/workspaces/${workspaceId}/skills`, {
+        params: { q: q || undefined, limit: 100 },
+      }),
+    placeholderData: (previous) => previous,
+  });
+}
+
+export function useSkill(workspaceId: string, skillId: string | null) {
+  return useQuery({
+    queryKey: ["skill", workspaceId, skillId],
+    queryFn: () => api<SkillDetail>(`/api/v1/workspaces/${workspaceId}/skills/${skillId}`),
+    enabled: skillId !== null,
+  });
+}
+
+export function useAgentSkills(workspaceId: string, agentId: string) {
+  return useQuery({
+    queryKey: ["agent-skills", workspaceId, agentId],
+    queryFn: () =>
+      api<AgentSkillInfo[]>(`/api/v1/workspaces/${workspaceId}/agents/${agentId}/skills`),
+  });
+}
+
+export function useInvalidateSkills(workspaceId: string) {
+  const queryClient = useQueryClient();
+  return () => {
+    void queryClient.invalidateQueries({ queryKey: ["skills", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["skill", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["agent-skills", workspaceId] });
   };
 }

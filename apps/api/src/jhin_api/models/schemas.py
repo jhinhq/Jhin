@@ -7,29 +7,39 @@ from uuid import UUID
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from jhin_domain import ModelProviderType
-from jhin_models import EmbeddingConfig
+from jhin_models import EmbeddingConfig, WebSearchConfig
 from jhin_models.embeddings import EMBEDDINGS_CONFIG_KEY
+from jhin_models.web_search import WEB_SEARCH_CONFIG_KEY
+
+
+def _validate_config_block(
+    config_json: dict[str, Any], key: str, model_type: type[EmbeddingConfig] | type[WebSearchConfig]
+) -> None:
+    raw = config_json.get(key)
+    if raw is None:
+        return
+    if not isinstance(raw, dict):
+        raise ValueError(f"config_json.{key} must be an object")
+    try:
+        model_type.model_validate(raw)
+    except ValidationError as exc:
+        problems = "; ".join(
+            f"{'.'.join(str(p) for p in err['loc']) or key}: {err['msg']}" for err in exc.errors()
+        )
+        raise ValueError(f"config_json.{key} is invalid: {problems}") from None
 
 
 def validate_profile_config(config_json: dict[str, Any]) -> dict[str, Any]:
     """Validate the typed capability blocks inside ``config_json``.
 
     ``embeddings`` (``{enabled, model, dimensions, cost_micros_per_million}``)
-    must parse as :class:`EmbeddingConfig`; other keys are passed through.
+    must parse as :class:`EmbeddingConfig` and ``web_search``
+    (``{enabled, max_uses}``) as :class:`WebSearchConfig`; other keys are
+    passed through. Provider/model support for ``web_search`` is checked in
+    the service layer, where the provider row is known.
     """
-    raw = config_json.get(EMBEDDINGS_CONFIG_KEY)
-    if raw is None:
-        return config_json
-    if not isinstance(raw, dict):
-        raise ValueError(f"config_json.{EMBEDDINGS_CONFIG_KEY} must be an object")
-    try:
-        EmbeddingConfig.model_validate(raw)
-    except ValidationError as exc:
-        problems = "; ".join(
-            f"{'.'.join(str(p) for p in err['loc']) or EMBEDDINGS_CONFIG_KEY}: {err['msg']}"
-            for err in exc.errors()
-        )
-        raise ValueError(f"config_json.{EMBEDDINGS_CONFIG_KEY} is invalid: {problems}") from None
+    _validate_config_block(config_json, EMBEDDINGS_CONFIG_KEY, EmbeddingConfig)
+    _validate_config_block(config_json, WEB_SEARCH_CONFIG_KEY, WebSearchConfig)
     return config_json
 
 

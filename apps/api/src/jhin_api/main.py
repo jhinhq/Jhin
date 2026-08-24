@@ -32,6 +32,7 @@ from jhin_api.policy.router import router as policy_router
 from jhin_api.secrets.router import router as secrets_router
 from jhin_api.security.rate_limit import LoginRateLimiter
 from jhin_api.settings import Settings, get_settings
+from jhin_api.skills.router import agent_skills_router, skills_router
 from jhin_api.tasks.router import agent_actions_router, runs_router, tasks_router
 from jhin_api.teams.router import router as teams_router
 from jhin_api.temporal import TemporalClientProvider
@@ -310,6 +311,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(directory_router)
     app.include_router(coordination_router)
     app.include_router(memory_router)
+    app.include_router(skills_router)
+    app.include_router(agent_skills_router)
     app.include_router(policy_router)
     app.include_router(approvals_router)
     app.include_router(connectors_catalog_router)

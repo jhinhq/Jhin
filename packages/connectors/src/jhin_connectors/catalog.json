@@ -535,5 +535,53 @@
     "auth_note": "Dev-only. Bearer token: fake-mcp-token. In-network URL: http://fake-mcp:8080/mcp",
     "docs_url": "https://github.com/jhin-ai/jhin/blob/main/docs/architecture/mcp.md",
     "setup_note": "Only available with the dev compose overlay (service fake-mcp)."
+  },
+  {
+    "slug": "web_search_tavily",
+    "name": "Web search (Tavily)",
+    "category": "Search & web",
+    "icon": "search",
+    "description": "Web search plus bounded page fetch for agents, using a Tavily API key.",
+    "connector_type": "web",
+    "auth_hint": "bearer",
+    "auth_note": "Use a Tavily API key (tvly-…) as the API key.",
+    "docs_url": "https://docs.tavily.com/",
+    "connector_config": { "search_backend": "tavily" }
+  },
+  {
+    "slug": "web_search_brave",
+    "name": "Web search (Brave)",
+    "category": "Search & web",
+    "icon": "search",
+    "description": "Web search plus bounded page fetch for agents, using a Brave Search API key.",
+    "connector_type": "web",
+    "auth_hint": "bearer",
+    "auth_note": "Use a Brave Search API subscription token as the API key.",
+    "docs_url": "https://brave.com/search/api/",
+    "connector_config": { "search_backend": "brave" }
+  },
+  {
+    "slug": "web_search_exa",
+    "name": "Web search (Exa)",
+    "category": "Search & web",
+    "icon": "search",
+    "description": "Web search plus bounded page fetch for agents, using an Exa API key.",
+    "connector_type": "web",
+    "auth_hint": "bearer",
+    "auth_note": "Use an Exa API key as the API key.",
+    "docs_url": "https://docs.exa.ai/",
+    "connector_config": { "search_backend": "exa" }
+  },
+  {
+    "slug": "fake_websearch",
+    "name": "Fake web search (dev)",
+    "category": "Search & web",
+    "icon": "flask",
+    "description": "The dev stack's deterministic search + fetch double speaking the Tavily, Brave, and Exa shapes.",
+    "connector_type": "web",
+    "auth_hint": "bearer",
+    "auth_note": "Dev-only. API key: fake-websearch-token. Base URL: http://fake-websearch:8080",
+    "setup_note": "Only available with the dev compose overlay (service fake-websearch).",
+    "connector_config": { "search_backend": "tavily", "base_url": "http://fake-websearch:8080" }
   }
 ]

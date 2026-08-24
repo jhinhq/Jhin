@@ -72,7 +72,8 @@ _RUNNER_BASE_ENVIRONMENT_KEYS = {
 }
 _DEV_HTTP_ORIGINS = (
     "http://fake-github:8080,http://fake-linear:8080,"
-    "http://fake-vercel:8080,http://fake-supabase:8080,http://fake-mcp:8080"
+    "http://fake-vercel:8080,http://fake-supabase:8080,http://fake-mcp:8080,"
+    "http://fake-websearch:8080"
 )
 _DEV_DB_HOSTS = "fake-supabase-db:5432"
 _CORE_DEPENDENCIES = {
@@ -682,6 +683,7 @@ def _assert_dev_contract(services: Mapping[str, Any], *, dev: bool) -> None:
             "fake-vercel",
             "fake-supabase",
             "fake-mcp",
+            "fake-websearch",
             "fake-provider",
         ):
             _require(fake not in services, f"{fake} leaked to production")
@@ -718,7 +720,14 @@ def _assert_dev_contract(services: Mapping[str, Any], *, dev: bool) -> None:
             and volumes[0]["source"] == "/tmp/jhin-disabled-barriers",
             f"{name} crash mount drifted",
         )
-    for name in ("fake-github", "fake-linear", "fake-vercel", "fake-supabase", "fake-mcp"):
+    for name in (
+        "fake-github",
+        "fake-linear",
+        "fake-vercel",
+        "fake-supabase",
+        "fake-mcp",
+        "fake-websearch",
+    ):
         _require(
             services[name]["build"]["args"]["SERVICE_PACKAGE"] == "jhin-tool-worker",
             f"{name} must use the tool-worker image",

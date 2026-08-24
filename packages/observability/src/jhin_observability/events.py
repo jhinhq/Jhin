@@ -101,6 +101,9 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
     },
     # Coordination release (docs/architecture/coordination.md).
     "coordination.context_failed": {"error_type": FieldKind.ERROR_TYPE},
+    # Skills release (docs/architecture/skills.md): loading the prompt's
+    # skills list is best-effort; a failure degrades to no skills block.
+    "skills.context_failed": {"error_type": FieldKind.ERROR_TYPE},
     "work_request.finalized": {
         "work_request_id": FieldKind.ID,
         "task_id": FieldKind.ID,

@@ -10,7 +10,8 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 DEV_HTTP_ORIGINS = (
     "http://fake-github:8080,http://fake-linear:8080,"
-    "http://fake-vercel:8080,http://fake-supabase:8080,http://fake-mcp:8080"
+    "http://fake-vercel:8080,http://fake-supabase:8080,http://fake-mcp:8080,"
+    "http://fake-websearch:8080"
 )
 FAKE_SERVICES = {
     "fake-vercel": {

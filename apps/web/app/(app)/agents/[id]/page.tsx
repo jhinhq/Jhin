@@ -13,6 +13,7 @@ import { ActivityFeed } from "@/components/activity/activity-feed";
 import { AvatarDialog } from "@/components/agents/avatar-dialog";
 import { HelpDirectory } from "@/components/agents/help-directory";
 import { MemoryPanel } from "@/components/agents/memory-panel";
+import { SkillsPanel } from "@/components/agents/skills-panel";
 import { TeamStatus } from "@/components/agents/team-status";
 import { PageHeader } from "@/components/app-shell";
 import { Avatar } from "@/components/avatar";
@@ -49,13 +50,22 @@ import { formatScope } from "@/lib/policy";
 import type { Agent, AgentAvatar } from "@/lib/types";
 import { useWorkspace } from "@/lib/workspace-context";
 
-type TabId = "about" | "colleagues" | "team" | "memory" | "access" | "activity" | "chats";
+type TabId =
+  | "about"
+  | "colleagues"
+  | "team"
+  | "memory"
+  | "skills"
+  | "access"
+  | "activity"
+  | "chats";
 
 const TABS: { id: TabId; label: string }[] = [
   { id: "about", label: "About" },
   { id: "colleagues", label: "Colleagues" },
   { id: "team", label: "Team status" },
   { id: "memory", label: "Memory" },
+  { id: "skills", label: "Skills" },
   { id: "access", label: "What it can use" },
   { id: "activity", label: "Recent activity" },
   { id: "chats", label: "Chats" },
@@ -358,6 +368,10 @@ export default function AgentProfilePage() {
 
         {tab === "memory" ? (
           <MemoryPanel workspaceId={workspaceId} agent={agent} canWrite={can("member")} isAdmin={isAdmin} />
+        ) : null}
+
+        {tab === "skills" ? (
+          <SkillsPanel workspaceId={workspaceId} agentId={agent.id} isAdmin={isAdmin} />
         ) : null}
 
         {tab === "access" ? <AccessSection workspaceId={workspaceId} agentId={agent.id} isAdmin={isAdmin} /> : null}

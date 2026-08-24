@@ -60,6 +60,19 @@ class CatalogApp(BaseModel):
     docs_url: str = ""
     setup_note: str = ""
     stdio_only: bool = False
+    # Non-secret connection config values the Connect dialog pre-fills for a
+    # native connector (e.g. the web connector's pre-selected search_backend).
+    connector_config: dict[str, str] = {}
+
+    @field_validator("connector_config")
+    @classmethod
+    def _connector_config(cls, value: dict[str, str]) -> dict[str, str]:
+        if len(value) > 10:
+            raise ValueError("connector_config accepts at most 10 entries")
+        for key, entry in value.items():
+            if not key or len(key) > 64 or len(entry) > 500:
+                raise ValueError("connector_config entries are too long")
+        return value
 
     @field_validator("slug")
     @classmethod

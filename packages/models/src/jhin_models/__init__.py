@@ -35,9 +35,15 @@ from jhin_models.images import (
     as_image_generation_client,
 )
 from jhin_models.tool_arguments import normalize_tool_arguments
+from jhin_models.web_search import (
+    WEB_SEARCH_CONFIG_KEY,
+    WebSearchConfig,
+    web_search_unsupported_reason,
+)
 
 __all__ = [
     "INSUFFICIENT_FUNDS",
+    "WEB_SEARCH_CONFIG_KEY",
     "AccountStatus",
     "AccountStatusUnsupported",
     "EmbeddingClient",
@@ -57,8 +63,10 @@ __all__ = [
     "ModelToolCall",
     "ModelUsage",
     "ToolSchema",
+    "WebSearchConfig",
     "as_embedding_client",
     "as_image_generation_client",
     "build_model_client",
     "normalize_tool_arguments",
+    "web_search_unsupported_reason",
 ]

@@ -127,7 +127,17 @@ webhooks**. The full security model — URL policy, discovery bounds,
 approval binding, prompt-injection posture — is in
 [mcp.md](mcp.md). The curated Apps library (`jhin_connectors/catalog.py`,
 `catalog.json`, `GET /api/v1/connectors/catalog`) maps well-known apps to
-either a native connector or an MCP endpoint.
+either a native connector or an MCP endpoint; entries may pre-fill
+non-secret connection config (`connector_config`).
+
+## Web access
+
+The `web` connector (`jhin_connectors/web/`) gives agents deny-by-default
+internet access: `web.search` through a workspace-supplied Tavily/Brave/Exa
+API key and `web.fetch` for bounded readable-text retrieval of public
+pages, with domain scoping in grants and connections. Model-native provider
+search is the separate opt-in path 2. Both are described in
+[web.md](web.md).
 
 ## Security invariants (non-negotiable)
 

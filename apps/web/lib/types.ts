@@ -1108,6 +1108,8 @@ export interface CatalogApp {
   docs_url: string;
   setup_note: string;
   stdio_only: boolean;
+  /** Non-secret connection config pre-filled for a native connector. */
+  connector_config: Record<string, string>;
 }
 
 export interface ConnectionToolInfo {
@@ -1132,4 +1134,66 @@ export interface ConnectionToolsOut {
   capability_pattern: string | null;
   discovered_at: string | null;
   tools: ConnectionToolInfo[];
+}
+
+// --- Agent Skills (docs/architecture/skills.md) ---
+
+export type SkillSource = "built_in" | "imported" | "custom";
+
+export interface SkillFileEntry {
+  path: string;
+  content: string;
+}
+
+export interface Skill {
+  id: string;
+  workspace_id: string;
+  name: string;
+  description: string;
+  source: SkillSource;
+  source_url: string;
+  enabled: boolean;
+  version: number;
+  file_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SkillDetail extends Skill {
+  content: string;
+  files: SkillFileEntry[];
+}
+
+export interface SkillList {
+  items: Skill[];
+  total: number;
+}
+
+export interface ImportedSkill {
+  name: string;
+  description: string;
+  status: "proposed" | "skipped";
+  reason: string;
+}
+
+export interface SkillImportResult {
+  created: number;
+  skipped: number;
+  skills: ImportedSkill[];
+  warnings: string[];
+}
+
+export interface InstallBuiltinsResult {
+  installed: number;
+  skipped: number;
+  names: string[];
+}
+
+export interface AgentSkillInfo {
+  skill_id: string;
+  name: string;
+  description: string;
+  source: SkillSource;
+  enabled: boolean;
+  enabled_for_agent: boolean;
 }

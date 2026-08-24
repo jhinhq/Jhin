@@ -45,10 +45,12 @@ import {
 import {
   autofillForModel,
   balanceSourceLabel,
+  buildProfileConfig,
   dollarInputToMicros,
   formatMicrosAsDollars,
   microsToDollarInput,
   summarizeBudget,
+  webSearchSupport,
 } from "@/lib/models";
 import type {
   ModelProfile,
@@ -791,6 +793,12 @@ function ProfileDialog({
   const [contextWindow, setContextWindow] = useState(
     existing?.context_window ? String(existing.context_window) : "",
   );
+  const [webSearchEnabled, setWebSearchEnabled] = useState(
+    Boolean(
+      (existing?.config_json as { web_search?: { enabled?: boolean } } | undefined)?.web_search
+        ?.enabled,
+    ),
+  );
   const [pricingOpen, setPricingOpen] = useState(false);
   const [pricingNote, setPricingNote] = useState<string | null>(null);
   // The model the prices were last auto-filled for, so edits survive re-renders.
@@ -798,6 +806,7 @@ function ProfileDialog({
   const providerModels = useProviderModels(workspaceId, providerId || null);
   const provider = providers.find((p) => p.id === providerId);
   const providerType: ModelProviderType = provider?.type ?? "openai_compatible";
+  const webSupport = webSearchSupport(providerType, modelName);
   const entries = providerModels.data?.models;
   const catalogUpdated = providerModels.data?.catalog_updated ?? null;
   const pricingPanelId = useId();
@@ -844,6 +853,10 @@ function ProfileDialog({
             // UI takes $ per 1M tokens; API stores micro-dollars per 1M.
             input_cost_micros_per_million: dollarInputToMicros(inputCost),
             output_cost_micros_per_million: dollarInputToMicros(outputCost),
+            config_json: buildProfileConfig(
+              existing?.config_json,
+              webSearchEnabled && webSupport.supported,
+            ),
           },
         },
       ),
@@ -921,6 +934,26 @@ function ProfileDialog({
             ))}
           </datalist>
         </Field>
+
+        <div className="rounded-xl border border-line px-3 py-2.5">
+          <label className="flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              aria-label="Model's built-in web search"
+              checked={webSearchEnabled && webSupport.supported}
+              disabled={!webSupport.supported}
+              onChange={(e) => setWebSearchEnabled(e.target.checked)}
+            />
+            <span>
+              Model&apos;s built-in web search
+              <span className="block text-xs text-dim">
+                {webSupport.supported
+                  ? "The provider searches the web inside the model call and cites sources in the reply. No tool grant is involved."
+                  : webSupport.reason}
+              </span>
+            </span>
+          </label>
+        </div>
 
         <div className="rounded-xl border border-line">
           <button

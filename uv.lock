@@ -24,6 +24,7 @@ members = [
     "jhin-policy",
     "jhin-sandbox-runner",
     "jhin-secrets",
+    "jhin-skills",
     "jhin-tool-worker",
     "jhin-tools",
     "jhin-triggers",
@@ -881,6 +882,7 @@ dependencies = [
     { name = "jhin-observability" },
     { name = "jhin-policy" },
     { name = "jhin-secrets" },
+    { name = "jhin-skills" },
     { name = "jhin-tools" },
     { name = "jhin-triggers" },
     { name = "jhin-workflows" },
@@ -909,6 +911,7 @@ requires-dist = [
     { name = "jhin-observability", editable = "packages/observability" },
     { name = "jhin-policy", editable = "packages/policy" },
     { name = "jhin-secrets", editable = "packages/secrets" },
+    { name = "jhin-skills", editable = "packages/skills" },
     { name = "jhin-tools", editable = "packages/tools" },
     { name = "jhin-triggers", editable = "packages/triggers" },
     { name = "jhin-workflows", editable = "packages/workflows" },
@@ -1198,6 +1201,17 @@ requires-dist = [
     { name = "jhin-observability", editable = "packages/observability" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.36" },
 ]
+
+[[package]]
+name = "jhin-skills"
+version = "0.1.0"
+source = { editable = "packages/skills" }
+dependencies = [
+    { name = "httpx" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "httpx", specifier = ">=0.28" }]
 
 [[package]]
 name = "jhin-tool-worker"

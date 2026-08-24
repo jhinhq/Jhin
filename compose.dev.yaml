@@ -5,7 +5,7 @@ services:
   api:
     environment:
       APP_ENV: dev
-      JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS: http://fake-github:8080,http://fake-linear:8080,http://fake-vercel:8080,http://fake-supabase:8080,http://fake-mcp:8080
+      JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS: http://fake-github:8080,http://fake-linear:8080,http://fake-vercel:8080,http://fake-supabase:8080,http://fake-mcp:8080,http://fake-websearch:8080
       JHIN_CONNECTOR_ALLOWED_DB_HOSTS: fake-supabase-db:5432
 
   agent-worker:
@@ -20,7 +20,7 @@ services:
   tool-worker:
     environment:
       APP_ENV: ${APP_ENV:-dev}
-      JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS: http://fake-github:8080,http://fake-linear:8080,http://fake-vercel:8080,http://fake-supabase:8080,http://fake-mcp:8080
+      JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS: http://fake-github:8080,http://fake-linear:8080,http://fake-vercel:8080,http://fake-supabase:8080,http://fake-mcp:8080,http://fake-websearch:8080
       JHIN_CONNECTOR_ALLOWED_DB_HOSTS: fake-supabase-db:5432
       JHIN_TEST_CRASH_BARRIER_DIR: ${JHIN_TEST_CRASH_BARRIER_DIR:-}
       JHIN_TEST_CRASH_BARRIER_NAME: ${JHIN_TEST_CRASH_BARRIER_NAME:-}
@@ -229,6 +229,38 @@ services:
       FAKE_SUPABASE_PORT: "8080"
     ports:
       - "127.0.0.1:${FAKE_SUPABASE_DEV_PORT:-8095}:8080"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8080/_state', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks: [data]
+    restart: unless-stopped
+
+  # Dev/test-only fake web search + page server for the web connector
+  # (docs/architecture/web.md): speaks the Tavily, Brave, and Exa API shapes
+  # deterministically and serves fetchable HTML pages. Connect it from the
+  # Apps library ("Fake web search (dev)") with the API key below; the
+  # in-network base URL is http://fake-websearch:8080.
+  fake-websearch:
+    build:
+      context: .
+      dockerfile: docker/python.Dockerfile
+      args:
+        SERVICE_PACKAGE: jhin-tool-worker
+    command: ["python", "-m", "jhin_connectors.testing.fake_websearch"]
+    environment:
+      FAKE_WEBSEARCH_PORT: "8080"
+      FAKE_WEBSEARCH_TOKEN: ${FAKE_WEBSEARCH_TOKEN:-fake-websearch-token}
+    ports:
+      - "127.0.0.1:${FAKE_WEBSEARCH_DEV_PORT:-8097}:8080"
     healthcheck:
       test:
         [

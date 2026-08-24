@@ -71,6 +71,7 @@ const ICONS: Record<string, LucideIcon> = {
   globe: Globe,
   "hard-drive": HardDrive,
   search: Search,
+  web: Search,
   flame: Flame,
   "book-open": BookOpen,
   send: Send,

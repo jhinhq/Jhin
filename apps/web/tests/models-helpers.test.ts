@@ -4,11 +4,13 @@ import { describe, expect, it } from "vitest";
 import {
   autofillForModel,
   balanceSourceLabel,
+  buildProfileConfig,
   dollarInputToMicros,
   formatMicrosAsDollars,
   isInsufficientFunds,
   microsToDollarInput,
   summarizeBudget,
+  webSearchSupport,
 } from "@/lib/models";
 import type { ProviderModelEntry } from "@/lib/types";
 
@@ -124,5 +126,37 @@ describe("isInsufficientFunds", () => {
     expect(isInsufficientFunds({ error_code: "insufficient_funds" })).toBe(true);
     expect(isInsufficientFunds({ error_code: "step_failed" })).toBe(false);
     expect(isInsufficientFunds(null)).toBe(false);
+  });
+});
+
+describe("webSearchSupport", () => {
+  it("supports anthropic and openrouter for any model", () => {
+    expect(webSearchSupport("anthropic", "claude-x")).toEqual({ supported: true, reason: null });
+    expect(webSearchSupport("openrouter", "meta/llama")).toEqual({ supported: true, reason: null });
+  });
+
+  it("gates openai on its dedicated search models", () => {
+    expect(webSearchSupport("openai", "gpt-4o-mini-search-preview").supported).toBe(true);
+    expect(webSearchSupport("openai", "gpt-5-search-api").supported).toBe(true);
+    const denied = webSearchSupport("openai", "gpt-4o-mini");
+    expect(denied.supported).toBe(false);
+    expect(denied.reason).toContain("search");
+  });
+
+  it("rejects providers without built-in search", () => {
+    expect(webSearchSupport("ollama", "llama3").supported).toBe(false);
+    expect(webSearchSupport("openai_compatible", "fake-mini").supported).toBe(false);
+  });
+});
+
+describe("buildProfileConfig", () => {
+  it("preserves unrelated keys and toggles web_search", () => {
+    const existing = { embeddings: { enabled: true }, web_search: { enabled: true } };
+    expect(buildProfileConfig(existing, true)).toEqual({
+      embeddings: { enabled: true },
+      web_search: { enabled: true },
+    });
+    expect(buildProfileConfig(existing, false)).toEqual({ embeddings: { enabled: true } });
+    expect(buildProfileConfig(undefined, true)).toEqual({ web_search: { enabled: true } });
   });
 });

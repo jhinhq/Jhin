@@ -84,6 +84,12 @@ def _http() -> Connector:
     return HttpConnector()
 
 
+def _web() -> Connector:
+    from jhin_connectors.web.connector import WebConnector
+
+    return WebConnector()
+
+
 # One factory per shipped connector. Factories keep import cost lazy and are
 # the single line a contributor adds for a new connector (plan 36.5).
 DEFAULT_CONNECTORS: tuple[Callable[[], Connector], ...] = (
@@ -94,6 +100,7 @@ DEFAULT_CONNECTORS: tuple[Callable[[], Connector], ...] = (
     _supabase,
     _mcp,
     _http,
+    _web,
 )
 
 

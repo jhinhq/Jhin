@@ -27,6 +27,7 @@ from jhin_models.base import (
 )
 from jhin_models.pricing import usd_to_micros
 from jhin_models.providers.openai_compatible import OpenAICompatibleClient
+from jhin_models.web_search import WebSearchConfig
 
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 _COSTS_PATH = "/organization/costs"
@@ -88,6 +89,14 @@ class OpenAIClient(OpenAICompatibleClient):
     @property
     def has_admin_key(self) -> bool:
         return self._admin is not None
+
+    def _apply_web_search(self, payload: dict[str, Any], config: WebSearchConfig) -> None:
+        """Chat-completions built-in search (search-preview models only).
+
+        ``web_search_options`` takes no use cap; ``max_uses`` is ignored here.
+        Citations come back as ``url_citation`` annotations on the message.
+        """
+        payload["web_search_options"] = {}
 
     async def get_account_status(self) -> AccountStatus | None:
         """Month-to-date organization cost via the Admin API (paginated)."""

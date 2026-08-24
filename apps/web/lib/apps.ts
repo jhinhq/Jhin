@@ -45,9 +45,16 @@ export function connectionsForApp(entry: CatalogApp, connections: ConnectionInfo
 }
 
 export type ConnectTarget =
-  | { kind: "native"; connector: ConnectorInfo }
+  | { kind: "native"; connector: ConnectorInfo; prefill: NativePrefill }
   | { kind: "mcp"; connector: ConnectorInfo; prefill: McpPrefill }
   | { kind: "unsupported"; reason: string };
+
+export interface NativePrefill {
+  name: string;
+  /** Non-secret config values the catalog entry pins (e.g. search_backend). */
+  config: Record<string, string>;
+  hint: string | null;
+}
 
 export interface McpPrefill {
   name: string;
@@ -70,7 +77,20 @@ function authTypeFor(entry: CatalogApp): McpPrefill["authType"] {
 export function connectTarget(entry: CatalogApp, connectors: ConnectorInfo[]): ConnectTarget {
   if (entry.connector_type) {
     const native = connectors.find((connector) => connector.connector_type === entry.connector_type);
-    if (native) return { kind: "native", connector: native };
+    if (native) {
+      const nativeHints: string[] = [];
+      if (entry.auth_note) nativeHints.push(entry.auth_note);
+      if (entry.setup_note) nativeHints.push(entry.setup_note);
+      return {
+        kind: "native",
+        connector: native,
+        prefill: {
+          name: entry.name,
+          config: { ...(entry.connector_config ?? {}) },
+          hint: nativeHints.length > 0 ? nativeHints.join(" ") : null,
+        },
+      };
+    }
   }
   if (entry.stdio_only) {
     return {

@@ -26,6 +26,7 @@ dependencies = [
     "jhin-observability",
     "jhin-policy",
     "jhin-secrets",
+    "jhin-skills",
     "jhin-tools",
     "jhin-triggers",
     "jhin-workflows",
@@ -45,6 +46,7 @@ jhin-models = { workspace = true }
 jhin-observability = { workspace = true }
 jhin-policy = { workspace = true }
 jhin-secrets = { workspace = true }
+jhin-skills = { workspace = true }
 jhin-tools = { workspace = true }
 jhin-triggers = { workspace = true }
 jhin-workflows = { workspace = true }

@@ -36,6 +36,7 @@ from jhin_models.embeddings import MAX_EMBEDDING_BATCH, EmbeddingResult, bound_i
 from jhin_models.images import DEFAULT_IMAGE_SIZE, GeneratedImage
 from jhin_models.pricing import lookup_price, per_token_usd_to_micros_per_million
 from jhin_models.tool_arguments import normalize_tool_arguments
+from jhin_models.web_search import WebCitation, WebSearchConfig, render_citations
 
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0)
 
@@ -123,8 +124,37 @@ class OpenAICompatibleClient(ModelClient):
             payload["temperature"] = request.temperature
         if request.max_output_tokens is not None:
             payload[self.max_tokens_field] = request.max_output_tokens
+        if request.web_search is not None and request.web_search.enabled:
+            self._apply_web_search(payload, request.web_search)
         payload.update(request.extra)
         return payload
+
+    def _apply_web_search(self, payload: dict[str, Any], config: WebSearchConfig) -> None:
+        """Translate an enabled ``web_search`` config to this provider's wire
+        format. The generic adapter has none — profile validation should have
+        rejected the flag, so a stale profile fails loudly here."""
+        raise ModelProviderError(
+            f"{self.provider_name}: model-native web search is not supported by this "
+            "provider; disable web_search on the model profile",
+            retryable=False,
+        )
+
+    @staticmethod
+    def _web_citations(message: dict[str, Any]) -> list[WebCitation]:
+        """``url_citation`` annotations from one chat-completion message."""
+        citations: list[WebCitation] = []
+        for annotation in message.get("annotations") or []:
+            if not isinstance(annotation, dict) or annotation.get("type") != "url_citation":
+                continue
+            cited = annotation.get("url_citation")
+            if not isinstance(cited, dict):
+                continue
+            url = cited.get("url")
+            if not isinstance(url, str) or not url:
+                continue
+            title = cited.get("title")
+            citations.append(WebCitation(url=url, title=title if isinstance(title, str) else ""))
+        return citations
 
     def _http_error(self, status_code: int, body: str) -> ModelProviderError:
         """Classify a failed response: out-of-credit first, then generic."""
@@ -179,8 +209,10 @@ class OpenAICompatibleClient(ModelClient):
                     arguments_json=normalize_tool_arguments(function.get("arguments")),
                 )
             )
+        text = message.get("content") or ""
+        text += render_citations(self._web_citations(message))
         return ModelResponse(
-            text=message.get("content") or "",
+            text=text,
             finish_reason=choices[0].get("finish_reason") or "",
             model=body.get("model") or request.model,
             usage=self._parse_usage(body.get("usage") or {}),

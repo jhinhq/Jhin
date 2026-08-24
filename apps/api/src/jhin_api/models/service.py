@@ -30,7 +30,9 @@ from jhin_models import (
     ModelClient,
     ModelListing,
     ModelProviderError,
+    WebSearchConfig,
     build_model_client,
+    web_search_unsupported_reason,
 )
 from jhin_models.factory import ProviderConfigError
 from jhin_models.pricing import CATALOG_UPDATED, lookup_price
@@ -598,6 +600,23 @@ async def get_profile(db: AsyncSession, workspace_id: UUID, profile_id: UUID) ->
     return profile
 
 
+def _require_web_search_support(
+    provider: ModelProvider, model_name: str, config_json: dict[str, Any] | None
+) -> None:
+    """Reject ``config_json.web_search`` when the provider/model cannot honor
+    it (docs/architecture/web.md path 2) — the flag must fail at save time,
+    never silently at run time."""
+    config = WebSearchConfig.from_profile_config(config_json or {})
+    if not config.enabled:
+        return
+    reason = web_search_unsupported_reason(provider.type, model_name)
+    if reason is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"config_json.web_search cannot be enabled: {reason}",
+        )
+
+
 async def create_profile(
     db: AsyncSession,
     ctx: WorkspaceContext,
@@ -606,7 +625,10 @@ async def create_profile(
     request_id: UUID,
     ip_hash: str,
 ) -> ModelProfile:
-    await get_provider(db, ctx.workspace_id, values["provider_id"])  # workspace scope check
+    provider = await get_provider(db, ctx.workspace_id, values["provider_id"])  # workspace scope
+    _require_web_search_support(
+        provider, str(values.get("model_name", "")), values.get("config_json")
+    )
     profile = ModelProfile(workspace_id=ctx.workspace_id, **values)
     db.add(profile)
     try:
@@ -641,8 +663,14 @@ async def update_profile(
     ip_hash: str,
 ) -> ModelProfile:
     profile = await get_profile(db, ctx.workspace_id, profile_id)
-    if "provider_id" in changes:
-        await get_provider(db, ctx.workspace_id, changes["provider_id"])
+    provider = await get_provider(
+        db, ctx.workspace_id, changes.get("provider_id", profile.provider_id)
+    )
+    _require_web_search_support(
+        provider,
+        str(changes.get("model_name", profile.model_name)),
+        changes.get("config_json", profile.config_json),
+    )
     for field, value in changes.items():
         setattr(profile, field, value)
     audit.record(

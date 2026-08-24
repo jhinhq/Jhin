@@ -15,6 +15,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from jhin_models.web_search import WebSearchConfig
+
 Role = Literal["system", "user", "assistant", "tool"]
 
 
@@ -95,6 +97,10 @@ class ModelRequest(BaseModel):
     temperature: float | None = None
     max_output_tokens: int | None = None
     tools: tuple[ToolSchema, ...] = ()
+    # Model-native web search (docs/architecture/web.md): the provider runs
+    # the search inside this call. Adapters that cannot honor an enabled
+    # config raise ModelProviderError instead of silently ignoring it.
+    web_search: WebSearchConfig | None = None
     extra: dict[str, Any] = Field(default_factory=dict)
 
 

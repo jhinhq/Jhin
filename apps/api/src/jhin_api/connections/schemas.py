@@ -212,3 +212,4 @@ class CatalogAppOut(BaseModel):
     docs_url: str = ""
     setup_note: str = ""
     stdio_only: bool = False
+    connector_config: dict[str, str] = {}

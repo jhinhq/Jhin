@@ -181,7 +181,11 @@ export default function AppsPage() {
                   config: target.target.prefill.config,
                   hint: target.target.prefill.hint,
                 }
-              : { name: target.entry.name }
+              : {
+                  name: target.target.prefill.name,
+                  config: target.target.prefill.config,
+                  hint: target.target.prefill.hint,
+                }
           }
           onClose={() => setTarget(null)}
           onCreated={(result) => {

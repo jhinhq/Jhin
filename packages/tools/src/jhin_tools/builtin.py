@@ -349,17 +349,21 @@ def builtin_tool_definitions() -> tuple[ToolDefinition, ...]:
     from jhin_tools.directory import DIRECTORY_TOOLS
     from jhin_tools.memory import MEMORY_TOOLS
     from jhin_tools.organization import ORGANIZATION_TOOLS
+    from jhin_tools.organization_admin import ORGANIZATION_ADMIN_TOOLS
     from jhin_tools.reviews import REVIEW_TOOLS
+    from jhin_tools.skills_tools import SKILL_TOOLS
     from jhin_tools.work_requests import WORK_REQUEST_TOOLS
 
     return tuple(definition for definition, _executor in BUILTIN_TOOLS) + tuple(
         definition
         for definition, _executor, _validator in (
             *ORGANIZATION_TOOLS,
+            *ORGANIZATION_ADMIN_TOOLS,
             *DIRECTORY_TOOLS,
             *WORK_REQUEST_TOOLS,
             *REVIEW_TOOLS,
             *MEMORY_TOOLS,
+            *SKILL_TOOLS,
         )
     )
 
@@ -374,7 +378,9 @@ def build_builtin_catalog() -> ToolCatalog:
     from jhin_tools.directory import DIRECTORY_TOOLS
     from jhin_tools.memory import MEMORY_TOOLS
     from jhin_tools.organization import ORGANIZATION_TOOLS
+    from jhin_tools.organization_admin import ORGANIZATION_ADMIN_TOOLS
     from jhin_tools.reviews import REVIEW_TOOLS
+    from jhin_tools.skills_tools import SKILL_TOOLS
     from jhin_tools.work_requests import WORK_REQUEST_TOOLS
 
     catalog = ToolCatalog()
@@ -384,10 +390,12 @@ def build_builtin_catalog() -> ToolCatalog:
     # register exactly like the Phase 8 organization tools.
     for definition, org_executor, validator in (
         *ORGANIZATION_TOOLS,
+        *ORGANIZATION_ADMIN_TOOLS,
         *DIRECTORY_TOOLS,
         *WORK_REQUEST_TOOLS,
         *REVIEW_TOOLS,
         *MEMORY_TOOLS,
+        *SKILL_TOOLS,
     ):
         catalog.register(definition, org_executor, validator)
     return catalog

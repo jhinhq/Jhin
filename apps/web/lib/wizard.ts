@@ -369,6 +369,35 @@ export const TOOL_PRESETS: ToolPreset[] = [
       "github.pull_request.create": { repository: "*" },
     },
   },
+  {
+    id: "team-building",
+    label: "Team building",
+    description:
+      "Create new AI teammates and teams, update teammate profiles, and look up colleagues in the directory. A human must approve each new teammate, and new teammates start with no tool access.",
+    tools: {
+      "organization.create_agent": {},
+      "organization.update_agent_profile": {},
+      "organization.create_team": {},
+      "organization.directory.search": {},
+    },
+  },
+  {
+    id: "web-access",
+    label: "Web search & browsing",
+    description:
+      "Search the web and read public pages through a Web connection. Everything that comes back is untrusted external content; fetch can be limited to specific domains.",
+    tools: {
+      "web.search": {},
+      "web.fetch": { domain: "*" },
+    },
+  },
+  {
+    id: "skills",
+    label: "Skills",
+    description:
+      "Let this agent read the workspace skills library — the playbooks your admins curate. Grants the skills.read tool for every skill.",
+    tools: { "skills.read": { name: "*" } },
+  },
 ];
 
 /** The slice of a workspace connection a preset needs. */

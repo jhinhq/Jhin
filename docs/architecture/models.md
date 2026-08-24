@@ -127,6 +127,17 @@ with the message *"Your <provider> account is out of credit. Add funds at
 and the conversation's system message carries both; the chat renders an
 "Out of credit" card linking to Advanced → Models.
 
+## Model-native web search
+
+`config_json.web_search = {enabled, max_uses?}` on a model profile opts the
+profile into the provider's own web search inside the chat completion
+(OpenAI search-preview models via `web_search_options`, OpenRouter's `web`
+plugin, Anthropic's server-side `web_search_20250305` tool). Validation
+rejects the flag on providers/models that cannot honor it, the reasoning
+path passes it through `ModelRequest.web_search`, and provider citations
+are appended to the reply as a visible "Sources" block. Details and risks:
+[web.md](web.md).
+
 ## Fake provider (dev and tests)
 
 `python -m jhin_models.testing.fake_openai` (the `fake-provider` compose

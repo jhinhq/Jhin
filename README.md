@@ -48,6 +48,12 @@ operations UI.
   sanitized and audited tool calls, executed only on an isolated tool worker;
   credentials live in an envelope-encrypted secret store and are never shown
   again.
+- **Agent Skills.** A workspace library of reusable instruction packs in
+  the open SKILL.md format (`/skills`) — ship the built-in starters, write
+  your own, or import from GitHub (imports stay disabled until reviewed).
+  Agents see only names and descriptions in their prompt and read a
+  skill's full playbook on demand through the audited `skills.read` tool
+  ([Agent Skills](docs/architecture/skills.md)).
 - **Connectors.** GitHub, Linear, Vercel, Supabase, and a CLI sandbox that runs
   jobs in ephemeral non-root containers, with fake services for
   credential-free development (`/apps`,

@@ -29,6 +29,7 @@ members = [
     "packages/triggers",
     "packages/media",
     "packages/memory",
+    "packages/skills",
 ]
 
 [dependency-groups]
@@ -67,6 +68,7 @@ src = [
     "packages/triggers/src",
     "packages/media/src",
     "packages/memory/src",
+    "packages/skills/src",
 ]
 
 [tool.ruff.lint]
@@ -109,6 +111,7 @@ files = [
     "packages/triggers/src",
     "packages/media/src",
     "packages/memory/src",
+    "packages/skills/src",
     "scripts",
     "tests",
 ]
@@ -156,6 +159,7 @@ testpaths = [
     "packages/connectors/tests",
     "packages/triggers/tests",
     "packages/memory/tests",
+    "packages/skills/tests",
     "packages/media/tests",
     "services/agent_worker/tests",
     "services/tool_worker/tests",

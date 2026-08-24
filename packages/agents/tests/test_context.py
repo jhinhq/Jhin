@@ -2,7 +2,7 @@
 
 from uuid import uuid4
 
-from jhin_agents.context import PLATFORM_POLICY, ConversationTurn, TaskContext, build_messages
+from jhin_agents.context import ConversationTurn, TaskContext, build_messages
 from jhin_agents.snapshot import AgentExecutionSnapshot, ModelProfileSnapshot, RunLimits
 
 
@@ -10,6 +10,7 @@ def make_snapshot(**overrides: object) -> AgentExecutionSnapshot:
     defaults: dict[str, object] = {
         "agent_id": uuid4(),
         "workspace_id": uuid4(),
+        "workspace_name": "Acme Rockets",
         "name": "Senior SWE",
         "role_title": "Senior Software Engineer",
         "system_prompt": "You write production-quality software.",
@@ -43,8 +44,11 @@ def test_prompt_layers_in_order() -> None:
     )
     system = messages[0]
     assert system.role == "system"
-    # Layer order (plan 7.2): platform policy before role, role before org context.
-    assert system.content.index(PLATFORM_POLICY[:40]) == 0
+    # Layer order (plan 7.2): platform preamble before role, role before org context.
+    assert system.content.startswith(
+        "You are Senior SWE, Senior Software Engineer, an AI teammate "
+        "in the Acme Rockets workspace on Jhin."
+    )
     assert system.content.index("Senior SWE") < system.content.index("Engineering team")
     assert "Your manager is CTO." in system.content
     assert "at most 5 reasoning steps" in system.content

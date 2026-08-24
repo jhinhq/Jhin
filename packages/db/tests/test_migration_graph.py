@@ -89,10 +89,18 @@ def test_provider_billing_directly_follows_0019() -> None:
     assert billing.down_revision == "0019"
 
 
-def test_shape_avatars_directly_follows_0020_and_is_the_head() -> None:
+def test_shape_avatars_directly_follows_0020() -> None:
     scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
     shapes = scripts.get_revision("0021")
 
     assert shapes is not None
     assert shapes.down_revision == "0020"
-    assert scripts.get_heads() == ["0021"]
+
+
+def test_skills_directly_follows_0021_and_the_graph_stays_linear() -> None:
+    scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
+    skills = scripts.get_revision("0022")
+
+    assert skills is not None
+    assert skills.down_revision == "0021"
+    assert len(scripts.get_heads()) == 1, "the migration graph must stay linear"

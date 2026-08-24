@@ -3,7 +3,7 @@
 /** Connector gallery (plan 17.9). Pure presentational so it is
  * component-testable. */
 
-import { Cable, GitBranch, Globe, Plug, Terminal } from "lucide-react";
+import { Cable, GitBranch, Globe, Plug, Search, Terminal } from "lucide-react";
 import { Badge, Button } from "@/components/ui";
 import type { ConnectorInfo } from "@/lib/types";
 
@@ -12,6 +12,7 @@ function ConnectorIcon({ icon }: { icon: string }) {
   if (icon === "terminal") return <Terminal size={18} />;
   if (icon === "mcp") return <Cable size={18} />;
   if (icon === "http") return <Globe size={18} />;
+  if (icon === "web") return <Search size={18} />;
   return <Plug size={18} />;
 }
 

@@ -21,6 +21,7 @@ from jhin_models.base import (
 )
 from jhin_models.pricing import usd_to_micros
 from jhin_models.providers.openai_compatible import OpenAICompatibleClient
+from jhin_models.web_search import WebSearchConfig
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 _CREDITS_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
@@ -58,6 +59,16 @@ class OpenRouterClient(OpenAICompatibleClient):
         # Optional attribution headers OpenRouter uses for app rankings.
         self._client.headers.setdefault("HTTP-Referer", "https://jhin.ai")
         self._client.headers.setdefault("X-Title", "Jhin")
+
+    def _apply_web_search(self, payload: dict[str, Any], config: WebSearchConfig) -> None:
+        """OpenRouter's ``web`` plugin (works with any underlying model).
+
+        Citations come back as ``url_citation`` annotations on the message.
+        """
+        plugin: dict[str, Any] = {"id": "web"}
+        if config.max_uses is not None:
+            plugin["max_results"] = config.max_uses
+        payload["plugins"] = [plugin]
 
     async def get_account_status(self) -> AccountStatus | None:
         try:

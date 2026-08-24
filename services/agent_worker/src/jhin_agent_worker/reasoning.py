@@ -24,6 +24,7 @@ from temporalio.exceptions import ApplicationError
 
 from jhin_agent_worker.coordination_activities import manager_context, organization_context
 from jhin_agent_worker.resources import Resources
+from jhin_agent_worker.skills_activities import skills_prompt_context
 from jhin_agents import AgentExecutionSnapshot
 from jhin_agents.context import ConversationTurn, TaskContext
 from jhin_agents.graph import NodeTransition
@@ -885,6 +886,16 @@ class AgentReasoningActivities:
             logger.warning("coordination.context_failed", error_type=type(error).__name__)
             return "", ""
 
+    async def _skills_context(self, *, workspace_id: UUID, agent_id: UUID) -> str:
+        """The "Skills available to you" block; best-effort, own session
+        (docs/architecture/skills.md). Failure degrades to no block."""
+        try:
+            async with self._resources.session_factory() as session:
+                return await skills_prompt_context(session, workspace_id, agent_id)
+        except Exception as error:
+            logger.warning("skills.context_failed", error_type=type(error).__name__)
+            return ""
+
     async def _after_reasoning_bind_commit(self) -> None:
         """Compatibility hook for the frozen Phase 9 crash-barrier harness."""
         return None
@@ -1205,6 +1216,10 @@ class AgentReasoningActivities:
                 workspace_id=workspace_id,
                 agent_id=agent_id,
             )
+            skills = await self._skills_context(
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+            )
 
             api_key: str | None = None
             if snapshot.model_profile.secret_id is not None:
@@ -1244,6 +1259,7 @@ class AgentReasoningActivities:
                         organization_context=organization,
                         manager_context=manager,
                         memory_context=memory.text,
+                        skills_context=skills,
                     ),
                     tools=to_model_tool_schemas(params.advertised_tools),
                 )

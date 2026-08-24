@@ -8,6 +8,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   BellRing,
+  BookOpen,
   Bot,
   Building2,
   CheckSquare,
@@ -52,6 +53,7 @@ const PRIMARY_NAV: readonly NavItem[] = [
   { href: "/attention", label: "Attention", icon: BellRing },
   { href: "/automations", label: "Automations", icon: Zap },
   { href: "/apps", label: "Apps", icon: Plug },
+  { href: "/skills", label: "Skills", icon: BookOpen },
 ] as const;
 
 export const ADVANCED_NAV: readonly NavItem[] = [

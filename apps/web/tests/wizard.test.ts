@@ -575,3 +575,72 @@ describe("wizard tool presets", () => {
     expect(next.grantToolNames.every((name) => name.startsWith("cli."))).toBe(true);
   });
 });
+
+describe("team building preset", () => {
+  const orgCatalog = [
+    { name: "organization.create_agent", scope_keys: [] as string[] },
+    { name: "organization.update_agent_profile", scope_keys: [] as string[] },
+    { name: "organization.create_team", scope_keys: [] as string[] },
+    { name: "organization.directory.search", scope_keys: [] as string[] },
+  ];
+  const preset = TOOL_PRESETS.find((entry) => entry.id === "team-building")!;
+
+  it("exists with a plain-language, approval-forward description", () => {
+    expect(preset.label).toBe("Team building");
+    expect(preset.description).toContain("human must approve");
+    expect(preset.description).toContain("no tool access");
+  });
+
+  it("grants exactly the four organization tools with empty scopes", () => {
+    const next = applyToolPreset(EMPTY_WIZARD, preset, orgCatalog, []);
+    expect(next.grantToolNames).toEqual([
+      "organization.create_agent",
+      "organization.update_agent_profile",
+      "organization.create_team",
+      "organization.directory.search",
+    ]);
+    expect(next.grantScopes["organization.create_agent"]).toEqual({});
+  });
+
+  it("dedupes to the two underlying capabilities in the grant payloads", () => {
+    const next = applyToolPreset(EMPTY_WIZARD, preset, orgCatalog, []);
+    const tools = orgCatalog.map((tool) => ({
+      ...tool,
+      description: "",
+      risk: "elevated" as const,
+      required_capability: tool.name.startsWith("organization.directory")
+        ? "organization.directory.read"
+        : "organization.manage_agents",
+      supports_approval: true,
+      required_grant_scope_keys: [] as string[],
+      input_schema: {},
+    }));
+    const payloads = grantPayloadsForTools(next, tools);
+    expect(payloads.map((payload) => payload.capability).sort()).toEqual([
+      "organization.directory.read",
+      "organization.manage_agents",
+    ]);
+    expect(payloads.every((payload) => payload.effect === "allow")).toBe(true);
+  });
+});
+
+describe("web access preset", () => {
+  const catalog = [
+    { name: "web.search", scope_keys: ["connection_id"] },
+    { name: "web.fetch", scope_keys: ["connection_id", "domain"] },
+  ];
+  const preset = TOOL_PRESETS.find((entry) => entry.id === "web-access")!;
+
+  it("grants search and fetch with the connection pinned and a broad domain", () => {
+    const connections = [{ id: "web-1", connector_type: "web", status: "active" }];
+    const next = applyToolPreset(EMPTY_WIZARD, preset, catalog, connections);
+    expect(next.grantToolNames).toEqual(["web.search", "web.fetch"]);
+    expect(next.grantScopes["web.search"]).toEqual({ connection_id: "web-1" });
+    expect(next.grantScopes["web.fetch"]).toEqual({ connection_id: "web-1", domain: "*" });
+  });
+
+  it("leaves the connection blank when no web connection exists", () => {
+    const next = applyToolPreset(EMPTY_WIZARD, preset, catalog, []);
+    expect(next.grantScopes["web.fetch"]).toEqual({ domain: "*" });
+  });
+});

@@ -23,6 +23,7 @@ function entry(overrides: Partial<CatalogApp>): CatalogApp {
     docs_url: "https://example.com/docs",
     setup_note: "",
     stdio_only: false,
+    connector_config: {},
     ...overrides,
   };
 }

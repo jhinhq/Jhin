@@ -124,6 +124,48 @@ export function summarizeBudget(
   return { ratio, percent, tone, label };
 }
 
+export interface WebSearchSupport {
+  supported: boolean;
+  reason: string | null;
+}
+
+/** Whether a provider/model pair can run the model's built-in web search
+ * (mirrors the API's validation in jhin_models.web_search). */
+export function webSearchSupport(
+  providerType: ModelProviderType,
+  modelName: string,
+): WebSearchSupport {
+  if (providerType === "anthropic" || providerType === "openrouter") {
+    return { supported: true, reason: null };
+  }
+  if (providerType === "openai") {
+    const model = modelName.trim().toLowerCase();
+    if (model.includes("search-preview") || model.includes("search-api")) {
+      return { supported: true, reason: null };
+    }
+    return {
+      supported: false,
+      reason:
+        "OpenAI only supports built-in web search on its dedicated search models (e.g. gpt-5-search-api or gpt-4o-mini-search-preview).",
+    };
+  }
+  return {
+    supported: false,
+    reason: "This provider has no built-in web search — grant the agent the web.search tool instead.",
+  };
+}
+
+/** The profile config_json to save, preserving unrelated keys. */
+export function buildProfileConfig(
+  existing: Record<string, unknown> | undefined,
+  webSearchEnabled: boolean,
+): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...(existing ?? {}) };
+  if (webSearchEnabled) next.web_search = { enabled: true };
+  else delete next.web_search;
+  return next;
+}
+
 export const INSUFFICIENT_FUNDS_CODE = "insufficient_funds";
 
 /** Whether a system/error message payload is the out-of-credit failure. */

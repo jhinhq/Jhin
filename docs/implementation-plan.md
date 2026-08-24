@@ -799,6 +799,12 @@ Store a hash/version of this snapshot on every run so future audits know exactly
 
 ## 7.2 Prompt composition
 
+The platform layer ships as the versioned `PLATFORM_PREAMBLE` in
+`packages/agents/src/jhin_agents/platform_prompt.py` — one default for every
+workspace (not configurable per workspace yet); edit it there and bump
+`PLATFORM_PREAMBLE_VERSION` to change what every agent is told about being
+an AI teammate on Jhin.
+
 Prompt layers, in order:
 
 1. platform safety/execution policy;

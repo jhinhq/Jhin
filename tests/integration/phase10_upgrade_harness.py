@@ -44,6 +44,7 @@ EXPECTED_ROOTFUL_SERVICES = {
     "fake-supabase",
     "fake-supabase-db",
     "fake-vercel",
+    "fake-websearch",
     "nats",
     "postgres",
     "sandbox-runner",

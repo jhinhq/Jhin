@@ -28,6 +28,7 @@ function entry(overrides: Partial<CatalogApp>): CatalogApp {
     docs_url: "",
     setup_note: "",
     stdio_only: false,
+    connector_config: {},
     ...overrides,
   };
 }
@@ -110,7 +111,27 @@ describe("connectTarget", () => {
   it("routes to the native connector when Jhin has one", () => {
     const target = connectTarget(GITHUB, CONNECTORS);
     expect(target.kind).toBe("native");
-    if (target.kind === "native") expect(target.connector.connector_type).toBe("github");
+    if (target.kind !== "native") return;
+    expect(target.connector.connector_type).toBe("github");
+    expect(target.prefill.name).toBe("GitHub");
+    expect(target.prefill.config).toEqual({});
+  });
+
+  it("pre-fills native connector config from the catalog entry", () => {
+    const WEB = entry({
+      slug: "web_search_tavily",
+      name: "Web search (Tavily)",
+      category: "Developer tools",
+      connector_type: "web",
+      auth_note: "Use a Tavily API key.",
+      connector_config: { search_backend: "tavily" },
+    });
+    const target = connectTarget(WEB, [...CONNECTORS, CONNECTOR("web")]);
+    expect(target.kind).toBe("native");
+    if (target.kind !== "native") return;
+    expect(target.prefill.name).toBe("Web search (Tavily)");
+    expect(target.prefill.config).toEqual({ search_backend: "tavily" });
+    expect(target.prefill.hint).toContain("Tavily API key");
   });
 
   it("pre-fills the MCP connector from a verified endpoint", () => {

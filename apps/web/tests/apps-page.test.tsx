@@ -81,6 +81,7 @@ const CATALOG: CatalogApp[] = [
     docs_url: "",
     setup_note: "",
     stdio_only: false,
+    connector_config: {},
   },
   {
     slug: "fake",
@@ -97,6 +98,7 @@ const CATALOG: CatalogApp[] = [
     docs_url: "",
     setup_note: "",
     stdio_only: false,
+    connector_config: {},
   },
   {
     slug: "slack",
@@ -113,6 +115,7 @@ const CATALOG: CatalogApp[] = [
     docs_url: "",
     setup_note: "Self-host a Slack MCP server.",
     stdio_only: false,
+    connector_config: {},
   },
 ];
 

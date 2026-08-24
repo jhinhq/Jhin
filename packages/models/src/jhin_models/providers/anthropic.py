@@ -30,11 +30,34 @@ from jhin_models.base import (
     wire_tool_name,
 )
 from jhin_models.pricing import lookup_price
+from jhin_models.web_search import WebCitation, render_citations
 
 ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
+# Anthropic's server-side web search tool on /v1/messages (the broadly
+# available basic variant; newer dated variants are model-gated).
+WEB_SEARCH_TOOL_TYPE = "web_search_20250305"
 ANTHROPIC_VERSION = "2023-06-01"
 _DEFAULT_MAX_TOKENS = 4096
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0)
+
+
+def _web_citations(content: list[Any]) -> list[WebCitation]:
+    """``web_search_result_location`` citations across the text blocks."""
+    citations: list[WebCitation] = []
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "text":
+            continue
+        for citation in block.get("citations") or []:
+            if not isinstance(citation, dict):
+                continue
+            if citation.get("type") != "web_search_result_location":
+                continue
+            url = citation.get("url")
+            if not isinstance(url, str) or not url:
+                continue
+            title = citation.get("title")
+            citations.append(WebCitation(url=url, title=title if isinstance(title, str) else ""))
+    return citations
 
 
 class AnthropicClient(ModelClient):
@@ -106,15 +129,23 @@ class AnthropicClient(ModelClient):
         }
         if system_parts:
             payload["system"] = "\n\n".join(system_parts)
-        if request.tools:
-            payload["tools"] = [
-                {
-                    "name": wire_tool_name(tool.name),
-                    "description": tool.description,
-                    "input_schema": tool.parameters or {"type": "object", "properties": {}},
-                }
-                for tool in request.tools
-            ]
+        tools: list[dict[str, Any]] = [
+            {
+                "name": wire_tool_name(tool.name),
+                "description": tool.description,
+                "input_schema": tool.parameters or {"type": "object", "properties": {}},
+            }
+            for tool in request.tools
+        ]
+        if request.web_search is not None and request.web_search.enabled:
+            # Server-side tool: the search runs inside this API call on
+            # Anthropic's infrastructure — no Jhin tool effect involved.
+            server_tool: dict[str, Any] = {"type": WEB_SEARCH_TOOL_TYPE, "name": "web_search"}
+            if request.web_search.max_uses is not None:
+                server_tool["max_uses"] = request.web_search.max_uses
+            tools.append(server_tool)
+        if tools:
+            payload["tools"] = tools
         if request.temperature is not None:
             payload["temperature"] = request.temperature
         if stream:
@@ -146,6 +177,7 @@ class AnthropicClient(ModelClient):
             for block in body.get("content") or []
             if block.get("type") == "text"
         )
+        text += render_citations(_web_citations(body.get("content") or []))
         known_tools = [tool.name for tool in request.tools]
         tool_calls = tuple(
             ModelToolCall(
