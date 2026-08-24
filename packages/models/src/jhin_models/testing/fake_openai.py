@@ -195,6 +195,93 @@ def _pending_tool_marker(messages: list[dict[str, Any]]) -> tuple[int, str, str]
     return None
 
 
+# --- deterministic memory extraction (jhin_memory.extraction contract) ---
+
+# Distinctive phrase of jhin_memory.extraction.EXTRACTION_SYSTEM_PROMPT.
+MEMORY_PROMPT_MARKER = "You extract durable, reusable memory"
+_TRANSCRIPT_RE = re.compile(r"<transcript>\n(.*)\n</transcript>", re.DOTALL)
+_KNOWN_MEMORIES_RE = re.compile(r"<known_memories>\n(.*?)\n</known_memories>", re.DOTALL)
+_REMEMBER_STRIP_RE = re.compile(r"(?i)^.*?\bremember\b(?:\s+that\b|:)?\s*")
+_DELEGATION_LINE_RE = re.compile(r"^delegation from (.+?) \(")
+_MEMORY_TOKEN_RE = re.compile(r"[a-z0-9]{2,}")
+
+
+def _memory_tokens(text: str) -> set[str]:
+    return set(_MEMORY_TOKEN_RE.findall(text.casefold()))
+
+
+def _token_containment(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / min(len(a), len(b))
+
+
+def _memory_extraction_reply(messages: list[dict[str, Any]]) -> str | None:
+    """Deterministic strict-JSON candidates for a memory-extraction request.
+
+    Real models return the ``{"candidates": [...]}`` document demanded by
+    ``jhin_memory.extraction``; the fake mirrors that so the memory feature is
+    exercisable offline: every ``user:`` transcript line containing the word
+    "remember" becomes one fact candidate (the text after "remember that"),
+    and a delegated task's exchange yields one fact about who delegated what.
+    Candidates overlapping an entry of the known-memories block (or an earlier
+    candidate) at ≥ 0.6 token containment are skipped — the deterministic
+    analogue of the prompt's "only NEW or CHANGED facts" rule.
+    """
+    system = next((str(m.get("content", "")) for m in messages if m.get("role") == "system"), "")
+    if MEMORY_PROMPT_MARKER not in system:
+        return None
+    user = next(
+        (str(m.get("content", "")) for m in reversed(messages) if m.get("role") == "user"), ""
+    )
+    transcript_match = _TRANSCRIPT_RE.search(user)
+    transcript = transcript_match.group(1) if transcript_match else ""
+    known_match = _KNOWN_MEMORIES_RE.search(user)
+    known_tokens = [
+        _memory_tokens(line[2:])
+        for line in (known_match.group(1).splitlines() if known_match else [])
+        if line.startswith("- ") and line[2:].strip()
+    ]
+
+    proposals: list[str] = []
+    task_title = ""
+    for raw_line in transcript.splitlines():
+        line = raw_line.strip()
+        if line.startswith("task: "):
+            task_title = line[len("task: ") :]
+        delegated = _DELEGATION_LINE_RE.match(line)
+        if delegated and task_title:
+            proposals.append(f"{delegated.group(1).strip()} delegated: {task_title}"[:280])
+        if line.startswith("user: ") and re.search(r"(?i)\bremember\b", line):
+            fact = _REMEMBER_STRIP_RE.sub("", line[len("user: ") :]).strip().rstrip(".")
+            if fact:
+                proposals.append(fact[:280])
+
+    candidates: list[dict[str, Any]] = []
+    accepted_tokens: list[set[str]] = []
+    for proposal in proposals:
+        tokens = _memory_tokens(proposal)
+        if not tokens:
+            continue
+        if any(_token_containment(tokens, entry) >= 0.6 for entry in known_tokens):
+            continue
+        if any(_token_containment(tokens, entry) >= 0.6 for entry in accepted_tokens):
+            continue
+        accepted_tokens.append(tokens)
+        candidates.append(
+            {
+                "content": proposal,
+                "kind": "fact",
+                "confidence": 0.75,
+                "importance": 0.6,
+                "requested_scope": "agent",
+            }
+        )
+        if len(candidates) >= 5:
+            break
+    return json.dumps({"candidates": candidates})
+
+
 def build_completion(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     """Pure request→response logic, separated for direct unit testing."""
     model = str(body.get("model", "fake-mini"))
@@ -223,6 +310,19 @@ def build_completion(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         "model": model,
         "usage": usage,
     }
+
+    memory_reply = _memory_extraction_reply(messages)
+    if memory_reply is not None:
+        usage["completion_tokens"] = _estimate_tokens(memory_reply)
+        usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+        envelope["choices"] = [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": memory_reply},
+                "finish_reason": "stop",
+            }
+        ]
+        return 200, envelope
 
     pending = _pending_tool_marker(messages)
     if pending is not None:

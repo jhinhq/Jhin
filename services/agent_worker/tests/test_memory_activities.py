@@ -560,3 +560,187 @@ class TestApplyEmbeds:
         async with world.session_factory() as session:
             record = await session.get(MemoryRecord, UUID(result.created_ids[0]))
             assert record is not None and record.embedding_json is None
+
+
+class TestExtractionContext:
+    async def test_known_memories_are_passed_to_the_model(
+        self, world: World, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async with world.session_factory() as session:
+            session.add(
+                MemoryRecord(
+                    workspace_id=world.workspace.id,
+                    scope="agent",
+                    scope_id=world.agent.id,
+                    kind="fact",
+                    content="Known fact about deploys.",
+                    content_hash="x",
+                    visibility="agent",
+                    status=MemoryStatus.ACTIVE.value,
+                    created_by_type="agent",
+                )
+            )
+            await session.commit()
+        client = StubClient(VALID_OUTPUT)
+        monkeypatch.setattr(module, "build_model_client", lambda *a, **k: client)
+        result = await ActivityEnvironment().run(
+            world.activities.extract_memory_candidates_activity, extract_input(world)
+        )
+        assert result.ok
+        user_prompt = client.requests[0].messages[1].content
+        assert "<known_memories>" in user_prompt
+        assert "Known fact about deploys." in user_prompt
+
+
+class TestQualityScreening:
+    async def test_agent_self_identity_candidate_is_rejected(self, world: World) -> None:
+        result = await ActivityEnvironment().run(
+            world.activities.apply_memory_candidates_activity,
+            apply_input(world, candidates_json=[{"content": "The AI teammate's name is Ava."}]),
+        )
+        assert result.ok
+        assert result.rejected == 1 and result.activated == 0
+        assert "self_reference" in result.reasons
+        async with world.session_factory() as session:
+            assert (await session.scalar(select(MemoryRecord))) is None
+
+    async def test_paraphrases_collapse_to_one_active_record(self, world: World) -> None:
+        env = ActivityEnvironment()
+        for content in (
+            "We deploy every other Thursday.",
+            "The release day is every other Thursday.",
+            "Release day is every other Thursday.",
+        ):
+            await env.run(
+                world.activities.apply_memory_candidates_activity,
+                apply_input(world, candidates_json=[{"content": content, "subject": "deploy.day"}]),
+            )
+        async with world.session_factory() as session:
+            rows = list(await session.scalars(select(MemoryRecord)))
+            active = [r for r in rows if r.status == MemoryStatus.ACTIVE.value]
+            assert len(active) == 1
+            assert active[0].policy_json.get("confirmations") == 1
+            assert all(
+                r.status == MemoryStatus.SUPERSEDED.value for r in rows if r.id != active[0].id
+            )
+
+
+class TestAgentToAgentLearning:
+    async def _make_delegation(self, world: World, *, same_team: bool) -> Task:
+        async with world.session_factory() as session:
+            boss = Agent(
+                workspace_id=world.workspace.id,
+                name="CTO",
+                slug=f"cto-{new_uuid7().hex[:6]}",
+                team_id=world.team.id if same_team else None,
+            )
+            session.add(boss)
+            await session.flush()
+            parent = Task(
+                workspace_id=world.workspace.id,
+                title="Parent",
+                state=TaskState.RUNNING.value,
+                assigned_agent_id=boss.id,
+                correlation_id=new_uuid7(),
+            )
+            session.add(parent)
+            await session.flush()
+            child = Task(
+                workspace_id=world.workspace.id,
+                title="Write the deploy docs",
+                description="Document the deploy pipeline.",
+                state=TaskState.COMPLETED.value,
+                assigned_agent_id=world.agent.id,
+                parent_task_id=parent.id,
+                correlation_id=parent.correlation_id,
+                metadata_json={
+                    "origin": "delegation",
+                    "delegation": {
+                        "kind": "delegation",
+                        "blocking": True,
+                        "delegated_by_agent_id": str(boss.id),
+                        "delegated_by_agent_name": "CTO",
+                        "parent_task_id": str(parent.id),
+                        "expected_output": "A docs page",
+                    },
+                    "reported_result": {"summary": "Docs written.", "status": "completed"},
+                },
+            )
+            session.add(child)
+            await session.flush()
+            session.add(
+                Message(
+                    workspace_id=world.workspace.id,
+                    task_id=parent.id,
+                    sender_type=SenderType.AGENT.value,
+                    sender_id=world.agent.id,
+                    recipient_type=RecipientType.AGENT.value,
+                    recipient_id=boss.id,
+                    message_type="review_result",
+                    content_json={
+                        "summary": "Looks good.",
+                        "child_task_id": str(child.id),
+                        "verdict": "pass",
+                    },
+                    visibility=MessageVisibility.VISIBLE.value,
+                )
+            )
+            await session.commit()
+            return child
+
+    async def test_child_task_source_includes_the_structured_exchange(self, world: World) -> None:
+        child = await self._make_delegation(world, same_team=True)
+        async with world.session_factory() as session:
+            loaded = await load_source_text(
+                session,
+                workspace_id=world.workspace.id,
+                agent_id=world.agent.id,
+                source_kind="task_outcome",
+                source_id=child.id,
+            )
+        assert loaded is not None
+        text, _refs = loaded
+        assert "delegation from CTO (delegation)" in text
+        assert "expected output: A docs page" in text
+        assert "description: Document the deploy pipeline." in text
+        assert '"summary": "Docs written."' in text
+        assert "review feedback: Looks good. (verdict: pass)" in text
+
+    async def test_same_team_delegation_may_activate_team_memory(self, world: World) -> None:
+        child = await self._make_delegation(world, same_team=True)
+        result = await ActivityEnvironment().run(
+            world.activities.apply_memory_candidates_activity,
+            apply_input(
+                world,
+                source_kind="task_outcome",
+                source_id=str(child.id),
+                task_id="",
+                conversation_id="",
+                candidates_json=[
+                    {"content": "Deploy docs live in the wiki.", "requested_scope": "team"}
+                ],
+            ),
+        )
+        assert result.activated == 1
+        async with world.session_factory() as session:
+            record = await session.scalar(select(MemoryRecord))
+            assert record is not None
+            assert record.scope == "team" and record.scope_id == world.team.id
+
+    async def test_cross_team_delegation_stays_agent_private(self, world: World) -> None:
+        child = await self._make_delegation(world, same_team=False)
+        result = await ActivityEnvironment().run(
+            world.activities.apply_memory_candidates_activity,
+            apply_input(
+                world,
+                source_kind="task_outcome",
+                source_id=str(child.id),
+                task_id="",
+                conversation_id="",
+                candidates_json=[
+                    {"content": "Deploy docs live in the wiki.", "requested_scope": "team"}
+                ],
+            ),
+        )
+        assert result.rejected == 1
+        assert "non_amplification" in result.reasons

@@ -77,7 +77,11 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
         "count": FieldKind.COUNT,
     },
     "memory.embedded": {"workspace_id": FieldKind.ID, "count": FieldKind.COUNT},
-    "memory.maintenance_start": {"status": FieldKind.ENUM, "task_id": FieldKind.ID},
+    "memory.maintenance_start": {
+        "status": FieldKind.ENUM,
+        "task_id": FieldKind.ID,
+        "message_id": FieldKind.ID,
+    },
     "memory.maintenance_start_failed": {"error_type": FieldKind.ERROR_TYPE},
     "memory.maintained": {
         "workspace_id": FieldKind.ID,

@@ -46,8 +46,10 @@ from jhin_domain import (
     RunStatus,
     SenderType,
     TaskState,
+    new_uuid7,
     structured_content,
 )
+from jhin_observability import get_logger
 from jhin_secrets.redaction import redact_text
 from jhin_workflows.agent_task import (
     ACTIVITY_RESOLVE_SNAPSHOT,
@@ -61,6 +63,13 @@ from jhin_workflows.delegated_task import (
     DeliverDelegationResultInput,
     SummarizeDelegationInput,
 )
+from jhin_workflows.memory_maintenance import (
+    SOURCE_KIND_MESSAGE,
+    MemoryMaintenanceInput,
+    start_memory_maintenance,
+)
+
+logger = get_logger(__name__)
 
 _ACTIVE_RUN_STATUSES = tuple(status.value for status in RUN_ACTIVE_STATUSES)
 
@@ -306,6 +315,10 @@ class AgentActivities(AgentReasoningActivities, AgentProjectionActivities):
                 select(Agent).where(Agent.id == agent_id, Agent.workspace_id == workspace_id)
             )
             agent_name = agent.name if agent is not None else "agent"
+            parent = await session.scalar(
+                select(Task).where(Task.id == parent_task_id, Task.workspace_id == workspace_id)
+            )
+            parent_conversation_id = parent.conversation_id if parent is not None else None
 
             reported = child.metadata_json.get("reported_result") if child is not None else None
             artifacts: list[Any] = []
@@ -364,8 +377,10 @@ class AgentActivities(AgentReasoningActivities, AgentProjectionActivities):
             message_type = (
                 MessageType.REVIEW_RESULT if params.kind == "review_request" else MessageType.RESULT
             )
+            result_message_id = new_uuid7()
             session.add(
                 Message(
+                    id=result_message_id,
                     workspace_id=workspace_id,
                     task_id=parent_task_id,
                     run_id=UUID(params.parent_run_id) if params.parent_run_id else None,
@@ -412,6 +427,15 @@ class AgentActivities(AgentReasoningActivities, AgentProjectionActivities):
                 "verdict": verdict,
             },
         )
+        # The delegating (parent/manager) agent learns from the reported
+        # result: detached maintenance keyed to the result message id.
+        await self._start_result_memory_maintenance(
+            workspace_id=params.workspace_id,
+            agent_id=params.delegating_agent_id,
+            message_id=str(result_message_id),
+            task_id=params.parent_task_id,
+            conversation_id=str(parent_conversation_id) if parent_conversation_id else "",
+        )
         return DelegationSummary(
             task_id=params.child_task_id,
             status=status,
@@ -422,6 +446,39 @@ class AgentActivities(AgentReasoningActivities, AgentProjectionActivities):
             verdict=verdict,
             reported=was_reported,
         )
+
+    async def _start_result_memory_maintenance(
+        self,
+        *,
+        workspace_id: str,
+        agent_id: str,
+        message_id: str,
+        task_id: str,
+        conversation_id: str,
+    ) -> None:
+        """Detached memory maintenance over a structured result message so
+        the receiving agent learns from what was reported to it. Best-effort
+        by contract: the summarize projection is already committed and no
+        failure here may surface into the delegation."""
+        client = self._temporal_client
+        if client is None or not agent_id or not message_id:
+            return
+        try:
+            status, _handle = await start_memory_maintenance(
+                client,
+                MemoryMaintenanceInput(
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    source_kind=SOURCE_KIND_MESSAGE,
+                    source_id=message_id,
+                    task_id=task_id,
+                    conversation_id=conversation_id,
+                ),
+            )
+        except Exception as error:
+            logger.warning("memory.maintenance_start_failed", error_type=type(error).__name__)
+            return
+        logger.info("memory.maintenance_start", status=status, message_id=message_id)
 
     @activity.defn(name=ACTIVITY_DELIVER_DELEGATION_RESULT)
     async def deliver_delegation_result_activity(

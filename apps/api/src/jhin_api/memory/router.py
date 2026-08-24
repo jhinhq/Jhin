@@ -15,6 +15,7 @@ from jhin_api.deps import get_request_id as req_id
 from jhin_api.memory import service
 from jhin_api.memory.schemas import (
     ContestIn,
+    DeduplicateOut,
     EmbedMissingIn,
     EmbedMissingOut,
     MemoryCreate,
@@ -120,6 +121,18 @@ async def embed_missing(
     return EmbedMissingOut(
         embedded=embedded, remaining=remaining, model=model, dimensions=dimensions
     )
+
+
+@router.post("/deduplicate")
+async def deduplicate(request: Request, ctx: AdminCtx, db: DbSession) -> DeduplicateOut:
+    """Retroactive cleanup: collapse active near-duplicates per scope (admin).
+
+    Keeps the best record of each duplicate cluster and supersedes the rest;
+    audited content-free as ``memory.deduplicated``."""
+    clusters, superseded, remaining = await service.deduplicate_memories(
+        db, ctx, request_id=req_id(request), ip_hash=ip_hash(request)
+    )
+    return DeduplicateOut(clusters=clusters, superseded=superseded, remaining_active=remaining)
 
 
 @router.get("/{memory_id}")

@@ -36,7 +36,8 @@ from jhin_domain import (
     MemorySensitivity,
     MemoryStatus,
 )
-from jhin_memory.screening import screen_content
+from jhin_memory.screening import is_low_information, is_self_referential, screen_content
+from jhin_memory.similarity import SimilarityVerdict, compare_contents, token_set
 from jhin_memory.types import (
     ActorFacts,
     ExistingRecord,
@@ -44,6 +45,11 @@ from jhin_memory.types import (
     MemoryDecision,
     SourceFacts,
 )
+
+# A near-duplicate candidate must beat the stored record's confidence by this
+# margin (or add new information at equal confidence) to become a new version;
+# otherwise it is skipped and the stored record is confirmed instead.
+NEAR_DUPLICATE_CONFIDENCE_MARGIN = 0.1
 
 _WHITESPACE_RE = re.compile(r"\s+")
 _TRAILING_PUNCT_RE = re.compile(r"[.!?;:,\s]+$")
@@ -88,8 +94,13 @@ def evaluate_candidate(
     source: SourceFacts,
     actor: ActorFacts,
     existing: Sequence[ExistingRecord] = (),
+    *,
+    candidate_embedding: Sequence[float] | None = None,
+    embedding_model: str | None = None,
+    agent_name: str = "",
 ) -> MemoryDecision:
     reasons: list[str] = []
+    human_explicit = actor.explicit and actor.actor_type is ActorType.USER
 
     # 1. Secret screening.
     screened = screen_content(candidate.content)
@@ -98,6 +109,18 @@ def evaluate_candidate(
         return MemoryDecision(candidate=candidate, outcome="reject", reasons=tuple(reasons))
     sensitivity = MemorySensitivity.REDACTED if screened.redacted else MemorySensitivity.NORMAL
 
+    # 1b. Deterministic quality screening for model-proposed candidates: the
+    # agent memorising its own identity, and near-empty content, are never
+    # memory. An explicit human "remember this" bypasses (their statement,
+    # their call).
+    if not human_explicit:
+        if is_self_referential(screened.content, agent_name):
+            reasons.append("self_reference")
+            return MemoryDecision(candidate=candidate, outcome="reject", reasons=tuple(reasons))
+        if is_low_information(screened.content):
+            reasons.append("low_information")
+            return MemoryDecision(candidate=candidate, outcome="reject", reasons=tuple(reasons))
+
     # 2. Hidden sources are never memory.
     if source.internal:
         reasons.append("source_internal")
@@ -105,7 +128,6 @@ def evaluate_candidate(
 
     # 3. Scope ceiling / non-amplification.
     scope = candidate.requested_scope
-    human_explicit = actor.explicit and actor.actor_type is ActorType.USER
     if human_explicit:
         if scope_exceeds(scope, actor.authority):
             reasons.append("insufficient_authority")
@@ -146,13 +168,64 @@ def evaluate_candidate(
             sensitivity=sensitivity,
         )
 
-    # 5. Contradiction: same subject, different value.
+    # 4b. Semantic near-duplicate: the same fact in different words (or a
+    # better wording/value of a keyed fact). Never two active near-duplicates
+    # in one scope: the weaker one is skipped (and the stored record
+    # confirmed), a meaningfully better one becomes the next VERSION.
+    best: tuple[SimilarityVerdict, ExistingRecord] | None = None
+    for record in in_scope:
+        if not record.content:
+            continue
+        verdict = compare_contents(
+            screened.content,
+            record.content,
+            subject_a=subject,
+            subject_b=record.subject,
+            embedding_a=candidate_embedding,
+            embedding_b=record.embedding,
+            embedding_model_a=embedding_model,
+            embedding_model_b=record.embedding_model,
+        )
+        if verdict.near_duplicate and (best is None or verdict.score > best[0].score):
+            best = (verdict, record)
+
+    supersedes: UUID | None = None
+    if best is not None:
+        near = best[1]
+        candidate_tokens = token_set(screened.content)
+        near_tokens = token_set(near.content)
+        more_specific = bool(candidate_tokens - near_tokens) and len(candidate_tokens) > len(
+            near_tokens
+        )
+        better = candidate.confidence >= near.confidence + NEAR_DUPLICATE_CONFIDENCE_MARGIN or (
+            candidate.confidence >= near.confidence and more_specific
+        )
+        if not better:
+            reasons.append("near_duplicate")
+            return MemoryDecision(
+                candidate=candidate,
+                outcome="duplicate",
+                reasons=tuple(reasons),
+                duplicate_of=near.id,
+                content=screened.content,
+                content_hash=digest,
+                scope=scope,
+                scope_id=scope_id,
+                visibility=visibility,
+                sensitivity=sensitivity,
+            )
+        supersedes = near.id
+        reasons.append("near_duplicate_superseded")
+
+    # 5. Contradiction: same subject, different value (a record being
+    # superseded by this candidate is its previous version, not a conflict).
     contested_with = tuple(
         record.id
         for record in in_scope
         if subject is not None
         and record.subject == subject
         and record.content_hash != digest
+        and record.id != supersedes
         and record.status in (MemoryStatus.ACTIVE, MemoryStatus.CONTESTED)
     )
 
@@ -190,4 +263,5 @@ def evaluate_candidate(
         content=screened.content,
         content_hash=digest,
         contested_with=contested_with,
+        supersedes=supersedes,
     )

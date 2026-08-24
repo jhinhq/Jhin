@@ -9,6 +9,7 @@ import pytest
 
 from jhin_domain import MemoryKind, MemoryScope
 from jhin_memory import (
+    EXTRACTION_SYSTEM_PROMPT,
     CandidateParseError,
     build_extraction_request,
     extract_candidates,
@@ -107,6 +108,28 @@ class TestExtraction:
         assert request.messages[0].role == "system"
         assert "Ava" in request.messages[1].content
         assert len(request.messages[1].content) < 13_000
+        assert "<known_memories>" not in request.messages[1].content
+
+    def test_prompt_excludes_self_facts_and_demands_consolidation(self) -> None:
+        prompt = EXTRACTION_SYSTEM_PROMPT
+        assert "Never propose facts about the AI teammate itself" in prompt
+        assert "greetings" in prompt
+        assert "ONE consolidated fact" in prompt
+        assert "only NEW or CHANGED facts" in prompt
+
+    def test_existing_memories_are_listed_and_bounded(self) -> None:
+        request = build_extraction_request(
+            model="fake-mini",
+            source_text="user: hi",
+            agent_name="Ava",
+            existing_memories=["We deploy every other Thursday.", "x" * 500] + [""] * 3,
+        )
+        content = request.messages[1].content
+        assert "<known_memories>" in content
+        assert "- We deploy every other Thursday." in content
+        # Entries are truncated and blanks skipped.
+        assert "x" * 201 not in content
+        assert "propose only NEW or CHANGED facts" in content.replace("\n", " ")
 
     async def test_success(self) -> None:
         client = StubClient(json.dumps(VALID))

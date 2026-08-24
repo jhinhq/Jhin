@@ -192,7 +192,7 @@ async def main() -> None:
         trigger_compatibility = TriggerCompatibilityActivities(client)
         engineering_activities = EngineeringActivities(resources)
         memory_activities = MemoryActivities(resources)
-        coordination_activities = CoordinationActivities(resources)
+        coordination_activities = CoordinationActivities(resources, temporal_client=client)
         media_activities = MediaActivities(resources)
         logger.info(
             "temporal.connected",

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -30,12 +31,25 @@ EXTRACTION_SYSTEM_PROMPT = (
     '"requested_scope": "agent|team|workspace"}]} with no prose and no markdown. '
     "Rules: each candidate is one concise, self-contained sentence (max 300 characters); "
     "never include secrets, credentials, tokens, passwords, connection strings, or "
-    "authorization headers; never copy the transcript verbatim; skip transient chit-chat; "
+    "authorization headers; never copy the transcript verbatim; skip transient chit-chat, "
+    "greetings, and small talk. "
+    "Never propose facts about the AI teammate itself — its name, its role, that it is an "
+    "AI/assistant/teammate, or anything already stated in its own system prompt or identity — "
+    "and never restate how this platform or its tooling works. "
+    "Facts must be about the user, the people or team the teammate works with, the company, "
+    "external systems, decisions, or preferences. "
+    "Prefer ONE consolidated fact over several wording variants of the same fact. "
+    "When a list of already-remembered facts is provided, propose only NEW or CHANGED facts — "
+    "never re-propose an existing fact in different words; "
     'use "subject" as a short stable key (e.g. "deploy.day") when the memory states a value '
     "for something that could later change; prefer requested_scope=agent unless the "
     "information is clearly about the whole team or company. "
     'Return {"candidates": []} when nothing is worth remembering.'
 )
+
+# Bounds for the "already remembered" context block sent with each request.
+MAX_EXISTING_MEMORIES = 40
+MAX_EXISTING_MEMORY_CHARS = 200
 
 
 class CandidateParseError(ValueError):
@@ -102,12 +116,27 @@ def build_extraction_request(
     model: str,
     source_text: str,
     agent_name: str,
+    existing_memories: Sequence[str] = (),
     max_output_tokens: int = 1_500,
 ) -> ModelRequest:
     bounded = source_text[:MAX_SOURCE_CHARS]
+    known = "\n".join(
+        f"- {memory[:MAX_EXISTING_MEMORY_CHARS]}"
+        for memory in list(existing_memories)[:MAX_EXISTING_MEMORIES]
+        if memory.strip()
+    )
+    known_block = (
+        (
+            "The teammate already remembers these facts — propose only NEW or CHANGED "
+            f"facts, never a rewording of one of these:\n<known_memories>\n{known}\n"
+            "</known_memories>\n\n"
+        )
+        if known
+        else ""
+    )
     user = (
-        f"The AI teammate is named {agent_name}. Extract memory candidates from the "
-        f"following transcript.\n\n<transcript>\n{bounded}\n</transcript>"
+        f"The AI teammate is named {agent_name}. {known_block}Extract memory candidates "
+        f"from the following transcript.\n\n<transcript>\n{bounded}\n</transcript>"
     )
     return ModelRequest(
         model=model,
@@ -126,10 +155,16 @@ async def extract_candidates(
     model: str,
     source_text: str,
     agent_name: str,
+    existing_memories: Sequence[str] = (),
 ) -> ExtractionResult:
     """Ask the model once; never raises — failures are returned as a typed
     result so maintenance can record them without failing the origin."""
-    request = build_extraction_request(model=model, source_text=source_text, agent_name=agent_name)
+    request = build_extraction_request(
+        model=model,
+        source_text=source_text,
+        agent_name=agent_name,
+        existing_memories=existing_memories,
+    )
     try:
         response = await client.generate(request)
     except ModelProviderError as exc:

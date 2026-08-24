@@ -169,7 +169,9 @@ class TestNonAmplification:
             authority=MemoryScope.WORKSPACE,
         )
         decision = evaluate_candidate(
-            MemoryCandidate(content="x", requested_scope=MemoryScope.WORKSPACE),
+            MemoryCandidate(
+                content="Company holiday is Friday.", requested_scope=MemoryScope.WORKSPACE
+            ),
             source(MemoryScope.AGENT),
             fake,
         )
@@ -265,13 +267,15 @@ class TestContradiction:
 
 class TestPromotion:
     def test_agent_private_auto_activates(self) -> None:
-        decision = evaluate_candidate(MemoryCandidate(content="x"), source(), AGENT_ACTOR)
+        decision = evaluate_candidate(
+            MemoryCandidate(content="Ava ships on Tuesdays."), source(), AGENT_ACTOR
+        )
         assert decision.status is MemoryStatus.ACTIVE
         assert decision.scope_id == AGENT
 
     def test_team_activates_when_source_team_visible(self) -> None:
         decision = evaluate_candidate(
-            MemoryCandidate(content="x", requested_scope=MemoryScope.TEAM),
+            MemoryCandidate(content="Standups happen at nine.", requested_scope=MemoryScope.TEAM),
             source(MemoryScope.TEAM),
             AGENT_ACTOR,
         )
@@ -281,7 +285,7 @@ class TestPromotion:
 
     def test_team_scope_without_team_is_rejected(self) -> None:
         decision = evaluate_candidate(
-            MemoryCandidate(content="x", requested_scope=MemoryScope.TEAM),
+            MemoryCandidate(content="Standups happen at nine.", requested_scope=MemoryScope.TEAM),
             source(MemoryScope.TEAM, team_id=None),
             AGENT_ACTOR,
         )
@@ -290,7 +294,9 @@ class TestPromotion:
 
     def test_workspace_promotion_stays_proposed(self) -> None:
         decision = evaluate_candidate(
-            MemoryCandidate(content="x", requested_scope=MemoryScope.WORKSPACE),
+            MemoryCandidate(
+                content="The company is fully remote.", requested_scope=MemoryScope.WORKSPACE
+            ),
             source(MemoryScope.WORKSPACE),
             AGENT_ACTOR,
         )

@@ -34,11 +34,20 @@ from temporalio import activity
 from jhin_agent_worker.resources import Resources
 from jhin_agents.snapshot import SnapshotError, resolve_snapshot
 from jhin_db.models import Agent, AuditEvent, MemoryRecord, Message, Task
-from jhin_domain import ActorType, MemoryScope, MessageVisibility, SenderType
+from jhin_domain import (
+    ActorType,
+    MemoryScope,
+    MemoryStatus,
+    MessageType,
+    MessageVisibility,
+    SenderType,
+)
 from jhin_memory import (
     ActorFacts,
     ExtractionResult,
     MemoryCandidate,
+    MemoryEmbedder,
+    agent_team_ids,
     apply_candidates,
     derive_source_facts,
     extract_candidates,
@@ -64,6 +73,36 @@ logger = get_logger(__name__)
 MAX_CONTEXT_MESSAGES = 12
 MAX_SOURCE_CHARS = 12_000
 MEMORY_MAINTAINED_AUDIT_ACTION = "memory.maintained"
+# Existing active memories shown to the extraction model so it proposes only
+# NEW or CHANGED facts (cheaper than post-hoc dedup, reduces churn).
+MAX_KNOWN_MEMORIES = 30
+
+
+async def load_known_memories(
+    session: AsyncSession, *, workspace_id: UUID, agent_id: UUID
+) -> list[str]:
+    """The newest active/contested memory contents the agent can see in its
+    own and team scopes (bounded), for the extraction prompt."""
+    team_ids = await agent_team_ids(session, workspace_id, agent_id)
+    scope_clause = (MemoryRecord.scope == MemoryScope.AGENT.value) & (
+        MemoryRecord.scope_id == agent_id
+    )
+    if team_ids:
+        scope_clause = scope_clause | (
+            (MemoryRecord.scope == MemoryScope.TEAM.value) & (MemoryRecord.scope_id.in_(team_ids))
+        )
+    rows = await session.scalars(
+        select(MemoryRecord.content)
+        .where(
+            MemoryRecord.workspace_id == workspace_id,
+            MemoryRecord.status.in_((MemoryStatus.ACTIVE.value, MemoryStatus.CONTESTED.value)),
+            MemoryRecord.content != "",
+            scope_clause,
+        )
+        .order_by(MemoryRecord.created_at.desc(), MemoryRecord.id.desc())
+        .limit(MAX_KNOWN_MEMORIES)
+    )
+    return [content for content in rows if content]
 
 
 def _message_text(message: Message) -> str:
@@ -149,11 +188,28 @@ async def load_source_text(
         if task.conversation_id is not None:
             refs["conversation_id"] = str(task.conversation_id)
         parts = [f"task: {task.title}"]
+        metadata = task.metadata_json or {}
+        # Structured agent↔agent exchange context so a delegated / work-request
+        # child learns from what it was told and what it reported.
+        delegation = metadata.get("delegation")
+        if isinstance(delegation, dict):
+            who = str(delegation.get("delegated_by_agent_name", "") or "another agent")
+            kind = str(delegation.get("kind", "delegation") or "delegation")
+            parts.append(f"delegation from {who} ({kind})")
+            expected = str(delegation.get("expected_output", "") or "")
+            if expected:
+                parts.append(f"expected output: {expected[:1_000]}")
+        work_request = metadata.get("work_request")
+        if isinstance(work_request, dict):
+            who = str(work_request.get("requester_agent_name", "") or "another agent")
+            parts.append(f"work request from {who}")
         if task.description:
             parts.append(f"description: {task.description[:2_000]}")
-        result = task.metadata_json.get("result") if task.metadata_json else None
-        if isinstance(result, dict):
-            parts.append("outcome: " + json.dumps(result, sort_keys=True)[:3_000])
+        for key in ("result", "reported_result"):
+            result = metadata.get(key)
+            if isinstance(result, dict):
+                parts.append("outcome: " + json.dumps(result, sort_keys=True)[:3_000])
+                break
         rows = list(
             await session.scalars(
                 select(Message)
@@ -170,6 +226,39 @@ async def load_source_text(
         rendered = _render_messages(rows, agent_id)
         if rendered:
             parts.append(rendered)
+        # Review feedback about THIS child task lands on the parent task as a
+        # visible structured message; include its summary (visible rows only).
+        if task.parent_task_id is not None:
+            feedback_rows = list(
+                await session.scalars(
+                    select(Message)
+                    .where(
+                        Message.workspace_id == workspace_id,
+                        Message.task_id == task.parent_task_id,
+                        Message.visibility == MessageVisibility.VISIBLE.value,
+                        Message.message_type.in_(
+                            (MessageType.RESULT.value, MessageType.REVIEW_RESULT.value)
+                        ),
+                    )
+                    .order_by(Message.created_at.desc(), Message.id.desc())
+                    .limit(MAX_CONTEXT_MESSAGES)
+                )
+            )
+            for row in feedback_rows:
+                content = row.content_json or {}
+                if str(content.get("child_task_id", "")) != str(task.id):
+                    continue
+                summary = str(content.get("summary", "") or "").strip()
+                if not summary:
+                    continue
+                label = (
+                    "review feedback"
+                    if row.message_type == MessageType.REVIEW_RESULT.value
+                    else "result summary"
+                )
+                verdict = str(content.get("verdict", "") or "")
+                suffix = f" (verdict: {verdict})" if verdict else ""
+                parts.append(f"{label}: {summary[:1_000]}{suffix}")
         text = "\n".join(parts)
     else:
         return None
@@ -234,12 +323,15 @@ class MemoryActivities:
                 )
             del api_key
 
+            known = await load_known_memories(session, workspace_id=workspace_id, agent_id=agent_id)
+
             try:
                 result: ExtractionResult = await extract_candidates(
                     client,
                     model=snapshot.model_profile.model_name,
                     source_text=source_text,
                     agent_name=snapshot.name,
+                    existing_memories=known,
                 )
             finally:
                 await client.close()
@@ -253,34 +345,6 @@ class MemoryActivities:
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,
         )
-
-    async def _embed_created(
-        self,
-        session: AsyncSession,
-        *,
-        workspace_id: UUID,
-        agent_id: UUID,
-        records: list[MemoryRecord],
-    ) -> int:
-        """Best-effort embeddings for newly persisted live records. A failure
-        (no embedding profile, provider error) leaves the records without an
-        embedding and is logged by the embedder; it never fails the apply."""
-        if not records:
-            return 0
-        embedder = await resolve_memory_embedder(
-            session,
-            self._resources.crypto,
-            workspace_id=workspace_id,
-            agent_id=agent_id,
-            metrics=self._metrics,
-            tracer=self._tracer,
-        )
-        if embedder is None:
-            return 0
-        try:
-            return await embedder.embed_records(session, records, workspace_id=workspace_id)
-        finally:
-            await embedder.close()
 
     @activity.defn(name=ACTIVITY_APPLY_MEMORY_CANDIDATES)
     async def apply_memory_candidates_activity(
@@ -344,13 +408,45 @@ class MemoryActivities:
             else:
                 actor = ActorFacts(actor_type=ActorType.AGENT, actor_id=agent_id)
 
-            applied = await apply_candidates(
-                session, candidates=candidates, source=source, actor=actor
+            # Embed the candidates BEFORE apply (one best-effort provider
+            # call) so semantic near-duplicate detection can compare them
+            # against stored records; the same vectors are attached to
+            # created records, so no second embedding call is needed.
+            embedder: MemoryEmbedder | None = await resolve_memory_embedder(
+                session,
+                self._resources.crypto,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                metrics=self._metrics,
+                tracer=self._tracer,
             )
-            summary: dict[str, Any] = applied.summary()
-            summary["embedded"] = await self._embed_created(
-                session, workspace_id=workspace_id, agent_id=agent_id, records=applied.created
-            )
+            vectors: list[list[float]] | None = None
+            try:
+                if embedder is not None:
+                    vectors = await embedder.embed_texts(
+                        [c.content for c in candidates], workspace_id=workspace_id
+                    )
+                applied = await apply_candidates(
+                    session,
+                    candidates=candidates,
+                    source=source,
+                    actor=actor,
+                    candidate_embeddings=vectors,
+                    embedding_model=embedder.model if embedder is not None else None,
+                    agent_name=agent.name,
+                )
+                summary: dict[str, Any] = applied.summary()
+                embedded = sum(1 for r in applied.created if r.embedding_json)
+                if embedder is not None and any(not r.embedding_json for r in applied.created):
+                    # Fallback for records whose candidate vector was missing
+                    # (embedding call failed); embed_records skips the rest.
+                    embedded += await embedder.embed_records(
+                        session, applied.created, workspace_id=workspace_id
+                    )
+                summary["embedded"] = embedded
+            finally:
+                if embedder is not None:
+                    await embedder.close()
             session.add(
                 AuditEvent(
                     workspace_id=workspace_id,

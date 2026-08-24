@@ -594,7 +594,7 @@ async def finalize_work_request(
             if completed
             else f"Could not complete: {request.title} ({run_status})"
         )
-    await _status_message(
+    message = await _status_message(
         session,
         request,
         sender_id=request.target_agent_id,
@@ -617,6 +617,10 @@ async def finalize_work_request(
         actor_id=None,
         extra={"run_status": run_status},
     )
+    await session.flush()
+    # Deterministic pointer for the worker: the requester agent learns from
+    # this result message (memory maintenance keyed to the message id).
+    request.metadata_json = {**request.metadata_json, "result_message_id": str(message.id)}
     await session.flush()
     return request
 

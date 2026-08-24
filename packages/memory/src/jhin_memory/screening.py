@@ -54,6 +54,55 @@ _REDACT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 
+# Facts about the agent itself ("the AI teammate's name is Bisby") are
+# worthless: the agent already knows its own identity from its system prompt.
+# Conservative on purpose — only clear self-reference matches.
+_SELF_REFERENCE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"(?i)\b(?:ai(?:\s+teammate)?|assistant|agent|teammate|bot|chatbot)(?:['\u2019]s)?\s+"
+        r"(?:name\s+is|is\s+(?:named|called))\b"
+    ),
+    re.compile(r"(?i)\b(?:ai(?:\s+teammate)?|assistant|teammate|bot|chatbot)\s+(?:called|named)\b"),
+    re.compile(r"(?i)\byour\s+name\s+is\b"),
+    re.compile(r"(?i)\byou\s+are\s+(?:called|named)\b"),
+    re.compile(r"(?i)\b(?:is|are)\s+an?\s+ai\s+(?:teammate|assistant|agent)\b"),
+    re.compile(r"(?i)\byou\s+are\s+(?:an?\s+)?(?:ai|assistant|agent|teammate|bot|chatbot)\b"),
+)
+_SELF_IDENTITY_VERB_RE = re.compile(
+    r"(?i)\b(?:name\s+is|is\s+named|is\s+called|is\s+an?\s+"
+    r"(?:ai|assistant|agent|teammate|bot|chatbot|virtual\s+\w+))\b"
+)
+
+_INFO_TOKEN_RE = re.compile(r"[a-z0-9]{2,}")
+_LOW_INFO_STOPWORDS = frozenset(
+    ["the", "a", "an", "is", "are", "was", "were", "it", "this", "that", "ok", "okay", "yes", "no"]
+)
+
+
+def is_self_referential(content: str, agent_name: str = "") -> bool:
+    """True when the candidate states the agent's own identity (its name,
+    that it is an AI/assistant/teammate). Facts *about other subjects* that
+    merely mention the agent's name do not match."""
+    for pattern in _SELF_REFERENCE_PATTERNS:
+        if pattern.search(content):
+            return True
+    name = agent_name.strip()
+    return bool(
+        name
+        and re.search(rf"(?i)\b{re.escape(name)}\b", content)
+        and _SELF_IDENTITY_VERB_RE.search(content)
+    )
+
+
+def is_low_information(content: str) -> bool:
+    """True for near-empty candidates (greetings, acknowledgements) that
+    carry fewer than two informative tokens."""
+    tokens = [
+        tok for tok in _INFO_TOKEN_RE.findall(content.casefold()) if tok not in _LOW_INFO_STOPWORDS
+    ]
+    return len(tokens) < 2
+
+
 def screen_content(content: str) -> ScreeningResult:
     """Classify ``content`` as clean, redacted, or rejected."""
     reasons: list[str] = []

@@ -35,6 +35,7 @@ from jhin_memory import (
     MemoryCandidate,
     SourceFacts,
     apply_candidates,
+    compare_contents,
     contains_secret,
     create_version,
     derive_source_facts,
@@ -496,6 +497,129 @@ async def reject_memory(
     )
     await session.commit()
     return record
+
+
+# Bounded scan for the retroactive dedup pass.
+MAX_DEDUP_RECORDS = 2_000
+
+
+def _find_root(parent: list[int], index: int) -> int:
+    """Union-find root with path compression."""
+    while parent[index] != index:
+        parent[index] = parent[parent[index]]
+        index = parent[index]
+    return index
+
+
+async def deduplicate_memories(
+    session: AsyncSession,
+    ctx: WorkspaceContext,
+    *,
+    request_id: UUID | None = None,
+    ip_hash: str | None = None,
+) -> tuple[int, int, int]:
+    """Admin retroactive cleanup: cluster ACTIVE records per (scope, scope_id)
+    with the shared near-duplicate rule (embedding cosine when both sides
+    carry a same-model vector, lexical token overlap, subject key), keep the
+    best record of each cluster (pinned first, then highest confidence, then
+    newest), and mark the rest superseded (content preserved as history).
+
+    Returns ``(clusters_merged, superseded, remaining_active)``. Audited as
+    ``memory.deduplicated`` (content-free).
+    """
+    if not role_satisfies(ctx.role, WorkspaceRole.ADMIN):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, detail="Deduplicating memory requires an admin"
+        )
+    rows = list(
+        await session.scalars(
+            select(MemoryRecord)
+            .where(
+                MemoryRecord.workspace_id == ctx.workspace_id,
+                MemoryRecord.status == MemoryStatus.ACTIVE.value,
+                MemoryRecord.content != "",
+            )
+            .order_by(MemoryRecord.created_at, MemoryRecord.id)
+            .limit(MAX_DEDUP_RECORDS)
+        )
+    )
+    groups: dict[tuple[str, UUID], list[MemoryRecord]] = {}
+    for row in rows:
+        groups.setdefault((row.scope, row.scope_id), []).append(row)
+
+    now = datetime.now(UTC)
+    clusters_merged = 0
+    superseded_total = 0
+    for group in groups.values():
+        count = len(group)
+        if count < 2:
+            continue
+        parent = list(range(count))
+        for i in range(count):
+            for j in range(i + 1, count):
+                a, b = group[i], group[j]
+                verdict = compare_contents(
+                    a.content,
+                    b.content,
+                    subject_a=a.subject,
+                    subject_b=b.subject,
+                    embedding_a=a.embedding_json,
+                    embedding_b=b.embedding_json,
+                    embedding_model_a=a.embedding_model,
+                    embedding_model_b=b.embedding_model,
+                )
+                if verdict.near_duplicate:
+                    parent[_find_root(parent, i)] = _find_root(parent, j)
+
+        clusters: dict[int, list[MemoryRecord]] = {}
+        for index, row in enumerate(group):
+            clusters.setdefault(_find_root(parent, index), []).append(row)
+        for members in clusters.values():
+            if len(members) < 2:
+                continue
+            keeper = max(
+                members,
+                key=lambda r: (r.pinned_at is not None, r.confidence, r.created_at, str(r.id)),
+            )
+            losers = [m for m in members if m.id != keeper.id]
+            merged_tags = list(keeper.tags_json)
+            for loser in losers:
+                merged_tags.extend(loser.tags_json)
+            keeper.tags_json = list(dict.fromkeys(merged_tags))
+            keeper.importance = max(m.importance for m in members)
+            keeper.policy_json = {
+                **keeper.policy_json,
+                "confirmations": int(keeper.policy_json.get("confirmations", 0) or 0) + len(losers),
+                "last_confirmed": now.isoformat(),
+            }
+            for loser in losers:
+                loser.status = MemoryStatus.SUPERSEDED.value
+                loser.policy_json = {
+                    **loser.policy_json,
+                    "deduplicated_into": str(keeper.id),
+                }
+            clusters_merged += 1
+            superseded_total += len(losers)
+
+    remaining_active = sum(1 for row in rows if row.status == MemoryStatus.ACTIVE.value)
+    audit.record(
+        session,
+        action="memory.deduplicated",
+        target_type="workspace",
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user.id,
+        target_id=ctx.workspace_id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        metadata={
+            "scanned": len(rows),
+            "clusters": clusters_merged,
+            "superseded": superseded_total,
+            "remaining_active": remaining_active,
+        },
+    )
+    await session.commit()
+    return clusters_merged, superseded_total, remaining_active
 
 
 async def embed_missing(

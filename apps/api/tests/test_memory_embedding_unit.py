@@ -167,9 +167,13 @@ async def test_without_deps_nothing_is_embedded(
 async def test_embed_missing_is_bounded_idempotent_and_audited(
     session: AsyncSession, admin_ctx: WorkspaceContext, world: World
 ) -> None:
-    for i in range(3):
+    for content in (
+        "Ava prefers concise updates.",
+        "The team deploys on Tuesdays.",
+        "Budget reviews happen monthly.",
+    ):
         await service.create_memory(
-            session, admin_ctx, MemoryCreate(content=f"note {i}", agent_id=world.agent.id)
+            session, admin_ctx, MemoryCreate(content=content, agent_id=world.agent.id)
         )
     first = await service.embed_missing(session, admin_ctx, embedding=DEPS, limit=2)
     assert first == (2, 1, "fake-embed", 8)

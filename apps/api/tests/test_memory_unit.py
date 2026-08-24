@@ -15,7 +15,7 @@ from jhin_api.memory import service
 from jhin_api.memory.schemas import MemoryCreate, MemoryUpdate
 from jhin_db.models import Agent, AuditEvent, MemoryRecord, Team, User, Workspace
 from jhin_domain import ActorType, MemoryScope, MemoryStatus, WorkspaceRole, new_uuid7
-from jhin_memory import ActorFacts, MemoryCandidate, SourceFacts, apply_candidates
+from jhin_memory import ActorFacts, MemoryCandidate, SourceFacts, apply_candidates, content_hash
 
 
 class World:
@@ -391,3 +391,116 @@ class TestPromotionReview:
         rejected = await service.reject_memory(session, admin_ctx, proposed.id)
         assert rejected.status == MemoryStatus.REJECTED.value
         assert (await audit_actions(session))[-1] == "memory.rejected"
+
+
+def _active_record(
+    admin_ctx: WorkspaceContext,
+    world: World,
+    content: str,
+    *,
+    subject: str | None = None,
+    confidence: float = 0.5,
+    embedding: list[float] | None = None,
+    model: str | None = None,
+) -> MemoryRecord:
+    return MemoryRecord(
+        workspace_id=admin_ctx.workspace_id,
+        scope="agent",
+        scope_id=world.agent.id,
+        kind="fact",
+        subject=subject,
+        content=content,
+        content_hash=content_hash(content),
+        visibility="agent",
+        confidence=confidence,
+        status=MemoryStatus.ACTIVE.value,
+        created_by_type="agent",
+        created_by_id=world.agent.id,
+        embedding_json=embedding,
+        embedding_model=model,
+    )
+
+
+class TestDeduplicate:
+    async def test_clusters_keep_the_best_and_audit(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext, world: World
+    ) -> None:
+        rows = [
+            _active_record(
+                admin_ctx,
+                world,
+                "We deploy every other Thursday.",
+                subject="deploy.day",
+                confidence=0.6,
+            ),
+            _active_record(
+                admin_ctx,
+                world,
+                "The release day is every other Thursday.",
+                subject="deploy.day",
+                confidence=0.5,
+            ),
+            _active_record(
+                admin_ctx,
+                world,
+                "Release day is every other Thursday.",
+                subject="deploy.day",
+                confidence=0.9,
+            ),
+            _active_record(admin_ctx, world, "Varand prefers concise updates."),
+        ]
+        session.add_all(rows)
+        await session.flush()
+
+        clusters, superseded, remaining = await service.deduplicate_memories(session, admin_ctx)
+        assert (clusters, superseded, remaining) == (1, 2, 2)
+        keeper = await session.get(MemoryRecord, rows[2].id)
+        assert keeper is not None
+        assert keeper.status == MemoryStatus.ACTIVE.value  # highest confidence wins
+        assert keeper.policy_json["confirmations"] == 2
+        for loser_row in (rows[0], rows[1]):
+            refreshed = await session.get(MemoryRecord, loser_row.id)
+            assert refreshed is not None
+            assert refreshed.status == MemoryStatus.SUPERSEDED.value
+            assert refreshed.policy_json["deduplicated_into"] == str(rows[2].id)
+            assert refreshed.content  # history is kept, not tombstoned
+        untouched = await session.get(MemoryRecord, rows[3].id)
+        assert untouched is not None and untouched.status == MemoryStatus.ACTIVE.value
+        assert (await audit_actions(session))[-1] == "memory.deduplicated"
+        # Idempotent: a second pass has nothing left to merge.
+        assert await service.deduplicate_memories(session, admin_ctx) == (0, 0, 2)
+
+    async def test_semantic_cluster_via_stored_embeddings(
+        self, session: AsyncSession, admin_ctx: WorkspaceContext, world: World
+    ) -> None:
+        rows = [
+            _active_record(
+                admin_ctx,
+                world,
+                "Shipping cadence is biweekly.",
+                confidence=0.8,
+                embedding=[1.0, 0.0],
+                model="m",
+            ),
+            _active_record(
+                admin_ctx,
+                world,
+                "We release every second week.",
+                confidence=0.5,
+                embedding=[0.99, 0.1],
+                model="m",
+            ),
+        ]
+        session.add_all(rows)
+        await session.flush()
+        clusters, superseded, remaining = await service.deduplicate_memories(session, admin_ctx)
+        assert (clusters, superseded, remaining) == (1, 1, 1)
+        keeper = await session.get(MemoryRecord, rows[0].id)
+        assert keeper is not None and keeper.status == MemoryStatus.ACTIVE.value
+
+    async def test_member_cannot_deduplicate(
+        self, session: AsyncSession, member_ctx: WorkspaceContext
+    ) -> None:
+        with pytest.raises(HTTPException) as exc:
+            await service.deduplicate_memories(session, member_ctx)
+        assert exc.value.status_code == 403

@@ -56,6 +56,18 @@ class ApplyResult:
     def duplicates(self) -> int:
         return sum(1 for d in self.decisions if d.outcome == "duplicate")
 
+    @property
+    def confirmed(self) -> int:
+        """Near-duplicates that bumped an existing record instead of storing."""
+        return sum(
+            1 for d in self.decisions if d.outcome == "duplicate" and "near_duplicate" in d.reasons
+        )
+
+    @property
+    def superseded(self) -> int:
+        """Created records that replaced an existing near-duplicate version."""
+        return sum(1 for r in self.created if r.supersedes_id is not None)
+
     def summary(self) -> dict[str, Any]:
         """Content-free summary for run events / workflow results."""
         return {
@@ -65,6 +77,8 @@ class ApplyResult:
             "contested": sum(1 for r in self.created if r.status == MemoryStatus.CONTESTED.value),
             "rejected": self.rejected,
             "duplicates": self.duplicates,
+            "confirmed": self.confirmed,
+            "superseded": self.superseded,
             "reasons": sorted({reason for d in self.decisions for reason in d.reasons}),
         }
 
@@ -136,6 +150,15 @@ async def derive_source_facts(
         if task.assigned_team_id is not None:
             team_id = task.assigned_team_id
             visibility = MemoryScope.TEAM
+        else:
+            # A delegated / work-request task between two agents of the SAME
+            # team was visible to that team's lineage: its exchange may
+            # activate team memory (never broader). Different teams (or no
+            # counterpart) keep the agent-private ceiling.
+            shared = await _shared_team_for_task(session, workspace_id, task)
+            if shared is not None:
+                team_id = shared
+                visibility = MemoryScope.TEAM
         if conversation_id is None:
             conversation_id = task.conversation_id
 
@@ -171,6 +194,40 @@ async def derive_source_facts(
     )
 
 
+async def _shared_team_for_task(
+    session: AsyncSession, workspace_id: UUID, task: Task
+) -> UUID | None:
+    """The primary team both sides of an agent↔agent task belong to, when the
+    task came from a delegation or an accepted work request; ``None``
+    otherwise. Deterministic and conservative: only the two named agents'
+    primary teams are compared."""
+    counterpart_raw: str = ""
+    delegation = task.metadata_json.get("delegation") if task.metadata_json else None
+    if isinstance(delegation, dict):
+        counterpart_raw = str(delegation.get("delegated_by_agent_id", "") or "")
+    else:
+        work_request = task.metadata_json.get("work_request") if task.metadata_json else None
+        if isinstance(work_request, dict):
+            counterpart_raw = str(work_request.get("requester_agent_id", "") or "")
+    if not counterpart_raw or task.assigned_agent_id is None:
+        return None
+    try:
+        counterpart_id = UUID(counterpart_raw)
+    except ValueError:
+        return None
+    assigned_team = await session.scalar(
+        select(Agent.team_id).where(
+            Agent.id == task.assigned_agent_id, Agent.workspace_id == workspace_id
+        )
+    )
+    counterpart_team = await session.scalar(
+        select(Agent.team_id).where(Agent.id == counterpart_id, Agent.workspace_id == workspace_id)
+    )
+    if assigned_team is not None and assigned_team == counterpart_team:
+        return assigned_team
+    return None
+
+
 async def _existing_in_scope(
     session: AsyncSession, workspace_id: UUID, scope: MemoryScope, scope_id: UUID
 ) -> list[MemoryRecord]:
@@ -196,6 +253,13 @@ def _as_existing(record: MemoryRecord) -> ExistingRecord:
         status=MemoryStatus(record.status),
         content_hash=record.content_hash,
         subject=record.subject,
+        content=record.content,
+        confidence=record.confidence,
+        importance=record.importance,
+        version=record.version,
+        tags=tuple(record.tags_json),
+        embedding=tuple(record.embedding_json) if record.embedding_json else None,
+        embedding_model=record.embedding_model,
     )
 
 
@@ -206,13 +270,28 @@ async def apply_candidates(
     source: SourceFacts,
     actor: ActorFacts,
     now: datetime | None = None,
+    candidate_embeddings: Sequence[Sequence[float] | None] | None = None,
+    embedding_model: str | None = None,
+    agent_name: str = "",
 ) -> ApplyResult:
-    """Run policy over ``candidates`` and persist the survivors."""
+    """Run policy over ``candidates`` and persist the survivors.
+
+    ``candidate_embeddings`` (parallel to ``candidates``, best-effort) powers
+    semantic near-duplicate detection and is attached to created records so
+    they need no second embedding call. A near-duplicate that adds nothing
+    bumps the stored record (confirmation count, importance, tag union); a
+    meaningfully better one becomes the next version of the stored record.
+    """
     now = now or datetime.now(UTC)
     result = ApplyResult()
     cache: dict[tuple[str, UUID], list[MemoryRecord]] = {}
+    pending_vectors: list[tuple[MemoryRecord, Sequence[float]]] = []
 
-    for candidate in candidates:
+    for index, candidate in enumerate(candidates):
+        vector: Sequence[float] | None = None
+        if candidate_embeddings is not None and index < len(candidate_embeddings):
+            vector = candidate_embeddings[index]
+
         # Pre-resolve the target scope so the existing set can be loaded;
         # the policy re-derives it and may still reject.
         scope = candidate.requested_scope
@@ -231,9 +310,30 @@ async def apply_candidates(
             existing_rows = cache[key]
 
         decision = evaluate_candidate(
-            candidate, source, actor, [_as_existing(r) for r in existing_rows]
+            candidate,
+            source,
+            actor,
+            [_as_existing(r) for r in existing_rows],
+            candidate_embedding=vector,
+            embedding_model=embedding_model,
+            agent_name=agent_name,
         )
         result.decisions.append(decision)
+        if decision.outcome == "duplicate" and decision.duplicate_of is not None:
+            # Confirmation: the same fact came up again. Strengthen the
+            # stored record instead of storing a wording variant.
+            for row in existing_rows:
+                if row.id == decision.duplicate_of:
+                    row.policy_json = {
+                        **row.policy_json,
+                        "confirmations": int(row.policy_json.get("confirmations", 0) or 0) + 1,
+                        "last_confirmed": now.isoformat(),
+                    }
+                    row.importance = max(row.importance, candidate.importance)
+                    if candidate.tags:
+                        row.tags_json = list(dict.fromkeys([*row.tags_json, *candidate.tags]))
+                    break
+            continue
         if decision.outcome not in ("activate", "propose"):
             continue
         assert decision.status is not None
@@ -247,12 +347,21 @@ async def apply_candidates(
                     row.status = MemoryStatus.CONTESTED.value
                     row.policy_json = {**row.policy_json, "contested_by": "new_version_pending"}
 
+        previous: MemoryRecord | None = None
+        if decision.supersedes is not None:
+            previous = next((r for r in existing_rows if r.id == decision.supersedes), None)
+
+        tags = list(candidate.tags)
+        if previous is not None:
+            tags = list(dict.fromkeys([*previous.tags_json, *tags]))
+
         record = MemoryRecord(
             workspace_id=source.workspace_id,
             scope=decision.scope.value,
             scope_id=decision.scope_id,
             kind=candidate.kind.value,
-            subject=normalize_subject(candidate.subject),
+            subject=normalize_subject(candidate.subject)
+            or (previous.subject if previous is not None else None),
             content=decision.content,
             content_hash=decision.content_hash,
             source_conversation_id=source.ref.conversation_id,
@@ -262,8 +371,10 @@ async def apply_candidates(
             visibility=decision.visibility.value,
             sensitivity=decision.sensitivity.value,
             confidence=candidate.confidence,
-            importance=candidate.importance,
-            tags_json=list(candidate.tags),
+            importance=candidate.importance
+            if previous is None
+            else max(candidate.importance, previous.importance),
+            tags_json=tags,
             status=decision.status.value,
             valid_from=now,
             expires_at=(
@@ -271,15 +382,28 @@ async def apply_candidates(
                 if candidate.expires_in_days
                 else None
             ),
+            pinned_at=previous.pinned_at if previous is not None else None,
+            version=previous.version + 1 if previous is not None else 1,
+            supersedes_id=previous.id if previous is not None else None,
             created_by_type=actor.actor_type.value,
             created_by_id=actor.actor_id,
             policy_json=decision.evidence(),
         )
+        if previous is not None:
+            previous.status = MemoryStatus.SUPERSEDED.value
+            existing_rows.remove(previous)
+        if vector is not None:
+            record.embedding_json = [float(v) for v in vector]
+            record.embedding_model = embedding_model
+            record.embedding_dimensions = len(vector)
+            pending_vectors.append((record, vector))
         session.add(record)
         existing_rows.append(record)
         result.created.append(record)
 
     await session.flush()
+    for record, vector in pending_vectors:
+        await store_embedding_vector(session, record.id, [float(v) for v in vector])
     return result
 
 

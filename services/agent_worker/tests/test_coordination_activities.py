@@ -111,3 +111,79 @@ async def test_context_blocks_and_finalize_activity(
     async with maker() as session:
         row: Any = await session.get(WorkRequest, request_id)
         assert row.status == WorkRequestStatus.COMPLETED.value
+
+
+async def test_finalize_starts_memory_maintenance_for_the_requester(
+    maker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with maker() as session:
+        workspace = Workspace(name="W", slug=f"w-{new_uuid7().hex[:8]}")
+        session.add(workspace)
+        await session.flush()
+        swe = Agent(workspace_id=workspace.id, name="SWE", slug="swe")
+        writer = Agent(workspace_id=workspace.id, name="Writer", slug="writer")
+        session.add_all([swe, writer])
+        await session.flush()
+        requester_task = Task(
+            workspace_id=workspace.id,
+            title="Parent",
+            state=TaskState.RUNNING.value,
+            assigned_agent_id=swe.id,
+            correlation_id=new_uuid7(),
+        )
+        session.add(requester_task)
+        await session.flush()
+        created = Task(
+            workspace_id=workspace.id,
+            title="Docs",
+            state=TaskState.COMPLETED.value,
+            assigned_agent_id=writer.id,
+            correlation_id=new_uuid7(),
+            metadata_json={"reported_result": {"summary": "Docs done", "status": "completed"}},
+        )
+        session.add(created)
+        await session.flush()
+        request = WorkRequest(
+            workspace_id=workspace.id,
+            requester_agent_id=swe.id,
+            requester_task_id=requester_task.id,
+            target_agent_id=writer.id,
+            title="Docs",
+            idempotency_key="k2",
+            status=WorkRequestStatus.ACCEPTED.value,
+            created_task_id=created.id,
+            metadata_json={"requester_agent_name": "SWE", "target_agent_name": "Writer"},
+        )
+        session.add(request)
+        await session.commit()
+        workspace_id, request_id, task_id = workspace.id, request.id, created.id
+        requester_id, requester_task_uuid = swe.id, requester_task.id
+
+    calls: list[Any] = []
+
+    async def fake_start(client: Any, params: Any, **kwargs: Any) -> tuple[str, None]:
+        calls.append(params)
+        return "started", None
+
+    monkeypatch.setattr(
+        "jhin_agent_worker.coordination_activities.start_memory_maintenance", fake_start
+    )
+    activities = CoordinationActivities(
+        FakeResources(maker),  # type: ignore[arg-type]
+        temporal_client=object(),  # type: ignore[arg-type]
+    )
+    params = FinalizeWorkRequestInput(
+        workspace_id=str(workspace_id),
+        work_request_id=str(request_id),
+        task_id=str(task_id),
+        run_status="completed",
+    )
+    assert await activities.finalize_work_request_activity(params) == "completed"
+    assert len(calls) == 1
+    start = calls[0]
+    assert start.source_kind == "message"
+    assert start.agent_id == str(requester_id)  # the requester learns
+    assert start.task_id == str(requester_task_uuid)
+    async with maker() as session:
+        row: Any = await session.get(WorkRequest, request_id)
+        assert start.source_id == row.metadata_json["result_message_id"]

@@ -5,7 +5,7 @@
  * remember something). `MemoryItemCard` is pure props for tests. */
 
 import { useMutation } from "@tanstack/react-query";
-import { MessageSquare, Plus, Star } from "lucide-react";
+import { Merge, MessageSquare, Plus, Star } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
 import { Chip, LoadError, SectionCard, Segmented, StatusPill } from "@/components/company/bits";
@@ -249,6 +249,7 @@ export function MemoryPanel({
   const [scope, setScope] = useState<MemoryScope>("agent");
   const [filter, setFilter] = useState<MemoryStatusFilter>("active");
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [composing, setComposing] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const hasTeam = Boolean(agent.team_id);
@@ -287,6 +288,25 @@ export function MemoryPanel({
       setError(err instanceof ApiError ? memoryErrorMessage(err.status, err.detail) : "Saving failed. Check your connection and try again."),
   });
 
+  const dedupe = useMutation({
+    mutationFn: () =>
+      api<{ clusters: number; superseded: number; remaining_active: number }>(
+        `/api/v1/workspaces/${workspaceId}/memories/deduplicate`,
+        { method: "POST" },
+      ),
+    onSuccess: (result) => {
+      setError(null);
+      setNotice(
+        result.superseded === 0
+          ? "No duplicates found."
+          : `Merged ${result.superseded} duplicate${result.superseded === 1 ? "" : "s"} into ${result.clusters} ${result.clusters === 1 ? "memory" : "memories"}.`,
+      );
+      invalidate();
+    },
+    onError: (err) =>
+      setError(err instanceof ApiError ? memoryErrorMessage(err.status, err.detail) : "Cleanup failed. Check your connection and try again."),
+  });
+
   const scopeOptions: { id: MemoryScope; label: string }[] = [
     { id: "agent", label: `${SCOPE_LABELS.agent} (just ${agent.name})` },
     ...(hasTeam ? [{ id: "team" as const, label: SCOPE_LABELS.team }] : []),
@@ -300,10 +320,25 @@ export function MemoryPanel({
       title="Memory"
       description="Things this agent keeps in mind across chats. Nothing here is a raw transcript — only curated notes."
       action={
-        canWrite ? (
-          <Button size="sm" onClick={() => setComposing(true)}>
-            <Plus size={14} /> Remember something
-          </Button>
+        canWrite || isAdmin ? (
+          <div className="flex flex-wrap justify-end gap-2">
+            {isAdmin ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={dedupe.isPending}
+                onClick={() => dedupe.mutate()}
+                title="Merge memories that say the same thing in different words"
+              >
+                <Merge size={14} /> {dedupe.isPending ? "Cleaning up…" : "Clean up duplicates"}
+              </Button>
+            ) : null}
+            {canWrite ? (
+              <Button size="sm" onClick={() => setComposing(true)}>
+                <Plus size={14} /> Remember something
+              </Button>
+            ) : null}
+          </div>
         ) : null
       }
     >
@@ -312,6 +347,11 @@ export function MemoryPanel({
         <Segmented label="Status" options={STATUS_FILTERS} value={filter} onChange={setFilter} />
       </div>
       <ErrorNote message={error} />
+      {notice ? (
+        <p role="status" className="mb-3 text-xs text-dim">
+          {notice}
+        </p>
+      ) : null}
       {query.isPending ? (
         <Spinner label="Loading memory…" />
       ) : query.isError ? (

@@ -43,7 +43,19 @@ from jhin_memory.retrieval import (
     record_retrieval_provenance,
     unavailable_context,
 )
-from jhin_memory.screening import contains_secret, screen_content
+from jhin_memory.screening import (
+    contains_secret,
+    is_low_information,
+    is_self_referential,
+    screen_content,
+)
+from jhin_memory.similarity import (
+    LEXICAL_DUPLICATE_JACCARD,
+    SEMANTIC_DUPLICATE_COSINE,
+    SimilarityVerdict,
+    compare_contents,
+    token_set,
+)
 from jhin_memory.types import (
     ActorFacts,
     ExistingRecord,
@@ -61,8 +73,10 @@ __all__ = [
     "DEFAULT_MAX_CHARS",
     "DEFAULT_MAX_RECORDS",
     "EXTRACTION_SYSTEM_PROMPT",
+    "LEXICAL_DUPLICATE_JACCARD",
     "MAX_BACKFILL_LIMIT",
     "MEMORY_RETRIEVED_EVENT",
+    "SEMANTIC_DUPLICATE_COSINE",
     "ActorFacts",
     "CandidateParseError",
     "ExistingRecord",
@@ -73,6 +87,7 @@ __all__ = [
     "MemoryDecision",
     "MemoryEmbedder",
     "MemoryProvenance",
+    "SimilarityVerdict",
     "SourceFacts",
     "SourceRef",
     "agent_team_ids",
@@ -80,6 +95,7 @@ __all__ = [
     "authorization_filter",
     "build_extraction_request",
     "build_memory_context",
+    "compare_contents",
     "contains_secret",
     "content_hash",
     "create_version",
@@ -87,6 +103,8 @@ __all__ = [
     "evaluate_candidate",
     "extract_candidates",
     "forget_record",
+    "is_low_information",
+    "is_self_referential",
     "normalize_content",
     "parse_candidates",
     "record_retrieval_provenance",
@@ -94,5 +112,6 @@ __all__ = [
     "screen_content",
     "select_embedding_profile",
     "set_embedding",
+    "token_set",
     "unavailable_context",
 ]

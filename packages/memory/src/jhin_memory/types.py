@@ -107,7 +107,11 @@ Outcome = Literal["activate", "propose", "reject", "duplicate"]
 
 
 class ExistingRecord(BaseModel):
-    """The slice of a stored record the policy needs (no content)."""
+    """The slice of a stored record the policy needs.
+
+    ``content`` powers lexical near-duplicate detection; ``embedding`` /
+    ``embedding_model`` power semantic near-duplicate detection (compared
+    only against a candidate vector from the same model)."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -117,6 +121,13 @@ class ExistingRecord(BaseModel):
     status: MemoryStatus
     content_hash: str
     subject: str | None = None
+    content: str = ""
+    confidence: float = 0.5
+    importance: float = 0.5
+    version: int = 1
+    tags: tuple[str, ...] = ()
+    embedding: tuple[float, ...] | None = None
+    embedding_model: str | None = None
 
 
 class MemoryDecision(BaseModel):
@@ -135,6 +146,10 @@ class MemoryDecision(BaseModel):
     content_hash: str = ""
     duplicate_of: UUID | None = None
     contested_with: tuple[UUID, ...] = ()
+    # Near-duplicate upgrade: the new record is a better wording/value of an
+    # existing one and must be persisted as its next VERSION (the previous
+    # record becomes ``superseded``) — never two active near-duplicates.
+    supersedes: UUID | None = None
 
     def evidence(self) -> dict[str, Any]:
         """Content-free policy evidence for ``policy_json`` / audit."""
@@ -145,6 +160,7 @@ class MemoryDecision(BaseModel):
             "sensitivity": self.sensitivity.value,
             "duplicate_of": str(self.duplicate_of) if self.duplicate_of else None,
             "contested_with": [str(i) for i in self.contested_with],
+            "supersedes": str(self.supersedes) if self.supersedes else None,
         }
 
 

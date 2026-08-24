@@ -125,3 +125,11 @@ class EmbedMissingOut(BaseModel):
     remaining: int
     model: str
     dimensions: int | None
+
+
+class DeduplicateOut(BaseModel):
+    """Result of the admin retroactive dedup pass."""
+
+    clusters: int
+    superseded: int
+    remaining_active: int

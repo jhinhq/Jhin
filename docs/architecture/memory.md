@@ -93,7 +93,11 @@ in order:
    authorization headers, JWTs, GitHub/AWS/Slack/Google tokens, private key
    blocks, DSNs with credentials, and `api_key=…` assignments → **reject**.
    `password: …` assignments → **redact** to `[REDACTED]`, stored with
-   `sensitivity=redacted`.
+   `sensitivity=redacted`. Model-proposed candidates (not explicit human
+   "remember this") are additionally rejected when they state the agent's
+   own identity (`self_reference` — "the AI teammate's name is …",
+   "<agent name> is an AI teammate") or carry fewer than two informative
+   tokens (`low_information`).
 2. **Hidden sources**: `SourceFacts.internal` (INTERNAL messages) → reject.
 3. **Non-amplification**: `requested_scope` above `SourceFacts.visibility`
    → reject (`non_amplification`). Only an explicit human "remember this"
@@ -102,8 +106,22 @@ in order:
 4. **Normalization + dedup**: NFKC/casefold/whitespace/punctuation-insensitive
    hash; same hash in the same `(scope, scope_id)` among
    proposed/active/contested → `duplicate`.
+   **Near-duplicates** (`jhin_memory.similarity`, shared with the API's
+   `/memories/deduplicate`): embedding cosine ≥ 0.90 (same model only),
+   token-set Jaccard ≥ 0.6, or same `subject` with Jaccard ≥ 0.4 and token
+   containment ≥ 0.75. A near-duplicate that adds nothing (no higher
+   confidence, no new information) is skipped as `duplicate` with reason
+   `near_duplicate`; persistence *confirms* the stored record instead
+   (`policy_json.confirmations` + `last_confirmed`, importance max, tag
+   union). A meaningfully better wording/value becomes the next **version**
+   of the stored record (`MemoryDecision.supersedes`, reason
+   `near_duplicate_superseded`) — never two active near-duplicates in one
+   scope. The apply path embeds candidates *before* apply (one best-effort
+   call) so semantic comparison works at write time; the same vectors are
+   attached to the created records.
 5. **Contradiction**: same normalized `subject` in the same scope with a
-   different hash → the new record and the existing active ones become
+   different hash (and no near-duplicate match — a changed *value* keeps
+   this path) → the new record and the existing active ones become
    `contested`.
 6. **Promotion**: agent scope → `active`; team scope → `active` (the source
    was team-visible, guaranteed by step 3); workspace scope → `proposed`
@@ -111,8 +129,11 @@ in order:
    requested scope.
 
 Source visibility (`derive_source_facts`): INTERNAL message → hidden; a task
-with `assigned_team_id` → ceiling `team` (that team); everything else
-(a chat with one agent, an unassigned task) → ceiling `agent`.
+with `assigned_team_id` → ceiling `team` (that team); a delegated or
+accepted work-request task whose two agents share the same primary team →
+ceiling `team` (that shared team — the exchange was already visible inside
+the team, never broader); everything else (a chat with one agent, an
+unassigned task) → ceiling `agent`.
 
 ## Embeddings (`jhin_models.embeddings`, `jhin_memory.embedding`)
 
@@ -209,12 +230,25 @@ memory store itself is unreachable (`mode=unavailable`).
 `expires_in_days`. The model cannot set status, source, actor, or
 `explicit`.
 
-`extract_candidates(client: ModelClient, *, model, source_text, agent_name) -> ExtractionResult`
+`extract_candidates(client: ModelClient, *, model, source_text, agent_name, existing_memories=()) -> ExtractionResult`
 sends `EXTRACTION_SYSTEM_PROMPT` + the bounded transcript (≤12k chars,
 temperature 0) through the provider-neutral `jhin_models` interface and
 parses the reply with `parse_candidates` — exactly `{"candidates": [...]}`,
 ≤20 entries, every entry schema-valid; anything else is
 `malformed_output`. Provider errors become `ok=False`; nothing raises.
+
+The system prompt explicitly excludes facts about the agent itself (its
+name, role, that it is an AI/teammate), platform mechanics, greetings and
+small talk, requires facts about the user/team/external systems/decisions/
+preferences, and prefers one consolidated fact over wording variants. The
+worker passes the scope's newest active/contested memory contents
+(`load_known_memories`, bounded to 30) as `existing_memories`; they render
+as a `<known_memories>` block with the instruction to propose only NEW or
+CHANGED facts — cheaper than post-hoc dedup and it reduces churn. The fake
+provider (`jhin_models.testing.fake_openai`) implements the extraction
+contract deterministically (`user:` lines containing "remember", delegation
+exchange lines; ≥0.6 token-containment overlap with a known memory is
+skipped), so the memory feature is exercisable offline.
 
 ## Maintenance workflow (`jhin_workflows.memory_maintenance`)
 
@@ -293,6 +327,20 @@ stays on the agent worker (`jhin-agent-queue`), never on the tool worker:
    owns no terminal transition and starts nothing more. Any failure is
    logged and swallowed — the terminal projection never depends on it.
 
+   Agent↔agent work feeds memory through the same seam: delegated and
+   work-request child tasks finalize like any other run, and the child's
+   `task_outcome` source text includes the structured exchange (delegation
+   metadata, `reported_result`, and visible `result`/`review_result`
+   feedback about that child on the parent task). The receiving side learns
+   from the reported result too: `summarize_delegation_activity` starts a
+   second detached maintenance run for the DELEGATING agent over the
+   persisted `result`/`review_result` message, and
+   `finalize_work_request_activity` does the same for the REQUESTER agent
+   (the result message id is mirrored into
+   `work_request.metadata_json.result_message_id`). Both use
+   `source_kind="message"`, so idempotency rides on the message id, and both
+   are best-effort — INTERNAL messages and screening rules still apply.
+
    For an explicit "remember this" turn, the API passes the *user* message
    as the source with `remember_enabled=True`, the validated
    `requested_scope`, `actor_user_id`, and `actor_authority` (`agent` for
@@ -330,11 +378,13 @@ require admin.
 | POST | `/{id}/approve` | admin | proposed → active |
 | POST | `/{id}/reject` | admin | proposed → rejected |
 | POST | `/embed-missing` | admin | `EmbedMissingIn {limit: 1..500 = 100}` → `EmbedMissingOut {embedded, remaining, model, dimensions}`; 409 `embeddings_unsupported` when no profile enables embeddings |
+| POST | `/deduplicate` | admin | → `DeduplicateOut {clusters, superseded, remaining_active}`: clusters active near-duplicates per `(scope, scope_id)` with the shared similarity rule, keeps the best of each cluster (pinned, then confidence, then newest; tag union + confirmation count), supersedes the rest (content kept as history) |
 
 Audit actions (content-free): `memory.created` (includes `embedded`),
 `memory.edited`, `memory.pinned`, `memory.unpinned`, `memory.contested`,
 `memory.forgotten` (metadata: `forgotten_ids`, `scope`), `memory.approved`,
-`memory.rejected`, `memory.embed_missing`.
+`memory.rejected`, `memory.embed_missing`, `memory.deduplicated`
+(metadata: `scanned`, `clusters`, `superseded`, `remaining_active`).
 
 ### Schemas
 

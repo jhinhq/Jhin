@@ -1,13 +1,22 @@
-/** Component tests: one memory card's content, chips, and actions. */
+/** Component tests: one memory card's content, chips, and actions, plus the
+ * panel's admin "Clean up duplicates" action. */
 
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MemoryItemCard } from "@/components/agents/memory-panel";
-import type { MemoryRecord } from "@/lib/types";
+import { MemoryItemCard, MemoryPanel } from "@/components/agents/memory-panel";
+import { api } from "@/lib/api";
+import { useMemories } from "@/lib/hooks";
+import type { Agent, MemoryRecord } from "@/lib/types";
 
 vi.mock("@/lib/hooks", () => ({
   useMemories: vi.fn(),
   useInvalidateMemories: () => () => undefined,
+}));
+
+vi.mock("@/lib/api", () => ({
+  api: vi.fn(),
+  ApiError: class ApiError extends Error {},
 }));
 
 afterEach(cleanup);
@@ -116,5 +125,49 @@ describe("MemoryItemCard", () => {
       </ul>,
     );
     expect(screen.queryByRole("button")).toBeNull();
+  });
+});
+
+function renderPanel(props: { canWrite: boolean; isAdmin: boolean }) {
+  vi.mocked(useMemories).mockReturnValue({
+    data: { items: [], total: 0 },
+    isPending: false,
+    isError: false,
+    refetch: vi.fn(),
+  } as never);
+  render(
+    <QueryClientProvider
+      client={new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })}
+    >
+      <MemoryPanel
+        workspaceId="ws-1"
+        agent={{ id: "a1", name: "Ava", team_id: null } as unknown as Agent}
+        canWrite={props.canWrite}
+        isAdmin={props.isAdmin}
+      />
+    </QueryClientProvider>,
+  );
+}
+
+describe("MemoryPanel duplicates cleanup", () => {
+  it("lets an admin merge duplicates and shows the result", async () => {
+    vi.mocked(api).mockResolvedValue({ clusters: 1, superseded: 2, remaining_active: 3 });
+    renderPanel({ canWrite: true, isAdmin: true });
+    fireEvent.click(screen.getByRole("button", { name: /Clean up duplicates/ }));
+    const status = await screen.findByRole("status");
+    expect(status.textContent).toBe("Merged 2 duplicates into 1 memory.");
+    expect(api).toHaveBeenCalledWith("/api/v1/workspaces/ws-1/memories/deduplicate", { method: "POST" });
+  });
+
+  it("reports when nothing needed merging", async () => {
+    vi.mocked(api).mockResolvedValue({ clusters: 0, superseded: 0, remaining_active: 5 });
+    renderPanel({ canWrite: true, isAdmin: true });
+    fireEvent.click(screen.getByRole("button", { name: /Clean up duplicates/ }));
+    expect((await screen.findByRole("status")).textContent).toBe("No duplicates found.");
+  });
+
+  it("hides the cleanup button from non-admins", () => {
+    renderPanel({ canWrite: true, isAdmin: false });
+    expect(screen.queryByRole("button", { name: /Clean up duplicates/ })).toBeNull();
   });
 });

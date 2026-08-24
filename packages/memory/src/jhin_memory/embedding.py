@@ -181,12 +181,32 @@ class MemoryEmbedder:
             return None
         return list(result.vectors[0])
 
+    async def embed_texts(
+        self, texts: Sequence[str], *, workspace_id: UUID
+    ) -> list[list[float]] | None:
+        """One vector per text (single provider call), or ``None`` on failure.
+        Used to embed memory candidates *before* apply so semantic dedup can
+        compare them against stored records."""
+        if not texts:
+            return []
+        result = await self._embed(list(texts), workspace_id=workspace_id)
+        if result is None:
+            return None
+        return [list(vector) for vector in result.vectors]
+
     async def embed_records(
         self, session: AsyncSession, records: Sequence[MemoryRecord], *, workspace_id: UUID
     ) -> int:
-        """Attach embeddings to ``records`` that carry content; returns how
-        many were embedded. Records keep no embedding on failure."""
-        targets = [r for r in records if r.content and r.status in _EMBEDDABLE_STATUSES]
+        """Attach embeddings to ``records`` that carry content and do not
+        already have a vector from the current model; returns how many were
+        embedded. Records keep no embedding on failure."""
+        targets = [
+            r
+            for r in records
+            if r.content
+            and r.status in _EMBEDDABLE_STATUSES
+            and not (r.embedding_json and r.embedding_model == self._config.model)
+        ]
         if not targets:
             return 0
         result = await self._embed([r.content for r in targets], workspace_id=workspace_id)

@@ -33,6 +33,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio import activity
+from temporalio.client import Client as TemporalClient
 from temporalio.exceptions import ApplicationError
 
 from jhin_agent_worker.resources import Resources
@@ -44,6 +45,11 @@ from jhin_tools.reviews import open_periodic_review
 from jhin_tools.rollups import build_manager_rollup, render_manager_rollup
 from jhin_tools.work_requests import finalize_work_request
 from jhin_workflows.agent_task.shared import ReviewDecisionSignal, WorkRequestStart
+from jhin_workflows.memory_maintenance import (
+    SOURCE_KIND_MESSAGE,
+    MemoryMaintenanceInput,
+    start_memory_maintenance,
+)
 from jhin_workflows.periodic_review import (
     ACTIVITY_LOAD_PERIODIC_REVIEW_POLICY,
     ACTIVITY_OPEN_PERIODIC_REVIEW,
@@ -128,12 +134,17 @@ async def manager_context(session: AsyncSession, workspace_id: UUID, agent_id: U
 
 
 class CoordinationActivities:
-    def __init__(self, resources: Resources) -> None:
+    def __init__(self, resources: Resources, temporal_client: TemporalClient | None = None) -> None:
         self._resources = resources
+        self._temporal_client = temporal_client
 
     @activity.defn(name=ACTIVITY_FINALIZE_WORK_REQUEST)
     async def finalize_work_request_activity(self, params: FinalizeWorkRequestInput) -> str:
         """Terminal projection for WorkRequestTaskWorkflow. Idempotent."""
+        requester_agent_id = ""
+        requester_task_id = ""
+        conversation_id = ""
+        result_message_id = ""
         async with self._resources.session_factory() as session:
             request = await finalize_work_request(
                 session,
@@ -143,6 +154,13 @@ class CoordinationActivities:
             )
             await session.commit()
             status = request.status if request is not None else "missing"
+            if request is not None:
+                requester_agent_id = str(request.requester_agent_id)
+                requester_task_id = (
+                    str(request.requester_task_id) if request.requester_task_id else ""
+                )
+                conversation_id = str(request.conversation_id) if request.conversation_id else ""
+                result_message_id = str(request.metadata_json.get("result_message_id", "") or "")
         logger.info(
             "work_request.finalized",
             work_request_id=params.work_request_id,
@@ -150,6 +168,24 @@ class CoordinationActivities:
             run_status=params.run_status,
             request_status=status,
         )
+        # The REQUESTER agent learns from the reported result (detached,
+        # best-effort, idempotent on the result message id).
+        if self._temporal_client is not None and requester_agent_id and result_message_id:
+            try:
+                start_status, _handle = await start_memory_maintenance(
+                    self._temporal_client,
+                    MemoryMaintenanceInput(
+                        workspace_id=params.workspace_id,
+                        agent_id=requester_agent_id,
+                        source_kind=SOURCE_KIND_MESSAGE,
+                        source_id=result_message_id,
+                        task_id=requester_task_id,
+                        conversation_id=conversation_id,
+                    ),
+                )
+                logger.info("memory.maintenance_start", status=start_status)
+            except Exception as error:
+                logger.warning("memory.maintenance_start_failed", error_type=type(error).__name__)
         return status
 
     @activity.defn(name=ACTIVITY_LOAD_PERIODIC_REVIEW_POLICY)

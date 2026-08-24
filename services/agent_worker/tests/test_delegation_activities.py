@@ -236,6 +236,51 @@ async def test_unreported_child_falls_back_to_last_visible_text(world: World) ->
     assert summary.status == "completed"  # falls back to the run status
 
 
+async def test_summarize_starts_memory_maintenance_for_the_delegating_agent(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[Any] = []
+
+    async def fake_start(client: Any, params: Any, **kwargs: Any) -> tuple[str, None]:
+        calls.append(params)
+        return "started", None
+
+    monkeypatch.setattr("jhin_agent_worker.activities.start_memory_maintenance", fake_start)
+    world.activities._temporal_client = object()
+    await set_reported(world, {"summary": "Implemented and opened PR #7.", "status": "completed"})
+    await ActivityEnvironment().run(
+        world.activities.summarize_delegation_activity, summarize_input(world)
+    )
+    assert len(calls) == 1
+    params = calls[0]
+    assert params.source_kind == "message"
+    assert params.agent_id == str(world.cto.id)  # the delegating agent learns
+    assert params.task_id == str(world.parent_task.id)
+    async with world.session_factory() as session:
+        message = await session.scalar(
+            select(Message).where(Message.message_type == MessageType.RESULT.value)
+        )
+        assert message is not None
+        assert params.source_id == str(message.id)
+
+
+async def test_summarize_without_temporal_client_starts_nothing(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[Any] = []
+
+    async def fake_start(client: Any, params: Any, **kwargs: Any) -> tuple[str, None]:
+        calls.append(params)
+        return "started", None
+
+    monkeypatch.setattr("jhin_agent_worker.activities.start_memory_maintenance", fake_start)
+    await set_reported(world, {"summary": "done", "status": "completed"})
+    await ActivityEnvironment().run(
+        world.activities.summarize_delegation_activity, summarize_input(world)
+    )
+    assert calls == []
+
+
 async def test_blocking_summary_message_is_marked_delivered(world: World) -> None:
     await set_reported(world, {"summary": "done", "status": "completed"})
     await ActivityEnvironment().run(
