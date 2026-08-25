@@ -9,6 +9,7 @@ import zipfile
 import pytest
 
 from jhin_skills import (
+    MAX_FILE_BYTES,
     BundleError,
     load_builtin_skills,
     load_zip,
@@ -132,7 +133,7 @@ class TestLoadZip:
         data = make_zip(
             {
                 "s/SKILL.md": GOOD_SKILL.format(name="s"),
-                "s/huge.md": "x" * (64 * 1024 + 1),
+                "s/huge.md": "x" * (MAX_FILE_BYTES + 1),
             }
         )
         result = load_zip(data)

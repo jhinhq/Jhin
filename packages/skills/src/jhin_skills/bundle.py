@@ -22,6 +22,7 @@ from jhin_skills.parser import (
     MAX_TOTAL_BYTES,
     ParsedSkill,
     SkillParseError,
+    format_kb,
     parse_skill_md,
     validate_file_path,
 )
@@ -82,13 +83,18 @@ def _assemble(
             continue
         size = len(content.encode("utf-8"))
         if size > MAX_FILE_BYTES:
-            warnings.append(f"{parsed.name}: file {path!r} is larger than 64 KB; skipped")
+            warnings.append(
+                f"{parsed.name}: file {path!r} is larger than {format_kb(MAX_FILE_BYTES)}; skipped"
+            )
             continue
         if len(files) >= MAX_FILES:
             warnings.append(f"{parsed.name}: more than {MAX_FILES} reference files; rest skipped")
             break
         if total + size > MAX_TOTAL_BYTES:
-            warnings.append(f"{parsed.name}: total size exceeds 256 KB; file {path!r} skipped")
+            warnings.append(
+                f"{parsed.name}: total size exceeds {format_kb(MAX_TOTAL_BYTES)}; "
+                f"file {path!r} skipped"
+            )
             continue
         total += size
         files.append(SkillFile(path=path, content=content))

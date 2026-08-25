@@ -104,7 +104,7 @@ class TestRejections:
 
     def test_body_too_large(self) -> None:
         body = "x" * (MAX_CONTENT_BYTES + 1)
-        with pytest.raises(SkillParseError, match="64 KB"):
+        with pytest.raises(SkillParseError, match="256 KB"):
             parse_skill_md(doc("name: big\ndescription: D.", body))
 
     def test_frontmatter_too_large(self) -> None:

@@ -43,8 +43,8 @@ Two deliberate deviations:
 
 Validation (`jhin_skills.parser`): `name` is a slug (lowercase letters,
 digits, hyphens, ≤ 64 chars; defaults to the folder name), `description`
-is required and ≤ 2000 chars, the body is ≤ 64 KB, each reference file is
-≤ 64 KB, a skill totals ≤ 256 KB across ≤ 20 files, and obviously
+is required and ≤ 2000 chars, the body is ≤ 256 KB, each reference file is
+≤ 256 KB, a skill totals ≤ 1024 KB across ≤ 20 files, and obviously
 credential-like content (private keys, provider API keys, tokens) is
 rejected outright. Every creation path — the plain create API, a GitHub
 import, a browse-gallery install, and the `skills.create` gateway tool —
@@ -227,12 +227,15 @@ never added on the strength of a description alone:
 | `jamestorrevillas/dev-skills` | A modular skill library for software engineers — technical, soft, and career skills | 37 skills parse cleanly, zero warnings (nested under `.github/skills/`) |
 | `avizmarlon/agent-skills` | Portable agent skills shared across Claude Code, Codex, Cursor, and Gemini | 31 skills parse cleanly, zero warnings |
 
-One skill in `anthropics/skills` is still not installable:
-**`claude-api`**, whose SKILL.md is 75 707 bytes — its *body alone* is
-74 542 bytes, past the 64 KB `MAX_CONTENT_BYTES` cap. That is a genuine
-size limit, not a parser gap: block-scalar support fixed its frontmatter but
-cannot shrink its body. It is dropped at the zip-entry level, before it ever
-becomes a skill folder, so it produces no warning.
+Every skill in `anthropics/skills` is installable. The largest,
+**`claude-api`** (SKILL.md 75 707 bytes, body 74 542 bytes), needed the
+body cap raised: reference skills genuinely run past 64 KB, so
+`MAX_CONTENT_BYTES` is 256 KB. Bodies live in unbounded `Text`/JSON
+columns and never enter a prompt until an agent explicitly reads the skill
+(the library block carries only name and description), so the caps bound
+abuse rather than protecting the context window. User-facing size messages
+are rendered from the constants via `format_kb`, so a cap and the text
+describing it cannot drift apart.
 
 Candidates that were checked live and **rejected**, for the record — every
 one failed one of this app's own real, enforced constraints, not a
@@ -400,7 +403,7 @@ full JSON, without touching what is actually persisted or replayed.
   as `enabled=false` "proposed" entries. Nothing reaches an agent until an
   admin reviews and enables each one. A browse-gallery install is the one
   deliberate exception — see above.
-- **Size caps everywhere**: 5 MB per archive, 64 KB per document, 256 KB
+- **Size caps everywhere**: 5 MB per archive, 256 KB per document, 1024 KB
   per skill, 50 skills per bundle, bounded frontmatter, bounded tool
   output.
 - **Secret screening**: skill bodies and files are scanned for obvious

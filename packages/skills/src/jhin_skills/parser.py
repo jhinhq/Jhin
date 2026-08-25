@@ -23,13 +23,26 @@ MAX_NAME_CHARS = 64
 # own accord (jhin_agents.context), so a larger stored cap costs nothing
 # there.
 MAX_DESCRIPTION_CHARS = 2000
-MAX_CONTENT_BYTES = 64 * 1024
-MAX_FILE_BYTES = 64 * 1024
-MAX_TOTAL_BYTES = 256 * 1024
+# Reference skills run large: anthropics/skills' own claude-api body is
+# ~74 KB, so a 64 KB body cap made official skills uninstallable. Bodies and
+# reference files are stored in Text/JSON columns (no database limit), and
+# the agent prompt only ever carries name + description until a skill is
+# explicitly read, so the cap exists to bound abuse rather than to protect
+# the prompt.
+MAX_CONTENT_BYTES = 256 * 1024
+MAX_FILE_BYTES = 256 * 1024
+MAX_TOTAL_BYTES = 1024 * 1024
 MAX_FILES = 20
 MAX_FRONTMATTER_BYTES = 8 * 1024
 MAX_FILE_PATH_CHARS = 255
 MAX_CATEGORY_CHARS = 64
+
+
+def format_kb(byte_cap: int) -> str:
+    """``262144`` -> ``"256 KB"`` for user-facing size messages, so a cap and
+    the text describing it can never drift apart."""
+    return f"{byte_cap // 1024} KB"
+
 
 _NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 _FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n(.*))?\Z", re.DOTALL)
@@ -286,7 +299,9 @@ def parse_skill_md(text: str, *, default_name: str = "") -> ParsedSkill:
             f"skill {name!r} description is longer than {MAX_DESCRIPTION_CHARS} characters"
         )
     if len(body.encode("utf-8")) > MAX_CONTENT_BYTES:
-        raise SkillParseError(f"skill {name!r} instructions are larger than 64 KB")
+        raise SkillParseError(
+            f"skill {name!r} instructions are larger than {format_kb(MAX_CONTENT_BYTES)}"
+        )
 
     allowed_raw = fields.get("allowed-tools", [])
     if isinstance(allowed_raw, str):

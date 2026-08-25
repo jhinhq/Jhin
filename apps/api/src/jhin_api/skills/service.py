@@ -35,6 +35,7 @@ from jhin_skills import (
     derive_category,
     fetch_github_repo_zip,
     find_secret,
+    format_kb,
     load_builtin_skills,
     load_zip,
     parse_github_ref,
@@ -171,7 +172,7 @@ def _audit(
 def _validated_files(files: list[SkillFile], *, content: str) -> list[dict[str, str]]:
     """Enforce the format's size caps and reject credential-like content."""
     if len(content.encode("utf-8")) > MAX_CONTENT_BYTES:
-        raise HTTPException(422, "instructions exceed 64 KB")
+        raise HTTPException(422, f"instructions exceed {format_kb(MAX_CONTENT_BYTES)}")
     secret = find_secret(content)
     if secret is not None:
         raise HTTPException(
@@ -191,10 +192,10 @@ def _validated_files(files: list[SkillFile], *, content: str) -> list[dict[str, 
         seen.add(file.path)
         size = len(file.content.encode("utf-8"))
         if size > MAX_FILE_BYTES:
-            raise HTTPException(422, f"file {file.path!r} exceeds 64 KB")
+            raise HTTPException(422, f"file {file.path!r} exceeds {format_kb(MAX_FILE_BYTES)}")
         total += size
         if total > MAX_TOTAL_BYTES:
-            raise HTTPException(422, "the skill's total size exceeds 256 KB")
+            raise HTTPException(422, f"the skill's total size exceeds {format_kb(MAX_TOTAL_BYTES)}")
         secret = find_secret(file.content)
         if secret is not None:
             raise HTTPException(

@@ -21,7 +21,7 @@ from jhin_api.skills.schemas import (
 )
 from jhin_db.models import Agent, AgentSkill, AuditEvent, Skill, User
 from jhin_domain import WorkspaceRole, new_uuid7
-from jhin_skills import DEFAULT_CATEGORY, SkillImportError, load_zip
+from jhin_skills import DEFAULT_CATEGORY, MAX_FILE_BYTES, SkillImportError, load_zip
 
 GOOD_SKILL = "---\nname: {name}\ndescription: Description of {name}.\n---\n\nInstructions.\n"
 
@@ -112,7 +112,7 @@ class TestCreate:
             await service.create_skill(
                 session,
                 admin_ctx,
-                payload(files=[{"path": "big.md", "content": "x" * (64 * 1024 + 1)}]),
+                payload(files=[{"path": "big.md", "content": "x" * (MAX_FILE_BYTES + 1)}]),
             )
         assert exc.value.status_code == 422
 
