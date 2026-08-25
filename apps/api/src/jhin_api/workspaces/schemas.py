@@ -67,6 +67,32 @@ class WorkspaceOut(BaseModel):
     updated_at: datetime
 
 
+class WorkspaceDeletionSummary(BaseModel):
+    """What deleting this workspace would destroy, counted from the database.
+
+    Every number is a live ``COUNT`` over the rows that the workspace's
+    ``ON DELETE CASCADE`` foreign keys would take with it, so the confirmation
+    dialog can name what is actually at stake instead of a generic warning.
+    Anything not counted here is still deleted; these are the categories a
+    person recognises.
+    """
+
+    workspace_id: UUID
+    name: str
+    agents: int
+    teams: int
+    tasks: int
+    conversations: int
+    messages: int
+    memories: int
+    skills: int
+    connections: int
+    triggers: int
+    api_keys: int
+    secrets: int
+    members: int
+
+
 class MemberCreate(BaseModel):
     email: EmailStr
     role: WorkspaceRole

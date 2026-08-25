@@ -18,6 +18,7 @@ from starlette.datastructures import Headers
 from starlette.requests import Request
 
 from jhin_api.auth import service as auth_service
+from jhin_api.auth.schemas import ChangePasswordRequest
 from jhin_api.deps import get_current_auth
 from jhin_api.security.passwords import hash_password, verify_password
 from jhin_api.security.rate_limit import LoginRateLimiter
@@ -328,6 +329,38 @@ async def test_password_change_rejects_reusing_the_same_password(
             user_agent=UA,
         )
     assert caught.value.status_code == 422
+
+
+def test_change_password_request_leaves_the_length_rule_to_the_policy() -> None:
+    """A short new password must reach the service.
+
+    ``BootstrapRequest`` bounds its password in the schema, which is fine for
+    an anonymous call. Doing the same here would answer a signed-in user with
+    Pydantic's "String should have at least 12 characters" and leave the
+    policy's own sentence unreachable, so the two would say different things
+    about the same rule.
+    """
+    payload = ChangePasswordRequest(current_password="whatever", new_password="short")
+    assert payload.new_password == "short"
+
+
+async def test_password_change_says_how_long_a_password_has_to_be(
+    session: AsyncSession,
+) -> None:
+    user = await make_user(session)
+    with pytest.raises(HTTPException) as caught:
+        await auth_service.change_password(
+            session,
+            user=user,
+            current_password=PASSWORD,
+            new_password="short",
+            session_ttl_hours=168,
+            request_id=new_uuid7(),
+            ip_hash="hash",
+            user_agent=UA,
+        )
+    assert caught.value.status_code == 422
+    assert "at least 12 characters" in str(caught.value.detail)
 
 
 # --- login hardening --------------------------------------------------------

@@ -3,9 +3,10 @@
 /** Home — where signing in lands you. Everything here is derived from the
  * endpoints the rest of the app already uses (attention, conversations,
  * tasks, activity, org graph, spend); no section invents its own data. The
- * getting-started checklist only appears while the workspace is incomplete. */
+ * getting-started checklist only appears while the workspace is incomplete,
+ * and the guided introduction can always be reopened from the header. */
 
-import { Plus } from "lucide-react";
+import { Compass, Plus } from "lucide-react";
 import Link from "next/link";
 import { useMemo } from "react";
 import { PageHeader } from "@/components/app-shell";
@@ -18,6 +19,7 @@ import {
   SpendPanelFrame,
   TeamGlancePanel,
 } from "@/components/home/panels";
+import { useOnboardingTour } from "@/components/onboarding/tour";
 import { SpendTile } from "@/components/spend-tile";
 import { Button } from "@/components/ui";
 import { sortByActivity } from "@/lib/chat";
@@ -53,6 +55,7 @@ export default function HomePage() {
   const spend = useWorkspaceSpend(workspaceId);
   const avatars = useAgentAvatarMap(workspaceId);
   const setup = useSetupStatus(workspaceId, isAdmin);
+  const tour = useOnboardingTour();
 
   const runningTasks = running.data?.items ?? [];
   const queuedTasks = queued.data?.items ?? [];
@@ -78,6 +81,14 @@ export default function HomePage() {
 
   const firstName = user.display_name.split(/\s+/)[0] || "there";
   const showGettingStarted = isAdmin && !setup.isPending && !setup.complete;
+  // Somebody who left the tour part-way should be invited back to it, not
+  // handed the same neutral label as somebody who finished it a month ago.
+  const paused = tour.status === "in_progress";
+  const tourButton = (
+    <Button onClick={tour.openTour} data-testid="open-tour">
+      <Compass size={14} /> {paused ? "Resume the tour" : "Take the tour"}
+    </Button>
+  );
 
   return (
     <>
@@ -86,20 +97,30 @@ export default function HomePage() {
         title={`Hi ${firstName}`}
         description="What needs you, and what your company is working on right now."
         actions={
-          can("member") ? (
-            <Link href="/chats">
-              <Button variant="primary">
-                <Plus size={14} /> New chat
-              </Button>
-            </Link>
-          ) : null
+          <>
+            {/* The checklist below carries its own way in, so the header only
+                offers one when that card is not on screen. */}
+            {showGettingStarted ? null : tourButton}
+            {can("member") ? (
+              <Link href="/chats">
+                <Button variant="primary">
+                  <Plus size={14} /> New chat
+                </Button>
+              </Link>
+            ) : null}
+          </>
         }
       />
       <div className="mx-auto w-full max-w-6xl space-y-4 px-4 py-5 sm:px-8 sm:py-6">
         {showGettingStarted ? (
           <SectionCard
             title="Getting started"
-            description="A couple of steps and your company is ready to work."
+            description={
+              paused
+                ? "You were part-way through setting this up. Pick up where you left off."
+                : "A couple of steps and your company is ready to work."
+            }
+            action={tourButton}
           >
             <div className="flex justify-center">
               <FirstRunSteps workspaceId={workspaceId} isAdmin={isAdmin} includeApps />

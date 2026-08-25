@@ -36,6 +36,41 @@ from jhin_policy.evaluator import Grant, GrantEffect, _scope_value_matches
 
 WORK_REQUEST_CAPABILITY = "organization.work.request"
 WORK_RESPOND_CAPABILITY = "organization.work.respond"
+# The directory-read capability lives with the directory tool, but the
+# collaboration baseline below needs it too, so it is named here (a plain
+# string, no import) to keep this pure policy module dependency-free.
+DIRECTORY_READ_CAPABILITY = "organization.directory.read"
+
+
+def collaboration_grant_specs() -> tuple[tuple[str, dict[str, Any]], ...]:
+    """The safe-by-default "can talk to colleagues" grant baseline.
+
+    Every ordinary agent should be able to *ask* a teammate for help without
+    a human first hand-granting an obscure capability — the product is a
+    company of agents that work together. Three allow grants make that real:
+
+    - ``organization.directory.read`` — find the right colleague by name,
+      role, or expertise (public identity only);
+    - ``organization.work.request`` scoped ``targets: any`` — open a peer
+      help request to any active teammate. This is safe by default: a work
+      request cannot make the target do anything the target is not already
+      permitted to do, it only *asks* (the target — or a human on its
+      behalf — accepts, declines, or asks for clarification), it creates at
+      most one task that stays visible and stoppable, and every structural
+      guard (no self-request, availability, depth, per-agent caps, and the
+      no-ping-pong rule) still runs in :func:`evaluate_work_request`;
+    - ``organization.work.respond`` — respond to requests addressed to you,
+      so an agent can be asked as well as ask.
+
+    Delegation (``organization.delegate``) is deliberately **not** here: it
+    transfers ownership/authority and stays deny-by-default.
+    """
+    return (
+        (DIRECTORY_READ_CAPABILITY, {}),
+        (WORK_REQUEST_CAPABILITY, {"targets": "any"}),
+        (WORK_RESPOND_CAPABILITY, {}),
+    )
+
 
 DEFAULT_MAX_REQUEST_DEPTH = 4
 DEFAULT_MAX_PENDING_REQUESTS_PER_AGENT = 10

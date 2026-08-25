@@ -1057,7 +1057,9 @@ async def test_an_empty_completion_never_becomes_an_empty_agent_bubble(
     note = messages[0]
     assert note.sender_id is None
     assert note.visibility == MessageVisibility.VISIBLE.value
-    assert note.content_json["text"] == "Projector finished without a reply."
+    assert note.content_json["text"] == (
+        "Projector could not complete this request and did not leave a reply."
+    )
     assert note.content_json["reason"] == "empty_completion"
 
 
@@ -1076,5 +1078,6 @@ async def test_the_empty_completion_note_carries_a_reported_summary(
 
     messages = await _final_messages(world)
     assert messages[0].content_json["text"] == (
-        "Projector finished without a reply. Its reported result: Looked up Connie's record."
+        "Projector could not complete this request and did not leave a reply. "
+        "Its reported result: Looked up Connie's record."
     )

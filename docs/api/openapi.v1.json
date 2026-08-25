@@ -1243,6 +1243,49 @@
         "title": "ApiKeyCreated",
         "type": "object"
       },
+      "ApiKeyIdentityOut": {
+        "description": "The key a caller presented, resolved to what it may actually do.\n\n``scopes`` is the *effective* set — already intersected with the key's\nrole ceiling and with its creator's role today — so a client can gate its\nUI on exactly what the next call will be allowed to do.",
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "prefix": {
+            "title": "Prefix",
+            "type": "string"
+          },
+          "role_ceiling": {
+            "$ref": "#/components/schemas/WorkspaceRole"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Scopes",
+            "type": "array"
+          },
+          "workspace_id": {
+            "format": "uuid",
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "prefix",
+          "workspace_id",
+          "role_ceiling",
+          "scopes"
+        ],
+        "title": "ApiKeyIdentityOut",
+        "type": "object"
+      },
       "ApiKeyOut": {
         "properties": {
           "created_at": {
@@ -2755,7 +2798,7 @@
           },
           "new_password": {
             "maxLength": 200,
-            "minLength": 12,
+            "minLength": 1,
             "title": "New Password",
             "type": "string"
           }
@@ -4309,6 +4352,37 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "IdentityResponse": {
+        "description": "Who is calling, and where they may act.\n\nThe same shape for both credentials, which is the point: a client boots\noff this one call without knowing which it holds. A session lists every\nworkspace the user belongs to and leaves ``api_key`` null; a key lists\nexactly the one workspace it is bound to and describes itself.",
+        "properties": {
+          "api_key": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiKeyIdentityOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "memberships": {
+            "items": {
+              "$ref": "#/components/schemas/MembershipOut"
+            },
+            "title": "Memberships",
+            "type": "array"
+          },
+          "user": {
+            "$ref": "#/components/schemas/UserOut"
+          }
+        },
+        "required": [
+          "user",
+          "memberships"
+        ],
+        "title": "IdentityResponse",
         "type": "object"
       },
       "ImportedSkillOut": {
@@ -6149,6 +6223,79 @@
           "computed_at"
         ],
         "title": "ObservedRateOut",
+        "type": "object"
+      },
+      "OnboardingStateIn": {
+        "properties": {
+          "last_step": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Step"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "in_progress",
+              "dismissed",
+              "completed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "OnboardingStateIn",
+        "type": "object"
+      },
+      "OnboardingStateOut": {
+        "properties": {
+          "last_step": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Step"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "in_progress",
+              "dismissed",
+              "completed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "OnboardingStateOut",
         "type": "object"
       },
       "OrgAgentNode": {
@@ -11210,6 +11357,86 @@
         "title": "WorkspaceCreate",
         "type": "object"
       },
+      "WorkspaceDeletionSummary": {
+        "description": "What deleting this workspace would destroy, counted from the database.\n\nEvery number is a live ``COUNT`` over the rows that the workspace's\n``ON DELETE CASCADE`` foreign keys would take with it, so the confirmation\ndialog can name what is actually at stake instead of a generic warning.\nAnything not counted here is still deleted; these are the categories a\nperson recognises.",
+        "properties": {
+          "agents": {
+            "title": "Agents",
+            "type": "integer"
+          },
+          "api_keys": {
+            "title": "Api Keys",
+            "type": "integer"
+          },
+          "connections": {
+            "title": "Connections",
+            "type": "integer"
+          },
+          "conversations": {
+            "title": "Conversations",
+            "type": "integer"
+          },
+          "members": {
+            "title": "Members",
+            "type": "integer"
+          },
+          "memories": {
+            "title": "Memories",
+            "type": "integer"
+          },
+          "messages": {
+            "title": "Messages",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "secrets": {
+            "title": "Secrets",
+            "type": "integer"
+          },
+          "skills": {
+            "title": "Skills",
+            "type": "integer"
+          },
+          "tasks": {
+            "title": "Tasks",
+            "type": "integer"
+          },
+          "teams": {
+            "title": "Teams",
+            "type": "integer"
+          },
+          "triggers": {
+            "title": "Triggers",
+            "type": "integer"
+          },
+          "workspace_id": {
+            "format": "uuid",
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "name",
+          "agents",
+          "teams",
+          "tasks",
+          "conversations",
+          "messages",
+          "memories",
+          "skills",
+          "connections",
+          "triggers",
+          "api_keys",
+          "secrets",
+          "members"
+        ],
+        "title": "WorkspaceDeletionSummary",
+        "type": "object"
+      },
       "WorkspaceOut": {
         "properties": {
           "created_at": {
@@ -11538,6 +11765,36 @@
         },
         "security": [],
         "summary": "Bootstrap Status",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/v1/auth/identity": {
+      "get": {
+        "description": "Who is calling, and where they may act — for either credential.\n\n`GET /auth/me` needs a browser session, so a client holding only an API\nkey has no way to learn its own user or which workspace it is bound to,\nand cannot render anything workspace-scoped. This endpoint closes that\ngap: it is the one call a desktop or CLI client makes on connect, before\nit knows which of the two credentials it holds.\n\nFor a key the reported role is the *effective* one — its ceiling capped\nby whatever its creator's role is today — and `scopes` is the effective\nset, so a client can grey out what the next call would refuse rather than\ndiscovering it through a `403`.\n\n**Auth.** A browser session or any API key, at any scope. A key sees only the one workspace it is bound to.",
+        "operationId": "identity_api_v1_auth_identity_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": []
+          }
+        ],
+        "summary": "Identity",
         "tags": [
           "auth"
         ]
@@ -16730,6 +16987,61 @@
         "x-jhin-scope": "chats:write"
       }
     },
+    "/api/v1/workspaces/{workspace_id}/deletion-summary": {
+      "get": {
+        "description": "What ``DELETE /workspaces/{workspace_id}`` would destroy, counted now.\n\nOwner-only for the same reason the delete is: nobody else can act on it,\nand a whole-workspace inventory is not a viewer's business. Read-only —\ncalling it changes nothing.\n\n**Scope.** An API key needs `workspace:read`.",
+        "operationId": "workspace_deletion_summary_api_v1_workspaces__workspace_id__deletion_summary_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceDeletionSummary"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": [
+              "workspace:read"
+            ]
+          }
+        ],
+        "summary": "Workspace Deletion Summary",
+        "tags": [
+          "workspaces"
+        ],
+        "x-jhin-scope": "workspace:read"
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/directory": {
       "get": {
         "description": "**Scope.** An API key needs `workspace:read`.",
@@ -19320,6 +19632,124 @@
           "model-providers"
         ],
         "x-jhin-scope": "models:write"
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/onboarding": {
+      "get": {
+        "description": "How far the *calling* user got through this workspace's introduction.\n\nViewer-level on purpose: everyone who can open the app gets oriented, and\nthe answer only ever describes the caller's own membership.\n\n**Scope.** An API key needs `workspace:read`.",
+        "operationId": "get_onboarding_api_v1_workspaces__workspace_id__onboarding_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OnboardingStateOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": [
+              "workspace:read"
+            ]
+          }
+        ],
+        "summary": "Get Onboarding",
+        "tags": [
+          "workspaces"
+        ],
+        "x-jhin-scope": "workspace:read"
+      },
+      "put": {
+        "description": "Record that the caller skipped, paused, or finished the introduction.\n\nNot audited: this is a personal preference about one person's own screen,\nwith no bearing on who may do what.\n\n**Scope.** An API key needs `workspace:settings`.",
+        "operationId": "set_onboarding_api_v1_workspaces__workspace_id__onboarding_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OnboardingStateIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OnboardingStateOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": [
+              "workspace:settings"
+            ]
+          }
+        ],
+        "summary": "Set Onboarding",
+        "tags": [
+          "workspaces"
+        ],
+        "x-jhin-scope": "workspace:settings"
       }
     },
     "/api/v1/workspaces/{workspace_id}/org-graph": {
@@ -23716,7 +24146,7 @@
       "name": "health"
     },
     {
-      "description": "Sign in, sign out, change a password, and read the current user. Session cookies only — an API key cannot mint or manage sessions.",
+      "description": "Sign in, sign out, change a password, and read the current user. Session cookies only — an API key cannot mint or manage sessions — except `GET /auth/identity`, which either credential may call to discover who it is and which workspace it may act in.",
       "name": "auth"
     },
     {

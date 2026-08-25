@@ -5,6 +5,8 @@
  * CSRF cookie set at login.
  */
 
+import { IS_DESKTOP } from "@/lib/desktop";
+
 const CSRF_COOKIE = "jhin_csrf";
 const CSRF_HEADER = "x-csrf-token";
 
@@ -85,6 +87,10 @@ function extractDetail(payload: unknown): string | null {
  * dead-end 403 into a hiccup the user never sees.
  */
 async function refreshCsrfCookie(): Promise<boolean> {
+  // The desktop app authenticates with a bearer key and holds no cookie at
+  // all, so a 403 there is a real refusal — a missing scope, most likely —
+  // and retrying it would only hide the reason behind a second failure.
+  if (IS_DESKTOP) return false;
   try {
     const response = await fetch("/api/v1/auth/me", { method: "GET" });
     return response.ok;

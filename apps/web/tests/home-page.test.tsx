@@ -297,6 +297,16 @@ describe("HomePage", () => {
     expect(screen.queryByText("Getting started")).toBeNull();
   });
 
+  it("keeps a way back into the guided introduction, for every role", () => {
+    // The checklist is admin-only and disappears once setup is done, so this
+    // is the one entry point that must survive both.
+    renderHome();
+    expect(screen.getByTestId("open-tour").textContent).toContain("Take the tour");
+    cleanup();
+    renderHome("member");
+    expect(screen.getByTestId("open-tour")).toBeTruthy();
+  });
+
   it("explains each empty section instead of showing blank space", () => {
     emptyButReady();
     renderHome();

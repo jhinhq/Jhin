@@ -39,6 +39,15 @@ _SEALED = _rule(None, None)
 
 ROUTE_SCOPES: dict[tuple[str, ...], RouteRule] = {
     (): _rule("workspace:read", "workspace:settings"),
+    # Owner-only by role (see the router); the scope keeps a key from reading
+    # a whole-workspace inventory on a read-everything token.
+    ("deletion-summary",): _rule("workspace:read", None),
+    # The caller's own first-run tour state. The write side takes the settings
+    # scope because there is no narrower workspace write scope — a strictly
+    # conservative choice: a browser session (which is how the tour is
+    # actually used) is unaffected, and a read-everything key cannot quietly
+    # mark somebody's introduction as finished.
+    ("onboarding",): _rule("workspace:read", "workspace:settings"),
     ("directory",): _rule("workspace:read", None),
     ("org-graph",): _rule("workspace:read", None),
     ("members",): _rule("members:read", "members:write"),

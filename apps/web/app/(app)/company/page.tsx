@@ -482,7 +482,7 @@ export default function CompanyPage() {
             {isAdmin ? (
               <p className="text-[13px] text-dim">
                 {view === "map"
-                  ? "Drag an agent by its handle onto a team to move them, or onto another agent to make that agent their manager. Every card also has a Move… menu."
+                  ? "Drag any agent card onto a team to move them, or onto another agent to make that agent their manager. Every card also has a Move… menu, and the grip on the left picks a card up with the keyboard."
                   : "Use the Move… button on an agent to put them on a team or under a manager."}
               </p>
             ) : null}

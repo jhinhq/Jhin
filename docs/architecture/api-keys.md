@@ -93,6 +93,27 @@ connection credential rotation and webhook signing secrets, and the draft
 provider verification endpoint that takes a raw provider key in its body. They
 are browser-session-only, forever.
 
+### The one route off the workspace prefix
+
+Everything above hangs off `/api/v1/workspaces/{workspace_id}`, which leaves a
+client holding only a key with no first call it can make: `GET /auth/me` needs
+a browser session, so the key knows neither who it acts as nor the workspace id
+that every other route is keyed by.
+
+`GET /api/v1/auth/identity` is that first call, and it takes either credential
+at any scope. A session gets every workspace the user belongs to and a null
+`api_key`; a key gets exactly the one workspace it is bound to, plus its own
+name, prefix, ceiling, and **effective** scopes. Because the scopes it reports
+are already intersected — by the ceiling and by the creator's role today — a
+client can grey out what the next call would refuse instead of discovering the
+limit through a `403`.
+
+It is the only operation outside the workspace prefix that a key may call, and
+the exception is written down twice: `_DUAL_CREDENTIAL_OPERATIONS` in
+`jhin_api.openapi` (which is what the published document declares) and the
+tests in `apps/api/tests/test_access_control.py`. Widening that set is meant to
+be a diff somebody reviews.
+
 ## The ceiling rule
 
 > **effective permission = intersection(key scopes, scopes allowed for the key's role ceiling)**

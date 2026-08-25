@@ -95,6 +95,20 @@ async def test_execute_step_runs_load_context_then_reason() -> None:
     assert request.reasoning is None
 
 
+async def test_execute_step_nudge_appends_a_final_user_message() -> None:
+    client = FakeClient()
+    snapshot = make_snapshot()
+    await execute_step(
+        client,
+        snapshot,
+        TaskContext(title="Do it", description=""),
+        nudge="You returned no reply. Answer the person now.",
+    )
+    messages = client.requests[0].messages
+    assert messages[-1].role == "user"
+    assert messages[-1].content == "You returned no reply. Answer the person now."
+
+
 async def test_execute_step_passes_profile_web_search_to_the_adapter() -> None:
     client = FakeClient()
     base = make_snapshot()

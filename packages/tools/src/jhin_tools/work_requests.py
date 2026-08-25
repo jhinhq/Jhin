@@ -473,6 +473,11 @@ async def accept_work_request(
     )
     task.temporal_workflow_id = f"task-{task.id}"
     session.add(task)
+    # Insert the task row before pointing work_request.created_task_id at it:
+    # the FK has no ORM relationship to drive save-ordering, so without this
+    # the UPDATE (autoflushed by the session.get in _status_message) can hit
+    # Postgres before the task INSERT and violate the FK constraint.
+    await session.flush()
     request.status = WorkRequestStatus.ACCEPTED.value
     request.created_task_id = task.id
     request.response = response[:4_000]
@@ -819,6 +824,14 @@ WORK_REQUEST_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor, ToolValidator | No
             required_capability=WORK_REQUEST_CAPABILITY,
             supports_approval=True,
             defers_scope=True,
+            # ``targets`` is a grant-scope dimension the validator interprets
+            # (subordinates | team | any), not an input field — declaring it
+            # lets the wizard's Collaboration preset set it, while the gateway
+            # extracts nothing (no such input key) and defers_scope means the
+            # generic evaluator never matches it; validate_request_work reads
+            # it from the grant. Missing defaults to "team" (see
+            # jhin_policy.work_requests).
+            scope_keys=("targets",),
         ),
         _request_work,
         validate_request_work,

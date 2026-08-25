@@ -1,6 +1,7 @@
 "use client";
 
-/** Workspace settings: rename (admin+) and the monthly model budget. People
+/** Workspace settings: rename (admin+), the monthly model budget, your own
+ * account password, and — for the owner alone — deleting the workspace. People
  * and roles live on their own page (docs/architecture/rbac.md). */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -8,6 +9,8 @@ import { ArrowRight, Users } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
 import { PageBody, PageHeader } from "@/components/app-shell";
+import { DangerZone } from "@/components/settings/danger-zone";
+import { PasswordCard } from "@/components/settings/password-card";
 import { Button, Card, ErrorNote, Field, Input, Spinner, focusRing } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import { useWorkspaceSpend } from "@/lib/hooks";
@@ -46,7 +49,7 @@ export default function SettingsPage() {
     <>
       <PageHeader
         title="Settings"
-        description="Name your workspace and keep an eye on what it spends."
+        description="Name your workspace, watch what it spends, and manage your own sign-in."
       />
       <PageBody className="max-w-3xl space-y-8">
         <Card as="section">
@@ -100,6 +103,11 @@ export default function SettingsPage() {
             <ArrowRight size={14} aria-hidden />
           </Link>
         </Card>
+
+        <PasswordCard />
+
+        {/* Last on the page, on purpose: nothing to scroll past it into. */}
+        <DangerZone />
       </PageBody>
     </>
   );

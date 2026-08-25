@@ -6,10 +6,14 @@ from __future__ import annotations
 from typing import Any
 
 from jhin_policy import (
+    DIRECTORY_READ_CAPABILITY,
+    WORK_REQUEST_CAPABILITY,
+    WORK_RESPOND_CAPABILITY,
     CoordinationSettings,
     Grant,
     GrantEffect,
     WorkRequestFacts,
+    collaboration_grant_specs,
     coordination_settings,
     evaluate_work_request,
 )
@@ -127,3 +131,29 @@ def test_malformed_settings_fall_back_to_defaults() -> None:
     )
     assert coordination_settings({"coordination": "nope"}) == CoordinationSettings()
     assert coordination_settings(None).max_request_depth == 4
+
+
+def test_collaboration_baseline_is_safe_by_default() -> None:
+    """The collaboration baseline grants directory read + ask + respond with
+    a cross-team (targets: any) request scope, and never delegation."""
+    specs = dict(collaboration_grant_specs())
+    assert set(specs) == {
+        DIRECTORY_READ_CAPABILITY,
+        WORK_REQUEST_CAPABILITY,
+        WORK_RESPOND_CAPABILITY,
+    }
+    assert specs[WORK_REQUEST_CAPABILITY] == {"targets": "any"}
+    assert "organization.delegate" not in specs
+
+    # The request grant it produces actually permits an ordinary cross-team
+    # ask (neither subordinate nor same team) through the pure evaluator.
+    grants = [Grant(capability=WORK_REQUEST_CAPABILITY, scope=specs[WORK_REQUEST_CAPABILITY])]
+    cross_team = WorkRequestFacts(
+        requester_agent_id=REQUESTER,
+        target_agent_id=TARGET,
+        target_exists=True,
+        target_active=True,
+        target_is_subordinate=False,
+        target_in_same_team=False,
+    )
+    assert evaluate_work_request(grants, cross_team).allowed

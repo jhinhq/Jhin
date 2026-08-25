@@ -38,6 +38,7 @@ signals a running task require member.
 | Read workspace, org chart, people directory | • | • | • | • | |
 | Rename workspace, change timezone/settings | – | – | • | • | |
 | Delete the workspace | – | – | – | • | Irreversible; owner only. |
+| Count what deleting it would destroy | – | – | – | • | The confirmation dialog's inventory. |
 | **People** | | | | | |
 | See members and pending invitations | • | • | • | • | Emails only, never credentials. |
 | Invite a viewer / member / admin | – | – | • | • | Admins may create admins — see below. |

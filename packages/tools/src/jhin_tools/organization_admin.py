@@ -6,8 +6,13 @@ model configuration — so these tools handle identity and placement only:
 
 - ``organization.create_agent`` (elevated → human approval under the default
   balanced policy) creates an ACTIVE agent with safe defaults: the workspace
-  default model profile, default run limits, a shape avatar, and **zero**
-  capability grants. Granting tools remains a human admin action.
+  default model profile, default run limits, a shape avatar, and the
+  safe-by-default *collaboration* baseline (find colleagues, ask peers for
+  help, respond to requests — :func:`jhin_policy.collaboration_grant_specs`).
+  This baseline is a fixed platform default, not a capability the calling
+  agent chooses; granting any *other* tool remains a human admin action, and
+  higher-authority capabilities (delegation, connectors, sandbox, agent
+  management) are never auto-granted.
 - ``organization.update_agent_profile`` (write) edits the public profile of
   an existing agent. The target's ``system_prompt`` may be changed only by a
   caller in the target's manager chain (enforced by a registered validator
@@ -33,7 +38,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from jhin_db.models import Agent, AgentTeamMembership, AuditEvent, Team
+from jhin_db.models import Agent, AgentCapabilityGrant, AgentTeamMembership, AuditEvent, Team
 from jhin_domain import (
     AVATAR_COLORS,
     AVATAR_SHAPES,
@@ -48,6 +53,7 @@ from jhin_policy import (
     PolicyDecision,
     RiskLevel,
     ToolDefinition,
+    collaboration_grant_specs,
 )
 from jhin_tools.builtin import ToolExecutionContext, ToolExecutor, ToolValidator
 from jhin_tools.errors import ToolExecutionError
@@ -330,6 +336,19 @@ async def _create_agent(ctx: ToolExecutionContext, payload: BaseModel) -> BaseMo
                 is_primary=True,
             )
         )
+    # Safe-by-default collaboration baseline (a fixed platform default, not
+    # an agent-chosen grant): the new teammate can find colleagues, ask peers
+    # for help, and answer requests. Nothing higher-authority is granted.
+    for capability, scope in collaboration_grant_specs():
+        session.add(
+            AgentCapabilityGrant(
+                workspace_id=ctx.workspace_id,
+                agent_id=agent.id,
+                capability=capability,
+                scope_json=dict(scope),
+                effect="allow",
+            )
+        )
     session.add(
         AuditEvent(
             workspace_id=ctx.workspace_id,
@@ -364,8 +383,9 @@ async def _create_agent(ctx: ToolExecutionContext, payload: BaseModel) -> BaseMo
             + (f" ({agent.role_title})" if agent.role_title else "")
             + placement
             + reporting
-            + ". It uses the workspace default model and has no tool "
-            "permissions yet; a workspace admin can grant tools."
+            + ". It uses the workspace default model and can find colleagues "
+            "and ask them for help; a workspace admin can grant any other "
+            "tools it needs."
         ),
     )
 
@@ -605,8 +625,9 @@ ORGANIZATION_ADMIN_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor, ToolValidato
                 "team_name (or team_id), a manager_name (or "
                 "manager_agent_id), a description, a public_purpose, and a "
                 "system_prompt. The new teammate starts active with the "
-                "workspace default model, a shape avatar, and NO tool "
-                "permissions; only a human admin can grant tools."
+                "workspace default model, a shape avatar, and only the "
+                "default ability to find colleagues and ask them for help; "
+                "only a human admin can grant any other tools."
             ),
             risk=RiskLevel.ELEVATED,
             input_model=CreateAgentInput,

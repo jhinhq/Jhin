@@ -31,6 +31,7 @@ from jhin_api.health.router import router as health_router
 from jhin_api.media.router import router as media_router
 from jhin_api.memory.router import router as memory_router
 from jhin_api.models.router import profiles_router, providers_router, spend_router
+from jhin_api.onboarding.router import router as onboarding_router
 from jhin_api.openapi import (
     CONTACT_INFO,
     DESCRIPTION,
@@ -419,6 +420,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(openapi_router)
     app.include_router(auth_router)
     app.include_router(workspaces_router)
+    app.include_router(onboarding_router)
     app.include_router(invitations_router)
     app.include_router(public_invitations_router)
     app.include_router(api_keys_router)

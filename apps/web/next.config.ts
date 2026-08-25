@@ -77,7 +77,29 @@ const productionOnlyHeaders = isProduction
     ]
   : [];
 
-const nextConfig: NextConfig = {
+/**
+ * The desktop shell (apps/desktop) ships this app as a static bundle and does
+ * the three server-side jobs itself: it serves the files, applies the security
+ * headers below, and proxies `/api/*` to whichever Jhin instance the user
+ * connected to — injecting their API key on the way through, which is why the
+ * key never has to exist inside this bundle's JavaScript.
+ *
+ * Static export supports none of `headers`, `redirects`, or `rewrites`, so the
+ * export build drops them and `apps/desktop/src/server.rs` reproduces each one.
+ * The two must stay in step; `apps/desktop/tests` pins the header set.
+ */
+const isDesktopExport = process.env.JHIN_DESKTOP === "1";
+
+const nextConfig: NextConfig = isDesktopExport
+  ? {
+      output: "export",
+      poweredByHeader: false,
+      // Deep routes become directories with an index.html, which is what the
+      // shell's file lookup expects.
+      trailingSlash: true,
+      images: { unoptimized: true },
+    }
+  : {
   // Self-contained server bundle consumed by the Docker runtime stage.
   output: "standalone",
   poweredByHeader: false,
@@ -115,4 +137,5 @@ const nextConfig: NextConfig = {
   },
 };
 
+export { contentSecurityPolicy, permissionsPolicy };
 export default nextConfig;

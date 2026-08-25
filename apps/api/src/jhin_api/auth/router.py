@@ -1,14 +1,17 @@
 """Route handlers for /api/v1/auth. Thin: all logic lives in the service."""
 
+from dataclasses import replace
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from jhin_api.auth import service
 from jhin_api.auth.schemas import (
+    ApiKeyIdentityOut,
     BootstrapRequest,
     BootstrapStatus,
     ChangePasswordRequest,
+    IdentityResponse,
     LoginRequest,
     MembershipOut,
     MeResponse,
@@ -17,6 +20,7 @@ from jhin_api.auth.schemas import (
 )
 from jhin_api.deps import (
     CurrentAuth,
+    CurrentPrincipal,
     DbSession,
     client_ip,
     client_ip_hash,
@@ -27,7 +31,7 @@ from jhin_api.security.csrf import csrf_protect
 from jhin_api.security.tokens import csrf_token_for_session
 from jhin_api.settings import Settings
 from jhin_db.models import User
-from jhin_domain import WorkspaceRole
+from jhin_domain import WorkspaceRole, role_satisfies, scopes_for_role
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
@@ -209,6 +213,86 @@ async def me(
 ) -> MeResponse:
     _refresh_csrf_cookie(request, response, settings)
     return await _me_response(db, auth.user)
+
+
+@router.get("/identity")
+async def identity(
+    request: Request,
+    response: Response,
+    db: DbSession,
+    settings: SettingsDep,
+    principal: CurrentPrincipal,
+) -> IdentityResponse:
+    """Who is calling, and where they may act — for either credential.
+
+    `GET /auth/me` needs a browser session, so a client holding only an API
+    key has no way to learn its own user or which workspace it is bound to,
+    and cannot render anything workspace-scoped. This endpoint closes that
+    gap: it is the one call a desktop or CLI client makes on connect, before
+    it knows which of the two credentials it holds.
+
+    For a key the reported role is the *effective* one — its ceiling capped
+    by whatever its creator's role is today — and `scopes` is the effective
+    set, so a client can grey out what the next call would refuse rather than
+    discovering it through a `403`.
+    """
+    key = principal.api_key
+    if key is None:
+        _refresh_csrf_cookie(request, response, settings)
+        session_identity = await _me_response(db, principal.user)
+        return IdentityResponse(
+            user=session_identity.user,
+            memberships=session_identity.memberships,
+            api_key=None,
+        )
+
+    memberships = await service.list_memberships(db, principal.user.id)
+    bound = next(
+        ((m, w) for m, w in memberships if m.workspace_id == key.workspace_id),
+        None,
+    )
+    if bound is None:
+        # The key is valid but its creator has since left the workspace, so
+        # every workspace-scoped call would 404. Say so plainly: the caller
+        # already holds a key for this workspace, so there is nothing here it
+        # could not already infer, and a vague error is a support ticket.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This key's creator is no longer a member of its workspace",
+        )
+    membership, workspace = bound
+
+    # The same capping ``require_workspace_role`` applies on every call: a key
+    # never outranks its creator's role today, so a demotion takes effect here
+    # too and the client is told the truth rather than the role at creation.
+    role = WorkspaceRole(membership.role)
+    if not role_satisfies(role, key.role_ceiling):
+        key = replace(key, role_ceiling=role, scopes=key.scopes & scopes_for_role(role))
+
+    return IdentityResponse(
+        user=UserOut(
+            id=principal.user.id,
+            email=principal.user.email,
+            display_name=principal.user.display_name,
+            created_at=principal.user.created_at,
+        ),
+        memberships=[
+            MembershipOut(
+                workspace_id=workspace.id,
+                workspace_name=workspace.name,
+                workspace_slug=workspace.slug,
+                role=key.role_ceiling,
+            )
+        ],
+        api_key=ApiKeyIdentityOut(
+            id=key.id,
+            name=key.name,
+            prefix=key.prefix,
+            workspace_id=key.workspace_id,
+            role_ceiling=key.role_ceiling,
+            scopes=sorted(key.scopes),
+        ),
+    )
 
 
 @router.post("/logout-all", status_code=200, dependencies=[Depends(csrf_protect)])

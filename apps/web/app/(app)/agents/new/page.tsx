@@ -40,6 +40,8 @@ import {
   ADVANCED_STEP,
   AGENT_TEMPLATES,
   applyTemplate,
+  applyToolPreset,
+  COLLABORATION_PRESET_ID,
   capabilitySummary,
   effectiveAvatar,
   hasManualGrants,
@@ -182,6 +184,23 @@ function WizardInner() {
   const [attempted, setAttempted] = useState(false);
   /** null = follow the state (open when tools were hand-picked). */
   const [advancedToolsOverride, setAdvancedToolsOverride] = useState<boolean | null>(null);
+
+  // Collaboration is on by default (the creator can toggle it off on the
+  // capabilities step): a new teammate should be able to find colleagues and
+  // ask them for help out of the box. Applied once, when the tool catalog
+  // first loads, against the live catalog so it registers as the preset — the
+  // render-phase "adjust state when data arrives" pattern (not an effect), so
+  // a workspace whose catalog lacks the tools simply gets nothing added.
+  const [collaborationSeeded, setCollaborationSeeded] = useState(false);
+  if (!collaborationSeeded && tools.data) {
+    const preset = TOOL_PRESETS.find((entry) => entry.id === COLLABORATION_PRESET_ID);
+    setCollaborationSeeded(true);
+    if (preset) {
+      setState((previous) =>
+        applyToolPreset(previous, preset, tools.data ?? [], connections.data ?? []),
+      );
+    }
+  }
 
   const patch = (changes: Partial<WizardState>) =>
     setState((previous) => ({ ...previous, ...changes }));

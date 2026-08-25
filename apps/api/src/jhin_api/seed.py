@@ -44,6 +44,7 @@ from jhin_domain import (
     new_uuid7,
 )
 from jhin_observability import noop_tracer
+from jhin_policy import collaboration_grant_specs
 from jhin_secrets import SecretCrypto, SecretStore, load_master_key
 from jhin_secrets.crypto import MasterKeyError
 
@@ -129,6 +130,28 @@ def _seed_delegation_grants(
                 effect="allow",
             )
         )
+
+
+def _seed_collaboration_grants(
+    session: AsyncSession, workspace_id: UUID, agents: list[Agent]
+) -> None:
+    """Safe-by-default collaboration baseline for every seeded teammate so a
+    fresh workspace demonstrates agents that work together out of the box:
+    find colleagues, ask peers for help, and answer requests
+    (:func:`jhin_policy.collaboration_grant_specs`). Delegation stays
+    deny-by-default and is granted separately in ``_seed_delegation_grants``.
+    """
+    for agent in agents:
+        for capability, scope in collaboration_grant_specs():
+            session.add(
+                AgentCapabilityGrant(
+                    workspace_id=workspace_id,
+                    agent_id=agent.id,
+                    capability=capability,
+                    scope_json=dict(scope),
+                    effect="allow",
+                )
+            )
 
 
 def _load_crypto() -> SecretCrypto | None:
@@ -388,6 +411,7 @@ async def seed(session: AsyncSession) -> str:
         )
 
     _seed_delegation_grants(session, workspace.id, cto=cto, swe=swe, qa=qa)
+    _seed_collaboration_grants(session, workspace.id, [cto, swe, qa, director, blogger])
 
     crypto = _load_crypto()
     if crypto is not None:

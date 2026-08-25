@@ -314,9 +314,19 @@ def _turn_to_message(turn: ConversationTurn) -> ModelMessage:
 
 
 def build_messages(
-    snapshot: AgentExecutionSnapshot, task: TaskContext, *, has_tools: bool = False
+    snapshot: AgentExecutionSnapshot,
+    task: TaskContext,
+    *,
+    has_tools: bool = False,
+    nudge: str = "",
 ) -> tuple[ModelMessage, ...]:
-    """Full message list for one reasoning step."""
+    """Full message list for one reasoning step.
+
+    ``nudge`` appends one final user message (used by the empty-completion
+    reflective retry: the first pass returned nothing, so we ask the model
+    once more to reply in plain language). It is platform text, not colleague
+    or task input, so it is added after the history and instructions.
+    """
     system_prompt = compose_system_prompt(
         snapshot,
         has_tools=has_tools,
@@ -342,4 +352,6 @@ def build_messages(
 
     for instruction in task.user_instructions:
         messages.append(ModelMessage(role="user", content=f"Additional instruction: {instruction}"))
+    if nudge:
+        messages.append(ModelMessage(role="user", content=nudge))
     return tuple(messages)

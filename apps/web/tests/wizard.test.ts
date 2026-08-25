@@ -10,6 +10,7 @@ import {
   AGENT_TEMPLATES,
   applyTemplate,
   applyToolPreset,
+  COLLABORATION_PRESET_ID,
   capabilitySummary,
   effectiveAvatar,
   hasManualGrants,
@@ -358,6 +359,81 @@ const webTools: ToolInfo[] = [
   },
 ];
 
+const collaborationTools: ToolInfo[] = [
+  {
+    name: "organization.directory.search",
+    description: "Find colleagues",
+    risk: "read",
+    required_capability: "organization.directory.read",
+    supports_approval: false,
+    scope_keys: [],
+    required_grant_scope_keys: [],
+    input_schema: {},
+  },
+  {
+    name: "organization.request_work",
+    description: "Ask a colleague for help",
+    risk: "write",
+    required_capability: "organization.work.request",
+    supports_approval: true,
+    scope_keys: ["targets"],
+    required_grant_scope_keys: [],
+    input_schema: {},
+  },
+  {
+    name: "organization.respond_work_request",
+    description: "Respond to a request",
+    risk: "write",
+    required_capability: "organization.work.respond",
+    supports_approval: true,
+    scope_keys: [],
+    required_grant_scope_keys: [],
+    input_schema: {},
+  },
+];
+
+describe("collaboration preset", () => {
+  const preset = TOOL_PRESETS.find((p) => p.id === COLLABORATION_PRESET_ID)!;
+
+  it("is the safe-by-default baseline granting find/ask/respond, never delegation", () => {
+    expect(preset).toBeDefined();
+    const applied = applyToolPreset(EMPTY_WIZARD, preset, collaborationTools, []);
+    expect(new Set(applied.grantToolNames)).toEqual(
+      new Set([
+        "organization.directory.search",
+        "organization.request_work",
+        "organization.respond_work_request",
+      ]),
+    );
+    expect(isPresetApplied(applied, preset, collaborationTools)).toBe(true);
+    const payloads = grantPayloadsForTools(applied, collaborationTools);
+    expect(payloads).toContainEqual({
+      capability: "organization.work.request",
+      scope: { targets: "any" },
+      effect: "allow",
+    });
+    expect(payloads).toContainEqual({
+      capability: "organization.directory.read",
+      scope: {},
+      effect: "allow",
+    });
+    expect(payloads).toContainEqual({
+      capability: "organization.work.respond",
+      scope: {},
+      effect: "allow",
+    });
+    expect(payloads.some((p) => p.capability === "organization.delegate")).toBe(false);
+  });
+
+  it("toggles off cleanly, leaving no grants or scopes behind", () => {
+    const on = applyToolPreset(EMPTY_WIZARD, preset, collaborationTools, []);
+    const off = removeToolPreset(on, preset);
+    expect(off.grantToolNames).toEqual([]);
+    expect(off.grantScopes).toEqual({});
+    expect(isPresetApplied(off, preset, collaborationTools)).toBe(false);
+  });
+});
+
 function renderWizard(
   toolCatalog: ToolInfo[] = wizardTools,
   connectionList: Record<string, unknown>[] = [
@@ -470,6 +546,24 @@ describe("agent wizard rendered grants", () => {
         effect: "allow",
       },
     ]);
+  });
+
+  it("applies the collaboration baseline to a new agent by default", async () => {
+    const grantBodies = renderWizard(collaborationTools, []);
+    const name = await screen.findByLabelText("Agent name");
+    fireEvent.change(name, { target: { value: "Bisby" } });
+    fireEvent.click(screen.getByTestId(`wizard-step-${REVIEW_STEP}`));
+    fireEvent.click(screen.getByRole("button", { name: "Create agent" }));
+    await waitFor(() => expect(grantBodies).toHaveLength(3));
+    expect(new Set(grantBodies.map((g) => g.capability))).toEqual(
+      new Set([
+        "organization.directory.read",
+        "organization.work.request",
+        "organization.work.respond",
+      ]),
+    );
+    const request = grantBodies.find((g) => g.capability === "organization.work.request");
+    expect(request?.scope).toEqual({ targets: "any" });
   });
 });
 

@@ -8,35 +8,52 @@
 import { CheckCircle2, Circle } from "lucide-react";
 import Link from "next/link";
 import { Button } from "@/components/ui";
-import { useAgents, useConnections, useModelProfiles } from "@/lib/hooks";
+import { useAgents, useConnections, useConversations, useModelProfiles } from "@/lib/hooks";
 
 export interface SetupStatus {
   isPending: boolean;
   hasModel: boolean;
   hasAgents: boolean;
   hasApps: boolean;
+  /** Whether anyone has started a chat yet. Always false unless the caller
+   * asked for it with `includeChats`; the checklist does not need it. */
+  hasChats: boolean;
   /** A model, at least one active agent, and at least one connected app. */
   complete: boolean;
 }
 
 /** Whether the workspace still needs first-run setup. Connections are an
- * admin-only endpoint, so `hasApps` is only meaningful for admins. */
-export function useSetupStatus(workspaceId: string, isAdmin: boolean): SetupStatus {
+ * admin-only endpoint, so `hasApps` is only meaningful for admins.
+ *
+ * `includeChats` is opt-in because only the guided introduction asks whether a
+ * first chat exists, and the checklist on three other screens should not pay
+ * for a conversation fetch it never reads. */
+export function useSetupStatus(
+  workspaceId: string,
+  isAdmin: boolean,
+  { includeChats = false }: { includeChats?: boolean } = {},
+): SetupStatus {
   const profiles = useModelProfiles(workspaceId);
   const agents = useAgents(workspaceId);
   const connections = useConnections(workspaceId, isAdmin);
+  const conversations = useConversations(workspaceId, { limit: 1 }, includeChats);
 
   const hasModel = (profiles.data?.length ?? 0) > 0;
   const hasAgents = (agents.data ?? []).some((agent) => agent.status === "active");
   const hasApps = (connections.data?.length ?? 0) > 0;
+  const hasChats = includeChats && (conversations.data?.items.length ?? 0) > 0;
   const isPending =
-    profiles.isPending || agents.isPending || (isAdmin && connections.isPending);
+    profiles.isPending ||
+    agents.isPending ||
+    (isAdmin && connections.isPending) ||
+    (includeChats && conversations.isPending);
 
   return {
     isPending,
     hasModel,
     hasAgents,
     hasApps,
+    hasChats,
     complete: hasModel && hasAgents && (!isAdmin || hasApps),
   };
 }

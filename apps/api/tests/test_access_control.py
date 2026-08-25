@@ -26,6 +26,7 @@ from jhin_api.access.router import (
     public_invitations_router,
 )
 from jhin_api.agents.router import router as agents_router
+from jhin_api.auth.router import router as auth_router
 from jhin_api.deps import (
     DbSession,
     Principal,
@@ -141,6 +142,7 @@ async def access() -> AsyncIterator[Harness]:
         return await call_next(request)
 
     for router in (
+        auth_router,
         workspaces_router,
         invitations_router,
         public_invitations_router,
@@ -944,3 +946,124 @@ async def test_hammering_a_bad_invitation_token_is_eventually_locked_out(
     ]
     assert statuses[0] == 404
     assert statuses[-1] == 429
+
+
+# --------------------------------------------------------------------------
+# Identity
+# --------------------------------------------------------------------------
+#
+# `GET /auth/me` is session-only, so a key-holding client (the desktop app,
+# a CLI) has no first call it can make: it knows neither its user nor the
+# workspace every other route is keyed by. `GET /auth/identity` is that call,
+# and what matters is that it reports the *effective* authority rather than
+# whatever was requested at creation.
+
+IDENTITY = "/api/v1/auth/identity"
+
+
+async def test_a_key_can_read_its_own_identity(access: Harness) -> None:
+    created = await _mint(access, WorkspaceRole.ADMIN, ["chats:read", "tasks:read"])
+    response = await access.client.get(IDENTITY, headers=_bearer(created["key"]))
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["user"]["email"] == access.users["admin"].email
+    # Exactly the workspace the key is bound to — never the creator's others.
+    assert [m["workspace_id"] for m in body["memberships"]] == [str(access.workspace.id)]
+    assert body["memberships"][0]["workspace_name"] == access.workspace.name
+    assert body["api_key"]["prefix"] == created["api_key"]["prefix"]
+    assert body["api_key"]["workspace_id"] == str(access.workspace.id)
+    assert set(body["api_key"]["scopes"]) == {"chats:read", "tasks:read"}
+
+
+async def test_identity_is_reachable_at_any_scope(access: Harness) -> None:
+    """Not scope-gated: a key that can do almost nothing can still boot a client."""
+    created = await _mint(access, WorkspaceRole.VIEWER, ["chats:read"])
+    response = await access.client.get(IDENTITY, headers=_bearer(created["key"]))
+    assert response.status_code == 200, response.text
+    assert response.json()["api_key"]["scopes"] == ["chats:read"]
+
+
+async def test_identity_never_echoes_the_key_itself(access: Harness) -> None:
+    created = await _mint(access, WorkspaceRole.ADMIN, ["agents:read"])
+    response = await access.client.get(IDENTITY, headers=_bearer(created["key"]))
+    assert created["key"] not in response.text
+
+
+async def test_a_session_sees_every_workspace_and_no_key(access: Harness) -> None:
+    access.act_as(WorkspaceRole.ADMIN)
+    response = await access.client.get(IDENTITY)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["api_key"] is None
+    assert [m["workspace_id"] for m in body["memberships"]] == [str(access.workspace.id)]
+
+
+async def test_the_reported_membership_role_is_the_keys_ceiling(
+    access: Harness,
+) -> None:
+    """The role a client gates its UI on is the key's, not the workspace's top role.
+
+    A viewer's key in a workspace that also has owners must render a viewer.
+    """
+    created = await _mint(access, WorkspaceRole.VIEWER, ["chats:read"])
+    response = await access.client.get(IDENTITY, headers=_bearer(created["key"]))
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["api_key"]["role_ceiling"] == "viewer"
+    assert body["memberships"][0]["role"] == "viewer"
+
+
+async def test_demoting_the_creator_narrows_what_identity_reports(
+    access: Harness,
+) -> None:
+    """The same capping every other route applies, so the client is told the truth."""
+    created = await _mint(access, WorkspaceRole.ADMIN, ["agents:read", "agents:admin"])
+    assert set(created["api_key"]["scopes"]) == {"agents:read", "agents:admin"}
+
+    membership = await access.session.scalar(
+        select(WorkspaceMembership).where(
+            WorkspaceMembership.workspace_id == access.workspace.id,
+            WorkspaceMembership.user_id == access.users["admin"].id,
+        )
+    )
+    assert membership is not None
+    membership.role = WorkspaceRole.MEMBER.value
+    await access.session.commit()
+
+    response = await access.client.get(IDENTITY, headers=_bearer(created["key"]))
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["api_key"]["role_ceiling"] == "member"
+    # `agents:admin` needs admin, so it is gone rather than merely unusable.
+    assert body["api_key"]["scopes"] == ["agents:read"]
+
+
+async def test_a_key_whose_creator_left_the_workspace_is_told_why(
+    access: Harness,
+) -> None:
+    created = await _mint(access, WorkspaceRole.ADMIN, ["agents:read"])
+
+    membership = await access.session.scalar(
+        select(WorkspaceMembership).where(
+            WorkspaceMembership.workspace_id == access.workspace.id,
+            WorkspaceMembership.user_id == access.users["admin"].id,
+        )
+    )
+    assert membership is not None
+    await access.session.delete(membership)
+    await access.session.commit()
+
+    response = await access.client.get(IDENTITY, headers=_bearer(created["key"]))
+    assert response.status_code == 403, response.text
+    assert "no longer a member" in response.json()["detail"]
+
+
+async def test_a_bad_key_never_falls_back_to_a_session_on_identity(
+    access: Harness,
+) -> None:
+    access.act_as(WorkspaceRole.ADMIN)
+    response = await access.client.get(IDENTITY, headers=_bearer("jhin_deadbeef_nope"))
+    assert response.status_code == 401, response.text

@@ -34,6 +34,35 @@ Authorization and safety).
   status only — never system prompts, grants, model config, memories,
   transcripts, or conversation text.
 
+## Default collaboration grants (safe-by-default)
+
+A company of agents that work together is the product promise, so an ordinary
+agent must be able to *ask a colleague for help without a human first
+hand-granting an obscure capability*. Every agent therefore starts with a
+fixed **collaboration baseline** of three allow grants
+(`jhin_policy.collaboration_grant_specs`, applied by the wizard's
+"Collaboration" preset, the `organization.create_agent` tool, and the dev
+seed):
+
+| capability | scope | why it is safe by default |
+| --- | --- | --- |
+| `organization.directory.read` | — | public identity only (no prompts, grants, model config, memories, or transcripts). |
+| `organization.work.request` | `targets: any` | a request only *asks*. It cannot make the target do anything the target is not already permitted to do (the target's own grants still gate everything it then does); the target — or a human on its behalf — accepts, declines, or asks for clarification; an accept creates at most **one** task that stays visible in the conversation/Activity and stoppable; and every structural guard (no self-request, target active/available, depth, per-agent open/rate/active-task caps, and no ping-pong) runs in `evaluate_work_request` regardless of the grant. `targets: any` lets a small company ask across teams; the missing-scope default remains `team`. |
+| `organization.work.respond` | — | structurally limited to the request's target agent, so an agent can be asked as well as ask. |
+
+`organization.delegate` is deliberately **excluded**: delegation transfers
+ownership/authority (a blocking parent wait, a child in the lineage), so it
+stays deny-by-default with the restrictive delegation permission model.
+
+This is a *platform* default, not a capability an agent chooses: the calling
+agent cannot pick these grants, `organization.create_agent` is still
+elevated → human approval, and no higher-authority capability (delegation,
+connectors, sandbox, agent management) is ever auto-granted. Existing
+workspaces are **not** mass-granted by migration (that would silently change
+authority and surprise admins); an admin adds the baseline per agent through
+the normal grants API, or toggles the "Collaboration" preset on the agent's
+Tools tab.
+
 ## Data model (migration `0018`, down revision `0017`; parking in `0019`)
 
 Migration `0019` (down revision `0018`) adds the nullable, indexed

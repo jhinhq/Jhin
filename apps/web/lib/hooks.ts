@@ -32,9 +32,11 @@ import type {
   Grant,
   Invitation,
   Member,
-  MeResponse,
+  IdentityResponse,
   ModelProfile,
   ModelProvider,
+  OnboardingState,
+  OnboardingStatus,
   ProviderBalance,
   PricingStatus,
   ProviderModels,
@@ -58,24 +60,33 @@ import type {
   Trigger,
   TriggerInvocation,
   WorkspaceDetail,
+  WorkspaceDeletionSummary,
   WorkspaceSpend,
 } from "@/lib/types";
 
 /** Poll cadence for live task/run views. */
 const LIVE_POLL_MS = 2000;
 
-export function useMe() {
+/**
+ * Who is signed in and where they may act.
+ *
+ * `/auth/identity` rather than `/auth/me` because the desktop app authenticates
+ * with an API key, which `/auth/me` refuses — see docs/architecture/api-keys.md.
+ * The response is a superset, so the browser build reads the same call.
+ */
+export function useIdentity() {
   return useQuery({
-    queryKey: ["me"],
-    queryFn: () => api<MeResponse>("/api/v1/auth/me"),
+    queryKey: ["identity"],
+    queryFn: () => api<IdentityResponse>("/api/v1/auth/identity"),
   });
 }
 
-export function useBootstrapStatus() {
+export function useBootstrapStatus(enabled = true) {
   return useQuery({
     queryKey: ["bootstrap-status"],
     queryFn: () => api<BootstrapStatus>("/api/v1/auth/bootstrap-status"),
     staleTime: 0,
+    enabled,
   });
 }
 
@@ -169,6 +180,22 @@ export function useWorkspaceDetail(workspaceId: string) {
   return useQuery({
     queryKey: ["workspace", workspaceId],
     queryFn: () => api<WorkspaceDetail>(`/api/v1/workspaces/${workspaceId}`),
+  });
+}
+
+/** Owner-only inventory of what deleting this workspace would destroy. Fetched
+ *  only when the confirmation dialog is open — nobody needs twelve COUNTs to
+ *  render a Settings page — and never cached, because a stale count on an
+ *  irreversible decision is worse than a spinner. */
+export function useWorkspaceDeletionSummary(workspaceId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ["workspace-deletion-summary", workspaceId],
+    queryFn: () =>
+      api<WorkspaceDeletionSummary>(`/api/v1/workspaces/${workspaceId}/deletion-summary`),
+    enabled,
+    gcTime: 0,
+    staleTime: 0,
+    retry: false,
   });
 }
 
@@ -539,6 +566,7 @@ export function useInvalidateOrg(workspaceId: string) {
 export function useConversations(
   workspaceId: string,
   params: Record<string, string | number | undefined> = {},
+  enabled = true,
 ) {
   return useQuery({
     queryKey: ["conversations", workspaceId, params],
@@ -546,6 +574,7 @@ export function useConversations(
       api<ConversationList>(`/api/v1/workspaces/${workspaceId}/conversations`, { params }),
     placeholderData: (previous) => previous,
     refetchInterval: 5_000,
+    enabled,
   });
 }
 
@@ -837,5 +866,46 @@ export function useInvalidateSkillSources(workspaceId: string) {
   const queryClient = useQueryClient();
   return () => {
     void queryClient.invalidateQueries({ queryKey: ["skill-sources", workspaceId] });
+  };
+}
+
+/**
+ * Where the signed-in user got to in this workspace's guided introduction.
+ *
+ * Server-side state, not local storage: skipping the tour on a laptop has to
+ * skip it on a phone too, and clearing a browser must not resurrect it. Never
+ * retried — if this call fails, the tour simply stays shut, which is the safe
+ * way for it to fail.
+ */
+export function useOnboarding(workspaceId: string) {
+  return useQuery({
+    queryKey: ["onboarding", workspaceId],
+    queryFn: () => api<OnboardingState>(`/api/v1/workspaces/${workspaceId}/onboarding`),
+    staleTime: Infinity,
+    retry: false,
+  });
+}
+
+/**
+ * Record that the tour was skipped, paused, or finished.
+ *
+ * The cache is written first and the request is not awaited: closing an
+ * overlay must never wait on the network. The worst case if the write fails is
+ * that the introduction offers itself once more.
+ */
+export function useSaveOnboarding(workspaceId: string) {
+  const queryClient = useQueryClient();
+  return (status: OnboardingStatus, lastStep: string | null) => {
+    queryClient.setQueryData<OnboardingState>(["onboarding", workspaceId], {
+      status,
+      last_step: lastStep,
+      updated_at: new Date().toISOString(),
+    });
+    void api<OnboardingState>(`/api/v1/workspaces/${workspaceId}/onboarding`, {
+      method: "PUT",
+      body: { status, last_step: lastStep },
+    }).catch(() => {
+      void queryClient.invalidateQueries({ queryKey: ["onboarding", workspaceId] });
+    });
   };
 }

@@ -23,6 +23,28 @@ export interface MeResponse {
   memberships: MembershipOut[];
 }
 
+/** The key a caller presented, as `/auth/identity` reports it back. */
+export interface ApiKeyIdentity {
+  id: string;
+  name: string;
+  prefix: string;
+  workspace_id: string;
+  role_ceiling: WorkspaceRole;
+  /** Effective scopes: already capped by the ceiling and the creator's role today. */
+  scopes: string[];
+}
+
+/**
+ * `GET /auth/identity` — the one boot call, for either credential. A session
+ * lists every workspace and leaves `api_key` null; an API key lists only the
+ * workspace it is bound to and describes itself.
+ */
+export interface IdentityResponse {
+  user: UserOut;
+  memberships: MembershipOut[];
+  api_key: ApiKeyIdentity | null;
+}
+
 export interface BootstrapStatus {
   needs_bootstrap: boolean;
 }
@@ -35,6 +57,26 @@ export interface Workspace {
   default_timezone: string;
   created_at: string;
   updated_at: string;
+}
+
+/** What deleting a workspace would destroy, counted live by the API. Every
+ *  field is a real row count, so the confirmation dialog can name what is at
+ *  stake instead of warning in the abstract. */
+export interface WorkspaceDeletionSummary {
+  workspace_id: string;
+  name: string;
+  agents: number;
+  teams: number;
+  tasks: number;
+  conversations: number;
+  messages: number;
+  memories: number;
+  skills: number;
+  connections: number;
+  triggers: number;
+  api_keys: number;
+  secrets: number;
+  members: number;
 }
 
 export interface Member {
@@ -1494,4 +1536,17 @@ export interface ApiKeyUsageEntry {
 export interface ApiKeyUsagePage {
   items: ApiKeyUsageEntry[];
   total: number;
+}
+
+/**
+ * How far one person got through this workspace's first-run introduction.
+ * Only `pending` opens the tour by itself; every other state leaves it
+ * available on demand but silent.
+ */
+export type OnboardingStatus = "pending" | "in_progress" | "dismissed" | "completed";
+
+export interface OnboardingState {
+  status: OnboardingStatus;
+  last_step: string | null;
+  updated_at: string | null;
 }

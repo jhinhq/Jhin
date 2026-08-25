@@ -29,7 +29,7 @@ from jhin_agent_worker.skills_activities import skills_prompt_context
 from jhin_agents import AgentExecutionSnapshot
 from jhin_agents.context import ConversationTurn, TaskContext
 from jhin_agents.graph import NodeTransition
-from jhin_agents.runtime import estimate_cost_micros, execute_step
+from jhin_agents.runtime import StepOutcome, estimate_cost_micros, execute_step
 from jhin_db.budget import budget_denial_message
 from jhin_db.models import Agent, AgentRun, AuditEvent, Message, RunEvent, Task, Workspace
 from jhin_domain import (
@@ -52,6 +52,7 @@ from jhin_models import (
     ModelClient,
     ModelProviderError,
     ModelToolCall,
+    ModelUsage,
     ToolSchema,
     build_model_client,
 )
@@ -119,6 +120,49 @@ _USAGE_VALIDATION_MEASUREMENT = 0
 logger = get_logger(__name__)
 
 BoundedProviderText = Annotated[str, StringConstraints(max_length=_MAX_PROVIDER_TEXT_CHARS)]
+
+# One bounded reflective retry for the empty-completion case: when the first
+# model pass on a tool-free step returns no text at all (the failure behind
+# "finished without a reply"), we ask once more — with no tools, so the model
+# must answer in words — to reply in plain language and, if it cannot do what
+# was asked, explain why and suggest a next step. This lives inside the
+# reasoning activity before the reasoning/manifest pair is persisted, so it is
+# replay-safe: once the pair is committed the activity short-circuits on
+# reload and never calls the model again; only a pre-commit activity retry
+# (worker crash) re-runs it, exactly like the first call already does.
+_EMPTY_COMPLETION_NUDGE = (
+    "You returned no reply. Answer the person now, in plain language. If you "
+    "cannot do what they asked, say so and explain what you can and cannot "
+    "do, then suggest a concrete next step (for example, who could help, or "
+    "which permission an admin would need to enable). Do not call any tool — "
+    "just reply."
+)
+
+
+def _merge_empty_retry(first: StepOutcome, retry: StepOutcome) -> StepOutcome:
+    """Fold a reflective-retry outcome onto the empty first pass.
+
+    The retry's text/finish drive the step (it is the reply the reader sees),
+    but token usage and latency are summed so the run's cost accounting
+    reflects both model calls, and the transitions of both are kept for the
+    timeline. The retry runs with no tools, so ``tool_calls`` is empty and the
+    step stays a tool-free final step.
+    """
+    return StepOutcome(
+        text=retry.text,
+        done=retry.done,
+        finish_reason=retry.finish_reason,
+        model=retry.model or first.model,
+        usage=ModelUsage(
+            input_tokens=first.usage.input_tokens + retry.usage.input_tokens,
+            output_tokens=first.usage.output_tokens + retry.usage.output_tokens,
+            cached_tokens=first.usage.cached_tokens + retry.usage.cached_tokens,
+        ),
+        latency_ms=first.latency_ms + retry.latency_ms,
+        provider_request_id=retry.provider_request_id or first.provider_request_id,
+        transitions=tuple(first.transitions) + tuple(retry.transitions),
+        tool_calls=retry.tool_calls,
+    )
 
 
 class AgentStepUsage(BaseModel):
@@ -1277,24 +1321,38 @@ class AgentReasoningActivities:
                 ) from None
             del api_key
 
+            task_context = TaskContext(
+                title=task.title,
+                description=task.description,
+                history=history,
+                user_instructions=tuple(params.user_instructions),
+                organization_context=organization,
+                manager_context=manager,
+                memory_context=memory.text,
+                skills_context=skills,
+                time_context=time_context,
+                interlocutor_context=interlocutor_context,
+            )
             try:
                 outcome = await execute_step(
                     client,
                     snapshot,
-                    TaskContext(
-                        title=task.title,
-                        description=task.description,
-                        history=history,
-                        user_instructions=tuple(params.user_instructions),
-                        organization_context=organization,
-                        manager_context=manager,
-                        memory_context=memory.text,
-                        skills_context=skills,
-                        time_context=time_context,
-                        interlocutor_context=interlocutor_context,
-                    ),
+                    task_context,
                     tools=to_model_tool_schemas(params.advertised_tools),
                 )
+                # Empty-completion reflective retry: a tool-free step whose
+                # text is blank would surface only as the system backstop
+                # note. Give the model one more bounded pass (no tools) to
+                # actually reply before falling back.
+                if not outcome.tool_calls and not outcome.text.strip():
+                    retry = await execute_step(
+                        client,
+                        snapshot,
+                        task_context,
+                        tools=(),
+                        nudge=_EMPTY_COMPLETION_NUDGE,
+                    )
+                    outcome = _merge_empty_retry(outcome, retry)
             except ModelProviderError as error:
                 # A stable provider error class (e.g. insufficient_funds)
                 # becomes the failure type so the run record can carry it.

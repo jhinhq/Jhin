@@ -31,6 +31,8 @@ import {
   type CollisionDetection,
   type DragEndEvent,
   type DragStartEvent,
+  type DraggableAttributes,
+  type DraggableSyntheticListeners,
 } from "@dnd-kit/core";
 import { GripVertical } from "lucide-react";
 import { createContext, useContext, useMemo, useState } from "react";
@@ -71,6 +73,22 @@ function useDragState(): DragState {
   if (!value) throw new Error("Org drag pieces must render inside OrgDnd");
   return value;
 }
+
+/**
+ * The one draggable per agent row lives on the row wrapper (so the *whole
+ * card* is the grab target for a pointer, not a hard-to-hit 6px handle), and
+ * its keyboard activator lives on the leading grip button (so a keyboard user
+ * still has one focusable "pick me up" control that doesn't swallow the card's
+ * click-to-open or its Move… menu). This context is how the row hands the grip
+ * the pieces it needs without a second `useDraggable`.
+ */
+interface RowDrag {
+  attributes: DraggableAttributes;
+  listeners: DraggableSyntheticListeners;
+  setActivatorNodeRef: (node: HTMLElement | null) => void;
+}
+
+const RowDragContext = createContext<RowDrag | null>(null);
 
 /**
  * Agent rows sit inside team sections, and team sections nest, so several
@@ -209,23 +227,26 @@ export function OrgDnd({
   );
 }
 
+/**
+ * The visible grip: a hover/focus cue that the card can be dragged, and the
+ * single keyboard activator for the row. Pointer dragging is handled by the
+ * row wrapper (the whole card), so this button only needs the keyboard
+ * listener — giving it `onPointerDown` too would start the drag twice, once
+ * here and once via the bubble to the wrapper.
+ */
 function DragHandle({ agent }: { agent: OrgAgentNode }) {
-  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
-    id: `drag:${agent.id}`,
-    data: { agentId: agent.id },
-    attributes: { roleDescription: "org chart card" },
-  });
+  const row = useContext(RowDragContext);
+  if (!row) return null;
+  const { attributes, listeners, setActivatorNodeRef } = row;
   return (
     <button
-      ref={setNodeRef}
+      ref={setActivatorNodeRef}
       type="button"
       {...attributes}
-      {...listeners}
+      onKeyDown={listeners?.onKeyDown as React.KeyboardEventHandler<HTMLButtonElement> | undefined}
       title={`Drag ${agent.name} to another team or manager`}
       style={{ touchAction: "none" }}
-      className={`inline-flex h-8 w-6 shrink-0 cursor-grab items-center justify-center rounded-lg text-faint transition-colors hover:bg-hover hover:text-dim ${focusRing} ${
-        isDragging ? "opacity-40" : ""
-      }`}
+      className={`inline-flex h-8 w-6 shrink-0 cursor-grab items-center justify-center rounded-lg text-faint transition-colors hover:bg-hover hover:text-dim ${focusRing}`}
     >
       <GripVertical size={14} aria-hidden />
       <span className="sr-only">Drag {agent.name}</span>
@@ -239,10 +260,25 @@ function AgentDropRow({ agent, children }: { agent: OrgAgentNode; children: Reac
   const check = dragging
     ? canMove(activeAgentId, { kind: "agent", agentId: agent.id }, graph)
     : { ok: true as const };
-  const { setNodeRef, isOver } = useDroppable({
+  const { setNodeRef: setDropRef, isOver } = useDroppable({
     id: `${AGENT_PREFIX}${agent.id}`,
     data: { kind: "agent", agentId: agent.id },
     disabled: !dragging,
+  });
+  // The draggable is the whole card, not the grip. A pointer-down anywhere on
+  // the card starts a drag once it clears the 6px activation distance, so a
+  // click still opens the agent and the Move… menu still opens — but a real
+  // drag no longer depends on hitting a tiny handle.
+  const {
+    attributes,
+    listeners,
+    setNodeRef: setDragRef,
+    setActivatorNodeRef,
+    isDragging: isSelfDragging,
+  } = useDraggable({
+    id: `drag:${agent.id}`,
+    data: { agentId: agent.id },
+    attributes: { roleDescription: "org chart card" },
   });
 
   const rejected = dragging && !check.ok;
@@ -257,23 +293,38 @@ function AgentDropRow({ agent, children }: { agent: OrgAgentNode; children: Reac
         : "";
 
   return (
-    <div
-      ref={setNodeRef}
-      data-testid={`drop-agent-${agent.id}`}
-      data-drop-state={!dragging ? "idle" : rejected ? "invalid" : isOver ? "over" : "valid"}
-      aria-disabled={rejected || undefined}
-      className={`relative ${tone}`}
-    >
-      {children}
-      {rejected && isOver && check.reason ? (
-        <p
-          aria-hidden
-          className="pointer-events-none absolute -bottom-1 left-2 right-2 translate-y-full rounded-lg bg-danger-soft px-2 py-1 text-[11px] font-medium text-danger shadow-card"
+    <RowDragContext.Provider value={{ attributes, listeners, setActivatorNodeRef }}>
+      <div
+        ref={setDropRef}
+        data-testid={`drop-agent-${agent.id}`}
+        data-drop-state={!dragging ? "idle" : rejected ? "invalid" : isOver ? "over" : "valid"}
+        aria-disabled={rejected || undefined}
+        className={`relative ${tone}`}
+      >
+        {/* Mouse/pen drag surface: the whole card. Only the pointer activator
+            lives here; the keyboard activator is the grip button, which reads
+            `listeners.onKeyDown` from context. Touch is deliberately left to
+            scroll the map — touch users reorganise from the Outline's Move…
+            menu, which is the mobile default. */}
+        <div
+          ref={setDragRef}
+          onPointerDown={listeners?.onPointerDown as React.PointerEventHandler<HTMLDivElement> | undefined}
+          className={`rounded-xl transition-opacity ${
+            isSelfDragging ? "opacity-40" : ""
+          } ${dragging ? "" : "cursor-grab active:cursor-grabbing"}`}
         >
-          {check.reason}
-        </p>
-      ) : null}
-    </div>
+          {children}
+        </div>
+        {rejected && isOver && check.reason ? (
+          <p
+            aria-hidden
+            className="pointer-events-none absolute -bottom-1 left-2 right-2 translate-y-full rounded-lg bg-danger-soft px-2 py-1 text-[11px] font-medium text-danger shadow-card"
+          >
+            {check.reason}
+          </p>
+        ) : null}
+      </div>
+    </RowDragContext.Provider>
   );
 }
 

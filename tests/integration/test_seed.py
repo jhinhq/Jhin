@@ -111,3 +111,16 @@ async def test_seed_creates_documented_dev_org(
         "github.check.read",
     } <= qa_granted
     assert "organization.delegate" not in qa_granted  # QA never delegates
+
+    # Every seeded teammate gets the safe-by-default collaboration baseline so
+    # a fresh workspace can ask colleagues for help out of the box. QA has no
+    # delegate grant but can still ask/answer and find colleagues.
+    collaboration = {
+        "organization.directory.read",
+        "organization.work.request",
+        "organization.work.respond",
+    }
+    assert collaboration <= qa_granted
+    assert collaboration <= granted  # the Senior Software Engineer too
+    qa_request = [g for g in qa_grants if g["capability"] == "organization.work.request"]
+    assert qa_request and qa_request[0]["scope_json"] == {"targets": "any"}

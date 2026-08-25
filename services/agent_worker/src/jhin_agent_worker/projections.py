@@ -477,7 +477,11 @@ class AgentProjectionActivities:
         summary = ""
         if isinstance(reported, dict):
             summary = str(reported.get("summary", "") or "").strip()
-        note = f"{name} finished without a reply."
+        # Genuine last resort: the reflective retry in reasoning already gives
+        # the model a second, tool-free pass to reply. Reaching here means it
+        # still produced nothing, so the note says the request was not
+        # completed rather than implying a normal, quiet finish.
+        note = f"{name} could not complete this request and did not leave a reply."
         if summary:
             note = f"{note} Its reported result: {summary}"
         return Message(

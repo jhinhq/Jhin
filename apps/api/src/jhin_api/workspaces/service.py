@@ -6,6 +6,7 @@ can never lose its last owner.
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -16,7 +17,23 @@ from jhin_api.audit import service as audit
 from jhin_api.deps import WorkspaceContext
 from jhin_api.skills import service as skills_service
 from jhin_api.slugs import slugify, with_suffix
-from jhin_db.models import ModelProfile, User, Workspace, WorkspaceMembership
+from jhin_db.models import (
+    Agent,
+    ApiKey,
+    Connection,
+    Conversation,
+    MemoryRecord,
+    Message,
+    ModelProfile,
+    Secret,
+    Skill,
+    Task,
+    Team,
+    Trigger,
+    User,
+    Workspace,
+    WorkspaceMembership,
+)
 from jhin_domain import WorkspaceRole
 
 
@@ -125,6 +142,46 @@ async def update(
     )
     await db.commit()
     return workspace
+
+
+#: The categories the deletion confirmation counts, in the order it shows
+#: them. Each entry is a table whose ``workspace_id`` foreign key cascades, so
+#: every row counted here really does disappear with the workspace. The list is
+#: deliberately not exhaustive — runs, tool calls, approvals and the rest go
+#: too — but naming *those* would turn a warning into a schema dump.
+_DELETION_COUNTS: tuple[tuple[str, type[Any]], ...] = (
+    ("agents", Agent),
+    ("teams", Team),
+    ("tasks", Task),
+    ("conversations", Conversation),
+    ("messages", Message),
+    ("memories", MemoryRecord),
+    ("skills", Skill),
+    ("connections", Connection),
+    ("triggers", Trigger),
+    ("api_keys", ApiKey),
+    ("secrets", Secret),
+    ("members", WorkspaceMembership),
+)
+
+
+async def deletion_summary(db: AsyncSession, workspace_id: UUID) -> dict[str, int]:
+    """Count, in one round trip, what deleting this workspace would destroy.
+
+    Counted rather than estimated: a confirmation that says "12 agents" and is
+    wrong is worse than one that says nothing, and the caller is about to make
+    an irreversible decision on the strength of these numbers.
+    """
+    columns = [
+        select(func.count())
+        .select_from(model)
+        .where(model.workspace_id == workspace_id)
+        .scalar_subquery()
+        .label(name)
+        for name, model in _DELETION_COUNTS
+    ]
+    row = (await db.execute(select(*columns))).one()
+    return {name: int(value or 0) for (name, _), value in zip(_DELETION_COUNTS, row, strict=True)}
 
 
 async def delete(

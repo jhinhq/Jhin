@@ -664,3 +664,67 @@ def test_manifest_entries_bind_invalid_arguments_and_name_storage_failures() -> 
     truncated = invalid_tool_arguments(json.loads(entries[4]["arguments_json"]))
     assert truncated is not None and truncated["reason"] == "arguments_not_strict_json"
     assert "Expecting" in truncated["detail"]
+
+
+def _empty_response() -> ModelResponse:
+    return ModelResponse(
+        text="   ",
+        finish_reason="stop",
+        model="reasoning-test",
+        usage=ModelUsage(input_tokens=5, output_tokens=0, cached_tokens=0),
+        latency_ms=2,
+        provider_request_id="provider-request-empty",
+        tool_calls=(),
+    )
+
+
+def _reply_response(text: str) -> ModelResponse:
+    return ModelResponse(
+        text=text,
+        finish_reason="stop",
+        model="reasoning-test",
+        usage=ModelUsage(input_tokens=9, output_tokens=6, cached_tokens=0),
+        latency_ms=3,
+        provider_request_id="provider-request-reply",
+        tool_calls=(),
+    )
+
+
+async def test_empty_completion_triggers_one_reflective_retry(world: ReasoningWorld) -> None:
+    """An empty first pass on a tool-free step gets one more bounded, tool-free
+    pass to actually reply; both calls' usage is summed."""
+    reply = "I don't have permission to message Connie; a workspace admin can enable it."
+    world.model.responses.append(_empty_response())
+    world.model.responses.append(_reply_response(reply))
+
+    result = await world.reasoning.reason_agent_step_activity(world.params)
+
+    assert result == ReasonAgentStepResult(call_count=0)
+    # Exactly two model calls: the empty first pass, then the reflective retry.
+    assert len(world.model.requests) == 2
+    assert world.model.requests[0].tools  # first pass advertised the tools
+    assert world.model.requests[1].tools == ()  # retry forces a text reply
+    reasoning = await world.load_event("agent.step.reasoning")
+    assert reasoning.payload_json["completion_sanitized"] == reply
+    assert reasoning.payload_json["done"] is True
+    # Usage of both calls is folded together for cost accounting.
+    assert reasoning.payload_json["usage"]["input_tokens"] == 14
+    assert reasoning.payload_json["usage"]["output_tokens"] == 6
+
+
+async def test_reflective_retry_is_bounded_and_replay_safe(world: ReasoningWorld) -> None:
+    """The retry happens at most once (a still-empty retry falls through to the
+    backstop), and once the step is committed a replay never calls the model."""
+    world.model.responses.append(_empty_response())
+    world.model.responses.append(_empty_response())
+
+    result = await world.reasoning.reason_agent_step_activity(world.params)
+
+    assert result == ReasonAgentStepResult(call_count=0)
+    assert len(world.model.requests) == 2  # one retry only, never a third call
+    reasoning = await world.load_event("agent.step.reasoning")
+    assert reasoning.payload_json["completion_sanitized"].strip() == ""
+
+    replay = await world.reasoning.reason_agent_step_activity(world.params)
+    assert replay == ReasonAgentStepResult(call_count=0)
+    assert len(world.model.requests) == 2  # replay short-circuits, no new call

@@ -6,7 +6,7 @@ import { SidebarNav } from "@/components/app-shell";
 import { WorkspaceProvider } from "@/lib/workspace-context";
 
 vi.mock("@/lib/hooks", () => ({
-  useMe: () => ({ data: undefined, isPending: false, error: null }),
+  useIdentity: () => ({ data: undefined, isPending: false, error: null }),
   useBootstrapStatus: () => ({ data: { needs_bootstrap: false } }),
   useAttention: () => ({
     data: {

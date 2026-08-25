@@ -5,7 +5,7 @@
  * the API actually emits. */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import ApiDocsPage from "@/app/(app)/api-docs/page";
 import { api } from "@/lib/api";
@@ -265,6 +265,7 @@ function renderPage() {
   );
 }
 
+
 describe("ApiDocsPage", () => {
   it("reads the session-authenticated document, not the anonymous one", async () => {
     renderPage();
@@ -272,33 +273,97 @@ describe("ApiDocsPage", () => {
     expect(vi.mocked(api).mock.calls[0][0]).toBe("/api/v1/openapi.json");
   });
 
-  it("renders every endpoint with its method, path, and required scope", async () => {
+  it("renders a table of contents with every group the document declares", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByTestId("docs-nav")).toBeDefined());
+    const nav = screen.getByTestId("docs-nav");
+    for (const name of ["agents", "secrets", "health"]) {
+      expect(within(nav).getByRole("link", { name: new RegExp(name) })).toBeDefined();
+    }
+  });
+
+  it("gives each group nav entry an anchor to a section that exists on the page", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByTestId("docs-nav")).toBeDefined());
+    const link = within(screen.getByTestId("docs-nav")).getByRole("link", { name: /agents/ });
+    expect(link.getAttribute("href")).toBe("#tag-agents");
+    // The anchor resolves: a section with that id is actually rendered.
+    expect(document.getElementById("tag-agents")).not.toBeNull();
+    fireEvent.click(link); // wired up, does not throw
+  });
+
+  it("lists every endpoint collapsed, showing method, path, and scope up front", async () => {
     renderPage();
     await waitFor(() => expect(screen.getAllByTestId("endpoint")).toHaveLength(4));
+    // Collapsed: the detail body (its tables) is not rendered yet.
+    expect(screen.queryByTestId("endpoint-detail")).toBeNull();
     expect(screen.getAllByText("/api/v1/workspaces/{workspace_id}/agents")).toHaveLength(2);
     expect(screen.getAllByText("agents:read").length).toBeGreaterThan(0);
     expect(screen.getByText("List Agents")).toBeDefined();
   });
 
-  it("says which endpoints a key may call and which are session only", async () => {
+  it("colour-codes the method with a badge on every row", async () => {
     renderPage();
     await waitFor(() => expect(screen.getAllByTestId("endpoint")).toHaveLength(4));
-    expect(screen.getAllByText("API key").length).toBe(2);
-    expect(screen.getByText("Session only")).toBeDefined();
-    expect(screen.getByText("No credential")).toBeDefined();
+    const inRows = (method: string) =>
+      screen.getAllByText(method).filter((el) => el.closest('[data-testid="endpoint"]'));
+    // Three GETs (agents, secrets, health) and one POST (create agent).
+    expect(inRows("get")).toHaveLength(3);
+    expect(inRows("post")).toHaveLength(1);
   });
 
-  it("shows the response fields of a real endpoint, resolved through its ref", async () => {
+  it("expands an operation to reveal its parameter and response tables", async () => {
     renderPage();
     await waitFor(() => expect(screen.getAllByTestId("endpoint")).toHaveLength(4));
-    expect(screen.getAllByText("What the agent is called.").length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: /List Agents/ }));
+    await waitFor(() =>
+      expect(screen.getAllByText("What the agent is called.").length).toBeGreaterThan(0),
+    );
     expect(screen.getAllByText("AgentStatus").length).toBeGreaterThan(0);
+    // The curl example points at the caller's own workspace.
+    expect(screen.getAllByText(/workspaces\/w-42\/agents/).length).toBeGreaterThan(0);
   });
 
-  it("offers a curl example pointing at the caller's own workspace", async () => {
+  it("opens the operation named by a deep link and shows its detail", async () => {
+    window.location.hash = "#get-api-v1-workspaces-workspace-id-agents";
+    renderPage();
+    await waitFor(() => expect(screen.getByTestId("endpoint-detail")).toBeDefined());
+    window.location.hash = "";
+  });
+
+  it("filters both the nav and the list, keeping the scope filter power", async () => {
     renderPage();
     await waitFor(() => expect(screen.getAllByTestId("endpoint")).toHaveLength(4));
-    expect(screen.getAllByText(/workspaces\/w-42\/agents/).length).toBeGreaterThan(0);
+    fireEvent.change(screen.getByTestId("search-desktop"), {
+      target: { value: "agents:write" },
+    });
+    await waitFor(() => expect(screen.getAllByTestId("endpoint")).toHaveLength(1));
+    // The nav narrows too: only the agents group survives.
+    const nav = screen.getByTestId("docs-nav");
+    expect(within(nav).getByRole("link", { name: /agents/ })).toBeDefined();
+    expect(within(nav).queryByRole("link", { name: /secrets/ })).toBeNull();
+    expect(screen.getByTestId("result-count").textContent).toBe("1 of 4 endpoints");
+  });
+
+  it("says nothing matches when the filter empties the document", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getAllByTestId("endpoint")).toHaveLength(4));
+    fireEvent.change(screen.getByTestId("search-desktop"), {
+      target: { value: "no-such-endpoint" },
+    });
+    await waitFor(() => expect(screen.getByText("Nothing matches")).toBeDefined());
+  });
+
+  it("has a mobile drawer that reveals the group nav on demand", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getAllByTestId("endpoint")).toHaveLength(4));
+    // Closed by default: only the (desktop) sidebar nav is in the tree.
+    expect(screen.queryByTestId("docs-drawer")).toBeNull();
+    expect(screen.getAllByTestId("docs-nav")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: /Jump to section/ }));
+    const drawer = await screen.findByTestId("docs-drawer");
+    expect(within(drawer).getByRole("link", { name: /agents/ })).toBeDefined();
+    expect(screen.getAllByTestId("docs-nav")).toHaveLength(2);
   });
 
   it("reports the API version and the app version it is describing", async () => {
@@ -306,16 +371,6 @@ describe("ApiDocsPage", () => {
     await waitFor(() => expect(screen.getByTestId("spec-version")).toBeDefined());
     expect(screen.getByTestId("spec-version").textContent).toContain("0.1.0");
     expect(screen.getByTestId("spec-version").textContent).toContain("4 endpoints");
-  });
-
-  it("filters by scope so a key holder can see exactly what their key reaches", async () => {
-    renderPage();
-    await waitFor(() => expect(screen.getAllByTestId("endpoint")).toHaveLength(4));
-    fireEvent.change(screen.getByRole("textbox", { name: /Search endpoints/ }), {
-      target: { value: "agents:write" },
-    });
-    await waitFor(() => expect(screen.getAllByTestId("endpoint")).toHaveLength(1));
-    expect(screen.getByTestId("result-count").textContent).toBe("1 of 4 endpoints");
   });
 
   it("says so plainly when the document cannot be read", async () => {
@@ -342,8 +397,6 @@ describe("ApiDocsPage", () => {
         </WorkspaceProvider>
       </QueryClientProvider>,
     );
-    await waitFor(() =>
-      expect(screen.getByText(/could not be loaded/)).toBeDefined(),
-    );
+    await waitFor(() => expect(screen.getByText(/could not be loaded/)).toBeDefined());
   });
 });

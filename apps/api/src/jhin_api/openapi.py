@@ -137,7 +137,9 @@ TAG_DESCRIPTIONS: dict[str, str] = {
     ),
     "auth": (
         "Sign in, sign out, change a password, and read the current user. "
-        "Session cookies only — an API key cannot mint or manage sessions."
+        "Session cookies only — an API key cannot mint or manage sessions — "
+        "except `GET /auth/identity`, which either credential may call to "
+        "discover who it is and which workspace it may act in."
     ),
     "workspaces": (
         "The workspace itself: its name, timezone, budget, members, and the roles "
@@ -245,6 +247,19 @@ PUBLIC_OPERATIONS: frozenset[tuple[str, str]] = frozenset(
 
 _SESSION_ONLY: list[dict[str, list[str]]] = [{"SessionCookie": []}]
 
+#: Operations outside `/workspaces/{workspace_id}` that an API key may still
+#: call. Everything else off that prefix is session-only by construction (see
+#: ``_security_for``), which is the safe default — but identity has to be
+#: readable *before* a caller knows its workspace, or a key-only client can
+#: never make a first call. Kept explicit, and short, for the same reason
+#: ``PUBLIC_OPERATIONS`` is: widening what a key reaches should be a diff
+#: somebody reviews.
+_DUAL_CREDENTIAL_OPERATIONS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("get", f"{API_PREFIX}/auth/identity"),
+    }
+)
+
 _SCOPE_NOTE = "**Scope.** An API key needs `{scope}`."
 
 _SESSION_ONLY_NOTE = (
@@ -253,6 +268,11 @@ _SESSION_ONLY_NOTE = (
 )
 
 _PUBLIC_NOTE = "**Auth.** None: this endpoint is reachable without a credential."
+
+_DUAL_CREDENTIAL_NOTE = (
+    "**Auth.** A browser session or any API key, at any scope. A key sees only "
+    "the one workspace it is bound to."
+)
 
 
 def tag_metadata() -> list[dict[str, str]]:
@@ -264,6 +284,9 @@ def _security_for(method: str, path: str) -> tuple[list[dict[str, list[str]]], s
     """The security requirement, the note to append, and the scope, if any."""
     if (method, path) in PUBLIC_OPERATIONS:
         return [], _PUBLIC_NOTE, None
+
+    if (method, path) in _DUAL_CREDENTIAL_OPERATIONS:
+        return [{"SessionCookie": []}, {"ApiKeyBearer": []}], _DUAL_CREDENTIAL_NOTE, None
 
     signature = route_signature(path)
     if signature is None:

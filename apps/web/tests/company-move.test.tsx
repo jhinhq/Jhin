@@ -181,6 +181,28 @@ describe("Company page — drag feedback", () => {
     });
     expect(document.body.textContent).toContain("Picked up Ada");
   });
+
+  it("makes the whole card a grab surface, with the grip as the keyboard handle", () => {
+    // The regression this guards: when only the 6px grip carried the
+    // draggable, pressing on the obvious target — the card — did nothing, so
+    // users reported "drag and drop isn't working". The whole card is now the
+    // pointer grab surface (cursor-grab), wrapping the grip, the open control
+    // and the Move… menu, while the grip stays the single keyboard activator.
+    renderPage("map");
+
+    const card = document.querySelector('[data-testid="drop-agent-quill"]');
+    // The first descendant div is the whole-card drag surface (setDragRef).
+    const surface = card?.querySelector<HTMLElement>("div");
+    expect(surface?.className).toContain("cursor-grab");
+
+    const grip = screen.getByRole("button", { name: "Drag Quill" });
+    // The grip lives inside the grab surface, so a pointer press anywhere on
+    // the card — grip included — reaches the drag surface's handler.
+    expect(surface?.contains(grip)).toBe(true);
+    // The grip is still the keyboard entry point: it exposes the draggable
+    // role, and it is the only place that owns the pick-up affordance.
+    expect(grip.getAttribute("aria-roledescription")).toBe("org chart card");
+  });
 });
 
 describe("Company page — Move… menu", () => {

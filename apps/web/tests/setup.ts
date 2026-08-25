@@ -36,3 +36,29 @@ for (const key of ["localStorage", "sessionStorage"] as const) {
     });
   }
 }
+
+/** jsdom implements neither `IntersectionObserver` (scroll-spy) nor
+ * `Element.prototype.scrollIntoView` (jump-to-section). Install inert stand-ins
+ * so components that reach for them render without throwing under test. */
+if (typeof (globalThis as Record<string, unknown>).IntersectionObserver === "undefined") {
+  class NoopIntersectionObserver {
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+    takeRecords(): IntersectionObserverEntry[] {
+      return [];
+    }
+    readonly root = null;
+    readonly rootMargin = "";
+    readonly thresholds = [];
+  }
+  Object.defineProperty(globalThis, "IntersectionObserver", {
+    value: NoopIntersectionObserver,
+    configurable: true,
+    writable: true,
+  });
+}
+
+if (typeof Element !== "undefined" && typeof Element.prototype.scrollIntoView !== "function") {
+  Element.prototype.scrollIntoView = function scrollIntoView() {};
+}

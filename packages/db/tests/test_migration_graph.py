@@ -149,7 +149,7 @@ def test_measured_pricing_directly_follows_0026() -> None:
     assert len(scripts.get_heads()) == 1, "the migration graph must stay linear"
 
 
-def test_catalog_attribution_directly_follows_0027_and_is_the_head() -> None:
+def test_catalog_attribution_directly_follows_0027() -> None:
     """Split from 0027 deliberately: 0027 had already shipped to a running
     database, and an applied migration must never be edited in place."""
     scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
@@ -157,4 +157,12 @@ def test_catalog_attribution_directly_follows_0027_and_is_the_head() -> None:
 
     assert attribution is not None
     assert attribution.down_revision == "0027"
-    assert list(scripts.get_heads()) == ["0028"], "the migration graph must stay linear"
+
+
+def test_membership_settings_directly_follows_0028_and_is_the_head() -> None:
+    scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
+    membership_settings = scripts.get_revision("0029")
+
+    assert membership_settings is not None
+    assert membership_settings.down_revision == "0028"
+    assert list(scripts.get_heads()) == ["0029"], "the migration graph must stay linear"

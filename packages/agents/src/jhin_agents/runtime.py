@@ -41,9 +41,16 @@ async def execute_step(
     snapshot: AgentExecutionSnapshot,
     task: TaskContext,
     tools: tuple[ToolSchema, ...] = (),
+    *,
+    nudge: str = "",
 ) -> StepOutcome:
-    """load_context (compose messages) then reason (one model call)."""
-    messages = build_messages(snapshot, task, has_tools=bool(tools))
+    """load_context (compose messages) then reason (one model call).
+
+    ``nudge`` appends one final instruction message (the empty-completion
+    reflective retry passes it with ``tools=()`` to force a plain-language
+    reply); the caller owns when to use it.
+    """
+    messages = build_messages(snapshot, task, has_tools=bool(tools), nudge=nudge)
     transitions = [NodeTransition(node="load_context", detail=f"{len(messages)} messages composed")]
 
     response = await client.generate(

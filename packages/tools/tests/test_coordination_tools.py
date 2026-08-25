@@ -32,7 +32,12 @@ from jhin_db.models import (
     Workspace,
 )
 from jhin_domain import MessageType, RunStatus, TaskState, WorkRequestStatus, new_uuid7
-from jhin_tools.builtin import ToolExecutionContext, build_builtin_catalog
+from jhin_policy import Grant, GrantEffect, collaboration_grant_specs
+from jhin_tools.builtin import (
+    ToolExecutionContext,
+    allowed_tool_definitions,
+    build_builtin_catalog,
+)
 from jhin_tools.directory import DirectoryEntry, build_roster, render_roster, search_directory
 from jhin_tools.gateway import GatewayOutcome, ToolGateway
 from jhin_tools.reviews import (
@@ -299,6 +304,39 @@ async def test_request_work_denied_without_grant_and_cross_team_default(
     assert await session.scalar(select(WorkRequest)) is None
     self_request = await request_work(session, org, org.swe, org.swe)
     assert self_request.decision_code == "self_request"
+
+
+async def test_collaboration_baseline_advertises_and_permits_cross_team_ask(
+    session: AsyncSession, org: Org
+) -> None:
+    """The safe-by-default collaboration baseline makes 'ask a colleague'
+    work out of the box: the three collaboration tools are advertised, an
+    ordinary agent can ask across teams, and delegation is NOT advertised."""
+    baseline = [
+        Grant(capability=capability, scope=scope, effect=GrantEffect.ALLOW)
+        for capability, scope in collaboration_grant_specs()
+    ]
+    advertised = {
+        definition.name
+        for definition in allowed_tool_definitions(build_builtin_catalog(), baseline)
+    }
+    assert {
+        "organization.directory.search",
+        "organization.request_work",
+        "organization.respond_work_request",
+    } <= advertised
+    assert "organization.delegate_task" not in advertised
+
+    # Persist the baseline on the SWE and ask the Blogger (a different team):
+    # targets=any in the baseline permits the cross-team ask end to end.
+    for capability, scope in collaboration_grant_specs():
+        await grant(session, org, org.swe, capability, scope)
+    outcome = await request_work(session, org, org.swe, org.blogger)
+    assert outcome.status == "executed", outcome.decision_reason
+    assert (outcome.sanitized_output or {})["created"] is True
+    request = await session.scalar(select(WorkRequest))
+    assert request is not None
+    assert request.target_agent_id == org.blogger.id
 
 
 async def test_request_accept_is_idempotent_and_creates_one_task(

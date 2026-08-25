@@ -62,16 +62,19 @@ from jhin_policy.skills import (
     SKILLS_READ_CAPABILITY,
 )
 from jhin_policy.work_requests import (
+    DIRECTORY_READ_CAPABILITY,
     WORK_REQUEST_CAPABILITY,
     WORK_RESPOND_CAPABILITY,
     CoordinationSettings,
     WorkRequestDecision,
     WorkRequestFacts,
+    collaboration_grant_specs,
     coordination_settings,
     evaluate_work_request,
 )
 
 __all__ = [
+    "DIRECTORY_READ_CAPABILITY",
     "FORBIDDEN_CAPABILITY_PREFIXES",
     "MEMORY_CAPABILITIES",
     "MEMORY_PROPOSE_CAPABILITY",
@@ -109,6 +112,7 @@ __all__ = [
     "WorkRequestDecision",
     "WorkRequestFacts",
     "capability_matches",
+    "collaboration_grant_specs",
     "coordination_settings",
     "delegation_settings",
     "evaluate",

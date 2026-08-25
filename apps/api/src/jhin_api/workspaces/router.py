@@ -14,6 +14,7 @@ from jhin_api.workspaces.schemas import (
     MemberOut,
     MemberUpdate,
     WorkspaceCreate,
+    WorkspaceDeletionSummary,
     WorkspaceOut,
     WorkspaceUpdate,
 )
@@ -77,6 +78,19 @@ async def update_workspace(
         ip_hash=ip_hash(request),
     )
     return _workspace_out(workspace)
+
+
+@router.get("/{workspace_id}/deletion-summary")
+async def workspace_deletion_summary(ctx: OwnerCtx, db: DbSession) -> WorkspaceDeletionSummary:
+    """What ``DELETE /workspaces/{workspace_id}`` would destroy, counted now.
+
+    Owner-only for the same reason the delete is: nobody else can act on it,
+    and a whole-workspace inventory is not a viewer's business. Read-only —
+    calling it changes nothing.
+    """
+    workspace = await service.get(db, ctx.workspace_id)
+    counts = await service.deletion_summary(db, ctx.workspace_id)
+    return WorkspaceDeletionSummary(workspace_id=workspace.id, name=workspace.name, **counts)
 
 
 @router.delete("/{workspace_id}", status_code=204)

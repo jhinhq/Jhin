@@ -34,9 +34,11 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import type { LucideIcon } from "lucide-react";
 import { Wordmark } from "@/components/brand/logo-mark";
+import { OnboardingProvider } from "@/components/onboarding/tour";
 import { Dialog, focusRing, Spinner, ThemeToggle } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
-import { useAttention, useBootstrapStatus, useMe } from "@/lib/hooks";
+import { goToConnect, IS_DESKTOP } from "@/lib/desktop";
+import { useAttention, useBootstrapStatus, useIdentity } from "@/lib/hooks";
 import { useWorkspace, WorkspaceProvider } from "@/lib/workspace-context";
 
 export interface NavItem {
@@ -418,19 +420,37 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
   const queryClient = useQueryClient();
-  const me = useMe();
+  const me = useIdentity();
   const unauthenticated = me.error instanceof ApiError && me.error.status === 401;
-  const bootstrap = useBootstrapStatus();
+  // Nothing to bootstrap into from the desktop app: it holds a key for an
+  // instance that, by definition, someone already set up in a browser.
+  const bootstrap = useBootstrapStatus(!IS_DESKTOP);
 
   useEffect(() => {
-    if (!unauthenticated || !bootstrap.data) return;
+    if (!unauthenticated) return;
+    if (IS_DESKTOP) {
+      // The key was revoked, expired, or the instance was reinstalled. Only
+      // the shell can fix that, because only the shell holds the key.
+      goToConnect("unauthorized");
+      return;
+    }
+    if (!bootstrap.data) return;
     router.replace(bootstrap.data.needs_bootstrap ? "/setup" : "/login");
   }, [unauthenticated, bootstrap.data, router]);
 
   const logout = useMutation({
-    mutationFn: () => api<void>("/api/v1/auth/logout", { method: "POST" }),
+    mutationFn: async () => {
+      // A key cannot log out — there is no session. Disconnecting is the
+      // equivalent act, and it is the shell that forgets the credential.
+      if (IS_DESKTOP) return;
+      await api<void>("/api/v1/auth/logout", { method: "POST" });
+    },
     onSettled: () => {
       queryClient.clear();
+      if (IS_DESKTOP) {
+        goToConnect("disconnect");
+        return;
+      }
       router.replace("/login");
     },
   });
@@ -458,9 +478,25 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   const workspace = me.data.memberships[0];
   if (!workspace) {
+    // Reachable two ways: an account that was never added to a workspace, and
+    // an owner who has just deleted their last one. Both need a way out of
+    // this screen, or the only escape is clearing cookies by hand — there is
+    // no navigation rendered here to sign out from.
     return (
-      <div className="flex min-h-screen items-center justify-center text-sm text-dim">
-        Your account has no workspace membership. Ask a workspace admin to add you.
+      <div
+        data-testid="no-workspace"
+        className="flex min-h-screen flex-col items-center justify-center gap-3 px-6 text-center"
+      >
+        <p className="text-sm text-dim">
+          Your account is not a member of any workspace. Ask a workspace admin to add you, or
+          sign in as someone else.
+        </p>
+        <button
+          className={`rounded-md text-sm text-accent-strong underline ${focusRing}`}
+          onClick={() => logout.mutate()}
+        >
+          Sign out
+        </button>
       </div>
     );
   }
@@ -469,6 +505,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <WorkspaceProvider user={user} workspace={workspace}>
+      {/* Inside the workspace provider and outside every page: the first-run
+          introduction has to know who this is, and must survive navigation
+          between the pages it sends people to. */}
+      <OnboardingProvider>
       <div className="flex min-h-screen">
         {/* Desktop sidebar (lg+) */}
         <aside className="fixed inset-y-0 left-0 z-20 hidden w-[260px] flex-col border-r border-line bg-surface lg:flex">
@@ -532,6 +572,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </main>
         </div>
       </div>
+      </OnboardingProvider>
     </WorkspaceProvider>
   );
 }

@@ -2,10 +2,11 @@
 the full gateway pipeline, against in-memory SQLite.
 
 The security invariants under test (docs/architecture/coordination.md,
-"Authorization and safety"): creating an agent never grants it anything,
-elevated risk parks on a human approval under the default policy, only a
-manager may rewrite a report's system prompt, and a retried invocation can
-never create two agents.
+"Authorization and safety" / "Default collaboration grants"): creating an
+agent grants only the safe-by-default collaboration baseline (never
+delegation or any higher-authority capability), elevated risk parks on a
+human approval under the default policy, only a manager may rewrite a
+report's system prompt, and a retried invocation can never create two agents.
 """
 
 from __future__ import annotations
@@ -160,7 +161,7 @@ async def approve_and_execute(
 # --- organization.create_agent ---------------------------------------------
 
 
-async def test_create_agent_is_approval_gated_and_creates_with_no_grants(
+async def test_create_agent_is_approval_gated_and_seeds_collaboration_grants(
     session: AsyncSession, org: Org
 ) -> None:
     await grant(session, org, org.cto, CAPABILITY)
@@ -184,7 +185,7 @@ async def test_create_agent_is_approval_gated_and_creates_with_no_grants(
     output = outcome.sanitized_output or {}
     assert output["name"] == "Connie"
     assert output["team_name"] == "Engineering"
-    assert "no tool permissions" in output["summary"]
+    assert "ask them for help" in output["summary"]
 
     connie = await session.scalar(select(Agent).where(Agent.name == "Connie"))
     assert connie is not None
@@ -202,13 +203,21 @@ async def test_create_agent_is_approval_gated_and_creates_with_no_grants(
     assert connie.avatar_shape == shape and shape in AVATAR_SHAPES
     assert connie.avatar_color == color and color in AVATAR_COLORS
 
-    # The no-grant invariant: a created agent holds zero capability grants.
+    # A created agent holds exactly the safe-by-default collaboration
+    # baseline — and never delegation or any higher-authority capability.
     grants = list(
         await session.scalars(
             select(AgentCapabilityGrant).where(AgentCapabilityGrant.agent_id == connie.id)
         )
     )
-    assert grants == []
+    assert all(g.effect == "allow" for g in grants)
+    by_capability = {g.capability: g.scope_json for g in grants}
+    assert by_capability == {
+        "organization.directory.read": {},
+        "organization.work.request": {"targets": "any"},
+        "organization.work.respond": {},
+    }
+    assert "organization.delegate" not in by_capability
 
     # Primary team membership row exists (Company page topology).
     membership = await session.scalar(

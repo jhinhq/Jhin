@@ -81,6 +81,12 @@ class WorkspaceMembership(Base, UuidPkMixin, TimestampMixin):
         StdUuid, ForeignKey("user.id", ondelete="CASCADE"), index=True
     )
     role: Mapped[str] = mapped_column(String(32))
+    # This person's own state *in this workspace* — currently just how far they
+    # got through first-run onboarding. Per membership rather than per user
+    # because the answer differs per workspace, and per user rather than per
+    # workspace because dismissing a tour is a personal decision that must not
+    # silence it for a colleague who joins tomorrow.
+    settings_json: Mapped[dict[str, Any]] = mapped_column(JsonDict, default=dict)
 
 
 class Team(Base, UuidPkMixin, TimestampMixin):
