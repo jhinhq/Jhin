@@ -5,7 +5,11 @@ without a browser session. Keys are **scoped** and **capped by the role of the
 person who made them**, so a key is never a way to acquire authority its owner
 does not have.
 
-Companion document: [Roles and permissions](rbac.md).
+Companion documents: [Roles and permissions](rbac.md) for the ceiling a key
+sits under, and [API versioning and compatibility](api-versioning.md) for what
+`/api/v1` promises a key holder. The endpoint list itself is not written down
+anywhere: signed-in users read it at `/api-docs`, generated from the install's
+own OpenAPI document, with the required scope shown against every operation.
 
 ## Wire format
 

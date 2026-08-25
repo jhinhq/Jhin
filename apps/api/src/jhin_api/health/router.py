@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from jhin_api import __version__
 from jhin_api.health import service
 from jhin_api.health.schemas import LivenessReport, ReadinessReport
+from jhin_api.openapi import API_VERSION
 from jhin_api.settings import Settings
 from jhin_api.temporal import TemporalClientProvider
 
@@ -30,9 +31,22 @@ def _temporal_provider(request: Request) -> TemporalClientProvider:
     return provider
 
 
-@router.get("/health")
+@router.get(
+    "/health",
+    summary="Liveness, app version, and API version",
+    description=(
+        "Answers without touching any dependency. Doubles as the capability "
+        "probe an integrator polls: `version` is the app release, `api_version` "
+        "is the contract version served under `/api/v1`."
+    ),
+)
 async def health(settings: Annotated[Settings, Depends(_settings)]) -> LivenessReport:
-    return LivenessReport(status="ok", app=settings.app_name, version=__version__)
+    return LivenessReport(
+        status="ok",
+        app=settings.app_name,
+        version=__version__,
+        api_version=API_VERSION,
+    )
 
 
 @router.get("/health/ready", responses={503: {"model": ReadinessReport}})

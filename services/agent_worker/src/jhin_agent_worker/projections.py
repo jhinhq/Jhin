@@ -84,6 +84,9 @@ from jhin_workflows.memory_maintenance import (
 _MAX_ARGUMENTS_CHARS = 8_192
 _MAX_PROVIDER_TEXT_CHARS = 200
 _MAX_REASON_CHARS = 2_000
+# The backstop note for a run that produced no text (agent name + reported
+# summary), kept short enough to read as one chip.
+_MAX_NOTE_CHARS = 2_000
 _VALID_TRANSITION_NODES = frozenset(
     {
         "load_context",
@@ -423,6 +426,75 @@ class AgentProjectionActivities:
                 content_json=content,
                 visibility=MessageVisibility.INTERNAL.value,
             )
+        )
+
+    async def _final_step_message(
+        self,
+        session: AsyncSession,
+        *,
+        workspace_id: UUID,
+        task_id: UUID,
+        run_id: UUID,
+        agent_id: UUID,
+        text: str,
+        finish_reason: str,
+    ) -> Message:
+        """The message a tool-free step leaves behind: the agent's answer.
+
+        An empty (or whitespace-only) completion is never persisted as an
+        agent message — a blank bubble is not an answer, and it reads as a
+        broken product. The reader still gets an honest account instead of
+        silence: a system note saying the run ended without a reply, carrying
+        the reported summary when the agent filed one. It is a *system* note
+        (a centered chip, not a bubble) on purpose — the platform is speaking
+        about the run, not putting words in the agent's mouth — and system
+        messages are excluded from the conversation history the model sees
+        (``reasoning._load_conversation_history``) and from the delegation
+        summarizer's last-visible-text fallback, so the note never feeds back
+        into reasoning.
+        """
+        if text.strip():
+            return Message(
+                workspace_id=workspace_id,
+                task_id=task_id,
+                run_id=run_id,
+                sender_type=SenderType.AGENT.value,
+                sender_id=agent_id,
+                recipient_type=RecipientType.TASK.value,
+                recipient_id=task_id,
+                message_type="text",
+                content_json={"text": text, "finish_reason": finish_reason},
+                visibility=MessageVisibility.VISIBLE.value,
+            )
+        agent = await session.scalar(
+            select(Agent).where(Agent.id == agent_id, Agent.workspace_id == workspace_id)
+        )
+        task = await session.scalar(
+            select(Task).where(Task.id == task_id, Task.workspace_id == workspace_id)
+        )
+        name = (agent.name if agent is not None else "").strip() or "The agent"
+        reported = task.metadata_json.get("reported_result") if task is not None else None
+        summary = ""
+        if isinstance(reported, dict):
+            summary = str(reported.get("summary", "") or "").strip()
+        note = f"{name} finished without a reply."
+        if summary:
+            note = f"{note} Its reported result: {summary}"
+        return Message(
+            workspace_id=workspace_id,
+            task_id=task_id,
+            run_id=run_id,
+            sender_type=SenderType.SYSTEM.value,
+            sender_id=None,
+            recipient_type=RecipientType.TASK.value,
+            recipient_id=task_id,
+            message_type="note",
+            content_json={
+                "text": redact_text(note)[:_MAX_NOTE_CHARS],
+                "finish_reason": finish_reason,
+                "reason": "empty_completion",
+            },
+            visibility=MessageVisibility.VISIBLE.value,
         )
 
     async def _committed_step_result(
@@ -1053,20 +1125,14 @@ class AgentProjectionActivities:
 
             if not calls:
                 session.add(
-                    Message(
+                    await self._final_step_message(
+                        session,
                         workspace_id=workspace_id,
                         task_id=task_id,
                         run_id=run_id,
-                        sender_type=SenderType.AGENT.value,
-                        sender_id=agent_id,
-                        recipient_type=RecipientType.TASK.value,
-                        recipient_id=task_id,
-                        message_type="text",
-                        content_json={
-                            "text": reasoning.completion_sanitized,
-                            "finish_reason": reasoning.finish_reason,
-                        },
-                        visibility=MessageVisibility.VISIBLE.value,
+                        agent_id=agent_id,
+                        text=reasoning.completion_sanitized,
+                        finish_reason=reasoning.finish_reason,
                     )
                 )
 

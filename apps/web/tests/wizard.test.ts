@@ -6,12 +6,27 @@ import NewAgentPage from "@/app/(app)/agents/new/page";
 import type { Agent, ToolInfo } from "@/lib/types";
 import { WorkspaceProvider } from "@/lib/workspace-context";
 import {
+  ADVANCED_STEP,
   AGENT_TEMPLATES,
   applyTemplate,
   applyToolPreset,
+  capabilitySummary,
   effectiveAvatar,
+  hasManualGrants,
+  isPresetApplied,
+  isPresetGranted,
+  manualGrantNames,
+  MANUAL_GRANT_SOURCE,
+  presetCapabilities,
   presetConnectionFor,
+  presetGrantsToAdd,
+  presetGrantsToRevoke,
   presetMissingTools,
+  presetScopeGaps,
+  removeToolPreset,
+  REVIEW_STEP,
+  setToolScope,
+  toggleToolPreset,
   TOOL_PRESETS,
   canSubmit,
   EMPTY_WIZARD,
@@ -25,6 +40,7 @@ import {
   validatePublicIdentity,
   validateStep,
   WIZARD_STEPS,
+  type ToolPreset,
 } from "@/lib/wizard";
 import { AVATAR_PALETTE, AVATAR_SHAPES } from "@/lib/shapes";
 import { delegationScope } from "@/components/org/tools-access-tab";
@@ -69,15 +85,15 @@ describe("wizard validation", () => {
     expect(canSubmit(state)).toBe(true);
   });
 
-  it("step 7 accepts the defaults and rejects out-of-range limits", () => {
-    expect(validateStep(7, EMPTY_WIZARD)).toEqual([]);
-    expect(validateStep(7, { ...EMPTY_WIZARD, maxSteps: "0" })).toEqual([
+  it("the advanced step accepts the defaults and rejects out-of-range limits", () => {
+    expect(validateStep(ADVANCED_STEP, EMPTY_WIZARD)).toEqual([]);
+    expect(validateStep(ADVANCED_STEP, { ...EMPTY_WIZARD, maxSteps: "0" })).toEqual([
       "Max steps must be a whole number between 1 and 500.",
     ]);
-    expect(validateStep(7, { ...EMPTY_WIZARD, maxSteps: "501" }).length).toBe(1);
-    expect(validateStep(7, { ...EMPTY_WIZARD, maxRunMinutes: "1441" }).length).toBe(1);
-    expect(validateStep(7, { ...EMPTY_WIZARD, maxConcurrentRuns: "2.5" }).length).toBe(1);
-    expect(firstInvalidStep({ ...EMPTY_WIZARD, name: "SWE", maxSteps: "" })).toBe(7);
+    expect(validateStep(ADVANCED_STEP, { ...EMPTY_WIZARD, maxSteps: "501" }).length).toBe(1);
+    expect(validateStep(ADVANCED_STEP, { ...EMPTY_WIZARD, maxRunMinutes: "1441" }).length).toBe(1);
+    expect(validateStep(ADVANCED_STEP, { ...EMPTY_WIZARD, maxConcurrentRuns: "2.5" }).length).toBe(1);
+    expect(firstInvalidStep({ ...EMPTY_WIZARD, name: "SWE", maxSteps: "" })).toBe(ADVANCED_STEP);
   });
 
   it("budget accepts blank or dollar amounts only", () => {
@@ -89,14 +105,24 @@ describe("wizard validation", () => {
     expect(monthlyBudgetCents("-1")).toBeUndefined();
     expect(monthlyBudgetCents("abc")).toBeUndefined();
     expect(monthlyBudgetCents("5.555")).toBeUndefined();
-    expect(validateStep(7, { ...EMPTY_WIZARD, monthlyBudgetDollars: "abc" })).toEqual([
+    expect(validateStep(ADVANCED_STEP, { ...EMPTY_WIZARD, monthlyBudgetDollars: "abc" })).toEqual([
       "Monthly budget must be a dollar amount (e.g. 5 or 5.50), or blank for no budget.",
     ]);
-    expect(validateStep(7, { ...EMPTY_WIZARD, monthlyBudgetDollars: "5.50" })).toEqual([]);
+    expect(validateStep(ADVANCED_STEP, { ...EMPTY_WIZARD, monthlyBudgetDollars: "5.50" })).toEqual([]);
   });
 
-  it("no wizard step is stubbed", () => {
-    expect(WIZARD_STEPS.map((s) => s.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+  it("is three required steps plus one optional advanced step", () => {
+    expect(WIZARD_STEPS.map((s) => s.id)).toEqual([1, 2, 3, 4]);
+    expect(WIZARD_STEPS.map((s) => s.title)).toEqual([
+      "Identity",
+      "What it can do",
+      "Advanced setup",
+      "Review & create",
+    ]);
+    expect(WIZARD_STEPS.filter((s) => s.optional).map((s) => s.id)).toEqual([ADVANCED_STEP]);
+    expect(WIZARD_STEPS.at(-1)?.id).toBe(REVIEW_STEP);
+    // Every step but review is reachable with defaults only.
+    expect(firstInvalidStep({ ...EMPTY_WIZARD, name: "SWE" })).toBeNull();
   });
 });
 
@@ -309,7 +335,35 @@ function response(data: unknown): Response {
   });
 }
 
-function renderWizard() {
+const webTools: ToolInfo[] = [
+  {
+    name: "web.search",
+    description: "Search the web",
+    risk: "read",
+    required_capability: "web.search",
+    supports_approval: false,
+    scope_keys: ["connection_id"],
+    required_grant_scope_keys: ["connection_id"],
+    input_schema: {},
+  },
+  {
+    name: "web.fetch",
+    description: "Fetch a page",
+    risk: "read",
+    required_capability: "web.fetch",
+    supports_approval: false,
+    scope_keys: ["connection_id", "domain"],
+    required_grant_scope_keys: ["connection_id"],
+    input_schema: {},
+  },
+];
+
+function renderWizard(
+  toolCatalog: ToolInfo[] = wizardTools,
+  connectionList: Record<string, unknown>[] = [
+    { id: "supabase-connection", connector_type: "supabase", name: "Supabase production", status: "active" },
+  ],
+) {
   const grantBodies: Record<string, unknown>[] = [];
   const createdAgent: Agent = {
     id: "agent-new",
@@ -341,10 +395,8 @@ function renderWizard() {
       return response({ workspace_id: "workspace-1", teams: [], agents: [] });
     }
     if (path.endsWith("/model-profiles")) return response([]);
-    if (path.endsWith("/tools")) return response(wizardTools);
-    if (path.endsWith("/connections")) {
-      return response([{ id: "supabase-connection", connector_type: "supabase", name: "Supabase production" }]);
-    }
+    if (path.endsWith("/tools")) return response(toolCatalog);
+    if (path.endsWith("/connections")) return response(connectionList);
     if (path === "/api/v1/workspaces/workspace-1" && method === "GET") {
       return response({ id: "workspace-1", default_model_profile_id: null });
     }
@@ -380,16 +432,17 @@ describe("agent wizard rendered grants", () => {
     const grantBodies = renderWizard();
     const name = await screen.findByLabelText("Agent name");
     fireEvent.change(name, { target: { value: "Database Analyst" } });
-    fireEvent.click(screen.getByRole("button", { name: /Tools & connections/ }));
+    fireEvent.click(screen.getByTestId("wizard-step-2"));
+    fireEvent.click(screen.getByTestId("advanced-tools-toggle"));
 
     for (const tool of wizardTools) {
       const row = screen.getByText(tool.name).closest("label")!;
       fireEvent.click(row.querySelector("input[type=checkbox]")!);
     }
-    fireEvent.click(screen.getByText("Review").closest("button")!);
+    fireEvent.click(screen.getByTestId(`wizard-step-${REVIEW_STEP}`));
     expect((screen.getByRole("button", { name: "Create agent" }) as HTMLButtonElement).disabled).toBe(true);
 
-    fireEvent.click(screen.getByRole("button", { name: /Tools & connections/ }));
+    fireEvent.click(screen.getByTestId("wizard-step-2"));
     const connections = screen.getAllByLabelText(/Connection — Required for this tool/);
     const projects = screen.getAllByLabelText(/Project reference — Required for this tool/);
     const schemas = screen.getAllByLabelText(/Schema — Required for this tool/);
@@ -400,7 +453,7 @@ describe("agent wizard rendered grants", () => {
     fireEvent.change(projects[1], { target: { value: "project-two" } });
     fireEvent.change(schemas[1], { target: { value: "audit" } });
 
-    fireEvent.click(screen.getByText("Review").closest("button")!);
+    fireEvent.click(screen.getByTestId(`wizard-step-${REVIEW_STEP}`));
     const create = screen.getByRole("button", { name: "Create agent" });
     expect((create as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(create);
@@ -666,5 +719,329 @@ describe("skill authoring preset", () => {
     const readPreset = TOOL_PRESETS.find((entry) => entry.id === "skills")!;
     expect(preset.id).not.toBe(readPreset.id);
     expect(Object.keys(preset.tools)).not.toEqual(Object.keys(readPreset.tools));
+  });
+});
+
+describe("preset attribution (grantSources)", () => {
+  const catalog = [
+    { name: "skills.read", scope_keys: [] as string[] },
+    { name: "skills.create", scope_keys: [] as string[] },
+    { name: "web.fetch", scope_keys: ["connection_id", "domain"] },
+  ];
+  const reader: ToolPreset = {
+    id: "reader",
+    label: "Reader",
+    summary: "Read the skills library",
+    description: "",
+    tools: { "skills.read": {} },
+  };
+  const author: ToolPreset = {
+    id: "author",
+    label: "Author",
+    summary: "Write skills",
+    description: "",
+    // Deliberately overlaps `reader` on skills.read.
+    tools: { "skills.read": {}, "skills.create": {} },
+  };
+
+  it("records the preset that contributed each grant", () => {
+    const next = applyToolPreset(EMPTY_WIZARD, author, catalog, []);
+    expect(next.grantSources).toEqual({ "skills.read": ["author"], "skills.create": ["author"] });
+    expect(isPresetApplied(next, author, catalog)).toBe(true);
+    expect(isPresetApplied(next, reader, catalog)).toBe(false);
+    expect(hasManualGrants(next)).toBe(false);
+  });
+
+  it("removing a preset takes back exactly what it granted", () => {
+    const applied = applyToolPreset(EMPTY_WIZARD, author, catalog, []);
+    const removed = removeToolPreset(applied, author);
+    expect(removed.grantToolNames).toEqual([]);
+    expect(removed.grantScopes).toEqual({});
+    expect(removed.grantSources).toEqual({});
+    expect(isPresetApplied(removed, author, catalog)).toBe(false);
+  });
+
+  it("keeps a shared tool another preset still needs", () => {
+    let state = applyToolPreset(EMPTY_WIZARD, reader, catalog, []);
+    state = applyToolPreset(state, author, catalog, []);
+    expect(state.grantSources["skills.read"]).toEqual(["reader", "author"]);
+    const removed = removeToolPreset(state, author);
+    expect(removed.grantToolNames).toEqual(["skills.read"]);
+    expect(removed.grantSources).toEqual({ "skills.read": ["reader"] });
+    expect(isPresetApplied(removed, reader, catalog)).toBe(true);
+    expect(isPresetApplied(removed, author, catalog)).toBe(false);
+    // …and removing the second preset finally clears it.
+    expect(removeToolPreset(removed, reader).grantToolNames).toEqual([]);
+  });
+
+  it("keeps a tool the user checked by hand before the preset", () => {
+    const manual = toggleTool(EMPTY_WIZARD, "skills.read");
+    expect(manual.grantSources["skills.read"]).toEqual([MANUAL_GRANT_SOURCE]);
+    const applied = applyToolPreset(manual, author, catalog, []);
+    expect(applied.grantSources["skills.read"]).toEqual([MANUAL_GRANT_SOURCE, "author"]);
+    const removed = removeToolPreset(applied, author);
+    expect(removed.grantToolNames).toEqual(["skills.read"]);
+    expect(manualGrantNames(removed)).toEqual(["skills.read"]);
+    expect(hasManualGrants(removed)).toBe(true);
+  });
+
+  it("never clobbers a scope the user edited by hand", () => {
+    const connections = [{ id: "web-1", connector_type: "web", status: "active" }];
+    const webPreset: ToolPreset = {
+      id: "web",
+      label: "Web",
+      summary: "Browse",
+      description: "",
+      tools: { "web.fetch": { domain: "*" } },
+    };
+    const applied = applyToolPreset(EMPTY_WIZARD, webPreset, catalog, connections);
+    expect(applied.grantScopes["web.fetch"]).toEqual({ connection_id: "web-1", domain: "*" });
+    const edited = setToolScope(applied, "web.fetch", {
+      connection_id: "web-1",
+      domain: "docs.example.com",
+    });
+    expect(edited.grantSources["web.fetch"]).toEqual(["web", MANUAL_GRANT_SOURCE]);
+    const removed = removeToolPreset(edited, webPreset);
+    expect(removed.grantToolNames).toEqual(["web.fetch"]);
+    expect(removed.grantScopes["web.fetch"]).toEqual({
+      connection_id: "web-1",
+      domain: "docs.example.com",
+    });
+    expect(isPresetApplied(removed, webPreset, catalog)).toBe(false);
+  });
+
+  it("unchecking a preset-granted tool by hand wins and un-applies the preset", () => {
+    const applied = applyToolPreset(EMPTY_WIZARD, author, catalog, []);
+    const unchecked = toggleTool(applied, "skills.create");
+    expect(unchecked.grantToolNames).toEqual(["skills.read"]);
+    expect(unchecked.grantSources["skills.create"]).toBeUndefined();
+    expect(isPresetApplied(unchecked, author, catalog)).toBe(false);
+  });
+
+  it("removing a preset ignores a same-named tool it never granted", () => {
+    const manual = toggleTool(EMPTY_WIZARD, "skills.read");
+    const removed = removeToolPreset(manual, reader);
+    expect(removed.grantToolNames).toEqual(["skills.read"]);
+    expect(removed.grantSources["skills.read"]).toEqual([MANUAL_GRANT_SOURCE]);
+  });
+
+  it("toggleToolPreset round-trips connection pinning and scopes", () => {
+    const connections = [
+      { id: "cli-1", connector_type: "cli", status: "active" },
+      { id: "gh-1", connector_type: "github", status: "active" },
+    ];
+    const codeCatalog = [
+      { name: "cli.file.write", scope_keys: ["connection_id", "path"] },
+      { name: "github.pull_request.create", scope_keys: ["connection_id", "repository"] },
+    ];
+    const preset = TOOL_PRESETS.find((entry) => entry.id === "code-editing")!;
+    const on = toggleToolPreset(EMPTY_WIZARD, preset, codeCatalog, connections);
+    expect(on.grantToolNames).toEqual(["cli.file.write", "github.pull_request.create"]);
+    expect(on.grantScopes["github.pull_request.create"]).toEqual({
+      connection_id: "gh-1",
+      repository: "*",
+    });
+    const off = toggleToolPreset(on, preset, codeCatalog, connections);
+    expect(off.grantToolNames).toEqual([]);
+    expect(off.grantScopes).toEqual({});
+    const again = toggleToolPreset(off, preset, codeCatalog, connections);
+    expect(again.grantScopes).toEqual(on.grantScopes);
+  });
+
+  it("treats grants with no recorded source as hand-picked", () => {
+    const legacy = { ...EMPTY_WIZARD, grantToolNames: ["skills.read"], grantSources: {} };
+    expect(hasManualGrants(legacy)).toBe(true);
+    expect(isPresetApplied(legacy, reader, catalog)).toBe(false);
+  });
+
+  it("summarises capabilities in plain language", () => {
+    const state = applyToolPreset(toggleTool(EMPTY_WIZARD, "web.fetch"), author, catalog, []);
+    const summary = capabilitySummary(state, catalog, [reader, author]);
+    expect(summary.presets.map((preset) => preset.id)).toEqual(["author"]);
+    expect(summary.presets[0].summary).toBe("Write skills");
+    expect(summary.manualToolNames).toEqual(["web.fetch"]);
+    expect(capabilitySummary(EMPTY_WIZARD, catalog, [reader, author])).toEqual({
+      presets: [],
+      manualToolNames: [],
+    });
+  });
+
+  it("every shipped preset has a plain-language summary", () => {
+    for (const preset of TOOL_PRESETS) {
+      expect(preset.summary.length).toBeGreaterThan(10);
+      expect(preset.summary).not.toContain(".");
+    }
+  });
+});
+
+describe("presets on the agent edit surface", () => {
+  const catalog: ToolInfo[] = [
+    {
+      name: "skills.read",
+      description: "Read a skill",
+      risk: "read",
+      required_capability: "skills.read",
+      supports_approval: false,
+      scope_keys: ["name"],
+      required_grant_scope_keys: [],
+      input_schema: {},
+    },
+    {
+      name: "web.search",
+      description: "Search",
+      risk: "read",
+      required_capability: "web.search",
+      supports_approval: false,
+      scope_keys: ["connection_id"],
+      required_grant_scope_keys: ["connection_id"],
+      input_schema: {},
+    },
+    {
+      name: "web.fetch",
+      description: "Fetch",
+      risk: "read",
+      required_capability: "web.fetch",
+      supports_approval: false,
+      scope_keys: ["connection_id", "domain"],
+      required_grant_scope_keys: ["connection_id"],
+      input_schema: {},
+    },
+  ];
+  const webPreset = TOOL_PRESETS.find((entry) => entry.id === "web-access")!;
+  const skillsPreset = TOOL_PRESETS.find((entry) => entry.id === "skills")!;
+  const webConnections = [{ id: "web-1", connector_type: "web", status: "active" }];
+
+  function grant(id: string, capability: string, scope: Record<string, string> = {}) {
+    return {
+      id,
+      agent_id: "agent-1",
+      capability,
+      scope_json: scope,
+      effect: "allow" as const,
+      created_at: "2026-08-18T00:00:00Z",
+    };
+  }
+
+  it("reads a preset back from the saved grants", () => {
+    expect(presetCapabilities(webPreset, catalog).sort()).toEqual(["web.fetch", "web.search"]);
+    expect(isPresetGranted([], webPreset, catalog)).toBe(false);
+    expect(isPresetGranted([grant("g1", "web.search")], webPreset, catalog)).toBe(false);
+    expect(
+      isPresetGranted([grant("g1", "web.search"), grant("g2", "web.fetch")], webPreset, catalog),
+    ).toBe(true);
+    // A preset whose tools this workspace does not offer is never "granted".
+    expect(isPresetGranted([grant("g1", "skills.read")], webPreset, [])).toBe(false);
+  });
+
+  it("adds only the capabilities that are missing", () => {
+    const existing = [grant("g1", "web.search", { connection_id: "web-1" })];
+    const toAdd = presetGrantsToAdd(existing, webPreset, catalog, webConnections);
+    expect(toAdd).toEqual([
+      { capability: "web.fetch", scope: { connection_id: "web-1", domain: "*" }, effect: "allow" },
+    ]);
+    expect(presetGrantsToAdd([], webPreset, catalog, webConnections)).toHaveLength(2);
+  });
+
+  it("revokes a preset's grants but keeps what another live preset needs", () => {
+    const shared: ToolPreset = {
+      id: "shared",
+      label: "Shared",
+      summary: "Also fetches pages",
+      description: "",
+      tools: { "web.fetch": { domain: "*" } },
+    };
+    const grants = [
+      grant("g1", "web.search", { connection_id: "web-1" }),
+      grant("g2", "web.fetch", { connection_id: "web-1", domain: "docs.example.com" }),
+      grant("g3", "skills.read"),
+    ];
+    expect(presetGrantsToRevoke(grants, webPreset, catalog, []).map((g) => g.id)).toEqual([
+      "g1",
+      "g2",
+    ]);
+    // `shared` still needs web.fetch, so only web.search goes.
+    expect(presetGrantsToRevoke(grants, webPreset, catalog, [shared]).map((g) => g.id)).toEqual([
+      "g1",
+    ]);
+    // Unrelated grants are never touched.
+    expect(
+      presetGrantsToRevoke(grants, skillsPreset, catalog, []).map((g) => g.id),
+    ).toEqual(["g3"]);
+  });
+
+  it("reports preset tools whose required scope cannot be filled in", () => {
+    expect(presetScopeGaps(webPreset, catalog, webConnections)).toEqual([]);
+    expect(presetScopeGaps(webPreset, catalog, [])).toEqual(["web.search", "web.fetch"]);
+    expect(presetScopeGaps(skillsPreset, catalog, [])).toEqual([]);
+  });
+});
+
+describe("streamlined wizard flow", () => {
+  const webConnections = [
+    { id: "web-1", connector_type: "web", name: "Web search", status: "active" },
+  ];
+
+  it("keeps the tool list collapsed and toggles a capability on and off", async () => {
+    renderWizard(webTools, webConnections);
+    await screen.findByLabelText("Agent name");
+    fireEvent.click(screen.getByTestId("wizard-step-2"));
+
+    expect(screen.queryByTestId("advanced-tools")).toBeNull();
+    expect(screen.queryByText("web.fetch")).toBeNull();
+    expect(screen.getByTestId("capability-summary").textContent).toContain("Nothing yet");
+
+    const preset = screen.getByTestId("tool-preset-web-access");
+    fireEvent.click(preset);
+    expect(preset.getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByTestId("capability-summary").textContent).toContain("Research online");
+    expect(screen.getByTestId("advanced-tools-toggle").textContent).toContain("2 tools selected");
+    // Preset-granted tools are not hand-picked, so the editor stays collapsed.
+    expect(screen.queryByTestId("advanced-tools")).toBeNull();
+
+    fireEvent.click(preset);
+    expect(preset.getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByTestId("capability-summary").textContent).toContain("Nothing yet");
+    expect(screen.getByTestId("advanced-tools-toggle").textContent).not.toContain("selected");
+  });
+
+  it("expands the advanced editor on demand with scopes and connection pinning", async () => {
+    renderWizard(webTools, webConnections);
+    await screen.findByLabelText("Agent name");
+    fireEvent.click(screen.getByTestId("wizard-step-2"));
+    fireEvent.click(screen.getByTestId("advanced-tools-toggle"));
+
+    const advanced = screen.getByTestId("advanced-tools");
+    expect(advanced.textContent).toContain("web.fetch");
+    const row = screen.getByText("web.fetch").closest("label")!;
+    fireEvent.click(row.querySelector("input[type=checkbox]")!);
+    fireEvent.change(screen.getByLabelText(/Connection — Required for this tool/), {
+      target: { value: "web-1" },
+    });
+    fireEvent.change(screen.getByLabelText("domain"), { target: { value: "docs.example.com" } });
+    expect(screen.getByTestId("advanced-tools-toggle").textContent).toContain("1 tool selected");
+    expect(screen.getByTestId("capability-summary").textContent).toContain(
+      "1 individually chosen tool",
+    );
+  });
+
+  it("creates an agent from presets and defaults without opening advanced setup", async () => {
+    const grantBodies = renderWizard(webTools, webConnections);
+    fireEvent.change(await screen.findByLabelText("Agent name"), {
+      target: { value: "Researcher" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+    fireEvent.click(screen.getByTestId("tool-preset-web-access"));
+    fireEvent.click(screen.getByTestId("wizard-skip"));
+
+    expect(screen.getByTestId("review-capabilities").textContent).toContain("Research online");
+    const create = screen.getByRole("button", { name: "Create agent" });
+    expect((create as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(create);
+    await waitFor(() => expect(grantBodies).toHaveLength(2));
+    expect(grantBodies).toEqual([
+      { capability: "web.search", scope: { connection_id: "web-1" }, effect: "allow" },
+      { capability: "web.fetch", scope: { connection_id: "web-1", domain: "*" }, effect: "allow" },
+    ]);
+    await waitFor(() => expect(navigation.push).toHaveBeenCalledWith("/agents/agent-new"));
   });
 });

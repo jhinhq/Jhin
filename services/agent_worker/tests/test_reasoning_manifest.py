@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
@@ -18,8 +19,19 @@ import jhin_agent_worker.reasoning as reasoning_module
 from jhin_agent_worker.reasoning import AgentReasoningActivities
 from jhin_agents.snapshot import AgentExecutionSnapshot, ModelProfileSnapshot, RunLimits
 from jhin_db.base import Base
-from jhin_db.models import Agent, AgentRun, MemoryRecord, RunEvent, Task, ToolCall, Workspace
-from jhin_domain import MemoryScope, MemoryStatus, RunStatus, new_uuid7
+from jhin_db.models import (
+    Agent,
+    AgentRun,
+    Conversation,
+    MemoryRecord,
+    RunEvent,
+    Task,
+    ToolCall,
+    User,
+    Workspace,
+    WorkspaceMembership,
+)
+from jhin_domain import MemoryScope, MemoryStatus, RunStatus, WorkspaceRole, new_uuid7
 from jhin_models import ModelRequest, ModelResponse, ModelToolCall, ModelUsage
 from jhin_observability import noop_metrics, noop_tracer
 from jhin_tools import invalid_tool_arguments
@@ -557,6 +569,75 @@ async def test_step_prompt_carries_roster_and_manager_rollup(world: ReasoningWor
     assert "Company directory" in system
     assert "Junior" in system
     assert "Team status rollup" in system
+
+
+async def test_step_prompt_always_carries_the_workspace_clock(world: ReasoningWorld) -> None:
+    async with world.sessions() as session:
+        workspace = await session.get(Workspace, world.workspace_id)
+        assert workspace is not None
+        workspace.default_timezone = "America/Los_Angeles"
+        await session.commit()
+    world.model.responses.append(_done_response())
+
+    await world.reasoning.reason_agent_step_activity(world.params)
+
+    system = world.model.requests[0].messages[0].content
+    assert "Current time: " in system
+    assert "(America/Los_Angeles)" in system
+    # This task has no human and no requester, so nothing is guessed.
+    assert "Who you are talking with" not in system
+
+
+async def test_step_prompt_names_the_person_on_the_other_side_of_the_chat(
+    world: ReasoningWorld,
+) -> None:
+    async with world.sessions() as session:
+        user = User(email="person@example.test", display_name="Varand", password_hash="x")
+        session.add(user)
+        await session.flush()
+        session.add(
+            WorkspaceMembership(
+                workspace_id=world.workspace_id,
+                user_id=user.id,
+                role=WorkspaceRole.OWNER.value,
+            )
+        )
+        conversation = Conversation(
+            workspace_id=world.workspace_id,
+            title="Chat",
+            created_by_user_id=user.id,
+            last_activity_at=datetime.now(UTC),
+        )
+        session.add(conversation)
+        await session.flush()
+        task = await session.get(Task, world.task_id)
+        assert task is not None
+        task.conversation_id = conversation.id
+        await session.commit()
+    world.model.responses.append(_done_response())
+
+    await world.reasoning.reason_agent_step_activity(world.params)
+
+    system = world.model.requests[0].messages[0].content
+    assert "Who you are talking with: Varand (workspace owner)" in system
+    assert "person@example.test" not in system
+
+
+async def test_situation_failure_never_fails_the_step(
+    world: ReasoningWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def explode(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("workspace row unreadable")
+
+    monkeypatch.setattr(reasoning_module, "situation_context", explode)
+    world.model.responses.append(_done_response())
+
+    result = await world.reasoning.reason_agent_step_activity(world.params)
+
+    assert result == ReasonAgentStepResult(call_count=0)
+    system = world.model.requests[0].messages[0].content
+    assert "Current time:" not in system
+    assert "Who you are talking with" not in system
 
 
 def test_manifest_entries_bind_invalid_arguments_and_name_storage_failures() -> None:

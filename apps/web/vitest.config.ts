@@ -9,6 +9,11 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
+    // 51 suites run in parallel across every core; under that contention the
+    // 5s default expires on render-heavy React tests that pass comfortably in
+    // isolation. This is headroom for scheduling, not for slow assertions.
+    testTimeout: 20_000,
+    hookTimeout: 20_000,
     setupFiles: ["tests/setup.ts"],
     include: ["tests/**/*.test.{ts,tsx}"],
   },

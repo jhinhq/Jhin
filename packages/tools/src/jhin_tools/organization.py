@@ -478,11 +478,13 @@ ORGANIZATION_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor, ToolValidator | No
         ToolDefinition(
             name="organization.report_result",
             description=(
-                "Report the structured final result of your current task: a "
-                "short summary, artifacts you produced, risks, and a "
-                "recommended next action. For review tasks report "
-                "status='pass' or 'fail'. Call this once, when your work is "
-                "done."
+                "Hand an assigned task back to whoever delegated it: a short "
+                "summary of what you did, artifacts you produced, risks, and "
+                "a recommended next action. For review tasks report "
+                "status='pass' or 'fail'. Call this once, when the assigned "
+                "work is finished. This is not how you end a conversation: "
+                "when a person asks you something, answer them in your reply "
+                "instead — never call this in place of replying."
             ),
             risk=RiskLevel.WRITE,
             input_model=ReportResultInput,

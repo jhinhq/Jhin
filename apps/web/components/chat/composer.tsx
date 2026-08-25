@@ -9,6 +9,17 @@ export interface ComposerHandle {
   focus: () => void;
 }
 
+/**
+ * Horizontal padding is the *whole* inset between the rounded shell and the
+ * text, so it must be a symmetric `px-*` and must not depend on how many
+ * trailing controls are rendered — that is what keeps the field optically
+ * centred. Exported so the tests can assert the contract directly.
+ */
+export const COMPOSER_FIELD_PAD = {
+  large: "px-5 pb-2 pt-4 text-base",
+  docked: "px-4 pb-1.5 pt-3 text-[15px]",
+} as const;
+
 export const Composer = forwardRef<
   ComposerHandle,
   {
@@ -101,7 +112,12 @@ export const Composer = forwardRef<
     }
   };
 
-  const pad = variant === "large" ? "px-5 py-4 text-base" : "px-4 py-3 text-[15px]";
+  // The text field owns a full-width row of its own, so its horizontal
+  // padding is the whole inset on both sides: left inset === right inset,
+  // whatever trailing controls happen to be visible. The controls sit on
+  // their own row underneath instead of eating into the field's width.
+  const fieldPad = variant === "large" ? COMPOSER_FIELD_PAD.large : COMPOSER_FIELD_PAD.docked;
+  const controlsPad = variant === "large" ? "px-3 pb-3" : "px-2 pb-2";
 
   return (
     <form
@@ -112,11 +128,12 @@ export const Composer = forwardRef<
       className="space-y-2"
     >
       <div
-        className={`flex items-end gap-2 rounded-2xl border bg-surface shadow-[var(--card-shadow)] transition-colors focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/25 ${
+        data-testid="composer-shell"
+        className={`flex flex-col rounded-2xl border bg-surface shadow-[var(--card-shadow)] transition-colors focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/25 ${
           disabled ? "border-line opacity-70" : "border-line-strong"
         }`}
       >
-        <label className="min-w-0 flex-1">
+        <label className="block min-w-0">
           <span className="sr-only">Message</span>
           <textarea
             ref={textareaRef}
@@ -129,31 +146,36 @@ export const Composer = forwardRef<
             placeholder={disabled && disabledReason ? disabledReason : placeholder}
             onChange={(event) => onChange(event.target.value)}
             onKeyDown={onKeyDown}
-            className={`block w-full resize-none bg-transparent leading-relaxed text-ink placeholder:text-faint outline-none disabled:cursor-not-allowed ${pad}`}
+            className={`block w-full resize-none bg-transparent leading-relaxed text-ink placeholder:text-faint outline-none disabled:cursor-not-allowed ${fieldPad}`}
           />
         </label>
-        {canStop ? (
-          <button
-            type="button"
-            data-testid="composer-stop"
-            aria-label={stopLabel}
-            title={stopLabel}
-            disabled={stopping}
-            onClick={onStop}
-            className="my-2 inline-flex h-10 shrink-0 items-center gap-1.5 rounded-xl border border-line-strong px-3 text-xs font-medium text-dim transition-colors hover:border-danger/40 hover:bg-danger/10 hover:text-danger disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <Square size={13} aria-hidden fill="currentColor" />
-            Stop
-          </button>
-        ) : null}
-        <button
-          type="submit"
-          aria-label="Send message"
-          disabled={!canSend}
-          className="m-2 inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-accent text-white shadow-[0_6px_20px_-6px_var(--glow,rgba(115,113,252,0.4))] transition-transform hover:-translate-y-px disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:translate-y-0"
+        <div
+          data-testid="composer-controls"
+          className={`flex shrink-0 items-center justify-end gap-2 ${controlsPad}`}
         >
-          <SendHorizontal size={18} />
-        </button>
+          {canStop ? (
+            <button
+              type="button"
+              data-testid="composer-stop"
+              aria-label={stopLabel}
+              title={stopLabel}
+              disabled={stopping}
+              onClick={onStop}
+              className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-xl border border-line-strong px-3 text-xs font-medium text-dim transition-colors hover:border-danger/40 hover:bg-danger/10 hover:text-danger disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Square size={13} aria-hidden fill="currentColor" />
+              Stop
+            </button>
+          ) : null}
+          <button
+            type="submit"
+            aria-label="Send message"
+            disabled={!canSend}
+            className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-accent text-white shadow-[0_6px_20px_-6px_var(--glow,rgba(115,113,252,0.4))] transition-transform hover:-translate-y-px disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:translate-y-0"
+          >
+            <SendHorizontal size={18} />
+          </button>
+        </div>
       </div>
       {disabled && disabledReason ? (
         <p id="composer-disabled-reason" className="px-2 text-xs text-dim">

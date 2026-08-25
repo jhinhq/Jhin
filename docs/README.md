@@ -18,6 +18,7 @@ and trust boundary to its authoritative document:
 
 - [Roles and permissions](architecture/rbac.md)
 - [API keys](architecture/api-keys.md)
+- [API versioning and compatibility](architecture/api-versioning.md)
 - [Conversations and Company Activity](architecture/conversations.md)
 - [Coordination and Oversight](architecture/coordination.md)
 - [Delegation and Teams](architecture/delegation-and-teams.md)

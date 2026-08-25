@@ -4,7 +4,7 @@
  * approval-policy preset with its underlying rules, and autonomy display. */
 
 import { useMutation } from "@tanstack/react-query";
-import { Plus, ShieldCheck, ShieldOff, Trash2 } from "lucide-react";
+import { Check, ChevronDown, Plus, ShieldCheck, ShieldOff, SlidersHorizontal, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { Badge, Button, ErrorNote, Field, focusRing, Select, Spinner, StatusLabel } from "@/components/ui";
 import { ScopeEditor } from "@/components/scope-editor";
@@ -35,6 +35,16 @@ import {
   sortGrants,
 } from "@/lib/policy";
 import type { Agent, ApprovalPreset, GrantEffect } from "@/lib/types";
+import {
+  isPresetGranted,
+  presetCapabilities,
+  presetGrantsToAdd,
+  presetGrantsToRevoke,
+  presetMissingTools,
+  presetScopeGaps,
+  TOOL_PRESETS,
+  type ToolPreset,
+} from "@/lib/wizard";
 import { useWorkspace } from "@/lib/workspace-context";
 
 const PRESETS: ApprovalPreset[] = ["autonomous", "balanced", "restricted"];
@@ -65,6 +75,8 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
   const [error, setError] = useState<string | null>(null);
 
   const [wholeServer, setWholeServer] = useState(false);
+  /** null = follow the grants (open when something was granted by hand). */
+  const [advancedOverride, setAdvancedOverride] = useState<boolean | null>(null);
 
   const toolList = tools.data ?? [];
   const selectedTool = toolList.find((tool) => tool.name === toolName);
@@ -118,6 +130,39 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
     onError: (err) => setError(err instanceof ApiError ? err.detail : "Revoking failed."),
   });
 
+  /** One capability preset on or off: add the grants it needs, or revoke the
+   * grants it owns and no other capability that is still on needs. */
+  const toggleCapability = useMutation({
+    mutationFn: async (preset: ToolPreset) => {
+      const current = grants.data ?? [];
+      const catalog = tools.data ?? [];
+      if (isPresetGranted(current, preset, catalog)) {
+        const keep = TOOL_PRESETS.filter(
+          (other) => other.id !== preset.id && isPresetGranted(current, other, catalog),
+        );
+        for (const grant of presetGrantsToRevoke(current, preset, catalog, keep)) {
+          await api<void>(
+            `/api/v1/workspaces/${workspaceId}/agents/${agent.id}/grants/${grant.id}`,
+            { method: "DELETE" },
+          );
+        }
+        return;
+      }
+      for (const body of presetGrantsToAdd(current, preset, catalog, connections.data ?? [])) {
+        await api(`/api/v1/workspaces/${workspaceId}/agents/${agent.id}/grants`, {
+          method: "POST",
+          body,
+        });
+      }
+    },
+    onSuccess: () => {
+      setError(null);
+      invalidate();
+    },
+    onError: (err) =>
+      setError(err instanceof ApiError ? err.detail : "Updating capabilities failed."),
+  });
+
   const setPreset = useMutation({
     mutationFn: (preset: ApprovalPreset) =>
       api(`/api/v1/workspaces/${workspaceId}/agents/${agent.id}/policy`, {
@@ -138,10 +183,70 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
   const grantList = sortGrants(grants.data ?? []);
   const currentPreset = policy.data?.preset ?? null;
   const rules = policy.data?.rules ?? [];
+  const appliedPresets = TOOL_PRESETS.filter((preset) =>
+    isPresetGranted(grantList, preset, toolList),
+  );
+  const presetCapabilitySet = new Set(
+    appliedPresets.flatMap((preset) => presetCapabilities(preset, toolList)),
+  );
+  const handPickedGrants = grantList.filter(
+    (grant) => !presetCapabilitySet.has(grant.capability),
+  );
+  const advancedOpen = advancedOverride ?? handPickedGrants.length > 0;
 
   return (
     <div className="space-y-6">
       <ErrorNote message={error} />
+
+      <section>
+        <h3 className="mb-1 font-display text-base font-semibold">Capabilities</h3>
+        <p className="mb-3 text-sm text-dim">
+          What this agent can do, in plain language. Turning a capability off revokes the grants
+          behind it; anything not listed here stays blocked.
+        </p>
+        <div className="grid gap-2 sm:grid-cols-2">
+          {TOOL_PRESETS.map((preset) => {
+            const granted = isPresetGranted(grantList, preset, toolList);
+            const missing = presetMissingTools(preset, toolList);
+            const gaps = granted
+              ? []
+              : presetScopeGaps(preset, toolList, connections.data ?? []);
+            const unavailable = missing.length === Object.keys(preset.tools).length;
+            const blocked = !granted && gaps.length > 0;
+            return (
+              <button
+                key={preset.id}
+                type="button"
+                data-testid={`capability-preset-${preset.id}`}
+                aria-pressed={granted}
+                title={
+                  blocked
+                    ? `Needs a connection first: ${gaps.join(", ")}`
+                    : preset.description
+                }
+                disabled={!canEdit || unavailable || blocked || toggleCapability.isPending}
+                onClick={() => toggleCapability.mutate(preset)}
+                className={`rounded-xl border px-3 py-2.5 text-left text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${focusRing} ${
+                  granted ? "border-accent bg-accent-soft" : "border-line bg-raised hover:border-line-strong"
+                }`}
+              >
+                <span className="flex items-center gap-2">
+                  <span
+                    aria-hidden
+                    className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-[5px] border ${
+                      granted ? "border-accent bg-accent text-white" : "border-line-strong"
+                    }`}
+                  >
+                    {granted ? <Check size={11} strokeWidth={3} /> : null}
+                  </span>
+                  <span className="font-medium">{preset.label}</span>
+                </span>
+                <span className="mt-1 block text-xs leading-snug text-dim">{preset.summary}</span>
+              </button>
+            );
+          })}
+        </div>
+      </section>
 
       <section>
         <h3 className="mb-1 font-display text-base font-semibold">Capability grants</h3>
@@ -187,6 +292,37 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
           </ul>
         )}
 
+        {canEdit ? null : (
+          <p className="mt-2 text-sm text-dim">Grants can be changed by workspace admins.</p>
+        )}
+      </section>
+
+      <div className="rounded-2xl border border-line bg-surface shadow-card">
+        <button
+          type="button"
+          data-testid="advanced-access-toggle"
+          aria-expanded={advancedOpen}
+          onClick={() => setAdvancedOverride(!advancedOpen)}
+          className={`flex w-full items-center gap-3 rounded-2xl px-4 py-3 text-left ${focusRing}`}
+        >
+          <SlidersHorizontal size={15} className="shrink-0 text-faint" />
+          <span className="min-w-0 flex-1">
+            <span className="block text-[13px] font-medium">
+              Advanced: choose individual tools
+            </span>
+            <span className="mt-0.5 block text-xs text-dim">
+              {grantList.length > 0
+                ? `${grantList.length} ${grantList.length === 1 ? "grant" : "grants"} · ${handPickedGrants.length} outside the capabilities above`
+                : `Grant one of the ${toolList.length} tools in this workspace and scope it`}
+            </span>
+          </span>
+          <ChevronDown
+            size={15}
+            className={`shrink-0 text-faint transition-transform ${advancedOpen ? "rotate-180" : ""}`}
+          />
+        </button>
+        {advancedOpen ? (
+          <div data-testid="advanced-access" className="space-y-6 border-t border-line px-4 py-4">
         {canEdit ? (
           <form
             className="mt-3 space-y-2"
@@ -309,12 +445,9 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
               </div>
             ) : null}
           </form>
-        ) : (
-          <p className="mt-2 text-sm text-dim">Grants can be changed by workspace admins.</p>
-        )}
-      </section>
+        ) : null}
 
-      <section>
+        <section>
         <h3 className="mb-1 font-display text-base font-semibold">Available tools</h3>
         <p className="mb-3 text-sm text-dim">
           The registered catalog. A tool is callable only when its capability is granted above.
@@ -348,7 +481,10 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
             );
           })}
         </ul>
-      </section>
+        </section>
+          </div>
+        ) : null}
+      </div>
 
       <section>
         <h3 className="mb-1 font-display text-base font-semibold">Approval policy</h3>

@@ -149,6 +149,12 @@ class AdvertisedTool:
 class ResolveAdvertisedToolsInput:
     workspace_id: str
     agent_id: str
+    # Which task this step belongs to. Advertisement is scoped by task kind
+    # (a delegated child may report back; a chat turn answers the person),
+    # so the resolver reads the task row. Optional with an empty default:
+    # histories recorded before this field replay unchanged, and an empty
+    # value simply skips the task-kind narrowing.
+    task_id: str = ""
 
 
 @dataclass

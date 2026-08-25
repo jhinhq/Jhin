@@ -182,7 +182,7 @@ function BudgetCard({ workspaceId, isAdmin }: { workspaceId: string; isAdmin: bo
         }}
       >
         <div className="w-44">
-          <Field label="Monthly budget ($)" hint="Leave empty for no budget.">
+          <Field label="Monthly budget ($)">
             <Input
               type="number"
               min="0"
@@ -212,6 +212,12 @@ function BudgetCard({ workspaceId, isAdmin }: { workspaceId: string; isAdmin: bo
             {save.isPending ? "Saving…" : "Save budget"}
           </Button>
         ) : null}
+        {/* One hint for the row: a hint under a single Field would make the
+         * inputs sit at different heights under `items-end`. */}
+        <p className="w-full text-[13px] text-faint">
+          Leave the budget empty for no limit. The warning shows on Home and Models once
+          spending passes that share of the budget.
+        </p>
       </form>
       <ErrorNote
         message={save.error ? (save.error instanceof ApiError ? save.error.detail : "Saving failed") : null}

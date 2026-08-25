@@ -172,24 +172,50 @@ function json(data: unknown): Response {
   });
 }
 
-function renderToolsAccess() {
+function grantRecord(capability: string, scope: Record<string, unknown> = {}) {
+  return {
+    id: `grant-${capability}`,
+    agent_id: "agent-1",
+    capability,
+    scope_json: scope,
+    effect: "allow",
+    created_at: "2026-08-18T00:00:00Z",
+  };
+}
+
+function renderToolsAccess(
+  toolCatalog: ToolInfo[] = accessTools,
+  initialGrants: ReturnType<typeof grantRecord>[] = [],
+) {
   const grantBodies: Record<string, unknown>[] = [];
+  const revoked: string[] = [];
+  const store = [...initialGrants];
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const path = String(input);
     const method = init?.method ?? "GET";
-    if (path.endsWith("/agents/agent-1/grants") && method === "GET") return json([]);
+    if (path.endsWith("/agents/agent-1/grants") && method === "GET") return json(store);
     if (path.endsWith("/agents/agent-1/grants") && method === "POST") {
-      grantBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      grantBodies.push(body);
+      store.push(grantRecord(String(body.capability), body.scope as Record<string, unknown>));
+      return json({});
+    }
+    if (path.includes("/agents/agent-1/grants/") && method === "DELETE") {
+      const id = path.split("/").pop()!;
+      revoked.push(id);
+      const index = store.findIndex((grant) => grant.id === id);
+      if (index >= 0) store.splice(index, 1);
       return json({});
     }
     if (path.endsWith("/agents/agent-1/policy")) {
       return json({ preset: "balanced", autonomy_level: "supervised", rules: [] });
     }
-    if (path.endsWith("/tools")) return json(accessTools);
+    if (path.endsWith("/tools")) return json(toolCatalog);
     if (path.endsWith("/connections")) {
       return json([
-        { id: "vercel-connection", connector_type: "vercel", name: "Vercel production" },
-        { id: "cli-connection", connector_type: "cli", name: "CLI sandbox" },
+        { id: "vercel-connection", connector_type: "vercel", name: "Vercel production", status: "active" },
+        { id: "cli-connection", connector_type: "cli", name: "CLI sandbox", status: "active" },
+        { id: "web-connection", connector_type: "web", name: "Web search", status: "active" },
       ]);
     }
     throw new Error(`Unexpected request: ${method} ${path}`);
@@ -205,13 +231,13 @@ function renderToolsAccess() {
       </WorkspaceProvider>
     </QueryClientProvider>,
   );
-  return grantBodies;
+  return { grantBodies, revoked };
 }
 
 describe("ToolsAccessTab", () => {
   it("blocks incomplete required scopes and preserves CLI and delegation semantics", async () => {
-    const grantBodies = renderToolsAccess();
-    await screen.findByText("vercel.deployment.read");
+    const { grantBodies } = renderToolsAccess();
+    fireEvent.click(await screen.findByTestId("advanced-access-toggle"));
     const capabilityPicker = screen.getByLabelText("Capability");
     const add = screen.getByRole("button", { name: "Add" });
 
@@ -262,5 +288,91 @@ describe("ToolsAccessTab", () => {
       scope: { targets: "team" },
       effect: "allow",
     });
+  });
+});
+
+const webAccessTools: ToolInfo[] = [
+  {
+    name: "web.search",
+    description: "Search the web",
+    risk: "read",
+    required_capability: "web.search",
+    supports_approval: false,
+    scope_keys: ["connection_id"],
+    required_grant_scope_keys: ["connection_id"],
+    input_schema: {},
+  },
+  {
+    name: "web.fetch",
+    description: "Fetch a page",
+    risk: "read",
+    required_capability: "web.fetch",
+    supports_approval: false,
+    scope_keys: ["connection_id", "domain"],
+    required_grant_scope_keys: ["connection_id"],
+    input_schema: {},
+  },
+];
+
+describe("ToolsAccessTab capabilities", () => {
+  it("keeps the tool catalog and the grant editor behind an advanced disclosure", async () => {
+    renderToolsAccess();
+    const toggle = await screen.findByTestId("advanced-access-toggle");
+    expect(screen.queryByTestId("advanced-access")).toBeNull();
+    expect(screen.queryByTestId("tool-vercel.deployment.read")).toBeNull();
+    expect(screen.queryByLabelText("Capability")).toBeNull();
+    expect(toggle.textContent).toContain("3 tools");
+    fireEvent.click(toggle);
+    expect(screen.getByTestId("tool-vercel.deployment.read")).toBeDefined();
+    expect(screen.getByLabelText("Capability")).toBeDefined();
+  });
+
+  it("auto-expands the advanced editor when a grant was made by hand", async () => {
+    renderToolsAccess(accessTools, [
+      grantRecord("vercel.deployment.read", { connection_id: "vercel-connection", project_id: "p" }),
+    ]);
+    await screen.findByTestId("advanced-access");
+    expect(screen.getByTestId("advanced-access-toggle").textContent).toContain(
+      "1 outside the capabilities above",
+    );
+  });
+
+  it("turns a capability on and back off by adding and revoking its grants", async () => {
+    const { grantBodies, revoked } = renderToolsAccess(webAccessTools);
+    const button = await screen.findByTestId("capability-preset-web-access");
+    expect(button.getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByTestId("no-grants")).toBeDefined();
+
+    fireEvent.click(button);
+    await waitFor(() => expect(grantBodies).toHaveLength(2));
+    expect(grantBodies).toEqual([
+      { capability: "web.search", scope: { connection_id: "web-connection" }, effect: "allow" },
+      {
+        capability: "web.fetch",
+        scope: { connection_id: "web-connection", domain: "*" },
+        effect: "allow",
+      },
+    ]);
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("capability-preset-web-access").getAttribute("aria-pressed"),
+      ).toBe("true"),
+    );
+    // Everything granted is accounted for by the capability, so the raw
+    // editor stays collapsed.
+    expect(screen.queryByTestId("advanced-access")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("capability-preset-web-access"));
+    await waitFor(() => expect(revoked).toHaveLength(2));
+    await waitFor(() => expect(screen.getByTestId("no-grants")).toBeDefined());
+    expect(
+      screen.getByTestId("capability-preset-web-access").getAttribute("aria-pressed"),
+    ).toBe("false");
+  });
+
+  it("disables a capability whose tools this workspace does not offer", async () => {
+    renderToolsAccess(webAccessTools);
+    const codeEditing = await screen.findByTestId("capability-preset-code-editing");
+    expect((codeEditing as HTMLButtonElement).disabled).toBe(true);
   });
 });

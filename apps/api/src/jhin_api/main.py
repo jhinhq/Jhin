@@ -31,6 +31,15 @@ from jhin_api.health.router import router as health_router
 from jhin_api.media.router import router as media_router
 from jhin_api.memory.router import router as memory_router
 from jhin_api.models.router import profiles_router, providers_router, spend_router
+from jhin_api.openapi import (
+    CONTACT_INFO,
+    DESCRIPTION,
+    LICENSE_INFO,
+    SUMMARY,
+    build_openapi,
+    tag_metadata,
+)
+from jhin_api.openapi import router as openapi_router
 from jhin_api.org.router import router as org_router
 from jhin_api.policy.router import router as policy_router
 from jhin_api.secrets.router import router as secrets_router
@@ -348,13 +357,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(
         title=settings.app_name,
         version=__version__,
+        summary=SUMMARY,
+        description=DESCRIPTION,
+        contact=CONTACT_INFO,
+        license_info=LICENSE_INFO,
+        openapi_tags=tag_metadata(),
+        # Relative, so the document is correct behind whatever host, port, and
+        # reverse proxy this install happens to sit behind — and identical
+        # across environments, which is what makes the committed snapshot in
+        # docs/api/openapi.v1.json a meaningful diff target.
+        servers=[{"url": "/", "description": "This Jhin install"}],
         lifespan=lifespan,
         # Interactive docs map the entire API surface for an unauthenticated
-        # visitor. Useful in development, needless exposure in production.
+        # visitor. Useful in development, needless exposure in production —
+        # signed-in users read the same document at /api/v1/openapi.json,
+        # which the web app renders at /api-docs.
         docs_url="/docs" if settings.expose_api_docs else None,
         redoc_url="/redoc" if settings.expose_api_docs else None,
         openapi_url="/openapi.json" if settings.expose_api_docs else None,
     )
+    # Adds auth schemes and the per-operation scope each route already
+    # declares in access/route_scopes.py, so the reference cannot drift from
+    # what the API enforces.
+    app.openapi = lambda: build_openapi(app)  # type: ignore[method-assign]
     app.state.settings = settings
     app.state.login_limiter = LoginRateLimiter(
         account_max_attempts=settings.login_max_attempts,
@@ -391,6 +416,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(SecurityHeadersMiddleware, hsts=settings.emit_hsts)
 
     app.include_router(health_router)
+    app.include_router(openapi_router)
     app.include_router(auth_router)
     app.include_router(workspaces_router)
     app.include_router(invitations_router)

@@ -73,6 +73,17 @@ adds the open-source release artifacts.
   taxonomy, a hard ceiling at the creating user's role, central per-route
   scope enforcement that fails closed, sealed credential endpoints, and a
   usage log with role-scoped visibility (`docs/architecture/api-keys.md`).
+- **API reference and a versioned contract:** an in-app reference at
+  `/api-docs`, rendered from the install's own OpenAPI document (served to
+  signed-in users at `GET /api/v1/openapi.json`, so it is available in
+  production where the anonymous `/docs` is not) and linked from the API keys
+  page alongside the base URL, bearer header, and a runnable curl example;
+  enriched OpenAPI metadata with described tags, both security schemes, and
+  the scope every operation requires read out of the same table the API
+  enforces; `api_version` on `GET /api/v1/health`; and a committed snapshot
+  (`docs/api/openapi.v1.json`) diffed on every test run so a backwards-
+  incompatible change to `/api/v1` fails the build
+  (`docs/architecture/api-versioning.md`).
 - **Open-source release (phase 11):** Apache-2.0 license metadata,
   community files (`CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`,
   `SUPPORT.md`), issue and pull-request templates, CODEOWNERS, Dependabot,

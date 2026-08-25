@@ -10,7 +10,12 @@ DependencyState = Literal["ok", "error"]
 class LivenessReport(BaseModel):
     status: Literal["ok"]
     app: str
+    #: The app's release version (VERSION / CHANGELOG), e.g. ``0.1.0``.
     version: str
+    #: The API contract version this install serves — the ``v1`` in
+    #: ``/api/v1``. Additive and stable: an integrator reads it to decide
+    #: which contract it is talking to (docs/architecture/api-versioning.md).
+    api_version: str = "v1"
 
 
 class DependencyStatus(BaseModel):

@@ -4,7 +4,8 @@
  * them (docs/architecture/api-keys.md). */
 
 import { useMutation } from "@tanstack/react-query";
-import { KeyRound, Plus, Trash2 } from "lucide-react";
+import { ArrowRight, BookOpen, KeyRound, Plus, Trash2 } from "lucide-react";
+import Link from "next/link";
 import { useMemo, useState } from "react";
 import { PageBody, PageHeader } from "@/components/app-shell";
 import {
@@ -25,10 +26,12 @@ import {
   Input,
   Select,
   Spinner,
+  focusRing,
 } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import { formatDateTime, formatRelative } from "@/lib/format";
 import { useApiKeys, useApiKeyUsage, useScopeCatalog } from "@/lib/hooks";
+import { useApiOrigin } from "@/lib/openapi";
 import type { ApiKeyCreated, ApiKeyInfo, ExpiryUnit } from "@/lib/types";
 import { useWorkspace } from "@/lib/workspace-context";
 
@@ -69,9 +72,17 @@ export default function ApiKeysPage() {
         title="API keys"
         description="Let a script, a CI job, or another system act in this workspace without a browser."
         actions={
-          <Button variant="primary" onClick={() => setCreateOpen(true)}>
-            <Plus size={14} /> New key
-          </Button>
+          <>
+            <Link
+              href="/api-docs"
+              className={`inline-flex h-10 shrink-0 items-center justify-center gap-1.5 rounded-xl border border-line px-4 text-sm font-medium text-dim transition-colors hover:border-accent hover:text-ink ${focusRing}`}
+            >
+              <BookOpen size={14} aria-hidden /> API reference
+            </Link>
+            <Button variant="primary" onClick={() => setCreateOpen(true)}>
+              <Plus size={14} /> New key
+            </Button>
+          </>
         }
       />
       <PageBody className="max-w-5xl space-y-8">
@@ -117,6 +128,8 @@ export default function ApiKeysPage() {
           )}
         </Card>
 
+        <UsingTheApi workspaceId={workspaceId} />
+
         <UsageLog workspaceId={workspaceId} keys={rows} help={USAGE_HELP[role]} />
       </PageBody>
 
@@ -127,6 +140,75 @@ export default function ApiKeysPage() {
         onCreated={() => void keys.refetch()}
       />
     </>
+  );
+}
+
+/** What to do with a key once you have one: where to point it, what header to
+ * send, and one call that works as written. The full endpoint list is not
+ * repeated here — it is generated at /api-docs from the API's own OpenAPI
+ * document, so it cannot fall behind the API the way a written list would. */
+function UsingTheApi({ workspaceId }: { workspaceId: string }) {
+  const origin = useApiOrigin();
+  const baseUrl = `${origin}/api/v1`;
+  const example = [
+    `curl -H "Authorization: Bearer jhin_xxxxxxxx_your-key-here" \\`,
+    `  ${baseUrl}/workspaces/${workspaceId}/agents`,
+  ].join("\n");
+
+  return (
+    <Card as="section">
+      <h2 className="mb-1 font-display text-base font-semibold">Using the API</h2>
+      <p className="mb-4 text-sm text-dim">
+        Everything this app does, a script can do. Same endpoints, same permission rules.
+      </p>
+
+      <dl className="space-y-3 text-sm">
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <dt className="w-28 shrink-0 text-dim">Base URL</dt>
+          <dd>
+            <code className="rounded-md bg-hover px-1.5 py-0.5 font-mono text-[12px]">
+              {baseUrl}
+            </code>
+          </dd>
+        </div>
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <dt className="w-28 shrink-0 text-dim">Auth header</dt>
+          <dd>
+            <code className="rounded-md bg-hover px-1.5 py-0.5 font-mono text-[12px]">
+              Authorization: Bearer jhin_&lt;prefix&gt;_&lt;secret&gt;
+            </code>
+          </dd>
+        </div>
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <dt className="w-28 shrink-0 text-dim">Permissions</dt>
+          <dd className="flex-1 text-dim">
+            A call needs the matching scope — <code className="font-mono text-[12px]">agents:read</code>{" "}
+            to list agents, <code className="font-mono text-[12px]">agents:write</code> to create
+            one. The reference names the scope for every endpoint, and the picker above only offers
+            the ones your role may grant.
+          </dd>
+        </div>
+      </dl>
+
+      <p className="mb-1.5 mt-4 text-xs font-semibold uppercase tracking-wider text-faint">
+        Try it
+      </p>
+      <pre
+        data-testid="api-example"
+        className="overflow-x-auto rounded-xl bg-hover p-3 font-mono text-[12px] leading-relaxed text-ink"
+      >
+        <code>{example}</code>
+      </pre>
+
+      <Link
+        href="/api-docs"
+        className={`mt-4 inline-flex items-center gap-1.5 text-sm font-medium text-accent-strong ${focusRing}`}
+      >
+        <BookOpen size={14} aria-hidden />
+        Browse every endpoint in the API reference
+        <ArrowRight size={14} aria-hidden />
+      </Link>
+    </Card>
   );
 }
 

@@ -243,6 +243,24 @@ describe("ApiKeysPage", () => {
     expect(table.textContent).toContain("403");
   });
 
+  it("points at the API reference from the header and from the guidance", () => {
+    renderPage([]);
+    const links = screen
+      .getAllByRole("link")
+      .filter((link) => link.getAttribute("href") === "/api-docs");
+    expect(links.length).toBe(2);
+    expect(links.some((link) => /API reference/.test(link.textContent ?? ""))).toBe(true);
+  });
+
+  it("gives a curl example that already names this workspace and the bearer header", () => {
+    renderPage([]);
+    const example = screen.getByTestId("api-example").textContent ?? "";
+    expect(example).toContain("Authorization: Bearer jhin_");
+    expect(example).toContain("/api/v1/workspaces/w1/agents");
+    expect(screen.getByText(/Base URL/)).toBeDefined();
+    expect(screen.getAllByText(/agents:read/).length).toBeGreaterThan(0);
+  });
+
   it("tells each role what slice of the usage log they are seeing", () => {
     renderPage([], "owner");
     expect(screen.getByText(/you see every API call made in this workspace/i)).toBeDefined();

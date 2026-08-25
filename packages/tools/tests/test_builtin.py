@@ -3,6 +3,8 @@ that no self-modifying / capability-granting tool exists."""
 
 import pytest
 
+from jhin_db.models import Task
+from jhin_domain import new_uuid7
 from jhin_policy import (
     FORBIDDEN_CAPABILITY_PREFIXES,
     Grant,
@@ -19,6 +21,8 @@ from jhin_tools.builtin import (
     allowed_tool_definitions,
     build_builtin_catalog,
     connection_hints,
+    task_expects_a_reported_result,
+    task_scoped_tool_definitions,
 )
 
 
@@ -135,3 +139,85 @@ def test_connection_hints_are_empty_without_connection_scope() -> None:
     echo = entry[0]
     grants = [Grant(capability="system.echo", scope={}, effect=GrantEffect.ALLOW)]
     assert advertised_description(echo, grants, {}) == echo.description
+
+
+def _task(**values: object) -> Task:
+    return Task(
+        id=new_uuid7(),
+        workspace_id=new_uuid7(),
+        title="Task",
+        correlation_id=new_uuid7(),
+        metadata_json=values.pop("metadata_json", {}),
+        **values,
+    )
+
+
+@pytest.mark.parametrize(
+    ("task", "expected"),
+    [
+        # A delegated or review child reports back to its delegator.
+        (_task(parent_task_id=new_uuid7(), metadata_json={"origin": "delegation"}), True),
+        (
+            _task(
+                parent_task_id=new_uuid7(),
+                metadata_json={"delegation": {"kind": "review_request"}},
+            ),
+            True,
+        ),
+        # An accepted work request is assigned work even though it is linked
+        # to the requester's chat, so conversation_id must not decide alone.
+        (
+            _task(
+                conversation_id=new_uuid7(),
+                metadata_json={"origin": "work_request", "work_request": {"id": "w"}},
+            ),
+            True,
+        ),
+        # A standalone task from the Tasks UI: its result card is its outcome.
+        (_task(), True),
+        # A trigger-created task is nobody's chat turn either.
+        (_task(metadata_json={"origin": "trigger"}), True),
+        # Chat turns: the person is waiting for a reply, not for a report.
+        (
+            _task(
+                conversation_id=new_uuid7(),
+                metadata_json={"origin": "conversation", "conversation_id": "c"},
+            ),
+            False,
+        ),
+        (_task(metadata_json={"origin": "message"}), False),
+        (_task(conversation_id=new_uuid7()), False),
+        # Unknown task: advertisement stays as-is (the gateway still decides).
+        (None, True),
+    ],
+)
+def test_reported_results_are_expected_only_from_assigned_work(
+    task: Task | None, expected: bool
+) -> None:
+    assert task_expects_a_reported_result(task) is expected
+
+
+def test_task_scoping_drops_only_the_reporting_tool_on_a_chat_turn() -> None:
+    catalog = build_builtin_catalog()
+    grants = [
+        Grant(capability="organization.*", scope={}, effect=GrantEffect.ALLOW),
+        Grant(capability="system.echo", scope={}, effect=GrantEffect.ALLOW),
+    ]
+    granted = allowed_tool_definitions(catalog, grants)
+    assert "organization.report_result" in {d.name for d in granted}
+
+    chat = task_scoped_tool_definitions(granted, _task(conversation_id=new_uuid7()))
+    delegated = task_scoped_tool_definitions(granted, _task(parent_task_id=new_uuid7()))
+
+    assert {d.name for d in granted} - {d.name for d in chat} == {"organization.report_result"}
+    assert delegated == granted
+
+
+def test_the_reporting_tool_never_reads_as_how_to_end_a_chat() -> None:
+    """Its description is the only guidance the model gets about when to use
+    it; it must say who it reports to and what to do in a conversation."""
+    entry = build_builtin_catalog().get("organization.report_result")
+    assert entry is not None
+    description = entry[0].description
+    assert "delegated" in description
+    assert "answer them in your reply" in description

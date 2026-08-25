@@ -36,7 +36,15 @@ from jhin_db.models import (
     ToolCall,
     Workspace,
 )
-from jhin_domain import ApprovalStatus, RunStatus, TaskState, ToolCallStatus, new_uuid7
+from jhin_domain import (
+    ApprovalStatus,
+    MessageVisibility,
+    RunStatus,
+    SenderType,
+    TaskState,
+    ToolCallStatus,
+    new_uuid7,
+)
 from jhin_observability import noop_metrics, noop_tracer
 from jhin_tools import stable_tool_invocation_id
 from jhin_workflows import AGENT_TASK_QUEUE, TOOL_TASK_QUEUE
@@ -189,6 +197,7 @@ class ProjectionWorld:
         tool_names: list[str] | None = None,
         approval_ordinals: frozenset[int] = frozenset(),
         outputs: list[dict[str, Any]] | None = None,
+        completion: str = "Calling a tool.",
     ) -> None:
         count = manifest_count if manifest_count is not None else len(statuses)
         names = tool_names if tool_names is not None else ["system.echo"] * count
@@ -232,7 +241,7 @@ class ProjectionWorld:
                         event_type="agent.step.reasoning",
                         payload_json=AgentStepReasoningRecord(
                             step=0,
-                            completion_sanitized="Calling a tool.",
+                            completion_sanitized=completion,
                             model="projection-test",
                             finish_reason="tool_calls",
                             provider_request_id="private-provider-request",
@@ -244,7 +253,7 @@ class ProjectionWorld:
                                 {"node": "reason", "detail": "model responded"},
                                 {"node": "call_tool", "detail": "tool requested"},
                             ),
-                            done=False,
+                            done=count == 0,
                             usage=AgentStepUsage(
                                 input_tokens=7,
                                 output_tokens=3,
@@ -1005,3 +1014,67 @@ async def test_failed_call_observation_carries_the_connector_hint(world: Project
     # The seeded row carries no error_code, so the status names the error.
     assert observation["error"] == "failed"
     assert observation["detail"] == "tool execution failed: use one SELECT with a LIMIT"
+
+
+async def _final_messages(world: ProjectionWorld) -> list[Message]:
+    async with world.sessions() as session:
+        return list(
+            await session.scalars(
+                select(Message)
+                .where(Message.run_id == world.run_id)
+                .order_by(Message.created_at, Message.id)
+            )
+        )
+
+
+async def test_a_final_answer_is_persisted_as_the_agent_saying_it(
+    world: ProjectionWorld,
+) -> None:
+    await world.seed_step(statuses=[], manifest_count=0, completion="Connie is on QA duty.")
+
+    await world.projections.commit_agent_step_activity(world.commit_params(ids=[]))
+
+    messages = await _final_messages(world)
+    assert [(m.sender_type, m.message_type) for m in messages] == [(SenderType.AGENT.value, "text")]
+    assert messages[0].content_json["text"] == "Connie is on QA duty."
+
+
+@pytest.mark.parametrize("completion", ["", "   ", "\n\t  \n"])
+async def test_an_empty_completion_never_becomes_an_empty_agent_bubble(
+    world: ProjectionWorld,
+    completion: str,
+) -> None:
+    """A run that ends with no text must not leave a blank bubble behind —
+    nor silence: the reader gets an honest system note instead."""
+    await world.seed_step(statuses=[], manifest_count=0, completion=completion)
+
+    await world.projections.commit_agent_step_activity(world.commit_params(ids=[]))
+
+    messages = await _final_messages(world)
+    assert [(m.sender_type, m.message_type) for m in messages] == [
+        (SenderType.SYSTEM.value, "note")
+    ]
+    note = messages[0]
+    assert note.sender_id is None
+    assert note.visibility == MessageVisibility.VISIBLE.value
+    assert note.content_json["text"] == "Projector finished without a reply."
+    assert note.content_json["reason"] == "empty_completion"
+
+
+async def test_the_empty_completion_note_carries_a_reported_summary(
+    world: ProjectionWorld,
+) -> None:
+    async with world.sessions() as session:
+        task = await session.get(Task, world.task_id)
+        assert task is not None
+        task.metadata_json = {"reported_result": {"summary": "Looked up Connie's record."}}
+        flag_modified(task, "metadata_json")
+        await session.commit()
+    await world.seed_step(statuses=[], manifest_count=0, completion="")
+
+    await world.projections.commit_agent_step_activity(world.commit_params(ids=[]))
+
+    messages = await _final_messages(world)
+    assert messages[0].content_json["text"] == (
+        "Projector finished without a reply. Its reported result: Looked up Connie's record."
+    )

@@ -52,6 +52,7 @@ from jhin_tools import (
     advertised_description,
     allowed_tool_definitions,
     stable_tool_invocation_id,
+    task_scoped_tool_definitions,
 )
 from jhin_tools.telemetry import (
     ToolTelemetryDescription,
@@ -895,6 +896,7 @@ class ToolActivities:
     ) -> list[AdvertisedTool]:
         workspace_id = _uuid(params.workspace_id, field="workspace_id")
         agent_id = _uuid(params.agent_id, field="agent_id")
+        task_id = _uuid(params.task_id, field="task_id") if params.task_id else None
         async with self._resources.session_factory() as session:
             rows = await session.scalars(
                 select(AgentCapabilityGrant).where(
@@ -941,13 +943,27 @@ class ToolActivities:
             # Workspace-scoped view: static tools plus tools discovered from
             # this workspace's MCP connections (docs/architecture/mcp.md).
             catalog = await self._catalog.for_workspace(session, workspace_id)
+            # Task-kind scoping: some tools only mean something for assigned
+            # work (reporting a result back to a delegator). On a plain chat
+            # turn they are withheld so the model answers the person instead
+            # of filing a report at them. Never widens the grant set.
+            task = (
+                await session.scalar(
+                    select(Task).where(Task.id == task_id, Task.workspace_id == workspace_id)
+                )
+                if task_id is not None
+                else None
+            )
+            definitions = task_scoped_tool_definitions(
+                allowed_tool_definitions(catalog, grants), task
+            )
         return [
             AdvertisedTool(
                 name=definition.name,
                 description=advertised_description(definition, grants, connection_labels),
                 parameters=definition.input_json_schema(),
             )
-            for definition in allowed_tool_definitions(catalog, grants)
+            for definition in definitions
         ]
 
     @activity.defn(name=ACTIVITY_EXECUTE_BOUND_TOOL)

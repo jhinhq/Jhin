@@ -125,6 +125,7 @@ class AgentCompatibilityActivities:
             AdvertisedCompatibilityInput(
                 workspace_id=workspace_id,
                 agent_id=agent_id,
+                task_id=task_id,
             ),
             workflow_id=advertised_id,
         )

@@ -479,6 +479,10 @@ export function Transcript({
     if (isWorkCard(message)) {
       return <WorkCard key={item.id} message={message} name={name} avatar={avatar} />;
     }
+    // An agent turn with no text is not an answer — render nothing rather
+    // than an empty bubble. The backend no longer writes these, but rows
+    // saved before that fix still exist in transcripts.
+    if (!messageText(message).trim()) return null;
     return <AgentBubble key={item.id} message={message} name={name} avatar={avatar} />;
   };
 

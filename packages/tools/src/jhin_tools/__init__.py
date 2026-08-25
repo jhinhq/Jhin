@@ -3,6 +3,7 @@ agent tool call (plan section 12) — plus the Phase 4 built-in system tools."""
 
 from jhin_tools.builtin import (
     BUILTIN_TOOLS,
+    DELEGATION_REPORTING_TOOLS,
     DynamicToolSource,
     ToolCatalog,
     ToolDefinitionCatalog,
@@ -11,6 +12,8 @@ from jhin_tools.builtin import (
     allowed_tool_definitions,
     build_builtin_catalog,
     builtin_tool_definitions,
+    task_expects_a_reported_result,
+    task_scoped_tool_definitions,
 )
 from jhin_tools.errors import ToolExecutionError
 from jhin_tools.gateway import (
@@ -53,6 +56,7 @@ from jhin_tools.test_barriers import (
 __all__ = [
     "AGENT_BEFORE_BIND",
     "BUILTIN_TOOLS",
+    "DELEGATION_REPORTING_TOOLS",
     "INVALID_TOOL_ARGUMENTS_KEY",
     "MAX_DOCUMENT_BYTES",
     "MAX_STRING_CHARS",
@@ -89,4 +93,6 @@ __all__ = [
     "sanitize_payload",
     "stable_sync_invocation_id",
     "stable_tool_invocation_id",
+    "task_expects_a_reported_result",
+    "task_scoped_tool_definitions",
 ]

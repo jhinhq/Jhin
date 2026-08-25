@@ -15,6 +15,9 @@ CompatibilityKind = Literal["advertised", "tool-step", "approval", "sync", "clea
 class AdvertisedCompatibilityInput:
     workspace_id: str
     agent_id: str
+    # Optional (default empty) so pre-existing compatibility histories keep
+    # replaying; see ResolveAdvertisedToolsInput.task_id.
+    task_id: str = ""
 
 
 @dataclass

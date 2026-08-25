@@ -43,6 +43,7 @@ export function ChatHeader({
   onTogglePin,
   onToggleArchive,
   busy = false,
+  quickControls = null,
 }: {
   conversation: Conversation;
   agent: ConversationAgentSummary | null;
@@ -57,6 +58,9 @@ export function ChatHeader({
   onTogglePin: () => void;
   onToggleArchive: () => void;
   busy?: boolean;
+  /** In-chat quick settings (model, mode, tools, cost). Passed in as a slot so
+   * the header stays free of data hooks. */
+  quickControls?: React.ReactNode;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(conversation.title);
@@ -85,8 +89,11 @@ export function ChatHeader({
     requestAnimationFrame(() => titleButtonRef.current?.focus());
   };
 
+  // `relative z-20` on the header: its backdrop-blur already makes it a
+  // stacking context, so without an explicit z-index the transcript below
+  // paints over anything the header pops out (the quick-settings popover).
   return (
-    <header className="flex items-center gap-3 border-b border-line bg-surface/80 px-3 py-2.5 backdrop-blur sm:px-5">
+    <header className="relative z-20 flex items-center gap-3 border-b border-line bg-surface/80 px-3 py-2.5 backdrop-blur sm:px-5">
       <Link
         href="/chats"
         aria-label="Back to chats"
@@ -145,6 +152,7 @@ export function ChatHeader({
         </p>
       </div>
       <div className="flex shrink-0 items-center gap-0.5">
+        {quickControls}
         {canEdit ? (
           <>
             <IconButton

@@ -27,21 +27,45 @@ export const TEAM_ICONS: Record<string, typeof Users> = {
   pen: PenLine,
 };
 
+/**
+ * Optional reorganisation slots. The chart stays presentational: an admin
+ * screen passes the drag-and-drop implementation (or a menu-only one) in,
+ * and a viewer passes nothing, which is exactly how the affordances
+ * disappear for people who may not move anyone.
+ */
+export interface OrgMoveApi {
+  /** Wrap a team (or Independent) section so it accepts top-level drops. */
+  groupWrapper: (
+    teamId: string | null,
+    teamName: string,
+    content: React.ReactNode,
+  ) => React.ReactNode;
+  /** Wrap one agent row so it accepts drops that set it as the manager. */
+  agentRow: (agent: OrgAgentNode, row: React.ReactNode) => React.ReactNode;
+  /** Leading drag handle for one agent row. */
+  agentHandle: (agent: OrgAgentNode) => React.ReactNode;
+  /** Trailing keyboard-operable "Move…" menu for one agent row. */
+  agentMenu: (agent: OrgAgentNode) => React.ReactNode;
+}
+
 export function AgentCard({
   node,
   managerName,
   onOpen,
+  move,
 }: {
   node: AgentTreeNode;
   managerName?: string;
   onOpen: (agent: OrgAgentNode) => void;
+  move?: OrgMoveApi;
 }) {
   const { agent } = node;
-  return (
-    <div>
+  const row = (
+    <div className="flex items-center gap-1">
+      {move?.agentHandle(agent)}
       <button
         onClick={() => onOpen(agent)}
-        className={`group flex w-full items-center gap-3 rounded-xl border border-line bg-raised px-3.5 py-2.5 text-left transition-colors hover:border-accent hover:bg-hover ${focusRing}`}
+        className={`group flex min-w-0 flex-1 items-center gap-3 rounded-xl border border-line bg-raised px-3.5 py-2.5 text-left transition-colors hover:border-accent hover:bg-hover ${focusRing}`}
       >
         <StatusDot status={agent.status} />
         <span className="min-w-0 flex-1">
@@ -55,6 +79,12 @@ export function AgentCard({
           <Badge tone={agent.status === "paused" ? "warn" : "neutral"}>{agent.status}</Badge>
         ) : null}
       </button>
+      {move?.agentMenu(agent)}
+    </div>
+  );
+  return (
+    <div>
+      {move ? move.agentRow(agent, row) : row}
       {node.reports.length > 0 ? (
         <div className="ml-4 mt-2 space-y-2 border-l border-line-strong pl-4">
           {node.reports.map((report) => (
@@ -63,6 +93,7 @@ export function AgentCard({
               node={report}
               managerName={agent.name}
               onOpen={onOpen}
+              move={move}
             />
           ))}
         </div>
@@ -80,6 +111,7 @@ export function TeamCard({
   onDeleteTeam,
   onAddAgent,
   managerNameFor,
+  move,
 }: {
   node: TeamTreeNode;
   depth: number;
@@ -89,10 +121,11 @@ export function TeamCard({
   onDeleteTeam: (team: OrgTeamNode) => void;
   onAddAgent: (teamId: string) => void;
   managerNameFor: (agent: OrgAgentNode) => string | undefined;
+  move?: OrgMoveApi;
 }) {
   const Icon = TEAM_ICONS[node.team.icon] ?? Users;
   const agentCount = countTeamAgents(node);
-  return (
+  const card = (
     <section
       className={`team-accent-${node.team.color_token} rounded-2xl border border-line bg-surface shadow-card`}
       style={{ borderLeft: "3px solid var(--team, var(--line-strong))" }}
@@ -149,6 +182,7 @@ export function TeamCard({
               node={agentNode}
               managerName={managerNameFor(agentNode.agent)}
               onOpen={onOpenAgent}
+              move={move}
             />
           ))
         )}
@@ -165,6 +199,7 @@ export function TeamCard({
                 onDeleteTeam={onDeleteTeam}
                 onAddAgent={onAddAgent}
                 managerNameFor={managerNameFor}
+                move={move}
               />
             ))}
           </div>
@@ -172,4 +207,5 @@ export function TeamCard({
       </div>
     </section>
   );
+  return move ? <>{move.groupWrapper(node.team.id, node.team.name, card)}</> : card;
 }

@@ -1,15 +1,21 @@
 """Prompt composition (plan 7.2).
 
 Layers, in order: platform preamble (jhin_agents.platform_prompt) → agent
-role/system prompt → organization placement (team, manager) → task →
-execution constraints. Memory and tool schemas join in later phases. Secrets
-are never available to this module, so they cannot be concatenated (plan
-2.4).
+role/system prompt → organization placement (team, manager) → current
+situation (time, interlocutor) → task → execution constraints. Memory and
+tool schemas join in later phases. Secrets are never available to this
+module, so they cannot be concatenated (plan 2.4).
+
+Everything here is a pure function of its arguments: the wall clock and the
+database are read by the caller (the reasoning *activity*), never by this
+module, so composing the same ``TaskContext`` twice always yields the same
+bytes. That is what keeps the recorded-step contract replay-stable.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -64,6 +70,143 @@ class TaskContext(BaseModel):
     # disclosure; the agent reads bodies via the skills.read tool). "" when
     # the agent has no enabled skills.
     skills_context: str = ""
+    # Situational awareness (shared knowledge, never per-agent memory). Both
+    # are rendered by the caller from live workspace data on every run:
+    #   time_context         — ``time_block()``: now, in the workspace's
+    #                          timezone, with the weekday named.
+    #   interlocutor_context — ``interlocutor_block()``: who this agent is
+    #                          talking with right now (person or agent).
+    # Empty strings simply drop the block, so old serialized contexts and
+    # callers that do not supply them keep composing unchanged.
+    time_context: str = ""
+    interlocutor_context: str = ""
+
+
+# --- Situational awareness blocks ---------------------------------------
+#
+# Two things every agent needs in every conversation and that no amount of
+# per-agent memory should have to supply: what time it is, and who it is
+# talking to. Both are cheap (two or three lines) and bounded.
+
+# Weekday/month names are spelled out rather than taken from ``strftime``
+# so the rendered text never depends on the container's locale.
+_WEEKDAY_NAMES = (
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+)
+_MONTH_NAMES = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
+
+MAX_INTERLOCUTORS_LISTED = 5
+_MAX_INTERLOCUTOR_FIELD_CHARS = 120
+
+
+def format_local_time(moment: datetime, timezone_name: str) -> str:
+    """``"Monday, 24 August 2026, 21:14 (America/Los_Angeles)"``.
+
+    ``moment`` must already be expressed in ``timezone_name``; resolving the
+    zone is the caller's job (it needs the workspace row). ``timezone_name``
+    is named explicitly so the model never has to guess the offset.
+    """
+    weekday = _WEEKDAY_NAMES[moment.weekday()]
+    month = _MONTH_NAMES[moment.month - 1]
+    stamp = f"{weekday}, {moment.day} {month} {moment.year}, {moment:%H:%M}"
+    label = " ".join(timezone_name.split())[:64]
+    return f"{stamp} ({label})" if label else stamp
+
+
+def time_block(moment: datetime, timezone_name: str) -> str:
+    """The "Current time" prompt block.
+
+    Present on every run so ordinary questions ("what's today?", "what is
+    due this week?") never need a tool round-trip; ``system.time`` remains
+    the way to re-check the clock mid-run or to get a precise UTC stamp.
+    """
+    return (
+        f"Current time: {format_local_time(moment, timezone_name)}. "
+        "This is your workspace's local time and it is correct right now — "
+        'treat it as "now" whenever you reason about dates such as today, '
+        "this week, or tomorrow, and never guess the date from your "
+        "training data."
+    )
+
+
+class Interlocutor(BaseModel):
+    """One participant this agent is currently talking with.
+
+    Public identity only: a display name the person or agent chose, and
+    their role in plain words. Never an email address, and never anyone who
+    is not part of this conversation in this workspace.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    display_name: str
+    kind: Literal["human", "agent"] = "human"
+    # Plain words: "workspace owner", "workspace member", or an agent's role
+    # title. "" drops the parenthetical.
+    role: str = ""
+    # How they relate to this task, e.g. "who delegated this task to you".
+    # "" drops the clause.
+    relation: str = ""
+
+
+def _clean(value: str) -> str:
+    return " ".join(value.split())[:_MAX_INTERLOCUTOR_FIELD_CHARS]
+
+
+def _describe(who: Interlocutor) -> str:
+    name = _clean(who.display_name)
+    role = _clean(who.role)
+    description = f"{name} ({role})" if role else name
+    description += (
+        ", a person in this workspace"
+        if who.kind == "human"
+        else ", an AI teammate in this workspace"
+    )
+    relation = _clean(who.relation)
+    if relation:
+        description += f", {relation}"
+    return description
+
+
+def interlocutor_block(interlocutors: Sequence[Interlocutor]) -> str:
+    """The "Who you are talking with" prompt block.
+
+    Returns ``""`` when the counterpart is unknown (a trigger-started task,
+    say), so an unresolved interlocutor degrades to silence rather than to a
+    wrong guess. This is shared knowledge derived live from workspace data
+    on every run — an agent never has to *learn* who it is talking to.
+    """
+    listed = [who for who in interlocutors if _clean(who.display_name)][:MAX_INTERLOCUTORS_LISTED]
+    if not listed:
+        return ""
+    if len(listed) == 1:
+        body = f"Who you are talking with: {_describe(listed[0])}."
+    else:
+        body = "\n".join(["Who you are talking with:"] + [f"- {_describe(who)}" for who in listed])
+    return (
+        f"{body}\nUse their name when you address them. Everything you know "
+        "about them is stated here — do not invent other details, and do not "
+        "assume anyone else can see this conversation."
+    )
 
 
 # --- Skills block (docs/architecture/skills.md) -------------------------
@@ -98,7 +241,13 @@ def skills_block(skills: Sequence[tuple[str, str]]) -> str:
     return "\n".join(lines)
 
 
-def compose_system_prompt(snapshot: AgentExecutionSnapshot, *, has_tools: bool = False) -> str:
+def compose_system_prompt(
+    snapshot: AgentExecutionSnapshot,
+    *,
+    has_tools: bool = False,
+    time_context: str = "",
+    interlocutor_context: str = "",
+) -> str:
     # Layer 1 — the platform preamble carries the agent's identity (name,
     # role, workspace) and the non-negotiable platform rules. The agent's
     # own system_prompt follows it, intact.
@@ -118,6 +267,13 @@ def compose_system_prompt(snapshot: AgentExecutionSnapshot, *, has_tools: bool =
         org_lines.append(f"Your manager is {snapshot.manager_name}.")
     if org_lines:
         parts.append(" ".join(org_lines))
+    # Layer 3 — the current situation. It sits high in the prompt (before
+    # the tool guidance and the appended roster/memory/skills blocks)
+    # because "who am I speaking to" and "what time is it" frame every
+    # other instruction. Both are re-derived live on each run.
+    for section in (time_context, interlocutor_context):
+        if section:
+            parts.append(section)
     if has_tools:
         parts.append(
             "You may call the provided tools. Every call is checked against "
@@ -161,7 +317,12 @@ def build_messages(
     snapshot: AgentExecutionSnapshot, task: TaskContext, *, has_tools: bool = False
 ) -> tuple[ModelMessage, ...]:
     """Full message list for one reasoning step."""
-    system_prompt = compose_system_prompt(snapshot, has_tools=has_tools)
+    system_prompt = compose_system_prompt(
+        snapshot,
+        has_tools=has_tools,
+        time_context=task.time_context,
+        interlocutor_context=task.interlocutor_context,
+    )
     for section in (
         task.organization_context,
         task.manager_context,

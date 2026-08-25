@@ -20,7 +20,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from jhin_db.models import AuditEvent, Message
+from jhin_db.models import AuditEvent, Message, Task
 from jhin_domain import ActorType, MessageVisibility, RecipientType, SenderType
 from jhin_policy import (
     CapabilityRegistry,
@@ -416,6 +416,55 @@ def allowed_tool_definitions(
             capability_matches(pattern, definition.required_capability)
             for pattern in allow_patterns
         )
+    )
+
+
+# Tools whose whole meaning is "hand a finished assignment back to whoever
+# delegated it". Advertising them on an ordinary chat turn invites the model
+# to file a report *instead of* answering the person who asked (and then it
+# has nothing left to say), so they are withheld there.
+DELEGATION_REPORTING_TOOLS = frozenset({"organization.report_result"})
+
+# Task metadata ``origin`` values that mean "a person is talking to this
+# agent in a chat thread", as written by the API conversation endpoints.
+_CONVERSATION_ORIGINS = frozenset({"conversation", "message"})
+
+
+def task_expects_a_reported_result(task: Task | None) -> bool:
+    """Whether reporting a structured result is meaningful for this task.
+
+    True for assigned work with somewhere to report *to*: delegated and
+    review children, accepted work requests, and ordinary standalone tasks
+    (whose result card is the task's own outcome). False for a plain
+    conversation turn — there the agent's reply *is* the deliverable.
+
+    ``None`` (task unknown to the caller) keeps the tool advertised: this is
+    prompt economy, not authorization, and the gateway re-decides every call
+    against live grants either way.
+    """
+    if task is None:
+        return True
+    metadata = task.metadata_json if isinstance(task.metadata_json, dict) else {}
+    # Delegated / review children and work-request tasks report back by
+    # design — the whole Phase 8 flow reads the reported result.
+    if task.parent_task_id is not None:
+        return True
+    if metadata.get("delegation") or metadata.get("work_request"):
+        return True
+    # A chat turn: a person is waiting for an answer, not for a filed report.
+    return not (metadata.get("origin") in _CONVERSATION_ORIGINS or task.conversation_id is not None)
+
+
+def task_scoped_tool_definitions(
+    definitions: Sequence[ToolDefinition], task: Task | None
+) -> tuple[ToolDefinition, ...]:
+    """Narrow advertised definitions to those meaningful for ``task``."""
+    if task_expects_a_reported_result(task):
+        return tuple(definitions)
+    return tuple(
+        definition
+        for definition in definitions
+        if definition.name not in DELEGATION_REPORTING_TOOLS
     )
 
 

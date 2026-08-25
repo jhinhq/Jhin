@@ -3,7 +3,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConversationRailItem } from "@/components/chat/chat-rail";
-import { Composer } from "@/components/chat/composer";
+import { COMPOSER_FIELD_PAD, Composer } from "@/components/chat/composer";
 import { Transcript } from "@/components/chat/transcript";
 import { groupExchanges, mergeTimeline, withDaySeparators } from "@/lib/chat";
 import type { ActivityCard, Conversation, ConversationMessage } from "@/lib/types";
@@ -144,6 +144,33 @@ describe("Transcript", () => {
     fireEvent.click(screen.getByRole("button", { name: "Show details" }));
     expect(screen.getByTestId("structured-message")).toBeTruthy();
     expect(screen.getByText("delegation")).toBeTruthy();
+  });
+
+  it("renders nothing for an empty agent message and keeps the rest", () => {
+    // Historical rows: runs that finished with no text once persisted an
+    // empty agent message, which rendered as a blank bubble.
+    const messages = [
+      message({ id: "m1", sender_type: "user", content_json: { text: "What is Connie doing?" } }),
+      message({ id: "m2", content_json: { text: "   " }, created_at: "2026-08-21T10:01:00Z" }),
+    ];
+    render(<Transcript items={mergeTimeline(messages, [])} agentName="Scout" userName="Ada" />);
+
+    expect(screen.queryByTestId("agent-message")).toBeNull();
+    expect(screen.getByTestId("user-message").textContent).toContain("What is Connie doing?");
+  });
+
+  it("shows the backstop note for a run that finished without a reply", () => {
+    const note = message({
+      id: "m3",
+      sender_type: "system",
+      sender_id: null,
+      message_type: "note",
+      content_json: { text: "Scout finished without a reply.", reason: "empty_completion" },
+    });
+    render(<Transcript items={mergeTimeline([note], [])} agentName="Scout" userName="Ada" />);
+
+    expect(screen.queryByTestId("agent-message")).toBeNull();
+    expect(screen.getByRole("log").textContent).toContain("Scout finished without a reply.");
   });
 
   it("shows the working indicator", () => {
@@ -395,5 +422,83 @@ describe("Composer", () => {
       <Composer value="" onChange={() => {}} onSend={() => {}} canStop stopping onStop={() => {}} />,
     );
     expect((screen.getByTestId("composer-stop") as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+/* The text field must read as centred inside the rounded shell: its left
+ * inset and its right inset are both just its own horizontal padding, and
+ * that padding cannot depend on how many trailing controls are visible. The
+ * mechanism is structural — the controls live on their own row instead of
+ * being flex siblings that eat into the field's width. */
+describe("Composer text field centring", () => {
+  /** Every horizontal-padding utility on the element, in class order. */
+  function horizontalPadding(node: Element): string[] {
+    return Array.from(node.classList).filter((name) =>
+      /^(px|pl|pr|ps|pe)-\[?[\d.]/.test(name),
+    );
+  }
+
+  function field(): HTMLTextAreaElement {
+    return screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
+  }
+
+  const configurations: [string, React.ReactElement][] = [
+    [
+      "no trailing controls beyond Send",
+      <Composer key="a" value="" onChange={() => {}} onSend={() => {}} />,
+    ],
+    [
+      "Send enabled",
+      <Composer key="b" value="hello" onChange={() => {}} onSend={() => {}} />,
+    ],
+    [
+      "Send + Stop",
+      <Composer key="c" value="hello" onChange={() => {}} onSend={() => {}} canStop onStop={() => {}} />,
+    ],
+    [
+      "disabled with a reason",
+      <Composer key="d" value="" onChange={() => {}} onSend={() => {}} disabled disabledReason="Archived." />,
+    ],
+  ];
+
+  it.each(configurations)("keeps symmetric horizontal padding: %s", (_name, element) => {
+    render(element);
+    // Exactly one symmetric `px-*`; no one-sided pl/pr/ps/pe can creep in.
+    expect(horizontalPadding(field())).toEqual(["px-4"]);
+  });
+
+  it("uses the same inset for every configuration and matches the exported contract", () => {
+    const insets = configurations.map(([, element]) => {
+      const view = render(element);
+      const value = horizontalPadding(field()).join(" ");
+      view.unmount();
+      return value;
+    });
+    expect(new Set(insets).size).toBe(1);
+    expect(COMPOSER_FIELD_PAD.docked.split(" ")).toContain(insets[0]);
+  });
+
+  it("uses the large variant's symmetric inset on the home hero", () => {
+    render(<Composer variant="large" value="" onChange={() => {}} onSend={() => {}} />);
+    expect(horizontalPadding(field())).toEqual(["px-5"]);
+    expect(COMPOSER_FIELD_PAD.large.split(" ")).toContain("px-5");
+  });
+
+  it("keeps the trailing controls out of the text field's row", () => {
+    render(
+      <Composer value="hi" onChange={() => {}} onSend={() => {}} canStop onStop={() => {}} />,
+    );
+    const label = field().parentElement as HTMLElement;
+    const controls = screen.getByTestId("composer-controls");
+    const send = screen.getByRole("button", { name: "Send message" });
+    const stop = screen.getByTestId("composer-stop");
+
+    // Both controls sit in the controls row, and that row is a *sibling* of
+    // the label rather than sharing a flex line with the text field.
+    expect(controls.contains(send)).toBe(true);
+    expect(controls.contains(stop)).toBe(true);
+    expect(label.contains(send)).toBe(false);
+    expect(controls.parentElement).toBe(label.parentElement);
+    expect(screen.getByTestId("composer-shell").className).toContain("flex-col");
   });
 });

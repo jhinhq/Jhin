@@ -75,7 +75,9 @@ flowchart LR
 | Roles | Four workspace roles with a documented matrix; the last owner can never be removed; only an owner unmakes an admin | [rbac](rbac.md), `apps/api/tests/test_access_control.py` |
 | API keys | Bearer keys are scoped, capped by their creator's role, and centrally gated per route; credential endpoints are unreachable by any key | [api-keys](api-keys.md), `apps/api/tests/test_route_scopes.py` |
 | Webhooks | Signature verification, delivery dedupe, and replay protection before publication | [events](events.md) |
+| API contract | `/api/v1` is additive: a committed OpenAPI snapshot is diffed on every test run and a breaking change fails the build | [api-versioning](api-versioning.md), `tests/test_openapi_snapshot.py` |
 
 Full details: [roles and permissions](rbac.md), [API keys](api-keys.md),
+[API versioning](api-versioning.md),
 [sandboxing](sandboxing.md), and [tool-worker-boundary](tool-worker-boundary.md). Deployment-facing
 consequences are in the [deployment guide](../deployment.md).

@@ -110,6 +110,33 @@ class TestAuthorization:
         ids = await context_ids(session, w, "anything")
         assert {mine.id, team.id, company.id} <= set(ids)
 
+    async def test_workspace_scope_reaches_an_agent_that_never_learned_the_fact(
+        self, session: AsyncSession, w: World
+    ) -> None:
+        """Shared company knowledge is a scope, not a per-agent lesson.
+
+        ``w.other`` is on a different team and recorded nothing: it must
+        still see the workspace-scope fact, and must still not see the
+        recording agent's private one. This is why the interlocutor/time
+        blocks are the only *new* shared context we add — durable shared
+        facts already have a home.
+        """
+        company = await seed(session, w, "The company is remote", scope=MemoryScope.WORKSPACE)
+        private = await seed(session, w, "The company pays me in tabs")
+        ctx = await build_memory_context(
+            session,
+            workspace_id=w.workspace.id,
+            agent_id=w.other.id,
+            query="the company",
+            now=NOW,
+        )
+        ids = [item.id for item in ctx.items]
+        assert company.id in ids
+        assert private.id not in ids
+        # It is labeled as shared knowledge, not as the reader's own memory.
+        assert "company knowledge" in ctx.text
+        assert "The company is remote" in ctx.text
+
     async def test_other_agents_private_and_other_team_memory_are_excluded(
         self, session: AsyncSession, w: World
     ) -> None:

@@ -24,6 +24,7 @@ from temporalio.exceptions import ApplicationError
 
 from jhin_agent_worker.coordination_activities import manager_context, organization_context
 from jhin_agent_worker.resources import Resources
+from jhin_agent_worker.situation import situation_context
 from jhin_agent_worker.skills_activities import skills_prompt_context
 from jhin_agents import AgentExecutionSnapshot
 from jhin_agents.context import ConversationTurn, TaskContext
@@ -886,6 +887,31 @@ class AgentReasoningActivities:
             logger.warning("coordination.context_failed", error_type=type(error).__name__)
             return "", ""
 
+    async def _situation_context(
+        self,
+        *,
+        workspace_id: UUID,
+        task: Task,
+    ) -> tuple[str, str]:
+        """The "current time" and "who you are talking with" blocks.
+
+        Shared knowledge, re-derived live on every run (jhin_agent_worker.
+        situation). Best-effort like the roster and skills blocks: a failure
+        degrades to no blocks rather than failing the step. The clock is read
+        here, in activity code — a replayed step never reaches this point
+        because the recorded manifest/reasoning pair short-circuits above.
+        """
+        try:
+            async with self._resources.session_factory() as session:
+                return await situation_context(
+                    session,
+                    workspace_id=workspace_id,
+                    task=task,
+                )
+        except Exception as error:
+            logger.warning("situation.context_failed", error_type=type(error).__name__)
+            return "", ""
+
     async def _skills_context(self, *, workspace_id: UUID, agent_id: UUID) -> str:
         """The "Skills available to you" block; best-effort, own session
         (docs/architecture/skills.md). Failure degrades to no block."""
@@ -1220,6 +1246,10 @@ class AgentReasoningActivities:
                 workspace_id=workspace_id,
                 agent_id=agent_id,
             )
+            time_context, interlocutor_context = await self._situation_context(
+                workspace_id=workspace_id,
+                task=task,
+            )
 
             api_key: str | None = None
             if snapshot.model_profile.secret_id is not None:
@@ -1260,6 +1290,8 @@ class AgentReasoningActivities:
                         manager_context=manager,
                         memory_context=memory.text,
                         skills_context=skills,
+                        time_context=time_context,
+                        interlocutor_context=interlocutor_context,
                     ),
                     tools=to_model_tool_schemas(params.advertised_tools),
                 )

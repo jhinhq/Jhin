@@ -105,6 +105,9 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
     # Skills release (docs/architecture/skills.md): loading the prompt's
     # skills list is best-effort; a failure degrades to no skills block.
     "skills.context_failed": {"error_type": FieldKind.ERROR_TYPE},
+    # Situational awareness (clock + interlocutor) is best-effort too; a
+    # failure degrades to no time/interlocutor blocks rather than a dead run.
+    "situation.context_failed": {"error_type": FieldKind.ERROR_TYPE},
     "work_request.finalized": {
         "work_request_id": FieldKind.ID,
         "task_id": FieldKind.ID,

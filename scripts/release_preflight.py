@@ -55,6 +55,8 @@ REQUIRED_FILES = (
     "docs/demo.md",
     "docs/templates.md",
     "docs/architecture/README.md",
+    "docs/architecture/api-versioning.md",
+    "docs/api/openapi.v1.json",
     "config/nats.conf",
 )
 
@@ -270,6 +272,27 @@ def check_versions(root: Path, expected: str | None = None) -> list[Finding]:
                     f"apps/web/package.json declares {data.get('version')!r}, expected {version!r}",
                 )
             )
+
+    # The published API surface is a release artifact like any other: a
+    # snapshot generated from a different build would describe an API this
+    # release does not serve. Freshness is the pytest gate
+    # (tests/test_openapi_snapshot.py); this only checks it belongs here.
+    snapshot = root / "docs" / "api" / "openapi.v1.json"
+    if snapshot.is_file():
+        try:
+            document = json.loads(snapshot.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as error:
+            findings.append(Finding("versions", f"docs/api/openapi.v1.json is not JSON: {error}"))
+        else:
+            declared = document.get("info", {}).get("version")
+            if declared != version:
+                findings.append(
+                    Finding(
+                        "versions",
+                        f"docs/api/openapi.v1.json declares {declared!r}, expected {version!r}; "
+                        "regenerate it with scripts/openapi_snapshot.py --update",
+                    )
+                )
 
     changelog = root / "CHANGELOG.md"
     if changelog.is_file() and not changelog_has_version(

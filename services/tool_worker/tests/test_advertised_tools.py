@@ -10,12 +10,13 @@ from typing import Any, cast
 
 import pytest
 from pydantic import BaseModel, ConfigDict, ValidationError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 import jhin_tool_worker.main as main_module
 import jhin_tool_worker.resources as resources_module
 from jhin_db.base import Base
-from jhin_db.models import Agent, AgentCapabilityGrant, Workspace
+from jhin_db.models import Agent, AgentCapabilityGrant, Task, Workspace
 from jhin_domain import new_uuid7
 from jhin_observability import ObservabilityRuntime, noop_metrics, noop_tracer
 from jhin_policy import RiskLevel, ToolDefinition
@@ -106,8 +107,39 @@ class _ClosableResources:
         self.close_count += 1
 
 
+@dataclass
+class _AdvertisedWorld:
+    activities: ToolActivities
+    workspace: Workspace
+    agent: Agent
+    sessions: async_sessionmaker[AsyncSession]
+
+    async def add_task(self, **values: Any) -> Task:
+        async with self.sessions() as session:
+            task = Task(
+                workspace_id=self.workspace.id,
+                title="Task",
+                assigned_agent_id=self.agent.id,
+                correlation_id=new_uuid7(),
+                **values,
+            )
+            session.add(task)
+            await session.commit()
+            return task
+
+    async def advertised(self, task: Task | None = None) -> list[str]:
+        tools = await self.activities.resolve_advertised_tools_activity(
+            ResolveAdvertisedToolsInput(
+                workspace_id=str(self.workspace.id),
+                agent_id=str(self.agent.id),
+                task_id="" if task is None else str(task.id),
+            )
+        )
+        return [tool.name for tool in tools]
+
+
 @pytest.fixture
-async def advertised_world() -> AsyncIterator[tuple[ToolActivities, Workspace, Agent]]:
+async def advertised_world() -> AsyncIterator[_AdvertisedWorld]:
     engine = create_async_engine("sqlite+aiosqlite://")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -115,6 +147,7 @@ async def advertised_world() -> AsyncIterator[tuple[ToolActivities, Workspace, A
     catalog = ToolCatalog()
     for name in ("system.echo", "linear.issue.get", "system.time"):
         catalog.register(_definition(name), _executor)
+    catalog.register(_definition("organization.report_result"), _executor)
 
     async with sessions() as session:
         workspace = Workspace(name="Advertise", slug=f"advertise-{new_uuid7().hex[:8]}")
@@ -123,7 +156,7 @@ async def advertised_world() -> AsyncIterator[tuple[ToolActivities, Workspace, A
         agent = Agent(workspace_id=workspace.id, name="Catalog agent", slug="catalog-agent")
         session.add(agent)
         await session.flush()
-        for capability in ("system.echo", "linear.issue.get"):
+        for capability in ("system.echo", "linear.issue.get", "organization.report_result"):
             session.add(
                 AgentCapabilityGrant(
                     workspace_id=workspace.id,
@@ -135,21 +168,91 @@ async def advertised_world() -> AsyncIterator[tuple[ToolActivities, Workspace, A
             )
         await session.commit()
 
-    yield ToolActivities(_Resources(sessions), catalog), workspace, agent  # type: ignore[arg-type]
+    yield _AdvertisedWorld(
+        activities=ToolActivities(_Resources(sessions), catalog),  # type: ignore[arg-type]
+        workspace=workspace,
+        agent=agent,
+        sessions=sessions,
+    )
     await engine.dispose()
 
 
 async def test_advertisement_uses_live_grants_and_preserves_catalog_order(
-    advertised_world: tuple[ToolActivities, Workspace, Agent],
+    advertised_world: _AdvertisedWorld,
 ) -> None:
-    activities, workspace, agent = advertised_world
-
-    advertised = await activities.resolve_advertised_tools_activity(
-        ResolveAdvertisedToolsInput(workspace_id=str(workspace.id), agent_id=str(agent.id))
+    tools = await advertised_world.activities.resolve_advertised_tools_activity(
+        ResolveAdvertisedToolsInput(
+            workspace_id=str(advertised_world.workspace.id),
+            agent_id=str(advertised_world.agent.id),
+        )
     )
 
-    assert [tool.name for tool in advertised] == ["system.echo", "linear.issue.get"]
-    assert advertised[0].parameters["type"] == "object"
+    assert [tool.name for tool in tools] == [
+        "system.echo",
+        "linear.issue.get",
+        "organization.report_result",
+    ]
+    assert tools[0].parameters["type"] == "object"
+
+
+async def test_reporting_is_advertised_for_delegated_and_work_request_children(
+    advertised_world: _AdvertisedWorld,
+) -> None:
+    """Phase 8 delegation/QA depends on the child reporting back, so the tool
+    stays advertised there — including when the child hangs off a chat."""
+    parent = await advertised_world.add_task()
+    delegated = await advertised_world.add_task(
+        parent_task_id=parent.id,
+        metadata_json={"origin": "delegation", "delegation": {"kind": "review_request"}},
+    )
+    work_request = await advertised_world.add_task(
+        conversation_id=None,
+        metadata_json={"origin": "work_request", "work_request": {"id": str(new_uuid7())}},
+    )
+    standalone = await advertised_world.add_task(metadata_json={})
+
+    for task in (delegated, work_request, standalone):
+        assert "organization.report_result" in await advertised_world.advertised(task)
+
+
+async def test_reporting_is_withheld_from_a_plain_conversation_turn(
+    advertised_world: _AdvertisedWorld,
+) -> None:
+    """In a chat with a person the reply is the deliverable: offering a
+    "report your result" tool invites the model to file a report instead of
+    answering. The grant is untouched — only the advertisement narrows."""
+    conversation_turn = await advertised_world.add_task(
+        metadata_json={"origin": "conversation", "conversation_id": str(new_uuid7())},
+    )
+
+    names = await advertised_world.advertised(conversation_turn)
+
+    assert "organization.report_result" not in names
+    assert names == ["system.echo", "linear.issue.get"]
+    async with advertised_world.sessions() as session:
+        grants = list(
+            await session.scalars(
+                select(AgentCapabilityGrant).where(
+                    AgentCapabilityGrant.agent_id == advertised_world.agent.id,
+                    AgentCapabilityGrant.capability == "organization.report_result",
+                )
+            )
+        )
+    assert [grant.effect for grant in grants] == ["allow"]
+
+
+async def test_an_unknown_task_keeps_every_granted_tool(
+    advertised_world: _AdvertisedWorld,
+) -> None:
+    missing = ResolveAdvertisedToolsInput(
+        workspace_id=str(advertised_world.workspace.id),
+        agent_id=str(advertised_world.agent.id),
+        task_id=str(new_uuid7()),
+    )
+
+    tools = await advertised_world.activities.resolve_advertised_tools_activity(missing)
+
+    assert "organization.report_result" in [tool.name for tool in tools]
 
 
 @pytest.mark.parametrize(

@@ -103,7 +103,8 @@ export function relationshipOtherId(relationship: AgentRelationship, agentId: st
     : relationship.source_agent_id;
 }
 
-const PRESET_FRIENDLY: Record<string, string> = {
+/** One-line, jargon-free meaning of each approval preset. */
+export const PRESET_FRIENDLY: Record<string, string> = {
   autonomous: "Acts on its own; only destructive actions wait for you",
   balanced: "Asks before risky actions",
   restricted: "Asks before changing anything; never runs destructive actions",

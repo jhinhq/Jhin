@@ -329,6 +329,7 @@ class AgentTaskWorkflow:
                         ResolveAdvertisedToolsInput(
                             workspace_id=params.workspace_id,
                             agent_id=params.agent_id,
+                            task_id=params.task_id,
                         ),
                         result_type=list[AdvertisedTool],
                         task_queue=TOOL_TASK_QUEUE,
