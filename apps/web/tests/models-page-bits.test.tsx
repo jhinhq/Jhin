@@ -2,7 +2,7 @@
 
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { SpendTile } from "@/app/(app)/models/page";
+import { SpendTile } from "@/components/spend-tile";
 import type { WorkspaceSpend } from "@/lib/types";
 
 function spend(overrides: Partial<WorkspaceSpend> = {}): WorkspaceSpend {

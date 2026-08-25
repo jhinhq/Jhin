@@ -103,6 +103,16 @@ The UI (gallery, connection create form, grant scoping) and the API
 (connections CRUD, verify, webhook ingress) are entirely manifest-driven, so
 a new connector appears there automatically.
 
+Everything a person can do with a connection lives on the **Apps** page
+(`apps/web/app/(app)/apps/page.tsx`, route `/apps`): the curated library and
+the connected list at the top level, the service-type gallery behind a
+"Connect by service type instead" disclosure, and per-connection verify,
+credential rotation, webhook setup, discovered tools with risk overrides,
+agent access, and enable/disable/delete in the connection drawer
+(`apps/web/components/connection-detail.tsx`), whose operational controls sit
+behind an "Advanced settings" disclosure. The former `/connectors` route is a
+permanent redirect to `/apps`.
+
 ## MCP connections
 
 The `mcp` connector (`jhin_connectors/mcp/`) is the one connector whose

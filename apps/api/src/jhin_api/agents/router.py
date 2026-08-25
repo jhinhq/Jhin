@@ -18,7 +18,7 @@ from jhin_api.agents.schemas import (
     MembershipReplace,
     RelationshipCreate,
 )
-from jhin_api.deps import AdminCtx, DbSession, MemberCtx, ViewerCtx
+from jhin_api.deps import AdminCtx, DbSession, ViewerCtx
 from jhin_api.deps import client_ip_hash as ip_hash
 from jhin_api.deps import get_request_id as req_id
 from jhin_api.security.csrf import csrf_protect
@@ -176,7 +176,7 @@ async def delete_relationship(
 
 
 @router.post("/{agent_id}/pause")
-async def pause_agent(agent_id: UUID, request: Request, ctx: MemberCtx, db: DbSession) -> AgentOut:
+async def pause_agent(agent_id: UUID, request: Request, ctx: AdminCtx, db: DbSession) -> AgentOut:
     agent = await service.set_agent_status(
         db,
         ctx,
@@ -190,7 +190,7 @@ async def pause_agent(agent_id: UUID, request: Request, ctx: MemberCtx, db: DbSe
 
 
 @router.post("/{agent_id}/resume")
-async def resume_agent(agent_id: UUID, request: Request, ctx: MemberCtx, db: DbSession) -> AgentOut:
+async def resume_agent(agent_id: UUID, request: Request, ctx: AdminCtx, db: DbSession) -> AgentOut:
     agent = await service.set_agent_status(
         db,
         ctx,

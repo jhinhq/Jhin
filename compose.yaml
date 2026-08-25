@@ -40,6 +40,13 @@ services:
       APP_NAME: ${APP_NAME:-Jhin}
       APP_ENV: ${APP_ENV:-production}
       APP_URL: ${APP_URL:-http://localhost:3000}
+      # Required once APP_URL is an https origin: the API refuses to start
+      # rather than serve session cookies without the Secure flag.
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      # The web container proxies /api/* to this service, so without this every
+      # request would look like it came from one address and the per-IP login
+      # lockout would be useless (or lock out everyone at once).
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-jhin}:${POSTGRES_PASSWORD:-jhin}@postgres:5432/${POSTGRES_DB:-jhin}
       NATS_URL: nats://nats:4222

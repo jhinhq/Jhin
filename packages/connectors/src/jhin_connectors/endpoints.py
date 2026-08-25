@@ -10,10 +10,18 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
+import socket
 from dataclasses import dataclass
 from urllib.parse import parse_qsl, unquote, urlsplit, urlunsplit
 
 _HOST_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
+# Labels that the resolver will happily reinterpret as an IPv4 literal even
+# though ``ipaddress`` refuses them: bare decimals (``2130706433``), short form
+# (``127.1``), octal (``0300.0250.0.1``) and hex (``0x7f000001``) all resolve to
+# loopback or RFC1918 space via ``getaddrinfo``/``inet_aton``. Treating them as
+# ordinary hostnames is how a private-range block gets walked straight past.
+_ALL_DIGITS_RE = re.compile(r"^[0-9]+$")
+_HEX_LITERAL_RE = re.compile(r"^0[xX][0-9a-fA-F]+$")
 _PROJECT_REF_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
 _HOSTED_TLS_MODES = frozenset({"require", "verify-ca", "verify-full"})
 _DEFAULT_POSTGRES_PORT = 5432
@@ -44,7 +52,23 @@ def _normalize_host(raw_host: str) -> str:
     labels = host.split(".")
     if any(not _HOST_LABEL_RE.fullmatch(label) for label in labels):
         raise EndpointPolicyError("Endpoint host is invalid")
+    if _is_ambiguous_ip_literal(labels):
+        raise EndpointPolicyError("Endpoint host is invalid")
     return host
+
+
+def _is_ambiguous_ip_literal(labels: list[str]) -> bool:
+    """True for names the resolver would parse as a packed IPv4 address.
+
+    ``ipaddress.ip_address`` rejects these forms, so without this check they
+    fall through to the hostname branch, pass the label regex, and are
+    classified as public — while ``getaddrinfo`` still resolves them to
+    loopback or private space. A real hostname's last label is never numeric
+    (RFC 1123 forbids an all-numeric TLD), so rejecting them costs nothing.
+    """
+    if any(_HEX_LITERAL_RE.fullmatch(label) for label in labels):
+        return True
+    return bool(labels) and bool(_ALL_DIGITS_RE.fullmatch(labels[-1]))
 
 
 def _render_origin(scheme: str, host: str, port: int) -> str:
@@ -81,11 +105,78 @@ def _normalize_origin(raw: str) -> tuple[str, str, int, str]:
     return scheme, host, port, _render_origin(scheme, host, port)
 
 
+def _address_is_reachable_public(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Whether an address is somewhere a connector may legitimately talk to.
+
+    ``is_global`` alone is not enough: it says nothing about multicast,
+    reserved, or unspecified space, and IPv6 has three ways to smuggle an IPv4
+    address (``::ffff:``, 6to4, Teredo) that must be judged on the address they
+    actually carry.
+    """
+    if isinstance(address, ipaddress.IPv6Address):
+        embedded = address.ipv4_mapped or address.sixtofour or address.teredo
+        if isinstance(embedded, tuple):  # Teredo yields (server, client).
+            embedded = embedded[1]
+        if embedded is not None:
+            return _address_is_reachable_public(embedded)
+    return not (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_unspecified
+        or not address.is_global
+    )
+
+
 def _host_is_local_or_private(host: str) -> bool:
     try:
-        return not ipaddress.ip_address(host).is_global
+        return not _address_is_reachable_public(ipaddress.ip_address(host))
     except ValueError:
         return host == "localhost" or host.endswith(".localhost") or host.endswith(".local")
+
+
+# DNS checking can be turned off for air-gapped installs whose internal names
+# never resolve; the lexical policy above still applies.
+def _dns_checks_enabled() -> bool:
+    return os.getenv("JHIN_CONNECTOR_SKIP_DNS_CHECK", "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+def _resolves_to_private_address(host: str) -> bool:
+    """True when DNS maps ``host`` onto space a connector must not reach.
+
+    Closes the hole where an attacker registers a perfectly public *name*
+    (``metadata.attacker.example``) whose A record points at ``169.254.169.254``
+    or an RFC1918 host. Resolution failures deliberately do **not** block: a
+    name that cannot be resolved here cannot be connected to either, and
+    failing closed would break air-gapped installs whose resolver is offline
+    at validation time.
+
+    NOTE: this is a check at validation time, not a pinned connection. A
+    hostile resolver can still answer differently for the connection that
+    follows (DNS rebinding); pinning the resolved address into the transport
+    is tracked as residual risk in docs/security-assessment.md.
+    """
+    if not _dns_checks_enabled():
+        return False
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except (OSError, UnicodeError):
+        return False
+    for info in infos:
+        raw = str(info[4][0]).split("%", 1)[0]
+        try:
+            address = ipaddress.ip_address(raw)
+        except ValueError:
+            continue
+        if not _address_is_reachable_public(address):
+            return True
+    return False
 
 
 def _official_origin_set(official_origins: tuple[str, ...]) -> set[str]:
@@ -165,11 +256,18 @@ def validate_public_http_url(
         scheme, host, _port, origin = _normalize_origin(origin_candidate)
     except EndpointPolicyError:
         raise EndpointPolicyError(f"{kind} is invalid") from None
-    allowed = origin in _operator_origin_set(allowlist_env) or (
-        scheme == "https" and not _host_is_local_or_private(host)
-    )
-    if not allowed:
-        raise EndpointPolicyError(f"{kind} is not allowed")
+    if origin not in _operator_origin_set(allowlist_env):
+        # Not operator-authorized: it must be a public https origin, and the
+        # name must not resolve into private space.
+        if scheme != "https" or _host_is_local_or_private(host):
+            raise EndpointPolicyError(f"{kind} is not allowed")
+        is_ip_literal = True
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            is_ip_literal = False
+        if not is_ip_literal and _resolves_to_private_address(host):
+            raise EndpointPolicyError(f"{kind} is not allowed")
     path = parsed.path or "/"
     return urlunsplit((scheme, origin.split("://", 1)[1], path, parsed.query, ""))
 

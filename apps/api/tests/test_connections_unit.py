@@ -16,7 +16,14 @@ from jhin_api.connections import router as connections_router_module
 from jhin_api.connections import service
 from jhin_api.connections.router import router as connections_router
 from jhin_api.connections.schemas import ConnectionOut
-from jhin_api.deps import AuthContext, WorkspaceContext, get_current_auth, get_db
+from jhin_api.deps import (
+    AuthContext,
+    Principal,
+    WorkspaceContext,
+    get_current_auth,
+    get_current_principal,
+    get_db,
+)
 from jhin_api.settings import Settings
 from jhin_connectors import (
     AuthSchemeSpec,
@@ -226,7 +233,12 @@ async def connection_routes(
         )
 
     app.dependency_overrides[get_db] = override_db
+
+    async def _principal() -> Principal:
+        return Principal(user=(await override_auth()).user)
+
     app.dependency_overrides[get_current_auth] = override_auth
+    app.dependency_overrides[get_current_principal] = _principal
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         client.cookies.set("jhin_csrf", CSRF_TOKEN)

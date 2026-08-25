@@ -22,7 +22,9 @@ shape (Tavily `POST /search` with a bearer token, Brave
 `GET /res/v1/web/search` with `X-Subscription-Token`, Exa `POST /search`
 with `x-api-key`). Auth scheme `none` creates a fetch-only connection.
 Public config: an optional `base_url` override (policy-checked; how the dev
-fake is reached) and optional `allowed_domains` glob patterns.
+fake is reached) and optional `allowed_domains` glob patterns. Web search has
+no catalog entry, so an admin creates it from Apps (`/apps`) under "Connect by
+service type instead".
 
 **`web.search`** (capability `web.search`, read risk). Input
 `{connection_id, query, max_results ≤ 10}`. The backend response is

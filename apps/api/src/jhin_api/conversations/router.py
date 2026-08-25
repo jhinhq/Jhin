@@ -28,7 +28,6 @@ from jhin_api.conversations.schemas import (
     TurnOut,
 )
 from jhin_api.deps import (
-    AdminCtx,
     DbSession,
     MemberCtx,
     ObservabilityRuntimeDep,
@@ -157,7 +156,7 @@ async def update_conversation(
 
 @conversations_router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_conversation(
-    conversation_id: UUID, request: Request, ctx: AdminCtx, db: DbSession
+    conversation_id: UUID, request: Request, ctx: MemberCtx, db: DbSession
 ) -> Response:
     await service.delete_conversation(
         db, ctx, conversation_id, request_id=req_id(request), ip_hash=ip_hash(request)

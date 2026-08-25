@@ -148,8 +148,8 @@ MCP results are untrusted external content. Each output carries
 never as instructions."`, and the agent context already labels every tool
 observation as data rather than instructions. Tool *descriptions* are also
 server-controlled: they are bounded, redacted, and shown to admins in the
-Tools tab before any grant exists, and they reach the model only for tools
-the agent was explicitly granted.
+Tools tab of the connection drawer on Apps (`/apps`) before any grant exists,
+and they reach the model only for tools the agent was explicitly granted.
 
 ## Dev and test double
 

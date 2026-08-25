@@ -44,6 +44,10 @@ services:
       APP_ENV: ${APP_ENV:-production}
       APP_URL: ${APP_URL:?set APP_URL to the public https origin}
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      # X-Forwarded-For is believed only from these networks (the compose
+      # bridges and whatever terminates TLS in front of the stack). Without it
+      # the per-IP login lockout sees only the proxy's address.
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-jhin}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-jhin}
       NATS_URL: nats://nats:4222

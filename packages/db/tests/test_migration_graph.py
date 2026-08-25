@@ -129,3 +129,12 @@ def test_skill_category_backfill_directly_follows_0024_and_the_graph_stays_linea
     assert backfill is not None
     assert backfill.down_revision == "0024"
     assert len(scripts.get_heads()) == 1, "the migration graph must stay linear"
+
+
+def test_access_control_directly_follows_0025_and_is_the_head() -> None:
+    scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
+    access = scripts.get_revision("0026")
+
+    assert access is not None
+    assert access.down_revision == "0025"
+    assert list(scripts.get_heads()) == ["0026"], "the migration graph must stay linear"

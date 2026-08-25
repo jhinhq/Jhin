@@ -1,8 +1,10 @@
 "use client";
 
-/** Connectors page (plan 17.9): gallery of available connectors, workspace
- * connections with health, and the create/detail flows. Credentials are
- * write-only; the webhook signing secret is shown exactly once at creation. */
+/** Everything you can do to one connected app, in a single drawer: status and
+ * agent access up front, the discovered tools on their own tab, and the
+ * operational controls (rotate credentials, webhook secret, disable, delete)
+ * behind an "Advanced settings" disclosure. This used to be a separate
+ * `/connectors` route; it now opens from Apps so there is one place to look. */
 
 import { useMutation } from "@tanstack/react-query";
 import {
@@ -11,23 +13,20 @@ import {
   KeyRound,
   RefreshCw,
   ShieldCheck,
+  Trash2,
   Webhook,
   XCircle,
 } from "lucide-react";
 import { useState } from "react";
-import { PageBody, PageHeader } from "@/components/app-shell";
-import { ConnectorsGallery } from "@/components/connectors-gallery";
 import { ConnectionAccessSummary } from "@/components/connection-access-summary";
-import { CreateConnectionDialog } from "@/components/connection-create-dialog";
 import { ConnectionTools } from "@/components/connection-tools";
+import { Disclosure } from "@/components/company/bits";
 import {
   Badge,
   Button,
   Dialog,
-  EmptyState,
   ErrorNote,
   Field,
-  focusRing,
   Input,
   Spinner,
   Tabs,
@@ -37,13 +36,10 @@ import { api, ApiError } from "@/lib/api";
 import { findAuthScheme, webhookPayloadUrl } from "@/lib/connectors";
 import { formatDateTime } from "@/lib/format";
 import {
-  useConnections,
   useConnectionAccessSummary,
   useConnectionToolCalls,
   useConnectionTools,
-  useConnectors,
   useInvalidateConnections,
-  useMarkConnectionWebhookConfigured,
 } from "@/lib/hooks";
 import type {
   ConnectionInfo,
@@ -51,169 +47,17 @@ import type {
   VerifyResult,
   WebhookSetup,
 } from "@/lib/types";
-import { useWorkspace } from "@/lib/workspace-context";
 
-function errText(error: unknown, fallback: string): string | null {
+export function errText(error: unknown, fallback: string): string | null {
   if (!error) return null;
   return error instanceof ApiError ? error.detail : fallback;
 }
 
-function statusTone(status: string): "ok" | "danger" | "neutral" {
+export function statusTone(status: string): "ok" | "danger" | "neutral" {
   return status === "active" ? "ok" : status === "error" ? "danger" : "neutral";
 }
 
-export default function ConnectorsPage() {
-  const { workspace, can } = useWorkspace();
-  const workspaceId = workspace.workspace_id;
-  const isAdmin = can("admin");
-
-  const connectors = useConnectors();
-  const connections = useConnections(workspaceId, isAdmin);
-  const invalidate = useInvalidateConnections(workspaceId);
-  const markWebhookConfigured = useMarkConnectionWebhookConfigured(workspaceId);
-
-  const [createFor, setCreateFor] = useState<ConnectorInfo | null>(null);
-  const [webhookOnce, setWebhookOnce] = useState<{
-    connection: ConnectionInfo;
-    webhook: WebhookSetup;
-  } | null>(null);
-  const [detailId, setDetailId] = useState<string | null>(null);
-
-  if (connectors.isPending) {
-    return (
-      <>
-        <PageHeader title="Connectors" />
-        <PageBody>
-          <Spinner label="Loading connectors…" />
-        </PageBody>
-      </>
-    );
-  }
-
-  const connectorList = connectors.data ?? [];
-  const connectionList = connections.data ?? [];
-  const detail = detailId
-    ? connectionList.find((connection) => connection.id === detailId) ?? null
-    : null;
-  const detailConnector = detail
-    ? connectorList.find((c) => c.connector_type === detail.connector_type)
-    : undefined;
-
-  return (
-    <>
-      <PageHeader
-        title="Connectors"
-        description="Connect outside services, choose what each connection can reach, and set up webhooks."
-      />
-      <PageBody className="space-y-8">
-        <section>
-          <h2 className="mb-3 font-display text-base font-semibold tracking-tight text-ink">Available connectors</h2>
-          <ConnectorsGallery
-            connectors={connectorList}
-            canManage={isAdmin}
-            onConnect={setCreateFor}
-          />
-        </section>
-
-        {isAdmin ? (
-          <section>
-            <h2 className="mb-3 font-display text-base font-semibold tracking-tight text-ink">Connections</h2>
-            {connections.isPending ? (
-              <Spinner label="Loading connections…" />
-            ) : connectionList.length === 0 ? (
-              <EmptyState
-                title="No connections yet"
-                description="Connect GitHub above to let agents read repositories, open pull requests, and receive webhooks — or any MCP server to bring its tools in. Access is scoped per agent by grants."
-              />
-            ) : (
-              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {connectionList.map((connection) => (
-                  <button
-                    key={connection.id}
-                    type="button"
-                    data-testid={`connection-${connection.name}`}
-                    onClick={() => setDetailId(connection.id)}
-                    className={`flex flex-col gap-2 rounded-2xl border border-line bg-surface px-5 py-4 text-left shadow-card transition-colors hover:border-accent ${focusRing}`}
-                  >
-                    <header className="flex items-center justify-between gap-2">
-                      <h3 className="min-w-0 truncate font-display text-sm font-semibold text-ink">
-                        {connection.name}
-                      </h3>
-                      <Badge tone={statusTone(connection.status)}>{connection.status}</Badge>
-                    </header>
-                    <p className="text-xs text-dim">
-                      {connection.connector_type} · {connection.auth_type}
-                    </p>
-                    <p className="text-xs text-faint">
-                      Last verified:{" "}
-                      {connection.last_verified_at
-                        ? formatDateTime(connection.last_verified_at)
-                        : "never"}
-                    </p>
-                    {connection.last_error ? (
-                      <p className="truncate rounded-xl bg-danger-soft px-2.5 py-1 text-xs text-danger">
-                        {connection.last_error}
-                      </p>
-                    ) : null}
-                  </button>
-                ))}
-              </div>
-            )}
-          </section>
-        ) : (
-          <p className="text-sm text-dim">Connections are managed by workspace admins.</p>
-        )}
-      </PageBody>
-
-      {createFor ? (
-        <CreateConnectionDialog
-          workspaceId={workspaceId}
-          connector={createFor}
-          onClose={() => setCreateFor(null)}
-          onCreated={(created) => {
-            invalidate();
-            setCreateFor(null);
-            if (created.webhook) {
-              setWebhookOnce({
-                connection: created.connection,
-                webhook: created.webhook,
-              });
-            }
-          }}
-        />
-      ) : null}
-
-      {webhookOnce ? (
-        <WebhookSecretDialog
-          connectionName={webhookOnce.connection.name}
-          connectionId={webhookOnce.connection.id}
-          workspaceId={workspaceId}
-          webhook={webhookOnce.webhook}
-          onClose={() => setWebhookOnce(null)}
-          onStored={() => {
-            markWebhookConfigured(webhookOnce.connection);
-            invalidate();
-          }}
-        />
-      ) : null}
-
-      {detail ? (
-        <ConnectionDetailDialog
-          workspaceId={workspaceId}
-          connection={detail}
-          connector={detailConnector}
-          onClose={() => setDetailId(null)}
-          onChanged={() => {
-            invalidate();
-            setDetailId(null);
-          }}
-        />
-      ) : null}
-    </>
-  );
-}
-
-function CopyRow({ label, value }: { label: string; value: string }) {
+export function CopyRow({ label, value }: { label: string; value: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <div className="space-y-1">
@@ -238,7 +82,10 @@ function CopyRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-function WebhookSecretDialog({
+/** Shown once, right after a connection that supports webhooks is created:
+ * the payload URL plus either the generated signing secret (never retrievable
+ * again) or a form for the provider-generated one. */
+export function WebhookSecretDialog({
   workspaceId,
   connectionId,
   connectionName,
@@ -316,27 +163,42 @@ function WebhookSecretDialog({
   );
 }
 
-ConnectorsPage.WebhookSecretDialog = WebhookSecretDialog;
-
-function ConnectionDetailDialog({
+/** The full detail view for one connection. Admin-only actions (rotate,
+ * disable, delete, webhook secret, risk overrides) render only when
+ * `canManage` is true. */
+export function ConnectionDetailDialog({
   workspaceId,
   connection,
   connector,
+  canManage,
+  title,
+  intro,
+  initialTab = "overview",
   onClose,
   onChanged,
+  onRemoved,
 }: {
   workspaceId: string;
   connection: ConnectionInfo;
   connector: ConnectorInfo | undefined;
+  canManage: boolean;
+  /** Defaults to the connection name; the just-connected moment overrides it. */
+  title?: string;
+  /** One friendly line above the tabs, used right after connecting. */
+  intro?: string;
+  initialTab?: "overview" | "tools";
   onClose: () => void;
+  /** A change that keeps the connection around (verify, rotate, enable…). */
   onChanged: () => void;
+  /** The connection is gone; the caller should close the drawer. */
+  onRemoved: () => void;
 }) {
   const base = `/api/v1/workspaces/${workspaceId}/connections/${connection.id}`;
   const toolCalls = useConnectionToolCalls(workspaceId, connection.id);
   const accessSummary = useConnectionAccessSummary(workspaceId, connection.id);
   const tools = useConnectionTools(workspaceId, connection.id);
   const invalidateAll = useInvalidateConnections(workspaceId);
-  const [tab, setTab] = useState<"overview" | "tools">("overview");
+  const [tab, setTab] = useState<"overview" | "tools">(initialTab);
   const [verifyResult, setVerifyResult] = useState<VerifyResult | null>(null);
   const [rotating, setRotating] = useState(false);
   const [rotateCredentials, setRotateCredentials] = useState<Record<string, string>>({});
@@ -351,6 +213,7 @@ function ConnectionDetailDialog({
     onSuccess: (result) => {
       setError(null);
       setVerifyResult(result);
+      onChanged();
     },
     onError: (err) => setError(errText(err, "Verification failed.")),
   });
@@ -384,7 +247,7 @@ function ConnectionDetailDialog({
 
   const remove = useMutation({
     mutationFn: () => api<void>(base, { method: "DELETE" }),
-    onSuccess: onChanged,
+    onSuccess: onRemoved,
     onError: (err) => setError(errText(err, "Deleting the connection failed.")),
   });
 
@@ -403,9 +266,10 @@ function ConnectionDetailDialog({
   const calls = toolCalls.data ?? [];
 
   return (
-    <Dialog title={connection.name} open onClose={onClose} wide>
+    <Dialog title={title ?? connection.name} open onClose={onClose} wide>
       <div className="space-y-5">
         <ErrorNote message={error} />
+        {intro ? <p className="text-sm text-dim">{intro}</p> : null}
 
         <div className="flex flex-wrap items-center gap-2">
           <Badge tone={statusTone(connection.status)}>{connection.status}</Badge>
@@ -414,7 +278,7 @@ function ConnectionDetailDialog({
             <KeyRound size={11} /> {scheme?.label ?? connection.auth_type}
           </Badge>
           <span className="ml-auto text-xs text-faint">
-            Last verified:{" "}
+            Last checked:{" "}
             {connection.last_verified_at ? formatDateTime(connection.last_verified_at) : "never"}
           </span>
         </div>
@@ -449,105 +313,6 @@ function ConnectionDetailDialog({
           </p>
         ) : null}
 
-        {connector?.supports_webhooks ? (
-          <div className="space-y-2 rounded-xl border border-line bg-raised px-3.5 py-3">
-            <p className="flex items-center gap-1.5 text-sm font-medium text-ink">
-              <Webhook size={13} /> Webhook
-            </p>
-            <CopyRow
-              label="Payload URL"
-              value={webhookPayloadUrl(
-                `/api/v1/webhooks/${connection.connector_type}/${connection.public_id}`,
-                origin,
-              )}
-            />
-            <p className="text-xs text-faint">
-              {connection.webhook_secret_configured
-                ? "Webhook secret configured"
-                : connector.webhook_secret_mode === "provider_supplied"
-                  ? "Webhook secret not configured. Store the provider-generated secret from setup."
-                  : "Webhook secret is not configured."}
-            </p>
-            {connector.webhook_secret_mode === "provider_supplied" ? (
-              <form
-                className="space-y-2 border-t border-line pt-2"
-                onSubmit={(event) => { event.preventDefault(); storeWebhookSecret.mutate(); }}
-              >
-                <p className="text-xs text-dim">
-                  Vercel signs the callback in the x-vercel-signature header with HMAC SHA1.
-                </p>
-                <Field
-                  label="Provider-generated signing secret"
-                  hint="Paste the Vercel secret here. It is write-only and cannot be read back."
-                >
-                  <Input
-                    type="password"
-                    autoComplete="off"
-                    minLength={16}
-                    required
-                    value={webhookSecret}
-                    onChange={(event) => setWebhookSecret(event.target.value)}
-                  />
-                </Field>
-                <Button
-                  type="submit"
-                  size="sm"
-                  disabled={storeWebhookSecret.isPending || webhookSecret.length < 16}
-                >
-                  {storeWebhookSecret.isPending ? "Storing…" : "Store provider secret"}
-                </Button>
-              </form>
-            ) : null}
-          </div>
-        ) : null}
-
-        {rotating ? (
-          <form
-            className="space-y-3 rounded-xl border border-accent/40 bg-accent-soft px-3.5 py-3"
-            onSubmit={(event) => {
-              event.preventDefault();
-              rotate.mutate();
-            }}
-          >
-            <p className="text-sm font-medium text-ink">Re-enter credentials ({scheme?.label})</p>
-            {(scheme?.secret_fields ?? []).map((field) => (
-              <Field key={field.name} label={field.label}>
-                {field.multiline ? (
-                  <Textarea
-                    rows={4}
-                    value={rotateCredentials[field.name] ?? ""}
-                    onChange={(e) =>
-                      setRotateCredentials((prev) => ({ ...prev, [field.name]: e.target.value }))
-                    }
-                    placeholder={field.placeholder}
-                    required={field.required}
-                    className="font-mono text-xs"
-                  />
-                ) : (
-                  <Input
-                    type="password"
-                    autoComplete="off"
-                    value={rotateCredentials[field.name] ?? ""}
-                    onChange={(e) =>
-                      setRotateCredentials((prev) => ({ ...prev, [field.name]: e.target.value }))
-                    }
-                    placeholder={field.placeholder}
-                    required={field.required}
-                  />
-                )}
-              </Field>
-            ))}
-            <div className="flex justify-end gap-2">
-              <Button type="button" size="sm" variant="ghost" onClick={() => setRotating(false)}>
-                Cancel
-              </Button>
-              <Button type="submit" size="sm" variant="primary" disabled={rotate.isPending}>
-                {rotate.isPending ? "Rotating…" : "Rotate credential"}
-              </Button>
-            </div>
-          </form>
-        ) : null}
-
         <Tabs
           label="Connection sections"
           tabs={[
@@ -566,7 +331,7 @@ function ConnectionDetailDialog({
               data={tools.data}
               isPending={tools.isPending}
               error={tools.error}
-              canManage
+              canManage={canManage}
               onChanged={() => invalidateAll()}
             />
           </section>
@@ -609,28 +374,147 @@ function ConnectionDetailDialog({
           )}
         </section>
 
+        {canManage ? (
+          <section hidden={tab !== "overview"} data-testid="connection-advanced">
+            <Disclosure label="Advanced settings" openLabel="Hide advanced settings">
+              <div className="space-y-4">
+                {connector?.supports_webhooks ? (
+                  <div className="space-y-2 rounded-xl border border-line bg-raised px-3.5 py-3">
+                    <p className="flex items-center gap-1.5 text-sm font-medium text-ink">
+                      <Webhook size={13} /> Webhook
+                    </p>
+                    <CopyRow
+                      label="Payload URL"
+                      value={webhookPayloadUrl(
+                        `/api/v1/webhooks/${connection.connector_type}/${connection.public_id}`,
+                        origin,
+                      )}
+                    />
+                    <p className="text-xs text-faint">
+                      {connection.webhook_secret_configured
+                        ? "Webhook secret configured"
+                        : connector.webhook_secret_mode === "provider_supplied"
+                          ? "Webhook secret not configured. Store the provider-generated secret from setup."
+                          : "Webhook secret is not configured."}
+                    </p>
+                    {connector.webhook_secret_mode === "provider_supplied" ? (
+                      <form
+                        className="space-y-2 border-t border-line pt-2"
+                        onSubmit={(event) => { event.preventDefault(); storeWebhookSecret.mutate(); }}
+                      >
+                        <p className="text-xs text-dim">
+                          Vercel signs the callback in the x-vercel-signature header with HMAC SHA1.
+                        </p>
+                        <Field
+                          label="Provider-generated signing secret"
+                          hint="Paste the Vercel secret here. It is write-only and cannot be read back."
+                        >
+                          <Input
+                            type="password"
+                            autoComplete="off"
+                            minLength={16}
+                            required
+                            value={webhookSecret}
+                            onChange={(event) => setWebhookSecret(event.target.value)}
+                          />
+                        </Field>
+                        <Button
+                          type="submit"
+                          size="sm"
+                          disabled={storeWebhookSecret.isPending || webhookSecret.length < 16}
+                        >
+                          {storeWebhookSecret.isPending ? "Storing…" : "Store provider secret"}
+                        </Button>
+                      </form>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {rotating ? (
+                  <form
+                    className="space-y-3 rounded-xl border border-accent/40 bg-accent-soft px-3.5 py-3"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      rotate.mutate();
+                    }}
+                  >
+                    <p className="text-sm font-medium text-ink">Re-enter credentials ({scheme?.label})</p>
+                    {(scheme?.secret_fields ?? []).map((field) => (
+                      <Field key={field.name} label={field.label}>
+                        {field.multiline ? (
+                          <Textarea
+                            rows={4}
+                            value={rotateCredentials[field.name] ?? ""}
+                            onChange={(e) =>
+                              setRotateCredentials((prev) => ({ ...prev, [field.name]: e.target.value }))
+                            }
+                            placeholder={field.placeholder}
+                            required={field.required}
+                            className="font-mono text-xs"
+                          />
+                        ) : (
+                          <Input
+                            type="password"
+                            autoComplete="off"
+                            value={rotateCredentials[field.name] ?? ""}
+                            onChange={(e) =>
+                              setRotateCredentials((prev) => ({ ...prev, [field.name]: e.target.value }))
+                            }
+                            placeholder={field.placeholder}
+                            required={field.required}
+                          />
+                        )}
+                      </Field>
+                    ))}
+                    <div className="flex justify-end gap-2">
+                      <Button type="button" size="sm" variant="ghost" onClick={() => setRotating(false)}>
+                        Cancel
+                      </Button>
+                      <Button type="submit" size="sm" variant="primary" disabled={rotate.isPending}>
+                        {rotate.isPending ? "Rotating…" : "Rotate credential"}
+                      </Button>
+                    </div>
+                  </form>
+                ) : null}
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button size="sm" onClick={() => setRotating(true)} disabled={rotating}>
+                    <RefreshCw size={13} /> Rotate credential
+                  </Button>
+                  <Button size="sm" onClick={() => toggle.mutate()} disabled={toggle.isPending}>
+                    {connection.status === "disabled" ? "Enable" : "Disable"}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    className="ml-auto"
+                    disabled={remove.isPending}
+                    onClick={() => {
+                      if (window.confirm(`Delete connection “${connection.name}”? Grants that reference it stop working.`)) {
+                        remove.mutate();
+                      }
+                    }}
+                  >
+                    <Trash2 size={13} /> Delete
+                  </Button>
+                </div>
+                <p className="text-xs text-faint">
+                  Disabling keeps the setup but stops every agent from using it. Deleting is
+                  permanent and breaks grants that reference this connection.
+                </p>
+              </div>
+            </Disclosure>
+          </section>
+        ) : null}
+
         <footer className="flex flex-wrap items-center gap-2 border-t border-line pt-4">
-          <Button size="sm" onClick={() => verify.mutate()} disabled={verify.isPending}>
-            <ShieldCheck size={13} /> {verify.isPending ? "Verifying…" : "Verify"}
-          </Button>
-          <Button size="sm" onClick={() => setRotating(true)} disabled={rotating}>
-            <RefreshCw size={13} /> Rotate credential
-          </Button>
-          <Button size="sm" onClick={() => toggle.mutate()} disabled={toggle.isPending}>
-            {connection.status === "disabled" ? "Enable" : "Disable"}
-          </Button>
-          <Button
-            size="sm"
-            variant="danger"
-            className="ml-auto"
-            disabled={remove.isPending}
-            onClick={() => {
-              if (window.confirm(`Delete connection “${connection.name}”? Grants that reference it stop working.`)) {
-                remove.mutate();
-              }
-            }}
-          >
-            Delete
+          {canManage ? (
+            <Button size="sm" onClick={() => verify.mutate()} disabled={verify.isPending}>
+              <ShieldCheck size={13} /> {verify.isPending ? "Checking…" : "Verify"}
+            </Button>
+          ) : null}
+          <Button size="sm" variant="primary" className="ml-auto" onClick={onClose}>
+            Done
           </Button>
         </footer>
       </div>

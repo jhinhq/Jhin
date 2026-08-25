@@ -4,8 +4,10 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from types import TracebackType
+from typing import Any
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.routing import APIRoute
 from opentelemetry.trace import Span, SpanKind
@@ -14,6 +16,8 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from jhin_api import __version__
+from jhin_api.access.api_keys import record_usage
+from jhin_api.access.router import api_keys_router, invitations_router, public_invitations_router
 from jhin_api.agents.router import router as agents_router
 from jhin_api.approvals.router import router as approvals_router
 from jhin_api.audit.router import router as audit_router
@@ -30,7 +34,10 @@ from jhin_api.models.router import profiles_router, providers_router, spend_rout
 from jhin_api.org.router import router as org_router
 from jhin_api.policy.router import router as policy_router
 from jhin_api.secrets.router import router as secrets_router
+from jhin_api.security.headers import SecurityHeadersMiddleware
+from jhin_api.security.limits import RequestSizeLimitMiddleware
 from jhin_api.security.rate_limit import LoginRateLimiter
+from jhin_api.security.validation import safe_validation_error_handler
 from jhin_api.settings import Settings, get_settings
 from jhin_api.skills.router import agent_skills_router, skill_sources_router, skills_router
 from jhin_api.tasks.router import agent_actions_router, runs_router, tasks_router
@@ -193,6 +200,67 @@ class HttpObservabilityMiddleware:
                 )
 
 
+class ApiKeyUsageMiddleware:
+    """Persist one usage row per API-key request, whatever the outcome.
+
+    The auth dependency stashes the resolved key on ``request.state`` the
+    moment it verifies, *before* the role and scope checks run, so denied calls
+    (403 for a missing scope) are logged just as faithfully as successful ones
+    — which is exactly what makes the log useful when investigating a key.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        status_code = 500
+
+        async def observe(message: Message) -> None:
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                candidate = message.get("status", 500)
+                status_code = candidate if isinstance(candidate, int) else 500
+            await send(message)
+
+        try:
+            await self.app(scope, receive, observe)
+        finally:
+            usage = scope.get("state", {}).get("api_key_usage")
+            if usage is not None:
+                await self._persist(scope, usage, status_code)
+
+    async def _persist(self, scope: Scope, usage: Any, status_code: int) -> None:
+        app = scope["app"]
+        settings: Settings = app.state.settings
+        route = scope.get("route")
+        template = getattr(route, "path", None)
+        try:
+            async with app.state.session_factory() as session:
+                await record_usage(
+                    session,
+                    api_key_id=usage.api_key_id,
+                    workspace_id=usage.workspace_id,
+                    acting_user_id=usage.acting_user_id,
+                    method=str(scope.get("method", "")),
+                    # Route template, never the raw URL: query strings can
+                    # carry filter values that do not belong in a log.
+                    path=template if isinstance(template, str) else str(scope.get("path", "")),
+                    status_code=status_code,
+                    ip_hash=usage.ip_hash,
+                    retention_days=settings.api_key_usage_retention_days,
+                )
+        except Exception:
+            # Telemetry must never turn a served request into a failed one.
+            logger.warning(
+                "api_key.usage_not_recorded",
+                error_code=SafeErrorCode.INTERNAL_ERROR.value,
+            )
+
+
 def _load_secret_crypto() -> SecretCrypto | None:
     try:
         return SecretCrypto(load_master_key())
@@ -277,12 +345,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if cleanup_error is not None:
             raise cleanup_error.with_traceback(cleanup_traceback)
 
-    app = FastAPI(title=settings.app_name, version=__version__, lifespan=lifespan)
+    app = FastAPI(
+        title=settings.app_name,
+        version=__version__,
+        lifespan=lifespan,
+        # Interactive docs map the entire API surface for an unauthenticated
+        # visitor. Useful in development, needless exposure in production.
+        docs_url="/docs" if settings.expose_api_docs else None,
+        redoc_url="/redoc" if settings.expose_api_docs else None,
+        openapi_url="/openapi.json" if settings.expose_api_docs else None,
+    )
     app.state.settings = settings
     app.state.login_limiter = LoginRateLimiter(
-        settings.login_max_attempts, settings.login_window_seconds
+        account_max_attempts=settings.login_max_attempts,
+        ip_max_attempts=settings.login_ip_max_attempts,
+        half_life_seconds=float(settings.login_window_seconds),
+        base_block_seconds=float(settings.login_base_block_seconds),
+        account_max_block_seconds=float(settings.login_account_max_block_seconds),
+        ip_max_block_seconds=float(settings.login_ip_max_block_seconds),
     )
+    app.state.api_key_limiter = LoginRateLimiter(
+        account_max_attempts=settings.api_key_max_attempts,
+        ip_max_attempts=settings.api_key_ip_max_attempts,
+        half_life_seconds=float(settings.login_window_seconds),
+        base_block_seconds=float(settings.login_base_block_seconds),
+        account_max_block_seconds=float(settings.login_account_max_block_seconds),
+        ip_max_block_seconds=float(settings.login_ip_max_block_seconds),
+    )
+    app.add_exception_handler(RequestValidationError, safe_validation_error_handler)
 
+    # Order matters: middleware added last runs first, so security headers wrap
+    # every response including CORS preflights and the body-size rejection.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[settings.app_url],
@@ -291,10 +384,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["*"],
     )
     app.add_middleware(HttpObservabilityMiddleware)
+    # Outside the observability layer so it sees the status a client actually
+    # received, including the 500 that layer substitutes for an unhandled error.
+    app.add_middleware(ApiKeyUsageMiddleware)
+    app.add_middleware(RequestSizeLimitMiddleware, max_body_bytes=settings.max_request_body_bytes)
+    app.add_middleware(SecurityHeadersMiddleware, hsts=settings.emit_hsts)
 
     app.include_router(health_router)
     app.include_router(auth_router)
     app.include_router(workspaces_router)
+    app.include_router(invitations_router)
+    app.include_router(public_invitations_router)
+    app.include_router(api_keys_router)
     app.include_router(teams_router)
     app.include_router(agents_router)
     app.include_router(org_router)

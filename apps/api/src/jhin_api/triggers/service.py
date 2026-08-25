@@ -327,6 +327,6 @@ async def list_invocations(
             TriggerInvocation.trigger_id == trigger_id,
         )
         .order_by(TriggerInvocation.id.desc())
-        .limit(min(limit, 100))
+        .limit(min(max(limit, 1), 100))
     )
     return list(rows)

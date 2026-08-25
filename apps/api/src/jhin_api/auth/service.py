@@ -12,11 +12,17 @@ from uuid import UUID
 
 import anyio.to_thread
 from fastapi import HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from jhin_api.audit import service as audit
-from jhin_api.security.passwords import hash_password, verify_password
+from jhin_api.security.passwords import (
+    PasswordPolicyError,
+    hash_password,
+    needs_rehash,
+    validate_password_strength,
+    verify_password,
+)
 from jhin_api.security.rate_limit import LoginRateLimiter
 from jhin_api.security.tokens import hash_token, new_session_token
 from jhin_api.skills import service as skills_service
@@ -35,6 +41,16 @@ class LoginResult:
     session_token: str
 
 
+def enforce_password_policy(password: str, *, email: str) -> None:
+    """Translate a policy failure into a 422 the UI can show verbatim."""
+    try:
+        validate_password_strength(password, email=email)
+    except PasswordPolicyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+
+
 async def needs_bootstrap(db: AsyncSession) -> bool:
     """True while no user exists; the bootstrap endpoint disables itself after."""
     count = await db.scalar(select(func.count()).select_from(User))
@@ -49,6 +65,12 @@ async def _create_session(
     ip_hash: str | None,
     user_agent: str | None,
 ) -> str:
+    """Mint a brand-new session row and return its plaintext token.
+
+    Every authentication mints a fresh token, so a token planted in the
+    victim's browser before login is never the token they end up authenticated
+    with — session fixation has no purchase here.
+    """
     token = new_session_token()
     db.add(
         UserSession(
@@ -60,6 +82,45 @@ async def _create_session(
         )
     )
     return token
+
+
+async def start_session(
+    db: AsyncSession,
+    user_id: UUID,
+    *,
+    ttl_hours: int,
+    ip_hash: str | None,
+    user_agent: str | None,
+) -> str:
+    """Seat a user in a fresh session from another authenticating flow.
+
+    Used by invitation accept (``jhin_api.access.router``), which authenticates
+    a brand-new account and must mint its session with exactly the policy above
+    rather than a second, drifting copy of it.
+    """
+    return await _create_session(
+        db, user_id, ttl_hours=ttl_hours, ip_hash=ip_hash, user_agent=user_agent
+    )
+
+
+async def revoke_all_sessions(
+    db: AsyncSession, user_id: UUID, *, except_session_id: UUID | None = None
+) -> int:
+    """Revoke every live session for a user; returns how many were revoked."""
+    now = datetime.now(UTC)
+    statement = (
+        update(UserSession)
+        .where(
+            UserSession.user_id == user_id,
+            UserSession.revoked_at.is_(None),
+            UserSession.expires_at > now,
+        )
+        .values(revoked_at=now)
+    )
+    if except_session_id is not None:
+        statement = statement.where(UserSession.id != except_session_id)
+    result = await db.execute(statement)
+    return int(getattr(result, "rowcount", 0) or 0)
 
 
 async def bootstrap_owner(
@@ -85,6 +146,7 @@ async def bootstrap_owner(
             detail="Bootstrap is disabled: an owner account already exists",
         )
 
+    enforce_password_policy(password, email=email)
     password_hash = await anyio.to_thread.run_sync(hash_password, password)
     user = User(
         email=email.strip().lower(),
@@ -166,10 +228,16 @@ async def login(
     user_agent: str | None,
 ) -> LoginResult:
     email = email.strip().lower()
-    if limiter.is_blocked(email, ip):
+    decision = limiter.check(email, ip)
+    if decision.blocked:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many login attempts; try again later",
+            detail=(
+                "Too many failed sign-in attempts. This lock clears itself in "
+                f"about {max(1, decision.retry_after_seconds // 60)} minute(s) — "
+                "no administrator action is required."
+            ),
+            headers={"Retry-After": str(decision.retry_after_seconds)},
         )
 
     user = await db.scalar(select(User).where(User.email == email))
@@ -194,6 +262,10 @@ async def login(
         )
 
     limiter.reset(email, ip)
+    # Free parameter upgrade: if argon2-cffi has raised its defaults since this
+    # hash was written, re-hash now while the plaintext is briefly in hand.
+    if needs_rehash(user.password_hash):
+        user.password_hash = await anyio.to_thread.run_sync(hash_password, password)
     token = await _create_session(
         db, user.id, ttl_hours=session_ttl_hours, ip_hash=ip_hash, user_agent=user_agent
     )
@@ -232,6 +304,84 @@ async def logout(
         ip_hash=ip_hash,
     )
     await db.commit()
+
+
+async def logout_everywhere(
+    db: AsyncSession,
+    *,
+    user: User,
+    request_id: UUID,
+    ip_hash: str,
+) -> int:
+    """Revoke every session this user holds, including the calling one.
+
+    The escape hatch for "my laptop was stolen" and for anyone who suspects a
+    cookie has been copied.
+    """
+    revoked = await revoke_all_sessions(db, user.id)
+    audit.record(
+        db,
+        action="auth.sessions_revoked",
+        target_type="user",
+        target_id=user.id,
+        workspace_id=None,
+        actor_id=user.id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        metadata={"revoked_sessions": revoked},
+    )
+    await db.commit()
+    return revoked
+
+
+async def change_password(
+    db: AsyncSession,
+    *,
+    user: User,
+    current_password: str,
+    new_password: str,
+    session_ttl_hours: int,
+    request_id: UUID,
+    ip_hash: str,
+    user_agent: str | None,
+) -> str:
+    """Rotate the password, then every session, and re-seat the caller.
+
+    A password change is the standard response to "I think someone has my
+    credentials", so it must invalidate every session that existed under the
+    old password — otherwise the attacker keeps their cookie and the victim
+    has changed nothing that matters.
+    """
+    valid = await anyio.to_thread.run_sync(verify_password, user.password_hash, current_password)
+    if not valid:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Current password is incorrect"
+        )
+    enforce_password_policy(new_password, email=user.email)
+    if new_password == current_password:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="New password must differ from the current password",
+        )
+
+    user.password_hash = await anyio.to_thread.run_sync(hash_password, new_password)
+    revoked = await revoke_all_sessions(db, user.id)
+    token = await _create_session(
+        db, user.id, ttl_hours=session_ttl_hours, ip_hash=ip_hash, user_agent=user_agent
+    )
+    audit.record(
+        db,
+        action="auth.password_changed",
+        target_type="user",
+        target_id=user.id,
+        workspace_id=None,
+        actor_id=user.id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        metadata={"revoked_sessions": revoked},
+    )
+    await db.commit()
+    return token
 
 
 async def list_memberships(

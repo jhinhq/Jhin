@@ -61,7 +61,8 @@ async def list_events(
     offset: int = 0,
 ) -> tuple[list[AuditEvent], int]:
     """Newest-first audit page for one workspace, plus the total match count."""
-    limit = min(limit, MAX_PAGE_SIZE)
+    limit = min(max(limit, 1), MAX_PAGE_SIZE)
+    offset = max(offset, 0)
     query = select(AuditEvent).where(AuditEvent.workspace_id == workspace_id)
     if actor_id is not None:
         query = query.where(AuditEvent.actor_id == actor_id)

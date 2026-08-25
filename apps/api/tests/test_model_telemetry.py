@@ -30,7 +30,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import Request
 
 import jhin_models.factory as model_factory
-from jhin_api.deps import AuthContext, WorkspaceContext, get_current_auth, get_secret_crypto
+from jhin_api.deps import (
+    AuthContext,
+    Principal,
+    WorkspaceContext,
+    get_current_auth,
+    get_current_principal,
+    get_secret_crypto,
+)
 from jhin_api.main import create_app
 from jhin_api.models import service as model_service
 from jhin_api.models.router import providers_router
@@ -328,9 +335,17 @@ async def test_real_lifespan_provider_verification_uses_exact_app_owned_handles_
         async def override_crypto() -> SecretCrypto:
             return _crypto()
 
+        async def _principal() -> Principal:
+            return Principal(user=(await override_auth()).user)
+
         app.dependency_overrides[get_current_auth] = override_auth
+        app.dependency_overrides[get_current_principal] = _principal
         app.dependency_overrides[get_secret_crypto] = override_crypto
-        assert set(app.dependency_overrides) == {get_current_auth, get_secret_crypto}
+        assert set(app.dependency_overrides) == {
+            get_current_auth,
+            get_current_principal,
+            get_secret_crypto,
+        }
 
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:

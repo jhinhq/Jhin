@@ -188,12 +188,41 @@ async def _owner_count(db: AsyncSession, workspace_id: UUID) -> int:
     return int(count or 0)
 
 
-def _require_owner_for_owner_changes(ctx: WorkspaceContext, *roles: WorkspaceRole) -> None:
-    """Admins manage members, except anything touching the owner role (20.2)."""
+def require_authority_over(ctx: WorkspaceContext, *roles: WorkspaceRole) -> None:
+    """May ``ctx`` hand out these roles? Only an owner may hand out ownership.
+
+    Admins may invite and promote up to admin — a workspace that needs a
+    second operator should not need the owner awake to get one. Ownership is
+    different: it carries workspace deletion and the power to unseat the other
+    owners, so it may only ever be granted by someone who already holds it
+    (docs/architecture/rbac.md).
+    """
     if WorkspaceRole.OWNER in roles and ctx.role != WorkspaceRole.OWNER:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only an owner can grant or modify the owner role",
+        )
+
+
+def require_authority_to_modify(ctx: WorkspaceContext, membership: WorkspaceMembership) -> None:
+    """May ``ctx`` change or remove this existing membership?
+
+    Admins may grant admin but may not *take it away*: otherwise any admin
+    could demote every peer and leave themselves the only operator, which is a
+    takeover with extra steps. Removing or demoting an admin or an owner is an
+    owner's call. Acting on your own membership is always allowed — leaving a
+    workspace or stepping down is not an escalation — subject to the
+    last-owner rule, which no one can bypass.
+    """
+    target_role = WorkspaceRole(membership.role)
+    if membership.user_id == ctx.user.id:
+        return
+    if target_role in {WorkspaceRole.ADMIN, WorkspaceRole.OWNER} and (
+        ctx.role != WorkspaceRole.OWNER
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Only an owner can change or remove an {target_role.value}",
         )
 
 
@@ -206,7 +235,7 @@ async def add_member(
     request_id: UUID,
     ip_hash: str,
 ) -> tuple[WorkspaceMembership, User]:
-    _require_owner_for_owner_changes(ctx, role)
+    require_authority_over(ctx, role)
     user = await db.scalar(select(User).where(User.email == email.strip().lower()))
     if user is None:
         raise HTTPException(
@@ -252,7 +281,8 @@ async def update_member_role(
 ) -> tuple[WorkspaceMembership, User]:
     membership = await _get_membership(db, ctx.workspace_id, membership_id)
     current_role = WorkspaceRole(membership.role)
-    _require_owner_for_owner_changes(ctx, role, current_role)
+    require_authority_over(ctx, role, current_role)
+    require_authority_to_modify(ctx, membership)
     if (
         current_role == WorkspaceRole.OWNER
         and role != WorkspaceRole.OWNER
@@ -290,7 +320,8 @@ async def remove_member(
 ) -> None:
     membership = await _get_membership(db, ctx.workspace_id, membership_id)
     current_role = WorkspaceRole(membership.role)
-    _require_owner_for_owner_changes(ctx, current_role)
+    require_authority_over(ctx, current_role)
+    require_authority_to_modify(ctx, membership)
     if current_role == WorkspaceRole.OWNER and await _owner_count(db, ctx.workspace_id) <= 1:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

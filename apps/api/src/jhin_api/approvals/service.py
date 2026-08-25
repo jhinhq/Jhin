@@ -35,7 +35,8 @@ async def list_approvals(
     offset: int = 0,
 ) -> tuple[list[tuple[Approval, str | None, str | None]], int, int]:
     """Inbox: pending first, newest within each group (plan 17.11)."""
-    limit = min(limit, MAX_PAGE_SIZE)
+    limit = min(max(limit, 1), MAX_PAGE_SIZE)
+    offset = max(offset, 0)
     query = (
         select(Approval, Agent.name, Task.title)
         .outerjoin(Agent, Agent.id == Approval.requested_by_agent_id)

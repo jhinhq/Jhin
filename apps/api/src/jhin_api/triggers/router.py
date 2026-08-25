@@ -8,7 +8,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
 
-from jhin_api.deps import AdminCtx, DbSession, MemberCtx
+from jhin_api.deps import AdminCtx, DbSession, ViewerCtx
 from jhin_api.deps import client_ip_hash as ip_hash
 from jhin_api.deps import get_request_id as req_id
 from jhin_api.security.csrf import csrf_protect
@@ -38,7 +38,7 @@ def _out(trigger: Trigger, last: TriggerInvocation | None = None) -> TriggerOut:
 
 
 @router.get("")
-async def list_triggers(ctx: MemberCtx, db: DbSession) -> list[TriggerOut]:
+async def list_triggers(ctx: ViewerCtx, db: DbSession) -> list[TriggerOut]:
     triggers = await service.list_triggers(db, ctx.workspace_id)
     latest = await service.last_invocations(db, ctx.workspace_id, [t.id for t in triggers])
     return [_out(trigger, latest.get(trigger.id)) for trigger in triggers]
@@ -55,7 +55,7 @@ async def create_trigger(
 
 
 @router.get("/{trigger_id}")
-async def get_trigger(trigger_id: UUID, ctx: MemberCtx, db: DbSession) -> TriggerOut:
+async def get_trigger(trigger_id: UUID, ctx: ViewerCtx, db: DbSession) -> TriggerOut:
     trigger = await service.get_trigger(db, ctx.workspace_id, trigger_id)
     latest = await service.last_invocations(db, ctx.workspace_id, [trigger.id])
     return _out(trigger, latest.get(trigger.id))
@@ -100,7 +100,7 @@ async def delete_trigger(trigger_id: UUID, request: Request, ctx: AdminCtx, db: 
 
 @router.post("/{trigger_id}/test")
 async def test_trigger(
-    trigger_id: UUID, payload: TriggerTestRequest, ctx: MemberCtx, db: DbSession
+    trigger_id: UUID, payload: TriggerTestRequest, ctx: AdminCtx, db: DbSession
 ) -> TriggerTestResult:
     """Dry-run the trigger's filter against a sample event (plan 10.3):
     returns matched/not plus which conditions passed or failed. Never
@@ -111,7 +111,7 @@ async def test_trigger(
 
 @router.get("/{trigger_id}/invocations")
 async def list_invocations(
-    trigger_id: UUID, ctx: MemberCtx, db: DbSession, limit: int = 20
+    trigger_id: UUID, ctx: ViewerCtx, db: DbSession, limit: int = 20
 ) -> list[TriggerInvocationOut]:
     await service.get_trigger(db, ctx.workspace_id, trigger_id)
     rows = await service.list_invocations(db, ctx.workspace_id, trigger_id, limit=limit)

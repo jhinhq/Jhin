@@ -1,39 +1,34 @@
 "use client";
 
-/** Workspace settings: rename (admin+), monthly model budget, and member
- * management (plan 20.2). */
+/** Workspace settings: rename (admin+) and the monthly model budget. People
+ * and roles live on their own page (docs/architecture/rbac.md). */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Trash2, UserPlus } from "lucide-react";
+import { ArrowRight, Users } from "lucide-react";
+import Link from "next/link";
 import { useState } from "react";
 import { PageBody, PageHeader } from "@/components/app-shell";
-import { Badge, Button, Card, ErrorNote, Field, Input, Select, Spinner } from "@/components/ui";
+import { Button, Card, ErrorNote, Field, Input, Spinner, focusRing } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
-import { useMembers, useWorkspaceSpend } from "@/lib/hooks";
+import { useWorkspaceSpend } from "@/lib/hooks";
 import {
   dollarInputToMicros,
   formatMicrosAsDollars,
   microsToDollarInput,
   summarizeBudget,
 } from "@/lib/models";
-import type { Member, Workspace, WorkspaceRole } from "@/lib/types";
+import type { Workspace } from "@/lib/types";
 import { useWorkspace } from "@/lib/workspace-context";
 
-const ASSIGNABLE_ROLES: WorkspaceRole[] = ["viewer", "member", "admin", "owner"];
-
 export default function SettingsPage() {
-  const { workspace, user, can } = useWorkspace();
+  const { workspace, can } = useWorkspace();
   const workspaceId = workspace.workspace_id;
-  const members = useMembers(workspaceId);
   const workspaceQuery = useQuery({
     queryKey: ["workspace", workspaceId],
     queryFn: () => api<Workspace>(`/api/v1/workspaces/${workspaceId}`),
   });
 
   const [name, setName] = useState<string | null>(null);
-  const [inviteEmail, setInviteEmail] = useState("");
-  const [inviteRole, setInviteRole] = useState<WorkspaceRole>("member");
-  const [memberError, setMemberError] = useState<string | null>(null);
 
   const rename = useMutation({
     mutationFn: (newName: string) =>
@@ -44,54 +39,15 @@ export default function SettingsPage() {
     onSuccess: () => void workspaceQuery.refetch(),
   });
 
-  const addMember = useMutation({
-    mutationFn: () =>
-      api<Member>(`/api/v1/workspaces/${workspaceId}/members`, {
-        method: "POST",
-        body: { email: inviteEmail, role: inviteRole },
-      }),
-    onSuccess: () => {
-      setInviteEmail("");
-      setMemberError(null);
-      void members.refetch();
-    },
-    onError: (error) =>
-      setMemberError(error instanceof ApiError ? error.detail : "Adding the member failed"),
-  });
-
-  const changeRole = useMutation({
-    mutationFn: ({ membershipId, role }: { membershipId: string; role: WorkspaceRole }) =>
-      api<Member>(`/api/v1/workspaces/${workspaceId}/members/${membershipId}`, {
-        method: "PATCH",
-        body: { role },
-      }),
-    onSuccess: () => {
-      setMemberError(null);
-      void members.refetch();
-    },
-    onError: (error) =>
-      setMemberError(error instanceof ApiError ? error.detail : "Role change failed"),
-  });
-
-  const removeMember = useMutation({
-    mutationFn: (membershipId: string) =>
-      api<void>(`/api/v1/workspaces/${workspaceId}/members/${membershipId}`, {
-        method: "DELETE",
-      }),
-    onSuccess: () => {
-      setMemberError(null);
-      void members.refetch();
-    },
-    onError: (error) =>
-      setMemberError(error instanceof ApiError ? error.detail : "Removal failed"),
-  });
-
   const currentName = name ?? workspaceQuery.data?.name ?? workspace.workspace_name;
   const isAdmin = can("admin");
 
   return (
     <>
-      <PageHeader title="Settings" description="Name your workspace and manage who has access." />
+      <PageHeader
+        title="Settings"
+        description="Name your workspace and keep an eye on what it spends."
+      />
       <PageBody className="max-w-3xl space-y-8">
         <Card as="section">
           <h2 className="mb-4 font-display text-base font-semibold">Workspace</h2>
@@ -131,107 +87,18 @@ export default function SettingsPage() {
         <BudgetCard workspaceId={workspaceId} isAdmin={isAdmin} />
 
         <Card as="section">
-          <h2 className="mb-1 font-display text-base font-semibold">Members</h2>
+          <h2 className="mb-1 font-display text-base font-semibold">People</h2>
           <p className="mb-4 text-sm text-dim">
-            Roles: owner &gt; admin &gt; member &gt; viewer. Only owners may grant or modify the
-            owner role.
+            Members, roles, and invitations moved to their own page so there is room to explain
+            what each role actually means.
           </p>
-          {isAdmin ? (
-            <form
-              className="mb-4 flex items-end gap-3"
-              onSubmit={(event) => {
-                event.preventDefault();
-                addMember.mutate();
-              }}
-            >
-              <div className="flex-1">
-                <Field label="Add by email" hint="The user must already have an account.">
-                  <Input
-                    type="email"
-                    required
-                    value={inviteEmail}
-                    onChange={(event) => setInviteEmail(event.target.value)}
-                    placeholder="teammate@company.com"
-                  />
-                </Field>
-              </div>
-              <div className="w-32">
-                <Field label="Role">
-                  <Select
-                    value={inviteRole}
-                    onChange={(event) => setInviteRole(event.target.value as WorkspaceRole)}
-                  >
-                    {ASSIGNABLE_ROLES.map((role) => (
-                      <option key={role} value={role}>
-                        {role}
-                      </option>
-                    ))}
-                  </Select>
-                </Field>
-              </div>
-              <Button type="submit" variant="primary" disabled={addMember.isPending}>
-                <UserPlus size={14} /> Add
-              </Button>
-            </form>
-          ) : null}
-          <ErrorNote message={memberError} />
-          {members.isPending ? (
-            <Spinner />
-          ) : (
-            <ul className="mt-2 divide-y divide-line">
-              {(members.data ?? []).map((member) => (
-                <li key={member.id} className="flex items-center justify-between gap-3 py-3">
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-medium">
-                      {member.display_name}
-                      {member.user_id === user.id ? (
-                        <span className="text-faint"> (you)</span>
-                      ) : null}
-                    </p>
-                    <p className="truncate text-xs text-dim">{member.email}</p>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-2">
-                    {isAdmin ? (
-                      <>
-                        <Select
-                          value={member.role}
-                          className="!h-8 w-28 !text-[13px]"
-                          onChange={(event) =>
-                            changeRole.mutate({
-                              membershipId: member.id,
-                              role: event.target.value as WorkspaceRole,
-                            })
-                          }
-                        >
-                          {ASSIGNABLE_ROLES.map((role) => (
-                            <option key={role} value={role}>
-                              {role}
-                            </option>
-                          ))}
-                        </Select>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          title="Remove member"
-                          onClick={() => {
-                            if (window.confirm(`Remove ${member.display_name}?`)) {
-                              removeMember.mutate(member.id);
-                            }
-                          }}
-                        >
-                          <Trash2 size={13} />
-                        </Button>
-                      </>
-                    ) : (
-                      <Badge tone={member.role === "owner" ? "accent" : "neutral"}>
-                        {member.role}
-                      </Badge>
-                    )}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
+          <Link
+            href="/people"
+            className={`inline-flex items-center gap-2 rounded-xl border border-line px-3 py-2 text-sm font-medium hover:bg-hover ${focusRing}`}
+          >
+            <Users size={15} aria-hidden /> Manage people
+            <ArrowRight size={14} aria-hidden />
+          </Link>
         </Card>
       </PageBody>
     </>

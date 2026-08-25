@@ -1240,3 +1240,99 @@ export interface BrowseInstallResult {
   skill: Skill;
   status: "installed" | "already_installed";
 }
+
+/* --- People, invitations, and API keys (docs/architecture/rbac.md) --- */
+
+export type InvitationStatus = "pending" | "accepted" | "revoked" | "expired";
+
+export interface Invitation {
+  id: string;
+  email: string;
+  role: WorkspaceRole;
+  status: InvitationStatus;
+  invited_by_user_id: string | null;
+  invited_by_name: string | null;
+  expires_at: string;
+  accepted_at: string | null;
+  revoked_at: string | null;
+  created_at: string;
+}
+
+/** The invite link comes back exactly once, at creation. */
+export interface InvitationCreated {
+  invitation: Invitation;
+  invite_url: string;
+  token: string;
+}
+
+export interface InvitationPreview {
+  workspace_name: string;
+  email: string;
+  role: WorkspaceRole;
+  expires_at: string;
+}
+
+export interface ScopeInfo {
+  key: string;
+  category: string;
+  action: string;
+  label: string;
+  description: string;
+  min_role: WorkspaceRole;
+  /** False when your own role may not grant this scope. */
+  available: boolean;
+}
+
+export interface ScopeCategoryInfo {
+  key: string;
+  label: string;
+  description: string;
+  scopes: ScopeInfo[];
+}
+
+export interface ScopeCatalog {
+  your_role: WorkspaceRole;
+  categories: ScopeCategoryInfo[];
+}
+
+export type ApiKeyStatus = "active" | "revoked" | "expired";
+export type ExpiryUnit = "minutes" | "hours" | "days" | "never";
+
+export interface ApiKeyInfo {
+  id: string;
+  name: string;
+  prefix: string;
+  scopes: string[];
+  role_ceiling: WorkspaceRole;
+  created_by_user_id: string | null;
+  created_by_name: string | null;
+  expires_at: string | null;
+  last_used_at: string | null;
+  revoked_at: string | null;
+  created_at: string;
+  status: ApiKeyStatus;
+}
+
+/** `key` is the only time the secret exists outside the caller's clipboard. */
+export interface ApiKeyCreated {
+  api_key: ApiKeyInfo;
+  key: string;
+}
+
+export interface ApiKeyUsageEntry {
+  id: string;
+  api_key_id: string;
+  api_key_name: string | null;
+  api_key_prefix: string | null;
+  acting_user_id: string | null;
+  acting_user_name: string | null;
+  method: string;
+  path: string;
+  status_code: number;
+  created_at: string;
+}
+
+export interface ApiKeyUsagePage {
+  items: ApiKeyUsageEntry[];
+  total: number;
+}

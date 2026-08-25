@@ -233,7 +233,7 @@ async def list_skills(
             query = query.where(Skill.category == category)
     total = await db.scalar(select(func.count()).select_from(query.subquery())) or 0
     rows = await db.scalars(
-        query.order_by(Skill.name).limit(min(limit, MAX_PAGE_SIZE)).offset(offset)
+        query.order_by(Skill.name).limit(min(max(limit, 1), MAX_PAGE_SIZE)).offset(max(offset, 0))
     )
     return list(rows), int(total)
 

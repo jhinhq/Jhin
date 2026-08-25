@@ -19,6 +19,8 @@ import type {
   ConversationDetail,
   ConversationList,
   ConversationMessage,
+  ApiKeyInfo,
+  ApiKeyUsagePage,
   ApprovalList,
   AuditEventPage,
   BootstrapStatus,
@@ -28,6 +30,7 @@ import type {
   ConnectionToolsOut,
   ConnectorInfo,
   Grant,
+  Invitation,
   Member,
   MeResponse,
   ModelProfile,
@@ -37,6 +40,7 @@ import type {
   OrgGraph,
   RunEvent,
   RunList,
+  ScopeCatalog,
   SecretOut,
   AgentSkillInfo,
   BrowseListResult,
@@ -107,6 +111,42 @@ export function useMembers(workspaceId: string) {
   return useQuery({
     queryKey: ["members", workspaceId],
     queryFn: () => api<Member[]>(`/api/v1/workspaces/${workspaceId}/members`),
+  });
+}
+
+/** Pending and past invitations; admin+ only, so it is opt-in via `enabled`. */
+export function useInvitations(workspaceId: string, enabled = true) {
+  return useQuery({
+    queryKey: ["invitations", workspaceId],
+    queryFn: () => api<Invitation[]>(`/api/v1/workspaces/${workspaceId}/invitations`),
+    enabled,
+  });
+}
+
+export function useApiKeys(workspaceId: string) {
+  return useQuery({
+    queryKey: ["api-keys", workspaceId],
+    queryFn: () => api<ApiKeyInfo[]>(`/api/v1/workspaces/${workspaceId}/api-keys`),
+  });
+}
+
+/** The scope taxonomy, annotated with what the signed-in role may grant. The
+ * UI never hard-codes scope strings; it renders whatever this returns. */
+export function useScopeCatalog(workspaceId: string) {
+  return useQuery({
+    queryKey: ["api-key-scopes", workspaceId],
+    queryFn: () => api<ScopeCatalog>(`/api/v1/workspaces/${workspaceId}/api-keys/scopes`),
+    staleTime: 5 * 60_000,
+  });
+}
+
+export function useApiKeyUsage(workspaceId: string, apiKeyId?: string) {
+  return useQuery({
+    queryKey: ["api-key-usage", workspaceId, apiKeyId ?? "all"],
+    queryFn: () =>
+      api<ApiKeyUsagePage>(`/api/v1/workspaces/${workspaceId}/api-keys/usage`, {
+        params: { limit: 100, api_key_id: apiKeyId },
+      }),
   });
 }
 

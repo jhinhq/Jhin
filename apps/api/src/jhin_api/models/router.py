@@ -63,7 +63,7 @@ def _profile_out(profile: ModelProfile) -> ModelProfileOut:
 
 
 @providers_router.get("")
-async def list_providers(ctx: ViewerCtx, db: DbSession) -> list[ModelProviderOut]:
+async def list_providers(ctx: AdminCtx, db: DbSession) -> list[ModelProviderOut]:
     return [_provider_out(p) for p in await service.list_providers(db, ctx.workspace_id)]
 
 
@@ -82,7 +82,7 @@ async def create_provider(
 
 
 @providers_router.get("/{provider_id}")
-async def get_provider(provider_id: UUID, ctx: ViewerCtx, db: DbSession) -> ModelProviderOut:
+async def get_provider(provider_id: UUID, ctx: AdminCtx, db: DbSession) -> ModelProviderOut:
     return _provider_out(await service.get_provider(db, ctx.workspace_id, provider_id))
 
 
@@ -153,7 +153,9 @@ async def list_provider_models(
 @providers_router.get("/{provider_id}/balance")
 async def provider_balance(
     provider_id: UUID,
-    ctx: ViewerCtx,
+    # Admin, not viewer: this decrypts the provider credential and makes a live
+    # authenticated billing call, exactly like the sibling `/models` route.
+    ctx: AdminCtx,
     db: DbSession,
     crypto: SecretCryptoDep,
     runtime: ObservabilityRuntimeDep,

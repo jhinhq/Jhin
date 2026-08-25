@@ -107,6 +107,7 @@ async def list_work_requests(
     offset: int = 0,
 ) -> tuple[list[WorkRequestOut], int]:
     limit = min(max(limit, 1), MAX_PAGE_SIZE)
+    offset = max(offset, 0)
     query = select(WorkRequest).where(WorkRequest.workspace_id == workspace_id)
     if status_filter:
         query = query.where(WorkRequest.status == status_filter)
@@ -572,6 +573,7 @@ async def list_reviews(
     offset: int = 0,
 ) -> tuple[list[WorkReviewOut], int, int]:
     limit = min(max(limit, 1), MAX_PAGE_SIZE)
+    offset = max(offset, 0)
     query = select(WorkReview).where(WorkReview.workspace_id == workspace_id)
     if status_filter:
         query = query.where(WorkReview.status == status_filter)

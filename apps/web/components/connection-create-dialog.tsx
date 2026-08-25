@@ -1,8 +1,8 @@
 "use client";
 
-/** Create-connection dialog shared by Advanced → Connectors and the Apps
- * library (which pre-fills name, auth scheme, and config from a catalog
- * entry). Credentials are write-only. */
+/** Create-connection dialog used across Apps: the library pre-fills name,
+ * auth scheme, and config from a catalog entry, while the service-type
+ * gallery opens it blank. Credentials are write-only. */
 
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";

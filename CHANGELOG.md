@@ -64,6 +64,15 @@ adds the open-source release artifacts.
   multipart upload.
 - **Coordination and oversight:** review policies, handoff/review/approval
   cards inline in chats, escalation visibility, and task lineage trees.
+- **People and permissions:** single-use, expiring invitation links (no
+  email dependency — the link is revealed once to share out of band), a
+  documented four-role matrix enforced in one dependency, last-owner
+  protection, and admin/owner authority rules
+  (`docs/architecture/rbac.md`).
+- **Scoped API keys:** `jhin_`-prefixed bearer keys with a granular scope
+  taxonomy, a hard ceiling at the creating user's role, central per-route
+  scope enforcement that fails closed, sealed credential endpoints, and a
+  usage log with role-scoped visibility (`docs/architecture/api-keys.md`).
 - **Open-source release (phase 11):** Apache-2.0 license metadata,
   community files (`CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`,
   `SUPPORT.md`), issue and pull-request templates, CODEOWNERS, Dependabot,

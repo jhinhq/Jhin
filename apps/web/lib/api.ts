@@ -76,6 +76,23 @@ function extractDetail(payload: unknown): string | null {
   return null;
 }
 
+/**
+ * Re-issue the session-bound CSRF cookie.
+ *
+ * The CSRF token is derived from the session token, so a cookie left over from
+ * a previous session (or dropped by the browser) fails verification on every
+ * mutation. `GET /auth/me` re-issues it; calling that once and retrying turns a
+ * dead-end 403 into a hiccup the user never sees.
+ */
+async function refreshCsrfCookie(): Promise<boolean> {
+  try {
+    const response = await fetch("/api/v1/auth/me", { method: "GET" });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function api<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const method = options.method ?? "GET";
   let url = path;
@@ -88,18 +105,24 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
     if (query) url += `?${query}`;
   }
 
-  const headers: Record<string, string> = {};
-  if (options.body !== undefined) headers["content-type"] = "application/json";
-  if (method !== "GET") {
-    const csrf = readCookie(CSRF_COOKIE);
-    if (csrf) headers[CSRF_HEADER] = csrf;
-  }
+  const send = async (): Promise<Response> => {
+    const headers: Record<string, string> = {};
+    if (options.body !== undefined) headers["content-type"] = "application/json";
+    if (method !== "GET") {
+      const csrf = readCookie(CSRF_COOKIE);
+      if (csrf) headers[CSRF_HEADER] = csrf;
+    }
+    return fetch(url, {
+      method,
+      headers,
+      body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+    });
+  };
 
-  const response = await fetch(url, {
-    method,
-    headers,
-    body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
-  });
+  let response = await send();
+  if (response.status === 403 && method !== "GET" && (await refreshCsrfCookie())) {
+    response = await send();
+  }
 
   if (response.status === 204) return undefined as T;
 

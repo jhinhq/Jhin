@@ -39,6 +39,11 @@ from jhin_workflows import AGENT_TASK_QUEUE
 from jhin_workflows.agent_task import AgentTaskInput
 
 MAX_PAGE_SIZE = 200
+# Timeline endpoints return a whole run/task history in one response rather
+# than a page. That is fine for a normal task and unbounded for a long-running
+# agent loop, so a hard ceiling is applied — high enough never to truncate real
+# usage, low enough that one request cannot exhaust the API's memory.
+MAX_TIMELINE_ROWS = 2_000
 ACTIVE_TASK_STATES = (TaskState.QUEUED.value, TaskState.RUNNING.value, TaskState.PAUSED.value)
 # metadata_json key stamped when a person dismisses a failed task from the
 # attention inbox; the failure stays on the task, it just stops nagging.
@@ -248,7 +253,8 @@ async def list_tasks(
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[Task], int]:
-    limit = min(limit, MAX_PAGE_SIZE)
+    limit = min(max(limit, 1), MAX_PAGE_SIZE)
+    offset = max(offset, 0)
     query = select(Task).where(Task.workspace_id == workspace_id)
     if state:
         query = query.where(Task.state == state)
@@ -352,6 +358,7 @@ async def list_task_runs(db: AsyncSession, workspace_id: UUID, task_id: UUID) ->
         select(AgentRun)
         .where(AgentRun.task_id == task_id, AgentRun.workspace_id == workspace_id)
         .order_by(AgentRun.created_at)
+        .limit(MAX_TIMELINE_ROWS)
     )
     return list(rows)
 
@@ -362,6 +369,7 @@ async def list_task_events(db: AsyncSession, workspace_id: UUID, task_id: UUID) 
         select(RunEvent)
         .where(RunEvent.task_id == task_id, RunEvent.workspace_id == workspace_id)
         .order_by(RunEvent.created_at, RunEvent.seq)
+        .limit(MAX_TIMELINE_ROWS)
     )
     return list(rows)
 
@@ -375,6 +383,7 @@ async def list_task_messages(db: AsyncSession, workspace_id: UUID, task_id: UUID
             Message.visibility == MessageVisibility.VISIBLE.value,
         )
         .order_by(Message.created_at, Message.id)
+        .limit(MAX_TIMELINE_ROWS)
     )
     return list(rows)
 
@@ -388,7 +397,8 @@ async def list_runs(
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[AgentRun], int]:
-    limit = min(limit, MAX_PAGE_SIZE)
+    limit = min(max(limit, 1), MAX_PAGE_SIZE)
+    offset = max(offset, 0)
     query = select(AgentRun).where(AgentRun.workspace_id == workspace_id)
     if status_filter:
         query = query.where(AgentRun.status == status_filter)
@@ -415,6 +425,7 @@ async def list_run_events(db: AsyncSession, workspace_id: UUID, run_id: UUID) ->
         select(RunEvent)
         .where(RunEvent.run_id == run_id, RunEvent.workspace_id == workspace_id)
         .order_by(RunEvent.seq)
+        .limit(MAX_TIMELINE_ROWS)
     )
     return list(rows)
 
@@ -424,6 +435,7 @@ async def list_run_tool_calls(db: AsyncSession, workspace_id: UUID, run_id: UUID
         select(ToolCall)
         .where(ToolCall.run_id == run_id, ToolCall.workspace_id == workspace_id)
         .order_by(ToolCall.created_at, ToolCall.id)
+        .limit(MAX_TIMELINE_ROWS)
     )
     return list(rows)
 

@@ -44,6 +44,15 @@ operations UI.
 - **Activity and Attention.** A plain-language feed of who asked whom for
   what and how it went (`/activity`), plus an inbox for approvals, failed
   work, and chats waiting on you (`/attention`).
+- **People and permissions.** Invite colleagues with single-use, expiring
+  links (no email server required — the link is shown once to share out of
+  band), with four roles whose boundaries are written down rather than
+  implied: owners run the workspace, admins run the agents, members use them,
+  viewers read (`/people`, [roles and permissions](docs/architecture/rbac.md)).
+- **Scoped API keys.** `jhin_`-prefixed bearer keys for scripts and CI, with a
+  granular scope tree and one hard rule: a key can never do more than the
+  person who created it. Every call lands in a usage log
+  (`/api-keys`, [API keys](docs/architecture/api-keys.md)).
 - **Secure tool use.** Deny-by-default capability grants, approval policies,
   sanitized and audited tool calls, executed only on an isolated tool worker;
   credentials live in an envelope-encrypted secret store and are never shown
@@ -536,9 +545,15 @@ grants for the Senior Software Engineer, and the enabled trigger **"Pick up
 new engineering tickets"** (team ENG + state transitions to Todo → assign to
 the SWE, comment the outcome back on the issue).
 
-### Chats, Activity, and Attention
+### Home, Chats, Activity, and Attention
 
-- **Chats** (the default screen) — pick an agent and describe what you want.
+- **Home** (`/home`, the screen you land on after signing in) — what needs a
+  person (approvals, reviews, failed work, chats waiting on you), what your
+  agents are running right now with the latest handoffs between them, your
+  recent chats, this month's model spend against the budget, and a team
+  snapshot. A short setup checklist appears only while the workspace is
+  missing a model provider, an agent, or a connected app.
+- **Chats** — pick an agent and describe what you want.
   Each conversation is a persistent thread; every turn that needs work
   becomes a durable task behind the scenes, and follow-up turns carry the
   earlier conversation as context. Rename, pin, archive, and search chats;
@@ -550,8 +565,14 @@ the SWE, comment the outcome back on the issue).
 - **Attention** — pending approvals, failed work, and chats waiting on you.
 - **Agents / Company** — a directory with profiles (purpose, colleagues,
   what each agent can use, recent activity) and an org outline/map.
-- **Automations / Apps** — friendly views over triggers and connectors; the
-  full builders remain under Advanced.
+- **Automations** — a friendly view over triggers; the full builder remains
+  under Advanced.
+- **Apps** (`/apps`) — the one place connections live: a searchable library of
+  well-known apps plus what is already connected, with per-connection
+  verification, credential rotation, webhook setup, discovered tools and risk
+  overrides, and the agent access summary in the connection drawer (the
+  operational controls sit behind an "Advanced settings" disclosure). The
+  older `/connectors` route permanently redirects here.
 
 ### Models and tasks
 

@@ -14,6 +14,8 @@ import {
   CheckSquare,
   ChevronDown,
   Cpu,
+  House,
+  KeyRound,
   ListTodo,
   LogOut,
   MessageSquare,
@@ -23,7 +25,7 @@ import {
   ScrollText,
   Settings,
   ShieldCheck,
-  SlidersHorizontal,
+  Users,
   Wrench,
   Zap,
 } from "lucide-react";
@@ -46,6 +48,7 @@ export interface NavItem {
 }
 
 const PRIMARY_NAV: readonly NavItem[] = [
+  { href: "/home", label: "Home", icon: House },
   { href: "/chats", label: "Chats", icon: MessageSquare },
   { href: "/agents", label: "Agents", icon: Bot },
   { href: "/company", label: "Company", icon: Building2 },
@@ -82,12 +85,6 @@ export const ADVANCED_NAV: readonly NavItem[] = [
     description: "Actions that paused to wait for a person to say yes or no.",
   },
   {
-    href: "/connectors",
-    label: "Connectors",
-    icon: Plug,
-    description: "Raw connections to outside services and the access they grant.",
-  },
-  {
     href: "/triggers",
     label: "Triggers",
     icon: Zap,
@@ -106,10 +103,22 @@ export const ADVANCED_NAV: readonly NavItem[] = [
     description: "A permanent record of who changed what, and when.",
   },
   {
+    href: "/people",
+    label: "People",
+    icon: Users,
+    description: "Who can use this workspace, what each role may do, and pending invitations.",
+  },
+  {
+    href: "/api-keys",
+    label: "API keys",
+    icon: KeyRound,
+    description: "Scoped keys for scripts and other systems, and a log of what they called.",
+  },
+  {
     href: "/settings",
     label: "Settings",
     icon: Settings,
-    description: "Workspace members, roles, and general preferences.",
+    description: "Workspace name, model budget, and general preferences.",
   },
 ] as const;
 
@@ -276,12 +285,6 @@ export function SidebarNav({ pathname, rail = false }: { pathname: string; rail?
                   <NavLink item={item} active={isActive(pathname, item.href)} />
                 </li>
               ))}
-              <li>
-                <NavLink
-                  item={{ href: "/advanced", label: "All advanced tools", icon: SlidersHorizontal }}
-                  active={isActive(pathname, "/advanced")}
-                />
-              </li>
             </ul>
           ) : null}
         </div>
@@ -303,7 +306,7 @@ function MobileBars({ pathname, onSignOut }: { pathname: string; onSignOut: () =
   return (
     <>
       <header className="sticky top-0 z-30 flex h-14 items-center justify-between border-b border-line bg-bg/85 px-4 backdrop-blur md:hidden">
-        <Link href="/chats" className={`rounded-lg ${focusRing}`} aria-label="Jhin home">
+        <Link href="/home" className={`rounded-lg ${focusRing}`} aria-label="Jhin home">
           <Wordmark />
         </Link>
         <div className="flex items-center gap-2">
@@ -388,15 +391,6 @@ function MobileBars({ pathname, onSignOut }: { pathname: string; onSignOut: () =
               </li>
             );
           })}
-          <li className="col-span-2">
-            <Link
-              href="/advanced"
-              onClick={closeMore}
-              className={`flex min-h-11 items-center justify-center gap-2 rounded-xl border border-dashed border-line-strong px-3 text-sm text-dim hover:text-ink ${focusRing}`}
-            >
-              <SlidersHorizontal size={16} aria-hidden /> All advanced tools
-            </Link>
-          </li>
         </ul>
         <div className="mt-4 flex items-center justify-between border-t border-line pt-4">
           <span className="text-sm text-dim">Theme</span>
@@ -479,7 +473,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         {/* Desktop sidebar (lg+) */}
         <aside className="fixed inset-y-0 left-0 z-20 hidden w-[260px] flex-col border-r border-line bg-surface lg:flex">
           <div className="px-5 pb-3 pt-5">
-            <Link href="/chats" className={`inline-flex rounded-lg ${focusRing}`} aria-label="Jhin home">
+            <Link href="/home" className={`inline-flex rounded-lg ${focusRing}`} aria-label="Jhin home">
               <Wordmark />
             </Link>
             <p className="mt-2 truncate text-[13px] text-dim" title={workspace.workspace_name}>
@@ -512,7 +506,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         {/* Tablet icon rail (md to lg) */}
         <aside className="fixed inset-y-0 left-0 z-20 hidden w-[72px] flex-col items-stretch border-r border-line bg-surface md:flex lg:hidden">
           <div className="flex justify-center py-4">
-            <Link href="/chats" className={`rounded-lg ${focusRing}`} aria-label="Jhin home">
+            <Link href="/home" className={`rounded-lg ${focusRing}`} aria-label="Jhin home">
               <Wordmark className="[&>span]:sr-only" />
             </Link>
           </div>

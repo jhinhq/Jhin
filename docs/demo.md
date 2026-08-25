@@ -35,15 +35,20 @@ Expected duration: under five minutes after the images are built.
 
 ## The demo flow
 
-1. Open <http://localhost:3000> and sign in with the seeded owner.
+1. Open <http://localhost:3000> and sign in with the seeded owner. You land
+   on **Home** (`/home`): what needs a person, what the agents are running
+   right now with their latest handoffs, your recent chats, this month's
+   spend, and a team snapshot.
 2. **Chats** (`/chats`): pick the Senior Software Engineer and ask for
    something small ("Summarise what you can do and which tools you have").
    The reply comes from the fake provider; the Details panel shows the
    underlying work episode, tokens, and cost.
 3. **Company** (`/company`) and **Agents** (`/agents`): the org map and agent
    profiles (purpose, colleagues, what each agent can use, recent activity).
-4. **Apps** (`/apps`): the seeded fake Linear connection. Open it to see the
-   agent access summary and recent tool usage.
+4. **Apps** (`/apps`): the seeded fake Linear connection. "Manage" opens the
+   connection drawer — agent access summary, recent tool usage, the Tools
+   tab, and Verify; credential rotation, webhook setup, disable, and delete
+   sit under "Advanced settings". `/connectors` redirects here.
 5. **Automations** (`/automations`): the seeded trigger. "Test" dry-runs it
    against a sample event with per-condition pass/fail explanations.
 6. Fire the flagship event from the host (fake Linear listens on

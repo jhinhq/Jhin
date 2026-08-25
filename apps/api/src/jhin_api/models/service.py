@@ -38,6 +38,7 @@ from jhin_models.factory import ProviderConfigError
 from jhin_models.pricing import CATALOG_UPDATED, lookup_price
 from jhin_observability import JhinMetrics
 from jhin_secrets import SecretCrypto, SecretStore
+from jhin_secrets.material import register_secret_material
 from jhin_secrets.redaction import redact_text
 
 # Provider billing APIs are polled by the UI; one live call per provider per
@@ -224,7 +225,10 @@ async def delete_provider(
         agent_names = list(
             await db.scalars(
                 select(Agent.name)
-                .where(Agent.model_profile_id.in_(profile_ids))
+                .where(
+                    Agent.workspace_id == ctx.workspace_id,
+                    Agent.model_profile_id.in_(profile_ids),
+                )
                 .order_by(Agent.name)
                 .limit(5)
             )
@@ -238,8 +242,14 @@ async def delete_provider(
                     "Change their model first, then delete the provider."
                 ),
             )
+        # Pin the workspace explicitly: this is a *write*, and selecting the
+        # row by profile id alone would let a mis-scoped profile id clear
+        # another workspace's default.
         workspace = await db.scalar(
-            select(Workspace).where(Workspace.default_model_profile_id.in_(profile_ids))
+            select(Workspace).where(
+                Workspace.id == ctx.workspace_id,
+                Workspace.default_model_profile_id.in_(profile_ids),
+            )
         )
         if workspace is not None:
             workspace.default_model_profile_id = None
@@ -277,13 +287,19 @@ async def verify_draft(
     scoped, 422 when unknown).
     """
     key = api_key
+    if key is not None:
+        # An inline key never passes through SecretStore, so nothing has
+        # registered it with the redactor. Register it now: provider errors
+        # below can quote up to 500 characters of the upstream body, and some
+        # providers echo part of the key back on an auth failure.
+        register_secret_material(key)
     if key is None and secret_id is not None:
         await _validate_secret(db, ctx.workspace_id, secret_id)
         key = await SecretStore(db, crypto).reveal(ctx.workspace_id, secret_id)
     try:
         client = _build_verification_client(provider_type, base_url, key, metrics, tracer)
     except ProviderConfigError as exc:
-        return False, str(exc)
+        return False, redact_text(str(exc))
     try:
         return True, await client.verify()
     except ModelProviderError as exc:
@@ -704,7 +720,9 @@ async def delete_profile(
 ) -> None:
     profile = await get_profile(db, ctx.workspace_id, profile_id)
     in_use_by_agent = await db.scalar(
-        select(Agent.id).where(Agent.model_profile_id == profile.id).limit(1)
+        select(Agent.id)
+        .where(Agent.workspace_id == ctx.workspace_id, Agent.model_profile_id == profile.id)
+        .limit(1)
     )
     if in_use_by_agent:
         raise HTTPException(
@@ -714,7 +732,10 @@ async def delete_profile(
     # Deleting the workspace default simply clears the default; agents fall
     # back to "no default" until an admin picks another profile.
     workspace = await db.scalar(
-        select(Workspace).where(Workspace.default_model_profile_id == profile.id)
+        select(Workspace).where(
+            Workspace.id == ctx.workspace_id,
+            Workspace.default_model_profile_id == profile.id,
+        )
     )
     if workspace is not None:
         workspace.default_model_profile_id = None

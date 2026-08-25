@@ -1,11 +1,14 @@
+/** Apps: the connection half of the merged page — the service-type gallery,
+ * the one-time webhook secret, and the per-connection drawer that replaced
+ * the old /connectors route. */
+
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import ConnectorsPage from "@/app/(app)/connectors/page";
+import AppsPage from "@/app/(app)/apps/page";
+import { WebhookSecretDialog } from "@/components/connection-detail";
 import type { ConnectionInfo, ConnectorInfo, WebhookSetup } from "@/lib/types";
 import { WorkspaceProvider } from "@/lib/workspace-context";
-
-const WebhookSecretDialog = ConnectorsPage.WebhookSecretDialog;
 
 afterEach(() => {
   cleanup();
@@ -173,6 +176,7 @@ function installServer({ deferWebhookRefetch = false } = {}) {
     const method = init?.method ?? "GET";
     const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
     if (path === "/api/v1/connectors") return json(CONNECTORS);
+    if (path === "/api/v1/connectors/catalog") return json([]);
     if (path === "/api/v1/workspaces/workspace-1/connections" && method === "GET") {
       if (webhookStored) {
         postWebhookPutGets += 1;
@@ -209,6 +213,16 @@ function installServer({ deferWebhookRefetch = false } = {}) {
       return json(null, 204);
     }
     if (path.endsWith("/tool-calls")) return json([]);
+    if (path.includes("/tools")) {
+      return json({
+        connection_id: path.split("/").at(-2),
+        connector_type: "github",
+        dynamic: false,
+        capability_pattern: null,
+        discovered_at: null,
+        tools: [],
+      });
+    }
     if (path.endsWith("/access-summary")) {
       return json({ connection_id: path.split("/").at(-2), agents: [] });
     }
@@ -235,21 +249,27 @@ function renderPage() {
         user={{ id: "user-1", email: "owner@example.com", display_name: "Owner", created_at: "2026-08-18T00:00:00Z" }}
         workspace={{ workspace_id: "workspace-1", workspace_name: "Acme", workspace_slug: "acme", role: "owner" }}
       >
-        <ConnectorsPage />
+        <AppsPage />
       </WorkspaceProvider>
     </QueryClientProvider>,
   );
+}
+
+/** The raw connector gallery lives behind a disclosure on Apps. */
+async function showServiceTypes() {
+  fireEvent.click(await screen.findByRole("button", { name: "Connect by service type instead" }));
 }
 
 function connectButton(type: string): HTMLButtonElement {
   return within(screen.getByTestId(`connector-${type}`)).getByRole("button", { name: "Connect" });
 }
 
-describe("ConnectorsPage", () => {
+describe("Apps: connections", () => {
   it("updates provider-secret status before the background refetch completes", async () => {
     const server = installServer({ deferWebhookRefetch: true });
     renderPage();
 
+    await showServiceTypes();
     await screen.findByTestId("connector-vercel");
     fireEvent.click(connectButton("vercel"));
     const createDialog = await screen.findByRole("dialog", { name: "Connect Vercel" });
@@ -258,7 +278,7 @@ describe("ConnectorsPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create connection" }));
 
     await waitFor(() => expect(server.writes).toHaveLength(1));
-    const connectionCard = await screen.findByTestId("connection-Vercel production");
+    await screen.findByTestId("connection-Vercel production");
     const setupDialog = await screen.findByRole("dialog", { name: "Webhook setup" });
     const secret = within(setupDialog).getByLabelText(/Provider-generated signing secret/);
     fireEvent.change(secret, { target: { value: "provider-secret-1234" } });
@@ -267,7 +287,9 @@ describe("ConnectorsPage", () => {
     await waitFor(() => expect(server.postWebhookPutGets).toBe(1));
 
     try {
-      fireEvent.click(connectionCard);
+      fireEvent.click(screen.getByTestId("manage-Vercel production"));
+      const detail = await screen.findByRole("dialog", { name: "Vercel production" });
+      fireEvent.click(within(detail).getByRole("button", { name: "Advanced settings" }));
       expect(screen.getByText("Webhook secret configured")).toBeDefined();
     } finally {
       server.releaseWebhookRefetch();
@@ -317,6 +339,7 @@ describe("ConnectorsPage", () => {
     const server = installServer();
     renderPage();
 
+    await showServiceTypes();
     await screen.findByTestId("connector-supabase");
     fireEvent.click(connectButton("supabase"));
     const dialog = await screen.findByRole("dialog", { name: "Connect Supabase" });
@@ -362,6 +385,7 @@ describe("ConnectorsPage", () => {
     installServer();
     renderPage();
 
+    await showServiceTypes();
     await screen.findByTestId(`connector-${type}`);
     fireEvent.click(connectButton(type));
     const createDialog = await screen.findByRole("dialog", { name: `Connect ${displayName}` });

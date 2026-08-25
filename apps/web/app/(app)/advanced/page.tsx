@@ -47,8 +47,8 @@ export default function AdvancedIndexPage() {
         </ul>
         <p className="mt-8 max-w-2xl text-sm text-faint">
           Tip: the friendlier versions of most of these live in the main navigation. Automations
-          wraps Triggers, Apps wraps Connectors, and Attention gathers approvals and failures in
-          one place.
+          wraps Triggers, Attention gathers approvals and failures in one place, and connecting or
+          reconfiguring an outside service now happens entirely under Apps.
         </p>
       </PageBody>
     </>

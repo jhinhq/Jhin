@@ -16,7 +16,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from jhin_api.agents.schemas import AgentOut
-from jhin_api.deps import AuthContext, WorkspaceContext, get_current_auth, get_db
+from jhin_api.deps import (
+    AuthContext,
+    Principal,
+    WorkspaceContext,
+    get_current_auth,
+    get_current_principal,
+    get_db,
+)
 from jhin_api.media import service
 from jhin_api.media.router import get_media_store
 from jhin_api.media.router import router as media_router
@@ -421,7 +428,12 @@ async def media_client(
         return AuthContext(user=current["user"], session_record=UserSession())  # type: ignore[call-arg]
 
     app.dependency_overrides[get_db] = _db
+
+    async def _principal() -> Principal:
+        return Principal(user=(await _auth()).user)
+
     app.dependency_overrides[get_current_auth] = _auth
+    app.dependency_overrides[get_current_principal] = _principal
     app.dependency_overrides[get_media_store] = lambda: app.state.media_store
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:

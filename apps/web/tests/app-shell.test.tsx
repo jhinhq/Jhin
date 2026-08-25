@@ -54,6 +54,7 @@ describe("SidebarNav", () => {
     renderNav("/chats");
     const nav = screen.getByRole("navigation", { name: "Main" });
     for (const label of [
+      "Home",
       "Chats",
       "Agents",
       "Company",
@@ -64,6 +65,9 @@ describe("SidebarNav", () => {
     ]) {
       expect(within(nav).getByRole("link", { name: new RegExp(label) })).toBeTruthy();
     }
+    // Home leads the primary group.
+    const primary = within(nav).getAllByRole("link").slice(0, 2).map((link) => link.textContent);
+    expect(primary).toEqual(["Home", "Chats"]);
     expect(within(nav).getByRole("link", { name: /Chats/ }).getAttribute("aria-current")).toBe(
       "page",
     );
@@ -90,19 +94,17 @@ describe("SidebarNav", () => {
       "Work queue",
       "Runs",
       "Approvals",
-      "Connectors",
       "Triggers",
       "Models",
       "Audit",
       "Settings",
-      "All advanced tools",
     ]) {
       expect(screen.getByRole("link", { name: label })).toBeTruthy();
     }
+    // Connectors merged into Apps; the redundant index link is gone.
+    expect(screen.queryByRole("link", { name: "Connectors" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "All advanced tools" })).toBeNull();
     expect(screen.getByRole("link", { name: "Runs" }).getAttribute("aria-current")).toBe("page");
-    expect(screen.getByRole("link", { name: "All advanced tools" }).getAttribute("href")).toBe(
-      "/advanced",
-    );
 
     fireEvent.click(toggle);
     expect(localStorage.getItem("jhin-advanced-open")).toBe("false");

@@ -139,7 +139,7 @@ export function AppLibrary({
       </div>
       {visible.length === 0 ? (
         <p className="rounded-2xl border border-dashed border-line-strong px-4 py-8 text-center text-sm text-dim">
-          No apps match. Any app with an MCP server can still be added with “Any MCP server” under Advanced → Connectors.
+          No apps match. Any app with an MCP server can still be added with “Any MCP server” at the top of this page.
         </p>
       ) : (
         <ul className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">

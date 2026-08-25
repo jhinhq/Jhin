@@ -14,7 +14,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from jhin_api.agents import service
 from jhin_api.agents.router import router as agents_router
-from jhin_api.deps import AuthContext, WorkspaceContext, get_current_auth, get_db
+from jhin_api.deps import (
+    AuthContext,
+    Principal,
+    WorkspaceContext,
+    get_current_auth,
+    get_current_principal,
+    get_db,
+)
 from jhin_api.org.router import router as org_router
 from jhin_api.settings import Settings
 from jhin_api.teams import service as team_service
@@ -496,7 +503,12 @@ async def topology_client(
         )
 
     app.dependency_overrides[get_db] = override_db
+
+    async def _principal() -> Principal:
+        return Principal(user=(await override_auth()).user)
+
     app.dependency_overrides[get_current_auth] = override_auth
+    app.dependency_overrides[get_current_principal] = _principal
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         client.cookies.set("jhin_csrf", "test-csrf")

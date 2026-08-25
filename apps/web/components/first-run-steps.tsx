@@ -1,17 +1,56 @@
 "use client";
 
-/** First-run guidance shown when a workspace has no agents yet. An agent
+/** First-run guidance for a workspace that is not set up yet. An agent
  * cannot work without a model, so the provider step comes first and is
- * marked done once any model profile exists. */
+ * marked done once any model profile exists. Home passes `includeApps` to
+ * add the optional "connect an app" step; the Chats empty state does not. */
 
 import { CheckCircle2, Circle } from "lucide-react";
 import Link from "next/link";
 import { Button } from "@/components/ui";
-import { useModelProfiles } from "@/lib/hooks";
+import { useAgents, useConnections, useModelProfiles } from "@/lib/hooks";
 
-export function FirstRunSteps({ workspaceId, isAdmin }: { workspaceId: string; isAdmin: boolean }) {
+export interface SetupStatus {
+  isPending: boolean;
+  hasModel: boolean;
+  hasAgents: boolean;
+  hasApps: boolean;
+  /** A model, at least one active agent, and at least one connected app. */
+  complete: boolean;
+}
+
+/** Whether the workspace still needs first-run setup. Connections are an
+ * admin-only endpoint, so `hasApps` is only meaningful for admins. */
+export function useSetupStatus(workspaceId: string, isAdmin: boolean): SetupStatus {
   const profiles = useModelProfiles(workspaceId);
+  const agents = useAgents(workspaceId);
+  const connections = useConnections(workspaceId, isAdmin);
+
   const hasModel = (profiles.data?.length ?? 0) > 0;
+  const hasAgents = (agents.data ?? []).some((agent) => agent.status === "active");
+  const hasApps = (connections.data?.length ?? 0) > 0;
+  const isPending =
+    profiles.isPending || agents.isPending || (isAdmin && connections.isPending);
+
+  return {
+    isPending,
+    hasModel,
+    hasAgents,
+    hasApps,
+    complete: hasModel && hasAgents && (!isAdmin || hasApps),
+  };
+}
+
+export function FirstRunSteps({
+  workspaceId,
+  isAdmin,
+  includeApps = false,
+}: {
+  workspaceId: string;
+  isAdmin: boolean;
+  includeApps?: boolean;
+}) {
+  const status = useSetupStatus(workspaceId, isAdmin);
 
   if (!isAdmin) {
     return <p className="text-xs text-faint">Ask a workspace admin to add one.</p>;
@@ -19,21 +58,36 @@ export function FirstRunSteps({ workspaceId, isAdmin }: { workspaceId: string; i
 
   const steps = [
     {
-      done: hasModel,
+      done: status.hasModel,
       title: "Connect a model provider",
-      detail: hasModel
+      detail: status.hasModel
         ? "A model is ready for your agents to use."
         : "Agents think with a model — add OpenAI, Anthropic, or any compatible endpoint.",
       href: "/models",
       cta: "Set up a model",
     },
     {
-      done: false,
+      done: status.hasAgents,
       title: "Create your first agent",
-      detail: "Give it a name and a role, then start a chat.",
+      detail: status.hasAgents
+        ? "Your first agent is ready — start a chat any time."
+        : "Give it a name and a role, then start a chat.",
       href: "/agents/new",
       cta: "Create an agent",
     },
+    ...(includeApps
+      ? [
+          {
+            done: status.hasApps,
+            title: "Connect an app",
+            detail: status.hasApps
+              ? "Your agents can reach an outside app."
+              : "Optional, but agents get far more done with GitHub, Notion, Slack, or any MCP server.",
+            href: "/apps",
+            cta: "Browse apps",
+          },
+        ]
+      : []),
   ];
   const current = steps.find((step) => !step.done) ?? steps[steps.length - 1];
 
@@ -45,6 +99,7 @@ export function FirstRunSteps({ workspaceId, isAdmin }: { workspaceId: string; i
           return (
             <li
               key={step.href}
+              data-testid={`setup-step-${index + 1}`}
               className={`flex items-start gap-3 rounded-xl border px-3.5 py-3 ${
                 active ? "border-accent bg-accent-soft/60" : "border-line bg-raised"
               }`}

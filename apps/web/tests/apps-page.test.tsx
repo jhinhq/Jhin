@@ -154,6 +154,8 @@ function installServer() {
           webhook: null,
         });
       }
+      if (path.endsWith("/tool-calls")) return json([]);
+      if (path.endsWith("/access-summary")) return json({ connection_id: "conn-1", agents: [] });
       if (path.endsWith("/connections/conn-1/tools")) {
         return json({
           connection_id: "conn-1",

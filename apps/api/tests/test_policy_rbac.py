@@ -13,7 +13,14 @@ import pytest
 from fastapi import FastAPI, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from jhin_api.deps import AuthContext, WorkspaceContext, get_current_auth, get_db
+from jhin_api.deps import (
+    AuthContext,
+    Principal,
+    WorkspaceContext,
+    get_current_auth,
+    get_current_principal,
+    get_db,
+)
 from jhin_api.policy.router import router as policy_router
 from jhin_api.settings import Settings
 from jhin_db.models import (
@@ -136,7 +143,12 @@ async def policy_rbac(
         )
 
     app.dependency_overrides[get_db] = override_db
+
+    async def _principal() -> Principal:
+        return Principal(user=(await override_auth()).user)
+
     app.dependency_overrides[get_current_auth] = override_auth
+    app.dependency_overrides[get_current_principal] = _principal
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         client.cookies.set("jhin_csrf", CSRF_TOKEN)

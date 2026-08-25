@@ -68,7 +68,9 @@ from jhin_domain import (
     TaskState,
     WorkRequestStatus,
     WorkReviewStatus,
+    WorkspaceRole,
     new_uuid7,
+    role_satisfies,
 )
 from jhin_events import EventEnvelope, EventPublisher, EventSource
 from jhin_observability import get_logger, normalize_event_family
@@ -379,6 +381,7 @@ async def list_conversations(
     offset: int = 0,
 ) -> tuple[list[Conversation], int]:
     limit = min(max(limit, 1), MAX_PAGE_SIZE)
+    offset = max(offset, 0)
     query = select(Conversation).where(Conversation.workspace_id == workspace_id)
     status_value = status_filter or ConversationStatus.ACTIVE.value
     query = query.where(Conversation.status == status_value)
@@ -533,6 +536,24 @@ async def create_conversation(
     return conversation, turn
 
 
+def _require_chat_authority(ctx: WorkspaceContext, conversation: Conversation) -> None:
+    """Members act on their own chats; admins act on anyone's.
+
+    A chat is a person's own workspace, not shared configuration: a colleague
+    should not be able to rename or delete the thread you are mid-conversation
+    in. Admins keep a way in because someone has to be able to clean up after
+    a departed teammate (docs/architecture/rbac.md).
+    """
+    if role_satisfies(ctx.role, WorkspaceRole.ADMIN):
+        return
+    if conversation.created_by_user_id == ctx.user.id:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Only the person who started this chat, or an admin, can change it",
+    )
+
+
 async def update_conversation(
     db: AsyncSession,
     ctx: WorkspaceContext,
@@ -543,6 +564,7 @@ async def update_conversation(
     ip_hash: str,
 ) -> Conversation:
     conversation = await get_conversation(db, ctx.workspace_id, conversation_id)
+    _require_chat_authority(ctx, conversation)
     changed: dict[str, Any] = {}
     if (title := values.get("title")) is not None:
         conversation.title = title.strip()[:200] or conversation.title
@@ -578,6 +600,7 @@ async def delete_conversation(
 ) -> None:
     """Delete the thread; tasks and messages keep their rows (FK set null)."""
     conversation = await get_conversation(db, ctx.workspace_id, conversation_id)
+    _require_chat_authority(ctx, conversation)
     for task in await _conversation_tasks(db, ctx.workspace_id, conversation_id):
         task.conversation_id = None
     messages = await db.scalars(

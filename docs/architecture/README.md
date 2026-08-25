@@ -72,8 +72,10 @@ flowchart LR
 | Outbound targets | Connector traffic only to built-in SaaS origins or exact operator-allowlisted origins/hosts | `packages/connectors/.../endpoints.py` |
 | Production manifest | No fake service, dev credential, fixture database, or dev allowlist renders from `compose.yaml` alone | `scripts/assert_phase9_production_compose.py`, `scripts/assert_phase10_tool_worker_compose.py` |
 | Workspace isolation | Every query is workspace-scoped; roles gate administration | `apps/api`, `tests/integration/test_phase2_api.py` |
+| Roles | Four workspace roles with a documented matrix; the last owner can never be removed; only an owner unmakes an admin | [rbac](rbac.md), `apps/api/tests/test_access_control.py` |
+| API keys | Bearer keys are scoped, capped by their creator's role, and centrally gated per route; credential endpoints are unreachable by any key | [api-keys](api-keys.md), `apps/api/tests/test_route_scopes.py` |
 | Webhooks | Signature verification, delivery dedupe, and replay protection before publication | [events](events.md) |
 
-Full details: [sandboxing](sandboxing.md) and
-[tool-worker-boundary](tool-worker-boundary.md). Deployment-facing
+Full details: [roles and permissions](rbac.md), [API keys](api-keys.md),
+[sandboxing](sandboxing.md), and [tool-worker-boundary](tool-worker-boundary.md). Deployment-facing
 consequences are in the [deployment guide](../deployment.md).

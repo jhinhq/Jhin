@@ -58,13 +58,33 @@ Only the most recent patch of the supported line receives fixes.
 
 ## Hardening notes for operators
 
+A full source-level assessment — findings, what was fixed, and the risks that
+remain yours — is in
+[docs/security-assessment.md](docs/security-assessment.md). The short version:
+
 - Back up the master key separately from database backups and restrict it
   to mode `0600`. Losing it makes every stored secret unrecoverable; leaking
-  it exposes every stored credential.
-- Run Jhin behind TLS (`COOKIE_SECURE=true`, `APP_URL=https://...`). Publish
-  only the web entry point; keep the API, PostgreSQL, NATS, Temporal, and
-  `sandbox-runner` off public interfaces (the base `compose.yaml` already does
-  this for infrastructure).
+  it exposes every stored credential. Note that the loader does **not** enforce
+  the file mode (Docker mounts secrets `0444`), and master-key rotation is not
+  yet implemented — plan for both.
+- Run Jhin behind TLS (`COOKIE_SECURE=true`, `APP_URL=https://...`). With
+  `APP_ENV=production` the API now **refuses to start** rather than serve
+  cookies without the `Secure` flag on an https origin, or serve a plaintext
+  origin on a non-loopback host. `http://localhost` still works for the
+  single-machine quick start.
+- Set `TRUSTED_PROXY_CIDRS` to the networks your reverse proxy and the web
+  container sit on. Without it the API sees only the proxy's address, and
+  per-IP login lockout cannot distinguish clients. Never include a network
+  from which untrusted clients can reach the API directly — they could forge
+  `X-Forwarded-For`.
+- Publish only the web entry point; keep the API, PostgreSQL, NATS, Temporal,
+  and `sandbox-runner` off public interfaces (the base `compose.yaml` already
+  does this for infrastructure, but it does publish the API on port 8000 for
+  convenience — the release compose does not, and neither should you).
+- If you run on a cloud instance with an instance-metadata endpoint, enforce
+  IMDSv2 or block `169.254.169.254` at the network layer. Outbound connector
+  requests are policy-checked, but sandbox jobs granted
+  `network_policy="internet"` are not.
 - Never run the stack with `compose.dev.yaml` in production: it enables fake
   providers, development credentials, and the connector allowlists.
 - Use exactly one Docker-socket overlay (`compose.rootful.yaml` or
@@ -74,7 +94,11 @@ Only the most recent patch of the supported line receives fixes.
   `JHIN_CONNECTOR_ALLOWED_DB_HOSTS` empty unless you intentionally authorize
   credentialed traffic to those exact origins.
 - Grant agents least-privilege connector scopes and keep approval policies on
-  for write operations.
+  for write operations. In particular, never grant an unscoped `cli.*` or `*`
+  capability: `cli.command.execute` lets the model choose the command, the
+  container image, and whether the job gets internet egress.
+- Login lockout is in-memory and therefore per-process. Do not run multiple
+  API replicas until it is backed by the database or NATS.
 - Verify image signatures and SBOMs before deploying (see
   `docs/deployment.md`).
 

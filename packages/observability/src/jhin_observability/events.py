@@ -42,6 +42,7 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
         "http_route": FieldKind.ENUM,
         "http_status_class": FieldKind.ENUM,
     },
+    "api_key.usage_not_recorded": {"error_code": FieldKind.ENUM},
     "secrets.master_key_unavailable": {"error_code": FieldKind.ENUM},
     "security.master_key_env_source": {},
     "temporal.connect_retry": {

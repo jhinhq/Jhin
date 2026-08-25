@@ -1,5 +1,6 @@
 """Typed SQLAlchemy 2 models for the Jhin system of record (plan section 6)."""
 
+from jhin_db.models.access import ApiKey, ApiKeyUsage, WorkspaceInvitation
 from jhin_db.models.audit import AuditEvent
 from jhin_db.models.connection import Connection, WebhookDelivery
 from jhin_db.models.conversation import Conversation
@@ -30,6 +31,8 @@ __all__ = [
     "AgentRun",
     "AgentSkill",
     "AgentTeamMembership",
+    "ApiKey",
+    "ApiKeyUsage",
     "Approval",
     "AuditEvent",
     "AvatarGeneration",
@@ -56,5 +59,6 @@ __all__ = [
     "WorkRequest",
     "WorkReview",
     "Workspace",
+    "WorkspaceInvitation",
     "WorkspaceMembership",
 ]

@@ -16,6 +16,8 @@ Start here if you are deploying, evaluating, or contributing to Jhin.
 [Architecture index](architecture/README.md) maps every first-party service
 and trust boundary to its authoritative document:
 
+- [Roles and permissions](architecture/rbac.md)
+- [API keys](architecture/api-keys.md)
 - [Conversations and Company Activity](architecture/conversations.md)
 - [Coordination and Oversight](architecture/coordination.md)
 - [Delegation and Teams](architecture/delegation-and-teams.md)

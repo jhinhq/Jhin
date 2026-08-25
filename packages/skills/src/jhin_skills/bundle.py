@@ -29,6 +29,13 @@ from jhin_skills.parser import (
 
 MAX_ZIP_BYTES = 5 * 1024 * 1024
 MAX_SKILLS_PER_BUNDLE = 50
+# Decompression budget. The 5 MB compressed cap says nothing about what comes
+# out: deflate reaches ~1000:1 on repetitive data, so a compliant 5 MB archive
+# of many highly compressible members could otherwise materialise gigabytes in
+# the API process before any per-skill limit is consulted. Both a member count
+# and a running total of decompressed bytes are enforced inside the read loop.
+MAX_ZIP_MEMBERS = 5_000
+MAX_UNCOMPRESSED_BYTES = 64 * 1024 * 1024
 
 SKILL_FILENAME = "SKILL.md"
 
@@ -161,6 +168,8 @@ def load_zip(data: bytes, *, path_prefix: str = "") -> BundleResult:
 
     with archive:
         infos = [info for info in archive.infolist() if not info.is_dir()]
+        if len(infos) > MAX_ZIP_MEMBERS:
+            raise BundleError(f"zip archive contains more than {MAX_ZIP_MEMBERS} files")
         names = [info.filename for info in infos]
         tops = {name.split("/", 1)[0] for name in names}
         wrapped = len(tops) == 1 and all("/" in name for name in names)
@@ -168,6 +177,7 @@ def load_zip(data: bytes, *, path_prefix: str = "") -> BundleResult:
         wanted = path_prefix.strip("/")
 
         entries: dict[str, bytes] = {}
+        decompressed = 0
         for info in infos:
             name = info.filename[len(prefix) :] if wrapped else info.filename
             if name.startswith("/") or any(part == ".." for part in name.split("/")):
@@ -178,7 +188,13 @@ def load_zip(data: bytes, *, path_prefix: str = "") -> BundleResult:
                 # Oversized members are dropped here; text members within the
                 # limit are size-checked again after decoding.
                 continue
-            entries[name] = archive.read(info.filename)
+            decompressed += info.file_size
+            if decompressed > MAX_UNCOMPRESSED_BYTES:
+                raise BundleError("zip archive expands to more than 64 MB")
+            # Read by ZipInfo, not by name: duplicate filenames resolve through
+            # NameToInfo to the *last* entry, which would decouple the bytes
+            # read from the `info` whose size was just checked.
+            entries[name] = archive.read(info)
     if not entries:
         raise BundleError(
             f"nothing found under {path_prefix!r} in the archive"
