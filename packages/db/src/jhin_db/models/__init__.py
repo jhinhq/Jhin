@@ -8,7 +8,12 @@ from jhin_db.models.coordination import ReviewPolicy, WorkRequest, WorkReview
 from jhin_db.models.identity import User, UserSession
 from jhin_db.models.media import AvatarGeneration, MediaAsset
 from jhin_db.models.memory import MemoryRecord
-from jhin_db.models.models import ModelProfile, ModelProvider
+from jhin_db.models.models import (
+    ModelObservedPrice,
+    ModelProfile,
+    ModelProvider,
+    PriceCatalogSnapshot,
+)
 from jhin_db.models.org import (
     Agent,
     AgentRelationship,
@@ -41,8 +46,10 @@ __all__ = [
     "MediaAsset",
     "MemoryRecord",
     "Message",
+    "ModelObservedPrice",
     "ModelProfile",
     "ModelProvider",
+    "PriceCatalogSnapshot",
     "ReviewPolicy",
     "RunEvent",
     "SandboxJob",

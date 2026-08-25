@@ -30,7 +30,7 @@ import {
 import { isWorkRequestMessage } from "@/lib/coordination";
 import { formatDateTime } from "@/lib/format";
 import { avatarProps } from "@/lib/media";
-import { isInsufficientFunds } from "@/lib/models";
+import { isInsufficientFunds, isModelIncompatibleRequest } from "@/lib/models";
 import type { ActivityCard, AgentAvatar, Approval, ConversationMessage } from "@/lib/types";
 
 function Timestamp({ iso, className = "" }: { iso: string; className?: string }) {
@@ -220,6 +220,26 @@ function SystemChip({ message }: { message: ConversationMessage }) {
               Advanced → Models
             </Link>
             <span className="text-faint"> to check the balance, then retry.</span>
+            <Timestamp iso={message.created_at} className="ml-2" />
+          </p>
+        </div>
+      </div>
+    );
+  }
+  if (isModelIncompatibleRequest(message.content_json)) {
+    // The message names the setting to change, so it must be readable in
+    // full rather than truncated into the one-line chip.
+    const friendly = text.replace(/^Run failed:\s*/i, "");
+    return (
+      <div data-testid="model-incompatible-request" className="flex justify-center">
+        <div className="max-w-[min(90%,36rem)] rounded-2xl border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-ink">
+          <p className="font-medium text-danger">Model setting needs a change</p>
+          <p className="mt-1 break-words text-dim">{friendly}</p>
+          <p className="mt-2 text-xs">
+            <Link href="/models" className="font-medium text-accent-strong underline-offset-2 hover:underline">
+              Advanced → Models
+            </Link>
+            <span className="text-faint"> to edit the model profile, then retry.</span>
             <Timestamp iso={message.created_at} className="ml-2" />
           </p>
         </div>

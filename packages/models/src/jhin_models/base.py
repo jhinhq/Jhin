@@ -15,6 +15,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from jhin_models.reasoning import ReasoningConfig
 from jhin_models.web_search import WebSearchConfig
 
 Role = Literal["system", "user", "assistant", "tool"]
@@ -101,6 +102,12 @@ class ModelRequest(BaseModel):
     # the search inside this call. Adapters that cannot honor an enabled
     # config raise ModelProviderError instead of silently ignoring it.
     web_search: WebSearchConfig | None = None
+    # Reasoning-effort control for OpenAI-family models
+    # (:mod:`jhin_models.reasoning`). None means "no profile opinion": the
+    # adapter still pins ``reasoning_effort="none"`` when tools are present on
+    # a reasoning-class model, because chat completions reject the two
+    # together.
+    reasoning: ReasoningConfig | None = None
     extra: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -166,6 +173,11 @@ class AccountStatusUnsupported(Exception):
 
 
 INSUFFICIENT_FUNDS = "insufficient_funds"
+# The provider refused the request itself (not the account, not the load):
+# the model cannot honor this combination of parameters. Today that is the
+# reasoning-effort/function-tools conflict; the code is deliberately broader
+# so future parameter conflicts can reuse it.
+MODEL_INCOMPATIBLE_REQUEST = "model_incompatible_request"
 _QUOTA_DASHBOARDS = {
     "openai": "https://platform.openai.com/settings/organization/billing",
     "openrouter": "https://openrouter.ai/settings/credits",
@@ -246,6 +258,68 @@ def quota_error(provider_name: str, status_code: int, body: str) -> ModelProvide
         status_code=status_code,
         retryable=False,
         error_code=INSUFFICIENT_FUNDS,
+    )
+
+
+def _error_param_from_body(text: str) -> str | None:
+    """``error.param`` from an OpenAI-shaped error body, when present."""
+    import json
+
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return None
+    param = error.get("param")
+    return str(param) if isinstance(param, str) else None
+
+
+def reasoning_incompatible_message(provider_name: str, detail: str) -> str:
+    """The friendly sentence for a rejected reasoning setting."""
+    label = _PROVIDER_LABELS.get(provider_name, provider_name)
+    return (
+        f"{label} rejected this request because of the model's reasoning setting: "
+        f"{detail} Fix it on the model profile (Advanced → Models): set "
+        '`config_json.reasoning.effort` to "none" to keep tool calling, or pick a '
+        "non-reasoning model."
+    )
+
+
+def reasoning_tool_conflict_message(provider_name: str, model_name: str, effort: str) -> str:
+    """The friendly sentence for the conflict we can see *before* calling."""
+    label = _PROVIDER_LABELS.get(provider_name, provider_name)
+    return (
+        f"{label}'s chat API cannot run '{model_name}' with tools while the model "
+        f"profile pins reasoning effort to '{effort}'. Set "
+        '`config_json.reasoning.effort` to "none" to keep tool calling, remove the '
+        "setting to let Jhin do it automatically, or run an agent with no tools."
+    )
+
+
+def incompatible_request_error(
+    provider_name: str, status_code: int, body: str
+) -> ModelProviderError | None:
+    """A ``model_incompatible_request`` error when the provider rejected the
+    request's ``reasoning_effort`` (unsupported value, or the chat-completions
+    "function tools with reasoning_effort" refusal). Otherwise ``None``.
+    """
+    if status_code != 400:
+        return None
+    detail = describe_error_body(body)
+    if (
+        "reasoning_effort" not in detail.lower()
+        and _error_param_from_body(body) != "reasoning_effort"
+    ):
+        return None
+    return ModelProviderError(
+        reasoning_incompatible_message(provider_name, detail),
+        status_code=status_code,
+        retryable=False,
+        error_code=MODEL_INCOMPATIBLE_REQUEST,
     )
 
 

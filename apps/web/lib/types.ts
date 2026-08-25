@@ -221,6 +221,9 @@ export interface ModelProfile {
   context_window: number | null;
   input_cost_micros_per_million: number | null;
   output_cost_micros_per_million: number | null;
+  /** Which source last wrote the price; null means unknown provenance, which
+   *  is treated as user-entered so nothing automatic overwrites it. */
+  price_source: PriceSourceName | null;
   supports_tools: boolean;
   supports_reasoning: boolean;
   config_json: Record<string, unknown>;
@@ -229,6 +232,18 @@ export interface ModelProfile {
 }
 
 export type PriceSource = "provider" | "catalog" | null;
+
+/**
+ * Where a stored price came from, highest authority first:
+ * user-entered > measured from spend > live from the provider >
+ * refreshed catalog > built-in catalog.
+ */
+export type PriceSourceName =
+  | "user"
+  | "observed"
+  | "provider"
+  | "refreshed_catalog"
+  | "catalog";
 
 export interface ProviderModelEntry {
   id: string;
@@ -267,6 +282,13 @@ export interface ProviderSpend {
   spent_total_micros: number;
 }
 
+export interface UntrackedModel {
+  model_name: string;
+  runs: number;
+  input_tokens: number;
+  output_tokens: number;
+}
+
 export interface WorkspaceSpend {
   spent_month_micros: number;
   spent_total_micros: number;
@@ -275,13 +297,150 @@ export interface WorkspaceSpend {
   monthly_budget_micros: number | null;
   warning_threshold: number;
   fetched_at: string;
+  /** Models that ran with no price set: their real cost is missing from the
+   *  totals above, so the tile has to say so rather than imply completeness. */
+  untracked: UntrackedModel[];
+  untracked_runs: number;
 }
 
 export interface ProfilePricingRefresh {
   updated: boolean;
-  source: PriceSource;
+  source: PriceSourceName | null;
   detail: string;
   profile: ModelProfile;
+}
+
+export type PriceDerivation =
+  | "provider_quantity"
+  | "split"
+  | "catalog_ratio"
+  | "blended";
+
+export type PriceConfidence = "high" | "medium" | "low";
+
+export interface PriceCandidate {
+  source: PriceSourceName;
+  input_cost_micros_per_million: number | null;
+  output_cost_micros_per_million: number | null;
+  context_window: number | null;
+  detail: string;
+}
+
+/** A rate measured from the provider's own invoice, with its evidence. */
+export interface ObservedRate {
+  model_key: string;
+  input_cost_micros_per_million: number | null;
+  output_cost_micros_per_million: number | null;
+  /** Filled instead of the pair above when the provider reported one
+   *  undifferentiated cost and no list price existed to split it. */
+  blended_cost_micros_per_million: number | null;
+  derivation: PriceDerivation;
+  confidence: PriceConfidence;
+  note: string;
+  sample_runs: number;
+  sample_input_tokens: number;
+  sample_output_tokens: number;
+  computed_at: string;
+}
+
+export interface ProfilePricing {
+  profile_id: string;
+  display_name: string;
+  model_name: string;
+  provider_id: string;
+  provider_type: ModelProviderType;
+  input_cost_micros_per_million: number | null;
+  output_cost_micros_per_million: number | null;
+  price_source: PriceSourceName | null;
+  price_source_label: string;
+  priced: boolean;
+  pricing_page_url: string | null;
+  runs_this_month: number;
+  suggestion: PriceCandidate | null;
+  suggestion_label: string | null;
+  observed: ObservedRate | null;
+}
+
+export interface PricingStatus {
+  catalog_updated: string;
+  catalog_stale: boolean;
+  refreshed_source: string | null;
+  refreshed_fetched_at: string | null;
+  refreshed_entry_count: number;
+  /** MIT notice for the cached community catalog; shown wherever one of its
+   *  prices is used, as the licence requires of a redistributed copy. */
+  refreshed_attribution: string | null;
+  refreshed_project_url: string;
+  profiles: ProfilePricing[];
+  untracked: UntrackedModel[];
+  untracked_runs: number;
+  reconcile_available: boolean;
+  reconcile_detail: string;
+  pricing_pages: Record<string, string>;
+}
+
+export interface AppliedPrice {
+  profile_id: string;
+  display_name: string;
+  model_name: string;
+  from_input_micros_per_million: number | null;
+  from_output_micros_per_million: number | null;
+  from_source: PriceSourceName | null;
+  to_input_micros_per_million: number;
+  to_output_micros_per_million: number;
+  to_source: PriceSourceName;
+  detail: string;
+}
+
+export interface DerivedRate {
+  model_key: string;
+  derivation: PriceDerivation;
+  confidence: PriceConfidence;
+  note: string;
+  input_micros_per_million: number | null;
+  output_micros_per_million: number | null;
+  blended_micros_per_million: number | null;
+  input_tokens: number;
+  output_tokens: number;
+  runs: number;
+  cost_micros: number;
+}
+
+export interface ProviderReconcile {
+  provider_id: string;
+  display_name: string;
+  provider_type: ModelProviderType;
+  derived: DerivedRate[];
+  skipped: { model_key: string; reason: string }[];
+  applied: AppliedPrice[];
+  period_start: string;
+  period_end: string;
+  billed_micros: number;
+  unattributed_micros: number;
+  unattributed_labels: string[];
+  detail: string;
+}
+
+export interface ReconcilePricingResult {
+  providers: ProviderReconcile[];
+  skipped_providers: {
+    provider_id: string;
+    display_name: string;
+    reason: string;
+  }[];
+  computed_at: string;
+  detail: string;
+}
+
+export interface CatalogRefreshResult {
+  updated: boolean;
+  entry_count: number;
+  fetched_at: string | null;
+  source: string;
+  source_url: string;
+  attribution: string;
+  detail: string;
+  repriced: AppliedPrice[];
 }
 
 export interface WorkspaceDetail extends Workspace {

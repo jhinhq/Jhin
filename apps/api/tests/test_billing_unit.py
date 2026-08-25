@@ -482,7 +482,8 @@ async def test_refresh_pricing_prefers_provider_list_then_catalog(
     assert refreshed.input_cost_micros_per_million == 2_500_000
     assert refreshed.output_cost_micros_per_million == 10_000_000
     assert refreshed.context_window == 128_000
-    assert "catalog updated" in detail
+    assert "Public list price, catalog" in detail
+    assert refreshed.price_source == "catalog", "provenance is stamped so it can be re-refreshed"
 
     # Provider list carries a different price: it wins.
     live = ModelListing(

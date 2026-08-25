@@ -13,14 +13,16 @@ from fastapi import APIRouter, Depends, Request
 from jhin_api.deps import AdminCtx, DbSession, ObservabilityRuntimeDep, SecretCryptoDep, ViewerCtx
 from jhin_api.deps import client_ip_hash as ip_hash
 from jhin_api.deps import get_request_id as req_id
-from jhin_api.models import service
+from jhin_api.models import pricing_service, service
 from jhin_api.models.schemas import (
+    CatalogRefreshResultOut,
     ModelProfileCreate,
     ModelProfileOut,
     ModelProfileUpdate,
     ModelProviderCreate,
     ModelProviderOut,
     ModelProviderUpdate,
+    PricingStatusOut,
     ProfilePricingRefreshResult,
     ProviderBalanceOut,
     ProviderDraftVerify,
@@ -28,6 +30,8 @@ from jhin_api.models.schemas import (
     ProviderModelsResult,
     ProviderSpendOut,
     ProviderVerifyResult,
+    ReconcilePricingResult,
+    UntrackedModelOut,
     WorkspaceSpendOut,
 )
 from jhin_api.security.csrf import csrf_protect
@@ -169,6 +173,10 @@ async def provider_balance(
 @spend_router.get("")
 async def workspace_spend(ctx: ViewerCtx, db: DbSession) -> WorkspaceSpendOut:
     spend = await service.get_workspace_spend(db, ctx.workspace_id)
+    # Runs on unpriced models contributed $0 to the totals above. Reporting
+    # them alongside is the difference between "you spent this much" and "you
+    # spent at least this much"; only the second one is true.
+    untracked = await pricing_service.untracked_models(db, ctx.workspace_id, spend.period_start)
     return WorkspaceSpendOut(
         spent_month_micros=spend.spent_month_micros,
         spent_total_micros=spend.spent_total_micros,
@@ -186,6 +194,10 @@ async def workspace_spend(ctx: ViewerCtx, db: DbSession) -> WorkspaceSpendOut:
         monthly_budget_micros=spend.monthly_budget_micros,
         warning_threshold=spend.warning_threshold,
         fetched_at=spend.fetched_at,
+        untracked=[
+            UntrackedModelOut.model_validate(row, from_attributes=True) for row in untracked
+        ],
+        untracked_runs=sum(row.runs for row in untracked),
     )
 
 
@@ -230,6 +242,15 @@ async def create_profile(
     return _profile_out(profile)
 
 
+@profiles_router.get("/pricing-status")
+async def pricing_status(ctx: ViewerCtx, db: DbSession) -> PricingStatusOut:
+    """Every profile's price, its provenance, and what could improve it."""
+    status = await pricing_service.pricing_status(
+        db, ctx.workspace_id, since=service.month_start_utc()
+    )
+    return PricingStatusOut.model_validate(status, from_attributes=True)
+
+
 @profiles_router.get("/{profile_id}")
 async def get_profile(profile_id: UUID, ctx: ViewerCtx, db: DbSession) -> ModelProfileOut:
     return _profile_out(await service.get_profile(db, ctx.workspace_id, profile_id))
@@ -258,6 +279,9 @@ async def refresh_profile_pricing(
     db: DbSession,
     crypto: SecretCryptoDep,
     runtime: ObservabilityRuntimeDep,
+    # A price an admin typed is never replaced silently. ``force=true`` is the
+    # UI's "update anyway" after showing the difference.
+    force: bool = False,
 ) -> ProfilePricingRefreshResult:
     profile, updated, source, detail = await service.refresh_profile_pricing(
         db,
@@ -268,6 +292,7 @@ async def refresh_profile_pricing(
         runtime.tracer,
         request_id=req_id(request),
         ip_hash=ip_hash(request),
+        force=force,
     )
     return ProfilePricingRefreshResult(
         updated=updated, source=source, detail=detail, profile=_profile_out(profile)
@@ -279,3 +304,39 @@ async def delete_profile(profile_id: UUID, request: Request, ctx: AdminCtx, db: 
     await service.delete_profile(
         db, ctx, profile_id, request_id=req_id(request), ip_hash=ip_hash(request)
     )
+
+
+@profiles_router.post("/reconcile-pricing")
+async def reconcile_pricing(
+    request: Request,
+    ctx: AdminCtx,
+    db: DbSession,
+    crypto: SecretCryptoDep,
+    runtime: ObservabilityRuntimeDep,
+) -> ReconcilePricingResult:
+    """Measure real per-token rates from what the provider actually billed.
+
+    Admin: this decrypts the billing credential and makes a live authenticated
+    call, exactly like the sibling `/balance` route.
+    """
+    result = await pricing_service.reconcile_pricing(
+        db,
+        crypto,
+        ctx,
+        runtime.metrics,
+        runtime.tracer,
+        request_id=req_id(request),
+        ip_hash=ip_hash(request),
+    )
+    return ReconcilePricingResult.model_validate(result, from_attributes=True)
+
+
+@profiles_router.post("/refresh-catalog")
+async def refresh_price_catalog(
+    request: Request, ctx: AdminCtx, db: DbSession
+) -> CatalogRefreshResultOut:
+    """Pull the LiteLLM community price map and merge it as a catalog layer."""
+    result = await pricing_service.refresh_price_catalog(
+        db, ctx, request_id=req_id(request), ip_hash=ip_hash(request)
+    )
+    return CatalogRefreshResultOut.model_validate(result, from_attributes=True)

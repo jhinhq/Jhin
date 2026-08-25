@@ -8,6 +8,7 @@ import {
   dollarInputToMicros,
   formatMicrosAsDollars,
   isInsufficientFunds,
+  isModelIncompatibleRequest,
   microsToDollarInput,
   summarizeBudget,
   webSearchSupport,
@@ -126,6 +127,14 @@ describe("isInsufficientFunds", () => {
     expect(isInsufficientFunds({ error_code: "insufficient_funds" })).toBe(true);
     expect(isInsufficientFunds({ error_code: "step_failed" })).toBe(false);
     expect(isInsufficientFunds(null)).toBe(false);
+  });
+});
+
+describe("isModelIncompatibleRequest", () => {
+  it("matches only the incompatible-request code", () => {
+    expect(isModelIncompatibleRequest({ error_code: "model_incompatible_request" })).toBe(true);
+    expect(isModelIncompatibleRequest({ error_code: "insufficient_funds" })).toBe(false);
+    expect(isModelIncompatibleRequest(null)).toBe(false);
   });
 });
 

@@ -30,12 +30,19 @@ from jhin_models import (
     ModelClient,
     ModelListing,
     ModelProviderError,
+    ReasoningConfig,
     WebSearchConfig,
     build_model_client,
+    reasoning_unsupported_reason,
     web_search_unsupported_reason,
 )
 from jhin_models.factory import ProviderConfigError
-from jhin_models.pricing import CATALOG_UPDATED, lookup_price
+from jhin_models.pricing import (
+    PriceCandidate,
+    PriceSource,
+    describe_price_source,
+    resolve_price,
+)
 from jhin_observability import JhinMetrics
 from jhin_secrets import SecretCrypto, SecretStore
 from jhin_secrets.material import register_secret_material
@@ -75,7 +82,7 @@ def _build_verification_client(
     )
 
 
-async def _provider_client(
+async def provider_client(
     db: AsyncSession,
     crypto: SecretCrypto,
     workspace_id: UUID,
@@ -324,7 +331,7 @@ async def list_provider_models(
     """
     provider = await get_provider(db, ctx.workspace_id, provider_id)
     try:
-        client = await _provider_client(db, crypto, ctx.workspace_id, provider, metrics, tracer)
+        client = await provider_client(db, crypto, ctx.workspace_id, provider, metrics, tracer)
     except ProviderConfigError as exc:
         return [], str(exc)
     try:
@@ -396,7 +403,7 @@ async def _live_account_status(
     status_value: AccountStatus | None = None
     error: str | None = None
     try:
-        client = await _provider_client(
+        client = await provider_client(
             db, crypto, workspace_id, provider, metrics, tracer, with_admin_key=True
         )
     except ProviderConfigError as exc:
@@ -564,7 +571,7 @@ async def verify_provider(
 
     ok, detail = True, ""
     try:
-        client = await _provider_client(db, crypto, ctx.workspace_id, provider, metrics, tracer)
+        client = await provider_client(db, crypto, ctx.workspace_id, provider, metrics, tracer)
     except ProviderConfigError as exc:
         ok, detail = False, str(exc)
     else:
@@ -616,6 +623,24 @@ async def get_profile(db: AsyncSession, workspace_id: UUID, profile_id: UUID) ->
     return profile
 
 
+PRICE_FIELDS = ("input_cost_micros_per_million", "output_cost_micros_per_million")
+
+
+def _carries_price(values: dict[str, Any]) -> bool:
+    """Whether this payload names a price field at all.
+
+    ``create`` always dumps every field, so this is true there; ``update``
+    dumps only what the client sent. Either way, *naming* the field is the
+    deliberate act — clearing a price is as much a decision as setting one.
+    """
+    return any(field in values for field in PRICE_FIELDS)
+
+
+def _sets_a_real_price(values: dict[str, Any]) -> bool:
+    """Whether an actual number is being stored (not just cleared to null)."""
+    return any(values.get(field) is not None for field in PRICE_FIELDS)
+
+
 def _require_web_search_support(
     provider: ModelProvider, model_name: str, config_json: dict[str, Any] | None
 ) -> None:
@@ -633,6 +658,37 @@ def _require_web_search_support(
         )
 
 
+def _require_reasoning_support(
+    provider: ModelProvider,
+    model_name: str,
+    config_json: dict[str, Any] | None,
+    supports_reasoning: bool,
+) -> None:
+    """Reject ``config_json.reasoning`` when the provider/model cannot honor
+    it (docs/architecture/models.md) — a pinned effort the provider would 400
+    on must fail at save time, not mid-run.
+
+    The tools-vs-effort conflict is deliberately *not* rejected here: whether
+    an agent advertises tools is a per-agent grant, not a profile fact, so a
+    profile pinning ``effort: "high"`` is legitimate for a tools-free agent.
+    That conflict is caught pre-flight in the adapter instead, with a named,
+    actionable message.
+    """
+    config = ReasoningConfig.from_profile_config(config_json or {})
+    if config.effort is None:
+        return
+    reason = reasoning_unsupported_reason(
+        provider.type,
+        model_name,
+        supports_reasoning=supports_reasoning or config.supports_reasoning,
+    )
+    if reason is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"config_json.reasoning cannot be set: {reason}",
+        )
+
+
 async def create_profile(
     db: AsyncSession,
     ctx: WorkspaceContext,
@@ -645,7 +701,21 @@ async def create_profile(
     _require_web_search_support(
         provider, str(values.get("model_name", "")), values.get("config_json")
     )
+    _require_reasoning_support(
+        provider,
+        str(values.get("model_name", "")),
+        values.get("config_json"),
+        bool(values.get("supports_reasoning", False)),
+    )
     profile = ModelProfile(workspace_id=ctx.workspace_id, **values)
+    # A price arriving through the public endpoint is, by definition, one a
+    # human entered — nothing automatic ever writes through here. Stamping it
+    # is what later lets the automatic sources know to leave it alone
+    # (jhin_api.models.pricing_service.may_write_price). A profile created
+    # *without* prices claims no provenance: it is simply unpriced, and any
+    # source may fill it.
+    if _sets_a_real_price(values):
+        profile.price_source = "user"
     db.add(profile)
     try:
         await db.flush()
@@ -677,7 +747,16 @@ async def update_profile(
     changes: dict[str, Any],
     request_id: UUID,
     ip_hash: str,
+    price_source: str | None = "user",
 ) -> ModelProfile:
+    """Apply ``changes`` to a profile.
+
+    ``price_source`` stamps the provenance of any price in ``changes`` and
+    defaults to ``"user"`` because the only caller that reaches here without
+    a human behind it is Jhin's own price refresh, which passes its actual
+    source. Getting this backwards would let an automatic refresh disguise
+    itself as a contract price and become un-overwritable.
+    """
     profile = await get_profile(db, ctx.workspace_id, profile_id)
     provider = await get_provider(
         db, ctx.workspace_id, changes.get("provider_id", profile.provider_id)
@@ -687,8 +766,18 @@ async def update_profile(
         str(changes.get("model_name", profile.model_name)),
         changes.get("config_json", profile.config_json),
     )
+    _require_reasoning_support(
+        provider,
+        str(changes.get("model_name", profile.model_name)),
+        changes.get("config_json", profile.config_json),
+        bool(changes.get("supports_reasoning", profile.supports_reasoning)),
+    )
     for field, value in changes.items():
         setattr(profile, field, value)
+    if _carries_price(changes):
+        # Clearing a price clears its provenance too, so the row does not keep
+        # claiming a source for a number that is no longer there.
+        profile.price_source = price_source if _sets_a_real_price(changes) else None
     audit.record(
         db,
         action="model_profile.updated",
@@ -764,60 +853,112 @@ async def refresh_profile_pricing(
     *,
     request_id: UUID,
     ip_hash: str,
-) -> tuple[ModelProfile, bool, Literal["provider", "catalog"] | None, str]:
-    """Re-look up the profile's prices (provider list first, then catalog)
-    and store them. Returns ``(profile, updated, source, detail)``."""
+    force: bool = False,
+) -> tuple[ModelProfile, bool, PriceSource | None, str]:
+    """Re-look up one profile's price across every source and store the best.
+
+    Consults, in the order :mod:`jhin_models.pricing` defines: a rate measured
+    from real spend, the provider's own live model list, the refreshed
+    community catalog, then the built-in list prices. A price an admin typed
+    is left alone and reported as such unless ``force`` is set, which is how
+    the UI offers "update it anyway" with the difference shown first.
+
+    Returns ``(profile, updated, source, detail)``.
+    """
+    from jhin_api.models import pricing_service
+
     profile = await get_profile(db, ctx.workspace_id, profile_id)
     provider = await get_provider(db, ctx.workspace_id, profile.provider_id)
 
-    listing: ModelListing | None = None
+    live: ModelListing | None = None
     lookup_detail: str | None = None
     try:
-        client = await _provider_client(db, crypto, ctx.workspace_id, provider, metrics, tracer)
+        client = await provider_client(db, crypto, ctx.workspace_id, provider, metrics, tracer)
     except ProviderConfigError as exc:
         lookup_detail = str(exc)
     else:
         try:
             wanted = profile.model_name.strip().lower()
             for entry in await client.list_models_detailed():
-                if entry.id.lower() == wanted and entry.source is not None:
-                    listing = entry
+                if entry.id.lower() == wanted and entry.source == "provider":
+                    live = entry
                     break
         except ModelProviderError as exc:
             lookup_detail = redact_text(str(exc))
         finally:
             await client.close()
-    if listing is None:
-        price = lookup_price(provider.type, profile.model_name)
-        if price is not None:
-            listing = ModelListing(
-                id=profile.model_name,
-                input_cost_micros_per_million=price.input_cost_micros_per_million,
-                output_cost_micros_per_million=price.output_cost_micros_per_million,
-                context_window=price.context_window,
-                source="catalog",
-            )
-    if listing is None:
-        detail = "No price is known for this model"
+
+    refreshed = await pricing_service.load_refreshed_catalog(db, ctx.workspace_id)
+    observed = await pricing_service.observed_for_profile(db, provider, profile)
+    candidates = [
+        pricing_service.observed_candidate(observed),
+        PriceCandidate(
+            source="provider",
+            input_cost_micros_per_million=live.input_cost_micros_per_million,
+            output_cost_micros_per_million=live.output_cost_micros_per_million,
+            context_window=live.context_window,
+        )
+        if live is not None
+        else None,
+        pricing_service.catalog_candidate(provider.type, profile.model_name, refreshed),
+    ]
+    winner = resolve_price([c for c in candidates if c is not None])
+    if winner is None:
+        detail = "No price is known for this model on any source"
         if lookup_detail:
             detail = f"{detail} ({lookup_detail})"
         return profile, False, None, detail
 
+    snapshot = await pricing_service.load_catalog_snapshot(db, ctx.workspace_id)
+    label = describe_price_source(
+        winner.source, refreshed_at=snapshot.fetched_at.date() if snapshot else None
+    )
+    if not force and not pricing_service.may_write_price(profile, winner.source):
+        theirs = _price_pair(
+            profile.input_cost_micros_per_million, profile.output_cost_micros_per_million
+        )
+        offered = _price_pair(
+            winner.input_cost_micros_per_million, winner.output_cost_micros_per_million
+        )
+        return (
+            profile,
+            False,
+            winner.source,
+            f"Kept your own price ({theirs}). {label} would set {offered} instead — "
+            "refresh again with 'update anyway' to take it.",
+        )
+
     changes: dict[str, Any] = {}
-    if profile.input_cost_micros_per_million != listing.input_cost_micros_per_million:
-        changes["input_cost_micros_per_million"] = listing.input_cost_micros_per_million
-    if profile.output_cost_micros_per_million != listing.output_cost_micros_per_million:
-        changes["output_cost_micros_per_million"] = listing.output_cost_micros_per_million
-    if listing.context_window is not None and profile.context_window != listing.context_window:
-        changes["context_window"] = listing.context_window
-    source_label = (
-        "the provider's model list"
-        if listing.source == "provider"
-        else f"the public price list (catalog updated {CATALOG_UPDATED})"
-    )
+    if profile.input_cost_micros_per_million != winner.input_cost_micros_per_million:
+        changes["input_cost_micros_per_million"] = winner.input_cost_micros_per_million
+    if profile.output_cost_micros_per_million != winner.output_cost_micros_per_million:
+        changes["output_cost_micros_per_million"] = winner.output_cost_micros_per_million
+    if winner.context_window is not None and profile.context_window != winner.context_window:
+        changes["context_window"] = winner.context_window
+    if not changes and profile.price_source == winner.source:
+        return profile, False, winner.source, f"Prices already match. {label}"
     if not changes:
-        return profile, False, listing.source, f"Prices already match {source_label}"
+        profile.price_source = winner.source
+        await db.commit()
+        return profile, False, winner.source, f"Prices already match. {label}"
+
+    # ``force`` records the human decision: the admin chose this price, so it
+    # becomes theirs and no later automatic refresh will move it again.
+    stamped: PriceSource = "user" if force and winner.source != "observed" else winner.source
     await update_profile(
-        db, ctx, profile.id, changes=changes, request_id=request_id, ip_hash=ip_hash
+        db,
+        ctx,
+        profile.id,
+        changes=changes,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        price_source=stamped,
     )
-    return profile, True, listing.source, f"Prices updated from {source_label}"
+    return profile, True, winner.source, f"Prices updated. {label}"
+
+
+def _price_pair(input_micros: int | None, output_micros: int | None) -> str:
+    def one(value: int | None) -> str:
+        return "unset" if value is None else f"${value / 1_000_000:.2f}"
+
+    return f"{one(input_micros)} in / {one(output_micros)} out per 1M tokens"

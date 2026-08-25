@@ -3281,3 +3281,72 @@ def test_exact_production_model_factory_owners_supply_semantic_handles() -> None
 def test_model_package_default_runtime_handles_are_explicit_noops() -> None:
     assert noop_metrics().is_noop
     assert noop_tracer() is noop_tracer()
+
+
+async def test_instrumented_client_forwards_fetch_model_costs() -> None:
+    """The pricing reconciliation must survive the telemetry wrapper.
+
+    ``fetch_model_costs`` is not part of the :class:`ModelClient` protocol —
+    only OpenAI can report itemised spend — so the wrapper forwards it
+    explicitly. Callers feature-test with ``getattr``, which means a missing
+    forward degrades *silently* into "this provider cannot report itemised
+    spend": the whole feature would quietly do nothing in production while
+    every unit test kept passing.
+    """
+    from datetime import date
+
+    from jhin_models.factory import build_model_client
+    from jhin_models.observed_pricing import CostLine, ModelCostReport
+    from jhin_models.telemetry import InstrumentedModelClient
+
+    report = ModelCostReport(
+        lines=[CostLine("gpt-4o", "input", 1_000)],
+        total_micros=1_000,
+        ignored_micros=0,
+        ignored_labels=[],
+    )
+    seen: list[tuple[date, date]] = []
+
+    class _Inner:
+        async def fetch_model_costs(self, *, start: date, end: date) -> ModelCostReport:
+            seen.append((start, end))
+            return report
+
+        async def close(self) -> None:
+            return None
+
+    wrapper = InstrumentedModelClient(
+        _Inner(),  # type: ignore[arg-type]
+        provider_type="openai",
+        metrics=noop_metrics(),
+        tracer=noop_tracer(),
+    )
+    assert getattr(wrapper, "fetch_model_costs", None) is not None
+    result = await wrapper.fetch_model_costs(start=date(2026, 7, 25), end=date(2026, 8, 24))
+    assert result is report
+    assert seen == [(date(2026, 7, 25), date(2026, 8, 24))]
+
+    # And the real factory output — what the API actually calls — exposes it.
+    client = build_model_client("openai", api_key="sk-test", base_url="http://example.invalid/v1")
+    assert getattr(client, "fetch_model_costs", None) is not None
+    await client.close()
+
+
+async def test_instrumented_client_reports_a_provider_that_truly_cannot_itemise() -> None:
+    """An adapter without the method still raises, so the caller can say why."""
+    from datetime import date
+
+    from jhin_models.telemetry import InstrumentedModelClient
+
+    class _Inner:
+        async def close(self) -> None:
+            return None
+
+    wrapper = InstrumentedModelClient(
+        _Inner(),  # type: ignore[arg-type]
+        provider_type="anthropic",
+        metrics=noop_metrics(),
+        tracer=noop_tracer(),
+    )
+    with pytest.raises(AttributeError):
+        await wrapper.fetch_model_costs(start=date(2026, 1, 1), end=date(2026, 2, 1))

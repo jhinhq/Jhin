@@ -4,7 +4,7 @@
  * when a monthly budget is set (Settings → Budget). Shared by Models and
  * Home so both read the same numbers the same way. */
 
-import { formatMicrosAsDollars, summarizeBudget } from "@/lib/models";
+import { formatMicrosAsDollars, summarizeBudget, untrackedSpendNote } from "@/lib/models";
 import type { WorkspaceSpend } from "@/lib/types";
 
 export function SpendTile({
@@ -22,6 +22,9 @@ export function SpendTile({
   );
   const barTone =
     budget?.tone === "over" ? "bg-danger" : budget?.tone === "warn" ? "bg-warn" : "bg-accent";
+  // Runs on unpriced models contributed $0 to the total above. Saying so is
+  // the difference between "you spent this much" and "at least this much".
+  const untracked = untrackedSpendNote(spend.untracked, spend.untracked_runs);
   return (
     <section
       data-testid="spend-tile"
@@ -38,6 +41,11 @@ export function SpendTile({
         <p className="text-xs text-dim">
           {formatMicrosAsDollars(spend.spent_total_micros)} all time · tracked by Jhin from run costs
         </p>
+        {untracked ? (
+          <p data-testid="spend-untracked" className="mt-1 text-xs text-warn">
+            {untracked}
+          </p>
+        ) : null}
       </div>
       <div className="flex-1">
         {budget ? (

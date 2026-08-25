@@ -7,13 +7,16 @@ from uuid import UUID
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from jhin_domain import ModelProviderType
-from jhin_models import EmbeddingConfig, WebSearchConfig
+from jhin_models import EmbeddingConfig, ReasoningConfig, WebSearchConfig
 from jhin_models.embeddings import EMBEDDINGS_CONFIG_KEY
+from jhin_models.reasoning import REASONING_CONFIG_KEY
 from jhin_models.web_search import WEB_SEARCH_CONFIG_KEY
 
 
 def _validate_config_block(
-    config_json: dict[str, Any], key: str, model_type: type[EmbeddingConfig] | type[WebSearchConfig]
+    config_json: dict[str, Any],
+    key: str,
+    model_type: type[EmbeddingConfig] | type[WebSearchConfig] | type[ReasoningConfig],
 ) -> None:
     raw = config_json.get(key)
     if raw is None:
@@ -33,13 +36,17 @@ def validate_profile_config(config_json: dict[str, Any]) -> dict[str, Any]:
     """Validate the typed capability blocks inside ``config_json``.
 
     ``embeddings`` (``{enabled, model, dimensions, cost_micros_per_million}``)
-    must parse as :class:`EmbeddingConfig` and ``web_search``
-    (``{enabled, max_uses}``) as :class:`WebSearchConfig`; other keys are
-    passed through. Provider/model support for ``web_search`` is checked in
-    the service layer, where the provider row is known.
+    must parse as :class:`EmbeddingConfig`, ``web_search``
+    (``{enabled, max_uses}``) as :class:`WebSearchConfig`, and ``reasoning``
+    (``{effort, supports_reasoning}``) as :class:`ReasoningConfig` — which
+    rejects any effort outside ``none``/``low``/``medium``/``high``. Other
+    keys are passed through. Provider/model support for ``web_search`` and
+    ``reasoning`` is checked in the service layer, where the provider row is
+    known.
     """
     _validate_config_block(config_json, EMBEDDINGS_CONFIG_KEY, EmbeddingConfig)
     _validate_config_block(config_json, WEB_SEARCH_CONFIG_KEY, WebSearchConfig)
+    _validate_config_block(config_json, REASONING_CONFIG_KEY, ReasoningConfig)
     return config_json
 
 
@@ -78,6 +85,13 @@ class ModelProviderOut(BaseModel):
     last_error: str | None
     created_at: datetime
     updated_at: datetime
+
+
+#: Where a stored price came from. Mirrors ``jhin_models.pricing.PriceSource``
+#: and is ordered by authority: user-entered beats a measured rate, which
+#: beats a live provider price, which beats a refreshed catalog, which beats
+#: the list prices built into the release.
+PriceSourceName = Literal["user", "observed", "provider", "refreshed_catalog", "catalog"]
 
 
 BalanceSource = Literal["openrouter", "openai_admin", "tracked"]
@@ -121,6 +135,11 @@ class WorkspaceSpendOut(BaseModel):
     monthly_budget_micros: int | None
     warning_threshold: float
     fetched_at: datetime
+    # Runs this period on models with no price: their real cost is missing
+    # from the totals above, so the UI must say so rather than imply the
+    # number is complete.
+    untracked: list["UntrackedModelOut"] = Field(default_factory=list)
+    untracked_runs: int = 0
 
 
 class ProviderVerifyResult(BaseModel):
@@ -198,6 +217,10 @@ class ModelProfileOut(BaseModel):
     context_window: int | None
     input_cost_micros_per_million: int | None
     output_cost_micros_per_million: int | None
+    # Which of the five sources last wrote the price. The UI renders it as a
+    # badge, and it is what makes "never overwrite a price you typed"
+    # inspectable rather than a promise.
+    price_source: PriceSourceName | None = None
     supports_tools: bool
     supports_reasoning: bool
     config_json: dict[str, Any]
@@ -209,6 +232,173 @@ class ProfilePricingRefreshResult(BaseModel):
     """Outcome of re-looking up a profile's prices."""
 
     updated: bool
-    source: Literal["provider", "catalog"] | None
+    source: PriceSourceName | None
     detail: str
     profile: ModelProfileOut
+
+
+class PriceCandidateOut(BaseModel):
+    """A price some source is offering for a model."""
+
+    source: PriceSourceName
+    input_cost_micros_per_million: int | None = None
+    output_cost_micros_per_million: int | None = None
+    context_window: int | None = None
+    detail: str = ""
+
+
+class ObservedRateOut(BaseModel):
+    """A rate measured from the provider's own invoice, with its evidence.
+
+    ``blended_cost_micros_per_million`` is filled instead of the input/output
+    pair when the provider reported one undifferentiated cost and no list
+    price existed to split it — an honest single number rather than a guessed
+    pair. ``note`` spells out the derivation and any assumption in it.
+    """
+
+    model_key: str
+    input_cost_micros_per_million: int | None
+    output_cost_micros_per_million: int | None
+    blended_cost_micros_per_million: int | None
+    derivation: Literal["provider_quantity", "split", "catalog_ratio", "blended"]
+    confidence: Literal["high", "medium", "low"]
+    note: str
+    sample_runs: int
+    sample_input_tokens: int
+    sample_output_tokens: int
+    computed_at: datetime
+
+
+class ProfilePricingOut(BaseModel):
+    """One profile's price, where it came from, and what could improve it."""
+
+    profile_id: UUID
+    display_name: str
+    model_name: str
+    provider_id: UUID
+    provider_type: ModelProviderType
+    input_cost_micros_per_million: int | None
+    output_cost_micros_per_million: int | None
+    price_source: PriceSourceName | None
+    price_source_label: str
+    priced: bool
+    pricing_page_url: str | None
+    runs_this_month: int
+    suggestion: PriceCandidateOut | None
+    suggestion_label: str | None
+    observed: ObservedRateOut | None
+
+
+class UntrackedModelOut(BaseModel):
+    """A model that ran but had no price, so its spend was recorded as zero."""
+
+    model_name: str
+    runs: int
+    input_tokens: int
+    output_tokens: int
+
+
+class PricingStatusOut(BaseModel):
+    """Everything the Models page needs to talk honestly about prices."""
+
+    catalog_updated: str
+    catalog_stale: bool
+    refreshed_source: str | None
+    refreshed_fetched_at: datetime | None
+    refreshed_entry_count: int
+    # MIT attribution for the cached community catalog, shown wherever one of
+    # its prices is used (see docs/architecture/models.md).
+    refreshed_attribution: str | None
+    refreshed_project_url: str
+    profiles: list[ProfilePricingOut]
+    untracked: list[UntrackedModelOut]
+    untracked_runs: int
+    reconcile_available: bool
+    reconcile_detail: str
+    pricing_pages: dict[str, str]
+
+
+class AppliedPriceOut(BaseModel):
+    """One profile's price changing, old value and new source included."""
+
+    profile_id: UUID
+    display_name: str
+    model_name: str
+    from_input_micros_per_million: int | None
+    from_output_micros_per_million: int | None
+    from_source: PriceSourceName | None
+    to_input_micros_per_million: int
+    to_output_micros_per_million: int
+    to_source: PriceSourceName
+    detail: str
+
+
+class DerivedRateOut(BaseModel):
+    """A rate this reconciliation measured."""
+
+    model_key: str
+    derivation: Literal["provider_quantity", "split", "catalog_ratio", "blended"]
+    confidence: Literal["high", "medium", "low"]
+    note: str
+    input_micros_per_million: int | None
+    output_micros_per_million: int | None
+    blended_micros_per_million: int | None
+    input_tokens: int
+    output_tokens: int
+    runs: int
+    cost_micros: int
+
+
+class SkippedModelOut(BaseModel):
+    """A model the reconciliation refused to price, and why."""
+
+    model_key: str
+    reason: str
+
+
+class SkippedProviderOut(BaseModel):
+    provider_id: UUID
+    display_name: str
+    reason: str
+
+
+class ProviderReconcileOut(BaseModel):
+    provider_id: UUID
+    display_name: str
+    provider_type: ModelProviderType
+    derived: list[DerivedRateOut]
+    skipped: list[SkippedModelOut]
+    applied: list[AppliedPriceOut]
+    period_start: datetime
+    period_end: datetime
+    billed_micros: int
+    unattributed_micros: int
+    unattributed_labels: list[str]
+    detail: str
+
+
+class ReconcilePricingResult(BaseModel):
+    """What a reconciliation derived, applied, and deliberately skipped."""
+
+    providers: list[ProviderReconcileOut]
+    skipped_providers: list[SkippedProviderOut]
+    computed_at: datetime
+    detail: str
+
+
+class CatalogRefreshResultOut(BaseModel):
+    """Outcome of refreshing the community price catalog."""
+
+    updated: bool
+    entry_count: int
+    fetched_at: datetime | None
+    source: str
+    source_url: str
+    attribution: str
+    detail: str
+    repriced: list[AppliedPriceOut]
+
+
+# ``WorkspaceSpendOut`` references a class defined further down; resolve it
+# now so the first request does not pay for a deferred rebuild.
+WorkspaceSpendOut.model_rebuild()

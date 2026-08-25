@@ -19,7 +19,9 @@ import {
 } from "lucide-react";
 import { useId, useState } from "react";
 import { PageBody, PageHeader } from "@/components/app-shell";
+import { PricingPanel } from "@/components/pricing-panel";
 import { SpendTile } from "@/components/spend-tile";
+import { UnpricedModelNote } from "@/components/unpriced-model-note";
 import {
   Badge,
   Button,
@@ -39,6 +41,7 @@ import {
   useModelProviders,
   useProviderBalance,
   useProviderModels,
+  usePricingStatus,
   useSecrets,
   useWorkspaceDetail,
   useWorkspaceSpend,
@@ -47,16 +50,25 @@ import {
   autofillForModel,
   balanceSourceLabel,
   buildProfileConfig,
+  catalogStalenessNote,
+  derivationLabel,
   dollarInputToMicros,
   formatMicrosAsDollars,
+  formatPricePair,
   microsToDollarInput,
+  observedRateSummary,
+  priceSourceBadge,
+  priceSourceLabel,
   webSearchSupport,
 } from "@/lib/models";
 import type {
+  CatalogRefreshResult,
   ModelProfile,
   ModelProvider,
   ModelProviderType,
+  ProfilePricing,
   ProfilePricingRefresh,
+  ReconcilePricingResult,
 } from "@/lib/types";
 import { useWorkspace } from "@/lib/workspace-context";
 
@@ -88,6 +100,42 @@ export default function ModelsPage() {
   const [profileDialog, setProfileDialog] = useState(false);
   const [editingProfile, setEditingProfile] = useState<ModelProfile | null>(null);
   const [pageError, setPageError] = useState<string | null>(null);
+  const [pricingError, setPricingError] = useState<string | null>(null);
+  const [reconcileResult, setReconcileResult] = useState<ReconcilePricingResult | null>(null);
+  const [catalogResult, setCatalogResult] = useState<CatalogRefreshResult | null>(null);
+
+  const pricing = usePricingStatus(workspaceId);
+  const pricingByProfile = new Map<string, ProfilePricing>(
+    (pricing.data?.profiles ?? []).map((row) => [row.profile_id, row]),
+  );
+
+  const reconcile = useMutation({
+    mutationFn: () =>
+      api<ReconcilePricingResult>(
+        `/api/v1/workspaces/${workspaceId}/model-profiles/reconcile-pricing`,
+        { method: "POST" },
+      ),
+    onSuccess: (result) => {
+      setPricingError(null);
+      setReconcileResult(result);
+      invalidate();
+    },
+    onError: (error) => setPricingError(errText(error, "Measuring real rates failed.")),
+  });
+
+  const refreshCatalog = useMutation({
+    mutationFn: () =>
+      api<CatalogRefreshResult>(
+        `/api/v1/workspaces/${workspaceId}/model-profiles/refresh-catalog`,
+        { method: "POST" },
+      ),
+    onSuccess: (result) => {
+      setPricingError(null);
+      setCatalogResult(result);
+      invalidate();
+    },
+    onError: (error) => setPricingError(errText(error, "Refreshing the price catalog failed.")),
+  });
 
   if (providers.isPending || profiles.isPending) {
     return (
@@ -130,6 +178,19 @@ export default function ModelsPage() {
         <ErrorNote message={pageError} />
 
         {spend.data ? <SpendTile spend={spend.data} /> : null}
+
+        <PricingPanel
+          status={pricing.data}
+          isPending={pricing.isPending}
+          isAdmin={isAdmin}
+          onReconcile={() => reconcile.mutate()}
+          onRefreshCatalog={() => refreshCatalog.mutate()}
+          reconciling={reconcile.isPending}
+          refreshing={refreshCatalog.isPending}
+          reconcileResult={reconcileResult}
+          catalogResult={catalogResult}
+          error={pricingError}
+        />
 
         <section>
           <h2 className="mb-3 font-display text-base font-semibold tracking-tight text-ink">Providers</h2>
@@ -196,6 +257,8 @@ export default function ModelsPage() {
                       onChanged={invalidate}
                       onError={setPageError}
                       onEdit={setEditingProfile}
+                      pricing={pricingByProfile.get(profile.id)}
+                      pricingPages={pricing.data?.pricing_pages}
                     />
                   ))}
                 </tbody>
@@ -397,6 +460,8 @@ function ProfileRow({
   onChanged,
   onError,
   onEdit,
+  pricing,
+  pricingPages,
 }: {
   profile: ModelProfile;
   provider: ModelProvider | undefined;
@@ -406,6 +471,8 @@ function ProfileRow({
   onChanged: () => void;
   onError: (message: string | null) => void;
   onEdit: (profile: ModelProfile) => void;
+  pricing: ProfilePricing | undefined;
+  pricingPages: Record<string, string> | undefined;
 }) {
   const makeDefault = useMutation({
     mutationFn: () =>
@@ -447,8 +514,32 @@ function ProfileRow({
     onError: (error) => onError(errText(error, "Refreshing prices failed.")),
   });
 
+  // Saving a price straight from the row: the API stamps anything posted here
+  // as user-entered, so no later automatic refresh will move it.
+  const savePrices = useMutation({
+    mutationFn: (costs: { input: number | null; output: number | null }) =>
+      api<ModelProfile>(`/api/v1/workspaces/${workspaceId}/model-profiles/${profile.id}`, {
+        method: "PATCH",
+        body: {
+          input_cost_micros_per_million: costs.input,
+          output_cost_micros_per_million: costs.output,
+        },
+      }),
+    onSuccess: () => {
+      onError(null);
+      setRefreshNote(null);
+      onChanged();
+    },
+    onError: (error) => onError(errText(error, "Saving prices failed.")),
+  });
+
   const cost = (micros: number | null) =>
     micros === null ? "—" : `$${(micros / 1_000_000).toFixed(2)}`;
+  const priced =
+    profile.input_cost_micros_per_million !== null &&
+    profile.output_cost_micros_per_million !== null;
+  const badge = priceSourceBadge(profile.price_source, priced);
+  const providerType = provider?.type ?? "openai_compatible";
 
   return (
     <tr className="border-t border-line hover:bg-hover">
@@ -458,8 +549,48 @@ function ProfileRow({
       </td>
       <td className="px-4 py-3 text-dim">{provider?.display_name ?? "—"}</td>
       <td className="px-4 py-3 tabular-nums text-dim">
-        {cost(profile.input_cost_micros_per_million)} ·{" "}
-        {cost(profile.output_cost_micros_per_million)}
+        {priced ? (
+          <>
+            <span>
+              {cost(profile.input_cost_micros_per_million)} ·{" "}
+              {cost(profile.output_cost_micros_per_million)}
+            </span>{" "}
+            <Badge tone={badge.tone}>{badge.text}</Badge>
+            <span className="mt-1 block text-[11px] text-faint">
+              {pricing?.price_source_label ?? priceSourceLabel(profile.price_source, priced)}
+            </span>
+            {pricing?.observed ? (
+              <span className="mt-1 block text-[11px] text-faint">
+                Measured: {observedRateSummary(pricing.observed)} —{" "}
+                {derivationLabel(pricing.observed.derivation)}
+              </span>
+            ) : null}
+            {pricing?.suggestion ? (
+              <span className="mt-1 block text-[11px] text-faint">
+                {pricing.suggestion_label} suggests{" "}
+                {formatPricePair(
+                  pricing.suggestion.input_cost_micros_per_million,
+                  pricing.suggestion.output_cost_micros_per_million,
+                )}
+                .
+              </span>
+            ) : null}
+          </>
+        ) : (
+          <UnpricedModelNote
+            modelName={profile.model_name}
+            providerType={providerType}
+            pricingPages={pricingPages}
+            runs={pricing?.runs_this_month ?? 0}
+            saving={savePrices.isPending}
+            onSave={
+              isAdmin
+                ? (input: number | null, output: number | null) =>
+                    savePrices.mutate({ input, output })
+                : undefined
+            }
+          />
+        )}
         {refreshNote ? <p className="mt-1 text-[11px] text-faint">{refreshNote}</p> : null}
       </td>
       <td className="px-4 py-3">
@@ -866,6 +997,9 @@ function ProfileDialog({
   });
 
   const pricesKnown = Boolean(inputCost || outputCost);
+  // List prices age. Saying how old they are is the difference between a
+  // number the admin can trust and one they should go check.
+  const catalogStaleness = catalogStalenessNote(catalogUpdated);
   const summary = pricesKnown
     ? `$${inputCost || "0"} in · $${outputCost || "0"} out per 1M tokens`
     : "No prices yet — runs will show $0.00 until you add them.";
@@ -969,6 +1103,14 @@ function ProfileDialog({
           {pricingOpen ? (
             <div id={pricingPanelId} className="space-y-3 border-t border-line px-3 py-3">
               {pricingNote ? <p className="text-xs text-dim">{pricingNote}</p> : null}
+              {!pricesKnown && modelName.trim() ? (
+                <UnpricedModelNote modelName={modelName.trim()} providerType={providerType} />
+              ) : null}
+              {catalogStaleness ? (
+                <p data-testid="dialog-catalog-staleness" className="text-xs text-warn">
+                  {catalogStaleness}
+                </p>
+              ) : null}
               <div className="grid grid-cols-2 gap-3">
                 <Field label="Input $ / 1M tokens">
                   <Input

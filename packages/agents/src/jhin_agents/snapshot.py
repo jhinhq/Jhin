@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from jhin_db.models import Agent, ModelProfile, ModelProvider, Team, Workspace
-from jhin_models import WebSearchConfig
+from jhin_models import ReasoningConfig, WebSearchConfig
 
 
 class SnapshotError(Exception):
@@ -52,6 +52,10 @@ class ModelProfileSnapshot(BaseModel):
     # Model-native web search opt-in from the profile's config_json
     # (docs/architecture/web.md). None when the profile does not enable it.
     web_search: WebSearchConfig | None = None
+    # Reasoning-effort override from the profile's config_json plus its
+    # supports_reasoning flag. None when the profile says nothing, in which
+    # case the adapter applies the automatic tool-compatibility rule.
+    reasoning: ReasoningConfig | None = None
 
 
 class AgentExecutionSnapshot(BaseModel):
@@ -85,6 +89,21 @@ def _enabled_web_search(config_json: dict[str, object] | None) -> WebSearchConfi
     """The profile's model-native web search opt-in, or None when disabled."""
     config = WebSearchConfig.from_profile_config(dict(config_json or {}))
     return config if config.enabled else None
+
+
+def _reasoning_override(
+    config_json: dict[str, object] | None, supports_reasoning: bool
+) -> ReasoningConfig | None:
+    """The profile's reasoning opinion, or None when it has none.
+
+    ``config_json.reasoning.effort`` is the explicit override; the profile's
+    ``supports_reasoning`` column is folded in as a hint so a reasoning model
+    whose name the matcher does not recognize is still treated as one.
+    """
+    config = ReasoningConfig.from_profile_config(dict(config_json or {}))
+    if supports_reasoning and not config.supports_reasoning:
+        config = config.model_copy(update={"supports_reasoning": True})
+    return config if config.is_set else None
 
 
 async def resolve_snapshot(
@@ -162,6 +181,7 @@ async def resolve_snapshot(
             input_cost_micros_per_million=profile.input_cost_micros_per_million,
             output_cost_micros_per_million=profile.output_cost_micros_per_million,
             web_search=_enabled_web_search(profile.config_json),
+            reasoning=_reasoning_override(profile.config_json, profile.supports_reasoning),
         ),
         temperature=agent.temperature,
         max_output_tokens=agent.max_output_tokens,

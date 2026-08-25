@@ -14,6 +14,8 @@ function spend(overrides: Partial<WorkspaceSpend> = {}): WorkspaceSpend {
     monthly_budget_micros: null,
     warning_threshold: 0.8,
     fetched_at: "2026-08-22T00:00:00Z",
+    untracked: [],
+    untracked_runs: 0,
     ...overrides,
   };
 }

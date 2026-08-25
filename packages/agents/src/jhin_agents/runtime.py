@@ -54,6 +54,7 @@ async def execute_step(
             max_output_tokens=snapshot.max_output_tokens,
             tools=tools,
             web_search=snapshot.model_profile.web_search,
+            reasoning=snapshot.model_profile.reasoning,
         )
     )
     transitions.append(

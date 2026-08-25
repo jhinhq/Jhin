@@ -18,6 +18,7 @@ from typing import Any
 import httpx
 
 from jhin_models.base import (
+    MODEL_INCOMPATIBLE_REQUEST,
     ModelClient,
     ModelListing,
     ModelMessage,
@@ -28,13 +29,21 @@ from jhin_models.base import (
     ModelUsage,
     classify_retryable,
     describe_error_body,
+    incompatible_request_error,
     quota_error,
+    reasoning_tool_conflict_message,
     tool_name_from_wire,
     wire_tool_name,
 )
 from jhin_models.embeddings import MAX_EMBEDDING_BATCH, EmbeddingResult, bound_inputs
 from jhin_models.images import DEFAULT_IMAGE_SIZE, GeneratedImage
 from jhin_models.pricing import lookup_price, per_token_usd_to_micros_per_million
+from jhin_models.reasoning import (
+    NO_REASONING,
+    ReasoningConfig,
+    automatic_reasoning_effort,
+    request_is_reasoning_class,
+)
 from jhin_models.tool_arguments import normalize_tool_arguments
 from jhin_models.web_search import WebCitation, WebSearchConfig, render_citations
 
@@ -63,6 +72,15 @@ class OpenAICompatibleClient(ModelClient):
     provider_name = "openai_compatible"
     # Legacy-but-universal field understood by vLLM/Ollama/OpenRouter/etc.
     max_tokens_field = "max_tokens"
+    # Whether this endpoint understands a reasoning effort at all. Local
+    # model servers (Ollama) do not, so the parameter is never sent there and
+    # an explicit profile setting fails loudly instead of being dropped.
+    reasoning_effort_supported = True
+    # Whether this endpoint is a raw ``/chat/completions`` that refuses to
+    # combine function tools with a non-``none`` reasoning effort. True for
+    # OpenAI and OpenAI-compatible gateways; OpenRouter normalizes reasoning
+    # parameters on its own side and overrides this to False.
+    reasoning_conflicts_with_tools = True
 
     def __init__(
         self,
@@ -126,8 +144,57 @@ class OpenAICompatibleClient(ModelClient):
             payload[self.max_tokens_field] = request.max_output_tokens
         if request.web_search is not None and request.web_search.enabled:
             self._apply_web_search(payload, request.web_search)
+        self._apply_reasoning(payload, request)
         payload.update(request.extra)
         return payload
+
+    def _apply_reasoning(self, payload: dict[str, Any], request: ModelRequest) -> None:
+        """Decide this request's ``reasoning_effort`` (see
+        :mod:`jhin_models.reasoning`).
+
+        An explicit ``config_json.reasoning.effort`` always wins. Otherwise
+        the effort is pinned to ``"none"`` only when the request carries tools
+        *and* the model is reasoning-class, because chat completions reject
+        function tools alongside a reasoning effort; every other request sends
+        no ``reasoning_effort`` key at all.
+        """
+        config: ReasoningConfig | None = request.reasoning
+        effort = config.effort if config is not None else None
+        if effort is None:
+            if not self.reasoning_effort_supported or not self.reasoning_conflicts_with_tools:
+                return
+            automatic = automatic_reasoning_effort(
+                request.model, has_tools=bool(request.tools), config=config
+            )
+            if automatic is not None:
+                self._apply_reasoning_effort(payload, automatic)
+            return
+        if not self.reasoning_effort_supported:
+            raise ModelProviderError(
+                f"{self.provider_name}: this provider does not accept a reasoning "
+                "effort; remove config_json.reasoning from the model profile",
+                retryable=False,
+                error_code=MODEL_INCOMPATIBLE_REQUEST,
+            )
+        if (
+            self.reasoning_conflicts_with_tools
+            and effort != NO_REASONING
+            and request.tools
+            and request_is_reasoning_class(request.model, config)
+        ):
+            # The provider would answer 400; say so in Jhin's own words, and
+            # without spending a round trip on a request we know is invalid.
+            raise ModelProviderError(
+                reasoning_tool_conflict_message(self.provider_name, request.model, effort),
+                status_code=400,
+                retryable=False,
+                error_code=MODEL_INCOMPATIBLE_REQUEST,
+            )
+        self._apply_reasoning_effort(payload, effort)
+
+    def _apply_reasoning_effort(self, payload: dict[str, Any], effort: str) -> None:
+        """Write the effort in this provider's wire format."""
+        payload["reasoning_effort"] = effort
 
     def _apply_web_search(self, payload: dict[str, Any], config: WebSearchConfig) -> None:
         """Translate an enabled ``web_search`` config to this provider's wire
@@ -157,10 +224,14 @@ class OpenAICompatibleClient(ModelClient):
         return citations
 
     def _http_error(self, status_code: int, body: str) -> ModelProviderError:
-        """Classify a failed response: out-of-credit first, then generic."""
+        """Classify a failed response: out-of-credit, then an unusable
+        parameter combination, then generic."""
         quota = quota_error(self.provider_name, status_code, body)
         if quota is not None:
             return quota
+        incompatible = incompatible_request_error(self.provider_name, status_code, body)
+        if incompatible is not None:
+            return incompatible
         return ModelProviderError(
             f"{self.provider_name}: HTTP {status_code}: {describe_error_body(body)}",
             status_code=status_code,

@@ -77,7 +77,9 @@ _GENERIC_FAILURE_TEXTS = frozenset({"Activity task failed", "Child workflow exec
 
 # Failure types raised by activities that the run record should carry verbatim
 # (instead of the generic step_failed) so the UI can react to them.
-_SPECIFIC_FAILURE_CODES = frozenset({"insufficient_funds", "budget_exceeded"})
+_SPECIFIC_FAILURE_CODES = frozenset(
+    {"insufficient_funds", "budget_exceeded", "model_incompatible_request"}
+)
 
 
 def _failure_code(exc: BaseException, default: str) -> str:

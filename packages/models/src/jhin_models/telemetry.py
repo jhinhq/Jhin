@@ -7,6 +7,7 @@ import math
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from contextlib import contextmanager
+from datetime import date
 from types import TracebackType
 from typing import Any, cast
 
@@ -23,6 +24,7 @@ from jhin_models.base import (
 )
 from jhin_models.embeddings import EmbeddingClient, EmbeddingResult
 from jhin_models.images import ImageGenerationClient
+from jhin_models.observed_pricing import ModelCostReport
 from jhin_observability import (
     SPAN_NAMES,
     AttributeValue,
@@ -520,6 +522,20 @@ class InstrumentedModelClient(ModelClient):
 
     async def get_account_status(self) -> AccountStatus | None:
         return await self._simple_attempt("account_status", self._wrapped.get_account_status)
+
+    async def fetch_model_costs(self, *, start: date, end: date) -> ModelCostReport:
+        """Itemised spend per model, for pricing reconciliation.
+
+        Not part of :class:`ModelClient` — only the OpenAI adapter can report
+        it — so this wrapper has to forward it explicitly. Callers feature-test
+        with ``getattr``, which means a missing forward would degrade silently
+        into "this provider cannot report itemised spend" rather than failing:
+        the reconciliation would quietly do nothing forever.
+        """
+        inner = getattr(self._wrapped, "fetch_model_costs", None)
+        if inner is None:
+            raise AttributeError("fetch_model_costs")
+        return await self._simple_attempt("model_costs", lambda: inner(start=start, end=end))
 
     async def close(self) -> None:
         await self._wrapped.close()

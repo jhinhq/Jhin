@@ -5,8 +5,20 @@ from uuid import uuid4
 
 from jhin_agents.context import TaskContext
 from jhin_agents.runtime import estimate_cost_micros, execute_step
-from jhin_agents.snapshot import AgentExecutionSnapshot, ModelProfileSnapshot, RunLimits
-from jhin_models import ModelClient, ModelRequest, ModelResponse, ModelUsage, WebSearchConfig
+from jhin_agents.snapshot import (
+    AgentExecutionSnapshot,
+    ModelProfileSnapshot,
+    RunLimits,
+    _reasoning_override,
+)
+from jhin_models import (
+    ModelClient,
+    ModelRequest,
+    ModelResponse,
+    ModelUsage,
+    ReasoningConfig,
+    WebSearchConfig,
+)
 
 
 def make_snapshot() -> AgentExecutionSnapshot:
@@ -77,8 +89,10 @@ async def test_execute_step_runs_load_context_then_reason() -> None:
     assert request.model == snapshot.model_profile.model_name
     assert request.temperature == snapshot.temperature
     assert request.max_output_tokens == snapshot.max_output_tokens
-    # No profile opt-in means no model-native web search.
+    # No profile opt-in means no model-native web search, and no reasoning
+    # opinion (the adapter applies the automatic tool-compatibility rule).
     assert request.web_search is None
+    assert request.reasoning is None
 
 
 async def test_execute_step_passes_profile_web_search_to_the_adapter() -> None:
@@ -94,6 +108,35 @@ async def test_execute_step_passes_profile_web_search_to_the_adapter() -> None:
     assert request.web_search is not None
     assert request.web_search.enabled is True
     assert request.web_search.max_uses == 3
+
+
+async def test_execute_step_passes_profile_reasoning_to_the_adapter() -> None:
+    client = FakeClient()
+    base = make_snapshot()
+    profile = base.model_profile.model_copy(
+        update={"reasoning": ReasoningConfig(effort="none", supports_reasoning=True)}
+    )
+    snapshot = base.model_copy(update={"model_profile": profile})
+    await execute_step(client, snapshot, TaskContext(title="Think", description=""))
+
+    request = client.requests[0]
+    assert request.reasoning is not None
+    assert request.reasoning.effort == "none"
+    assert request.reasoning.supports_reasoning is True
+
+
+def test_reasoning_override_folds_in_the_supports_reasoning_column() -> None:
+    assert _reasoning_override(None, False) is None
+    assert _reasoning_override({}, False) is None
+    assert _reasoning_override({"reasoning": {"effort": "bogus"}}, False) is None
+
+    flagged = _reasoning_override({}, True)
+    assert flagged is not None and flagged.supports_reasoning is True
+    assert flagged.effort is None
+
+    pinned = _reasoning_override({"reasoning": {"effort": "high"}}, False)
+    assert pinned is not None and pinned.effort == "high"
+    assert pinned.supports_reasoning is False
 
 
 def test_estimate_cost_micros() -> None:

@@ -36,6 +36,7 @@ import type {
   ModelProfile,
   ModelProvider,
   ProviderBalance,
+  PricingStatus,
   ProviderModels,
   OrgGraph,
   RunEvent,
@@ -224,6 +225,15 @@ export function useWorkspaceSpend(workspaceId: string) {
   });
 }
 
+/** Every profile's price, where it came from, and what could improve it. */
+export function usePricingStatus(workspaceId: string) {
+  return useQuery({
+    queryKey: ["pricing-status", workspaceId],
+    queryFn: () => api<PricingStatus>(`/api/v1/workspaces/${workspaceId}/model-profiles/pricing-status`),
+    staleTime: 30_000,
+  });
+}
+
 export function useModelProfiles(workspaceId: string) {
   return useQuery({
     queryKey: ["model-profiles", workspaceId],
@@ -368,6 +378,7 @@ export function useInvalidateModels(workspaceId: string) {
     void queryClient.invalidateQueries({ queryKey: ["workspace", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["provider-balance", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["workspace-spend", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["pricing-status", workspaceId] });
   };
 }
 

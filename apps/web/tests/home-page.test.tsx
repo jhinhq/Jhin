@@ -148,6 +148,8 @@ const SPEND: WorkspaceSpend = {
   monthly_budget_micros: null,
   warning_threshold: 0.8,
   fetched_at: "2026-08-24T12:00:00Z",
+  untracked: [],
+  untracked_runs: 0,
 };
 
 /** A fully set-up workspace with work in flight. */

@@ -129,6 +129,11 @@ ROUTE_SCOPES: dict[tuple[str, ...], RouteRule] = {
     ("model-providers", "verify-draft"): _SEALED,
     ("model-profiles",): _rule("models:read", "models:write"),
     ("model-profiles", "refresh-pricing"): _rule(None, "models:write"),
+    ("model-profiles", "pricing-status"): _rule("models:read", None),
+    # Reconciliation reads the provider's billing API with the admin key and
+    # writes prices back onto profiles: a models *write*, and a spend read.
+    ("model-profiles", "reconcile-pricing"): _rule(None, "models:write"),
+    ("model-profiles", "refresh-catalog"): _rule(None, "models:write"),
     ("spend",): _rule("spend:read", None),
     ("audit-events",): _rule("audit:read", None),
     ("media",): _rule("agents:read", None),

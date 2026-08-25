@@ -1,7 +1,15 @@
 /** Pure helpers for the Models page: price auto-fill when a model is picked
  * and balance/spend formatting. Kept free of React so they are unit-testable. */
 
-import type { BalanceSource, ModelProviderType, PriceSource, ProviderModelEntry } from "@/lib/types";
+import type {
+  BalanceSource,
+  ModelProviderType,
+  ObservedRate,
+  PriceSourceName,
+  PriceSource,
+  ProviderModelEntry,
+  UntrackedModel,
+} from "@/lib/types";
 
 export const MICROS_PER_DOLLAR = 1_000_000;
 
@@ -31,7 +39,7 @@ export interface PriceAutofill {
   note: string;
 }
 
-const PROVIDER_LABELS: Record<ModelProviderType, string> = {
+export const PROVIDER_LABELS: Record<ModelProviderType, string> = {
   openai: "OpenAI",
   anthropic: "Anthropic",
   openrouter: "OpenRouter",
@@ -171,4 +179,169 @@ export const INSUFFICIENT_FUNDS_CODE = "insufficient_funds";
 /** Whether a system/error message payload is the out-of-credit failure. */
 export function isInsufficientFunds(content: Record<string, unknown> | null | undefined): boolean {
   return content?.error_code === INSUFFICIENT_FUNDS_CODE;
+}
+
+export const MODEL_INCOMPATIBLE_REQUEST_CODE = "model_incompatible_request";
+
+/**
+ * Whether the failure is "this model cannot serve this request as configured"
+ * (today: a reasoning effort that the provider will not combine with tools).
+ * The message names the fix, so it needs a readable card rather than the
+ * truncating one-line chip.
+ */
+export function isModelIncompatibleRequest(
+  content: Record<string, unknown> | null | undefined,
+): boolean {
+  return content?.error_code === MODEL_INCOMPATIBLE_REQUEST_CODE;
+}
+
+/** Real pricing pages, for the "we don't know this model's price" prompt.
+ *  Mirrors `jhin_models.pricing.PRICING_PAGES`; the API sends the same map on
+ *  the pricing-status response and that copy wins when present. */
+export const PRICING_PAGE_URLS: Partial<Record<ModelProviderType, string>> = {
+  openai: "https://platform.openai.com/docs/pricing",
+  anthropic: "https://www.anthropic.com/pricing#api",
+  openrouter: "https://openrouter.ai/models",
+};
+
+export function pricingPageUrl(
+  providerType: ModelProviderType,
+  fromApi?: Record<string, string> | null,
+): string | null {
+  return fromApi?.[providerType] ?? PRICING_PAGE_URLS[providerType] ?? null;
+}
+
+/** How far back the built-in list prices may be before we nudge, in months.
+ *  Matches `CATALOG_STALE_AFTER_DAYS` on the server (≈6 months). */
+export const CATALOG_STALE_AFTER_MONTHS = 6;
+
+/**
+ * Whether a `YYYY-MM` catalog stamp is old enough to warn about.
+ *
+ * List prices move. Showing a two-year-old number without saying so is how a
+ * spend total quietly becomes fiction, so an old catalog earns a nudge rather
+ * than silent trust. An unparseable stamp counts as stale: not knowing how old
+ * the prices are is itself a reason to check.
+ */
+export function isCatalogStale(catalogUpdated: string | null | undefined, now = new Date()): boolean {
+  if (!catalogUpdated) return true;
+  const match = /^(\d{4})-(\d{2})$/.exec(catalogUpdated.trim());
+  if (!match) return true;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  if (month < 1 || month > 12) return true;
+  const months =
+    (now.getUTCFullYear() - year) * 12 + (now.getUTCMonth() + 1 - month);
+  return months > CATALOG_STALE_AFTER_MONTHS;
+}
+
+export function catalogStalenessNote(catalogUpdated: string | null | undefined): string | null {
+  if (!isCatalogStale(catalogUpdated)) return null;
+  return catalogUpdated
+    ? `These are list prices from ${catalogUpdated} — check they're current.`
+    : "We can't tell how old these list prices are — check they're current.";
+}
+
+const PRICE_SOURCE_LABELS: Record<PriceSourceName, string> = {
+  user: "Entered by an admin in this workspace",
+  observed: "Measured from your actual provider spend",
+  provider: "Live from the provider's own model list",
+  refreshed_catalog: "From the LiteLLM community price catalog",
+  catalog: "Public list price",
+};
+
+/**
+ * Short label naming where a price came from.
+ *
+ * `priced` separates the two ways a source can be unknown: no price at all,
+ * versus a price whose provenance was never recorded. The second is treated
+ * as user-entered, and saying so stops a perfectly good number reading as
+ * "no price set".
+ */
+export function priceSourceLabel(
+  source: PriceSourceName | null | undefined,
+  priced = false,
+): string {
+  if (!source) return priced ? "Set before Jhin tracked price sources" : "No price set";
+  return PRICE_SOURCE_LABELS[source];
+}
+
+export function priceSourceBadge(
+  source: PriceSourceName | null | undefined,
+  priced = false,
+): { text: string; tone: "neutral" | "ok" | "warn" | "accent" | "info" } {
+  if (!source && priced) return { text: "Yours", tone: "accent" };
+  switch (source) {
+    case "user":
+      return { text: "Yours", tone: "accent" };
+    case "observed":
+      return { text: "Measured", tone: "ok" };
+    case "provider":
+      return { text: "Live", tone: "info" };
+    case "refreshed_catalog":
+      return { text: "Catalog", tone: "neutral" };
+    case "catalog":
+      return { text: "List price", tone: "neutral" };
+    default:
+      return { text: "No price", tone: "warn" };
+  }
+}
+
+/** "$2.50 in · $10.00 out" — or an em dash when either half is unknown. */
+export function formatPricePair(
+  inputMicros: number | null | undefined,
+  outputMicros: number | null | undefined,
+): string {
+  if (inputMicros === null || inputMicros === undefined) return "—";
+  if (outputMicros === null || outputMicros === undefined) return "—";
+  return `${formatMicrosAsDollars(inputMicros)} in · ${formatMicrosAsDollars(outputMicros)} out`;
+}
+
+/**
+ * The sentence shown under a measured rate.
+ *
+ * A blended rate has no input/output split — saying so is the whole point,
+ * because presenting it as a pair would be a number we made up.
+ */
+export function observedRateSummary(rate: ObservedRate): string {
+  if (rate.blended_cost_micros_per_million !== null) {
+    return `${formatMicrosAsDollars(rate.blended_cost_micros_per_million)} per 1M tokens (blended — we can't split input from output)`;
+  }
+  return formatPricePair(
+    rate.input_cost_micros_per_million,
+    rate.output_cost_micros_per_million,
+  );
+}
+
+const DERIVATION_LABELS: Record<ObservedRate["derivation"], string> = {
+  provider_quantity: "measured exactly from your provider's itemised invoice",
+  split: "measured from itemised spend divided by Jhin's token counts",
+  catalog_ratio: "measured total, input/output split assumed from list prices",
+  blended: "one blended rate across all tokens",
+};
+
+export function derivationLabel(derivation: ObservedRate["derivation"]): string {
+  return DERIVATION_LABELS[derivation];
+}
+
+/**
+ * The honest footnote for a spend total that excludes unpriced models.
+ *
+ * Without it, a run on an unpriced model is indistinguishable from a free one
+ * and the total reads as complete when it is not.
+ */
+export function untrackedSpendNote(
+  untracked: UntrackedModel[] | undefined,
+  untrackedRuns: number | undefined,
+): string | null {
+  if (!untracked || untracked.length === 0 || !untrackedRuns) return null;
+  const single = untrackedRuns === 1;
+  const named = untracked
+    .slice(0, 2)
+    .map((row) => row.model_name)
+    .join(", ");
+  const more = untracked.length > 2 ? ` and ${untracked.length - 2} more` : "";
+  return `${untrackedRuns} ${single ? "run" : "runs"} on ${named}${more} ${
+    single ? "isn't" : "aren't"
+  } included — no price set.`;
 }

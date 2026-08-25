@@ -59,6 +59,7 @@ import threading
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 FAIL_MODEL = "always-fails"
 # Returns OpenAI's out-of-credit shape (HTTP 429, code "insufficient_quota").
@@ -79,30 +80,93 @@ FAKE_TOTAL_USAGE = 12.5
 FAKE_DAILY_COST_USD = 1.25
 FAKE_COST_DAYS = 3
 
+# Itemised daily spend for ``group_by=line_item``. The rates these imply are
+# deliberately *not* the list prices in ``FAKE_MODEL_PRICING``: a discount is
+# exactly what a reconciliation is supposed to discover.
+#   fake-mini: $0.02 / 200_000 in  = $0.10 per 1M in
+#              $0.03 /  50_000 out = $0.60 per 1M out
+#   fake-pro:  $0.40 / 200_000 in  = $2.00 per 1M in
+#              $0.80 / 100_000 out = $8.00 per 1M out
+FAKE_COST_LINE_ITEMS: tuple[dict[str, Any], ...] = (
+    {"line_item": "fake-mini, input", "cost": 0.02, "quantity": 200_000},
+    {"line_item": "fake-mini, output", "cost": 0.03, "quantity": 50_000},
+    {"line_item": "fake-pro, input", "cost": 0.40, "quantity": 200_000},
+    {"line_item": "fake-pro, output", "cost": 0.80, "quantity": 100_000},
+)
+
+
+def _int_or_none(values: list[str] | None) -> int | None:
+    if not values:
+        return None
+    try:
+        return int(values[0])
+    except ValueError:
+        return None
+
 
 def build_credits() -> dict[str, Any]:
     """``GET /v1/credits`` — OpenRouter's shape."""
     return {"data": {"total_credits": FAKE_TOTAL_CREDITS, "total_usage": FAKE_TOTAL_USAGE}}
 
 
-def build_organization_costs() -> dict[str, Any]:
-    """``GET /v1/organization/costs`` — OpenAI Admin API shape, one page."""
-    buckets = [
-        {
-            "object": "bucket",
-            "start_time": 86_400 * day,
-            "end_time": 86_400 * (day + 1),
-            "results": [
+def build_organization_costs(
+    *, group_by_line_item: bool = False, start_time: int | None = None
+) -> dict[str, Any]:
+    """``GET /v1/organization/costs`` — OpenAI Admin API shape, one page.
+
+    Ungrouped it returns one flat daily amount, which is what the balance
+    tile sums. Asked to ``group_by=line_item`` it returns the itemised shape
+    the real Admin API produces — ``"<model>, input"`` / ``"<model>, output"``
+    lines carrying ``quantity``/``quantity_unit`` — so the pricing
+    reconciliation can be exercised end to end without a real organization.
+    A non-model service line is included on purpose: a parser that cannot
+    ignore one would misattribute it to a model.
+
+    Day buckets start at ``start_time`` when given, so the fake lands inside
+    whatever window the caller asked about rather than at the epoch.
+    """
+    base = start_time if start_time is not None else 0
+    buckets = []
+    for day in range(FAKE_COST_DAYS):
+        if group_by_line_item:
+            results: list[dict[str, Any]] = [
+                {
+                    "object": "organization.costs.result",
+                    "amount": {"value": item["cost"], "currency": "usd"},
+                    "line_item": item["line_item"],
+                    "project_id": "proj_fake",
+                    "quantity": item["quantity"],
+                    "quantity_unit": "tokens",
+                }
+                for item in FAKE_COST_LINE_ITEMS
+            ]
+            results.append(
+                {
+                    "object": "organization.costs.result",
+                    "amount": {"value": 0.02, "currency": "usd"},
+                    "line_item": "assistants api | file search",
+                    "project_id": "proj_fake",
+                    "quantity": None,
+                    "quantity_unit": None,
+                }
+            )
+        else:
+            results = [
                 {
                     "object": "organization.costs.result",
                     "amount": {"value": FAKE_DAILY_COST_USD, "currency": "usd"},
                     "line_item": None,
                     "project_id": None,
                 }
-            ],
-        }
-        for day in range(FAKE_COST_DAYS)
-    ]
+            ]
+        buckets.append(
+            {
+                "object": "bucket",
+                "start_time": base + 86_400 * day,
+                "end_time": base + 86_400 * (day + 1),
+                "results": results,
+            }
+        )
     return {"object": "page", "data": buckets, "has_more": False, "next_page": None}
 
 
@@ -544,7 +608,14 @@ class _Handler(BaseHTTPRequestHandler):
         elif path.endswith("/credits"):
             self._send_json(200, build_credits())
         elif path.endswith("/organization/costs"):
-            self._send_json(200, build_organization_costs())
+            query = parse_qs(urlsplit(self.path).query)
+            self._send_json(
+                200,
+                build_organization_costs(
+                    group_by_line_item="line_item" in query.get("group_by", []),
+                    start_time=_int_or_none(query.get("start_time")),
+                ),
+            )
         else:
             self._send_json(404, {"error": {"message": f"no route {self.path}"}})
 

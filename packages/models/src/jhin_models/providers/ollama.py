@@ -11,6 +11,9 @@ OLLAMA_BASE_URL = "http://localhost:11434/v1"
 
 class OllamaClient(OpenAICompatibleClient):
     provider_name = "ollama"
+    # Local models take no ``reasoning_effort``; an explicit profile setting
+    # fails loudly rather than being silently dropped.
+    reasoning_effort_supported = False
 
     def __init__(
         self,

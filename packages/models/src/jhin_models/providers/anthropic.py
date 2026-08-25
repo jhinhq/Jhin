@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 
 from jhin_models.base import (
+    MODEL_INCOMPATIBLE_REQUEST,
     ModelClient,
     ModelListing,
     ModelMessage,
@@ -119,6 +120,17 @@ class AnthropicClient(ModelClient):
         return {"role": message.role, "content": message.content}
 
     def _payload(self, request: ModelRequest, *, stream: bool) -> dict[str, Any]:
+        if request.reasoning is not None and request.reasoning.effort is not None:
+            # The Messages API has no ``reasoning_effort`` (extended thinking
+            # is a different shape). Profile validation rejects the block on
+            # this provider, so only a stale profile lands here — fail loudly
+            # rather than silently dropping the setting.
+            raise ModelProviderError(
+                "anthropic: this provider does not accept a reasoning effort; "
+                "remove config_json.reasoning from the model profile",
+                retryable=False,
+                error_code=MODEL_INCOMPATIBLE_REQUEST,
+            )
         system_parts = [m.content for m in request.messages if m.role == "system"]
         payload: dict[str, Any] = {
             "model": request.model,

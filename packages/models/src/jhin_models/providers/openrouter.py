@@ -21,6 +21,7 @@ from jhin_models.base import (
 )
 from jhin_models.pricing import usd_to_micros
 from jhin_models.providers.openai_compatible import OpenAICompatibleClient
+from jhin_models.reasoning import NO_REASONING
 from jhin_models.web_search import WebSearchConfig
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -47,6 +48,13 @@ def parse_credits(payload: dict[str, Any]) -> AccountStatus:
 
 class OpenRouterClient(OpenAICompatibleClient):
     provider_name = "openrouter"
+    # OpenRouter takes reasoning controls in its own ``reasoning`` block and
+    # normalizes them per upstream model (it can route to OpenAI's Responses
+    # API), so Jhin does not inject the chat-completions
+    # ``reasoning_effort="none"`` tool workaround here — only an explicit
+    # profile setting is translated. If an upstream refusal does surface, the
+    # base adapter still maps it to ``model_incompatible_request``.
+    reasoning_conflicts_with_tools = False
 
     def __init__(
         self,
@@ -69,6 +77,14 @@ class OpenRouterClient(OpenAICompatibleClient):
         if config.max_uses is not None:
             plugin["max_results"] = config.max_uses
         payload["plugins"] = [plugin]
+
+    def _apply_reasoning_effort(self, payload: dict[str, Any], effort: str) -> None:
+        """OpenRouter's native ``reasoning`` block.
+
+        Its effort vocabulary has no ``"none"``; turning reasoning off is
+        ``{"enabled": false}``.
+        """
+        payload["reasoning"] = {"enabled": False} if effort == NO_REASONING else {"effort": effort}
 
     async def get_account_status(self) -> AccountStatus | None:
         try:

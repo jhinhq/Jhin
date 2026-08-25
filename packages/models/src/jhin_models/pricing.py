@@ -1,11 +1,27 @@
-"""Static public price list for first-party providers (OpenAI, Anthropic).
+"""Where a model's price comes from, and which source wins.
 
-OpenRouter reports prices live from its ``/models`` endpoint; OpenAI and
-Anthropic do not expose pricing through their APIs, so the profile picker
-falls back to this catalog of *public list prices*. Entries are micro-dollars
-per million tokens (the ``model_profile`` unit). ``CATALOG_UPDATED`` is shown
-to the user next to auto-filled prices so they know how fresh the numbers are
-and can override them when their contract differs.
+Jhin knows a price from up to five places. This module owns the built-in
+static catalog, the parsing of a refreshed community catalog, and — the part
+everything else defers to — the single precedence rule:
+
+    user-entered > measured from spend > live from the provider
+                 > refreshed catalog > built-in catalog > unknown
+
+Rationale for the order. A price an admin typed is a contract fact and is
+never overwritten by anything automatic. A rate measured from the
+organization's own invoices (:mod:`jhin_models.observed_pricing`) beats any
+list price because it reflects the discounts actually applied. A live price
+from the provider's own ``/models`` response (OpenRouter) is authoritative
+list data straight from the source. A community catalog refreshed from
+LiteLLM is fresher than whatever shipped in this file. The built-in catalog
+below is the offline floor. Anything else is honestly *unknown* — and an
+unknown price is reported as unknown, never silently as zero, because a run
+priced at $0.00 is a lie that quietly breaks budgets.
+
+The built-in catalog holds *public list prices* for OpenAI and Anthropic,
+which expose no pricing endpoint at all. Entries are micro-dollars per
+million tokens (the ``model_profile`` unit). ``CATALOG_UPDATED`` is shown to
+the user next to auto-filled prices so they know how fresh the numbers are.
 
 Lookup normalises identifiers the way providers spell them in model lists:
 vendor prefixes (``openai/gpt-4o``), dated snapshots (``gpt-4o-2024-08-06``,
@@ -19,12 +35,27 @@ wrong one.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from typing import Any, Literal
 
 CATALOG_UPDATED = "2026-01"
 
+# How long before the built-in list prices are old enough to warn about. Six
+# months is roughly the cadence at which the frontier vendors reprice.
+CATALOG_STALE_AFTER_DAYS = 183
+
 MICROS_PER_DOLLAR = 1_000_000
+
+# Where a human goes to check a price we could not determine. Real, current
+# pricing pages — these are shown as links next to an unpriced model.
+PRICING_PAGES: dict[str, str] = {
+    "openai": "https://platform.openai.com/docs/pricing",
+    "anthropic": "https://www.anthropic.com/pricing#api",
+    "openrouter": "https://openrouter.ai/models",
+}
 
 
 @dataclass(frozen=True)
@@ -111,16 +142,13 @@ def normalize_model_id(model_id: str) -> str:
     return key
 
 
-def lookup_price(provider_type: str, model_id: str) -> ModelPrice | None:
-    """Catalog price for ``model_id`` on ``provider_type`` or ``None``.
+def lookup_in_catalog(catalog: Mapping[str, ModelPrice], model_id: str) -> ModelPrice | None:
+    """Price for ``model_id`` in one catalog layer, or ``None``.
 
     Exact match after normalisation first; then progressively shorter
     dash-delimited prefixes (``gpt-4o-mini-audio`` → ``gpt-4o-mini``) unless
     the dropped segment is a bare version number.
     """
-    catalog = CATALOGS.get(provider_type)
-    if not catalog:
-        return None
     key = normalize_model_id(model_id)
     if not key:
         return None
@@ -135,6 +163,14 @@ def lookup_price(provider_type: str, model_id: str) -> ModelPrice | None:
         if candidate in catalog:
             return catalog[candidate]
     return None
+
+
+def lookup_price(provider_type: str, model_id: str) -> ModelPrice | None:
+    """Built-in catalog price for ``model_id`` on ``provider_type``."""
+    catalog = CATALOGS.get(provider_type)
+    if not catalog:
+        return None
+    return lookup_in_catalog(catalog, model_id)
 
 
 def per_token_usd_to_micros_per_million(value: object) -> int | None:
@@ -167,13 +203,299 @@ def usd_to_micros(value: object) -> int | None:
     return int((amount * MICROS_PER_DOLLAR).to_integral_value(rounding=ROUND_HALF_UP))
 
 
+# --- Catalog freshness ---
+
+
+def catalog_updated_date(catalog_updated: str = CATALOG_UPDATED) -> date | None:
+    """The ``YYYY-MM`` stamp as the first of that month, or ``None``."""
+    try:
+        return datetime.strptime(catalog_updated.strip(), "%Y-%m").replace(tzinfo=UTC).date()
+    except ValueError:
+        return None
+
+
+def catalog_is_stale(*, today: date | None = None, catalog_updated: str = CATALOG_UPDATED) -> bool:
+    """Whether the built-in list prices are old enough to warn about.
+
+    List prices move. Showing a two-year-old number without saying so is how
+    a spend total quietly becomes fiction, so the UI nudges the admin to
+    check once the catalog passes :data:`CATALOG_STALE_AFTER_DAYS`.
+    """
+    stamped = catalog_updated_date(catalog_updated)
+    if stamped is None:
+        return True
+    current = today or datetime.now(UTC).date()
+    return (current - stamped).days > CATALOG_STALE_AFTER_DAYS
+
+
+# --- The refreshed community catalog (LiteLLM) ---
+
+# LiteLLM maintains the most complete open price map there is, covering models
+# the moment they ship. Verified live: both this path and the packaged
+# ``litellm/model_prices_and_context_window_backup.json`` copy serve the same
+# ~1.8 MB document.
+#
+# Licensing: the LiteLLM repository is dual-licensed — everything under
+# ``enterprise/`` carries its own terms, everything else is MIT. This file
+# lives at the repository root, so it is MIT and may be cached and
+# redistributed provided the notice below travels with it. Jhin therefore
+# fetches it at run time rather than vendoring it, and stamps
+# :data:`LITELLM_ATTRIBUTION` onto every stored snapshot. Never fetch anything
+# under ``enterprise/``.
+LITELLM_PRICE_MAP_URL = (
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+)
+LITELLM_PROJECT_URL = "https://github.com/BerriAI/litellm"
+LITELLM_ATTRIBUTION = "LiteLLM model price map, MIT License, Copyright (c) 2023 Berri AI"
+# Generous headroom over the ~1.8 MB the document weighs today, so a normal
+# month of growth does not start failing refreshes.
+LITELLM_MAX_BYTES = 8 * 1024 * 1024
+LITELLM_CATALOG_SOURCE = "litellm"
+
+# Top-level keys that are documentation or routing rules rather than models.
+# ``sample_spec`` even carries a ``litellm_provider`` value, so "looks like a
+# model" is not a safe filter — these are excluded by name.
+_LITELLM_NON_MODEL_KEYS = frozenset({"sample_spec", "fallback_generalizations"})
+# ``litellm_provider`` value -> the Jhin provider type it prices for.
+_LITELLM_PROVIDERS = {"openai": "openai", "anthropic": "anthropic", "openrouter": "openrouter"}
+# Per-token modes only; image, audio, and session-billed entries price in
+# units the profile has no column for.
+_LITELLM_TOKEN_MODES = frozenset({"chat", "completion", "responses", "embedding"})
+
+RefreshedCatalog = dict[str, dict[str, ModelPrice]]
+
+
+def _litellm_price(entry: Mapping[str, Any]) -> ModelPrice | None:
+    input_micros = per_token_usd_to_micros_per_million(entry.get("input_cost_per_token"))
+    output_micros = per_token_usd_to_micros_per_million(entry.get("output_cost_per_token"))
+    if input_micros is None and output_micros is None:
+        return None
+    context = entry.get("max_input_tokens")
+    window = int(context) if isinstance(context, int | float) and context > 0 else None
+    return ModelPrice(
+        input_cost_micros_per_million=input_micros or 0,
+        output_cost_micros_per_million=output_micros or 0,
+        context_window=window,
+    )
+
+
+def parse_litellm_price_map(payload: object) -> RefreshedCatalog:
+    """A provider-keyed catalog from LiteLLM's ``model_prices_and_context_window.json``.
+
+    The document is a flat ``model id -> entry`` object of a few thousand
+    keys. Only ``litellm_provider`` is present on every entry, so every other
+    field is treated as optional and a malformed entry is dropped rather than
+    raising — a community file must never be able to break pricing.
+
+    Keys are folded to the same normalised spelling the built-in catalog uses
+    (:func:`normalize_model_id`), which collapses dated snapshots onto their
+    family. When several raw keys collapse together the undated alias wins,
+    because that is the entry LiteLLM keeps current.
+    """
+    if not isinstance(payload, dict):
+        return {}
+    catalogs: RefreshedCatalog = {}
+    # (provider, normalised key) -> was the entry we kept the undated alias?
+    from_alias: dict[tuple[str, str], bool] = {}
+    for raw_key in sorted(str(k) for k in payload):
+        if raw_key in _LITELLM_NON_MODEL_KEYS:
+            continue
+        entry = payload.get(raw_key)
+        if not isinstance(entry, dict):
+            continue
+        litellm_provider = str(entry.get("litellm_provider", ""))
+        provider_type = _LITELLM_PROVIDERS.get(litellm_provider)
+        if provider_type is None:
+            continue
+        # LiteLLM prefixes routed entries with their provider
+        # (``openrouter/anthropic/claude-3.5-sonnet``). Jhin stores the model
+        # name the way the provider's own API spells it, so drop the prefix
+        # before normalising or nothing would ever match.
+        bare_key = raw_key.removeprefix(f"{litellm_provider}/")
+        mode = entry.get("mode")
+        if mode is not None and str(mode) not in _LITELLM_TOKEN_MODES:
+            continue
+        price = _litellm_price(entry)
+        if price is None:
+            continue
+        key = normalize_model_id(bare_key)
+        if not key:
+            continue
+        seat = (provider_type, key)
+        is_alias = bare_key.strip().lower() == key
+        if seat in from_alias and (from_alias[seat] or not is_alias):
+            continue  # keep the alias we already have, or the first snapshot
+        catalogs.setdefault(provider_type, {})[key] = price
+        from_alias[seat] = is_alias
+    return catalogs
+
+
+def refreshed_catalog_to_json(catalog: RefreshedCatalog) -> dict[str, dict[str, list[int | None]]]:
+    """Compact ``[input, output, context]`` triples for storage."""
+    return {
+        provider_type: {
+            key: [
+                price.input_cost_micros_per_million,
+                price.output_cost_micros_per_million,
+                price.context_window,
+            ]
+            for key, price in sorted(entries.items())
+        }
+        for provider_type, entries in sorted(catalog.items())
+    }
+
+
+def refreshed_catalog_from_json(payload: object) -> RefreshedCatalog:
+    """Inverse of :func:`refreshed_catalog_to_json`, tolerant of junk."""
+    if not isinstance(payload, dict):
+        return {}
+    catalog: RefreshedCatalog = {}
+    for provider_type, entries in payload.items():
+        if not isinstance(entries, dict):
+            continue
+        parsed: dict[str, ModelPrice] = {}
+        for key, triple in entries.items():
+            if not isinstance(triple, list | tuple) or len(triple) < 2:
+                continue
+            first, second = triple[0], triple[1]
+            if not isinstance(first, int) or not isinstance(second, int):
+                continue
+            context = triple[2] if len(triple) > 2 else None
+            parsed[str(key)] = ModelPrice(
+                input_cost_micros_per_million=first,
+                output_cost_micros_per_million=second,
+                context_window=context if isinstance(context, int) else None,
+            )
+        if parsed:
+            catalog[str(provider_type)] = parsed
+    return catalog
+
+
+def lookup_refreshed_price(
+    catalog: RefreshedCatalog, provider_type: str, model_id: str
+) -> ModelPrice | None:
+    """Refreshed-catalog price for ``model_id`` on ``provider_type``."""
+    entries = catalog.get(provider_type)
+    if not entries:
+        return None
+    return lookup_in_catalog(entries, model_id)
+
+
+# --- Precedence: the one place that decides which source wins ---
+
+PriceSource = Literal["user", "observed", "provider", "refreshed_catalog", "catalog"]
+
+#: Highest authority first. Every surface that has to choose between two
+#: known prices consults this order and nothing else.
+PRICE_SOURCE_PRECEDENCE: tuple[PriceSource, ...] = (
+    "user",
+    "observed",
+    "provider",
+    "refreshed_catalog",
+    "catalog",
+)
+
+
+@dataclass(frozen=True)
+class PriceCandidate:
+    """A price one source is offering, before precedence is applied."""
+
+    source: PriceSource
+    input_cost_micros_per_million: int | None = None
+    output_cost_micros_per_million: int | None = None
+    context_window: int | None = None
+    detail: str = ""
+
+    @property
+    def is_usable(self) -> bool:
+        """Both halves known. A half-price would silently undercount a run,
+        so it does not count as knowing the price."""
+        return (
+            self.input_cost_micros_per_million is not None
+            and self.output_cost_micros_per_million is not None
+        )
+
+
+def resolve_price(candidates: list[PriceCandidate]) -> PriceCandidate | None:
+    """The winning candidate under :data:`PRICE_SOURCE_PRECEDENCE`.
+
+    Order of the input list is irrelevant; only the declared source matters.
+    ``None`` means no source knew the price — which is reported as *unknown*,
+    never as free.
+    """
+    usable = [candidate for candidate in candidates if candidate.is_usable]
+    for source in PRICE_SOURCE_PRECEDENCE:
+        for candidate in usable:
+            if candidate.source == source:
+                return candidate
+    return None
+
+
+def describe_price_source(
+    source: PriceSource | None,
+    *,
+    priced: bool = False,
+    catalog_updated: str = CATALOG_UPDATED,
+    refreshed_at: date | None = None,
+) -> str:
+    """The sentence the UI shows under a price, naming where it came from.
+
+    ``priced`` distinguishes the two ways a source can be unknown: a model
+    with no price at all, and a price whose provenance was never recorded
+    (rows predating the column, or a price posted straight to the API). The
+    second is treated as user-entered, and saying so is what stops the row
+    reading as "no price known" when a perfectly good number is sitting there.
+    """
+    if source == "user":
+        return "Entered by an admin in this workspace"
+    if source == "observed":
+        return "Measured from your actual provider spend"
+    if source == "provider":
+        return "Live from the provider's own model list"
+    if source == "refreshed_catalog":
+        when = f" on {refreshed_at.isoformat()}" if refreshed_at is not None else ""
+        return (
+            "From the community-maintained LiteLLM price catalog (MIT), refreshed"
+            f"{when} — community figures can be stale or wrong, which is why anything "
+            "you enter or Jhin measures outranks them"
+        )
+    if source == "catalog":
+        return f"Public list price, catalog {catalog_updated}"
+    if priced:
+        return (
+            "Set before Jhin recorded where prices come from — treated as yours, "
+            "so nothing automatic will change it"
+        )
+    return "No price is known for this model"
+
+
 __all__ = [
     "CATALOGS",
+    "CATALOG_STALE_AFTER_DAYS",
     "CATALOG_UPDATED",
+    "LITELLM_ATTRIBUTION",
+    "LITELLM_CATALOG_SOURCE",
+    "LITELLM_MAX_BYTES",
+    "LITELLM_PRICE_MAP_URL",
+    "LITELLM_PROJECT_URL",
     "MICROS_PER_DOLLAR",
+    "PRICE_SOURCE_PRECEDENCE",
+    "PRICING_PAGES",
     "ModelPrice",
+    "PriceCandidate",
+    "PriceSource",
+    "RefreshedCatalog",
+    "catalog_is_stale",
+    "catalog_updated_date",
+    "describe_price_source",
+    "lookup_in_catalog",
     "lookup_price",
+    "lookup_refreshed_price",
     "normalize_model_id",
+    "parse_litellm_price_map",
     "per_token_usd_to_micros_per_million",
+    "refreshed_catalog_from_json",
+    "refreshed_catalog_to_json",
+    "resolve_price",
     "usd_to_micros",
 ]
