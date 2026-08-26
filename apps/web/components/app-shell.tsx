@@ -35,7 +35,7 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import type { LucideIcon } from "lucide-react";
 import { Wordmark } from "@/components/brand/logo-mark";
 import { OnboardingProvider } from "@/components/onboarding/tour";
-import { Dialog, focusRing, Spinner, ThemeToggle } from "@/components/ui";
+import { Button, Dialog, ErrorNote, Field, focusRing, Input, Spinner, ThemeToggle } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import { goToConnect, IS_DESKTOP } from "@/lib/desktop";
 import { useAttention, useBootstrapStatus, useIdentity } from "@/lib/hooks";
@@ -479,26 +479,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const workspace = me.data.memberships[0];
   if (!workspace) {
     // Reachable two ways: an account that was never added to a workspace, and
-    // an owner who has just deleted their last one. Both need a way out of
-    // this screen, or the only escape is clearing cookies by hand — there is
-    // no navigation rendered here to sign out from.
-    return (
-      <div
-        data-testid="no-workspace"
-        className="flex min-h-screen flex-col items-center justify-center gap-3 px-6 text-center"
-      >
-        <p className="text-sm text-dim">
-          Your account is not a member of any workspace. Ask a workspace admin to add you, or
-          sign in as someone else.
-        </p>
-        <button
-          className={`rounded-md text-sm text-accent-strong underline ${focusRing}`}
-          onClick={() => logout.mutate()}
-        >
-          Sign out
-        </button>
-      </div>
-    );
+    // an owner who has just deleted their last one. Creating a workspace needs
+    // only an authenticated user and makes the creator its owner, so the
+    // useful thing to offer is a new workspace rather than a note telling
+    // someone to go find an admin. A brand-new membership starts onboarding
+    // as `pending`, so the guided tour opens on arrival.
+    return <NoWorkspace onSignOut={() => logout.mutate()} />;
   }
 
   const user = me.data.user;
@@ -627,6 +613,93 @@ export function PageBody({
       className={`mx-auto w-full px-5 py-6 md:px-8 md:py-8 ${wide ? "max-w-7xl" : "max-w-6xl"} ${className}`}
     >
       {children}
+    </div>
+  );
+}
+
+
+/** Shown to a signed-in account with no workspace: create one, or sign out. */
+function NoWorkspace({ onSignOut }: { onSignOut: () => void }) {
+  const queryClient = useQueryClient();
+  const [name, setName] = useState("");
+
+  const create = useMutation({
+    mutationFn: () =>
+      api<{ id: string }>("/api/v1/workspaces", {
+        method: "POST",
+        body: {
+          name: name.trim(),
+          // The browser knows the viewer's zone; the workspace uses it for
+          // agent "today" reasoning and scheduled work.
+          default_timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+        },
+      }),
+    // Re-reading identity swaps this screen for the app itself, where the
+    // onboarding tour opens on the fresh membership.
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["identity"] }),
+  });
+
+  return (
+    <div
+      data-testid="no-workspace"
+      className="flex min-h-screen flex-col items-center justify-center px-6"
+    >
+      <div className="w-full max-w-sm space-y-5 text-center">
+        <Wordmark className="justify-center" />
+        <div className="space-y-1.5">
+          <h1 className="font-display text-xl font-semibold text-ink">Create your workspace</h1>
+          <p className="text-sm text-dim">
+            A workspace holds your AI teammates, their chats, and everything they connect to.
+            You will own this one.
+          </p>
+        </div>
+        <form
+          className="space-y-3 text-left"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (name.trim()) create.mutate();
+          }}
+        >
+          <Field label="Workspace name">
+            <Input
+              autoFocus
+              required
+              maxLength={200}
+              value={name}
+              placeholder="Acme HQ"
+              disabled={create.isPending}
+              onChange={(event) => setName(event.target.value)}
+            />
+          </Field>
+          <ErrorNote
+            message={
+              create.error instanceof ApiError
+                ? create.error.detail
+                : create.error
+                  ? "The workspace could not be created."
+                  : null
+            }
+          />
+          <Button
+            type="submit"
+            variant="primary"
+            className="w-full justify-center"
+            disabled={create.isPending || !name.trim()}
+          >
+            {create.isPending ? "Creating…" : "Create workspace"}
+          </Button>
+        </form>
+        <p className="text-xs text-faint">
+          Expecting an invitation instead? Ask an admin to invite this account, or{" "}
+          <button
+            className={`rounded-md text-accent-strong underline ${focusRing}`}
+            onClick={onSignOut}
+          >
+            sign out
+          </button>
+          .
+        </p>
+      </div>
     </div>
   );
 }
