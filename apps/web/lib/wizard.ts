@@ -451,11 +451,13 @@ export const TOOL_PRESETS: ToolPreset[] = [
   {
     id: COLLABORATION_PRESET_ID,
     label: "Collaboration",
-    summary: "Work with teammates: find colleagues, ask them for help, and answer their requests",
+    summary:
+      "Work with teammates: find colleagues, see what they are working on, ask them for help, and answer their requests",
     description:
-      "Let this agent look colleagues up in the directory, ask any teammate for help with a piece of work (they decide whether to accept), and respond to requests addressed to it. This is safe by default: a request only asks — it can never make a colleague do anything they are not already allowed to do — so it is on by default for new agents. It does NOT include delegation, which transfers authority and stays off unless an admin grants it.",
+      "Let this agent look colleagues up in the directory, see what a teammate is working on right now, ask any teammate for help with a piece of work (they decide whether to accept), and respond to requests addressed to it. This is safe by default: it can only read public work status — never a colleague's instructions, permissions, notes, or conversations — and a request only asks, so it can never make a colleague do anything they are not already allowed to do. It is on by default for new agents. It does NOT include delegation, which transfers authority and stays off unless an admin grants it.",
     tools: {
       "organization.directory.search": {},
+      "organization.colleague_status": {},
       "organization.request_work": { targets: "any" },
       "organization.respond_work_request": {},
     },

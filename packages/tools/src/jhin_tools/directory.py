@@ -7,6 +7,18 @@ fields an agent or a colleague may learn about another agent:
 ``DirectoryEntry``. System prompts, grants, model configuration, private
 metadata, memories, and conversations are never loaded here.
 
+This module is also the one place that turns *a colleague's name* into an
+agent row (:func:`resolve_agent_reference`). Agents refer to each other by
+name — the roster deliberately hides ids from agents that have no tool
+taking one — so every tool that accepts a colleague must accept a name, and
+they all resolve it the same way here rather than each inventing its own
+matching rules.
+
+``organization.colleague_status`` answers "what is X doing right now?" from
+the same public footing: identity plus work status derived from
+authoritative task/run/review rows, and nothing else (see
+:class:`jhin_tools.rollups.ColleagueStatus`).
+
 The roster is an agent's *knowledge* of its colleagues: it is meant to be
 used, including to answer a person's questions about the team. It is not an
 authorization artifact — relationships (manager, team, collaborator) never
@@ -16,17 +28,19 @@ change what an agent is allowed to do, and the rendered block says so.
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from typing import cast
+from typing import Any, Literal, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import or_, select
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from sqlalchemy import Select, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from jhin_db.models import Agent, AgentRelationship, AgentTeamMembership, Team
 from jhin_domain import AgentStatus
 from jhin_policy import RiskLevel, ToolDefinition, capability_matches
 from jhin_tools.builtin import ToolExecutionContext, ToolExecutor, ToolValidator
+from jhin_tools.errors import ToolExecutionError
+from jhin_tools.rollups import ColleagueStatus, build_colleague_status
 
 DIRECTORY_CAPABILITY = "organization.directory.read"
 DIRECTORY_MAX_RESULTS = 25
@@ -217,6 +231,160 @@ async def search_directory(
     page = [item[3] for item in ranked[: limit + 1]]
     has_more = len(page) > limit
     return await entries_for(session, workspace_id, page[:limit]), has_more
+
+
+# --- name resolution ---
+#
+# Agents know their colleagues by name, not by uuid: the roster prints an id
+# only for an agent holding a tool that consumes one, and the platform
+# preamble forbids putting an id in a message to a person. A tool that only
+# accepted ``target_agent_id`` was therefore unusable for the most ordinary
+# ask there is ("ask the CTO what he is working on"), so every colleague
+# argument resolves through the one function below.
+
+# How many names a "here is who exists" hint may list.
+MAX_HINT_NAMES = 15
+
+
+def names_hint(label: str, names: Sequence[str]) -> str:
+    """A bounded, sorted "here is what exists" hint for a failed lookup."""
+    unique = sorted(set(names))
+    shown = ", ".join(unique[:MAX_HINT_NAMES])
+    if len(unique) > MAX_HINT_NAMES:
+        shown += ", …"
+    return f"{label}: {shown}" if shown else f"this workspace has no {label.lower()} yet"
+
+
+def _visible[SelectT: Select[Any]](query: SelectT, *, discoverable_only: bool) -> SelectT:
+    """Optionally narrow a scan to agents the directory would list at all."""
+    if not discoverable_only:
+        return query
+    return query.where(
+        Agent.status == AgentStatus.ACTIVE.value,
+        Agent.discoverability == "discoverable",
+    )
+
+
+async def agent_names_hint(
+    session: AsyncSession, workspace_id: UUID, *, discoverable_only: bool = True
+) -> str:
+    """Candidate colleague names for a failed lookup.
+
+    Defaults to discoverable, active agents only: a failed name lookup must
+    never become a way to enumerate agents the directory and the roster
+    deliberately hide.
+    """
+    names = list(
+        await session.scalars(
+            _visible(
+                select(Agent.name).where(Agent.workspace_id == workspace_id),
+                discoverable_only=discoverable_only,
+            ).limit(_SCAN_LIMIT)
+        )
+    )
+    return names_hint("Agents", names)
+
+
+async def find_agent_by_reference(
+    session: AsyncSession,
+    workspace_id: UUID,
+    *,
+    agent_id: str | None = None,
+    agent_name: str | None = None,
+    discoverable_only: bool = False,
+) -> Agent | Literal["ambiguous"] | None:
+    """Quiet colleague lookup by id or by name (no exceptions raised).
+
+    ``agent_id`` wins when both are given. Name matching is
+    case-insensitive and runs in decreasing strength — exact name, exact
+    slug, exact role title, then a *unique* substring of a name or role
+    title — so "CTO", "cto", and "Chief Technology Officer" all reach the
+    same colleague while a needle matching several agents reports
+    ``"ambiguous"`` instead of silently picking one.
+    """
+    if agent_id:
+        try:
+            parsed = UUID(agent_id)
+        except ValueError:
+            return None
+        by_id: Agent | None = await session.scalar(
+            _visible(
+                select(Agent).where(Agent.id == parsed, Agent.workspace_id == workspace_id),
+                discoverable_only=discoverable_only,
+            )
+        )
+        return by_id
+    needle = (agent_name or "").strip().lower()
+    if not needle:
+        return None
+    candidates = list(
+        await session.scalars(
+            _visible(
+                select(Agent).where(Agent.workspace_id == workspace_id),
+                discoverable_only=discoverable_only,
+            )
+            .order_by(Agent.name, Agent.id)
+            .limit(_SCAN_LIMIT)
+        )
+    )
+    tiers = (
+        lambda a: a.name.strip().lower() == needle,
+        lambda a: a.slug.strip().lower() == needle,
+        lambda a: a.role_title.strip().lower() == needle,
+        lambda a: needle in a.name.strip().lower(),
+        lambda a: needle in a.role_title.strip().lower(),
+    )
+    for matches_tier in tiers:
+        matches = [a for a in candidates if matches_tier(a)]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            return "ambiguous"
+    return None
+
+
+async def resolve_agent_reference(
+    session: AsyncSession,
+    workspace_id: UUID,
+    *,
+    agent_id: str | None = None,
+    agent_name: str | None = None,
+    discoverable_only: bool = False,
+    hint_discoverable_only: bool = True,
+    role: str = "agent",
+) -> Agent:
+    """:func:`find_agent_by_reference`, raising a model-readable failure.
+
+    An unknown name comes back as a bounded failure that *names the
+    candidates* rather than a bare "not found", because the model's next
+    move should be to retry with a real colleague's name. ``role`` only
+    shapes the message ("the manager name '…'").
+    """
+    found = await find_agent_by_reference(
+        session,
+        workspace_id,
+        agent_id=agent_id,
+        agent_name=agent_name,
+        discoverable_only=discoverable_only,
+    )
+    if isinstance(found, str):
+        raise ToolExecutionError(
+            f"the {role} name '{agent_name}' matches more than one agent",
+            code="agent_name_ambiguous",
+            side_effect_possible=False,
+            hint="pass the agent id instead to pick one exactly",
+        )
+    if found is None:
+        label = agent_name or agent_id or ""
+        raise ToolExecutionError(
+            f"no agent '{label}' in this workspace",
+            code="agent_not_found",
+            side_effect_possible=False,
+            hint=await agent_names_hint(
+                session, workspace_id, discoverable_only=hint_discoverable_only
+            ),
+        )
+    return found
 
 
 async def build_roster(session: AsyncSession, agent: Agent) -> OrganizationRoster:
@@ -510,6 +678,44 @@ async def _directory_search(ctx: ToolExecutionContext, payload: BaseModel) -> Ba
     return DirectorySearchOutput(entries=entries, has_more=has_more)
 
 
+class ColleagueStatusInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    agent_name: str = Field(default="", max_length=200)
+    # Optional: only agents that hold a tool taking an id ever see one.
+    agent_id: str = Field(default="", max_length=64)
+
+    @model_validator(mode="after")
+    def _needs_a_colleague(self) -> ColleagueStatusInput:
+        if not self.agent_name.strip() and not self.agent_id.strip():
+            raise ValueError("pass agent_name (or agent_id) to pick the colleague")
+        return self
+
+
+async def _colleague_status(ctx: ToolExecutionContext, payload: BaseModel) -> BaseModel:
+    data = cast(ColleagueStatusInput, payload)
+    colleague = await resolve_agent_reference(
+        ctx.session,
+        ctx.workspace_id,
+        agent_id=data.agent_id.strip() or None,
+        agent_name=data.agent_name.strip() or None,
+        # A status lookup is a discovery: an agent the directory and roster
+        # hide must not become visible through it, by name or by id.
+        discoverable_only=True,
+        role="colleague",
+    )
+    if colleague.id == ctx.agent_id:
+        raise ToolExecutionError(
+            "that is you — you already know what you are working on",
+            code="self_status",
+            side_effect_possible=False,
+            hint="pass a colleague's name instead",
+        )
+    teams = await _primary_team_by_agent(ctx.session, ctx.workspace_id, [colleague])
+    team = teams.get(colleague.id)
+    return await build_colleague_status(ctx.session, colleague, team_name=team[1] if team else "")
+
+
 DIRECTORY_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor, ToolValidator | None], ...] = (
     (
         ToolDefinition(
@@ -525,6 +731,28 @@ DIRECTORY_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor, ToolValidator | None]
             required_capability=DIRECTORY_CAPABILITY,
         ),
         _directory_search,
+        None,
+    ),
+    (
+        ToolDefinition(
+            name="organization.colleague_status",
+            description=(
+                "Find out what a colleague is doing right now. Pass their "
+                'name (agent_name) — for example "what is the CTO working '
+                'on?" Returns their availability, the tasks they are '
+                "working on and have queued, what they recently finished, "
+                "when they were last active, and how much is waiting on "
+                "them. Use this before telling anyone you do not know what a "
+                "colleague is up to. Public work status only: it never "
+                "returns a colleague's instructions, permissions, private "
+                "notes, or conversations."
+            ),
+            risk=RiskLevel.READ,
+            input_model=ColleagueStatusInput,
+            output_model=ColleagueStatus,
+            required_capability=DIRECTORY_CAPABILITY,
+        ),
+        _colleague_status,
         None,
     ),
 )

@@ -111,4 +111,22 @@ def test_old_snapshots_without_workspace_name_still_render() -> None:
 
 
 def test_preamble_is_versioned() -> None:
-    assert PLATFORM_PREAMBLE_VERSION == 4
+    assert PLATFORM_PREAMBLE_VERSION == 5
+
+
+def test_preamble_tells_agents_to_look_before_saying_they_do_not_know() -> None:
+    """The "say what you cannot do" rule on its own taught agents to answer
+    "I don't have access to that" while holding a tool that would have
+    answered. The preamble now orders the two: look first, then say so."""
+    text = render_platform_preamble(agent_name="Connie")
+    assert "Before you tell anyone you do not know something" in text
+    assert "If one of your tools answers the question, call it" in text
+    # ...and being told to ask a colleague means actually asking one.
+    assert "ask them with your work-request tool" in text
+    assert '"can you ask him"' in text
+    assert "actually send that request" in text
+    # The look-first rule comes before the "say what you cannot do" rule, so
+    # the model reads the escape hatch as the fallback it is.
+    assert text.index("Before you tell anyone") < text.index(
+        "You act only through the tools you have been granted"
+    )

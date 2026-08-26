@@ -46,7 +46,7 @@ seed):
 
 | capability | scope | why it is safe by default |
 | --- | --- | --- |
-| `organization.directory.read` | — | public identity only (no prompts, grants, model config, memories, or transcripts). |
+| `organization.directory.read` | — | public identity and public work status only (no prompts, grants, model config, memories, or transcripts). Covers `organization.directory.search` and `organization.colleague_status`. |
 | `organization.work.request` | `targets: any` | a request only *asks*. It cannot make the target do anything the target is not already permitted to do (the target's own grants still gate everything it then does); the target — or a human on its behalf — accepts, declines, or asks for clarification; an accept creates at most **one** task that stays visible in the conversation/Activity and stoppable; and every structural guard (no self-request, target active/available, depth, per-agent open/rate/active-task caps, and no ping-pong) runs in `evaluate_work_request` regardless of the grant. `targets: any` lets a small company ask across teams; the missing-scope default remains `team`. |
 | `organization.work.respond` | — | structurally limited to the request's target agent, so an agent can be asked as well as ask. |
 
@@ -142,22 +142,82 @@ Shared by the API and the agent worker so there is one implementation.
 
 | module | functions | gateway tools |
 | --- | --- | --- |
-| `directory.py` | `search_directory`, `build_roster`, `render_roster`, `DirectoryEntry` allowlist | `organization.directory.search` (capability `organization.directory.read`, read) |
+| `directory.py` | `search_directory`, `build_roster`, `render_roster`, `DirectoryEntry` allowlist, `find_agent_by_reference` / `resolve_agent_reference` (the one name→agent resolver) | `organization.directory.search` and `organization.colleague_status` (capability `organization.directory.read`, read) |
 | `work_requests.py` | `load_work_request_facts`, `create_work_request`, `accept_work_request`, `decline_work_request`, `request_clarification`, `finalize_work_request`, `root_task_id` | `organization.request_work` (capability `organization.work.request`, write, defers scope to the validator), `organization.respond_work_request` (capability `organization.work.respond`, write, structurally limited to the target agent) |
 | `reviews.py` | `check_review_gate`, `evaluate_review_event`, `open_review`, `decide_review`, `load_policy_specs` | `organization.review.request` and `organization.review.submit` (capability `organization.review.request`, write; submit is structurally limited to the assigned AI reviewer while pending) |
-| `rollups.py` | `build_manager_rollup`, `render_manager_rollup` | — |
+| `rollups.py` | `build_manager_rollup`, `render_manager_rollup`, `build_colleague_status` | — |
 
 All four tool groups register through `build_builtin_catalog` exactly like
 the Phase 8 organization tools.
 
+### Colleagues are referred to by name
+
+The roster prints agent ids only for an agent holding a tool that consumes
+one, and the platform preamble forbids putting an id in a message to a
+person — so *a name is the only handle an agent reliably has for a
+colleague*. Every tool that takes a colleague therefore accepts
+`..._agent_name` as well as `..._agent_id`, and they all resolve through
+`jhin_tools.directory.resolve_agent_reference` rather than inventing their
+own matching:
+
+- an id wins when both are given; otherwise matching is case-insensitive
+  and runs in decreasing strength — exact name, exact slug, exact role
+  title, then a *unique* substring of a name or role title;
+- a needle matching several agents fails as `agent_name_ambiguous` instead
+  of silently picking one;
+- an unknown name fails as `agent_not_found` **naming the candidates**, so
+  the model's next move is a retry with a real colleague rather than "I
+  don't know who that is". The candidate list covers discoverable, active
+  agents only: a wrong name must never become a way to enumerate agents the
+  directory hides.
+
+`organization.request_work` matches over every agent in the workspace (so
+the structural deny codes `target_not_found` / `target_inactive` /
+`target_unavailable` keep their meaning for a caller that already holds an
+id), while `organization.colleague_status` matches over discoverable, active
+agents only — a status lookup is itself a discovery.
+
+### `organization.colleague_status` (read, no approval)
+
+"What is the CTO doing right now?" is answerable from Jhin's own rows, and
+an agent that cannot answer it looks like it works alone. The tool takes
+`agent_name` (or `agent_id`) and returns `ColleagueStatus`: public identity,
+the titles and lifecycle states of the tasks that colleague is working on,
+has queued, and recently finished, the live run status, when they were last
+active, counts of what is waiting on them (unanswered work requests, reviews
+assigned to them, approvals pending on their work), and one plain-language
+`summary` sentence assembled from those fields.
+
+Why each field is safe to show any colleague: identity is exactly what the
+roster already carries; a task **title** and its state are already visible
+workspace-wide in the shared Activity feed, so naming them leaks nothing
+new; the load figures are counts only, so "they are backed up" is answerable
+without naming what they are backed up on. Deliberately absent, by
+construction rather than by filtering: another agent's system prompt,
+capability grants, model configuration, private metadata, memories, message
+or conversation content, task **descriptions**, and reported-result
+summaries (the manager rollup carries those under a reporting line; a peer
+has no such standing). Task/run/review ids are omitted too — nothing here
+consumes them and an agent only tends to echo them at a person. Every query
+is pinned to the resolved agent's `workspace_id`, so cross-workspace reads
+are impossible. `ColleagueStatus.model_fields` is asserted verbatim in
+`packages/tools/tests/test_coordination_tools.py`, so widening the payload
+is a deliberate act.
+
 ### Work request flow
 
 1. Requester calls `organization.request_work` (or a human posts
-   `POST /work-requests`). The validator loads live facts and runs
+   `POST /work-requests`). Only two arguments are genuinely required of the
+   model — `target_agent_name` and `description` — because the commonest ask
+   in the product ("ask the CTO what he's working on") is a question, not a
+   work package; `title` defaults to the ask's own first sentence
+   (`derived_title`, deterministic so the default idempotency key is stable).
+   The validator resolves the colleague, loads live facts, and runs
    `evaluate_work_request`; denials are recorded tool calls.
 2. `create_work_request` persists the row (idempotent on
-   `idempotency_key`; the tool derives `run:{run_id}:{sha256}` when the model
-   gives none) and a `question` message on the requester's task with
+   `idempotency_key`; the tool derives `run:{run_id}:{sha256}` from the
+   *resolved* target id, the title, and the description when the model gives
+   none, so naming a colleague and passing their id are the same request) and a `question` message on the requester's task with
    `kind="work_request"`, `work_request_id`, `target_agent_name`,
    `from_agent_name`.
 3. The target responds with `organization.respond_work_request` (or an admin

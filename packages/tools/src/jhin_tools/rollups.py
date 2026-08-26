@@ -1,28 +1,35 @@
-"""Manager rollups: a deterministic, source-linked status digest of a
-manager's direct and indirect reports.
+"""Status digests derived from authoritative rows.
 
-Built only from authoritative rows (tasks, runs, approvals, reviews, work
-requests, reported results). No transcripts, no private memory, no
-conversation text — every item carries the ids it was derived from so a
-reader can open the source. The same structure serves the API
-(``GET /agents/{id}/rollup``) and the manager's prompt context
-(:func:`render_manager_rollup`).
+Two projections live here, both built only from authoritative rows (tasks,
+runs, approvals, reviews, work requests, reported results) — never from
+transcripts, private memory, or conversation text:
+
+* :func:`build_manager_rollup` — a manager's view of their direct and
+  indirect reports. Every item carries the ids it was derived from so a
+  reader can open the source. It serves the API (``GET
+  /agents/{id}/rollup``) and the manager's prompt context
+  (:func:`render_manager_rollup`).
+* :func:`build_colleague_status` — *anyone's* view of one colleague, behind
+  ``organization.colleague_status``. Strictly narrower than the rollup: see
+  :class:`ColleagueStatus` for the allowlist and the reasoning behind it.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from jhin_db.models import Agent, AgentRun, Approval, Task, WorkRequest, WorkReview
 from jhin_domain import (
     RUN_ACTIVE_STATUSES,
     WORK_REQUEST_OPEN_STATUSES,
+    AgentStatus,
     ApprovalStatus,
     RunStatus,
     TaskState,
@@ -440,3 +447,242 @@ def render_manager_rollup(rollup: ManagerRollup, *, max_chars: int = ROLLUP_MAX_
     if len(text) > max_chars:
         text = text[: max_chars - 1].rstrip() + "…"
     return text
+
+
+# --- colleague status (peer-visible) ---------------------------------------
+#
+# "What is the CTO doing right now?" is a question Jhin can answer from its
+# own rows, and an agent that cannot answer it looks like it works alone.
+# The manager rollup above is the wrong shape for it: it is keyed to a
+# reporting line the asker may not have, it fans out over a whole subtree,
+# and it carries reported-result summaries a peer has no business reading.
+# This projection is deliberately narrower.
+
+COLLEAGUE_STATUS_WINDOW = timedelta(days=7)
+COLLEAGUE_STATUS_MAX_ITEMS = 5
+_COLLEAGUE_ACTIVE_STATES = (TaskState.RUNNING.value, TaskState.PAUSED.value)
+_COLLEAGUE_OPEN_STATES = (
+    TaskState.QUEUED.value,
+    TaskState.RUNNING.value,
+    TaskState.PAUSED.value,
+)
+
+
+class ColleagueWorkItem(BaseModel):
+    """One piece of work, by title only.
+
+    No description, no reported summary, no ids: a task *title* is already
+    visible to the whole workspace in the shared Activity feed, so naming it
+    leaks nothing new, while a description or a result summary is the first
+    place real content shows up.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    title: str
+    state: str
+    # The run's own status when one is live ("running", "waiting_approval",
+    # …) — it is what makes "working" different from "blocked".
+    run_status: str = ""
+    updated_at: datetime
+
+
+class ColleagueStatus(BaseModel):
+    """What any colleague may learn about another colleague's work.
+
+    The complete allowlist, and why each field is safe:
+
+    * identity (``name``, ``role_title``, ``team_name``, ``availability``,
+      ``status``) — exactly the public directory identity every agent
+      already has in its roster;
+    * work status (``working_now``, ``active_runs``, ``current_work``,
+      ``queued_work``, ``recently_finished``) — task titles and lifecycle
+      states, both already visible workspace-wide in Activity;
+    * load (``open_requests_awaiting_them``, ``pending_reviews``,
+      ``pending_approvals``) — *counts only*, so "they are backed up" is
+      answerable without naming what they are backed up on;
+    * ``last_active_at`` and ``generated_at`` — timestamps.
+
+    Never here, by construction rather than by filtering: another agent's
+    system prompt, capability grants, model configuration, private
+    metadata, memories, message or conversation content, task descriptions,
+    reported-result summaries, and anything belonging to another workspace
+    (every query is pinned to ``agent.workspace_id``).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    agent_id: str
+    name: str
+    role_title: str = ""
+    team_name: str = ""
+    status: str = AgentStatus.ACTIVE.value
+    availability: str = "available"
+    working_now: bool = False
+    active_runs: int = 0
+    current_work: list[ColleagueWorkItem] = Field(default_factory=list)
+    queued_work: list[ColleagueWorkItem] = Field(default_factory=list)
+    recently_finished: list[ColleagueWorkItem] = Field(default_factory=list)
+    open_requests_awaiting_them: int = 0
+    pending_reviews: int = 0
+    pending_approvals: int = 0
+    last_active_at: datetime | None = None
+    generated_at: datetime
+    # One plain-language sentence assembled from the fields above, so the
+    # model has something to say back without re-deriving it.
+    summary: str = ""
+
+
+def _colleague_items(
+    tasks: Sequence[Task], run_status_by_task: dict[UUID, str]
+) -> list[ColleagueWorkItem]:
+    ordered = sorted(tasks, key=lambda t: (_aware(t.updated_at), str(t.id)), reverse=True)
+    return [
+        ColleagueWorkItem(
+            title=task.title,
+            state=task.state,
+            run_status=run_status_by_task.get(task.id, ""),
+            updated_at=_aware(task.updated_at),
+        )
+        for task in ordered[:COLLEAGUE_STATUS_MAX_ITEMS]
+    ]
+
+
+def _colleague_summary(status: ColleagueStatus) -> str:
+    """A deterministic sentence built from the allowlisted fields only."""
+    who = status.name + (f" ({status.role_title})" if status.role_title else "")
+    if status.status != AgentStatus.ACTIVE.value:
+        return f"{who} is not active in this workspace right now."
+    if status.availability != "available":
+        head = f"{who} is marked {status.availability}"
+    elif status.working_now:
+        head = f"{who} is working right now"
+    else:
+        head = f"{who} is not running anything right now"
+    if status.current_work:
+        head += ": " + "; ".join(f'"{item.title}"' for item in status.current_work)
+    elif status.queued_work:
+        head += f", with {len(status.queued_work)} task(s) queued"
+    elif status.recently_finished:
+        head += f'. Most recently finished: "{status.recently_finished[0].title}"'
+    waiting = []
+    if status.open_requests_awaiting_them:
+        waiting.append(f"{status.open_requests_awaiting_them} unanswered work request(s)")
+    if status.pending_reviews:
+        waiting.append(f"{status.pending_reviews} review(s) to do")
+    if status.pending_approvals:
+        waiting.append(f"{status.pending_approvals} approval(s) pending on their work")
+    tail = f" Waiting on them: {', '.join(waiting)}." if waiting else ""
+    return head.rstrip(".") + "." + tail
+
+
+async def build_colleague_status(
+    session: AsyncSession,
+    colleague: Agent,
+    *,
+    team_name: str = "",
+    now: datetime | None = None,
+) -> ColleagueStatus:
+    """Public work status for one colleague.
+
+    Every query is pinned to ``colleague.workspace_id``, so a caller from
+    another workspace cannot reach this data even with a valid agent row in
+    hand — the tool resolves the name inside the caller's workspace first.
+    """
+    now = now or datetime.now(UTC)
+    window_start = now - COLLEAGUE_STATUS_WINDOW
+    workspace_id = colleague.workspace_id
+
+    open_tasks = list(
+        await session.scalars(
+            select(Task).where(
+                Task.workspace_id == workspace_id,
+                Task.assigned_agent_id == colleague.id,
+                Task.state.in_(_COLLEAGUE_OPEN_STATES),
+            )
+        )
+    )
+    finished_tasks = list(
+        await session.scalars(
+            select(Task)
+            .where(
+                Task.workspace_id == workspace_id,
+                Task.assigned_agent_id == colleague.id,
+                Task.state.notin_(_COLLEAGUE_OPEN_STATES),
+                Task.updated_at >= window_start,
+            )
+            .order_by(Task.updated_at.desc(), Task.id.desc())
+            .limit(COLLEAGUE_STATUS_MAX_ITEMS)
+        )
+    )
+    runs = list(
+        await session.scalars(
+            select(AgentRun).where(
+                AgentRun.workspace_id == workspace_id,
+                AgentRun.agent_id == colleague.id,
+                AgentRun.status.in_([s.value for s in RUN_ACTIVE_STATUSES]),
+            )
+        )
+    )
+    run_status_by_task = {run.task_id: run.status for run in runs if run.task_id is not None}
+
+    async def count(model: Any, *where: Any) -> int:
+        value = await session.scalar(select(func.count()).select_from(model).where(*where))
+        return int(value or 0)
+
+    open_requests = await count(
+        WorkRequest,
+        WorkRequest.workspace_id == workspace_id,
+        WorkRequest.target_agent_id == colleague.id,
+        WorkRequest.status.in_([s.value for s in WORK_REQUEST_OPEN_STATUSES]),
+    )
+    pending_reviews = await count(
+        WorkReview,
+        WorkReview.workspace_id == workspace_id,
+        WorkReview.reviewer_agent_id == colleague.id,
+        WorkReview.status == WorkReviewStatus.PENDING.value,
+    )
+    pending_approvals = await count(
+        Approval,
+        Approval.workspace_id == workspace_id,
+        Approval.requested_by_agent_id == colleague.id,
+        Approval.status == ApprovalStatus.PENDING.value,
+    )
+
+    # "Last active" from timestamps only — the newest run touch, or the
+    # newest task touch when the colleague has never run.
+    last_run_at = await session.scalar(
+        select(func.max(AgentRun.updated_at)).where(
+            AgentRun.workspace_id == workspace_id, AgentRun.agent_id == colleague.id
+        )
+    )
+    last_task_at = await session.scalar(
+        select(func.max(Task.updated_at)).where(
+            Task.workspace_id == workspace_id, Task.assigned_agent_id == colleague.id
+        )
+    )
+    stamps = [_aware(value) for value in (last_run_at, last_task_at) if value is not None]
+
+    status = ColleagueStatus(
+        agent_id=str(colleague.id),
+        name=colleague.name,
+        role_title=colleague.role_title,
+        team_name=team_name,
+        status=colleague.status,
+        availability=colleague.availability,
+        working_now=bool(runs),
+        active_runs=len(runs),
+        current_work=_colleague_items(
+            [t for t in open_tasks if t.state in _COLLEAGUE_ACTIVE_STATES], run_status_by_task
+        ),
+        queued_work=_colleague_items(
+            [t for t in open_tasks if t.state == TaskState.QUEUED.value], run_status_by_task
+        ),
+        recently_finished=_colleague_items(finished_tasks, run_status_by_task),
+        open_requests_awaiting_them=open_requests,
+        pending_reviews=pending_reviews,
+        pending_approvals=pending_approvals,
+        last_active_at=max(stamps) if stamps else None,
+        generated_at=now,
+    )
+    return status.model_copy(update={"summary": _colleague_summary(status)})

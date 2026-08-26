@@ -27,7 +27,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -59,6 +59,8 @@ from jhin_policy import (
     evaluate_work_request,
 )
 from jhin_tools.builtin import ToolExecutionContext, ToolExecutor, ToolValidator
+from jhin_tools.directory import resolve_agent_reference
+from jhin_tools.errors import ToolExecutionError
 from jhin_tools.organization import _is_subordinate
 
 _MAX_TASK_ANCESTORS = 50
@@ -634,14 +636,49 @@ async def finalize_work_request(
 
 
 class RequestWorkInput(BaseModel):
+    """The ask. Only two fields are genuinely required of the model: *who*
+    and *what* — everything else has a sane default.
+
+    ``target_agent_name`` exists because that is how agents know each other:
+    the roster prints ids only for agents holding a tool that consumes one,
+    and the platform preamble forbids ids in messages to people. Requiring a
+    uuid made the commonest ask in the product ("ask the CTO what he is
+    working on") impossible to express, so the model gave up and answered
+    that it could not.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
-    target_agent_id: str = Field(min_length=1, max_length=64)
-    title: str = Field(min_length=1, max_length=500)
+    target_agent_name: str = Field(default="", max_length=200)
+    target_agent_id: str = Field(default="", max_length=64)
     description: str = Field(min_length=1, max_length=20_000)
+    # Optional: a short label for the ask. Derived from ``description`` when
+    # the model does not bother — a question does not need a headline.
+    title: str = Field(default="", max_length=500)
     expected_output: str = Field(default="", max_length=4_000)
     # Retries with the same key never create a second request.
     idempotency_key: str = Field(default="", max_length=200)
+
+    @model_validator(mode="after")
+    def _needs_a_target(self) -> RequestWorkInput:
+        if not self.target_agent_name.strip() and not self.target_agent_id.strip():
+            raise ValueError("pass target_agent_name (or target_agent_id) to pick the colleague")
+        return self
+
+
+def derived_title(title: str, description: str) -> str:
+    """A title for an ask that arrived without one: the first sentence or
+    clause of the ask itself, bounded. Deterministic, so the default
+    idempotency key stays stable across a retry of the same call."""
+    if title.strip():
+        return title.strip()
+    first = description.strip().splitlines()[0].strip() if description.strip() else ""
+    for stop in (". ", "? ", "! "):
+        head, sep, _rest = first.partition(stop)
+        if sep:
+            first = head + sep.strip()
+            break
+    return (first[:117] + "…") if len(first) > 118 else (first or "A question from a colleague")
 
 
 class RequestWorkOutput(BaseModel):
@@ -675,15 +712,45 @@ def default_idempotency_key(
     return f"run:{run_id}:{digest[:32]}"
 
 
+async def _resolve_target(ctx: ToolExecutionContext, data: RequestWorkInput) -> Agent:
+    """The requested colleague, by id or by name.
+
+    Matching spans every agent in the workspace (not only discoverable
+    ones), so the existing structural deny codes — ``target_not_found``,
+    ``target_inactive``, ``target_unavailable`` — keep their meaning for a
+    caller that already holds an id. The failure *hint* still lists
+    discoverable agents only, so a wrong name can never enumerate the
+    colleagues the directory hides.
+    """
+    return await resolve_agent_reference(
+        ctx.session,
+        ctx.workspace_id,
+        agent_id=data.target_agent_id.strip() or None,
+        agent_name=data.target_agent_name.strip() or None,
+        role="colleague",
+    )
+
+
 async def validate_request_work(
     ctx: ToolExecutionContext, payload: BaseModel, grants: Sequence[Grant]
 ) -> PolicyDecision | None:
     data = cast(RequestWorkInput, payload)
+    try:
+        target = await _resolve_target(ctx, data)
+    except ToolExecutionError as exc:
+        # A name that does not resolve is a bad argument, not a permission
+        # problem — but the veto hook can only deny, so say plainly what
+        # went wrong and name the colleagues that do exist.
+        return PolicyDecision(
+            decision=DecisionType.DENY,
+            code=exc.code,
+            reason=f"{exc}. {exc.hint}" if exc.hint else str(exc),
+        )
     facts = await load_work_request_facts(
         ctx.session,
         workspace_id=ctx.workspace_id,
         requester_agent_id=ctx.agent_id,
-        target_agent_id=data.target_agent_id,
+        target_agent_id=str(target.id),
         task_id=ctx.task_id,
     )
     workspace = await ctx.session.get(Workspace, ctx.workspace_id)
@@ -696,21 +763,18 @@ async def validate_request_work(
 
 async def _request_work(ctx: ToolExecutionContext, payload: BaseModel) -> BaseModel:
     data = cast(RequestWorkInput, payload)
-    target = await ctx.session.scalar(
-        select(Agent).where(
-            Agent.id == UUID(data.target_agent_id), Agent.workspace_id == ctx.workspace_id
-        )
-    )
+    target = await _resolve_target(ctx, data)
     requester = await ctx.session.scalar(
         select(Agent).where(Agent.id == ctx.agent_id, Agent.workspace_id == ctx.workspace_id)
     )
-    if target is None or requester is None:
+    if requester is None:
         raise ValueError("work request participants disappeared before execution")
     task = await ctx.session.scalar(
         select(Task).where(Task.id == ctx.task_id, Task.workspace_id == ctx.workspace_id)
     )
+    title = derived_title(data.title, data.description)
     key = data.idempotency_key or default_idempotency_key(
-        ctx.run_id, data.target_agent_id, data.title, data.description
+        ctx.run_id, str(target.id), title, data.description
     )
     request, created = await create_work_request(
         ctx.session,
@@ -719,7 +783,7 @@ async def _request_work(ctx: ToolExecutionContext, payload: BaseModel) -> BaseMo
         target=target,
         requester_task=task,
         requester_run_id=ctx.run_id,
-        title=data.title,
+        title=title,
         description=data.description,
         expected_output=data.expected_output,
         idempotency_key=key,
@@ -812,11 +876,18 @@ WORK_REQUEST_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor, ToolValidator | No
         ToolDefinition(
             name="organization.request_work",
             description=(
-                "Ask another agent (a peer or someone on another team) for "
-                "help with a piece of work. Unlike delegation, the target "
-                "decides whether to accept; if they do, a separate task is "
-                "created for them and the result arrives as a message. Use "
-                "organization.directory.search to find the right colleague."
+                "Ask a colleague something and get an answer back. Use this "
+                "whenever someone tells you to ask, check with, or find out "
+                "from a teammate — \"can you ask the CTO what he's working "
+                'on?" is exactly this tool — and whenever a colleague is '
+                "better placed than you to answer or to do a piece of work. "
+                "Pass target_agent_name (their name as you know it, e.g. "
+                '"CTO") and description (what you are asking them, in '
+                "plain words). Nothing else is required. They decide whether "
+                "to accept; their answer arrives later as a message on this "
+                "conversation, so tell the person you have asked and what "
+                "you asked. Unlike delegating, this does not hand over your "
+                "work — it only asks."
             ),
             risk=RiskLevel.WRITE,
             input_model=RequestWorkInput,

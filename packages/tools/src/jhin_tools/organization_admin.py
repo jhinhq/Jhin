@@ -56,6 +56,11 @@ from jhin_policy import (
     collaboration_grant_specs,
 )
 from jhin_tools.builtin import ToolExecutionContext, ToolExecutor, ToolValidator
+from jhin_tools.directory import (
+    find_agent_by_reference,
+    names_hint,
+    resolve_agent_reference,
+)
 from jhin_tools.errors import ToolExecutionError
 from jhin_tools.organization import _is_subordinate
 
@@ -64,7 +69,6 @@ ORGANIZATION_MANAGE_AGENTS_CAPABILITY = "organization.manage_agents"
 _SLUG_INVALID = re.compile(r"[^a-z0-9]+")
 # Bound on candidate scans; workspaces are small organizations.
 _SCAN_LIMIT = 1_000
-_MAX_HINT_NAMES = 15
 
 
 def _slugify(value: str) -> str:
@@ -86,13 +90,6 @@ def default_shape_avatar(name: str) -> tuple[str, str]:
         AVATAR_SHAPES[hashed % len(AVATAR_SHAPES)],
         AVATAR_COLORS[(hashed // 7) % len(AVATAR_COLORS)],
     )
-
-
-def _names_hint(label: str, names: Sequence[str]) -> str:
-    shown = ", ".join(sorted(names)[:_MAX_HINT_NAMES])
-    if len(names) > _MAX_HINT_NAMES:
-        shown += ", …"
-    return f"{label}: {shown}" if shown else f"this workspace has no {label.lower()} yet"
 
 
 # --- name resolution -------------------------------------------------------
@@ -138,7 +135,7 @@ async def _resolve_team(
                 f"no team named '{team_name}' in this workspace",
                 code="team_not_found",
                 side_effect_possible=False,
-                hint=_names_hint("Teams", [t.name for t in teams]),
+                hint=names_hint("Teams", [t.name for t in teams]),
             )
         if len(matches) > 1:
             raise ToolExecutionError(
@@ -157,7 +154,7 @@ async def _team_names_hint(session: AsyncSession, workspace_id: UUID) -> str:
             select(Team.name).where(Team.workspace_id == workspace_id).limit(_SCAN_LIMIT)
         )
     )
-    return _names_hint("Teams", names)
+    return names_hint("Teams", names)
 
 
 async def _find_agent(
@@ -167,27 +164,14 @@ async def _find_agent(
     agent_id: str | None,
     agent_name: str | None,
 ) -> Agent | Literal["ambiguous"] | None:
-    """Quiet lookup shared by the validator (no exceptions) and executors."""
-    if agent_id:
-        try:
-            parsed = UUID(agent_id)
-        except ValueError:
-            return None
-        by_id: Agent | None = await session.scalar(
-            select(Agent).where(Agent.id == parsed, Agent.workspace_id == workspace_id)
-        )
-        return by_id
-    if agent_name:
-        agents = list(
-            await session.scalars(
-                select(Agent).where(Agent.workspace_id == workspace_id).limit(_SCAN_LIMIT)
-            )
-        )
-        matches = [a for a in agents if a.name.strip().lower() == agent_name.strip().lower()]
-        if len(matches) > 1:
-            return "ambiguous"
-        return matches[0] if matches else None
-    return None
+    """Quiet lookup shared by the validator (no exceptions) and executors.
+
+    Administration reaches every agent in the workspace, hidden ones
+    included: this capability already manages them.
+    """
+    return await find_agent_by_reference(
+        session, workspace_id, agent_id=agent_id, agent_name=agent_name
+    )
 
 
 async def _resolve_agent(
@@ -198,28 +182,16 @@ async def _resolve_agent(
     agent_name: str | None,
     role: str,
 ) -> Agent:
-    found = await _find_agent(session, workspace_id, agent_id=agent_id, agent_name=agent_name)
-    if isinstance(found, str):
-        raise ToolExecutionError(
-            f"the {role} name '{agent_name}' matches more than one agent",
-            code="agent_name_ambiguous",
-            side_effect_possible=False,
-            hint="pass the agent id instead to pick one exactly",
-        )
-    if found is None:
-        label = agent_name or agent_id or ""
-        names = list(
-            await session.scalars(
-                select(Agent.name).where(Agent.workspace_id == workspace_id).limit(_SCAN_LIMIT)
-            )
-        )
-        raise ToolExecutionError(
-            f"no agent '{label}' in this workspace",
-            code="agent_not_found",
-            side_effect_possible=False,
-            hint=_names_hint("Agents", names),
-        )
-    return found
+    return await resolve_agent_reference(
+        session,
+        workspace_id,
+        agent_id=agent_id,
+        agent_name=agent_name,
+        # Administration needs the full picture, e.g. to explain that a name
+        # is already taken by an agent the directory does not list.
+        hint_discoverable_only=False,
+        role=role,
+    )
 
 
 # --- organization.create_agent (elevated) ---------------------------------

@@ -32,13 +32,22 @@ from jhin_db.models import (
     Workspace,
 )
 from jhin_domain import MessageType, RunStatus, TaskState, WorkRequestStatus, new_uuid7
-from jhin_policy import Grant, GrantEffect, collaboration_grant_specs
+from jhin_policy import Grant, GrantEffect, RiskLevel, collaboration_grant_specs
 from jhin_tools.builtin import (
     ToolExecutionContext,
     allowed_tool_definitions,
     build_builtin_catalog,
+    task_scoped_tool_definitions,
 )
-from jhin_tools.directory import DirectoryEntry, build_roster, render_roster, search_directory
+from jhin_tools.directory import (
+    DirectoryEntry,
+    build_roster,
+    find_agent_by_reference,
+    render_roster,
+    resolve_agent_reference,
+    search_directory,
+)
+from jhin_tools.errors import ToolExecutionError
 from jhin_tools.gateway import GatewayOutcome, ToolGateway
 from jhin_tools.reviews import (
     ToolCallIntent,
@@ -47,8 +56,8 @@ from jhin_tools.reviews import (
     open_periodic_review,
     periodic_trigger_key,
 )
-from jhin_tools.rollups import build_manager_rollup, render_manager_rollup
-from jhin_tools.work_requests import finalize_work_request
+from jhin_tools.rollups import ColleagueStatus, build_manager_rollup, render_manager_rollup
+from jhin_tools.work_requests import derived_title, finalize_work_request
 
 
 class Org:
@@ -916,3 +925,421 @@ async def test_gateway_review_gate_runs_after_authorization_and_before_execution
     staged = await later_gateway.request("system.demo.destructive", arguments)
     assert staged.status == "needs_approval", staged.decision_reason
     assert staged.approval_id is not None
+
+
+# --- colleague references by name ---------------------------------------
+#
+# Regression cluster for the reported bug: Bisby held organization.work.request
+# and was told "can you ask him", yet answered "I can't see the CTO's current
+# activity". Two things were missing — a way to *look* (colleague_status) and
+# a way to *ask* using the only handle an agent has for a colleague: a name.
+
+
+async def test_a_colleague_resolves_by_name_case_insensitively(
+    session: AsyncSession, org: Org
+) -> None:
+    ws = org.workspace.id
+
+    async def find(**kwargs: Any) -> Any:
+        return await find_agent_by_reference(session, ws, **kwargs)
+
+    exact = await find(agent_name="CTO")
+    assert exact is not None and not isinstance(exact, str) and exact.id == org.cto.id
+    for spelling in ("cto", "  CtO ", "Chief Technology Officer", "chief technology officer"):
+        match = await find(agent_name=spelling)
+        assert match is not None and not isinstance(match, str), spelling
+        assert match.id == org.cto.id, spelling
+    # Slug, and a substring unique to one colleague.
+    by_slug = await find(agent_name="blogger")
+    assert by_slug is not None and not isinstance(by_slug, str) and by_slug.id == org.blogger.id
+    by_part = await find(agent_name="Blog")
+    assert by_part is not None and not isinstance(by_part, str) and by_part.id == org.blogger.id
+    # An id still wins, and a malformed one is simply not found.
+    by_id = await find(agent_id=str(org.qa.id))
+    assert by_id is not None and not isinstance(by_id, str) and by_id.id == org.qa.id
+    assert await find(agent_id="not-a-uuid") is None
+
+
+async def test_an_ambiguous_or_unknown_name_says_so_and_names_the_candidates(
+    session: AsyncSession, org: Org
+) -> None:
+    ws = org.workspace.id
+    # "Engineer" is a substring of two role titles: never silently pick one.
+    assert await find_agent_by_reference(session, ws, agent_name="Engineer") == "ambiguous"
+    with pytest.raises(ToolExecutionError) as ambiguous:
+        await resolve_agent_reference(session, ws, agent_name="Engineer", role="colleague")
+    assert ambiguous.value.code == "agent_name_ambiguous"
+
+    assert await find_agent_by_reference(session, ws, agent_name="Nobody At All") is None
+    with pytest.raises(ToolExecutionError) as unknown:
+        await resolve_agent_reference(session, ws, agent_name="Nobody At All")
+    assert unknown.value.code == "agent_not_found"
+    # The retry hint names real colleagues...
+    assert "CTO" in unknown.value.hint and "SWE" in unknown.value.hint
+    # ...but a wrong name is never a way to enumerate hidden ones.
+    assert "Shadow" not in unknown.value.hint
+
+    # Cross-workspace: a valid agent id from elsewhere resolves to nothing.
+    other = Workspace(name="Other", slug=f"other-{new_uuid7().hex[:8]}")
+    session.add(other)
+    await session.flush()
+    outsider = Agent(workspace_id=other.id, name="CTO", slug="cto")
+    session.add(outsider)
+    await session.flush()
+    assert await find_agent_by_reference(session, ws, agent_id=str(outsider.id)) is None
+    mine = await find_agent_by_reference(session, ws, agent_name="CTO")
+    assert mine is not None and not isinstance(mine, str) and mine.id == org.cto.id
+
+
+# --- organization.colleague_status --------------------------------------
+
+
+async def _busy_cto(session: AsyncSession, org: Org) -> tuple[Task, Task, Task]:
+    """The CTO with one running task, one queued, and one just finished."""
+    ws = org.workspace.id
+    running = Task(
+        workspace_id=ws,
+        title="Architecture review",
+        description="Confidential rewrite plan the CTO has not shared.",
+        state=TaskState.RUNNING.value,
+        assigned_agent_id=org.cto.id,
+        correlation_id=new_uuid7(),
+        metadata_json={"reported_result": {"summary": "internal result summary"}},
+    )
+    queued = Task(
+        workspace_id=ws,
+        title="Hiring plan",
+        state=TaskState.QUEUED.value,
+        assigned_agent_id=org.cto.id,
+        correlation_id=new_uuid7(),
+    )
+    done = Task(
+        workspace_id=ws,
+        title="Q3 roadmap",
+        state=TaskState.COMPLETED.value,
+        assigned_agent_id=org.cto.id,
+        correlation_id=new_uuid7(),
+    )
+    session.add_all([running, queued, done])
+    await session.flush()
+    session.add(
+        AgentRun(
+            workspace_id=ws,
+            agent_id=org.cto.id,
+            task_id=running.id,
+            status=RunStatus.RUNNING.value,
+        )
+    )
+    await session.flush()
+    return running, queued, done
+
+
+async def test_colleague_status_answers_what_a_colleague_is_doing_right_now(
+    session: AsyncSession, org: Org
+) -> None:
+    await _busy_cto(session, org)
+    await grant(session, org, org.swe, "organization.directory.read")
+
+    outcome = await org.gateway(session, org.swe).request(
+        "organization.colleague_status", json.dumps({"agent_name": "cto"})
+    )
+    assert outcome.status == "executed", outcome.decision_reason
+    status = outcome.sanitized_output or {}
+    assert status["name"] == "CTO"
+    assert status["role_title"] == "Chief Technology Officer"
+    assert status["team_name"] == "Engineering"
+    assert status["working_now"] is True and status["active_runs"] == 1
+    assert [item["title"] for item in status["current_work"]] == ["Architecture review"]
+    assert status["current_work"][0]["run_status"] == "running"
+    assert [item["title"] for item in status["queued_work"]] == ["Hiring plan"]
+    assert [item["title"] for item in status["recently_finished"]] == ["Q3 roadmap"]
+    assert status["last_active_at"]
+    # One ready-made sentence, so the agent has something to say back.
+    assert "CTO" in status["summary"] and "Architecture review" in status["summary"]
+
+
+async def test_colleague_status_counts_what_is_waiting_on_them(
+    session: AsyncSession, org: Org
+) -> None:
+    await grant(session, org, org.swe, "organization.directory.read")
+    session.add(
+        WorkRequest(
+            workspace_id=org.workspace.id,
+            requester_agent_id=org.qa.id,
+            target_agent_id=org.cto.id,
+            title="Review the migration",
+            description="please look",
+            status=WorkRequestStatus.PENDING.value,
+            idempotency_key=f"k-{new_uuid7().hex[:8]}",
+        )
+    )
+    session.add(
+        WorkReview(
+            workspace_id=org.workspace.id,
+            trigger_key=f"t-{new_uuid7().hex[:8]}",
+            mode="pre_action",
+            reviewer_type="agent",
+            reviewer_agent_id=org.cto.id,
+            subject_agent_id=org.qa.id,
+            requested_at=datetime.now(UTC),
+        )
+    )
+    await session.flush()
+    outcome = await org.gateway(session, org.swe).request(
+        "organization.colleague_status", json.dumps({"agent_name": "CTO"})
+    )
+    status = outcome.sanitized_output or {}
+    assert status["open_requests_awaiting_them"] == 1
+    assert status["pending_reviews"] == 1
+    assert status["pending_approvals"] == 0
+    assert status["working_now"] is False
+    assert "Waiting on them" in status["summary"]
+    # Counts only: what they were asked is never named.
+    assert "Review the migration" not in json.dumps(status)
+
+
+async def test_colleague_status_is_public_work_status_and_nothing_else(
+    session: AsyncSession, org: Org
+) -> None:
+    """The privacy contract, asserted as negatives."""
+    running, _queued, _done = await _busy_cto(session, org)
+    org.cto.system_prompt = "SECRET-CTO-INSTRUCTIONS"
+    org.cto.metadata_json = {"private_note": "SECRET-CTO-METADATA"}
+    session.add(
+        Message(
+            workspace_id=org.workspace.id,
+            task_id=running.id,
+            sender_type="agent",
+            sender_id=org.cto.id,
+            recipient_type="task",
+            recipient_id=running.id,
+            message_type="note",
+            content_json={"text": "SECRET-CTO-CONVERSATION"},
+        )
+    )
+    await grant(session, org, org.cto, "cli.command.execute", {"command": "SECRET-CTO-GRANT"})
+    await grant(session, org, org.swe, "organization.directory.read")
+    await session.flush()
+
+    outcome = await org.gateway(session, org.swe).request(
+        "organization.colleague_status", json.dumps({"agent_name": "CTO"})
+    )
+    status = outcome.sanitized_output or {}
+    blob = json.dumps(status)
+    for secret in (
+        "SECRET-CTO-INSTRUCTIONS",  # another agent's system prompt
+        "SECRET-CTO-METADATA",  # private metadata
+        "SECRET-CTO-CONVERSATION",  # message / conversation content
+        "SECRET-CTO-GRANT",  # capability grants
+        "Confidential rewrite plan",  # task descriptions
+        "internal result summary",  # reported-result summaries
+    ):
+        assert secret not in blob, secret
+    # The payload is exactly the declared allowlist — a new field has to be
+    # added here deliberately, with the privacy reasoning in ColleagueStatus.
+    assert set(status) == set(ColleagueStatus.model_fields)
+    assert set(ColleagueStatus.model_fields) == {
+        "agent_id",
+        "name",
+        "role_title",
+        "team_name",
+        "status",
+        "availability",
+        "working_now",
+        "active_runs",
+        "current_work",
+        "queued_work",
+        "recently_finished",
+        "open_requests_awaiting_them",
+        "pending_reviews",
+        "pending_approvals",
+        "last_active_at",
+        "generated_at",
+        "summary",
+    }
+
+
+async def test_colleague_status_never_reaches_hidden_agents_or_another_workspace(
+    session: AsyncSession, org: Org
+) -> None:
+    await grant(session, org, org.swe, "organization.directory.read")
+    gateway = org.gateway(session, org.swe)
+
+    hidden_by_name = await gateway.request(
+        "organization.colleague_status", json.dumps({"agent_name": "Shadow"})
+    )
+    assert hidden_by_name.status == "failed"
+    assert hidden_by_name.error_code == "agent_not_found"
+    # ...and knowing the id does not help either: a status lookup is discovery.
+    hidden_by_id = await gateway.request(
+        "organization.colleague_status", json.dumps({"agent_id": str(org.hidden.id)})
+    )
+    assert hidden_by_id.error_code == "agent_not_found"
+
+    other = Workspace(name="Other", slug=f"other-{new_uuid7().hex[:8]}")
+    session.add(other)
+    await session.flush()
+    outsider = Agent(workspace_id=other.id, name="Outsider", slug="outsider")
+    session.add(outsider)
+    await session.flush()
+    across = await gateway.request(
+        "organization.colleague_status", json.dumps({"agent_id": str(outsider.id)})
+    )
+    assert across.error_code == "agent_not_found"
+
+    # Asking about yourself is a mistake worth naming, not a status card.
+    mirror = await gateway.request(
+        "organization.colleague_status", json.dumps({"agent_name": "SWE"})
+    )
+    assert mirror.error_code == "self_status"
+
+
+async def test_colleague_status_needs_the_directory_grant(session: AsyncSession, org: Org) -> None:
+    """The negative the product depends on: an agent without the capability
+    is told it cannot look, rather than failing silently."""
+    denied = await org.gateway(session, org.qa).request(
+        "organization.colleague_status", json.dumps({"agent_name": "CTO"})
+    )
+    assert denied.status == "denied" and denied.decision_code == "no_grant"
+    assert "organization.directory.read" in (denied.decision_reason or "")
+
+
+# --- asking a colleague by name -----------------------------------------
+
+
+async def test_request_work_reaches_a_colleague_by_name_with_only_a_question(
+    session: AsyncSession, org: Org
+) -> None:
+    """ "Can you ask him what he's working on" must be one cheap tool call:
+    a name and a question, no uuid, no title, no expected output."""
+    for capability, scope in collaboration_grant_specs():
+        await grant(session, org, org.swe, capability, scope)
+    outcome = await org.gateway(session, org.swe).request(
+        "organization.request_work",
+        json.dumps(
+            {"target_agent_name": "cto", "description": "What are you working on right now?"}
+        ),
+    )
+    assert outcome.status == "executed", outcome.decision_reason
+    output = outcome.sanitized_output or {}
+    assert output["created"] is True
+    assert output["target_agent_name"] == "CTO"
+
+    request = await session.scalar(select(WorkRequest))
+    assert request is not None
+    assert request.target_agent_id == org.cto.id
+    assert request.requester_agent_id == org.swe.id
+    # A missing title becomes the ask itself rather than blocking the call.
+    assert request.title == "What are you working on right now?"
+
+
+async def test_request_work_by_name_is_idempotent_with_the_id_form(
+    session: AsyncSession, org: Org
+) -> None:
+    for capability, scope in collaboration_grant_specs():
+        await grant(session, org, org.swe, capability, scope)
+    gateway = org.gateway(session, org.swe)
+    body = {"description": "What are you working on right now?"}
+    first = await gateway.request(
+        "organization.request_work", json.dumps({"target_agent_name": "CTO", **body})
+    )
+    assert first.status == "executed", first.decision_reason
+    again = await gateway.request(
+        "organization.request_work", json.dumps({"target_agent_id": str(org.cto.id), **body})
+    )
+    # The default key is built from the *resolved* target, so naming and
+    # id-ing the same colleague is the same request.
+    assert (again.sanitized_output or {})["created"] is False
+    assert len(list(await session.scalars(select(WorkRequest)))) == 1
+
+
+async def test_request_work_with_a_bad_name_explains_and_names_candidates(
+    session: AsyncSession, org: Org
+) -> None:
+    for capability, scope in collaboration_grant_specs():
+        await grant(session, org, org.swe, capability, scope)
+    gateway = org.gateway(session, org.swe)
+
+    unknown = await gateway.request(
+        "organization.request_work",
+        json.dumps({"target_agent_name": "Nobody At All", "description": "hello?"}),
+    )
+    assert unknown.status == "denied" and unknown.decision_code == "agent_not_found"
+    assert "CTO" in (unknown.decision_reason or "")
+    assert "Shadow" not in (unknown.decision_reason or "")
+
+    ambiguous = await gateway.request(
+        "organization.request_work",
+        json.dumps({"target_agent_name": "Engineer", "description": "hello?"}),
+    )
+    assert ambiguous.decision_code == "agent_name_ambiguous"
+
+    nobody = await gateway.request(
+        "organization.request_work", json.dumps({"description": "hello?"})
+    )
+    assert nobody.status == "denied" and nobody.decision_code == "invalid_input"
+    assert await session.scalar(select(WorkRequest)) is None
+
+
+def test_derived_title_is_bounded_and_deterministic() -> None:
+    assert derived_title("Given", "ignored") == "Given"
+    assert derived_title("", "What are you working on?") == "What are you working on?"
+    assert derived_title("", "Two things. The second one.") == "Two things."
+    long_ask = "x" * 400
+    assert len(derived_title("", long_ask)) <= 118
+    assert derived_title("", long_ask) == derived_title("", long_ask)
+    assert derived_title("", "   ") == "A question from a colleague"
+
+
+def test_asking_a_colleague_is_advertised_on_an_ordinary_chat_turn() -> None:
+    """The advertisement regression behind the report: on the exact task
+    shape of a chat message, an agent holding the collaboration baseline is
+    still offered both "look it up" and "go ask"."""
+    baseline = [
+        Grant(capability=capability, scope=scope, effect=GrantEffect.ALLOW)
+        for capability, scope in collaboration_grant_specs()
+    ]
+    chat_turn = Task(
+        workspace_id=new_uuid7(),
+        title="What is the CTO doing right now?",
+        state=TaskState.RUNNING.value,
+        correlation_id=new_uuid7(),
+        conversation_id=new_uuid7(),
+        metadata_json={"origin": "conversation"},
+    )
+    names = {
+        definition.name
+        for definition in task_scoped_tool_definitions(
+            allowed_tool_definitions(build_builtin_catalog(), baseline), chat_turn
+        )
+    }
+    assert "organization.request_work" in names
+    assert "organization.colleague_status" in names
+    assert "organization.directory.search" in names
+    # ...and the reporting tool still stays out of a chat turn.
+    assert "organization.report_result" not in names
+
+
+def test_the_ask_tool_reads_like_asking_a_colleague() -> None:
+    """Wording is load-bearing: the previous description ("help with a piece
+    of work", "a separate task is created") read as task-routing machinery,
+    so the model never mapped "can you ask him" onto it."""
+    catalog = build_builtin_catalog()
+    entry = catalog.get("organization.request_work")
+    assert entry is not None
+    description = entry[0].description
+    assert description.startswith("Ask a colleague something and get an answer back.")
+    assert "can you ask" in description.lower()
+    assert "target_agent_name" in description
+
+    schema = entry[0].input_json_schema()
+    # The cheap common case: a name and a question, nothing else.
+    assert schema["required"] == ["description"]
+    assert "target_agent_name" in schema["properties"]
+
+    status = catalog.get("organization.colleague_status")
+    assert status is not None
+    assert "what a colleague is doing right now" in status[0].description
+    assert status[0].risk is RiskLevel.READ
+    assert status[0].supports_approval is False
+    assert status[0].required_capability == "organization.directory.read"
