@@ -186,6 +186,111 @@ describe("Transcript", () => {
   });
 });
 
+describe("Transcript markdown", () => {
+  /** Agents write markdown; before this the transcript showed the asterisks.
+   * The rule the transcript follows: markdown is rendered where an agent is
+   * speaking to the reader in prose, and nowhere else. */
+  const reply = (text: string) =>
+    mergeTimeline([message({ id: "m1", content_json: { text } })], []);
+
+  it("formats an agent reply instead of printing its markup", () => {
+    render(<Transcript items={reply("Your **CTO** runs *Engineering*.")} agentName="Scout" userName="Ada" />);
+    const bubble = screen.getByTestId("agent-message");
+    expect(bubble.querySelector("strong")?.textContent).toBe("CTO");
+    expect(bubble.querySelector("em")?.textContent).toBe("Engineering");
+    expect(bubble.textContent).not.toContain("**");
+  });
+
+  it("renders lists, headings, and inline code in a reply", () => {
+    render(
+      <Transcript
+        items={reply("## Team\n\n- Ada — `CTO`\n- Ben — `CFO`")}
+        agentName="Scout"
+        userName="Ada"
+      />,
+    );
+    const bubble = screen.getByTestId("agent-message");
+    expect(bubble.querySelector("h3")?.textContent).toBe("Team");
+    expect(bubble.querySelectorAll("li")).toHaveLength(2);
+    expect(bubble.querySelectorAll("code")).toHaveLength(2);
+  });
+
+  it("scrolls a long code block inside the bubble instead of widening it", () => {
+    const long = "x".repeat(400);
+    render(<Transcript items={reply("```sh\n" + long + "\n```")} agentName="Scout" userName="Ada" />);
+    const bubble = screen.getByTestId("agent-message");
+    const pre = bubble.querySelector("pre")!;
+    expect(pre.textContent).toContain(long);
+    // The contract that keeps the layout: the block scrolls, and the bubble
+    // may shrink below its content so `max-w` still binds.
+    expect(pre.className).toContain("overflow-x-auto");
+    const column = bubble.children[1];
+    expect(column.className).toContain("min-w-0");
+    expect(column.className).toContain("max-w-[min(85%,40rem)]");
+  });
+
+  it("never turns a javascript: link in a reply into an anchor", () => {
+    render(
+      <Transcript
+        items={reply("Read [this](javascript:alert(1)) and [that](java\nscript:alert(1))")}
+        agentName="Scout"
+        userName="Ada"
+      />,
+    );
+    const bubble = screen.getByTestId("agent-message");
+    expect(bubble.querySelector("a")).toBeNull();
+    expect(bubble.textContent).toContain("javascript:alert(1)");
+  });
+
+  it("renders a safe link in a reply as a new-tab anchor", () => {
+    render(<Transcript items={reply("See [docs](https://jhin.dev).")} agentName="Scout" userName="Ada" />);
+    const link = screen.getByRole("link", { name: "docs" });
+    expect(link.getAttribute("href")).toBe("https://jhin.dev");
+    expect(link.getAttribute("rel")).toBe("noreferrer noopener");
+  });
+
+  it("shows markup a person typed exactly as they typed it", () => {
+    // A typed message is quoted, not formatted: there is no way to escape a
+    // character from the composer, so `**not bold**` has to stay literal.
+    const items = mergeTimeline(
+      [
+        message({
+          id: "m1",
+          sender_type: "user",
+          content_json: { text: "why is **not bold** in my_file_name?" },
+        }),
+      ],
+      [],
+    );
+    render(<Transcript items={items} agentName="Scout" userName="Ada" />);
+    const bubble = screen.getByTestId("user-message");
+    expect(bubble.querySelector("strong")).toBeNull();
+    expect(bubble.textContent).toContain("**not bold**");
+  });
+
+  it("leaves the clamped work-card summary literal too", () => {
+    const items = mergeTimeline(
+      [
+        message({
+          id: "m2",
+          message_type: "delegation",
+          content_json: { summary: "Handing **the data pull** to QA.", target_agent_name: "QA" },
+        }),
+      ],
+      [],
+    );
+    render(<Transcript items={items} agentName="Scout" userName="Ada" />);
+    const card = screen.getByTestId("work-card");
+    expect(card.querySelector("strong")).toBeNull();
+    expect(card.textContent).toContain("**the data pull**");
+  });
+
+  it("still renders nothing for an agent message that is only markup whitespace", () => {
+    render(<Transcript items={reply("   ")} agentName="Scout" userName="Ada" />);
+    expect(screen.queryByTestId("agent-message")).toBeNull();
+  });
+});
+
 describe("Transcript quiet exchanges", () => {
   const delegation = message({
     id: "d1",

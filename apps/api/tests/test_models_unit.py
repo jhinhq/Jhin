@@ -142,3 +142,43 @@ async def test_delete_provider_clears_default_but_refuses_when_agents_use_it(
     await session.refresh(workspace)
     assert workspace.default_model_profile_id is None
     assert await session.get(ModelProvider, provider.id) is None
+
+
+async def test_first_profile_becomes_the_workspace_default(
+    session: AsyncSession, admin_ctx: WorkspaceContext
+) -> None:
+    """A workspace with no default cannot run any agent, so the first profile
+    adopts the empty slot — and a second one never displaces it."""
+    from uuid import uuid4
+
+    from jhin_domain import new_uuid7
+
+    ws = admin_ctx.workspace_id
+    workspace = await session.get(Workspace, ws)
+    assert workspace is not None
+    assert workspace.default_model_profile_id is None
+
+    provider = ModelProvider(workspace_id=ws, type="openai", display_name="OpenAI")
+    session.add(provider)
+    await session.flush()
+
+    first = await service.create_profile(
+        session,
+        admin_ctx,
+        values={"provider_id": provider.id, "model_name": "gpt-5-mini", "display_name": "First"},
+        request_id=new_uuid7(),
+        ip_hash=str(uuid4()),
+    )
+    await session.refresh(workspace)
+    assert workspace.default_model_profile_id == first.id
+
+    second = await service.create_profile(
+        session,
+        admin_ctx,
+        values={"provider_id": provider.id, "model_name": "gpt-5", "display_name": "Second"},
+        request_id=new_uuid7(),
+        ip_hash=str(uuid4()),
+    )
+    await session.refresh(workspace)
+    assert workspace.default_model_profile_id == first.id
+    assert second.id != first.id

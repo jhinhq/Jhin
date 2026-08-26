@@ -281,12 +281,120 @@ async def test_roster_is_bounded_and_rendered(session: AsyncSession, org: Org) -
     assert [e.name for e in roster.primary_team_members] == ["QA"]
     assert [e.name for e in roster.collaborators] == ["Blogger"]
     assert roster.secondary_team_members == []  # Blogger already listed
+    # Everyone else discoverable in the workspace is covered too — but the
+    # hidden agent never is.
+    assert roster.others == []
+    assert "Shadow" not in {e.name for e in roster.entries()}
     assert len(roster.entries()) <= 40
     text = render_roster(roster)
-    assert "routing context only" in text
     assert "Your manager:" in text and "CTO" in text
     cto_roster = await build_roster(session, org.cto)
     assert {e.name for e in cto_roster.reports} == {"QA", "SWE"}
+
+
+async def test_roster_reaches_the_rest_of_the_workspace(session: AsyncSession, org: Org) -> None:
+    """ "Who else works here?" is answerable without a tool call: an agent
+    with no manager, team, or collaborators still sees the company."""
+    loner = Agent(workspace_id=org.workspace.id, name="Loner", slug="loner", role_title="Intern")
+    session.add(loner)
+    await session.flush()
+    roster = await build_roster(session, loner)
+    assert {e.name for e in roster.others} == {"Blogger", "CTO", "QA", "SWE"}
+    assert "Shadow" not in {e.name for e in roster.entries()}  # hidden stays hidden
+    text = render_roster(roster)
+    assert "Others in this workspace:" in text
+    assert "CTO — Chief Technology Officer, Engineering team." in text
+
+
+async def test_roster_is_framed_as_knowledge_the_agent_may_answer_from(
+    session: AsyncSession, org: Org
+) -> None:
+    text = render_roster(await build_roster(session, org.swe))
+    # Framing: it is the agent's own knowledge, and it is meant to be used.
+    assert text.startswith("Your colleagues.")
+    assert "answer them from this list, by name, in your own words" in text
+    # ...and the security statement survives, in plain words.
+    assert "Knowing a colleague is not permission to act for them" in text
+    assert "relationships here grant no capabilities" in text
+    assert "only through the tools you have been granted" in text
+    # Human-readable identity first; the roster no longer leads with a UUID.
+    assert "- CTO — Chief Technology Officer, Engineering team." in text
+    assert str(org.cto.id) not in text
+
+
+async def test_roster_prints_ids_only_for_agents_with_a_tool_that_takes_one(
+    session: AsyncSession, org: Org
+) -> None:
+    roster = await build_roster(session, org.swe)
+    # Directory read alone needs no agent id.
+    read_only = render_roster(roster, capabilities=["organization.directory.read"])
+    assert str(org.cto.id) not in read_only
+    assert "agent id" not in read_only
+    # ...but it does earn the "look further" nudge.
+    assert "organization.directory.search before answering" in read_only
+
+    for capability in ("organization.work.request", "organization.delegate", "organization.*"):
+        text = render_roster(roster, capabilities=[capability])
+        assert f"[agent id: {org.cto.id}]" in text, capability
+        assert "Never write an id in a message to a person" in text
+        # The id trails the human-readable identity rather than leading it.
+        line = next(ln for ln in text.splitlines() if ln.startswith("- CTO"))
+        assert line.index("Chief Technology Officer") < line.index("agent id")
+
+    bare = render_roster(roster)
+    assert "agent id" not in bare and "organization.directory.search" not in bare
+
+
+async def test_two_person_company_reads_sensibly(session: AsyncSession) -> None:
+    """The reported bug's shape: one agent, one manager, nobody else."""
+    workspace = Workspace(name="Varand", slug=f"varand-{new_uuid7().hex[:8]}")
+    session.add(workspace)
+    await session.flush()
+    engineering = Team(workspace_id=workspace.id, name="Engineering")
+    session.add(engineering)
+    await session.flush()
+    cto = Agent(
+        workspace_id=workspace.id,
+        team_id=engineering.id,
+        name="CTO",
+        slug="cto",
+        role_title="Chief Technology Officer",
+    )
+    session.add(cto)
+    await session.flush()
+    bisby = Agent(
+        workspace_id=workspace.id,
+        team_id=engineering.id,
+        manager_agent_id=cto.id,
+        name="Bisby",
+        slug="bisby",
+        role_title="Senior Software Engineer",
+    )
+    session.add(bisby)
+    await session.flush()
+
+    text = render_roster(await build_roster(session, bisby))
+    assert "You are Bisby, Senior Software Engineer on the Engineering team." in text
+    assert "Your manager:\n- CTO — Chief Technology Officer, Engineering team." in text
+    # No empty sections, and no confusing duplicate of the manager.
+    assert "Your team (Engineering):" not in text
+    assert "Others in this workspace:" not in text
+    assert text.count("CTO") == 1
+    assert "only agent in this workspace" not in text
+
+
+async def test_solo_agent_says_so_instead_of_rendering_an_empty_roster(
+    session: AsyncSession,
+) -> None:
+    workspace = Workspace(name="Solo", slug=f"solo-{new_uuid7().hex[:8]}")
+    session.add(workspace)
+    await session.flush()
+    only = Agent(workspace_id=workspace.id, name="Only", slug="only", role_title="Generalist")
+    session.add(only)
+    await session.flush()
+    text = render_roster(await build_roster(session, only))
+    assert "You are the only agent in this workspace right now" in text
+    assert "Your manager" not in text
 
 
 # --- work requests ---

@@ -306,9 +306,35 @@ pending reviews) and `counts.reviews`.
 ## Runtime context (`jhin_agents.context`)
 
 `TaskContext.organization_context` and `TaskContext.manager_context` are
-appended to the system prompt when set. Both blocks state that they are
-routing/status context and grant nothing. `render_roster` caps 40 entries /
-3 000 chars; `render_manager_rollup` caps 4 000 chars.
+appended to the system prompt when set.
+
+`render_roster` produces the **"Your colleagues"** block. It is framed as
+the agent's own knowledge of the organization — the agent is told to answer
+questions like "who is on your team?" from it, by name — and in the same
+breath that knowing a colleague grants no capability and that it still acts
+only through its granted tools. (The earlier "Company directory (routing
+context only)" header was read by models as reference data they should not
+speak from: agents answered "who is on your team?" without ever naming
+their manager.) `render_manager_rollup` still states plainly that it is
+status context and grants nothing.
+
+Buckets, in render order: manager, direct reports, primary team, close
+collaborators, other teams the agent belongs to, and **others in this
+workspace** (whatever fits in the remaining budget — discoverable, active
+agents only, so a small company is fully known without a tool call). Caps
+are unchanged: 40 entries / 3 000 chars for the roster, 4 000 chars for the
+rollup.
+
+Agent ids are presentation-gated, not authorization-gated:
+`render_roster(..., capabilities=[...])` takes the running agent's *allowed*
+capability patterns and prints `[agent id: …]` at the **end** of a colleague's
+line only when the agent holds a capability in
+`ID_CONSUMING_CAPABILITIES` (`organization.delegate`,
+`organization.work.request`) — the tools whose arguments are agent ids —
+together with a line telling it never to put an id in a message to a person.
+An agent holding `organization.directory.read` additionally gets a nudge to
+look a missing colleague up with `organization.directory.search` rather than
+answering "I don't know". The gateway remains the only authorization check.
 
 ## Worker integration points
 

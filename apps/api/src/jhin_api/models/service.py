@@ -724,6 +724,14 @@ async def create_profile(
             status_code=status.HTTP_409_CONFLICT,
             detail="A profile with this name already exists in the workspace",
         ) from exc
+    # A workspace with no default cannot run an agent at all ("no model
+    # profile and the workspace has no default"), so the first profile to
+    # exist becomes the default. Only ever fills an empty slot — a later
+    # profile never displaces a default someone chose.
+    workspace = await db.get(Workspace, ctx.workspace_id)
+    adopted_default = workspace is not None and workspace.default_model_profile_id is None
+    if adopted_default and workspace is not None:
+        workspace.default_model_profile_id = profile.id
     audit.record(
         db,
         action="model_profile.created",
@@ -733,7 +741,11 @@ async def create_profile(
         actor_id=ctx.user.id,
         request_id=request_id,
         ip_hash=ip_hash,
-        metadata={"display_name": profile.display_name, "model_name": profile.model_name},
+        metadata={
+            "display_name": profile.display_name,
+            "model_name": profile.model_name,
+            "became_workspace_default": adopted_default,
+        },
     )
     await db.commit()
     return profile

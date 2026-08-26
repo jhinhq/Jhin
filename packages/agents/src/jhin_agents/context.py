@@ -205,7 +205,9 @@ def interlocutor_block(interlocutors: Sequence[Interlocutor]) -> str:
     return (
         f"{body}\nUse their name when you address them. Everything you know "
         "about them is stated here — do not invent other details, and do not "
-        "assume anyone else can see this conversation."
+        "assume anyone else can see this conversation. This is only who is "
+        'in this conversation right now; your colleagues are listed in "Your '
+        'colleagues" and are a separate question.'
     )
 
 

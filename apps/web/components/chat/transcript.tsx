@@ -10,6 +10,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApprovalCard } from "@/components/approval-card";
 import { Avatar } from "@/components/avatar";
+import { Markdown } from "@/components/markdown";
 import { MessageTypeBadge, StructuredMessageBody } from "@/components/task-bits";
 import {
   exchangeLabel,
@@ -60,6 +61,13 @@ function UserBubble({
   return (
     <div data-testid="user-message" className="flex justify-end">
       <div className="max-w-[min(85%,40rem)]">
+        {/* Verbatim, deliberately. Markdown is rendered where an agent is
+         * speaking to the reader in prose, not everywhere a string appears:
+         * what a person typed is the message, and formatting it would eat the
+         * characters they meant — `**not bold**`, a `snake_case` name, a path
+         * full of underscores — with no way to escape them from a plain chat
+         * box. Work cards follow the same rule for the same reason: they show
+         * clamped, truncated field values, and half a fence is not markdown. */}
         <div className="rounded-2xl rounded-br-md bg-accent-soft px-4 py-2.5 text-[15px] leading-relaxed text-ink">
           <p className="whitespace-pre-wrap break-words">{text}</p>
         </div>
@@ -110,9 +118,14 @@ function AgentBubble({
   return (
     <div data-testid="agent-message" className="flex items-end gap-2.5">
       <Avatar name={name} size="sm" className="mb-5" {...avatarProps(avatar)} />
-      <div className="max-w-[min(85%,40rem)]">
+      {/* `min-w-0` lets the bubble stay inside its max width even when it holds
+       * a code block with an unbreakable line: without it the flex item's
+       * automatic minimum size wins over `max-w` and the bubble stretches. */}
+      <div className="min-w-0 max-w-[min(85%,40rem)]">
         <div className="rounded-2xl rounded-bl-md border border-line bg-surface px-4 py-2.5 text-[15px] leading-relaxed text-ink shadow-[var(--card-shadow)]">
-          <p className="whitespace-pre-wrap break-words">{text}</p>
+          {/* An agent writes markdown, so render it. See `UserBubble` for why
+           * what a person typed stays literal. */}
+          <Markdown source={text} variant="chat" />
         </div>
         <p className="mt-1">
           <span className="text-[11px] text-faint">{name} · </span>

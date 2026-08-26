@@ -566,7 +566,7 @@ async def test_step_prompt_carries_roster_and_manager_rollup(world: ReasoningWor
     await world.reasoning.reason_agent_step_activity(world.params)
 
     system = world.model.requests[0].messages[0].content
-    assert "Company directory" in system
+    assert "Your colleagues." in system
     assert "Junior" in system
     assert "Team status rollup" in system
 
@@ -585,7 +585,7 @@ async def test_step_prompt_always_carries_the_workspace_clock(world: ReasoningWo
     assert "Current time: " in system
     assert "(America/Los_Angeles)" in system
     # This task has no human and no requester, so nothing is guessed.
-    assert "Who you are talking with" not in system
+    assert "Who you are talking with:" not in system
 
 
 async def test_step_prompt_names_the_person_on_the_other_side_of_the_chat(
@@ -637,7 +637,7 @@ async def test_situation_failure_never_fails_the_step(
     assert result == ReasonAgentStepResult(call_count=0)
     system = world.model.requests[0].messages[0].content
     assert "Current time:" not in system
-    assert "Who you are talking with" not in system
+    assert "Who you are talking with:" not in system
 
 
 def test_manifest_entries_bind_invalid_arguments_and_name_storage_failures() -> None:

@@ -23,7 +23,8 @@
 
 import { ArrowUp, BookOpen, ChevronDown, ListTree, Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Markdown, METHOD_TONE } from "@/components/api-reference";
+import { METHOD_TONE } from "@/components/api-reference";
+import { Markdown } from "@/components/markdown";
 import { DocsNav } from "@/components/api-docs/docs-nav";
 import { OperationRow } from "@/components/api-docs/operation-row";
 import { PageBody, PageHeader } from "@/components/app-shell";

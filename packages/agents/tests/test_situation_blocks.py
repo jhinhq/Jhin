@@ -157,7 +157,7 @@ def test_situation_blocks_sit_after_the_role_prompt_and_before_the_roster() -> N
             interlocutor_context=interlocutor_block(
                 [Interlocutor(display_name="Varand", role="workspace owner")]
             ),
-            organization_context="Company directory (routing context only)",
+            organization_context="Your colleagues. Your manager:\n- CTO",
             memory_context="Recalled memory (curated records from earlier work)",
         ),
     )[0].content
@@ -167,14 +167,15 @@ def test_situation_blocks_sit_after_the_role_prompt_and_before_the_roster() -> N
     assert system.startswith(preamble)
     assert system.index(ROLE_PROMPT) < system.index("Current time:")
     assert system.index("Current time:") < system.index("Who you are talking with:")
-    assert system.index("Who you are talking with:") < system.index("Company directory")
-    assert system.index("Company directory") < system.index("Recalled memory")
+    assert system.index("Who you are talking with:") < system.index("Your colleagues.")
+    assert system.index("Your colleagues.") < system.index("Recalled memory")
 
 
 def test_absent_situation_blocks_add_nothing() -> None:
     system = build_messages(make_snapshot(), _task())[0].content
     assert "Current time:" not in system
-    assert "Who you are talking with" not in system
+    # The preamble mentions the block by name; the block itself is absent.
+    assert "Who you are talking with:" not in system
 
 
 def test_composition_is_replay_stable_for_a_fixed_context() -> None:

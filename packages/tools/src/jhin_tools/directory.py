@@ -7,8 +7,10 @@ fields an agent or a colleague may learn about another agent:
 ``DirectoryEntry``. System prompts, grants, model configuration, private
 metadata, memories, and conversations are never loaded here.
 
-Relationships (manager, team, collaborator) are routing context only; the
-roster never changes what an agent is allowed to do.
+The roster is an agent's *knowledge* of its colleagues: it is meant to be
+used, including to answer a person's questions about the team. It is not an
+authorization artifact — relationships (manager, team, collaborator) never
+change what an agent is allowed to do, and the rendered block says so.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from jhin_db.models import Agent, AgentRelationship, AgentTeamMembership, Team
 from jhin_domain import AgentStatus
-from jhin_policy import RiskLevel, ToolDefinition
+from jhin_policy import RiskLevel, ToolDefinition, capability_matches
 from jhin_tools.builtin import ToolExecutionContext, ToolExecutor, ToolValidator
 
 DIRECTORY_CAPABILITY = "organization.directory.read"
@@ -31,6 +33,12 @@ DIRECTORY_MAX_RESULTS = 25
 DIRECTORY_TOOL_MAX_RESULTS = 10
 ROSTER_MAX_ENTRIES = 40
 ROSTER_MAX_CHARS = 3_000
+# Tools whose arguments are agent ids. The roster prints ids only for an
+# agent that holds one of these — for everyone else an id is pure noise the
+# model can only misuse (echoing it at a person).
+ID_CONSUMING_CAPABILITIES: frozenset[str] = frozenset(
+    {"organization.delegate", "organization.work.request"}
+)
 # Bound on the candidate scan; workspaces are small organizations.
 _SCAN_LIMIT = 1_000
 
@@ -62,6 +70,9 @@ class OrganizationRoster(BaseModel):
     primary_team_members: list[DirectoryEntry] = Field(default_factory=list)
     secondary_team_members: list[DirectoryEntry] = Field(default_factory=list)
     collaborators: list[DirectoryEntry] = Field(default_factory=list)
+    # Everyone else discoverable in the workspace, so "who else works here?"
+    # is answerable without a tool call in a small organization.
+    others: list[DirectoryEntry] = Field(default_factory=list)
     truncated: bool = False
 
     def entries(self) -> list[DirectoryEntry]:
@@ -72,6 +83,7 @@ class OrganizationRoster(BaseModel):
         out.extend(self.primary_team_members)
         out.extend(self.collaborators)
         out.extend(self.secondary_team_members)
+        out.extend(self.others)
         return out
 
 
@@ -302,6 +314,23 @@ async def build_roster(session: AsyncSession, agent: Agent) -> OrganizationRoste
     for team_id in secondary_ids:
         secondary_members.extend(take(await members(team_id)))
 
+    # Whatever budget is left goes to the rest of the workspace, so a small
+    # organization is fully known to every agent and "who else works here?"
+    # never needs a tool call. Discoverable, active agents only — the same
+    # visibility rule the directory search applies.
+    others = take(
+        await session.scalars(
+            select(Agent)
+            .where(
+                Agent.workspace_id == workspace_id,
+                Agent.status == AgentStatus.ACTIVE.value,
+                Agent.discoverability == "discoverable",
+            )
+            .order_by(Agent.name, Agent.id)
+            .limit(_SCAN_LIMIT)
+        )
+    )
+
     everyone = [
         agent,
         *manager_list,
@@ -309,6 +338,7 @@ async def build_roster(session: AsyncSession, agent: Agent) -> OrganizationRoste
         *primary_members,
         *collaborators,
         *secondary_members,
+        *others,
     ]
     entries = {e.id: e for e in await entries_for(session, workspace_id, everyone)}
 
@@ -322,53 +352,122 @@ async def build_roster(session: AsyncSession, agent: Agent) -> OrganizationRoste
         primary_team_members=project(primary_members),
         secondary_team_members=project(secondary_members),
         collaborators=project(collaborators),
+        others=project(others),
         truncated=truncated,
     )
 
 
-def _line(entry: DirectoryEntry) -> str:
-    bits = [f"- {entry.name} ({entry.id})"]
+ROSTER_HEADER = (
+    "Your colleagues. This section is your own knowledge of who works in "
+    "this organization: when someone asks who is on your team, who your "
+    "manager is, who else works here, or who could help with something, "
+    "answer them from this list, by name, in your own words. Knowing a "
+    "colleague is not permission to act for them: relationships here grant "
+    "no capabilities, and you still act only through the tools you have "
+    "been granted."
+)
+
+_ID_GUIDANCE = (
+    "The bracketed agent ids are tool arguments only (pass one as "
+    "target_agent_id). Never write an id in a message to a person — refer "
+    "to colleagues by name."
+)
+
+
+def _line(entry: DirectoryEntry, *, with_id: bool) -> str:
+    """One colleague, human-readable first. The id (when the agent has a
+    tool that consumes one) trails at the end so it reads as machine detail
+    rather than as part of the colleague's identity."""
+    line = f"- {entry.name}"
     if entry.role_title:
-        bits.append(f"— {entry.role_title}")
+        line += f" — {entry.role_title}"
     if entry.primary_team_name:
-        bits.append(f"[{entry.primary_team_name}]")
+        line += f", {entry.primary_team_name} team"
     if entry.availability != "available":
-        bits.append(f"({entry.availability})")
-    line = " ".join(bits)
+        line += f" (currently {entry.availability})"
     if entry.expertise:
-        line += f"; expertise: {', '.join(entry.expertise[:6])}"
+        line += f". Expertise: {', '.join(entry.expertise[:6])}"
     if entry.public_purpose:
-        line += f"; {entry.public_purpose[:120]}"
+        line += f". {entry.public_purpose[:120]}"
+    if not line.endswith("."):
+        line += "."
+    if with_id:
+        line += f" [agent id: {entry.id}]"
     return line
 
 
-def render_roster(roster: OrganizationRoster, *, max_chars: int = ROSTER_MAX_CHARS) -> str:
-    """Compact prompt block. Routing context only — it states so explicitly
-    so the model does not infer permissions from relationships."""
+def render_roster(
+    roster: OrganizationRoster,
+    *,
+    max_chars: int = ROSTER_MAX_CHARS,
+    capabilities: Iterable[str] = (),
+) -> str:
+    """The "Your colleagues" prompt block.
+
+    Framed as knowledge the agent may answer from — the previous "routing
+    context only" header read as reference data the model was not supposed
+    to speak from, and agents answered "who is on your team?" without ever
+    naming their manager. The security statement is kept verbatim in intent:
+    the block still says plainly that knowing a colleague grants nothing.
+
+    ``capabilities`` are the running agent's granted capability patterns.
+    They only decide presentation: ids appear when the agent has a tool that
+    takes one, and the "look further" hint appears when it can search the
+    directory. Nothing here is an authorization check.
+    """
+    granted = list(capabilities)
+
+    def has(capability: str) -> bool:
+        return any(capability_matches(pattern, capability) for pattern in granted)
+
+    with_ids = any(has(capability) for capability in ID_CONSUMING_CAPABILITIES)
+    can_search = has(DIRECTORY_CAPABILITY)
+
+    team = roster.self_entry.primary_team_name
     sections: list[tuple[str, list[DirectoryEntry]]] = [
         ("Your manager", [roster.manager] if roster.manager else []),
         ("Your direct reports", roster.reports),
-        ("Your team", roster.primary_team_members),
+        (f"Your team ({team})" if team else "Your team", roster.primary_team_members),
         ("Close collaborators", roster.collaborators),
         ("Other teams you belong to", roster.secondary_team_members),
+        ("Others in this workspace", roster.others),
     ]
     lines = [
-        "Company directory (routing context only; it grants no permissions):",
-        f"You are {roster.self_entry.name} ({roster.self_entry.id})"
+        ROSTER_HEADER,
+        f"You are {roster.self_entry.name}"
         + (f", {roster.self_entry.role_title}" if roster.self_entry.role_title else "")
-        + (
-            f" on the {roster.self_entry.primary_team_name} team."
-            if roster.self_entry.primary_team_name
-            else "."
-        ),
+        + (f" on the {team} team." if team else "."),
     ]
+    listed = 0
     for title, entries in sections:
         if not entries:
             continue
+        listed += len(entries)
         lines.append(f"{title}:")
-        lines.extend(_line(e) for e in entries)
+        lines.extend(_line(e, with_id=with_ids) for e in entries)
+    if listed == 0:
+        lines.append(
+            "You are the only agent in this workspace right now; you have no "
+            "colleagues to name yet."
+        )
+    elif with_ids:
+        lines.append(_ID_GUIDANCE)
     if roster.truncated:
-        lines.append("(roster truncated; use organization.directory.search to find others)")
+        lines.append(
+            "There are more colleagues than are listed above."
+            + (
+                " Look someone up with organization.directory.search rather "
+                "than saying you do not know."
+                if can_search
+                else ""
+            )
+        )
+    elif can_search and listed:
+        lines.append(
+            "If someone asks about a colleague who is not listed above, look "
+            "them up with organization.directory.search before answering that "
+            "you do not know them."
+        )
     text = "\n".join(lines)
     if len(text) > max_chars:
         text = text[: max_chars - 1].rstrip() + "…"

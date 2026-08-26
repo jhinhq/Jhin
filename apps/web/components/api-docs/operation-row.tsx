@@ -9,7 +9,8 @@
  * the detail is built lazily for the handful a reader actually opens. */
 
 import { ChevronRight, Link2 } from "lucide-react";
-import { CopyButton, Markdown, MethodTag } from "@/components/api-reference";
+import { CopyButton, MethodTag } from "@/components/api-reference";
+import { Markdown } from "@/components/markdown";
 import { Badge, focusRing } from "@/components/ui";
 import type { BadgeTone } from "@/components/ui";
 import {

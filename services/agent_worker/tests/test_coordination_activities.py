@@ -17,7 +17,7 @@ from jhin_agent_worker.coordination_activities import (
     work_request_start_from_output,
 )
 from jhin_db.base import Base
-from jhin_db.models import Agent, Task, WorkRequest, Workspace
+from jhin_db.models import Agent, AgentCapabilityGrant, Task, WorkRequest, Workspace
 from jhin_domain import TaskState, WorkRequestStatus, new_uuid7
 from jhin_workflows.work_request_task import FinalizeWorkRequestInput
 
@@ -94,6 +94,9 @@ async def test_context_blocks_and_finalize_activity(
 
         roster = await organization_context(session, workspace.id, swe.id)
         assert "Your manager:" in roster and "CTO" in roster
+        assert roster.startswith("Your colleagues.")
+        # No agent-id-consuming grant, so ids stay out of the prompt.
+        assert "agent id" not in roster and str(cto.id) not in roster
         assert await manager_context(session, workspace.id, writer.id) == ""
         manager_block = await manager_context(session, workspace.id, cto.id)
         assert "SWE" in manager_block
@@ -187,3 +190,58 @@ async def test_finalize_starts_memory_maintenance_for_the_requester(
     async with maker() as session:
         row: Any = await session.get(WorkRequest, request_id)
         assert start.source_id == row.metadata_json["result_message_id"]
+
+
+async def test_roster_prints_ids_only_when_the_agent_can_use_them(
+    maker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The activity reads the agent's allow-grants purely to shape the
+    block: an agent that can ask a colleague for work needs the ids its
+    tool takes; one that cannot is spared the noise."""
+    async with maker() as session:
+        workspace = Workspace(name="W", slug=f"w-{new_uuid7().hex[:8]}")
+        session.add(workspace)
+        await session.flush()
+        cto = Agent(
+            workspace_id=workspace.id,
+            name="CTO",
+            slug="cto",
+            role_title="Chief Technology Officer",
+        )
+        session.add(cto)
+        await session.flush()
+        bisby = Agent(
+            workspace_id=workspace.id,
+            name="Bisby",
+            slug="bisby",
+            role_title="Senior Software Engineer",
+            manager_agent_id=cto.id,
+        )
+        session.add(bisby)
+        await session.flush()
+
+        session.add_all(
+            [
+                AgentCapabilityGrant(
+                    workspace_id=workspace.id,
+                    agent_id=bisby.id,
+                    capability=capability,
+                    scope_json={},
+                    effect=effect,
+                )
+                for capability, effect in (
+                    ("organization.work.request", "allow"),
+                    ("organization.directory.read", "allow"),
+                    ("organization.delegate", "deny"),
+                )
+            ]
+        )
+        await session.flush()
+
+        roster = await organization_context(session, workspace.id, bisby.id)
+        assert f"[agent id: {cto.id}]" in roster
+        assert "Never write an id in a message to a person" in roster
+        assert "organization.directory.search before answering" in roster
+        # Deny rows are not grants: they never turn presentation on.
+        no_grants = await organization_context(session, workspace.id, cto.id)
+        assert "agent id" not in no_grants

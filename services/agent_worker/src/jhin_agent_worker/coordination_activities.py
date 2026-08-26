@@ -37,9 +37,10 @@ from temporalio.client import Client as TemporalClient
 from temporalio.exceptions import ApplicationError
 
 from jhin_agent_worker.resources import Resources
-from jhin_db.models import Agent, ReviewPolicy
+from jhin_db.models import Agent, AgentCapabilityGrant, ReviewPolicy
 from jhin_domain import ReviewMode
 from jhin_observability import get_logger
+from jhin_policy import GrantEffect
 from jhin_tools.directory import build_roster, render_roster
 from jhin_tools.reviews import open_periodic_review
 from jhin_tools.rollups import build_manager_rollup, render_manager_rollup
@@ -112,13 +113,29 @@ def _parse_window(raw: str, *, field: str) -> datetime:
 
 
 async def organization_context(session: AsyncSession, workspace_id: UUID, agent_id: UUID) -> str:
-    """Roster block for the running agent's prompt (public identity only)."""
+    """Roster block for the running agent's prompt (public identity only).
+
+    The agent's allowed capability patterns are read alongside the roster,
+    but only to shape presentation (see :func:`render_roster`): agent ids
+    are printed only for an agent that has a tool taking one, and the
+    "look it up" hint only for one that can search the directory. The
+    gateway remains the sole authorization check.
+    """
     agent = await session.scalar(
         select(Agent).where(Agent.id == agent_id, Agent.workspace_id == workspace_id)
     )
     if agent is None:
         return ""
-    return render_roster(await build_roster(session, agent))
+    capabilities = list(
+        await session.scalars(
+            select(AgentCapabilityGrant.capability).where(
+                AgentCapabilityGrant.workspace_id == workspace_id,
+                AgentCapabilityGrant.agent_id == agent_id,
+                AgentCapabilityGrant.effect == GrantEffect.ALLOW.value,
+            )
+        )
+    )
+    return render_roster(await build_roster(session, agent), capabilities=capabilities)
 
 
 async def manager_context(session: AsyncSession, workspace_id: UUID, agent_id: UUID) -> str:

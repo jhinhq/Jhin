@@ -63,18 +63,18 @@ def test_context_blocks_follow_the_role_prompt_in_order() -> None:
     task = TaskContext(
         title="Chat",
         description="",
-        organization_context="Company directory (routing context only)",
+        organization_context="Your colleagues. Your manager:\n- CTO",
         manager_context="Team status rollup",
         memory_context="Relevant memory:\n- prefers short answers",
     )
     system = build_messages(make_snapshot(), task)[0].content
-    assert system.index("Senior SWE") < system.index("Company directory")
-    assert system.index("Company directory") < system.index("Team status rollup")
+    assert system.index("Senior SWE") < system.index("Your colleagues.")
+    assert system.index("Your colleagues.") < system.index("Team status rollup")
     assert system.index("Team status rollup") < system.index("Relevant memory:")
     assert "prefers short answers" in system
     # Absent blocks add nothing.
     bare = build_messages(make_snapshot(), TaskContext(title="Chat", description=""))[0].content
-    assert "Relevant memory" not in bare and "Company directory" not in bare
+    assert "Relevant memory" not in bare and "Your colleagues." not in bare
 
 
 def test_history_and_instructions_become_turns() -> None:
