@@ -82,14 +82,33 @@ export class JhinClient {
       const csrf = await this.csrfToken();
       if (csrf) headers["x-csrf-token"] = csrf;
     }
-    const response = await this.ctx[method](path, { headers, data: body ?? undefined });
-    if (!response.ok()) {
-      throw new Error(
-        `${method.toUpperCase()} ${path} → ${response.status()}: ${await response.text()}`,
-      );
+    // Provisioning chains several writes through the Next rewrite, which turns
+    // an upstream socket hang-up into a plain 500 the API never saw. One
+    // hiccup there would otherwise fail a spec that has nothing to do with
+    // what it tests. Retrying a POST is normally unsafe, but a dropped
+    // connection means the request almost certainly never ran, and a stray
+    // duplicate row in a workspace this spec created and will never look at
+    // again is harmless. Anything the API answers deliberately -- a 4xx -- is
+    // never retried.
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+      let response: Awaited<ReturnType<APIRequestContext["get"]>>;
+      try {
+        response = await this.ctx[method](path, { headers, data: body ?? undefined });
+      } catch (error) {
+        lastError = error;
+        continue;
+      }
+      if (response.ok()) {
+        if (response.status() === 204) return undefined as T;
+        return (await response.json()) as T;
+      }
+      const detail = `${method.toUpperCase()} ${path} → ${response.status()}: ${await response.text()}`;
+      if (response.status() < 500) throw new Error(detail);
+      lastError = new Error(detail);
     }
-    if (response.status() === 204) return undefined as T;
-    return (await response.json()) as T;
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 
   /** Null before the first sign-in: logging in and accepting an invitation are

@@ -126,11 +126,12 @@ Honest list. These need a person, or a model with judgement.
 
 ## Known flakiness
 
-- `apps/web/e2e/fixtures/live-run.ts` sizes its wait from one startup latency
-  probe plus a fixed per-step constant, leaving roughly 2.5× headroom. On a
-  loaded machine a slow run can overrun the 45s reply budget.
-- The Next.js rewrite turns an upstream `ECONNRESET` into a `500`, and the e2e
-  fixture chains several unretried writes through it, so one hiccup can fail a
-  spec that has nothing to do with what it tests.
+- `apps/web/e2e/fixtures/live-run.ts` sizes its window from one startup latency
+  probe plus a fixed per-step constant. The reply budget is now 90s against an
+  ~18s window, so a loaded machine has room; if the probe's assumptions drift
+  far enough, a slow run could still overrun it.
+- The Next.js rewrite turns an upstream `ECONNRESET` into a `500` the API never
+  saw. Provisioning writes retry twice on a 5xx or a dropped connection, which
+  covers the observed hiccup; a sustained proxy failure still fails the spec.
 - `tests/integration/test_phase10_tool_worker_boundary.py` fails if a Docker
   image build runs concurrently. It passes in isolation.

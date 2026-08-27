@@ -16,8 +16,18 @@ import { test as base } from "@playwright/test";
 import { provisionWorkspace, type Workspace } from "./api";
 
 /** An agent run has to reach Temporal, a worker, and the fake provider, and
- * the transcript polls every 2s on top of that. */
-export const REPLY_TIMEOUT_MS = 45_000;
+ * the transcript polls every 2s on top of that.
+ *
+ * Sized against the longest thing a spec waits for, which is not an ordinary
+ * turn but a deliberately-stretched one: `live-run.ts` builds a ~18s window
+ * out of tool steps so the mid-run controls can be pressed, and a spec that
+ * waits for that run to *finish* pays the whole window plus a poll. At 45s
+ * that left barely 2.5x headroom and a loaded machine could overrun it, which
+ * reads as a product failure when it is only slowness. A generous ceiling
+ * costs nothing when things are healthy -- the assertion resolves as soon as
+ * the reply lands -- and only spends the extra seconds when something is
+ * already wrong. */
+export const REPLY_TIMEOUT_MS = 90_000;
 
 export const test = base.extend<{ workspace: Workspace }>({
   workspace: async ({ playwright, baseURL }, use, testInfo) => {
