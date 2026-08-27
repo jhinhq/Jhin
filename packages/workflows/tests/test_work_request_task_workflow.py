@@ -49,6 +49,10 @@ from jhin_workflows.work_request_task import (
 class StubAgentTaskWorkflow:
     @workflow.run
     async def run(self, params: AgentTaskInput) -> AgentTaskResult:
+        if params.task_id.startswith("h"):
+            # Never finishes: stands in for a run parked on an approval
+            # nobody decides. The parent's execution timeout must end it.
+            await workflow.wait_condition(lambda: False)
         status = "failed" if params.task_id.startswith("f") else "completed"
         return AgentTaskResult(run_id=f"run-{params.task_id}", status=status, steps_used=1)
 
@@ -106,6 +110,22 @@ async def test_failed_task_still_finalizes() -> None:
     )
     result: WorkRequestTaskResult = await run_workflow(stubs, params)
     assert result.run_status == "failed" and result.request_status == "failed"
+
+
+async def test_hung_task_is_time_boxed_and_finalized() -> None:
+    """A request a colleague never finishes still reaches a terminal state
+    with a reason, instead of holding one of their slots forever."""
+    stubs = Stubs()
+    params = WorkRequestTaskInput(
+        workspace_id=str(uuid.uuid4()),
+        work_request_id=str(uuid.uuid4()),
+        task_id="h" + str(uuid.uuid4()),
+        agent_id=str(uuid.uuid4()),
+    )
+    result: WorkRequestTaskResult = await run_workflow(stubs, params)
+    assert result.run_status == "timed_out"
+    assert result.request_status == "failed"
+    assert [f.run_status for f in stubs.finalized] == ["timed_out"]
 
 
 # --- AgentTaskWorkflow starts the child for accepted requests ---

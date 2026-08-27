@@ -927,6 +927,49 @@ async def test_accepted_work_request_is_lifted_and_replayed_from_the_commit(
     assert await world.count_events("agent.step.committed") == 1
 
 
+async def test_auto_activated_request_is_lifted_from_the_requester_step(
+    world: ProjectionWorld,
+) -> None:
+    """``organization.request_work`` now activates its target, so the
+    *requester's* step carries the colleague's task into the workflow — the
+    same lift the explicit accept uses, keyed to the target's agent id."""
+    created_task_id = str(new_uuid7())
+    request_id = str(new_uuid7())
+    target_agent_id = str(new_uuid7())
+    await world.seed_step(
+        statuses=[ToolCallStatus.COMPLETED.value, ToolCallStatus.COMPLETED.value],
+        tool_names=["organization.request_work", "organization.request_work"],
+        outputs=[
+            {
+                "work_request_id": request_id,
+                "created_task_id": created_task_id,
+                "agent_id": target_agent_id,
+                "status": "accepted",
+                "activated": True,
+            },
+            # Auto-activation refused (or switched off): nothing to start.
+            {
+                "work_request_id": str(new_uuid7()),
+                "created_task_id": "",
+                "status": "pending",
+                "activated": False,
+            },
+        ],
+    )
+    ids = [str(stable_tool_invocation_id(world.run_id, 0, ordinal)) for ordinal in range(2)]
+
+    first = await world.projections.commit_agent_step_activity(world.commit_params(ids=ids))
+    replay = await world.projections.commit_agent_step_activity(world.commit_params(ids=ids))
+
+    expected = [
+        WorkRequestStart(
+            work_request_id=request_id, task_id=created_task_id, agent_id=target_agent_id
+        )
+    ]
+    assert first.work_request_starts == expected
+    assert replay.work_request_starts == expected
+
+
 class _StartRecorder:
     def __init__(self, error: Exception | None = None) -> None:
         self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []

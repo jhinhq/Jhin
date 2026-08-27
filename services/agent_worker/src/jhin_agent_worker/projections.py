@@ -125,6 +125,10 @@ _PRESERVED_FINAL_ERRORS = frozenset(
         "tool_step_manifest_not_lossless",
     }
 )
+# Tools whose executed output can carry a work-request task to start.
+_WORK_REQUEST_START_TOOLS = frozenset(
+    {"organization.respond_work_request", "organization.request_work"}
+)
 _AGENT_RUNS_METRIC = "agent_runs_total"
 _AGENT_DURATION_METRIC = "agent_run_duration_seconds"
 _AGENT_FAILURES_METRIC = "agent_run_failures_total"
@@ -904,12 +908,18 @@ class AgentProjectionActivities:
 
     @staticmethod
     def _work_request_start(result: _ProjectedToolOutcome) -> WorkRequestStart | None:
-        """An executed ``organization.respond_work_request`` accept created
-        the task row; the workflow starts its WorkRequestTaskWorkflow."""
-        if (
-            result.status != "executed"
-            or result.manifest.tool_name != "organization.respond_work_request"
-        ):
+        """A task row was created for an accepted work request; the workflow
+        starts its WorkRequestTaskWorkflow.
+
+        Two tools can create it, and both land here rather than growing a
+        second execution path: ``organization.respond_work_request`` (the
+        target explicitly accepting) and ``organization.request_work`` (the
+        request auto-activated its target, so the *requester's* workflow
+        starts the colleague's abandoned child).
+        """
+        if result.status != "executed":
+            return None
+        if result.manifest.tool_name not in _WORK_REQUEST_START_TOOLS:
             return None
         return work_request_start_from_output(result.row.sanitized_output_json)
 

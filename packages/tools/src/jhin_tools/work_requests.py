@@ -13,8 +13,16 @@ Authorization for the requester runs through the gateway: the
 ping-pong). The responder tool is structurally limited to the request's
 target agent. Humans reach the same service functions through the API.
 
-Worker integration: when ``organization.respond_work_request`` returns
-``created_task_id``, the agent worker lifts it into
+Auto-activation: a permitted request does not sit and wait for a human. Once
+every structural guard has passed, :func:`activate_work_request` accepts on
+the target's behalf (workspace setting ``coordination.auto_activate_targets``,
+default on) so the colleague actually starts. This is a policy decision about
+*cost and loops*, not about privilege — the target's own grants still gate
+everything the created task does.
+
+Worker integration: when ``organization.request_work`` or
+``organization.respond_work_request`` returns ``created_task_id`` (plus the
+owning ``agent_id``), the agent worker lifts it into
 ``StepResult.work_request_starts`` and ``AgentTaskWorkflow`` starts one
 durable ``WorkRequestTaskWorkflow`` (see ``docs/architecture/coordination.md``).
 """
@@ -49,6 +57,7 @@ from jhin_domain import (
 from jhin_policy import (
     WORK_REQUEST_CAPABILITY,
     WORK_RESPOND_CAPABILITY,
+    CoordinationSettings,
     DecisionType,
     Grant,
     PolicyDecision,
@@ -160,13 +169,18 @@ async def load_work_request_facts(
         and requester.team_id is not None
         and requester.team_id == target.team_id
     )
+    # Everything this agent has asked for that has not come back yet —
+    # awaiting a decision *and* already running. Counting only the
+    # undecided ones would make the cap vanish the moment requests
+    # auto-activate (they leave ``pending`` immediately), which is exactly
+    # when a bound on concurrent asks matters most.
     open_count = await session.scalar(
         select(func.count())
         .select_from(WorkRequest)
         .where(
             WorkRequest.workspace_id == workspace_id,
             WorkRequest.requester_agent_id == requester_agent_id,
-            WorkRequest.status.in_([s.value for s in WORK_REQUEST_OPEN_STATUSES]),
+            WorkRequest.status.in_([s.value for s in WORK_REQUEST_ACTIVE_STATUSES]),
         )
     )
     hour_count = await session.scalar(
@@ -425,6 +439,7 @@ async def accept_work_request(
     *,
     response: str = "",
     decided_by_user_id: UUID | None = None,
+    auto_activated: bool = False,
 ) -> tuple[WorkRequest, Task, bool]:
     """Accept: create exactly one linked standalone task.
 
@@ -432,6 +447,13 @@ async def accept_work_request(
     ``created=False``. Declined/terminal requests cannot be accepted.
     Callers own authorization (target agent structurally, or admin) and the
     workflow start (``WorkRequestTaskWorkflow``).
+
+    ``auto_activated`` records that the platform accepted on the target's
+    behalf because the workspace has ``coordination.auto_activate_targets``
+    on and every structural guard passed (see
+    :class:`jhin_policy.CoordinationSettings`). It changes only the audit
+    actor and the recorded provenance — never what the created task may do,
+    which the gateway re-decides from the target's own live grants.
     """
     if request.status == WorkRequestStatus.ACCEPTED.value and request.created_task_id is not None:
         task = await session.get(Task, request.created_task_id)
@@ -445,7 +467,16 @@ async def accept_work_request(
     requester_task = (
         await session.get(Task, request.requester_task_id) if request.requester_task_id else None
     )
-    description = request.description
+    # Frame the ask as *incoming*. Without this the task description is the
+    # bare question ("What are you working on right now?") and the target
+    # reads it as an instruction to go and ask somebody — observed live: the
+    # CTO answered "I can't message myself" after trying to relay its own
+    # request onward. Saying who is asking, and that answering is the whole
+    # job, removes the ambiguity; the ask itself is preserved verbatim.
+    asker = str(request.metadata_json.get("requester_agent_name", "") or "A colleague")
+    description = (
+        f"{asker} asked you this. Answer it yourself — do not pass it on.\n\n{request.description}"
+    )
     if request.expected_output:
         description += f"\n\nExpected output: {request.expected_output}"
     task = Task(
@@ -470,6 +501,7 @@ async def accept_work_request(
                 "root_task_id": str(request.root_task_id) if request.root_task_id else "",
                 "depth": request.depth,
                 "expected_output": request.expected_output,
+                "auto_activated": auto_activated,
             },
         },
     )
@@ -496,9 +528,17 @@ async def accept_work_request(
         session,
         request,
         "work_request.accepted",
-        actor_type=ActorType.USER if decided_by_user_id else ActorType.AGENT,
-        actor_id=decided_by_user_id or request.target_agent_id,
-        extra={"created_task_id": str(task.id)},
+        actor_type=(
+            ActorType.USER
+            if decided_by_user_id
+            else (ActorType.SYSTEM if auto_activated else ActorType.AGENT)
+        ),
+        actor_id=(
+            decided_by_user_id
+            if decided_by_user_id
+            else (None if auto_activated else request.target_agent_id)
+        ),
+        extra={"created_task_id": str(task.id), "auto_activated": auto_activated},
     )
     await session.flush()
     return request, task, True
@@ -538,6 +578,55 @@ async def decline_work_request(
     return request
 
 
+async def fail_work_request(
+    session: AsyncSession,
+    request: WorkRequest,
+    *,
+    code: str,
+    reason: str,
+) -> WorkRequest:
+    """Close an open request that cannot proceed, with a readable reason.
+
+    A request that nothing can act on must never sit at ``pending``
+    forever: the requester was told "I asked them" and a person is waiting
+    on the answer. This drives the row to ``failed`` and posts the same
+    ``result`` message shape ``finalize_work_request`` posts, so the
+    conversation shows *why* instead of showing nothing. Idempotent:
+    already-terminal requests are returned untouched.
+    """
+    if request.status in (
+        WorkRequestStatus.COMPLETED.value,
+        WorkRequestStatus.FAILED.value,
+        WorkRequestStatus.DECLINED.value,
+    ):
+        return request
+    request.status = WorkRequestStatus.FAILED.value
+    request.response = reason[:4_000]
+    request.responded_at = _now()
+    request.completed_at = request.responded_at
+    message = await _status_message(
+        session,
+        request,
+        sender_id=request.target_agent_id,
+        recipient_id=request.requester_agent_id,
+        summary=reason,
+        message_type=MessageType.RESULT,
+        extra={"failure_code": code, "run_status": "failed"},
+    )
+    _audit_transition(
+        session,
+        request,
+        "work_request.failed",
+        actor_type=ActorType.SYSTEM,
+        actor_id=None,
+        extra={"failure_code": code},
+    )
+    await session.flush()
+    request.metadata_json = {**request.metadata_json, "result_message_id": str(message.id)}
+    await session.flush()
+    return request
+
+
 async def request_clarification(
     session: AsyncSession,
     request: WorkRequest,
@@ -567,6 +656,20 @@ async def request_clarification(
     )
     await session.flush()
     return request
+
+
+_FAILURE_REASONS = {
+    "timed_out": (
+        "they did not finish within the time allowed for a colleague's request, so it was stopped"
+    ),
+    "cancelled": "their work on it was stopped",
+    "failed": "their run failed before they could answer",
+}
+
+
+def _failure_reason(run_status: str) -> str:
+    """Plain language for why a request did not produce an answer."""
+    return _FAILURE_REASONS.get(run_status, f"their run ended as {run_status}")
 
 
 async def finalize_work_request(
@@ -599,7 +702,7 @@ async def finalize_work_request(
         summary = (
             f"Finished: {request.title}"
             if completed
-            else f"Could not complete: {request.title} ({run_status})"
+            else f"Could not answer: {request.title} — {_failure_reason(run_status)}"
         )
     message = await _status_message(
         session,
@@ -688,6 +791,15 @@ class RequestWorkOutput(BaseModel):
     target_agent_name: str
     created: bool
     detail: str = ""
+    # Set when the target was activated: the task the colleague now runs.
+    # The agent worker lifts this into ``StepResult.work_request_starts``
+    # and the requester's workflow starts the (abandoned, non-blocking)
+    # ``WorkRequestTaskWorkflow`` for it — the same path an explicit accept
+    # takes, never a second one.
+    created_task_id: str = ""
+    # Whose task it is: the *target* agent, not the caller.
+    agent_id: str = ""
+    activated: bool = False
 
 
 class RespondWorkRequestInput(BaseModel):
@@ -703,6 +815,11 @@ class RespondWorkRequestOutput(BaseModel):
     status: str
     created_task_id: str | None = None
     detail: str = ""
+    # The agent that owns the created task (the request's target, i.e. the
+    # responder). ``WorkRequestTaskWorkflow`` needs it to run the task, and
+    # it is lifted out of this sanitized output — without it the workflow
+    # was started with an empty agent id.
+    agent_id: str = ""
 
 
 def default_idempotency_key(
@@ -761,6 +878,90 @@ async def validate_request_work(
     return PolicyDecision(decision=DecisionType.DENY, code=decision.code, reason=decision.reason)
 
 
+class WorkRequestActivation(BaseModel):
+    """Outcome of trying to start the target's task for a fresh request."""
+
+    task_id: str = ""
+    activated: bool = False
+    detail: str
+
+
+async def activate_work_request(
+    session: AsyncSession,
+    request: WorkRequest,
+    *,
+    settings: CoordinationSettings,
+    target_name: str,
+) -> WorkRequestActivation:
+    """Start the colleague on a permitted request, or say why not.
+
+    This is the fix for "the ask was recorded but nobody was ever woken".
+    Acceptance used to be human-in-the-loop, which meant the commonest ask
+    in the product — "message the CTO and ask what they're working on" —
+    produced a ``pending`` row, a "their response is pending" reply, and
+    then silence forever.
+
+    It reuses :func:`accept_work_request` and (through the caller's
+    workflow) ``WorkRequestTaskWorkflow``; there is no second execution
+    path. Every structural guard already ran in
+    :func:`jhin_policy.evaluate_work_request` *before* the row existed, and
+    the created task is authorized exactly like any other task: the tool
+    gateway re-decides each of the target's calls against the target's own
+    live grants, so a peer request can never widen what the target may do.
+
+    Idempotent: an already-accepted request returns its existing task, so a
+    retried tool invocation restarts the same workflow id instead of
+    creating a second task.
+    """
+    if request.status == WorkRequestStatus.ACCEPTED.value and request.created_task_id is not None:
+        return WorkRequestActivation(
+            task_id=str(request.created_task_id),
+            activated=True,
+            detail=(
+                f"{target_name} is already working on this; their answer arrives in this "
+                "conversation when they are done"
+            ),
+        )
+    if not settings.auto_activate_targets:
+        return WorkRequestActivation(
+            detail=(
+                "request recorded, but this workspace requires a person to accept work "
+                f"requests before {target_name} starts — say plainly that it is waiting "
+                "for a human to approve it, not that an answer is on its way"
+            )
+        )
+    if request.status not in {s.value for s in WORK_REQUEST_OPEN_STATUSES}:
+        return WorkRequestActivation(
+            detail=f"this request is already {request.status}; nothing was started"
+        )
+    try:
+        _request, task, _created = await accept_work_request(
+            session,
+            request,
+            response=f"{target_name} picked this up.",
+            auto_activated=True,
+        )
+    except WorkRequestError as exc:
+        # Terminal, with a reason the requester (and the person reading the
+        # conversation) can act on — never a row left silently pending.
+        await fail_work_request(
+            session,
+            request,
+            code=exc.code,
+            reason=f"Could not start {target_name} on this request: {exc.message}",
+        )
+        return WorkRequestActivation(detail=f"{exc.code}: {exc.message}")
+    return WorkRequestActivation(
+        task_id=str(task.id),
+        activated=True,
+        detail=(
+            f"sent, and {target_name} has started on it. Tell the person you have asked "
+            f"{target_name} and what you asked; their answer arrives in this conversation "
+            "shortly — you do not need to wait for it or ask again"
+        ),
+    )
+
+
 async def _request_work(ctx: ToolExecutionContext, payload: BaseModel) -> BaseModel:
     data = cast(RequestWorkInput, payload)
     target = await _resolve_target(ctx, data)
@@ -788,18 +989,21 @@ async def _request_work(ctx: ToolExecutionContext, payload: BaseModel) -> BaseMo
         expected_output=data.expected_output,
         idempotency_key=key,
     )
+    workspace = await ctx.session.get(Workspace, ctx.workspace_id)
+    settings = coordination_settings(workspace.settings_json if workspace is not None else None)
+    activation = await activate_work_request(
+        ctx.session, request, settings=settings, target_name=target.name
+    )
     return RequestWorkOutput(
         work_request_id=str(request.id),
         status=request.status,
         target_agent_id=str(target.id),
         target_agent_name=target.name,
         created=created,
-        detail=(
-            "request sent; the target decides whether to accept and the result "
-            "arrives as a message when their task finishes"
-            if created
-            else "an identical request already exists; returning it"
-        ),
+        created_task_id=activation.task_id,
+        agent_id=str(target.id),
+        activated=activation.activated,
+        detail=activation.detail,
     )
 
 
@@ -846,6 +1050,7 @@ async def _respond_work_request(ctx: ToolExecutionContext, payload: BaseModel) -
                 work_request_id=str(request.id),
                 status=request.status,
                 created_task_id=str(task.id),
+                agent_id=str(request.target_agent_id),
                 detail=(
                     "accepted; a new task was created for you and starts after this step"
                     if created
@@ -883,11 +1088,14 @@ WORK_REQUEST_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor, ToolValidator | No
                 "better placed than you to answer or to do a piece of work. "
                 "Pass target_agent_name (their name as you know it, e.g. "
                 '"CTO") and description (what you are asking them, in '
-                "plain words). Nothing else is required. They decide whether "
-                "to accept; their answer arrives later as a message on this "
-                "conversation, so tell the person you have asked and what "
-                "you asked. Unlike delegating, this does not hand over your "
-                "work — it only asks."
+                "plain words). Nothing else is required. The colleague "
+                "starts on it straight away and their answer appears in "
+                "this conversation by itself a little later, so tell the "
+                "person who you asked and what you asked, then finish your "
+                "turn — do not wait, do not poll, and do not ask again. "
+                "Read the `detail` field: it says whether they actually "
+                "started, and if they could not, why. Unlike delegating, "
+                "this does not hand over your work — it only asks."
             ),
             risk=RiskLevel.WRITE,
             input_model=RequestWorkInput,

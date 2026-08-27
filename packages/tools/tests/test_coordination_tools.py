@@ -32,7 +32,13 @@ from jhin_db.models import (
     Workspace,
 )
 from jhin_domain import MessageType, RunStatus, TaskState, WorkRequestStatus, new_uuid7
-from jhin_policy import Grant, GrantEffect, RiskLevel, collaboration_grant_specs
+from jhin_policy import (
+    CoordinationSettings,
+    Grant,
+    GrantEffect,
+    RiskLevel,
+    collaboration_grant_specs,
+)
 from jhin_tools.builtin import (
     ToolExecutionContext,
     allowed_tool_definitions,
@@ -57,7 +63,11 @@ from jhin_tools.reviews import (
     periodic_trigger_key,
 )
 from jhin_tools.rollups import ColleagueStatus, build_manager_rollup, render_manager_rollup
-from jhin_tools.work_requests import derived_title, finalize_work_request
+from jhin_tools.work_requests import (
+    activate_work_request,
+    derived_title,
+    finalize_work_request,
+)
 
 
 class Org:
@@ -219,6 +229,18 @@ async def request_work(
     return await org.gateway(session, actor).request(
         "organization.request_work", request_args(target, **overrides)
     )
+
+
+async def human_in_the_loop(session: AsyncSession, org: Org) -> None:
+    """Turn auto-activation off: requests then wait for an explicit accept."""
+    org.workspace.settings_json = {
+        **(org.workspace.settings_json or {}),
+        "coordination": {
+            **(org.workspace.settings_json or {}).get("coordination", {}),
+            "auto_activate_targets": False,
+        },
+    }
+    await session.flush()
 
 
 async def respond(
@@ -459,6 +481,8 @@ async def test_collaboration_baseline_advertises_and_permits_cross_team_ask(
 async def test_request_accept_is_idempotent_and_creates_one_task(
     session: AsyncSession, org: Org
 ) -> None:
+    # The explicit accept/decline path, with auto-activation turned off.
+    await human_in_the_loop(session, org)
     await grant(session, org, org.swe, "organization.work.request", {"targets": "any"})
     first = await request_work(session, org, org.swe, org.blogger)
     assert first.status == "executed", first.decision_reason
@@ -555,6 +579,7 @@ async def test_request_accept_is_idempotent_and_creates_one_task(
 
 
 async def test_decline_creates_no_task(session: AsyncSession, org: Org) -> None:
+    await human_in_the_loop(session, org)
     await grant(session, org, org.swe, "organization.work.request", {"targets": "team"})
     outcome = await request_work(session, org, org.swe, org.qa)
     assert outcome.status == "executed", outcome.decision_reason
@@ -585,6 +610,162 @@ async def test_decline_creates_no_task(session: AsyncSession, org: Org) -> None:
     assert "work_request_not_open" in (late_accept.sanitized_output or {})["detail"]
     actions = list(await session.scalars(select(AuditEvent.action)))
     assert "work_request.created" in actions and "work_request.declined" in actions
+
+
+async def test_request_auto_activates_the_target(session: AsyncSession, org: Org) -> None:
+    """The reported bug: asking a colleague used to leave a pending row that
+    nothing ever woke. A permitted request now starts the target itself."""
+    await grant(session, org, org.swe, "organization.work.request", {"targets": "any"})
+    outcome = await request_work(session, org, org.swe, org.blogger)
+    assert outcome.status == "executed", outcome.decision_reason
+    output = outcome.sanitized_output or {}
+    assert output["status"] == WorkRequestStatus.ACCEPTED.value
+    assert output["activated"] is True
+    assert output["created_task_id"]
+    # The workflow needs the *target*'s id to run their task.
+    assert output["agent_id"] == str(org.blogger.id)
+    assert "started on it" in output["detail"]
+
+    request = await session.scalar(select(WorkRequest))
+    assert request is not None
+    assert request.status == WorkRequestStatus.ACCEPTED.value
+    created = await session.get(Task, UUID(output["created_task_id"]))
+    assert created is not None
+    assert request.created_task_id == created.id
+    assert created.assigned_agent_id == org.blogger.id
+    assert created.parent_task_id is None
+    assert created.conversation_id == org.task.conversation_id
+    assert created.temporal_workflow_id == f"task-{created.id}"
+    assert created.metadata_json["work_request"]["auto_activated"] is True
+    # The colleague is told the ask is incoming, so it answers instead of
+    # trying to relay the question onward.
+    assert created.description.startswith("SWE asked you this. Answer it yourself")
+    assert "Summarize the changes for the 2.0 release." in created.description
+    # Auto-acceptance is the platform's act, not the target agent's.
+    accepted_audit = await session.scalar(
+        select(AuditEvent).where(AuditEvent.action == "work_request.accepted")
+    )
+    assert accepted_audit is not None
+    assert accepted_audit.actor_type == "system" and accepted_audit.actor_id is None
+    assert accepted_audit.metadata_json["auto_activated"] is True
+
+    # A retried invocation of the same ask creates no second request or task.
+    again = await request_work(session, org, org.swe, org.blogger)
+    again_output = again.sanitized_output or {}
+    assert again_output["created"] is False
+    assert again_output["created_task_id"] == output["created_task_id"]
+    assert again_output["activated"] is True
+    assert len(list(await session.scalars(select(WorkRequest)))) == 1
+    assert (
+        len(
+            list(
+                await session.scalars(
+                    select(Task).where(Task.metadata_json["origin"].as_string() == "work_request")
+                )
+            )
+        )
+        == 1
+    )
+
+    # The answer lands on the requester's own task, so it shows up in the
+    # conversation the person is watching.
+    created.metadata_json = {
+        **created.metadata_json,
+        "reported_result": {"summary": "Working on the 2.0 migration.", "status": "completed"},
+    }
+    await session.flush()
+    done = await finalize_work_request(
+        session, workspace_id=org.workspace.id, request_id=request.id, run_status="completed"
+    )
+    assert done is not None and done.status == WorkRequestStatus.COMPLETED.value
+    result = await session.scalar(
+        select(Message).where(Message.message_type == MessageType.RESULT.value)
+    )
+    assert result is not None
+    assert result.task_id == org.task.id
+    assert result.content_json["summary"] == "Working on the 2.0 migration."
+    assert result.content_json["from_agent_name"] == "Blogger"
+
+
+async def test_auto_activation_is_workspace_configurable(session: AsyncSession, org: Org) -> None:
+    await human_in_the_loop(session, org)
+    await grant(session, org, org.swe, "organization.work.request", {"targets": "any"})
+    output = (await request_work(session, org, org.swe, org.blogger)).sanitized_output or {}
+    assert output["status"] == WorkRequestStatus.PENDING.value
+    assert output["activated"] is False and output["created_task_id"] == ""
+    # The model is told the truth so it does not promise an answer.
+    assert "waiting for a human" in output["detail"]
+
+
+async def test_activation_failure_is_terminal_with_a_reason(
+    session: AsyncSession, org: Org
+) -> None:
+    """A request that cannot be started never stays pending: it fails with a
+    readable reason posted back into the requester's conversation."""
+    await grant(session, org, org.swe, "organization.work.request", {"targets": "any"})
+    await human_in_the_loop(session, org)
+    request_id = (await request_work(session, org, org.swe, org.blogger)).sanitized_output or {}
+    request = await session.get(WorkRequest, UUID(request_id["work_request_id"]))
+    assert request is not None and request.status == WorkRequestStatus.PENDING.value
+
+    # The colleague goes inactive between the ask and the activation.
+    org.blogger.status = "archived"
+    await session.flush()
+    activation = await activate_work_request(
+        session, request, settings=CoordinationSettings(), target_name="Blogger"
+    )
+    assert activation.activated is False
+    assert "target_inactive" in activation.detail
+    await session.refresh(request)
+    assert request.status == WorkRequestStatus.FAILED.value
+    assert request.completed_at is not None
+    message = await session.scalar(
+        select(Message).where(Message.message_type == MessageType.RESULT.value)
+    )
+    assert message is not None
+    assert message.task_id == org.task.id
+    assert "Could not start Blogger" in message.content_json["summary"]
+    assert message.content_json["failure_code"] == "target_inactive"
+    # Idempotent: a second attempt does not post a second failure.
+    assert (
+        await activate_work_request(
+            session, request, settings=CoordinationSettings(), target_name="Blogger"
+        )
+    ).activated is False
+    assert (
+        len(
+            list(
+                await session.scalars(
+                    select(Message).where(Message.message_type == MessageType.RESULT.value)
+                )
+            )
+        )
+        == 1
+    )
+
+
+async def test_auto_activated_mutual_ask_cannot_loop(session: AsyncSession, org: Org) -> None:
+    """Two agents asking each other must not ping-pong: the guards run before
+    the row exists and auto-activation never gets a chance to widen them."""
+    await grant(session, org, org.swe, "organization.work.request", {"targets": "any"})
+    await grant(session, org, org.blogger, "organization.work.request", {"targets": "any"})
+    first = (await request_work(session, org, org.swe, org.blogger)).sanitized_output or {}
+    created = await session.get(Task, UUID(first["created_task_id"]))
+    assert created is not None
+
+    back = await org.gateway(session, org.blogger, created).request(
+        "organization.request_work", request_args(org.swe, idempotency_key="back")
+    )
+    assert back.status == "denied" and back.decision_code == "request_ping_pong"
+    assert "answer it instead" in (back.decision_reason or "")
+
+    # The depth cap bounds a chain that walks forward instead of back.
+    org.workspace.settings_json = {"coordination": {"max_request_depth": 1}}
+    await session.flush()
+    deeper = await org.gateway(session, org.blogger, created).request(
+        "organization.request_work", request_args(org.qa, idempotency_key="deeper")
+    )
+    assert deeper.status == "denied" and deeper.decision_code == "request_depth_exceeded"
 
 
 async def test_target_capacity_and_unavailable_target(session: AsyncSession, org: Org) -> None:

@@ -69,6 +69,8 @@ from jhin_workflows.delegated_task.shared import (
 )
 from jhin_workflows.task_queues import AGENT_TASK_QUEUE, TOOL_TASK_QUEUE
 from jhin_workflows.work_request_task.shared import (
+    ACTIVITY_FINALIZE_WORK_REQUEST,
+    FinalizeWorkRequestInput,
     WorkRequestTaskInput,
     work_request_workflow_id,
 )
@@ -729,6 +731,25 @@ class AgentTaskWorkflow:
             )
         except WorkflowAlreadyStartedError:
             return
+        except Exception:
+            # The request row is already `accepted` with a task that will now
+            # never run. Close it instead of leaving a colleague's ask stuck
+            # forever, and do not fail this run over it — the requester's own
+            # work is unrelated. A failure to finalize is swallowed for the
+            # same reason; the row is still visible as accepted.
+            with contextlib.suppress(Exception):
+                await workflow.execute_activity(
+                    ACTIVITY_FINALIZE_WORK_REQUEST,
+                    FinalizeWorkRequestInput(
+                        workspace_id=params.workspace_id,
+                        work_request_id=accepted.work_request_id,
+                        task_id=accepted.task_id,
+                        run_status="failed",
+                    ),
+                    result_type=str,
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=_FINALIZE_RETRY,
+                )
 
     async def _finalize(
         self,

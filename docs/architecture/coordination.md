@@ -125,7 +125,12 @@ from an explicit request, `fail_closed`), `reviewer_type` (`agent` | `human`
 - `coordination_settings(workspace.settings_json)` reads
   `settings_json.coordination` with defaults `max_request_depth=4`,
   `max_pending_requests_per_agent=10`, `max_requests_per_agent_per_hour=30`,
-  `max_active_request_tasks_per_agent=3`.
+  `max_active_request_tasks_per_agent=3`, `auto_activate_targets=true`.
+  `open_requests_by_requester` counts every request the agent has out that
+  has not come back — `pending`, `clarification_requested` **and**
+  `accepted`. Counting only the undecided ones would make that cap vanish
+  the moment requests auto-activate, which is exactly when a bound on
+  concurrent asks matters.
 - `evaluate_review_policies(policies, ReviewContext) -> ReviewDecision`:
   enabled policies of the context's mode whose scope applies and at least
   one condition fires; ordered by scope specificity (agent → task_type →
@@ -220,22 +225,135 @@ is a deliberate act.
    none, so naming a colleague and passing their id are the same request) and a `question` message on the requester's task with
    `kind="work_request"`, `work_request_id`, `target_agent_name`,
    `from_agent_name`.
-3. The target responds with `organization.respond_work_request` (or an admin
-   via `POST /work-requests/{id}/accept|decline|clarify`):
+3. **Auto-activation** (`activate_work_request`, same transaction as the
+   create). A permitted request starts its target instead of waiting for a
+   human: it calls the *same* `accept_work_request` and returns
+   `created_task_id` + the target's `agent_id` in the tool output. Nothing
+   else changes — one task, `origin: work_request`, and the task metadata
+   records `work_request.auto_activated = true` while the audit row is
+   written with `actor_type = system` (the platform accepted, not the
+   target agent). Idempotent: a retried invocation returns the existing
+   task, never a second one.
+4. The target can still respond explicitly with
+   `organization.respond_work_request` (or an admin via
+   `POST /work-requests/{id}/accept|decline|clarify`) — that is the path
+   when `auto_activate_targets` is off, when a request came back for
+   clarification, or when a human overrides:
    - accept → one task (`origin: work_request`, `temporal_workflow_id =
      task-<id>`, same conversation/correlation as the requester task), a
      `status` message, audit `work_request.accepted`; repeat accepts return
      the same task;
    - decline → status only, no task; clarify → `question` back.
-4. Durable execution: `WorkRequestTaskWorkflow(work_request_id, task_id,
+5. Durable execution: `WorkRequestTaskWorkflow(work_request_id, task_id,
    agent_id)` (id `work-request-<request id>`) runs the task's
    `AgentTaskWorkflow` as a child under `task-<id>`, then the
    `finalize_work_request` activity marks the request completed/failed and
    posts a `result` message (summary, artifacts, risks from
    `reported_result`) to the requester's task. The API starts it directly on
-   human accept; an agent accept is lifted by the worker into
-   `StepResult.work_request_starts` and `AgentTaskWorkflow` starts it as an
-   abandoned child (duplicate starts are no-ops).
+   human accept; an agent accept **and an auto-activation** are lifted by
+   the worker into `StepResult.work_request_starts`
+   (`organization.respond_work_request` or `organization.request_work`,
+   both through `work_request_start_from_output`) and `AgentTaskWorkflow`
+   starts it as an abandoned child (duplicate starts are no-ops). The child
+   carries a 6-hour `execution_timeout`, so a task that never finishes ends
+   as `run_status = "timed_out"` and the request is finalized `failed` with
+   a readable reason rather than holding a target slot forever.
+
+### Auto-activation: why acceptance is not human-in-the-loop
+
+The product promise is a company of agents that work together, and the
+commonest ask in it is "message the CTO and ask what they're working on".
+While acceptance was human-in-the-loop that ask produced a `pending` row,
+a "their response is pending" reply, and then nothing: no task was ever
+created, so no answer ever existed, and the requester's own run had already
+finished by the time anyone could have accepted. The loop has to close by
+itself.
+
+Auto-activation is a deliberate **policy** change, and the security
+argument for it is that a *request is not an authority transfer*:
+
+- A request cannot make the target exceed its own grants. Everything the
+  created task then does goes through the tool gateway, which re-decides
+  each call against the **target's** live grants, rules, validators, review
+  policies and human-approval requirements. The requester's grants are
+  irrelevant to it.
+- It is not delegation. No lineage, no `parent_task_id`, no blocking
+  parent wait, no ownership handover; `organization.delegate` stays
+  deny-by-default with the restrictive delegation model.
+- The created task is an ordinary task: visible in Activity and the
+  conversation, stoppable, budgeted, and admitted through the same
+  concurrency slots as any other work.
+
+What is left is **cost and runaway loops**, so every guard that bounds
+those still runs, unchanged, in `evaluate_work_request` *before* the row
+exists: no self-request; target must exist, be active and be available;
+chain depth ≤ `max_request_depth`; requester's outstanding-request cap and
+hourly rate cap; the target's `max_active_request_tasks_per_agent`;
+ping-pong prevention on the root task; explicit deny; and the grant's
+`targets` scope. A refusal is a recorded tool denial whose `reason` is
+plain language, so the requester tells the person *why* instead of
+promising an answer that will never come.
+
+`coordination.auto_activate_targets` (default **true**) turns it off per
+workspace. It defaults on because that is the behaviour that makes the
+product work out of the box; with it off, requests stay `pending` for the
+admin accept/decline endpoints and the tool's `detail` says exactly that,
+so the requester reports "waiting for a human to approve it" rather than
+"an answer is on its way".
+
+### Never silently stuck
+
+A request must always reach a terminal state with a reason a person can
+read:
+
+- A guard refuses → the request is never created; the denial code and
+  reason reach the model as the tool's result.
+- Activation cannot proceed after the row exists (e.g. the colleague went
+  inactive in between) → `fail_work_request` drives the row to `failed` and
+  posts the same `result`-shaped message into the requester's task, so the
+  conversation shows the reason.
+- The target's task fails, is cancelled, or runs past the time box →
+  `finalize_work_request` marks the request `failed` and posts a plain
+  sentence ("their run failed before they could answer", "they did not
+  finish within the time allowed…"). The failed task itself also shows up
+  in the Attention inbox through the ordinary recent-failures projection.
+- The `WorkRequestTaskWorkflow` child cannot be started at all →
+  `AgentTaskWorkflow._start_work_request_task` finalizes the request as
+  `failed` rather than leaving an `accepted` row whose task will never run
+  (and never fails the requester's own run over it; a duplicate start stays
+  a no-op).
+- Auto-activation switched off → the row stays `pending` **by design**, is
+  listed by `GET /work-requests?status=pending`, and the requester was told
+  so in words.
+
+The colleague's task description is framed as an incoming ask
+(`"<Requester> asked you this. Answer it yourself — do not pass it on."`
+followed by the request verbatim). Without that framing the bare question
+reads as an instruction to go and ask somebody — observed live: the CTO
+answered "I can't message myself" after trying to relay its own request
+onward.
+
+### How the answer gets back to the person
+
+The requester's run has normally finished by the time the colleague
+answers, so nothing can be handed back to it — the answer is delivered into
+the **conversation** instead, which is what the person is actually looking
+at:
+
+- `accept_work_request` gives the created task the requester task's
+  `conversation_id`, so the colleague's own final reply is an ordinary
+  visible agent message in that conversation, attributed to them
+  (`sender_name`), rendered as a normal bubble by
+  `apps/web/components/chat/transcript.tsx`.
+- `finalize_work_request` additionally posts the structured `result`
+  message (summary/artifacts/risks) on the *requester's* task, which the
+  transcript folds into the collapsed agent↔agent exchange row along with
+  the `question` and `accepted` cards.
+
+So the reader sees a quiet "…updates with <colleague>" row for the
+mechanics and the colleague's actual answer as a bubble, without re-asking
+and without the requester having to be woken and pay for another model
+call.
 
 ### Review gate order
 

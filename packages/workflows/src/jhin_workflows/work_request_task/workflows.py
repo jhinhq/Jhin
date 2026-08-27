@@ -14,6 +14,7 @@ from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 from jhin_workflows.agent_task.shared import AgentTaskInput, AgentTaskResult
 from jhin_workflows.work_request_task.shared import (
@@ -30,6 +31,29 @@ _FINALIZE_RETRY = RetryPolicy(
     maximum_attempts=5,
 )
 
+# A colleague's answer is something a person is waiting on, so the request
+# is time-boxed: an accepted request that never finishes (a task parked on
+# an approval nobody decides, a queue slot that never frees, a wedged run)
+# must still reach a terminal state with a readable reason instead of
+# holding one of the target's ``max_active_request_tasks_per_agent`` slots
+# forever. The window is generous — long enough for a legitimate human
+# approval on the target's own work — because the point is a ceiling, not a
+# deadline. On expiry the child is terminated and the request is finalized
+# as failed.
+_MAX_CHILD_EXECUTION = timedelta(hours=6)
+
+
+def _timed_out(error: BaseException) -> bool:
+    """Whether a child failure was the execution timeout (bounded walk)."""
+    current: BaseException | None = error
+    for _ in range(5):
+        if current is None:
+            return False
+        if isinstance(current, TemporalTimeoutError):
+            return True
+        current = current.__cause__
+    return False
+
 
 @workflow.defn(name="WorkRequestTaskWorkflow")
 class WorkRequestTaskWorkflow:
@@ -45,12 +69,14 @@ class WorkRequestTaskWorkflow:
                 ),
                 id=f"task-{params.task_id}",
                 result_type=AgentTaskResult,
+                execution_timeout=_MAX_CHILD_EXECUTION,
             )
             run_status = child.status
-        except Exception:
+        except Exception as error:
             # AgentTaskWorkflow persists its own failures; reaching here means
-            # the child died abnormally. The request still resolves.
-            run_status = "failed"
+            # the child died abnormally or ran past the time box. The request
+            # still resolves — that is the whole point of finalizing below.
+            run_status = "timed_out" if _timed_out(error) else "failed"
 
         request_status: str = await workflow.execute_activity(
             ACTIVITY_FINALIZE_WORK_REQUEST,

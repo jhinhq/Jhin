@@ -76,6 +76,9 @@ DEFAULT_MAX_REQUEST_DEPTH = 4
 DEFAULT_MAX_PENDING_REQUESTS_PER_AGENT = 10
 DEFAULT_MAX_REQUESTS_PER_AGENT_PER_HOUR = 30
 DEFAULT_MAX_ACTIVE_REQUEST_TASKS_PER_AGENT = 3
+# A permitted request activates its target by itself (see
+# ``CoordinationSettings.auto_activate_targets``).
+DEFAULT_AUTO_ACTIVATE_TARGETS = True
 
 _VALID_TARGETS = ("subordinates", "team", "any")
 
@@ -95,6 +98,27 @@ class CoordinationSettings(BaseModel):
     max_active_request_tasks_per_agent: int = Field(
         default=DEFAULT_MAX_ACTIVE_REQUEST_TASKS_PER_AGENT, ge=1, le=500
     )
+    # Whether a permitted request starts the target's task by itself.
+    #
+    # **Default on, deliberately.** The product promise is a company of
+    # agents that work together: "ask the CTO what he is working on" has to
+    # produce an answer, not a row that waits for an admin to press accept.
+    # The security exposure of auto-acceptance is *cost and runaway loops*,
+    # not privilege: a request cannot make the target exceed its own grants
+    # (the tool gateway re-authorizes everything the target then does
+    # against the target's live grants), it never transfers ownership the
+    # way delegation does, and the created task stays visible and
+    # stoppable. Every guard that bounds cost and loops still runs before
+    # the request is even created — no self-request, target active and
+    # available, chain depth, requester open/hourly caps, target active
+    # request-task cap, ping-pong, plus the ordinary run-admission and
+    # budget checks on the target's own task.
+    #
+    # Turn it off (``settings_json.coordination.auto_activate_targets:
+    # false``) to put a person back in the loop: requests then stay
+    # ``pending`` for the admin accept/decline endpoints, and the requester
+    # is told so in plain language instead of being told nothing.
+    auto_activate_targets: bool = DEFAULT_AUTO_ACTIVATE_TARGETS
 
 
 def coordination_settings(settings_json: dict[str, Any] | None) -> CoordinationSettings:
@@ -122,7 +146,9 @@ class WorkRequestFacts(BaseModel):
     target_in_same_team: bool = False
     # Depth the *new* request would have (1 for ordinary work).
     request_depth: int = 1
-    # Requester-side counters.
+    # Requester-side counters. ``open_requests_by_requester`` is every ask
+    # of this agent's that has not come back yet — awaiting a decision or
+    # already running as the target's task.
     open_requests_by_requester: int = 0
     requests_last_hour_by_requester: int = 0
     # Target-side load: tasks created from accepted requests still active.
@@ -205,8 +231,9 @@ def evaluate_work_request(
     if facts.open_requests_by_requester >= limits.max_pending_requests_per_agent:
         return _deny(
             "requester_pending_limit",
-            f"you already have {facts.open_requests_by_requester} open requests "
-            f"(limit {limits.max_pending_requests_per_agent})",
+            f"you already have {facts.open_requests_by_requester} requests out with "
+            f"colleagues that have not come back yet "
+            f"(limit {limits.max_pending_requests_per_agent}); wait for one to finish",
         )
     if facts.requests_last_hour_by_requester >= limits.max_requests_per_agent_per_hour:
         return _deny(

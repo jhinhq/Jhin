@@ -3,7 +3,7 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Transcript } from "@/components/chat/transcript";
-import { friendlyMessageLabel, mergeTimeline, workRequestDetailLines } from "@/lib/chat";
+import { friendlyMessageLabel, groupExchanges, mergeTimeline, workRequestDetailLines } from "@/lib/chat";
 import type { ConversationMessage } from "@/lib/types";
 
 vi.mock("@/lib/hooks", () => ({}));
@@ -90,6 +90,19 @@ const reviewed = message({
   content_json: { summary: "Fine to merge.", verdict: "approve", from_agent_name: "QA" },
 });
 
+/** The colleague's own reply once their task ran: an ordinary agent turn in
+ * the same conversation, attributed to them — this is how the answer reaches
+ * the person who asked, because the requester's run has already finished. */
+const colleagueAnswer = message({
+  id: "m5",
+  message_type: "text",
+  sender_id: "a2",
+  agent_id: "a2",
+  sender_name: "Senior SWE",
+  created_at: "2026-08-21T10:04:00Z",
+  content_json: { text: "Right now I'm on the retry branch and the release checklist." },
+});
+
 describe("work-request labels", () => {
   it("follows the request through its lifecycle", () => {
     expect(friendlyMessageLabel(asked)).toBe("Asked Senior SWE for help");
@@ -128,5 +141,33 @@ describe("Transcript work-request cards", () => {
     expect(screen.getByTestId("work-card").textContent).toContain("QA's review: looks good");
     expect(document.body.textContent).not.toContain("wr-1");
     expect(document.body.textContent).not.toContain("task-9");
+  });
+
+  it("shows the colleague's answer as a visible bubble, not folded into the quiet exchange", () => {
+    // The whole point of the loop: the person watching this chat reads the
+    // answer without expanding anything and without asking again.
+    const items = groupExchanges(
+      mergeTimeline([asked, accepted, colleagueAnswer, reported], []),
+      { primaryAgentId: "a1", primaryAgentName: "CTO" },
+    );
+    const standalone = items.filter((item) => item.kind === "message");
+    expect(standalone.map((item) => (item as { message: ConversationMessage }).message.id)).toEqual([
+      "m5",
+    ]);
+
+    render(
+      <Transcript
+        items={items}
+        agentName="CTO"
+        userName="Ada"
+        agentAvatars={{ a1: null, a2: null }}
+      />,
+    );
+    const bubbles = screen.getAllByTestId("agent-message");
+    expect(bubbles).toHaveLength(1);
+    expect(bubbles[0].textContent).toContain("Right now I'm on the retry branch");
+    expect(bubbles[0].textContent).toContain("Senior SWE");
+    // The mechanics stay quiet: the asked/accepted pair collapses on its own.
+    expect(screen.getAllByTestId("exchange").length).toBeGreaterThan(0);
   });
 });
