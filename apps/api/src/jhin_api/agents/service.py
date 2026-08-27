@@ -23,6 +23,7 @@ from jhin_db.models import (
     AgentTeamMembership,
     ModelProfile,
     Team,
+    Trigger,
 )
 from jhin_domain import AgentStatus, AvatarKind
 
@@ -549,6 +550,32 @@ async def delete_agent(
         ip_hash=ip_hash,
         metadata={"name": agent.name, "slug": agent.slug},
     )
+    # An automation that gives work to this agent has nowhere left to send it
+    # (the FK is SET NULL), and an enabled trigger with no target fails on
+    # every matching event. Switch those off here, with the reason recorded,
+    # so the failures never happen rather than being explained afterwards.
+    stranded = list(
+        await db.scalars(
+            select(Trigger).where(
+                Trigger.workspace_id == ctx.workspace_id,
+                Trigger.target_agent_id == agent.id,
+                Trigger.enabled.is_(True),
+            )
+        )
+    )
+    for trigger in stranded:
+        trigger.enabled = False
+        audit.record(
+            db,
+            action="trigger.disabled",
+            target_type="trigger",
+            target_id=trigger.id,
+            workspace_id=ctx.workspace_id,
+            actor_id=ctx.user.id,
+            request_id=request_id,
+            ip_hash=ip_hash,
+            metadata={"name": trigger.name, "reason": "target agent was deleted"},
+        )
     # Subordinates and managed teams are detached (FK SET NULL), not deleted.
     await db.delete(agent)
     await db.commit()

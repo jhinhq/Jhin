@@ -16,6 +16,15 @@ import { useAgents, useConnections, useTriggers } from "@/lib/hooks";
 import type { Trigger } from "@/lib/types";
 import { useWorkspace } from "@/lib/workspace-context";
 
+function onOffText(trigger: Trigger): { label: string; tone: "ok" | "warn" | "neutral" | "danger" | "accent" } {
+  // An automation switched off because its agent was deleted reads as an
+  // ordinary "Off" otherwise, and nobody goes looking for the reason.
+  if (trigger.target_state === "agent_deleted") return { label: "Needs an agent", tone: "warn" };
+  if (!trigger.enabled) return { label: "Off", tone: "neutral" };
+  if (trigger.target_warning) return { label: "On, but stuck", tone: "warn" };
+  return { label: "On", tone: "ok" };
+}
+
 function lastRunText(trigger: Trigger): { label: string; tone: "ok" | "warn" | "neutral" | "danger" | "accent" } {
   const last = trigger.last_invocation;
   if (!last) return { label: "Hasn’t run yet", tone: "neutral" };
@@ -75,10 +84,7 @@ export default function AutomationsPage() {
                       </span>
                       <h3 className="truncate font-display text-base font-semibold tracking-tight">{trigger.name}</h3>
                     </div>
-                    <StatusPill
-                      status={trigger.enabled ? { label: "On", tone: "ok" } : { label: "Off", tone: "neutral" }}
-                      className="shrink-0"
-                    />
+                    <StatusPill status={onOffText(trigger)} className="shrink-0" />
                   </div>
                   <p className="text-sm text-ink/90">
                     When {triggerWhen(trigger.event_type, connectionName(trigger.connection_id))}
@@ -111,9 +117,14 @@ export default function AutomationsPage() {
                       </time>
                     ) : null}
                   </div>
-                  {trigger.last_invocation?.status === "failed" && trigger.last_invocation.error ? (
+                  {trigger.target_warning ? (
+                    <p className="rounded-xl border border-warn/30 bg-warn-soft px-3 py-2 text-[13px] text-warn">
+                      {trigger.target_warning}
+                    </p>
+                  ) : null}
+                  {trigger.last_invocation?.status === "failed" && trigger.last_invocation.error_message ? (
                     <p className="rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-[13px] text-danger">
-                      Last run failed: {trigger.last_invocation.error}. Check the app connection in Apps, then try again from Advanced.
+                      Last run failed. {trigger.last_invocation.error_message}
                     </p>
                   ) : null}
                 </li>

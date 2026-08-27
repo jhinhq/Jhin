@@ -58,6 +58,9 @@ class TriggerInvocationOut(BaseModel):
     workflow_id: str | None
     error: str | None
     created_at: datetime
+    # ``error`` holds a closed internal code; this is the same outcome said in
+    # words, and it is the only one a reader should ever be shown.
+    error_message: str | None = None
 
 
 class TriggerOut(BaseModel):
@@ -80,6 +83,11 @@ class TriggerOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     last_invocation: TriggerInvocationOut | None = None
+    # Whether the trigger still has an agent that can take the work: "ok",
+    # "agent_deleted", "agent_paused" or "team_unstaffed". A trigger whose
+    # agent was deleted is switched off and carries the warning explaining it.
+    target_state: str = "ok"
+    target_warning: str | None = None
 
 
 class TriggerTestRequest(BaseModel):

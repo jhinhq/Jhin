@@ -198,7 +198,11 @@ function TriggerCard({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <p className="truncate font-display text-sm font-semibold text-ink">{trigger.name}</p>
-            {!trigger.enabled ? <Badge tone="neutral">disabled</Badge> : null}
+            {trigger.target_state === "agent_deleted" ? (
+              <Badge tone="warn">needs an agent</Badge>
+            ) : !trigger.enabled ? (
+              <Badge tone="neutral">disabled</Badge>
+            ) : null}
           </div>
           <p className="mt-0.5 truncate text-xs text-dim">
             {trigger.event_type ?? "any event"}
@@ -246,6 +250,11 @@ function TriggerCard({
           {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         </Button>
       </div>
+      {trigger.target_warning ? (
+        <p className="mx-5 mb-3 rounded-xl border border-warn/30 bg-warn-soft px-3 py-2 text-[13px] text-warn">
+          {trigger.target_warning}
+        </p>
+      ) : null}
       {error ? (
         <div className="px-5 pb-3">
           <ErrorNote message={error} />
@@ -277,8 +286,8 @@ function TriggerCard({
                     task {shortId(invocation.task_id)}
                   </Link>
                 ) : null}
-                {invocation.error ? (
-                  <span className="truncate text-xs text-danger">{invocation.error}</span>
+                {invocation.error_message ? (
+                  <span className="truncate text-xs text-danger">{invocation.error_message}</span>
                 ) : null}
               </li>
             ))}

@@ -6,6 +6,7 @@ anything accepted here is exactly what will run. All writes are audited.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
@@ -22,7 +23,8 @@ from jhin_api.triggers.schemas import (
     TriggerUpdate,
 )
 from jhin_db.models import Agent, Connection, Team, Trigger, TriggerInvocation
-from jhin_domain import TriggerType
+from jhin_domain import ActorType, AgentStatus, TriggerInvocationStatus, TriggerType
+from jhin_observability import SafeErrorCode
 from jhin_triggers import FilterError, evaluate_filter, validate_filter
 
 
@@ -109,6 +111,152 @@ async def list_triggers(db: AsyncSession, workspace_id: UUID) -> list[Trigger]:
         select(Trigger).where(Trigger.workspace_id == workspace_id).order_by(Trigger.created_at)
     )
     return list(rows)
+
+
+# --- Target health (a trigger is only as alive as the agent it assigns to) ---
+
+TARGET_OK = "ok"
+TARGET_AGENT_DELETED = "agent_deleted"
+TARGET_AGENT_PAUSED = "agent_paused"
+TARGET_TEAM_UNSTAFFED = "team_unstaffed"
+
+_TARGET_WARNINGS = {
+    TARGET_AGENT_DELETED: (
+        "The agent this automation gave work to was deleted, so the automation was switched "
+        "off. Edit it to choose another agent, then switch it back on."
+    ),
+    TARGET_AGENT_PAUSED: (
+        "The agent this automation gives work to is paused, so nothing will run. Resume that "
+        "agent, or edit the automation to choose another one."
+    ),
+    TARGET_TEAM_UNSTAFFED: (
+        "The team this automation hands work to has no active agent to take it. Add one to "
+        "the team, or edit the automation to choose an agent directly."
+    ),
+}
+
+
+@dataclass(frozen=True)
+class TargetHealth:
+    """Whether this trigger still has somewhere to send work, and what to do."""
+
+    state: str
+    warning: str | None
+
+
+def _health(state: str) -> TargetHealth:
+    return TargetHealth(state=state, warning=_TARGET_WARNINGS.get(state))
+
+
+async def _team_has_active_agent(db: AsyncSession, workspace_id: UUID, team_id: UUID) -> bool:
+    """The same availability the event worker requires: a manager or member
+    that is active. A team of paused agents can take no work."""
+    team = await db.scalar(
+        select(Team).where(Team.id == team_id, Team.workspace_id == workspace_id)
+    )
+    candidates = select(Agent).where(
+        Agent.workspace_id == workspace_id,
+        Agent.status == AgentStatus.ACTIVE.value,
+    )
+    if team is not None and team.manager_agent_id is not None:
+        manager = await db.scalar(candidates.where(Agent.id == team.manager_agent_id))
+        if manager is not None:
+            return True
+    member = await db.scalar(candidates.where(Agent.team_id == team_id))
+    return member is not None
+
+
+async def target_health(db: AsyncSession, workspace_id: UUID, trigger: Trigger) -> TargetHealth:
+    """Why this trigger cannot dispatch, in words an admin can act on.
+
+    Create and update both refuse a trigger with no target, so a trigger that
+    has neither can only have lost one: ``target_agent_id`` is ``SET NULL``
+    when the agent row goes away."""
+    if trigger.target_agent_id is not None:
+        agent = await db.scalar(
+            select(Agent).where(
+                Agent.id == trigger.target_agent_id, Agent.workspace_id == workspace_id
+            )
+        )
+        if agent is None:
+            return _health(TARGET_AGENT_DELETED)
+        return _health(
+            TARGET_OK if agent.status == AgentStatus.ACTIVE.value else TARGET_AGENT_PAUSED
+        )
+    if trigger.target_team_id is not None:
+        if await _team_has_active_agent(db, workspace_id, trigger.target_team_id):
+            return _health(TARGET_OK)
+        return _health(TARGET_TEAM_UNSTAFFED)
+    return _health(TARGET_AGENT_DELETED)
+
+
+async def reconcile_targets(
+    db: AsyncSession, workspace_id: UUID, triggers: list[Trigger]
+) -> dict[UUID, TargetHealth]:
+    """Report each trigger's target health, switching off any whose target is gone.
+
+    Deleting an agent detaches it from every trigger that assigned work to it
+    (FK ``SET NULL``) and leaves those triggers enabled, so each matching
+    event afterwards produces nothing but a failed invocation. There is no
+    target left to restore and no safe guess to make, so such a trigger is
+    switched off here — durably, with an audit row saying why — and its
+    warning tells the admin how to bring it back."""
+    health: dict[UUID, TargetHealth] = {}
+    switched_off = False
+    for trigger in triggers:
+        state = await target_health(db, workspace_id, trigger)
+        health[trigger.id] = state
+        if state.state != TARGET_AGENT_DELETED or not trigger.enabled:
+            continue
+        trigger.enabled = False
+        switched_off = True
+        audit.record(
+            db,
+            action="trigger.disabled",
+            target_type="trigger",
+            workspace_id=workspace_id,
+            actor_type=ActorType.SYSTEM,
+            target_id=trigger.id,
+            metadata={"name": trigger.name, "reason": "target agent no longer exists"},
+        )
+    if switched_off:
+        await db.commit()
+    return health
+
+
+# --- Invocation outcomes in words (the stored codes stay internal) ---
+
+_FAILURE_FALLBACK = (
+    "This run could not be started. Check the app this automation watches and the agent it "
+    "gives work to, then try again."
+)
+_FAILURE_MESSAGES = {
+    SafeErrorCode.INVALID_REQUEST.value: (
+        "This run had nowhere to go: no active agent was available to take the work. Check the "
+        "agent this automation gives work to."
+    ),
+    SafeErrorCode.UPSTREAM_UNAVAILABLE.value: (
+        "This run could not be started because the service that runs agent work was "
+        "unreachable. It is retried automatically."
+    ),
+}
+
+
+def invocation_message(
+    invocation: TriggerInvocation, health: TargetHealth | None = None
+) -> str | None:
+    """Plain language for a failed invocation, or None when it did not fail.
+
+    The event worker deliberately persists only closed, payload-free codes, so
+    a reader must never be handed one. When the trigger's target explains the
+    failure right now — a paused or deleted agent — that explanation wins,
+    because it names the thing the admin has to fix."""
+    if invocation.status != TriggerInvocationStatus.FAILED.value:
+        return None
+    error = invocation.error or ""
+    if error == SafeErrorCode.INVALID_REQUEST.value and health is not None and health.warning:
+        return health.warning
+    return _FAILURE_MESSAGES.get(error, _FAILURE_FALLBACK)
 
 
 async def last_invocations(
@@ -293,6 +441,15 @@ async def set_enabled(
     ip_hash: str,
 ) -> Trigger:
     trigger = await get_trigger(db, ctx.workspace_id, trigger_id)
+    if enabled:
+        # Switching a targetless trigger back on only restores the failure it
+        # was switched off for; the target has to be chosen first.
+        health = await target_health(db, ctx.workspace_id, trigger)
+        if health.state == TARGET_AGENT_DELETED:
+            raise _bad_request(
+                "This automation has no agent to give work to — the one it used was deleted. "
+                "Edit it to choose another agent, then switch it on."
+            )
     trigger.enabled = enabled
     audit.record(
         db,
