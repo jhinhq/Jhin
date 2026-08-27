@@ -35,6 +35,7 @@ from jhin_db.models import Agent, AgentRun, AuditEvent, Message, RunEvent, Task,
 from jhin_domain import (
     AGENT_MESSAGE_TYPES,
     ActorType,
+    MessageType,
     MessageVisibility,
     ModelProviderType,
     RunStatus,
@@ -506,12 +507,61 @@ def _add_run_event(
     )
 
 
+async def _load_history_parts(
+    session: AsyncSession, task: Task
+) -> tuple[tuple[ConversationTurn, ...], tuple[ConversationTurn, ...]]:
+    """``(earlier conversation, this task's own transcript)``.
+
+    Kept separate for the caller because the boundary between the two is
+    where a chat turn's current question sits, and ``_is_chat_turn`` needs to
+    look at the head of the second half.
+    """
+    return (
+        await _load_conversation_history(session, task),
+        await _load_task_history(session, task),
+    )
+
+
 async def _load_history(session: AsyncSession, task: Task) -> tuple[ConversationTurn, ...]:
     """Conversation context from earlier tasks in the same thread, then this
     task's visible conversation plus its internal tool transcript, in order,
     so each reasoning step rebuilds the exact provider message sequence."""
-    prefix = await _load_conversation_history(session, task)
-    return prefix + await _load_task_history(session, task)
+    prefix, own = await _load_history_parts(session, task)
+    return prefix + own
+
+
+# Task metadata "origin" values written by the API's chat endpoints. Mirrors
+# jhin_tools.builtin._CONVERSATION_ORIGINS; kept as a literal here so the agent
+# worker does not take a new dependency edge for two strings.
+_CONVERSATION_ORIGINS = frozenset({"conversation", "message"})
+
+
+def _is_chat_turn(task: Task, own_history: tuple[ConversationTurn, ...]) -> bool:
+    """Whether ``task.description`` is the person's latest chat message *and*
+    that message is already the head of this task's own transcript.
+
+    ``task.conversation_id`` is deliberately not the test: an agent-to-agent
+    work request raised from inside a chat inherits the chat's
+    ``conversation_id`` while its description is a composed framing brief that
+    must keep its leading position.
+
+    Requiring the seed turn to be present is the safety net -- on anything
+    unexpected the task keeps the brief rather than reaching the model with no
+    question in it at all.
+    """
+    metadata = task.metadata_json if isinstance(task.metadata_json, dict) else {}
+    if task.parent_task_id is not None:
+        return False
+    if metadata.get("origin") not in _CONVERSATION_ORIGINS:
+        return False
+    if not own_history:
+        return False
+    seed = own_history[0]
+    return (
+        seed.kind == "text"
+        and seed.role == "user"
+        and seed.text.strip() == task.description.strip()
+    )
 
 
 async def _load_conversation_history(
@@ -603,6 +653,23 @@ async def _load_task_history(session: AsyncSession, task: Task) -> tuple[Convers
                 )
             )
             continue
+        if message.message_type == MessageType.INSTRUCTION.value:
+            # A person steering a run mid-flight. Plain language, not
+            # agent-to-agent structure: rendering it as JSON strands the
+            # actual words behind a client_turn_id on every later step, since
+            # the workflow drains the live instruction exactly once. Worded
+            # exactly as build_messages words a freshly drained instruction so
+            # the two forms are one message rather than two.
+            instruction_text = str(content.get("text", "") or "").strip()
+            if not instruction_text:
+                continue
+            turns.append(
+                ConversationTurn(
+                    role="user",
+                    text=f"Additional instruction: {instruction_text}"[:_MAX_STRUCTURED_TURN_CHARS],
+                )
+            )
+            continue
         if message.message_type in _STRUCTURED_MESSAGE_TYPES:
             if content.get("delivered") == "observation":
                 continue
@@ -622,8 +689,11 @@ async def _load_task_history(session: AsyncSession, task: Task) -> tuple[Convers
         if not text:
             continue
         role = "agent" if message.sender_type == SenderType.AGENT.value else "user"
-        if not turns and role == "user" and text.strip() == task.description.strip():
-            continue
+        # The seed user message is deliberately kept. On a chat turn it is the
+        # person's current question, and its position -- first turn of this
+        # task's own segment, after the earlier conversation -- is exactly
+        # where the question belongs on every step of the run. build_messages
+        # omits the "Task: ..." brief for a chat turn so it is stated once.
         turns.append(ConversationTurn(role=role, text=text))
     return tuple(turns)
 
@@ -1274,7 +1344,9 @@ class AgentReasoningActivities:
             )
             if task is None:
                 raise ApplicationError("task not found", type="task_not_found", non_retryable=True)
-            history = await _load_history(session, task)
+            prefix, own_history = await _load_history_parts(session, task)
+            history = prefix + own_history
+            conversation_turn = _is_chat_turn(task, own_history)
             memory = await self._memory_context(
                 workspace_id=workspace_id,
                 agent_id=agent_id,
@@ -1332,6 +1404,7 @@ class AgentReasoningActivities:
                 skills_context=skills,
                 time_context=time_context,
                 interlocutor_context=interlocutor_context,
+                conversation_turn=conversation_turn,
             )
             try:
                 outcome = await execute_step(

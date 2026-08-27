@@ -80,6 +80,17 @@ class TaskContext(BaseModel):
     # callers that do not supply them keep composing unchanged.
     time_context: str = ""
     interlocutor_context: str = ""
+    # Chat turns (docs/architecture/conversations.md). For assigned work, a
+    # trigger, a delegation or a work request, "Task: {title}\n\n{description}"
+    # is a framing brief and belongs before everything else. For a chat turn it
+    # is not a brief at all: it IS the person's latest message, and that message
+    # is already the first turn of this task's own history. Composing it as a
+    # brief as well states the question twice, and states it *before* everything
+    # said earlier -- which is how an agent ends up answering the previous
+    # question. The caller sets this only when it has actually seen the seed
+    # turn, so a missing seed row degrades to the brief rather than to a prompt
+    # with no question in it.
+    conversation_turn: bool = False
 
 
 # --- Situational awareness blocks ---------------------------------------
@@ -324,6 +335,11 @@ def build_messages(
 ) -> tuple[ModelMessage, ...]:
     """Full message list for one reasoning step.
 
+    The invariant this owes the caller: **the newest user turn is the last
+    ``user``-role message the provider sees**, and on a tool-using step it is
+    the last user turn before that step's tool transcript. For a chat turn the
+    history carries it (see ``conversation_turn``); for work the brief does.
+
     ``nudge`` appends one final user message (used by the empty-completion
     reflective retry: the first pass returned nothing, so we ask the model
     once more to reply in plain language). It is platform text, not colleague
@@ -345,15 +361,26 @@ def build_messages(
             system_prompt += "\n\n" + section
     messages: list[ModelMessage] = [ModelMessage(role="system", content=system_prompt)]
 
-    task_text = f"Task: {task.title}"
-    if task.description:
-        task_text += f"\n\n{task.description}"
-    messages.append(ModelMessage(role="user", content=task_text))
+    if not task.conversation_turn:
+        task_text = f"Task: {task.title}"
+        if task.description:
+            task_text += f"\n\n{task.description}"
+        messages.append(ModelMessage(role="user", content=task_text))
 
     messages.extend(_turn_to_message(turn) for turn in task.history)
 
+    # The history already carries a mid-run instruction once the row is
+    # committed, and the API commits it before signalling the workflow -- so on
+    # the step that drains it, the same words arrive from both sources. Match on
+    # the exact rendered string: if the two ever diverge the instruction is
+    # stated twice rather than lost, which is the safe direction.
+    already = {message.content for message in messages if message.role == "user"}
     for instruction in task.user_instructions:
-        messages.append(ModelMessage(role="user", content=f"Additional instruction: {instruction}"))
+        rendered = f"Additional instruction: {instruction}"
+        if rendered in already:
+            continue
+        messages.append(ModelMessage(role="user", content=rendered))
+        already.add(rendered)
     if nudge:
         messages.append(ModelMessage(role="user", content=nudge))
     return tuple(messages)

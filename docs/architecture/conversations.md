@@ -227,8 +227,39 @@ tool data; structured message content is already sanitized at write time.
    prepended when truncation happened);
 2. followed by the current task's own history exactly as today.
 
-The seed user message of the current task is still deduplicated against
-`task.description`. Memory, retrieval, and provenance are out of scope here.
+The seed user message of the current task is **kept**. On a chat turn it is
+the person's current question, and its position — first turn of this task's
+own segment, after the earlier conversation — is where the question belongs on
+every step of the run, including a step whose trailing turns are tool results.
+
+### The invariant
+
+**The newest user turn is the last `user`-role message the provider sees**, and
+on a tool-using step it is the last user turn before that step's tool
+transcript.
+
+`build_messages` therefore omits the `"Task: {title}\n\n{description}"` brief
+for a chat turn — the seed message already carries it, in the right place.
+Composing it as a brief as well stated the question twice and stated it
+*before* everything said earlier, which made the previous turn's question the
+newest user message: agents answered the previous question, and the third turn
+of a chat replied verbatim with the second turn's answer.
+
+Work is different and keeps the brief first, because there the description
+frames the whole run rather than being the latest thing somebody said. The
+shape is chosen on `task.metadata_json["origin"]` (`conversation` and `message`
+are chat), **not** on `task.conversation_id` — a work request raised from
+inside a chat inherits that conversation id while its description is a composed
+brief. The predicate also requires the seed turn to actually be present, so
+anything unexpected falls back to the brief rather than reaching the model with
+no question in it.
+
+A mid-run `instruction` row renders as `Additional instruction: {text}`, worded
+identically to a freshly drained instruction so the two collapse into one
+message; the workflow drains the live copy exactly once, so on later steps the
+history row is all that survives.
+
+Memory, retrieval, and provenance are out of scope here.
 
 ## Events
 

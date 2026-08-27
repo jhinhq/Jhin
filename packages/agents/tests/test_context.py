@@ -77,7 +77,9 @@ def test_context_blocks_follow_the_role_prompt_in_order() -> None:
     assert "Relevant memory" not in bare and "Your colleagues." not in bare
 
 
-def test_history_and_instructions_become_turns() -> None:
+def test_work_task_brief_precedes_history() -> None:
+    """Assigned work, a trigger or a delegation gets its brief first: it frames
+    the whole run rather than being the latest thing somebody said."""
     task = TaskContext(
         title="Chat",
         description="",
@@ -90,7 +92,92 @@ def test_history_and_instructions_become_turns() -> None:
     messages = build_messages(make_snapshot(), task)
     roles = [m.role for m in messages]
     assert roles == ["system", "user", "user", "assistant", "user"]
+    assert messages[1].content.startswith("Task: ")
     assert messages[-1].content == "Additional instruction: focus on tests"
+
+
+def test_a_chat_turn_ends_on_the_newest_user_message() -> None:
+    """A chat turn's description is not a brief -- it is what the person just
+    said, and the seed turn already carries it in its chronological place.
+    Composing it as a brief as well stated the question twice and put it
+    *before* everything said earlier, so the newest user message the provider
+    saw was the previous turn's question and agents answered that instead."""
+    task = TaskContext(
+        title="Whos in your team?",
+        description="Whos in your team?",
+        conversation_turn=True,
+        history=(
+            ConversationTurn(role="user", text="Hey what is your name?"),
+            ConversationTurn(role="agent", text="I'm Atlas."),
+            ConversationTurn(role="user", text="Whos in your team?"),
+        ),
+    )
+    messages = build_messages(make_snapshot(), task)
+    assert [m.role for m in messages] == ["system", "user", "assistant", "user"]
+    assert messages[-1].content == "Whos in your team?"
+    # Stated once, and never as a brief.
+    assert sum("Whos in your team?" in m.content for m in messages) == 1
+    assert not any(m.content.startswith("Task: ") for m in messages)
+
+
+def test_chat_turn_question_precedes_this_steps_tool_transcript() -> None:
+    """On a later step the question is no longer last -- the tool transcript
+    it caused follows it. What must hold is that it is the last *user* turn,
+    and that no user message trails a tool result."""
+    task = TaskContext(
+        title="Check the retries",
+        description="Check the retries",
+        conversation_turn=True,
+        history=(
+            ConversationTurn(role="user", text="Hey what is your name?"),
+            ConversationTurn(role="agent", text="I'm Atlas."),
+            ConversationTurn(role="user", text="Check the retries"),
+            ConversationTurn(
+                role="agent",
+                text="",
+                kind="tool_call",
+                tool_call_id="c1",
+                tool_name="system.echo",
+                arguments_json='{"text": "hi"}',
+            ),
+            ConversationTurn(
+                role="agent",
+                text="hi",
+                kind="tool_result",
+                tool_call_id="c1",
+                tool_name="system.echo",
+            ),
+        ),
+    )
+    messages = build_messages(make_snapshot(), task)
+    assert [m.role for m in messages] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "tool",
+    ]
+    last_user = max(i for i, m in enumerate(messages) if m.role == "user")
+    assert messages[last_user].content == "Check the retries"
+    assert last_user < len(messages) - 1
+
+
+def test_a_live_instruction_is_composed_once() -> None:
+    """The API commits the instruction row before signalling the workflow, so
+    on the step that drains it the same words arrive from the history and from
+    user_instructions. The person said it once; the model should see it once."""
+    task = TaskContext(
+        title="Chat",
+        description="",
+        history=(ConversationTurn(role="user", text="Additional instruction: focus on tests"),),
+        user_instructions=("focus on tests",),
+    )
+    messages = build_messages(make_snapshot(), task)
+    rendered = [
+        m.content for m in messages if m.content == "Additional instruction: focus on tests"
+    ]
+    assert len(rendered) == 1
 
 
 def test_snapshot_hash_is_stable_and_config_sensitive() -> None:

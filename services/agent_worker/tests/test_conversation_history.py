@@ -16,6 +16,7 @@ from jhin_agent_worker.activities import (
     CONVERSATION_HISTORY_OMITTED_MARKER,
     AgentActivities,
 )
+from jhin_agent_worker.reasoning import _is_chat_turn, _load_history_parts
 from jhin_db.base import Base
 from jhin_db.models import Agent, Conversation, Message, Task, Workspace
 from jhin_domain import (
@@ -83,6 +84,10 @@ def make_task(
         title="Roadmap",
         description=description,
         state=TaskState.COMPLETED.value,
+        # What the chat endpoints actually write, and what _is_chat_turn keys
+        # off to decide whether the description is a brief or the person's
+        # latest message.
+        metadata_json={"origin": "conversation"},
         assigned_agent_id=world.agent.id,
         conversation_id=world.conversation.id if in_conversation else None,
         correlation_id=new_uuid7(),
@@ -177,8 +182,12 @@ async def test_earlier_tasks_precede_current_history_without_internal_rows(world
     assert turns == [
         ("user", "text", "First ask"),
         ("agent", "text", "Here is the plan"),
-        # The current task's seed message duplicates task.description and is
-        # still deduplicated; its tool transcript still enters as before.
+        # The seed message is kept: it is the person's current question, and
+        # sitting here -- after the earlier conversation, before this task's own
+        # transcript -- is where the question has to be on every step of the
+        # run. build_messages omits the "Task: ..." brief for a chat turn so it
+        # is stated once, not twice.
+        ("user", "text", "Second ask"),
         ("agent", "tool_call", ""),
         ("agent", "text", "Working on it"),
     ]
@@ -196,7 +205,12 @@ async def test_no_conversation_means_unchanged_history(world: World) -> None:
             ]
         )
         await session.commit()
-        assert await load(world, session, task) == [("agent", "text", "Reply")]
+        # No conversation means no prefix -- not that the task's own opening
+        # turn disappears.
+        assert await load(world, session, task) == [
+            ("user", "text", "Solo"),
+            ("agent", "text", "Reply"),
+        ]
 
 
 async def test_message_cap_keeps_most_recent_and_marks_omission(world: World) -> None:
@@ -283,4 +297,66 @@ async def test_system_notices_never_reach_the_model(world: World) -> None:
         await session.commit()
         turns = await load(world, session, current)
 
-    assert turns == [("user", "text", "First ask"), ("agent", "text", "On it")]
+    assert turns == [
+        ("user", "text", "First ask"),
+        ("agent", "text", "On it"),
+        ("user", "text", "Second ask"),
+    ]
+
+
+async def test_a_mid_run_instruction_reads_as_plain_language(world: World) -> None:
+    """The workflow drains a live instruction exactly once, so on every later
+    step the history row is all that survives. Rendered as structured JSON it
+    stranded the person's actual words behind a client turn id."""
+    async with world.session_factory() as session:
+        task = make_task(world, seconds=0, description="Draft the release note")
+        session.add(task)
+        await session.flush()
+        steer = make_message(world, task, seconds=2, text="keep it under 200 words")
+        steer.message_type = MessageType.INSTRUCTION.value
+        steer.content_json = {"text": "keep it under 200 words", "client_turn_id": "ct-42"}
+        session.add_all(
+            [
+                make_message(world, task, seconds=0, text="Draft the release note"),
+                make_message(world, task, seconds=1, text="On it", agent=True),
+                steer,
+            ]
+        )
+        await session.commit()
+        turns = await load(world, session, task)
+
+    assert turns[-1] == ("user", "text", "Additional instruction: keep it under 200 words")
+    # Worded exactly as build_messages words a freshly drained instruction, so
+    # the two forms collapse into one message rather than two.
+    assert not any("client_turn_id" in text for _, _, text in turns)
+    assert not any(text.startswith("[instruction]") for _, _, text in turns)
+
+
+async def test_a_work_request_inside_a_chat_keeps_its_brief(world: World) -> None:
+    """A colleague's task inherits the requester's conversation_id, but its
+    description is a composed framing brief that has to keep its leading
+    position. This is why the shape is keyed off origin, not conversation_id."""
+    async with world.session_factory() as session:
+        task = make_task(world, seconds=0, description="Bisby asked you this. Answer it yourself.")
+        task.metadata_json = {"origin": "work_request", "work_request": {"id": "wr-1"}}
+        session.add(task)
+        await session.flush()
+        await session.commit()
+        _, own = await _load_history_parts(session, task)
+
+    assert task.conversation_id is not None
+    assert _is_chat_turn(task, own) is False
+
+
+async def test_a_chat_task_whose_seed_row_is_missing_keeps_its_brief(world: World) -> None:
+    """The safety net: on anything unexpected the task falls back to the brief
+    rather than reaching the model with no question in it at all."""
+    async with world.session_factory() as session:
+        task = make_task(world, seconds=0, description="Whats my name?")
+        session.add(task)
+        await session.flush()
+        await session.commit()
+        _, own = await _load_history_parts(session, task)
+
+    assert own == ()
+    assert _is_chat_turn(task, own) is False
