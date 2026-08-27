@@ -20,6 +20,7 @@ import {
   mergeTimeline,
   newTurn,
   statusLabelFor,
+  takeCarriedDraft,
   withDaySeparators,
 } from "@/lib/chat";
 import {
@@ -66,7 +67,10 @@ export default function ChatThreadPage() {
   const invalidateApprovals = useInvalidateApprovals(workspaceId);
   const wide = useMediaQuery("(min-width: 1280px)");
 
-  const [text, setText] = useState("");
+  // Seeded with anything typed on /chats while the first turn was redirecting
+  // here. Safe as an initializer: the shell renders a spinner until identity
+  // resolves on the client, so this view never renders on the server.
+  const [text, setText] = useState(() => takeCarriedDraft(conversationId));
   const [detailsOpen, setDetailsOpen] = useState(false);
   // Routine "Started working / Finished" chips are off by default; the
   // preference is remembered per browser.

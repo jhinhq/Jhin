@@ -111,7 +111,7 @@ def test_old_snapshots_without_workspace_name_still_render() -> None:
 
 
 def test_preamble_is_versioned() -> None:
-    assert PLATFORM_PREAMBLE_VERSION == 5
+    assert PLATFORM_PREAMBLE_VERSION == 6
 
 
 def test_preamble_tells_agents_to_look_before_saying_they_do_not_know() -> None:

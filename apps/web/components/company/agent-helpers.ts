@@ -153,6 +153,17 @@ function pluralize(noun: string): string {
 /** Plain-language grant, e.g. "GitHub: read repositories octo/*" or
  * "Everything (all tools)". Never shows raw capability strings; callers put
  * those under Advanced. */
+/** The opening sentence of a model-facing tool description, trimmed of its
+ * full stop and capped so a long prompt can never spill into the UI. */
+export function firstSentence(text: string, maxChars = 140): string {
+  const collapsed = text.replace(/\s+/g, " ").trim();
+  // A full stop that ends a sentence is followed by a space and a capital, or
+  // by nothing at all — which leaves "e.g." and "ISO-8601." alone.
+  const end = collapsed.search(/\.(\s+[A-Z(]|$)/);
+  const sentence = end === -1 ? collapsed : collapsed.slice(0, end);
+  return sentence.length > maxChars ? `${sentence.slice(0, maxChars - 1).trimEnd()}…` : sentence;
+}
+
 export function describeGrant(
   grant: Grant,
   tools: ToolInfo[],
@@ -173,9 +184,12 @@ export function describeGrant(
     if (verb) {
       action = nouns.length ? `${verb} ${nouns.map(pluralize).join(" ")}` : verb;
     } else if (matching.length === 1 && matching[0].description) {
-      // Keep acronyms like UTC or ISO-8601 intact; only the sentence-initial
-      // capital is dropped so it reads as a fragment after "System:".
-      const description = matching[0].description.replace(/\.$/, "");
+      // Tool descriptions are written for the model and go on to explain when
+      // to call it and what it returns; only the opening sentence describes
+      // the capability, so that is all a person is shown. Keep acronyms like
+      // UTC or ISO-8601 intact; only the sentence-initial capital is dropped
+      // so it reads as a fragment after "System:".
+      const description = firstSentence(matching[0].description);
       action = description.charAt(0).toLowerCase() + description.slice(1);
     } else {
       action = `${humanizeSegment(verbRaw)}${nouns.length ? ` ${nouns.join(" ")}` : ""}`;

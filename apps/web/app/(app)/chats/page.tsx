@@ -5,14 +5,14 @@
 import { useMutation } from "@tanstack/react-query";
 import { Sparkles } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useMemo, useState } from "react";
+import { Suspense, useCallback, useMemo, useRef, useState } from "react";
 import { AgentPicker } from "@/components/chat/agent-picker";
 import { Composer } from "@/components/chat/composer";
 import { FirstRunSteps } from "@/components/first-run-steps";
 import { LogoMark } from "@/components/brand/logo-mark";
 import { EmptyState, ErrorNote, Spinner } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
-import { LAST_AGENT_STORAGE_KEY, STARTER_PROMPTS, newTurn } from "@/lib/chat";
+import { LAST_AGENT_STORAGE_KEY, STARTER_PROMPTS, newTurn, stashCarriedDraft } from "@/lib/chat";
 import { useAgents, useInvalidateConversations } from "@/lib/hooks";
 import type { Agent, ConversationDetail } from "@/lib/types";
 import { useWorkspace } from "@/lib/workspace-context";
@@ -43,6 +43,13 @@ function ChatsHome() {
   const agents = useAgents(workspaceId);
   const invalidate = useInvalidateConversations(workspaceId);
   const [text, setText] = useState("");
+  // Mirrors `text` so the mutation callbacks read what is in the box now, not
+  // what it held when the request was sent.
+  const textRef = useRef("");
+  const changeText = useCallback((value: string) => {
+    textRef.current = value;
+    setText(value);
+  }, []);
   const [chosenAgentId, setChosenAgentId] = useState<string | null>(null);
   const [rememberedId] = useState<string | null>(() =>
     typeof window === "undefined" ? null : readLastAgent(),
@@ -73,19 +80,27 @@ function ChatsHome() {
     onSuccess: (detail) => {
       setError(null);
       rememberAgent(detail.conversation.primary_agent_id ?? agentId ?? "");
+      // Anything typed while the first turn was in flight would be lost with
+      // this page; hand it to the conversation we are about to open.
+      stashCarriedDraft(detail.conversation.id, textRef.current);
       invalidate();
       router.push(`/chats/${detail.conversation.id}`);
     },
-    onError: (err) =>
+    onError: (err, variables) => {
+      setText((current) => current || variables.text);
       setError(
         err instanceof ApiError
           ? `Couldn't start the chat: ${err.detail}`
           : "Couldn't start the chat. Check your connection and try again.",
-      ),
+      );
+    },
   });
 
   const send = (value: string) => {
     if (!agentId) return;
+    // Clear straight away so the box is usable during the redirect, exactly
+    // as it behaves once the chat exists.
+    changeText("");
     create.mutate({ agent_id: agentId, ...newTurn(value) });
   };
 
@@ -130,7 +145,7 @@ function ChatsHome() {
               variant="large"
               autoFocus
               value={text}
-              onChange={setText}
+              onChange={changeText}
               onSend={send}
               sending={create.isPending}
               disabled={!canStart || !agentId}

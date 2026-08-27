@@ -90,9 +90,9 @@ const reviewed = message({
   content_json: { summary: "Fine to merge.", verdict: "approve", from_agent_name: "QA" },
 });
 
-/** The colleague's own reply once their task ran: an ordinary agent turn in
- * the same conversation, attributed to them — this is how the answer reaches
- * the person who asked, because the requester's run has already finished. */
+/** The colleague's own reply once their task ran. It is addressed to the
+ * agent who asked, not to the person watching this chat, so it belongs inside
+ * the exchange rather than loose in the dialogue. */
 const colleagueAnswer = message({
   id: "m5",
   message_type: "text",
@@ -143,17 +143,16 @@ describe("Transcript work-request cards", () => {
     expect(document.body.textContent).not.toContain("task-9");
   });
 
-  it("shows the colleague's answer as a visible bubble, not folded into the quiet exchange", () => {
-    // The whole point of the loop: the person watching this chat reads the
-    // answer without expanding anything and without asking again.
+  it("keeps the colleague's reply inside the exchange, not in the user's dialogue", () => {
+    // The user asked their own agent, not the colleague. Seeing the
+    // colleague's turn addressed to someone else reads like eavesdropping on
+    // a conversation that is not theirs, so it folds away and expands on
+    // request.
     const items = groupExchanges(
       mergeTimeline([asked, accepted, colleagueAnswer, reported], []),
       { primaryAgentId: "a1", primaryAgentName: "CTO" },
     );
-    const standalone = items.filter((item) => item.kind === "message");
-    expect(standalone.map((item) => (item as { message: ConversationMessage }).message.id)).toEqual([
-      "m5",
-    ]);
+    expect(items.every((item) => item.kind === "exchange")).toBe(true);
 
     render(
       <Transcript
@@ -163,11 +162,26 @@ describe("Transcript work-request cards", () => {
         agentAvatars={{ a1: null, a2: null }}
       />,
     );
-    const bubbles = screen.getAllByTestId("agent-message");
-    expect(bubbles).toHaveLength(1);
-    expect(bubbles[0].textContent).toContain("Right now I'm on the retry branch");
-    expect(bubbles[0].textContent).toContain("Senior SWE");
-    // The mechanics stay quiet: the asked/accepted pair collapses on its own.
+    expect(screen.queryAllByTestId("agent-message")).toHaveLength(0);
     expect(screen.getAllByTestId("exchange").length).toBeGreaterThan(0);
+    // Still reachable: the collapsed row names who it was with.
+    expect(document.body.textContent).toContain("Senior SWE");
+  });
+
+  it("leaves the primary agent's own turns in the dialogue", () => {
+    const ownAnswer = message({
+      id: "m6",
+      message_type: "text",
+      created_at: "2026-08-21T10:07:00Z",
+      content_json: { text: "I asked Senior SWE and will pass on what they say." },
+    });
+    const items = groupExchanges(mergeTimeline([asked, accepted, ownAnswer], []), {
+      primaryAgentId: "a1",
+      primaryAgentName: "CTO",
+    });
+    const standalone = items.filter((item) => item.kind === "message");
+    expect(standalone.map((item) => (item as { message: ConversationMessage }).message.id)).toEqual([
+      "m6",
+    ]);
   });
 });

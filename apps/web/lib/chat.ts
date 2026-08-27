@@ -270,7 +270,6 @@ function messageExchangeInfo(
   message: ConversationMessage,
   primary: { id: string | null; name: string | null },
 ): { key: string; ids: string[]; other: ExchangeParty; taskIds: string[] } | null {
-  if (!isWorkCard(message)) return null;
   const content = message.content_json;
   const sender: ExchangeParty = { id: message.agent_id, name: message.sender_name ?? "" };
   const target: ExchangeParty = {
@@ -288,6 +287,16 @@ function messageExchangeInfo(
   const isPrimary = (party: ExchangeParty) =>
     (primary.id !== null && party.id === primary.id) ||
     (primary.name !== null && primary.name !== "" && party.name === primary.name);
+
+  // Work cards are always exchange traffic. A plain turn is too when it comes
+  // from a colleague rather than the agent the user is talking to: the user
+  // asked their own agent, so a colleague's reply belongs inside the exchange
+  // they can expand, not loose in their dialogue as if it were addressed to
+  // them.
+  if (!isWorkCard(message)) {
+    if (message.sender_type !== "agent") return null;
+    if (!exists(sender) || isPrimary(sender)) return null;
+  }
 
   let counterpart: ExchangeParty | null = null;
   if (differsFromSender(target)) counterpart = target;
@@ -564,4 +573,35 @@ export function instructionDeliveryState(
     return true;
   });
   return delivered ? "delivered" : "queued";
+}
+
+/* ------------------------------------------------------------------ */
+/* Carrying a half-typed message across the new-chat redirect          */
+/* ------------------------------------------------------------------ */
+
+const CARRIED_DRAFT_PREFIX = "jhin-chat-carry:";
+
+/** Hand a draft to the conversation page the first turn is redirecting to.
+ * Starting a chat navigates from /chats to /chats/{id}, and anything typed
+ * in that window would otherwise die with the unmounted page. */
+export function stashCarriedDraft(conversationId: string, text: string): void {
+  if (typeof window === "undefined" || text.trim() === "") return;
+  try {
+    window.sessionStorage.setItem(`${CARRIED_DRAFT_PREFIX}${conversationId}`, text);
+  } catch {
+    // Private mode or quota: losing the carry-over is no worse than today.
+  }
+}
+
+/** Read and clear a draft handed over by the new-chat page. */
+export function takeCarriedDraft(conversationId: string): string {
+  if (typeof window === "undefined") return "";
+  const key = `${CARRIED_DRAFT_PREFIX}${conversationId}`;
+  try {
+    const value = window.sessionStorage.getItem(key) ?? "";
+    if (value) window.sessionStorage.removeItem(key);
+    return value;
+  } catch {
+    return "";
+  }
 }

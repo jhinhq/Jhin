@@ -341,19 +341,20 @@ the **conversation** instead, which is what the person is actually looking
 at:
 
 - `accept_work_request` gives the created task the requester task's
-  `conversation_id`, so the colleague's own final reply is an ordinary
-  visible agent message in that conversation, attributed to them
-  (`sender_name`), rendered as a normal bubble by
-  `apps/web/components/chat/transcript.tsx`.
+  `conversation_id`, so the colleague's own final reply lands in that
+  conversation, attributed to them (`sender_name`).
 - `finalize_work_request` additionally posts the structured `result`
-  message (summary/artifacts/risks) on the *requester's* task, which the
-  transcript folds into the collapsed agent↔agent exchange row along with
-  the `question` and `accepted` cards.
+  message (summary/artifacts/risks) on the *requester's* task.
 
-So the reader sees a quiet "…updates with <colleague>" row for the
-mechanics and the colleague's actual answer as a bubble, without re-asking
-and without the requester having to be woken and pay for another model
-call.
+Both are presentation-folded. `groupExchanges` in `apps/web/lib/chat.ts`
+puts every turn from an agent that is not the conversation's primary agent
+into the collapsed "…updates with <colleague>" row, alongside the
+`question`, `accepted` and `result` cards. The colleague is answering the
+*agent* who asked, not the person watching the chat, so leaving their turn
+loose in the dialogue reads as eavesdropping on somebody else's
+conversation; the reader expands the row when they want the exchange. The
+answer still arrives without re-asking and without waking the requester for
+another model call.
 
 ### Review gate order
 

@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import {
   describeGrant,
+  firstSentence,
   matchesAvailability,
   matchesSearch,
   policySummary,
@@ -74,6 +75,26 @@ describe("relationshipLabel", () => {
     expect(relationshipLabel(base, "cto")).toBe("Advises");
     expect(relationshipLabel({ ...base, kind: "preferred_reviewer" }, "swe")).toBe("Prefers reviews from");
     expect(relationshipLabel({ ...base, kind: "close_collaborator" }, "cto")).toBe("Works closely with");
+  });
+});
+
+describe("firstSentence", () => {
+  it("keeps only the sentence that describes the capability", () => {
+    expect(
+      firstSentence(
+        'Find out what a colleague is doing right now. Pass their name (agent_name) — for example "what is the CTO working on?" Returns their availability.',
+      ),
+    ).toBe("Find out what a colleague is doing right now");
+  });
+
+  it("leaves abbreviations and a single sentence alone", () => {
+    expect(firstSentence("Read a file, e.g. a config, from the workspace.")).toBe(
+      "Read a file, e.g. a config, from the workspace",
+    );
+  });
+
+  it("caps a long opening sentence", () => {
+    expect(firstSentence("a".repeat(200)).length).toBe(140);
   });
 });
 

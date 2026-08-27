@@ -93,7 +93,7 @@ export function ChatHeader({
   // stacking context, so without an explicit z-index the transcript below
   // paints over anything the header pops out (the quick-settings popover).
   return (
-    <header className="relative z-20 flex items-center gap-3 border-b border-line bg-surface/80 px-3 py-2.5 backdrop-blur sm:px-5">
+    <header className="relative z-20 flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-line bg-surface/80 px-3 py-2.5 backdrop-blur sm:flex-nowrap sm:px-5">
       <Link
         href="/chats"
         aria-label="Back to chats"
@@ -102,7 +102,7 @@ export function ChatHeader({
         <ArrowLeft size={18} />
       </Link>
       <Avatar name={agentName} size="md" {...avatarProps(avatar)} />
-      <div className="min-w-0 flex-1">
+      <div className="min-w-0 flex-1 basis-0">
         {editing ? (
           <input
             ref={inputRef}
@@ -151,7 +151,7 @@ export function ChatHeader({
           <LiveStatusPill conversation={conversation} />
         </p>
       </div>
-      <div className="flex shrink-0 items-center gap-0.5">
+      <div className="flex w-full shrink-0 items-center justify-end gap-0.5 sm:w-auto">
         {quickControls}
         {canEdit ? (
           <>
