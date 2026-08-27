@@ -53,9 +53,11 @@ import base64
 import binascii
 import hashlib
 import json
+import os
 import re
 import struct
 import threading
+import time
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -592,6 +594,21 @@ def build_embeddings(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     }
 
 
+def completion_latency_seconds() -> float:
+    """Artificial per-completion delay, from ``FAKE_PROVIDER_LATENCY_MS``.
+
+    Defaults to 0 so the pytest fixture and normal dev use stay fast. Set it on
+    the compose service to make runs slow enough to exercise the mid-run
+    controls by hand (Stop, pause/resume, reload while a run is in flight),
+    which are otherwise impossible to hit against an instant provider.
+    """
+    raw = os.environ.get("FAKE_PROVIDER_LATENCY_MS", "")
+    try:
+        return max(0.0, float(raw) / 1000.0)
+    except ValueError:
+        return 0.0
+
+
 class _Handler(BaseHTTPRequestHandler):
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
         data = json.dumps(payload).encode()
@@ -636,6 +653,7 @@ class _Handler(BaseHTTPRequestHandler):
         elif path.endswith("/embeddings"):
             status, payload = build_embeddings(body)
         else:
+            time.sleep(completion_latency_seconds())
             status, payload = build_completion(body)
         self._send_json(status, payload)
 

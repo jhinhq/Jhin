@@ -7,7 +7,11 @@ import pytest
 
 from jhin_models import ModelMessage, ModelProviderError, ModelRequest, build_model_client
 from jhin_models.testing import FakeOpenAIServer
-from jhin_models.testing.fake_openai import FAIL_MODEL, build_completion
+from jhin_models.testing.fake_openai import (
+    FAIL_MODEL,
+    build_completion,
+    completion_latency_seconds,
+)
 
 
 async def test_adapter_roundtrip_against_fake_server() -> None:
@@ -184,3 +188,21 @@ def test_adjudication_numbers_count_as_value_tokens() -> None:
     assert status == 200
     reply = json.loads(payload["choices"][0]["message"]["content"])
     assert reply == {"verdicts": ["SAME", "DIFFERENT"]}
+
+
+def test_completion_latency_defaults_to_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No env var (or a junk value) must not slow the pytest fixture down."""
+    monkeypatch.delenv("FAKE_PROVIDER_LATENCY_MS", raising=False)
+    assert completion_latency_seconds() == 0.0
+
+    monkeypatch.setenv("FAKE_PROVIDER_LATENCY_MS", "not-a-number")
+    assert completion_latency_seconds() == 0.0
+
+    monkeypatch.setenv("FAKE_PROVIDER_LATENCY_MS", "-500")
+    assert completion_latency_seconds() == 0.0
+
+
+def test_completion_latency_reads_milliseconds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """QA slows the compose service down to exercise the mid-run controls."""
+    monkeypatch.setenv("FAKE_PROVIDER_LATENCY_MS", "2500")
+    assert completion_latency_seconds() == 2.5
