@@ -38,3 +38,5 @@ out/
 # Test artifacts
 .test-artifacts/
 playwright-report/
+test-results/
+blob-report/

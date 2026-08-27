@@ -7,7 +7,7 @@ PHASE10_HARNESS := uv run python -m tests.integration.phase10_upgrade_harness
 PHASE10_MODE ?= rootful
 SANDBOX_DOCKER_SOCKET_HOST ?= /var/run/docker.sock
 
-.PHONY: help dev test test-unit test-integration lint typecheck migrate seed \
+.PHONY: help dev test test-unit test-integration test-e2e lint typecheck migrate seed \
 	compose-up compose-down sample-workflow master-key sandbox-image \
 	test-tool-worker-boundary test-tool-worker-boundary-integration \
 	test-phase10-regressions test-phase10-extended test-tool-worker-live-upgrade \
@@ -32,6 +32,10 @@ test-unit: ## Run Python unit tests and frontend Vitest
 	pnpm --filter jhin-web test
 
 test-integration: test-phase10-regressions test-phase10-extended ## Run the frozen live regression set and the extended live files in isolation
+
+test-e2e: ## Run the Playwright chat browser specs against a running dev stack (see apps/web/e2e/README.md)
+	@node apps/web/e2e/tools/check-browsers.mjs
+	pnpm --filter jhin-web test:e2e
 
 test-tool-worker-boundary: ## Run focused Phase 10 unit, replay, dependency, and render gates
 	$(PYTEST) \

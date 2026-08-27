@@ -6,6 +6,7 @@
     "lint": "pnpm --filter jhin-web lint",
     "typecheck": "pnpm --filter jhin-web typecheck",
     "test": "pnpm --filter jhin-web test",
+    "test:e2e": "pnpm --filter jhin-web test:e2e",
     "build": "pnpm --filter jhin-web build",
     "dev": "pnpm --filter jhin-web dev"
   }

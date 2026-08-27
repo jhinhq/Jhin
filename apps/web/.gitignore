@@ -13,6 +13,14 @@
 # testing
 /coverage
 
+# playwright: reports, traces/screenshots, and the browser cache when
+# PLAYWRIGHT_BROWSERS_PATH=0 puts it inside the project instead of ~/.cache
+/playwright-report/
+/test-results/
+/blob-report/
+/.playwright/
+/ms-playwright/
+
 # next.js
 /.next/
 /out/
