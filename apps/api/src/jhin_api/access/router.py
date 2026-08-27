@@ -37,7 +37,7 @@ from jhin_api.access.schemas import (
 from jhin_api.auth import service as auth_service
 from jhin_api.auth.router import SettingsDep, me_response, set_auth_cookies
 from jhin_api.auth.schemas import MeResponse
-from jhin_api.deps import AdminCtx, DbSession, ViewerCtx, client_ip
+from jhin_api.deps import AdminCtx, DbSession, ViewerCtx, client_ip, get_current_auth
 from jhin_api.deps import client_ip_hash as ip_hash
 from jhin_api.deps import get_request_id as req_id
 from jhin_api.security.csrf import csrf_protect
@@ -162,6 +162,23 @@ async def preview_invitation(token: str, request: Request, db: DbSession) -> Inv
     )
 
 
+async def _optional_signed_in_user(
+    request: Request, db: DbSession, settings: SettingsDep
+) -> User | None:
+    """Whoever is signed in right now, or None. Never raises.
+
+    The accept route is public by design -- a brand-new invitee has no session
+    -- but it still needs to know whether the browser is already carrying one,
+    because an invitation addressed to an existing account may only be
+    accepted by that account.
+    """
+    try:
+        auth = await get_current_auth(request, db, settings)
+    except HTTPException:
+        return None
+    return auth.user
+
+
 @public_invitations_router.post("/{token}/accept", status_code=201)
 async def accept_invitation(
     token: str,
@@ -172,6 +189,7 @@ async def accept_invitation(
     settings: SettingsDep,
 ) -> MeResponse:
     _guard_invite_attempt(request, token)
+    signed_in = await _optional_signed_in_user(request, db, settings)
     try:
         result = await invite_service.accept(
             db,
@@ -180,6 +198,7 @@ async def accept_invitation(
             password=payload.password,
             request_id=req_id(request),
             ip_hash=ip_hash(request),
+            acting_user_id=signed_in.id if signed_in else None,
         )
     except HTTPException:
         _record_invite_failure(request, token)

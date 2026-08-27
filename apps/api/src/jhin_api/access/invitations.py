@@ -208,6 +208,32 @@ async def preview(db: AsyncSession, token: str) -> tuple[WorkspaceInvitation, Wo
     return invitation, workspace
 
 
+def _require_account_owner(existing: User, acting_user_id: UUID | None) -> None:
+    """An invitation is not a way to log in as somebody who already exists.
+
+    Holding the link proves only that you were handed a URL. When the invited
+    address has no account yet that is enough -- whoever completes the form
+    chooses the credential and becomes the account. When it *does* have one,
+    accepting would otherwise hand the link-holder a session belonging to that
+    account, and with it every other workspace that account can reach: an
+    address is public information, so anyone able to send an invitation could
+    take over any account whose email they know. So the acceptance has to be
+    made by the account itself, signed in.
+
+    401 (not 403) is deliberate: the caller is not forbidden, they are simply
+    not yet identified, and signing in is exactly the next step.
+    """
+    if acting_user_id is not None and acting_user_id == existing.id:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=(
+            f"{existing.email} already has a Jhin account. "
+            "Sign in with it first, then open this invitation link again to join."
+        ),
+    )
+
+
 async def accept(
     db: AsyncSession,
     token: str,
@@ -216,12 +242,19 @@ async def accept(
     password: str,
     request_id: UUID,
     ip_hash: str,
+    acting_user_id: UUID | None = None,
 ) -> AcceptedInvitation:
     """Create the account and the membership atomically, then hand back both.
 
     Single-use is enforced by stamping ``accepted_at`` inside the same
     transaction that creates the membership: a replay of the same link finds
     the invitation no longer ``pending``.
+
+    ``acting_user_id`` is the already-signed-in caller, if any. It is what
+    separates the two cases below: minting a *new* account from a link is the
+    whole point of an invitation, but joining an account that already exists
+    is an act by that account's owner, so it requires proof they are the one
+    clicking (:func:`_require_account_owner`).
     """
     invitation = await _usable_invitation(db, token)
     workspace = await db.get(Workspace, invitation.workspace_id)
@@ -247,7 +280,9 @@ async def accept(
     else:
         # The address already has an account (invited into a second workspace).
         # Joining must not be a password-reset primitive, so the submitted
-        # password is ignored entirely and the existing credential stands.
+        # password is ignored entirely and the existing credential stands --
+        # which is exactly why the click has to come from that account.
+        _require_account_owner(existing, acting_user_id)
         user = existing
 
     already = await db.scalar(

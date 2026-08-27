@@ -51,7 +51,7 @@ from jhin_db.models import (
     WorkspaceInvitation,
     WorkspaceMembership,
 )
-from jhin_domain import AgentStatus, WorkspaceRole, new_uuid7
+from jhin_domain import AgentStatus, UserStatus, WorkspaceRole, new_uuid7
 
 CSRF = "access-control-csrf"
 CSRF_HEADERS = {"x-csrf-token": CSRF}
@@ -257,6 +257,52 @@ async def test_an_invitation_is_single_use(access: Harness) -> None:
     )
     assert first.status_code == 201
     assert second.status_code == 404
+
+
+async def test_an_invitation_to_an_existing_account_cannot_be_accepted_anonymously(
+    access: Harness,
+) -> None:
+    """Holding the link must not be enough to become an account that exists.
+
+    An email address is public information, so if accepting were anonymous
+    anyone able to send an invitation could aim one at an address they do not
+    control, click it themselves, and be handed a signed-in session for that
+    account -- along with every other workspace it belongs to. The invited
+    account has to do the accepting itself.
+    """
+    access.act_as(WorkspaceRole.ADMIN)
+    # Someone with a Jhin account who is not in this workspace yet -- the
+    # ordinary reason to invite an address that already exists.
+    victim = User(
+        email="already.has.an.account@example.com",
+        display_name="Already Has An Account",
+        password_hash="argon2-placeholder",
+        status=UserStatus.ACTIVE.value,
+    )
+    access.session.add(victim)
+    await access.session.commit()
+
+    token = (
+        await access.client.post(
+            f"{access.base}/invitations",
+            json={"email": victim.email, "role": "admin"},
+            headers=CSRF_HEADERS,
+        )
+    ).json()["token"]
+
+    # No session cookie: whoever holds the link is nobody in particular.
+    stolen = await access.client.post(
+        f"/api/v1/invitations/{token}/accept",
+        json={"display_name": "Not Them", "password": GOOD_PASSWORD},
+    )
+    assert stolen.status_code == 401, stolen.text
+    assert "jhin_session" not in stolen.cookies
+    # And the refusal must not have quietly changed the victim's credential.
+    await access.session.refresh(victim)
+    assert victim.password_hash is not None
+
+    # The link is still pending, so the real invitee can sign in and use it.
+    assert (await access.client.get(f"/api/v1/invitations/{token}")).status_code == 200
 
 
 async def test_expired_revoked_and_unknown_tokens_are_indistinguishable(
