@@ -100,6 +100,63 @@ class MemoryProposeOutput(BaseModel):
     status: str
     memory_id: str
     reasons: list[str]
+    # The reason codes above are for audit; on their own they taught agents to
+    # repeat words like "non_amplification" back to the person who asked. This
+    # says what happened and what would work instead.
+    detail: str = ""
+
+
+# Plain language for the outcomes an agent can actually do something about.
+# Anything unlisted falls back to the generic line below, which is still a
+# sentence rather than a code.
+_REASON_DETAIL: dict[str, str] = {
+    "non_amplification": (
+        "Not saved. This conversation is only visible to you and the person in "
+        "it, so what is said here can become your own memory but not the "
+        "team's. Propose it again with requested_scope 'agent' to remember it "
+        "yourself, and tell the person that a team-wide memory has to be added "
+        "by someone on the Memories page."
+    ),
+    "insufficient_authority": (
+        "Not saved: that scope is wider than the person asking is allowed to "
+        "set. Remember it at 'agent' scope instead, and say who would need to "
+        "record it more widely."
+    ),
+    "no_team_for_scope": (
+        "Not saved: you are not on a team, so there is no team memory to add "
+        "to. Propose it with requested_scope 'agent' instead."
+    ),
+    "no_agent_for_scope": "Not saved: this memory has no agent to belong to.",
+    "low_information": (
+        "Not saved: too vague to be useful later. Only propose something a "
+        "colleague could act on months from now without this conversation."
+    ),
+    "self_reference": ("Not saved: it describes this conversation rather than a durable fact."),
+    "source_internal": ("Not saved: it came from hidden reasoning, which never becomes memory."),
+    "duplicate": "Already remembered; nothing new was stored.",
+    "near_duplicate": "Already remembered in nearly these words; nothing new was stored.",
+    "adjudicated_same": "Already remembered; nothing new was stored.",
+    "contradiction": (
+        "Not saved: it contradicts something already remembered. Say so to the "
+        "person rather than overwriting it yourself."
+    ),
+    "workspace_promotion_requires_review": (
+        "Saved, but a person has to approve it before it becomes "
+        "workspace-wide. Tell them it is waiting for review."
+    ),
+}
+
+
+def _propose_detail(outcome: str, status: str, reasons: tuple[str, ...] | list[str]) -> str:
+    for reason in reasons:
+        detail = _REASON_DETAIL.get(reason)
+        if detail:
+            return detail
+    if outcome == "reject":
+        return "Not saved, and the reason is not one you can act on."
+    if status == "active":
+        return "Remembered."
+    return "Recorded."
 
 
 async def _memory_propose(ctx: ToolExecutionContext, payload: BaseModel) -> BaseModel:
@@ -136,7 +193,11 @@ async def _memory_propose(ctx: ToolExecutionContext, payload: BaseModel) -> Base
         record_id = str(decision.duplicate_of)
         status = "duplicate"
     return MemoryProposeOutput(
-        outcome=decision.outcome, status=status, memory_id=record_id, reasons=list(decision.reasons)
+        outcome=decision.outcome,
+        status=status,
+        memory_id=record_id,
+        reasons=list(decision.reasons),
+        detail=_propose_detail(decision.outcome, status, decision.reasons),
     )
 
 
@@ -161,10 +222,15 @@ MEMORY_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor, ToolValidator | None], .
         ToolDefinition(
             name="memory.propose",
             description=(
-                "Propose one concise, durable memory from the current task. Private "
-                "(agent) memory activates automatically; team memory activates only "
-                "when the task was team-visible; workspace memory is queued for "
-                "human review. Never include secrets or credentials."
+                "Propose one concise, durable memory from the current task. Use "
+                "requested_scope 'agent' unless you know the source was wider: "
+                "an ordinary chat with a person is private to the two of you, "
+                "so it can only become your own memory. Team memory needs a "
+                "team-visible source such as work shared with a teammate, and "
+                "workspace memory is queued for human review. A rejected "
+                "proposal comes back with a `detail` sentence saying what would "
+                "work instead -- relay that, not the reason codes. Never "
+                "include secrets or credentials."
             ),
             risk=RiskLevel.WRITE,
             input_model=MemoryProposeInput,
