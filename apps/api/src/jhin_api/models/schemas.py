@@ -132,6 +132,11 @@ class WorkspaceSpendOut(BaseModel):
     spent_total_micros: int
     period_start: datetime
     providers: list[ProviderSpendOut]
+    # Cost carried by runs whose model profile has since been deleted. The
+    # spend is real and stays in the totals, so it needs a name of its own —
+    # otherwise the provider breakdown silently stops adding up.
+    deleted_model_month_micros: int
+    deleted_model_total_micros: int
     monthly_budget_micros: int | None
     warning_threshold: float
     fetched_at: datetime

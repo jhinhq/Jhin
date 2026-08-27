@@ -29,6 +29,29 @@ describe("SpendTile", () => {
     expect(screen.queryByRole("progressbar")).toBeNull();
   });
 
+  it("names spend from deleted models so the breakdown adds up", () => {
+    render(
+      <SpendTile
+        spend={spend({
+          providers: [
+            {
+              provider_id: "prov-1",
+              display_name: "OpenAI",
+              type: "openai",
+              spent_month_micros: 10_000_000,
+              spent_total_micros: 10_000_000,
+            },
+          ],
+          deleted_model_month_micros: 2_500_000,
+          deleted_model_total_micros: 2_500_000,
+        })}
+      />,
+    );
+    const breakdown = screen.getByTestId("spend-breakdown").textContent ?? "";
+    expect(breakdown).toContain("OpenAI $10.00");
+    expect(breakdown).toContain("Deleted models $2.50");
+  });
+
   it("renders the budget bar with the spent share", () => {
     render(<SpendTile spend={spend({ monthly_budget_micros: 50_000_000 })} />);
     const bar = screen.getByRole("progressbar", { name: "Budget used" });

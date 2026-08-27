@@ -25,6 +25,16 @@ export function SpendTile({
   // Runs on unpriced models contributed $0 to the total above. Saying so is
   // the difference between "you spent this much" and "at least this much".
   const untracked = untrackedSpendNote(spend.untracked, spend.untracked_runs);
+  // Deleting a model does not refund its runs. That spend stays in the total,
+  // so it gets its own line here — otherwise the per-provider figures quietly
+  // stop adding up to the number above them.
+  const deletedMonth = spend.deleted_model_month_micros ?? 0;
+  const breakdown = [
+    ...spend.providers.map(
+      (p) => `${p.display_name} ${formatMicrosAsDollars(p.spent_month_micros)}`,
+    ),
+    ...(deletedMonth > 0 ? [`Deleted models ${formatMicrosAsDollars(deletedMonth)}`] : []),
+  ];
   return (
     <section
       data-testid="spend-tile"
@@ -68,11 +78,9 @@ export function SpendTile({
         ) : (
           <p className="text-xs text-faint">No monthly budget set — add one under Settings to get a warning bar here.</p>
         )}
-        {spend.providers.length > 1 ? (
-          <p className="mt-1 truncate text-xs text-faint">
-            {spend.providers
-              .map((p) => `${p.display_name} ${formatMicrosAsDollars(p.spent_month_micros)}`)
-              .join(" · ")}
+        {breakdown.length > 1 ? (
+          <p data-testid="spend-breakdown" className="mt-1 truncate text-xs text-faint">
+            {breakdown.join(" · ")}
           </p>
         ) : null}
       </div>

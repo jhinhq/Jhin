@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -213,6 +214,63 @@ async def update_provider(
     return provider
 
 
+async def _hand_over_workspace_default(
+    db: AsyncSession, workspace_id: UUID, *, losing: Sequence[UUID], subject: str
+) -> ModelProfile | None:
+    """Move the workspace default off profiles that are about to disappear.
+
+    An agent with no model of its own runs on the workspace default, so
+    emptying that slot never fails loudly — every such agent simply starts
+    failing at its next run ("no model profile and the workspace has no
+    default"). A surviving profile therefore inherits the slot, mirroring the
+    "the first profile becomes the default" rule in ``create_profile``. When
+    nothing survives to inherit it *and* agents are relying on the default,
+    refuse instead and say what to add first.
+
+    Returns the profile promoted into the slot, or None when the default was
+    never at stake or nothing is left to promote.
+    """
+    # Pin the workspace explicitly: this is a *write*, and selecting the row
+    # by profile id alone would let a mis-scoped profile id clear another
+    # workspace's default.
+    workspace = await db.scalar(
+        select(Workspace).where(
+            Workspace.id == workspace_id,
+            Workspace.default_model_profile_id.in_(losing),
+        )
+    )
+    if workspace is None:
+        return None
+    successor = await db.scalar(
+        select(ModelProfile)
+        .where(ModelProfile.workspace_id == workspace_id, ModelProfile.id.not_in(losing))
+        .order_by(ModelProfile.created_at)
+        .limit(1)
+    )
+    if successor is None:
+        # Nothing to fall back on: name the agents that would quietly break.
+        stranded = list(
+            await db.scalars(
+                select(Agent.name)
+                .where(Agent.workspace_id == workspace_id, Agent.model_profile_id.is_(None))
+                .order_by(Agent.name)
+                .limit(5)
+            )
+        )
+        if stranded:
+            listed = ", ".join(stranded)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Deleting this {subject} would leave the workspace with no model to "
+                    f"fall back on, and agents still run on the workspace default "
+                    f"({listed}). Add another model first, then delete this {subject}."
+                ),
+            )
+    workspace.default_model_profile_id = successor.id if successor is not None else None
+    return successor
+
+
 async def delete_provider(
     db: AsyncSession,
     ctx: WorkspaceContext,
@@ -225,10 +283,11 @@ async def delete_provider(
     profile_ids = list(
         await db.scalars(select(ModelProfile.id).where(ModelProfile.provider_id == provider.id))
     )
+    promoted: ModelProfile | None = None
     if profile_ids:
         # Agents pinned to one of this provider's profiles keep it alive; name
-        # them so the admin knows what to change. The workspace default is
-        # just cleared — profiles cascade away with the provider.
+        # them so the admin knows what to change. Profiles cascade away with
+        # the provider, so the workspace default has to move with them.
         agent_names = list(
             await db.scalars(
                 select(Agent.name)
@@ -249,17 +308,9 @@ async def delete_provider(
                     "Change their model first, then delete the provider."
                 ),
             )
-        # Pin the workspace explicitly: this is a *write*, and selecting the
-        # row by profile id alone would let a mis-scoped profile id clear
-        # another workspace's default.
-        workspace = await db.scalar(
-            select(Workspace).where(
-                Workspace.id == ctx.workspace_id,
-                Workspace.default_model_profile_id.in_(profile_ids),
-            )
+        promoted = await _hand_over_workspace_default(
+            db, ctx.workspace_id, losing=profile_ids, subject="provider"
         )
-        if workspace is not None:
-            workspace.default_model_profile_id = None
     audit.record(
         db,
         action="provider.deleted",
@@ -269,7 +320,11 @@ async def delete_provider(
         actor_id=ctx.user.id,
         request_id=request_id,
         ip_hash=ip_hash,
-        metadata={"display_name": provider.display_name, "type": provider.type},
+        metadata={
+            "display_name": provider.display_name,
+            "type": provider.type,
+            "promoted_default": promoted.display_name if promoted is not None else None,
+        },
     )
     await db.delete(provider)
     await db.commit()
@@ -366,9 +421,20 @@ def month_start_utc(now: datetime | None = None) -> datetime:
 
 
 async def _tracked_spend(
-    db: AsyncSession, workspace_id: UUID, *, since: datetime, provider_id: UUID | None = None
+    db: AsyncSession,
+    workspace_id: UUID,
+    *,
+    since: datetime,
+    provider_id: UUID | None = None,
+    profile_gone: bool = False,
 ) -> tuple[int, int]:
-    """(this period, all time) sum of ``agent_run.estimated_cost_micros``."""
+    """(this period, all time) sum of ``agent_run.estimated_cost_micros``.
+
+    ``provider_id`` narrows to runs on that provider's profiles. ``profile_gone``
+    narrows to runs whose profile no longer exists: deleting a model clears
+    ``agent_run.model_profile_id`` (FK ON DELETE SET NULL) but the money was
+    still spent, so that cost has to land somewhere the breakdown can show.
+    """
     base = (
         select(
             func.coalesce(
@@ -382,6 +448,13 @@ async def _tracked_spend(
     if provider_id is not None:
         base = base.join(ModelProfile, ModelProfile.id == AgentRun.model_profile_id).where(
             ModelProfile.provider_id == provider_id
+        )
+    elif profile_gone:
+        # Correlated EXISTS rather than NOT IN: a NULL profile id matches no
+        # row, which is exactly the case being counted, and NOT IN would go
+        # NULL-blind on it.
+        base = base.where(
+            ~select(ModelProfile.id).where(ModelProfile.id == AgentRun.model_profile_id).exists()
         )
     row = (await db.execute(base)).one()
     return int(row[0] or 0), int(row[1] or 0)
@@ -512,6 +585,11 @@ class WorkspaceSpend:
     spent_total_micros: int
     period_start: datetime
     providers: list[ProviderSpend]
+    # Cost from models that have since been deleted. Their runs keep the cost
+    # and lose the profile, so without this bucket the per-provider breakdown
+    # quietly stops adding up to the total above.
+    deleted_model_month_micros: int
+    deleted_model_total_micros: int
     monthly_budget_micros: int | None
     warning_threshold: float
     fetched_at: datetime
@@ -530,7 +608,11 @@ def budget_from_settings(settings_json: dict[str, Any]) -> tuple[int | None, flo
 
 
 async def get_workspace_spend(db: AsyncSession, workspace_id: UUID) -> WorkspaceSpend:
-    """Tracked spend this month / all time, per provider, plus the budget."""
+    """Tracked spend this month / all time, per provider, plus the budget.
+
+    Every profile belongs to a provider and dies with it, so the per-provider
+    sums plus the deleted-model bucket always add back up to the totals.
+    """
     now = datetime.now(UTC)
     since = month_start_utc(now)
     month, total = await _tracked_spend(db, workspace_id, since=since)
@@ -542,6 +624,7 @@ async def get_workspace_spend(db: AsyncSession, workspace_id: UUID) -> Workspace
         providers.append(
             ProviderSpend(provider=provider, spent_month_micros=p_month, spent_total_micros=p_total)
         )
+    gone_month, gone_total = await _tracked_spend(db, workspace_id, since=since, profile_gone=True)
     workspace = await db.get(Workspace, workspace_id)
     budget, threshold = budget_from_settings(workspace.settings_json if workspace else {})
     return WorkspaceSpend(
@@ -549,6 +632,8 @@ async def get_workspace_spend(db: AsyncSession, workspace_id: UUID) -> Workspace
         spent_total_micros=total,
         period_start=since,
         providers=providers,
+        deleted_model_month_micros=gone_month,
+        deleted_model_total_micros=gone_total,
         monthly_budget_micros=budget,
         warning_threshold=threshold,
         fetched_at=now,
@@ -830,16 +915,12 @@ async def delete_profile(
             status_code=status.HTTP_409_CONFLICT,
             detail="Profile is in use by agents; change their model first",
         )
-    # Deleting the workspace default simply clears the default; agents fall
-    # back to "no default" until an admin picks another profile.
-    workspace = await db.scalar(
-        select(Workspace).where(
-            Workspace.id == ctx.workspace_id,
-            Workspace.default_model_profile_id == profile.id,
-        )
+    # Pinning is only half the story: an agent with no model of its own runs on
+    # the workspace default, so deleting the default hands the slot to another
+    # profile (or refuses, when there is none left and agents need it).
+    promoted = await _hand_over_workspace_default(
+        db, ctx.workspace_id, losing=[profile.id], subject="model"
     )
-    if workspace is not None:
-        workspace.default_model_profile_id = None
     audit.record(
         db,
         action="model_profile.deleted",
@@ -849,7 +930,10 @@ async def delete_profile(
         actor_id=ctx.user.id,
         request_id=request_id,
         ip_hash=ip_hash,
-        metadata={"display_name": profile.display_name},
+        metadata={
+            "display_name": profile.display_name,
+            "promoted_default": promoted.display_name if promoted is not None else None,
+        },
     )
     await db.delete(profile)
     await db.commit()

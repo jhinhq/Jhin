@@ -191,6 +191,8 @@ async def workspace_spend(ctx: ViewerCtx, db: DbSession) -> WorkspaceSpendOut:
             )
             for entry in spend.providers
         ],
+        deleted_model_month_micros=spend.deleted_model_month_micros,
+        deleted_model_total_micros=spend.deleted_model_total_micros,
         monthly_budget_micros=spend.monthly_budget_micros,
         warning_threshold=spend.warning_threshold,
         fetched_at=spend.fetched_at,
