@@ -31,7 +31,7 @@ from jhin_api.main import HttpObservabilityMiddleware
 from jhin_api.webhooks import router as webhook_router_module
 from jhin_api.webhooks import service as webhooks
 from jhin_api.webhooks.router import router as webhooks_router
-from jhin_connectors import WebhookVerificationError
+from jhin_connectors import WebhookVerificationError, default_registry
 from jhin_connectors.github.manifest import GITHUB_MANIFEST
 from jhin_connectors.github.webhook import sign_payload
 from jhin_connectors.vercel.webhook import sign_payload as sign_vercel_payload
@@ -984,6 +984,10 @@ async def test_invalid_signature_rejected_and_audited(
         await deliver(session, crypto, js, connection, headers, body)
 
     assert excinfo.value.status_code == 401
+    # The one case that stays vague on purpose: it says the signature did not
+    # match and what to do, and nothing about the secret itself.
+    assert "Signature verification failed" in str(excinfo.value.detail)
+    assert "signing secret" in str(excinfo.value.detail)
     assert js.published == []
     assert (await session.scalars(select(WebhookDelivery))).all() == []
     audits = (
@@ -991,6 +995,111 @@ async def test_invalid_signature_rejected_and_audited(
     ).all()
     assert len(audits) == 1
     assert audits[0].actor_type == "system"
+    assert audits[0].metadata_json["reason"] == "verification_failed"
+
+
+async def test_a_signed_but_unparseable_body_is_not_reported_as_a_bad_signature(
+    session: AsyncSession, crypto: SecretCrypto, github_connection: tuple[Connection, str]
+) -> None:
+    """Verification covers more than the HMAC, and every failure used to come
+    back as "Signature verification failed" — sending people to rotate a
+    secret that was never wrong."""
+    connection, secret = github_connection
+    body = b"<html>not json at all</html>"
+    headers = github_headers(secret, body, event="issues", delivery="d-broken")
+
+    with pytest.raises(HTTPException) as excinfo:
+        await deliver(session, crypto, RecordingJetStream(), connection, headers, body)
+
+    detail = str(excinfo.value.detail)
+    assert excinfo.value.status_code == 400
+    assert "Signature verification failed" not in detail
+    assert "not the JSON" in detail
+    audit_event = await session.scalar(
+        select(AuditEvent).where(AuditEvent.action == "webhook.rejected")
+    )
+    assert audit_event is not None
+    assert audit_event.metadata_json["reason"] == "malformed_body"
+
+
+async def test_a_delivery_missing_its_identifying_headers_says_which_part_failed(
+    session: AsyncSession, crypto: SecretCrypto, github_connection: tuple[Connection, str]
+) -> None:
+    connection, secret = github_connection
+    body = json.dumps(ISSUE_PAYLOAD).encode()
+    headers = {"X-Hub-Signature-256": sign_payload(secret, body)}
+
+    with pytest.raises(HTTPException) as excinfo:
+        await deliver(session, crypto, RecordingJetStream(), connection, headers, body)
+
+    detail = str(excinfo.value.detail)
+    assert excinfo.value.status_code == 400
+    assert "Signature verification failed" not in detail
+    assert "missing the headers" in detail
+    audit_event = await session.scalar(
+        select(AuditEvent).where(AuditEvent.action == "webhook.rejected")
+    )
+    assert audit_event is not None
+    assert audit_event.metadata_json["reason"] == "missing_headers"
+
+
+def _github_case(secret: str, case: str) -> tuple[Mapping[str, str], bytes]:
+    body = json.dumps(ISSUE_PAYLOAD).encode()
+    if case == "bad_signature":
+        return {"X-Hub-Signature-256": "sha256=" + "0" * 64}, body
+    if case == "no_headers":
+        return {"X-Hub-Signature-256": sign_payload(secret, body)}, body
+    broken = b"{not json"
+    return dict(github_headers(secret, broken, event="issues", delivery="d-x")), broken
+
+
+def _linear_case(secret: str, case: str) -> tuple[Mapping[str, str], bytes]:
+    from jhin_connectors.linear.webhook import sign_payload as sign_linear
+
+    payload: dict[str, Any] = {"action": "create", "type": "Issue", "data": {}}
+    if case != "stale_timestamp":
+        payload["webhookTimestamp"] = 0
+    body = json.dumps(payload).encode() if case != "bad_body" else b"{not json"
+    headers = {"Linear-Signature": sign_linear(secret, body)}
+    if case != "no_headers":
+        headers |= {"Linear-Event": "Issue", "Linear-Delivery": "d-1"}
+    return headers, body
+
+
+def _vercel_case(secret: str, case: str) -> tuple[Mapping[str, str], bytes]:
+    body = b"{not json" if case == "bad_body" else json.dumps({"payload": {}}).encode()
+    return {"x-vercel-signature": sign_vercel_payload(secret, body)}, body
+
+
+@pytest.mark.parametrize(
+    ("connector_type", "case", "expected"),
+    [
+        ("github", "bad_signature", "verification_failed"),
+        ("github", "no_headers", "missing_headers"),
+        ("github", "bad_body", "malformed_body"),
+        ("linear", "no_headers", "missing_headers"),
+        ("linear", "bad_body", "malformed_body"),
+        ("linear", "stale_timestamp", "stale_timestamp"),
+        ("vercel", "bad_body", "malformed_body"),
+        ("vercel", "no_identity", "malformed_body"),
+    ],
+)
+def test_every_connector_refusal_is_classified_by_what_actually_failed(
+    connector_type: str, case: str, expected: str
+) -> None:
+    """The classifier reads the connector's own message, so this pins the real
+    wording of every refusal each connector raises. A connector that rewords
+    one fails here rather than quietly regressing to "bad signature"."""
+    secret = "s3cr3t-for-classification"
+    builders = {"github": _github_case, "linear": _linear_case, "vercel": _vercel_case}
+    headers, body = builders[connector_type](secret, case)
+    connector = default_registry().get(connector_type)
+    assert connector is not None
+
+    with pytest.raises(WebhookVerificationError) as excinfo:
+        connector.parse_webhook(headers, body, secret)
+
+    assert webhooks._classify(excinfo.value).reason == expected
 
 
 async def test_webhook_rejection_audit_does_not_persist_echoed_secret_or_body(
