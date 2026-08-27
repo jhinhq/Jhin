@@ -96,6 +96,8 @@ export default function ChatThreadPage() {
   const [sendError, setSendError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [optimistic, setOptimistic] = useState<ConversationMessage[]>([]);
+  // Keeps the pollers alive for a moment after something we did changes the
+  // run, so the outcome is fetched even once the task stops being "live".
   const [recentlySent, setRecentlySent] = useState(false);
   const [confirmStop, setConfirmStop] = useState(false);
   const composerRef = useRef<ComposerHandle>(null);
@@ -105,7 +107,12 @@ export default function ChatThreadPage() {
   const liveStatus = conversation ? statusLabelFor(conversation) : null;
   const live = liveStatus !== null || recentlySent;
 
-  // Keep polling for a little while after a send so the new task shows up.
+  // Keep polling for a little while after a send so the new task shows up,
+  // and after a stop/pause/resume so its outcome does. Stopping is the case
+  // that bit: it ends the run, so `liveStatus` goes null and both pollers
+  // would switch themselves off in the same tick that produced the "Stopped"
+  // chip -- leaving the transcript looking as though nothing happened until
+  // the page was reloaded.
   useEffect(() => {
     if (!recentlySent) return;
     const timer = window.setTimeout(() => setRecentlySent(false), RECENT_SEND_WINDOW_MS);
@@ -218,6 +225,7 @@ export default function ChatThreadPage() {
       api(`/api/v1/workspaces/${workspaceId}/tasks/${taskId}/${action}`, { method: "POST" }),
     onSuccess: () => {
       setActionError(null);
+      setRecentlySent(true);
       invalidate();
     },
     onError: (error) =>
