@@ -28,7 +28,7 @@ from typing import Any
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.openapi.utils import get_openapi
 
-from jhin_api.access.route_scopes import READ_METHODS, ROUTE_SCOPES, route_signature
+from jhin_api.access.route_scopes import ROUTE_SCOPES, route_signature
 from jhin_api.deps import CurrentAuth
 
 #: The version segment every route is published under. Bumped only by adding
@@ -267,6 +267,14 @@ _SESSION_ONLY_NOTE = (
     "against API keys at every scope; it needs a browser session."
 )
 
+# A route whose other methods a key may call, but whose DELETE is sealed: the
+# credential-material sentence would be simply untrue there.
+_SEALED_DELETE_NOTE = (
+    "**Session only.** This deletion is irreversible and is sealed against API keys "
+    "at every scope; it needs a browser session. The other methods on this path stay "
+    "available to a key with the scope they name."
+)
+
 _PUBLIC_NOTE = "**Auth.** None: this endpoint is reachable without a credential."
 
 _DUAL_CREDENTIAL_NOTE = (
@@ -296,8 +304,11 @@ def _security_for(method: str, path: str) -> tuple[list[dict[str, list[str]]], s
     rule = ROUTE_SCOPES.get(signature)
     scope = None
     if rule is not None:
-        scope = rule.read if method.upper() in READ_METHODS else rule.write
+        # Per method, not per read/write: a rule may seal DELETE on its own.
+        scope = rule.scope_for(method)
     if scope is None:
+        if rule is not None and method.upper() == "DELETE" and rule.write is not None:
+            return _SESSION_ONLY, _SEALED_DELETE_NOTE, None
         return _SESSION_ONLY, _SESSION_ONLY_NOTE, None
     return (
         [{"SessionCookie": []}, {"ApiKeyBearer": [scope]}],

@@ -2975,6 +2975,13 @@
             "format": "uuid",
             "title": "Connection Id",
             "type": "string"
+          },
+          "delete_impact": {
+            "$ref": "#/components/schemas/ConnectionDeleteImpactOut",
+            "default": {
+              "trigger_count": 0,
+              "trigger_invocation_count": 0
+            }
           }
         },
         "required": [
@@ -3045,6 +3052,23 @@
           "connection"
         ],
         "title": "ConnectionCreated",
+        "type": "object"
+      },
+      "ConnectionDeleteImpactOut": {
+        "description": "What a delete would take with the connection (plan 17.9).\n\nTriggers and their invocation history cascade off the connection row, so\nthe delete confirmation can name the cost before anyone accepts it.",
+        "properties": {
+          "trigger_count": {
+            "default": 0,
+            "title": "Trigger Count",
+            "type": "integer"
+          },
+          "trigger_invocation_count": {
+            "default": 0,
+            "title": "Trigger Invocation Count",
+            "type": "integer"
+          }
+        },
+        "title": "ConnectionDeleteImpactOut",
         "type": "object"
       },
       "ConnectionGrantSummaryOut": {
@@ -10091,6 +10115,17 @@
             ],
             "title": "Error"
           },
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message"
+          },
           "event_id": {
             "format": "uuid",
             "title": "Event Id",
@@ -10242,6 +10277,11 @@
             ],
             "title": "Target Agent Id"
           },
+          "target_state": {
+            "default": "ok",
+            "title": "Target State",
+            "type": "string"
+          },
           "target_team_id": {
             "anyOf": [
               {
@@ -10253,6 +10293,17 @@
               }
             ],
             "title": "Target Team Id"
+          },
+          "target_warning": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Warning"
           },
           "trigger_type": {
             "title": "Trigger Type",
@@ -11552,6 +11603,14 @@
       "WorkspaceSpendOut": {
         "description": "Tracked spend across the workspace plus the optional monthly budget.",
         "properties": {
+          "deleted_model_month_micros": {
+            "title": "Deleted Model Month Micros",
+            "type": "integer"
+          },
+          "deleted_model_total_micros": {
+            "title": "Deleted Model Total Micros",
+            "type": "integer"
+          },
           "fetched_at": {
             "format": "date-time",
             "title": "Fetched At",
@@ -11610,6 +11669,8 @@
           "spent_total_micros",
           "period_start",
           "providers",
+          "deleted_model_month_micros",
+          "deleted_model_total_micros",
           "monthly_budget_micros",
           "warning_threshold",
           "fetched_at"
@@ -12336,7 +12397,7 @@
     },
     "/api/v1/workspaces/{workspace_id}": {
       "delete": {
-        "description": "**Scope.** An API key needs `workspace:settings`.",
+        "description": "**Session only.** This deletion is irreversible and is sealed against API keys at every scope; it needs a browser session. The other methods on this path stay available to a key with the scope they name.",
         "operationId": "delete_workspace_api_v1_workspaces__workspace_id__delete",
         "parameters": [
           {
@@ -12368,18 +12429,12 @@
         "security": [
           {
             "SessionCookie": []
-          },
-          {
-            "ApiKeyBearer": [
-              "workspace:settings"
-            ]
           }
         ],
         "summary": "Delete Workspace",
         "tags": [
           "workspaces"
-        ],
-        "x-jhin-scope": "workspace:settings"
+        ]
       },
       "get": {
         "description": "**Scope.** An API key needs `workspace:read`.",

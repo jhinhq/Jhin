@@ -93,6 +93,13 @@ connection credential rotation and webhook signing secrets, and the draft
 provider verification endpoint that takes a raw provider key in its body. They
 are browser-session-only, forever.
 
+One method is sealed on its own: `DELETE /api/v1/workspaces/{workspace_id}`.
+The rest of that path is a normal scoped route — `workspace:read` to read it,
+`workspace:settings` to rename it and set its budgets — but a scope offered as
+"rename and budgets" must not also buy destroying the workspace and everything
+in it, so a rule may seal `DELETE` while leaving its other writes alone.
+Deleting a workspace stays an owner's browser-session act.
+
 ### The one route off the workspace prefix
 
 Everything above hangs off `/api/v1/workspaces/{workspace_id}`, which leaves a

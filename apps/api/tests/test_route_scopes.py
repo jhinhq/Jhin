@@ -10,7 +10,6 @@ from __future__ import annotations
 import pytest
 
 from jhin_api.access.route_scopes import (
-    READ_METHODS,
     ROUTE_SCOPES,
     WORKSPACE_PREFIX,
     required_scope,
@@ -26,6 +25,12 @@ SEALED_SIGNATURES = {
     ("connections", "rotate"),
     ("connections", "webhook-secret"),
     ("model-providers", "verify-draft"),
+}
+
+# Signatures whose DELETE alone is sealed: the route's write scope buys the
+# other methods, but destruction here is not something any key may do.
+SEALED_DELETE_SIGNATURES = {
+    (),
 }
 
 
@@ -68,8 +73,10 @@ def test_every_workspace_route_is_classified(
         f"{method} {path} has no entry in ROUTE_SCOPES. Add {signature!r} with the "
         "scope it needs (or a sealed rule if no API key may ever call it)."
     )
-    side = rule.read if method in READ_METHODS else rule.write
-    if signature in SEALED_SIGNATURES:
+    side = rule.scope_for(method)
+    if signature in SEALED_SIGNATURES or (
+        method == "DELETE" and signature in SEALED_DELETE_SIGNATURES
+    ):
         assert side is None
         return
     assert side is not None, f"{method} {path} maps to {signature!r}, which has no scope for it"
@@ -80,6 +87,28 @@ def test_credential_routes_are_unreachable_with_any_api_key() -> None:
     for method, path, signature in ROUTES:
         if signature in SEALED_SIGNATURES:
             assert required_scope(method, path) is None, f"{method} {path} leaked a scope"
+
+
+def test_no_api_key_can_delete_a_workspace() -> None:
+    """Destroying a workspace is an owner's browser-session act.
+
+    ``workspace:settings`` is offered as "rename the workspace and change its
+    timezone, budgets, and limits". Keying the rule by signature alone once
+    let that same scope reach DELETE on the workspace root, so a key handed
+    out to adjust a budget could destroy the workspace and everything in it.
+    """
+    assert required_scope("DELETE", WORKSPACE_PREFIX) is None
+    assert required_scope("PATCH", WORKSPACE_PREFIX) == "workspace:settings"
+    assert required_scope("GET", WORKSPACE_PREFIX) == "workspace:read"
+
+
+def test_a_sealed_delete_does_not_seal_the_other_writes() -> None:
+    """The sentinel keeps "unstated" and "explicitly sealed" apart, so every
+    other rule still lets its write scope delete what that scope describes."""
+    for signature, rule in ROUTE_SCOPES.items():
+        if signature in SEALED_SIGNATURES or signature in SEALED_DELETE_SIGNATURES:
+            continue
+        assert rule.scope_for("DELETE") == rule.write, signature
 
 
 def test_unmapped_routes_fail_closed() -> None:

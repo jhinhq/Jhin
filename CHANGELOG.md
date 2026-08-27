@@ -8,6 +8,15 @@ versions.
 
 ## [Unreleased]
 
+### Security
+
+- `DELETE /api/v1/workspaces/{workspace_id}` no longer accepts an API key at
+  any scope. The route table keyed rules by path alone, so `workspace:settings`
+  — offered as renaming the workspace and changing its budgets — also bought
+  destroying the workspace and everything in it. Deleting a workspace is now a
+  browser-session, owner-only action. Existing keys keep every other workspace
+  write, including `PATCH` on the same path.
+
 ## [0.1.0] - Unreleased
 
 First public, self-hostable release candidate. Everything below was built

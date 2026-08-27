@@ -16,7 +16,7 @@ import pytest
 
 import jhin_api.main as main_module
 from jhin_api import __version__
-from jhin_api.access.route_scopes import READ_METHODS, ROUTE_SCOPES, route_signature
+from jhin_api.access.route_scopes import ROUTE_SCOPES, route_signature
 from jhin_api.main import create_app
 from jhin_api.openapi import API_VERSION, PUBLIC_OPERATIONS, TAG_DESCRIPTIONS
 from jhin_api.settings import Settings
@@ -149,7 +149,7 @@ def test_the_declared_scope_is_the_scope_the_api_enforces(spec: dict[str, Any]) 
         rule = ROUTE_SCOPES.get(signature)
         expected = None
         if rule is not None:
-            expected = rule.read if method.upper() in READ_METHODS else rule.write
+            expected = rule.scope_for(method)
         declared = operation.get("x-jhin-scope")
         assert declared == expected, (
             f"{method.upper()} {path} documents {declared!r}, enforces {expected!r}"
@@ -166,6 +166,24 @@ def test_the_declared_scope_is_the_scope_the_api_enforces(spec: dict[str, Any]) 
             assert f"`{expected}`" in operation["description"]
             checked += 1
     assert checked > 100, f"only {checked} scoped operations found"
+
+
+def test_deleting_a_workspace_is_documented_as_session_only(spec: dict[str, Any]) -> None:
+    """The reference has to show the seal, and show it for the right reason.
+
+    Reading the rule per read/write instead of per method documented DELETE
+    with the settings scope PATCH needs — telling integrators that a budget
+    key could destroy the workspace, which is exactly what it could do.
+    """
+    operations = spec["paths"]["/api/v1/workspaces/{workspace_id}"]
+    deletion = operations["delete"]
+    assert deletion["security"] == [{"SessionCookie": []}]
+    assert "x-jhin-scope" not in deletion
+    assert "irreversible" in deletion["description"]
+    # This one is sealed for being destructive, not for touching secrets.
+    assert "credential material" not in deletion["description"]
+    assert operations["patch"]["x-jhin-scope"] == "workspace:settings"
+    assert operations["get"]["x-jhin-scope"] == "workspace:read"
 
 
 def test_the_credential_surfaces_stay_session_only(spec: dict[str, Any]) -> None:

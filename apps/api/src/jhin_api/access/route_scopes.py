@@ -13,24 +13,58 @@ removed, so ``/agents/{agent_id}/grants/{grant_id}`` is ``("agents", "grants")``
 ``None`` on either side means "no API key may do this, at any scope". That is
 reserved for credential material: workspace secrets, connection credentials,
 and webhook signing secrets are browser-session-only, forever.
+
+A rule's ``delete`` side follows its ``write`` side unless it says otherwise,
+which is right whenever the scope's own description covers deleting the thing
+("Create, rename, and delete teams"). It does not follow where DELETE destroys
+something the write scope never promised: ``workspace:settings`` is offered as
+renaming and budgets, so ``delete=None`` seals DELETE on the workspace root and
+destroying a workspace stays an owner's browser-session act.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 
 WORKSPACE_PREFIX = "/api/v1/workspaces/{workspace_id}"
 READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+class _Inherit(Enum):
+    """Sentinel so an unstated ``delete`` side stays distinguishable from an
+    explicit ``None``: the first means "same as write", the second means
+    "sealed against every key", and conflating them would silently unseal."""
+
+    TOKEN = "inherit"
+
+
+INHERIT_WRITE = _Inherit.TOKEN
 
 
 @dataclass(frozen=True, slots=True)
 class RouteRule:
     read: str | None
     write: str | None
+    delete: str | _Inherit | None = INHERIT_WRITE
+
+    def scope_for(self, method: str) -> str | None:
+        """The scope this rule requires of ``method``, or None when sealed."""
+        upper = method.upper()
+        if upper in READ_METHODS:
+            return self.read
+        if upper == "DELETE" and self.delete is not INHERIT_WRITE:
+            return self.delete
+        return self.write
 
 
-def _rule(read: str | None, write: str | None) -> RouteRule:
-    return RouteRule(read=read, write=write)
+def _rule(
+    read: str | None,
+    write: str | None,
+    *,
+    delete: str | _Inherit | None = INHERIT_WRITE,
+) -> RouteRule:
+    return RouteRule(read=read, write=write, delete=delete)
 
 
 # Credential surfaces: present, deliberately unreachable with a bearer key.
@@ -38,7 +72,10 @@ _SEALED = _rule(None, None)
 
 
 ROUTE_SCOPES: dict[tuple[str, ...], RouteRule] = {
-    (): _rule("workspace:read", "workspace:settings"),
+    # PATCH renames the workspace and sets budgets; DELETE destroys it and
+    # everything in it. One scope must not buy both, so DELETE is sealed —
+    # the same treatment ("deletion-summary",) below already gets.
+    (): _rule("workspace:read", "workspace:settings", delete=None),
     # Owner-only by role (see the router); the scope keeps a key from reading
     # a whole-workspace inventory on a read-everything token.
     ("deletion-summary",): _rule("workspace:read", None),
@@ -177,4 +214,4 @@ def required_scope(method: str, path_template: str) -> str | None:
     rule = ROUTE_SCOPES.get(signature)
     if rule is None:
         return None
-    return rule.read if method.upper() in READ_METHODS else rule.write
+    return rule.scope_for(method)
