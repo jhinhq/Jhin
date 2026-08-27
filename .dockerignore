@@ -13,3 +13,17 @@
 !.env.example
 docs
 terminals
+# Sibling checkouts and desktop build output: gigabytes that no image needs,
+# and the Docker daemon copies the whole context before the first layer runs.
+# .worktrees held a second copy of the repo and apps/desktop a Rust target
+# directory -- together 5.3GB, which is what made an image build take
+# three quarters of an hour.
+.worktrees
+apps/desktop/target
+apps/desktop/src-tauri/target
+apps/desktop/node_modules
+# Playwright output.
+**/test-results
+**/playwright-report
+**/blob-report
+**/.playwright
