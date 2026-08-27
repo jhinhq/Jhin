@@ -145,6 +145,27 @@ async def last_invocations(
     return {row.trigger_id: row for row in rows}
 
 
+def _validate_invariants(
+    *,
+    trigger_type: str,
+    event_type: str | None,
+    target_agent_id: UUID | None,
+    target_team_id: UUID | None,
+) -> None:
+    """Rules a stored trigger must always satisfy, on create *and* update.
+
+    A connector_event trigger without an event_type matches every connector
+    event in the workspace (the matcher only filters when event_type is
+    truthy), so clearing it silently widens the trigger far beyond what the
+    author configured. A trigger without a target can never dispatch and only
+    produces failed invocations.
+    """
+    if trigger_type == TriggerType.CONNECTOR_EVENT.value and not event_type:
+        raise _bad_request("connector_event triggers require an event_type")
+    if target_agent_id is None and target_team_id is None:
+        raise _bad_request("a trigger needs a target_agent_id or target_team_id to assign work")
+
+
 async def get_trigger(db: AsyncSession, workspace_id: UUID, trigger_id: UUID) -> Trigger:
     trigger = await db.scalar(
         select(Trigger).where(Trigger.id == trigger_id, Trigger.workspace_id == workspace_id)
@@ -162,10 +183,12 @@ async def create_trigger(
     request_id: UUID,
     ip_hash: str,
 ) -> Trigger:
-    if payload.trigger_type == TriggerType.CONNECTOR_EVENT and not payload.event_type:
-        raise _bad_request("connector_event triggers require an event_type")
-    if payload.target_agent_id is None and payload.target_team_id is None:
-        raise _bad_request("a trigger needs a target_agent_id or target_team_id to assign work")
+    _validate_invariants(
+        trigger_type=payload.trigger_type.value,
+        event_type=payload.event_type,
+        target_agent_id=payload.target_agent_id,
+        target_team_id=payload.target_team_id,
+    )
     _validate_filter_document(payload.filter)
     await _validate_references(
         db,
@@ -233,6 +256,15 @@ async def update_trigger(
         connection_id=changes.get("connection_id"),
         target_agent_id=changes.get("target_agent_id"),
         target_team_id=changes.get("target_team_id"),
+    )
+    # Same invariants the create path enforces, against the values this
+    # update would leave behind — an update may not put a trigger into a
+    # shape create would refuse (an unscoped event_type, or no target).
+    _validate_invariants(
+        trigger_type=trigger.trigger_type,
+        event_type=changes.get("event_type", trigger.event_type),
+        target_agent_id=changes.get("target_agent_id", trigger.target_agent_id),
+        target_team_id=changes.get("target_team_id", trigger.target_team_id),
     )
     for field, value in changes.items():
         setattr(trigger, field, value)
