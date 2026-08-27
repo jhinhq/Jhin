@@ -159,10 +159,18 @@ def test_catalog_attribution_directly_follows_0027() -> None:
     assert attribution.down_revision == "0027"
 
 
-def test_membership_settings_directly_follows_0028_and_is_the_head() -> None:
+def test_membership_settings_directly_follows_0028() -> None:
     scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
     membership_settings = scripts.get_revision("0029")
 
     assert membership_settings is not None
     assert membership_settings.down_revision == "0028"
-    assert list(scripts.get_heads()) == ["0029"], "the migration graph must stay linear"
+
+
+def test_mcp_server_slug_unique_directly_follows_0029_and_is_the_head() -> None:
+    scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
+    server_slug = scripts.get_revision("0030")
+
+    assert server_slug is not None
+    assert server_slug.down_revision == "0029"
+    assert list(scripts.get_heads()) == ["0030"], "the migration graph must stay linear"

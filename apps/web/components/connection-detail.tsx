@@ -42,6 +42,7 @@ import {
   useInvalidateConnections,
 } from "@/lib/hooks";
 import type {
+  ConnectionDeleteImpact,
   ConnectionInfo,
   ConnectorInfo,
   VerifyResult,
@@ -51,6 +52,34 @@ import type {
 export function errText(error: unknown, fallback: string): string | null {
   if (!error) return null;
   return error instanceof ApiError ? error.detail : fallback;
+}
+
+function plural(count: number, one: string, many: string): string {
+  return `${count} ${count === 1 ? one : many}`;
+}
+
+/** What else goes when this connection goes. Automations built on a
+ * connection are deleted with it, along with everything they have ever run,
+ * and neither comes back — so the delete is only informed if it says so. */
+export function impactSentence(impact: ConnectionDeleteImpact | undefined): string | null {
+  if (!impact || impact.trigger_count === 0) return null;
+  const automations = plural(impact.trigger_count, "automation", "automations");
+  if (impact.trigger_invocation_count === 0) {
+    return `Deleting also removes ${automations} built on this app.`;
+  }
+  const runs = plural(impact.trigger_invocation_count, "recorded run", "recorded runs");
+  return `Deleting also removes ${automations} built on this app, and their ${runs}.`;
+}
+
+export function deletePrompt(name: string, impact: ConnectionDeleteImpact | undefined): string {
+  const extra = impactSentence(impact);
+  return [
+    `Delete connection “${name}”? Grants that reference it stop working.`,
+    extra,
+    "This cannot be undone.",
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 export function statusTone(status: string): "ok" | "danger" | "neutral" {
@@ -297,7 +326,12 @@ export function ConnectionDetailDialog({
         {verifyResult ? (
           <p
             className={`flex items-start gap-1.5 rounded-xl px-3 py-2 text-xs ${
-              verifyResult.ok ? "bg-ok-soft text-ok" : "bg-danger-soft text-danger"
+              verifyResult.status === "disabled"
+                ? // A passing check on a turned-off app is not a green light.
+                  "bg-warn-soft text-warn"
+                : verifyResult.ok
+                  ? "bg-ok-soft text-ok"
+                  : "bg-danger-soft text-danger"
             }`}
           >
             {verifyResult.ok ? (
@@ -490,7 +524,7 @@ export function ConnectionDetailDialog({
                     className="ml-auto"
                     disabled={remove.isPending}
                     onClick={() => {
-                      if (window.confirm(`Delete connection “${connection.name}”? Grants that reference it stop working.`)) {
+                      if (window.confirm(deletePrompt(connection.name, accessSummary.data?.delete_impact))) {
                         remove.mutate();
                       }
                     }}
@@ -501,6 +535,9 @@ export function ConnectionDetailDialog({
                 <p className="text-xs text-faint">
                   Disabling keeps the setup but stops every agent from using it. Deleting is
                   permanent and breaks grants that reference this connection.
+                  {impactSentence(accessSummary.data?.delete_impact)
+                    ? ` ${impactSentence(accessSummary.data?.delete_impact)}`
+                    : ""}
                 </p>
               </div>
             </Disclosure>

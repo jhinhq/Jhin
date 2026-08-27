@@ -343,6 +343,11 @@ export interface WorkspaceSpend {
    *  totals above, so the tile has to say so rather than imply completeness. */
   untracked: UntrackedModel[];
   untracked_runs: number;
+  /** Spend from models that have since been deleted. It stays in the totals,
+   *  so the provider breakdown needs it as its own line or it stops adding up.
+   *  Optional only for fixtures: the API always sends both. */
+  deleted_model_month_micros?: number;
+  deleted_model_total_micros?: number;
 }
 
 export interface ProfilePricingRefresh {
@@ -738,9 +743,18 @@ interface ConnectionAgentAccessOut {
   grants: ConnectionGrantSummaryOut[];
 }
 
+/** What deleting the connection would take with it, so the confirmation
+ * can name the cost. Triggers and their run history cascade off the row. */
+export interface ConnectionDeleteImpact {
+  trigger_count: number;
+  trigger_invocation_count: number;
+}
+
 export interface ConnectionAccessSummaryOut {
   connection_id: string;
   agents: ConnectionAgentAccessOut[];
+  /** Absent only when an older API is still serving this route. */
+  delete_impact?: ConnectionDeleteImpact;
 }
 
 export interface ConnectionCreated {
@@ -795,6 +809,8 @@ export interface TriggerInvocation {
   workflow_id: string | null;
   error: string | null;
   created_at: string;
+  /** The same outcome in words. `error` is an internal code; show this. */
+  error_message: string | null;
 }
 
 export interface Trigger {
@@ -816,6 +832,10 @@ export interface Trigger {
   created_at: string;
   updated_at: string;
   last_invocation: TriggerInvocation | null;
+  /** "ok", "agent_deleted", "agent_paused" or "team_unstaffed". */
+  target_state: string;
+  /** Why this automation cannot run, and what to do about it. */
+  target_warning: string | null;
 }
 
 export interface ConditionExplanation {

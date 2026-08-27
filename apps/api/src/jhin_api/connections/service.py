@@ -19,7 +19,7 @@ from typing import Any, cast
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,7 +44,14 @@ from jhin_connectors.mcp import (
     tool_name_for,
 )
 from jhin_connectors.mcp.discovery import discovered_at as mcp_discovered_at
-from jhin_db.models import Agent, AgentCapabilityGrant, Connection, ToolCall
+from jhin_db.models import (
+    Agent,
+    AgentCapabilityGrant,
+    Connection,
+    ToolCall,
+    Trigger,
+    TriggerInvocation,
+)
 from jhin_db.models.connection import new_public_id
 from jhin_domain import ConnectionStatus, SecretType
 from jhin_policy import RiskLevel, ToolDefinition, capability_matches, scope_matches
@@ -64,6 +71,13 @@ _MAX_PROVIDER_OUTPUT_DEPTH = 16
 _MAX_CONNECTION_ACCESS_SUMMARY_ROWS = 256
 _CONNECTION_ACCESS_SUMMARY_STREAM_BATCH_SIZE = 64
 _ACCESS_SUMMARY_UNAVAILABLE_DETAIL = "Connection access summary is temporarily unavailable"
+_STILL_DISABLED_NOTE = (
+    "This app is still turned off, so agents cannot use its tools. Turn it back on when you "
+    "want them to."
+)
+# The database index (migration 0030) that keeps one MCP short name per
+# workspace; its name is how a lost race is told apart from a duplicate name.
+MCP_SERVER_SLUG_INDEX = "uq_connection_mcp_server_slug"
 
 
 class _ProviderOutputLimitError(ValueError):
@@ -627,7 +641,106 @@ async def connection_access_summary(
             str(item["agent_id"]),
         )
     )
-    return {"connection_id": connection.id, "agents": agents}
+    return {
+        "connection_id": connection.id,
+        "agents": agents,
+        "delete_impact": await delete_impact(db, workspace_id, connection.id),
+    }
+
+
+async def delete_impact(
+    db: AsyncSession, workspace_id: UUID, connection_id: UUID
+) -> dict[str, int]:
+    """What deleting this connection takes with it (plan 17.9).
+
+    Triggers hang off the connection with ``ON DELETE CASCADE``, and their
+    invocation history hangs off them the same way, so removing a connection
+    silently removes every automation built on it. The delete stays allowed —
+    an admin may well mean it — but the confirmation has to say the cost."""
+    trigger_ids = list(
+        await db.scalars(
+            select(Trigger.id).where(
+                Trigger.workspace_id == workspace_id,
+                Trigger.connection_id == connection_id,
+            )
+        )
+    )
+    invocation_count = 0
+    if trigger_ids:
+        invocation_count = int(
+            await db.scalar(
+                select(func.count())
+                .select_from(TriggerInvocation)
+                .where(
+                    TriggerInvocation.workspace_id == workspace_id,
+                    TriggerInvocation.trigger_id.in_(trigger_ids),
+                )
+            )
+            or 0
+        )
+    return {"trigger_count": len(trigger_ids), "trigger_invocation_count": invocation_count}
+
+
+def _duplicate_server_slug(server_slug: str, existing_name: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=(
+            f"The short name '{server_slug}' is already used by the app '{existing_name}'. "
+            "Give this server a different short name, or open the app you already connected "
+            "and manage it there."
+        ),
+    )
+
+
+async def _existing_server_slug_owner(
+    db: AsyncSession,
+    workspace_id: UUID,
+    server_slug: str,
+    *,
+    exclude_id: UUID | None = None,
+) -> Connection | None:
+    """The MCP connection already claiming this short name, if there is one.
+
+    Slugs live inside ``config_json``, whose JSON operators differ between
+    Postgres and the SQLite used by unit tests, so the comparison happens in
+    Python. A workspace holds a handful of connections, not a table scan."""
+    query = select(Connection).where(
+        Connection.workspace_id == workspace_id,
+        Connection.connector_type == MCP_CONNECTOR_TYPE,
+    )
+    if exclude_id is not None:
+        query = query.where(Connection.id != exclude_id)
+    rows = await db.scalars(query.order_by(Connection.created_at, Connection.id))
+    return next((row for row in rows if row.config_json.get("server_slug") == server_slug), None)
+
+
+async def ensure_server_slug_is_free(
+    db: AsyncSession,
+    workspace_id: UUID,
+    connector_type: str,
+    config: dict[str, object],
+    *,
+    exclude_id: UUID | None = None,
+) -> None:
+    """Refuse a second MCP connection on one workspace's short name.
+
+    Tool names, the capability family, and the per-tool risk overrides an
+    admin approved are all keyed by ``mcp.<short name>``. Two connections
+    sharing one short name means only one of them is ever resolved, so the
+    other's reviewed risk levels silently stop being enforced — a destructive
+    tool can end up running without the approval its own connection demands.
+    The database index added in migration 0030 enforces the same rule; this
+    check exists so the caller gets an explanation instead of a constraint."""
+    if connector_type != MCP_CONNECTOR_TYPE:
+        return
+    server_slug = config.get("server_slug")
+    if not isinstance(server_slug, str) or not server_slug:
+        return
+    existing = await _existing_server_slug_owner(
+        db, workspace_id, server_slug, exclude_id=exclude_id
+    )
+    if existing is not None:
+        raise _duplicate_server_slug(server_slug, existing.name)
 
 
 async def create_connection(
@@ -652,6 +765,8 @@ async def create_connection(
         normalized_config = connector.validate_settings(auth_type, normalized_config)
     except ValueError as exc:
         raise _bad_request(str(exc)) from None
+    # Before any secret is written, so a refused create leaves nothing behind.
+    await ensure_server_slug_is_free(db, ctx.workspace_id, connector_type, normalized_config)
 
     public_id = new_public_id()
     store = SecretStore(db, crypto)
@@ -691,6 +806,19 @@ async def create_connection(
     try:
         await db.flush()
     except IntegrityError as exc:
+        # Two admins creating the same short name at once race past the check
+        # above; the index is the authority and its name says which rule bit.
+        # The winning row cannot be read back from a broken transaction, so
+        # this message names the short name rather than the other app.
+        if MCP_SERVER_SLUG_INDEX in str(exc.orig):
+            server_slug = str(normalized_config.get("server_slug", ""))
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"The short name '{server_slug}' was just taken by another app in this "
+                    "workspace. Give this server a different short name and try again."
+                ),
+            ) from exc
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="A connection with this name already exists in the workspace",
@@ -814,8 +942,15 @@ async def verify_connection(
     except (_ProviderOutputLimitError, KeyError, TypeError, ValueError):
         raise _unsafe_provider_output() from None
     connection.last_verified_at = datetime.now(UTC)
+    # A disabled connection was disabled on purpose, to cut its tools off.
+    # Verification still runs, reports the truth, and records what it learned,
+    # but putting the connection back in service stays the explicit job of the
+    # enable control — otherwise "Test connection" quietly undoes an admin's
+    # decision.
+    was_disabled = connection.status == ConnectionStatus.DISABLED.value
     if health.ok:
-        connection.status = ConnectionStatus.ACTIVE.value
+        if not was_disabled:
+            connection.status = ConnectionStatus.ACTIVE.value
         connection.last_error = None
         # Per-connection discovery (e.g. an MCP server's tool list) rides
         # along with a successful verification so the tools an admin sees are
@@ -834,8 +969,17 @@ async def verify_connection(
         if discovery:
             connection.config_json = {**connection.config_json, **discovery}
     else:
-        connection.status = ConnectionStatus.ERROR.value
+        if not was_disabled:
+            connection.status = ConnectionStatus.ERROR.value
         connection.last_error = health.message[:2000]
+    if was_disabled:
+        # The stored last_error keeps the provider's own words; only the
+        # message handed back to the caller says why the app is still off.
+        health = ConnectionHealth(
+            ok=health.ok,
+            message=f"{health.message.rstrip()} {_STILL_DISABLED_NOTE}".strip(),
+            details=health.details,
+        )
     audit.record(
         db,
         action="connection.verified",
@@ -904,8 +1048,11 @@ async def rotate_credentials(
         raise _bad_request("Connection has no stored credential to rotate")
     store = SecretStore(db, crypto)
     await store.rotate(ctx.workspace_id, connection.encrypted_secret_id, json.dumps(credentials))
-    # The new credential is unproven: reset health so operators re-verify.
-    connection.status = ConnectionStatus.ACTIVE.value
+    # The new credential is unproven: reset health so operators re-verify. A
+    # disabled connection stays disabled — replacing a secret is maintenance,
+    # not a decision to put the app back in service.
+    if connection.status != ConnectionStatus.DISABLED.value:
+        connection.status = ConnectionStatus.ACTIVE.value
     connection.last_error = None
     connection.last_verified_at = None
     audit.record(

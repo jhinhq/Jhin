@@ -118,11 +118,22 @@ class ConnectionAgentAccessOut(BaseModel):
     grants: list[ConnectionGrantSummaryOut]
 
 
+class ConnectionDeleteImpactOut(BaseModel):
+    """What a delete would take with the connection (plan 17.9).
+
+    Triggers and their invocation history cascade off the connection row, so
+    the delete confirmation can name the cost before anyone accepts it."""
+
+    trigger_count: int = 0
+    trigger_invocation_count: int = 0
+
+
 class ConnectionAccessSummaryOut(BaseModel):
     """Workspace-local connection access diagnostics for administrators."""
 
     connection_id: UUID
     agents: list[ConnectionAgentAccessOut]
+    delete_impact: ConnectionDeleteImpactOut = ConnectionDeleteImpactOut()
 
 
 class WebhookSetupOut(BaseModel):
