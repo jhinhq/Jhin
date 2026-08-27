@@ -557,8 +557,9 @@ LIVE_SCENARIOS = {
             "tests/integration/test_temporal_durability.py",
             "tests/integration/test_nats_durability.py",
             "tests/integration/test_company_topology_concurrency.py",
+            "tests/integration/test_conversation_turns.py",
         ),
-        expected_tests=53,
+        expected_tests=55,
     ),
     "socket-rootful": LiveScenario(
         nodes=(

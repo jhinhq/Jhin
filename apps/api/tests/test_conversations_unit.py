@@ -132,6 +132,11 @@ async def turn(
     )
 
 
+async def task_count(session: AsyncSession, conversation: Conversation) -> int:
+    rows = await session.scalars(select(Task.id).where(Task.conversation_id == conversation.id))
+    return len(list(rows))
+
+
 async def test_create_with_first_turn_links_task_and_seed_message(
     session: AsyncSession, admin_ctx: WorkspaceContext, temporal: FakeTemporal, agent: Agent
 ) -> None:
@@ -166,6 +171,54 @@ async def test_create_with_first_turn_links_task_and_seed_message(
     assert detail.conversation.last_message_preview == "Plan the Q4 roadmap with details"
     assert detail.conversation.agent_name == "Atlas"
     assert detail.conversation.task_count == 1
+
+
+async def test_seed_message_carries_the_request_verbatim(
+    session: AsyncSession, admin_ctx: WorkspaceContext, temporal: FakeTemporal, agent: Agent
+) -> None:
+    """The seed message text and ``task.description`` must stay byte-identical.
+
+    This is what makes a chat turn a chat turn. The agent worker decides the
+    prompt shape with ``_is_chat_turn``, whose last condition is
+    ``seed.text.strip() == task.description.strip()`` — only then is the
+    "Task: {title}\\n\\n{description}" brief dropped and the question left in
+    its chronological place between the earlier conversation and this task's
+    own transcript.
+
+    That predicate fails closed. If anything ever normalizes one side and not
+    the other (trims the description, collapses whitespace in the message,
+    re-titles the text into the body), the worker quietly falls back to the
+    brief — question first, before everything said earlier — which is exactly
+    the shape that had agents answering the *previous* question. Nothing
+    raises and no other test notices, so the equality is asserted here on both
+    turn paths, with a text whose whitespace a normalizer would not survive.
+    """
+    text = "  Plan the Q4 roadmap  \n\n\tand say why.  \n"
+    conversation, first = await start(session, admin_ctx, temporal, agent, text=text)
+
+    # Exact, not `.strip()`-equal: a normalizer applied to only one side is the
+    # failure this guards, so neither side may be normalized at all.
+    assert first.message.content_json == {"text": text}
+    assert first.task.description == text
+    # The title is the one derived field; it must not leak back into either.
+    assert conversation.title == "Plan the Q4 roadmap"
+    assert first.task.title == "Plan the Q4 roadmap"
+
+    # The second turn is the one that actually broke: its task carries earlier
+    # conversation ahead of the seed, so a mismatch here buries the question.
+    first.task.state = TaskState.COMPLETED.value
+    await session.commit()
+    follow_up = "  Now the budget, please.\n"
+    second = await turn(
+        session, admin_ctx, temporal, conversation.id, follow_up, client_turn_id="c-9"
+    )
+    assert second.mode == "new_task"
+    assert second.message.content_json == {"text": follow_up, "client_turn_id": "c-9"}
+    assert second.task.description == follow_up
+
+    # And the instruction the workflow is started with, which is where the
+    # reasoning activity gets the same words a second time.
+    assert [arg.instruction for _, arg, _ in temporal.started] == [text, follow_up]
 
 
 async def test_second_turn_while_task_active_is_an_instruction(
@@ -205,6 +258,62 @@ async def test_second_turn_after_completion_starts_a_new_task(
     assert projected.active_task_id == second.task.id
 
 
+async def test_turn_while_task_is_paused_is_still_an_instruction(
+    session: AsyncSession, admin_ctx: WorkspaceContext, temporal: FakeTemporal, agent: Agent
+) -> None:
+    """A paused task is still this chat's active episode.
+
+    Pausing parks the workflow; it does not end the turn. So the next thing
+    the person says has to reach that workflow as an instruction (it is
+    delivered when the run resumes) rather than forking a second task that
+    would race the paused one for the same conversation.
+    """
+    conversation, first = await start(session, admin_ctx, temporal, agent)
+    first.task.state = TaskState.PAUSED.value
+    await session.commit()
+
+    second = await turn(session, admin_ctx, temporal, conversation.id, "One more thing")
+
+    assert second.mode == "instruction"
+    assert second.task.id == first.task.id
+    assert second.message.message_type == MessageType.INSTRUCTION.value
+    assert temporal.signals == [(f"task-{first.task.id}", "user_instruction", ("One more thing",))]
+    assert len(temporal.started) == 1
+    assert await task_count(session, conversation) == 1
+    # Signalling a paused task must not resume it behind the person's back.
+    assert first.task.state == TaskState.PAUSED.value
+
+
+async def test_turn_after_a_failed_turn_starts_a_new_task(
+    session: AsyncSession, admin_ctx: WorkspaceContext, temporal: FakeTemporal, agent: Agent
+) -> None:
+    """A failed run ends the episode, and its task stays in the thread.
+
+    The failure is part of the conversation's history — the details panel
+    lists it, and the worker reads it back as the turn that went unanswered —
+    so unlinking it would erase the fact that the question was ever asked.
+    """
+    conversation, first = await start(session, admin_ctx, temporal, agent)
+    first.task.state = TaskState.FAILED.value
+    await session.commit()
+
+    second = await turn(session, admin_ctx, temporal, conversation.id, "Try again please")
+
+    assert second.mode == "new_task"
+    assert second.task.id != first.task.id
+    assert temporal.signals == []
+    assert len(temporal.started) == 2
+
+    assert first.task.conversation_id == conversation.id
+    assert first.message.conversation_id == conversation.id
+    detail = await service.get_detail(session, admin_ctx.workspace_id, conversation.id)
+    assert [t.id for t in detail.tasks] == [second.task.id, first.task.id]
+    assert detail.conversation.task_count == 2
+    assert detail.conversation.active_task_id == second.task.id
+    messages = await service.list_messages(session, admin_ctx.workspace_id, conversation.id)
+    assert [m.id for m in messages] == [first.message.id, second.message.id]
+
+
 async def test_client_turn_id_is_idempotent(
     session: AsyncSession, admin_ctx: WorkspaceContext, temporal: FakeTemporal, agent: Agent
 ) -> None:
@@ -215,6 +324,10 @@ async def test_client_turn_id_is_idempotent(
     assert replay.task.id == first.task.id
     assert replay.mode == "new_task"
     assert len(temporal.started) == 1 and temporal.signals == []
+    # Returning the original task is not enough: a retried send that also
+    # wrote a second task row would leave an orphan run charging the
+    # workspace and competing for the chat's active slot.
+    assert await task_count(session, conversation) == 1
 
     # An instruction replay keeps its original mode too.
     instr = await turn(session, admin_ctx, temporal, conversation.id, "more", "c-2")
@@ -222,6 +335,9 @@ async def test_client_turn_id_is_idempotent(
     assert instr.mode == again.mode == "instruction"
     assert again.message.id == instr.message.id
     assert len(temporal.signals) == 1
+    assert await task_count(session, conversation) == 1
+    messages = await service.list_messages(session, admin_ctx.workspace_id, conversation.id)
+    assert [m.id for m in messages] == [first.message.id, instr.message.id]
 
 
 async def test_cross_workspace_is_404(
