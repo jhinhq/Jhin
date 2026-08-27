@@ -14,6 +14,7 @@ from jhin_agent_worker.activities import (
     CONVERSATION_HISTORY_MAX_CHARS,
     CONVERSATION_HISTORY_MAX_MESSAGES,
     CONVERSATION_HISTORY_OMITTED_MARKER,
+    CONVERSATION_UNANSWERED_MARKER,
     AgentActivities,
 )
 from jhin_agent_worker.reasoning import _is_chat_turn, _load_history_parts
@@ -360,3 +361,80 @@ async def test_a_chat_task_whose_seed_row_is_missing_keeps_its_brief(world: Worl
 
     assert own == ()
     assert _is_chat_turn(task, own) is False
+
+
+async def test_a_turn_whose_run_failed_is_marked_unanswered(world: World) -> None:
+    """The row recording the failure is an `error`, written for a human and
+    filtered out. Without a marker the model sees the question with no reply
+    after it, reads two consecutive user turns, and cannot tell one went
+    unanswered."""
+    async with world.session_factory() as session:
+        failed = make_task(world, seconds=0, description="First ask")
+        failed.state = TaskState.FAILED.value
+        current = make_task(world, seconds=100, description="Second ask")
+        session.add_all([failed, current])
+        await session.flush()
+        failure = make_message(
+            world, failed, seconds=1, text="Run failed: openai: HTTP 429", agent=True
+        )
+        failure.sender_type = SenderType.SYSTEM.value
+        failure.sender_id = None
+        failure.message_type = MessageType.ERROR.value
+        session.add_all(
+            [
+                make_message(world, failed, seconds=0, text="First ask"),
+                failure,
+                make_message(world, current, seconds=100, text="Second ask"),
+            ]
+        )
+        await session.commit()
+        turns = await load(world, session, current)
+
+    assert turns == [
+        ("user", "text", "First ask"),
+        ("user", "text", CONVERSATION_UNANSWERED_MARKER),
+        ("user", "text", "Second ask"),
+    ]
+    # The provider's own words stay out of the prompt; the model needs to know
+    # only that the turn got no answer.
+    assert not any("429" in text for _, _, text in turns)
+
+
+async def test_a_turn_that_was_answered_gets_no_marker(world: World) -> None:
+    async with world.session_factory() as session:
+        earlier = make_task(world, seconds=0, description="First ask")
+        current = make_task(world, seconds=100, description="Second ask")
+        session.add_all([earlier, current])
+        await session.flush()
+        session.add_all(
+            [
+                make_message(world, earlier, seconds=0, text="First ask"),
+                make_message(world, earlier, seconds=1, text="On it", agent=True),
+                make_message(world, current, seconds=100, text="Second ask"),
+            ]
+        )
+        await session.commit()
+        turns = await load(world, session, current)
+
+    assert CONVERSATION_UNANSWERED_MARKER not in [text for _, _, text in turns]
+
+
+async def test_a_sibling_task_still_running_gets_no_marker(world: World) -> None:
+    """A work request raised inside this chat shares the conversation and can
+    legitimately be mid-flight. Only a terminal, unfinished run is marked."""
+    async with world.session_factory() as session:
+        sibling = make_task(world, seconds=0, description="Colleague work")
+        sibling.state = TaskState.RUNNING.value
+        current = make_task(world, seconds=100, description="Second ask")
+        session.add_all([sibling, current])
+        await session.flush()
+        session.add_all(
+            [
+                make_message(world, sibling, seconds=0, text="Colleague work"),
+                make_message(world, current, seconds=100, text="Second ask"),
+            ]
+        )
+        await session.commit()
+        turns = await load(world, session, current)
+
+    assert CONVERSATION_UNANSWERED_MARKER not in [text for _, _, text in turns]

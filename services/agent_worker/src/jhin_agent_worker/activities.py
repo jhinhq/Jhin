@@ -31,6 +31,9 @@ from jhin_agent_worker.reasoning import (
 from jhin_agent_worker.reasoning import (
     CONVERSATION_HISTORY_OMITTED_MARKER as CONVERSATION_HISTORY_OMITTED_MARKER,
 )
+from jhin_agent_worker.reasoning import (
+    CONVERSATION_UNANSWERED_MARKER as CONVERSATION_UNANSWERED_MARKER,
+)
 from jhin_agent_worker.reasoning import AgentReasoningActivities
 from jhin_agent_worker.resources import Resources
 from jhin_agents import resolve_snapshot

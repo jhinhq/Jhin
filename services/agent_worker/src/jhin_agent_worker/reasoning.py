@@ -40,6 +40,7 @@ from jhin_domain import (
     ModelProviderType,
     RunStatus,
     SenderType,
+    TaskState,
 )
 from jhin_memory import (
     MemoryContext,
@@ -99,6 +100,7 @@ _STRUCTURED_MESSAGE_TYPES = frozenset(item.value for item in AGENT_MESSAGE_TYPES
 CONVERSATION_HISTORY_MAX_MESSAGES = 40
 CONVERSATION_HISTORY_MAX_CHARS = 24_000
 CONVERSATION_HISTORY_OMITTED_MARKER = "[earlier messages omitted]"
+CONVERSATION_UNANSWERED_MARKER = "[the previous message was not answered: that run did not finish]"
 _REASON_SPAN_NAME = "agent.reason_step"
 _REASON_WORKSPACE_ATTRIBUTE = "jhin.workspace_id"
 _REASON_TASK_ATTRIBUTE = "jhin.task_id"
@@ -594,14 +596,37 @@ async def _load_conversation_history(
         )
         .order_by(Message.created_at, Message.id)
     )
+    # A turn whose run failed or was cancelled leaves the person's question in
+    # the transcript with no reply after it -- the row that recorded the
+    # failure is an `error`, filtered out just above because it is written for
+    # a human. Left alone the model reads two consecutive user messages and
+    # cannot tell that one went unanswered.
+    unfinished = set(
+        await session.scalars(
+            select(Task.id).where(
+                Task.id.in_(earlier_tasks),
+                Task.state.in_((TaskState.FAILED.value, TaskState.CANCELLED.value)),
+            )
+        )
+    )
     turns: list[ConversationTurn] = []
+    previous_task_id: Any = None
     for message in rows:
         content = message.content_json
         text = str(content.get("text", "") or content.get("summary", "") or "")
         if not text.strip():
             continue
+        if (
+            previous_task_id is not None
+            and message.task_id != previous_task_id
+            and previous_task_id in unfinished
+        ):
+            turns.append(ConversationTurn(role="user", text=CONVERSATION_UNANSWERED_MARKER))
+        previous_task_id = message.task_id
         role = "agent" if message.sender_type == SenderType.AGENT.value else "user"
         turns.append(ConversationTurn(role=role, text=text[:_MAX_STRUCTURED_TURN_CHARS]))
+    if previous_task_id is not None and previous_task_id in unfinished:
+        turns.append(ConversationTurn(role="user", text=CONVERSATION_UNANSWERED_MARKER))
     truncated = len(turns) > CONVERSATION_HISTORY_MAX_MESSAGES
     turns = turns[-CONVERSATION_HISTORY_MAX_MESSAGES:]
     total_chars = sum(len(turn.text) for turn in turns)
