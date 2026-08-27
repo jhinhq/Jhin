@@ -30,6 +30,7 @@ from jhin_api.tasks.schemas import (
     TaskTreeOut,
     ToolCallOut,
 )
+from jhin_domain import TaskState
 
 tasks_router = APIRouter(
     prefix="/api/v1/workspaces/{workspace_id}/tasks",
@@ -145,6 +146,10 @@ async def pause_task(
         task_id,
         signal="pause",
         action="task.paused",
+        # The workflow keeps the pause in memory until the run ends, so the
+        # row has to carry it or the chat shows "Working…" with no way back.
+        new_state=TaskState.PAUSED.value,
+        from_states=(TaskState.QUEUED.value, TaskState.RUNNING.value),
         request_id=req_id(request),
         ip_hash=ip_hash(request),
     )
@@ -162,6 +167,8 @@ async def resume_task(
         task_id,
         signal="resume",
         action="task.resumed",
+        new_state=TaskState.RUNNING.value,
+        from_states=(TaskState.PAUSED.value,),
         request_id=req_id(request),
         ip_hash=ip_hash(request),
     )

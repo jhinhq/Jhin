@@ -16,7 +16,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.client import Client as TemporalClient
 from temporalio.client import WorkflowHandle
@@ -461,6 +461,8 @@ async def signal_task(
     signal: str,
     args: list[Any] | None = None,
     action: str,
+    new_state: str | None = None,
+    from_states: tuple[str, ...] = ACTIVE_TASK_STATES,
     request_id: UUID,
     ip_hash: str,
 ) -> Task:
@@ -478,6 +480,8 @@ async def signal_task(
             status_code=status.HTTP_409_CONFLICT,
             detail="Could not signal the task workflow (it may have already finished)",
         ) from exc
+    if new_state is not None:
+        await _apply_signalled_state(db, task, new_state=new_state, from_states=from_states)
     audit.record(
         db,
         action=action,
@@ -490,6 +494,35 @@ async def signal_task(
     )
     await db.commit()
     return task
+
+
+async def _apply_signalled_state(
+    db: AsyncSession,
+    task: Task,
+    *,
+    new_state: str,
+    from_states: tuple[str, ...],
+) -> None:
+    """Record a pause/resume on the task row so the UI can reflect it.
+
+    The workflow keeps the authoritative in-memory pause flag, but it only
+    reaches the database when the run reaches a terminal state, so without
+    this a paused task reads as "running" forever and never offers Resume.
+    The update is conditional on the state we saw, so a run that finished in
+    the moment between the signal and this write keeps its real outcome.
+    """
+    await db.execute(
+        update(Task)
+        .where(
+            Task.id == task.id,
+            Task.workspace_id == task.workspace_id,
+            Task.state.in_(from_states),
+        )
+        .values(state=new_state)
+    )
+    # Re-read rather than assume: the update is a no-op when the state moved
+    # on, and the caller returns this row.
+    await db.refresh(task)
 
 
 def is_attention_acknowledged(task: Task) -> bool:

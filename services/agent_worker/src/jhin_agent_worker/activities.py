@@ -203,7 +203,8 @@ class AgentActivities(AgentReasoningActivities, AgentProjectionActivities):
                                 },
                             )
                         )
-                    task.state = TaskState.QUEUED.value
+                    if task.state != TaskState.PAUSED.value:
+                        task.state = TaskState.QUEUED.value
                     existing = task.metadata_json.get("queue")
                     since = (
                         existing.get("since", "")
@@ -255,7 +256,11 @@ class AgentActivities(AgentReasoningActivities, AgentProjectionActivities):
             )
             session.add(run)
             if task is not None:
-                task.state = TaskState.RUNNING.value
+                # A pause asked for while the task was still waiting is already
+                # on the row; the workflow parks on it the moment the step loop
+                # starts, so admission must not advertise it as running.
+                if task.state != TaskState.PAUSED.value:
+                    task.state = TaskState.RUNNING.value
                 if "queue" in task.metadata_json:
                     task.metadata_json = {
                         key: value for key, value in task.metadata_json.items() if key != "queue"
