@@ -4,8 +4,13 @@ Mirrors ``DelegatedTaskWorkflow`` without the lineage semantics: the created
 task runs as an ordinary nested ``AgentTaskWorkflow`` under ``task-<id>`` (so
 pause/resume/cancel/approval signals work), then a retrying activity marks
 the request completed/failed and posts the standardized ``result`` message
-on the requester's task. Nothing here parks the requester: work requests are
-always non-blocking.
+on the requester's task.
+
+Nothing here knows whether anyone is waiting. The requester parks on this
+workflow's completion for a bounded while (``AgentTaskWorkflow.
+_await_work_request_answer``) precisely because the ``result`` message is
+committed before it returns; a requester that has given up, or was never
+waiting, changes nothing about what this workflow does.
 """
 
 from __future__ import annotations

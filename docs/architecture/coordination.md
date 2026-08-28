@@ -51,8 +51,8 @@ seed):
 | `organization.work.respond` | — | structurally limited to the request's target agent, so an agent can be asked as well as ask. |
 
 `organization.delegate` is deliberately **excluded**: delegation transfers
-ownership/authority (a blocking parent wait, a child in the lineage), so it
-stays deny-by-default with the restrictive delegation permission model.
+ownership/authority (an unbounded parent wait, a child in the lineage), so
+it stays deny-by-default with the restrictive delegation permission model.
 
 This is a *platform* default, not a capability an agent chooses: the calling
 agent cannot pick these grants, `organization.create_agent` is still
@@ -277,9 +277,11 @@ argument for it is that a *request is not an authority transfer*:
   each call against the **target's** live grants, rules, validators, review
   policies and human-approval requirements. The requester's grants are
   irrelevant to it.
-- It is not delegation. No lineage, no `parent_task_id`, no blocking
-  parent wait, no ownership handover; `organization.delegate` stays
-  deny-by-default with the restrictive delegation model.
+- It is not delegation. No lineage, no `parent_task_id`, no ownership
+  handover; `organization.delegate` stays deny-by-default with the
+  restrictive delegation model. The requester does wait for the answer, but
+  only briefly and only to report it (below) — it never takes the work, and
+  the colleague's task runs on whether anyone is still listening.
 - The created task is an ordinary task: visible in Activity and the
   conversation, stoppable, budgeted, and admitted through the same
   concurrency slots as any other work.
@@ -335,26 +337,69 @@ onward.
 
 ### How the answer gets back to the person
 
-The requester's run has normally finished by the time the colleague
-answers, so nothing can be handed back to it — the answer is delivered into
-the **conversation** instead, which is what the person is actually looking
-at:
+**The requester waits for it and reports it itself.** Firing the request off
+and ending the turn gave the person a promise ("his answer will appear here
+shortly") with the colleague's reply arriving beside it, addressed to
+nobody. So the requester parks:
 
-- `accept_work_request` gives the created task the requester task's
-  `conversation_id`, so the colleague's own final reply lands in that
-  conversation, attributed to them (`sender_name`).
-- `finalize_work_request` additionally posts the structured `result`
-  message (summary/artifacts/risks) on the *requester's* task.
+- `AgentTaskWorkflow._await_work_request_answer` holds the requester's turn
+  open on the `WorkRequestTaskWorkflow` it just started, for
+  `_WORK_REQUEST_ANSWER_WAIT` (2 minutes). A `cancel` signal releases it;
+  the child is `ABANDON`ed, so giving up costs the colleague nothing.
+- The colleague's answer reaches the model as the **first thing its next
+  step reads**: `finalize_work_request` posts the structured `result`
+  message (summary/artifacts/risks) on the *requester's* task, and it is
+  committed before the child workflow completes — so by the time the wait
+  returns the row is there, and `_load_task_history` renders it as a
+  `[result] …` turn. The requester then composes one reply carrying the
+  information.
+- When the wait elapses, the run continues rather than parking forever:
+  `note_unanswered_work_request` marks the task ("<Target> has not answered
+  yet"), the next step tells the person that plainly, and the request stays
+  live — its answer still lands in the conversation later, exactly as it
+  did when nothing waited.
 
-Both are presentation-folded. `groupExchanges` in `apps/web/lib/chat.ts`
-puts every turn from an agent that is not the conversation's primary agent
-into the collapsed "…updates with <colleague>" row, alongside the
-`question`, `accepted` and `result` cards. The colleague is answering the
-*agent* who asked, not the person watching the chat, so leaving their turn
-loose in the dialogue reads as eavesdropping on somebody else's
-conversation; the reader expands the row when they want the exchange. The
-answer still arrives without re-asking and without waking the requester for
-another model call.
+**Only the requester may park.** `WorkRequestStart` is surfaced on both
+sides of the ask — `organization.request_work` auto-activates the target on
+the *requester's* step, and `organization.respond_work_request` accepts on
+the *responder's* — and a responder that parked would be waiting on the
+task it just accepted for itself. The record therefore carries an explicit
+`side`, set at the lift site from the tool that ran (the responder's tool is
+limited by its validator to the request's target, so the tool name *is* the
+role) and never re-derived downstream; the workflow additionally refuses to
+wait on a task belonging to the agent it is running.
+
+**What the wait costs.** A parked requester keeps its own concurrency slot
+(`RunStatus` stays active), so with a tight `max_concurrent_runs` the
+colleague can be queued behind the very agent waiting for it. That is what
+the bound buys: the deadlock resolves itself in two minutes with an honest
+sentence instead of never. Chains (A→B→C) nest the same way, each hop
+bounded, and the mutual case is refused earlier by the ping-pong guard. Two
+asks in one step are waited on one after the other rather than raced, so the
+worst case is one bound per ask.
+
+The workflow is `patched` (`work-request-requester-wait-v1`) so runs that
+were in flight when this landed replay their old, non-blocking shape; the
+marker is written only on the requester's path, which no earlier history
+takes.
+
+**Delivery is not a second tool result.** The `organization.request_work`
+call already has its own `tool_result` (committed with the step, carrying
+`detail`), and unlike a blocking delegation it does not stop the step's
+manifest — a second result bound to the same call would put two `tool`
+messages under one `tool_call_id`, out of order with the other calls in that
+step. The `result` message is the delivery route, and it is the only one.
+
+The colleague's *own* final reply also lands in the conversation:
+`accept_work_request` gives the created task the requester task's
+`conversation_id`. That is presentation only. `groupExchanges` in
+`apps/web/lib/chat.ts` puts every turn from an agent that is not the
+conversation's primary agent into the collapsed "…updates with <colleague>"
+row, alongside the `question`, `accepted` and `result` cards: the colleague
+is answering the *agent* who asked, not the person watching the chat, so
+leaving their turn loose in the dialogue reads as eavesdropping on somebody
+else's conversation. The reader expands the row when they want the
+exchange — and the reply they actually get is the requester's own.
 
 ### Review gate order
 

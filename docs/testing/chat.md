@@ -102,6 +102,8 @@ to exercise these by hand; without it runs finish faster than a person can click
 | Markdown renders; user text stays literal | `apps/web/tests/chat-components.test.tsx`, `apps/web/e2e/chat-markdown.spec.ts` |
 | `javascript:` links are refused | `chat-components.test.tsx` |
 | An agent-to-agent exchange stays folded | `apps/web/tests/chat-work-request.test.tsx`, `apps/web/e2e/chat-exchange.spec.ts` |
+| The agent that asked a colleague answers with what it heard | `packages/workflows/tests/test_work_request_task_workflow.py::test_the_requester_waits_for_the_colleagues_answer` (it waits), `services/agent_worker/tests/test_conversation_history.py::test_a_colleagues_answer_reaches_the_requesters_next_step` (it can read the answer) |
+| A colleague who does not answer in time is reported, not invented | `test_a_colleague_who_does_not_answer_in_time_is_reported_not_invented`, `services/agent_worker/tests/test_coordination_activities.py::test_an_unanswered_request_leaves_a_mark_the_requester_can_read` |
 | The primary agent's own turns stay in the dialogue | `chat-work-request.test.tsx` |
 | Queued instructions show as queued, then delivered | `chat-helpers.test.ts`, `chat-components.test.tsx` |
 | An empty completion never becomes an empty bubble | `services/agent_worker/tests/test_step_projection.py` |

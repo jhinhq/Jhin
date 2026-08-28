@@ -11,6 +11,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 ACTIVITY_FINALIZE_WORK_REQUEST = "finalize_work_request"
+# The requester's bounded wait elapsed before the colleague answered. The
+# activity posts the "not answered yet" status on the requester's task so the
+# requester's very next model step tells the person the truth instead of
+# promising an answer it never saw.
+ACTIVITY_NOTE_WORK_REQUEST_UNANSWERED = "note_work_request_unanswered"
 
 
 def work_request_workflow_id(work_request_id: str) -> str:
@@ -33,6 +38,12 @@ class FinalizeWorkRequestInput:
     work_request_id: str
     task_id: str
     run_status: str  # the task AgentTaskWorkflow's final status
+
+
+@dataclass
+class NoteWorkRequestUnansweredInput:
+    workspace_id: str
+    work_request_id: str
 
 
 @dataclass

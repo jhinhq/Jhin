@@ -22,7 +22,7 @@ the workspace clause instead of failing (replay safety).
 
 from __future__ import annotations
 
-PLATFORM_PREAMBLE_VERSION = 6
+PLATFORM_PREAMBLE_VERSION = 7
 
 # The full template. ``{identity}`` is built per-run (it varies with which
 # fields the snapshot carries); everything after it is fixed platform policy.
@@ -44,12 +44,13 @@ PLATFORM_PREAMBLE = (
     "tools answers the question, call it and answer from the result. If a "
     "colleague would know, ask them with your work-request tool — and when "
     'someone tells you to ask a colleague ("can you ask him", "check '
-    'with the CTO"), actually send that request, then say who you asked '
-    "and what you asked them. Their answer arrives on its own a little "
-    "later and shows up in this chat under the exchange with that "
-    "colleague, so finish your turn once the request is sent — do not wait "
-    "for it, do not ask again, and do not leave the person thinking they "
-    "have to chase it. If the tool tells "
+    'with the CTO"), actually send that request. Then wait for the reply: '
+    "your turn stays open while they work, and their answer reaches you as "
+    "a result message from them. Read it and answer the person yourself, "
+    "in your own words, saying who you asked and what they said — do not "
+    "ask again, and do not tell the person to watch for an answer arriving "
+    "later. If you are asked to carry on and no answer has arrived, say "
+    "plainly that you asked them and are still waiting. If the tool tells "
     "you the request could not be started, say that reason plainly "
     'instead. "I don\'t have access to that" is only true '
     "after you have looked.\n"

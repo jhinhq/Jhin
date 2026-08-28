@@ -55,6 +55,8 @@ from jhin_workflows.agent_task.shared import (
     ACTIVITY_REASON_AGENT_STEP,
     ACTIVITY_RESOLVE_ADVERTISED_TOOLS,
     ACTIVITY_RESOLVE_SNAPSHOT,
+    WORK_REQUEST_SIDE_REQUESTER,
+    WORK_REQUEST_SIDE_RESPONDER,
     AdvertisedTool,
     BoundToolResult,
     CleanupRunWorkspaceInput,
@@ -917,7 +919,12 @@ async def test_accepted_work_request_is_lifted_and_replayed_from_the_commit(
 
     expected = [
         WorkRequestStart(
-            work_request_id=request_id, task_id=created_task_id, agent_id=str(world.agent_id)
+            work_request_id=request_id,
+            task_id=created_task_id,
+            agent_id=str(world.agent_id),
+            # The responder accepted work for itself: this side must never
+            # park on the task it just created, or it waits on its own run.
+            side=WORK_REQUEST_SIDE_RESPONDER,
         )
     ]
     assert first.work_request_starts == expected
@@ -963,7 +970,12 @@ async def test_auto_activated_request_is_lifted_from_the_requester_step(
 
     expected = [
         WorkRequestStart(
-            work_request_id=request_id, task_id=created_task_id, agent_id=target_agent_id
+            work_request_id=request_id,
+            task_id=created_task_id,
+            agent_id=target_agent_id,
+            # The requester's own tool, so this is the side that waits for
+            # the answer — and the side is read off the tool, never guessed.
+            side=WORK_REQUEST_SIDE_REQUESTER,
         )
     ]
     assert first.work_request_starts == expected

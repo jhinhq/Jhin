@@ -27,6 +27,7 @@ from jhin_domain import (
     SenderType,
     TaskState,
     new_uuid7,
+    structured_content,
 )
 from jhin_observability import noop_metrics, noop_tracer
 
@@ -438,3 +439,56 @@ async def test_a_sibling_task_still_running_gets_no_marker(world: World) -> None
         turns = await load(world, session, current)
 
     assert CONVERSATION_UNANSWERED_MARKER not in [text for _, _, text in turns]
+
+
+async def test_a_colleagues_answer_reaches_the_requesters_next_step(world: World) -> None:
+    """The route the answer travels back to the person.
+
+    The requester now holds its turn open until the colleague is done
+    (``AgentTaskWorkflow._await_work_request_answer``), and this is what it
+    is waiting for: ``finalize_work_request`` posts the colleague's ``result``
+    on the *requester's* task, committed before the wait returns, so the very
+    next reasoning step reads it as an incoming turn and can answer the
+    person with it instead of promising them something later.
+    """
+    async with world.session_factory() as session:
+        colleague = Agent(workspace_id=world.workspace.id, name="CTO", slug="cto")
+        session.add(colleague)
+        await session.flush()
+        task = make_task(world, seconds=0, description="What is the CTO working on?")
+        session.add(task)
+        await session.flush()
+        answer = Message(
+            workspace_id=world.workspace.id,
+            task_id=task.id,
+            conversation_id=task.conversation_id,
+            sender_type=SenderType.AGENT.value,
+            sender_id=colleague.id,
+            recipient_type=RecipientType.AGENT.value,
+            recipient_id=world.agent.id,
+            message_type=MessageType.RESULT.value,
+            content_json=structured_content(
+                "Migrating the billing service to 2.0.",
+                kind="work_request",
+                status="completed",
+                from_agent_name="CTO",
+            ),
+            visibility=MessageVisibility.VISIBLE.value,
+            created_at=T0 + timedelta(seconds=3),
+        )
+        session.add_all(
+            [
+                make_message(world, task, seconds=0, text="What is the CTO working on?"),
+                answer,
+            ]
+        )
+        await session.commit()
+        turns = await load(world, session, task)
+
+    assert turns[0] == ("user", "text", "What is the CTO working on?")
+    role, _kind, text = turns[-1]
+    # Somebody else's report, so it arrives as a turn addressed to this agent
+    # rather than as something it already said.
+    assert role == "user"
+    assert text.startswith("[result] ")
+    assert "Migrating the billing service to 2.0." in text

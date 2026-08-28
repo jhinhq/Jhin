@@ -24,7 +24,10 @@ Worker integration: when ``organization.request_work`` or
 ``organization.respond_work_request`` returns ``created_task_id`` (plus the
 owning ``agent_id``), the agent worker lifts it into
 ``StepResult.work_request_starts`` and ``AgentTaskWorkflow`` starts one
-durable ``WorkRequestTaskWorkflow`` (see ``docs/architecture/coordination.md``).
+durable ``WorkRequestTaskWorkflow``. The lifted record also carries which
+*side* of the ask the running agent is on, because only the requester parks
+on the answer — the responder would be waiting on its own task (see
+``docs/architecture/coordination.md``).
 """
 
 from __future__ import annotations
@@ -73,6 +76,9 @@ from jhin_tools.errors import ToolExecutionError
 from jhin_tools.organization import _is_subordinate
 
 _MAX_TASK_ANCESTORS = 50
+# A relayed answer is a chat message, not a document: long enough for a real
+# reply, short enough that it cannot flood the requester's next prompt.
+_MAX_SUMMARY_CHARS = 4000
 _ACTIVE_TASK_STATES = (TaskState.QUEUED.value, TaskState.RUNNING.value, TaskState.PAUSED.value)
 
 Decision = Literal["accept", "decline", "clarify"]
@@ -658,6 +664,57 @@ async def request_clarification(
     return request
 
 
+async def note_unanswered_work_request(
+    session: AsyncSession, workspace_id: UUID, request_id: UUID
+) -> str:
+    """Tell the requester's task that the colleague has not answered yet.
+
+    The requester holds its turn open for a couple of minutes waiting for the
+    answer (``AgentTaskWorkflow._await_work_request_answer``). When that
+    elapses the run continues, and without this the model would reach its
+    next step with nothing new in front of it and repeat the old promise. So
+    the wait leaves a mark: a ``status`` message on the requester's task
+    saying, in the same vocabulary as every other update about this request,
+    that it is still open.
+
+    Nothing is written when the request already reached a terminal state —
+    ``finalize_work_request`` or ``fail_work_request`` posted the real answer
+    or the real reason in the meantime, and a "still waiting" line after it
+    would be a lie. Idempotent on ``waiting_note_message_id``: an activity
+    retry after a committed write posts nothing further.
+    """
+    request = await get_work_request(session, workspace_id, request_id)
+    if request is None:
+        return "missing"
+    if request.status not in {s.value for s in WORK_REQUEST_ACTIVE_STATUSES}:
+        return "terminal"
+    if request.metadata_json.get("waiting_note_message_id"):
+        return "noted"
+    target_name = str(request.metadata_json.get("target_agent_name", "") or "your colleague")
+    message = await _status_message(
+        session,
+        request,
+        sender_id=request.target_agent_id,
+        recipient_id=request.requester_agent_id,
+        # Plain prose, like every other update about this request: a person
+        # may expand the exchange and read it, and the agent reading it needs
+        # the fact, not an instruction (its tool description carries those).
+        summary=(
+            f"{target_name} has not answered yet. The request is still open, and their "
+            "answer arrives in this conversation when it lands."
+        ),
+        message_type=MessageType.STATUS,
+        extra={"waiting": True},
+    )
+    await session.flush()
+    request.metadata_json = {
+        **request.metadata_json,
+        "waiting_note_message_id": str(message.id),
+    }
+    await session.flush()
+    return "noted"
+
+
 _FAILURE_REASONS = {
     "timed_out": (
         "they did not finish within the time allowed for a colleague's request, so it was stopped"
@@ -670,6 +727,33 @@ _FAILURE_REASONS = {
 def _failure_reason(run_status: str) -> str:
     """Plain language for why a request did not produce an answer."""
     return _FAILURE_REASONS.get(run_status, f"their run ended as {run_status}")
+
+
+async def _final_reply_text(session: AsyncSession, request: WorkRequest) -> str:
+    """The colleague's own last visible answer on the task they were given.
+
+    Only plain replies count: structured coordination rows are machinery, and
+    the requester relaying one back to a person would read as noise rather
+    than an answer.
+    """
+    if request.created_task_id is None:
+        return ""
+    row = await session.scalar(
+        select(Message)
+        .where(
+            Message.task_id == request.created_task_id,
+            Message.sender_type == SenderType.AGENT.value,
+            Message.sender_id == request.target_agent_id,
+            Message.message_type == MessageType.TEXT.value,
+            Message.visibility == MessageVisibility.VISIBLE.value,
+        )
+        .order_by(Message.created_at.desc(), Message.id.desc())
+        .limit(1)
+    )
+    if row is None:
+        return ""
+    text = str((row.content_json or {}).get("text", "") or "").strip()
+    return text[:_MAX_SUMMARY_CHARS]
 
 
 async def finalize_work_request(
@@ -698,6 +782,13 @@ async def finalize_work_request(
     )
     request.completed_at = _now()
     summary = str(reported.get("summary", "") or "")
+    if not summary and completed:
+        # The colleague answered in prose rather than through
+        # ``organization.report_result``, which is the ordinary thing to do
+        # when the ask was a question. Their reply *is* the answer, so relay
+        # it; without this the requester was handed "Finished: <title>" and
+        # truthfully told the person no details came back.
+        summary = await _final_reply_text(session, request)
     if not summary:
         summary = (
             f"Finished: {request.title}"
@@ -793,9 +884,10 @@ class RequestWorkOutput(BaseModel):
     detail: str = ""
     # Set when the target was activated: the task the colleague now runs.
     # The agent worker lifts this into ``StepResult.work_request_starts``
-    # and the requester's workflow starts the (abandoned, non-blocking)
+    # and the requester's workflow starts the (abandoned)
     # ``WorkRequestTaskWorkflow`` for it — the same path an explicit accept
-    # takes, never a second one.
+    # takes, never a second one — then waits a bounded while on it, because
+    # this is the requester's side of the ask.
     created_task_id: str = ""
     # Whose task it is: the *target* agent, not the caller.
     agent_id: str = ""
@@ -918,8 +1010,9 @@ async def activate_work_request(
             task_id=str(request.created_task_id),
             activated=True,
             detail=(
-                f"{target_name} is already working on this; their answer arrives in this "
-                "conversation when they are done"
+                f"{target_name} is already working on this, so do not ask again. Their "
+                "answer reaches you as a result message; if you are asked to carry on "
+                "before it does, say you are still waiting on them"
             ),
         )
     if not settings.auto_activate_targets:
@@ -955,9 +1048,11 @@ async def activate_work_request(
         task_id=str(task.id),
         activated=True,
         detail=(
-            f"sent, and {target_name} has started on it. Tell the person you have asked "
-            f"{target_name} and what you asked; their answer arrives in this conversation "
-            "shortly — you do not need to wait for it or ask again"
+            f"sent, and {target_name} has started on it. Your turn is held open until they "
+            f"answer: their reply reaches you as a result message from {target_name} before "
+            "your next step, and you then tell the person what you asked and what they said, "
+            "in your own words. If you are asked to carry on without one, they have not "
+            "answered yet — say that plainly, and do not ask again"
         ),
     )
 
@@ -1089,13 +1184,15 @@ WORK_REQUEST_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor, ToolValidator | No
                 "Pass target_agent_name (their name as you know it, e.g. "
                 '"CTO") and description (what you are asking them, in '
                 "plain words). Nothing else is required. The colleague "
-                "starts on it straight away and their answer appears in "
-                "this conversation by itself a little later, so tell the "
-                "person who you asked and what you asked, then finish your "
-                "turn — do not wait, do not poll, and do not ask again. "
-                "Read the `detail` field: it says whether they actually "
-                "started, and if they could not, why. Unlike delegating, "
-                "this does not hand over your work — it only asks."
+                "starts straight away and your turn is held open while they "
+                "work: their answer reaches you as a result message from "
+                "them, and you then reply to the person yourself with what "
+                "they said. Do not poll and do not ask twice. If you are "
+                "asked to carry on and no answer has arrived, tell the "
+                "person you asked and are still waiting. Read the `detail` "
+                "field: it says whether they actually started, and if they "
+                "could not, why. Unlike delegating, this does not hand over "
+                "your work — it only asks."
             ),
             risk=RiskLevel.WRITE,
             input_model=RequestWorkInput,

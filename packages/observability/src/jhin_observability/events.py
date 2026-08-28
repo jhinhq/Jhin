@@ -114,6 +114,12 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
         "run_status": FieldKind.ENUM,
         "request_status": FieldKind.ENUM,
     },
+    # The requester gave up waiting inside its own run; the request itself is
+    # still open and its answer still reaches the conversation later.
+    "work_request.unanswered": {
+        "work_request_id": FieldKind.ID,
+        "outcome": FieldKind.ENUM,
+    },
     "periodic_review.window": {
         "policy_id": FieldKind.ID,
         "review_id": FieldKind.ID,

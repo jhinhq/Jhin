@@ -237,6 +237,7 @@ async def main() -> None:
             media_activities.generate_avatar_activity,
             media_activities.fail_avatar_generation_activity,
             coordination_activities.finalize_work_request_activity,
+            coordination_activities.note_work_request_unanswered_activity,
             coordination_activities.load_periodic_review_policy_activity,
             coordination_activities.open_periodic_review_activity,
         ]

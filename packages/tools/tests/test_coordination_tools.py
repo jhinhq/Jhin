@@ -624,7 +624,11 @@ async def test_request_auto_activates_the_target(session: AsyncSession, org: Org
     assert output["created_task_id"]
     # The workflow needs the *target*'s id to run their task.
     assert output["agent_id"] == str(org.blogger.id)
+    # What the model is told to do next, now that its turn is held open for
+    # the answer: report what the colleague said, and never promise one.
     assert "started on it" in output["detail"]
+    assert "held open until they answer" in output["detail"]
+    assert "do not need to wait" not in output["detail"]
 
     request = await session.scalar(select(WorkRequest))
     assert request is not None
@@ -1524,3 +1528,63 @@ def test_the_ask_tool_reads_like_asking_a_colleague() -> None:
     assert status[0].risk is RiskLevel.READ
     assert status[0].supports_approval is False
     assert status[0].required_capability == "organization.directory.read"
+
+
+async def test_a_prose_answer_is_relayed_not_reported_as_empty(
+    session: AsyncSession, org: Org
+) -> None:
+    """A colleague asked a question usually just answers it rather than
+    calling ``organization.report_result``. Before this, the requester was
+    handed "Finished: <title>" and truthfully told the person that no details
+    came back -- with the answer sitting one table away."""
+    await human_in_the_loop(session, org)
+    await grant(session, org, org.swe, "organization.work.request", {"targets": "team"})
+    outcome = await request_work(session, org, org.swe, org.qa)
+    assert outcome.status == "executed", outcome.decision_reason
+    request = await session.scalar(select(WorkRequest))
+    assert request is not None
+    inbox = Task(
+        workspace_id=org.workspace.id,
+        title="Inbox",
+        state=TaskState.RUNNING.value,
+        assigned_agent_id=org.qa.id,
+        correlation_id=new_uuid7(),
+    )
+    session.add(inbox)
+    await session.flush()
+    await grant(session, org, org.qa, "organization.work.respond")
+    accepted = await respond(session, org, org.qa, str(request.id), "accept", inbox)
+    assert accepted.status == "executed", accepted.decision_reason
+    await session.refresh(request)
+    created = await session.get(Task, request.created_task_id)
+    assert created is not None
+
+    session.add(
+        Message(
+            workspace_id=org.workspace.id,
+            task_id=created.id,
+            sender_type="agent",
+            sender_id=org.qa.id,
+            recipient_type="agent",
+            recipient_id=org.swe.id,
+            message_type=MessageType.TEXT.value,
+            content_json={"text": "I am reviewing the retry branch and the release checklist."},
+            visibility="visible",
+        )
+    )
+    await session.flush()
+
+    done = await finalize_work_request(
+        session, workspace_id=org.workspace.id, request_id=request.id, run_status="completed"
+    )
+    assert done is not None and done.status == WorkRequestStatus.COMPLETED.value
+    result = await session.scalar(
+        select(Message)
+        .where(Message.message_type == MessageType.RESULT.value)
+        .order_by(Message.created_at.desc())
+        .limit(1)
+    )
+    assert result is not None
+    summary = result.content_json["summary"]
+    assert "retry branch" in summary
+    assert not summary.startswith("Finished:")

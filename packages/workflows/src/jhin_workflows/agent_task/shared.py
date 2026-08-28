@@ -22,6 +22,11 @@ ACTIVITY_RESOLVE_APPROVAL = "resolve_approval"
 ACTIVITY_FINALIZE_RUN = "finalize_run"
 
 PHASE10_TOOL_WORKER_PATCH = "phase10-tool-worker-boundary-v1"
+# The requester now parks on a colleague's answer instead of ending its turn
+# with a promise (see ``WorkRequestStart``). That adds a timer, a wait and an
+# activity to the command history, so in-flight runs recorded before it must
+# keep replaying the old, non-blocking shape.
+WORK_REQUEST_REQUESTER_WAIT_PATCH = "work-request-requester-wait-v1"
 ACTIVITY_RESOLVE_ADVERTISED_TOOLS = "resolve_advertised_tools"
 ACTIVITY_REASON_AGENT_STEP = "reason_agent_step"
 ACTIVITY_EXECUTE_BOUND_TOOL = "execute_bound_tool"
@@ -115,15 +120,37 @@ class ReviewDecisionSignal:
     source_workflow_id: str
 
 
+# Which end of a work request the running agent is on. The requester asked
+# and waits for the answer; the responder is the colleague doing the work.
+WORK_REQUEST_SIDE_REQUESTER = "requester"
+WORK_REQUEST_SIDE_RESPONDER = "responder"
+
+
 @dataclass
 class WorkRequestStart:
-    """One accepted work request surfaced by the step activity (the
-    ``organization.respond_work_request`` executor created the task row);
-    the workflow starts the durable, non-blocking WorkRequestTaskWorkflow."""
+    """One accepted work request surfaced by the step activity; the workflow
+    starts the durable WorkRequestTaskWorkflow that runs the created task.
+
+    Two tools create that task, and the running agent is on a different side
+    of the ask in each: ``organization.request_work`` auto-activates the
+    target (so this is the *requester's* step), while
+    ``organization.respond_work_request`` accepts an ask addressed to the
+    caller (so this is the *responder's* step).
+    """
 
     work_request_id: str
     task_id: str
+    # Whose task was created: always the request's *target*.
     agent_id: str
+    # Only the requester may park on the answer. The responder created this
+    # task for itself, so waiting on it would be waiting on its own work —
+    # an immediate self-deadlock. The value is set at the lift site from the
+    # tool that produced the outcome (``organization.respond_work_request``
+    # is structurally limited to the request's target, so the tool name *is*
+    # the role) and never re-derived downstream. The default is the
+    # responder: that is what every bundle recorded before this field meant,
+    # so rehydrated histories keep their non-blocking behaviour.
+    side: str = WORK_REQUEST_SIDE_RESPONDER
 
 
 @dataclass

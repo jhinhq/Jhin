@@ -12,11 +12,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from datetime import timedelta
+from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, ApplicationError, WorkflowAlreadyStartedError
-from temporalio.workflow import ParentClosePolicy
+from temporalio.workflow import ChildWorkflowHandle, ParentClosePolicy
 
 from jhin_workflows.agent_task.shared import (
     ACTIVITY_CLEANUP_RUN_WORKSPACE,
@@ -36,6 +37,8 @@ from jhin_workflows.agent_task.shared import (
     ORDINARY_TOOL_FAILURE_MESSAGE,
     PHASE10_TOOL_WORKER_PATCH,
     SIGNAL_REVIEW_DECISION,
+    WORK_REQUEST_REQUESTER_WAIT_PATCH,
+    WORK_REQUEST_SIDE_REQUESTER,
     AdvertisedTool,
     AgentTaskInput,
     AgentTaskResult,
@@ -70,8 +73,11 @@ from jhin_workflows.delegated_task.shared import (
 from jhin_workflows.task_queues import AGENT_TASK_QUEUE, TOOL_TASK_QUEUE
 from jhin_workflows.work_request_task.shared import (
     ACTIVITY_FINALIZE_WORK_REQUEST,
+    ACTIVITY_NOTE_WORK_REQUEST_UNANSWERED,
     FinalizeWorkRequestInput,
+    NoteWorkRequestUnansweredInput,
     WorkRequestTaskInput,
+    WorkRequestTaskResult,
     work_request_workflow_id,
 )
 
@@ -138,6 +144,15 @@ def _failure_message(exc: BaseException) -> str:
 # correctness backstop against missed kicks.
 _QUEUE_POLL_INTERVAL = timedelta(seconds=30)
 
+# How long a requester holds its turn open waiting for a colleague's answer
+# (see ``_await_work_request_answer``). Short on purpose: a person is usually
+# sitting in a chat watching for the reply, and a waiting requester keeps its
+# own concurrency slot, so an unbounded wait would trade one silent promise
+# for one silent hang. The colleague's task keeps its own six-hour ceiling —
+# this is only how long the conversation waits for it, and when it elapses
+# the requester says so and the answer still lands in the conversation later.
+_WORK_REQUEST_ANSWER_WAIT = timedelta(minutes=2)
+
 # Bounded exponential backoff; Temporal adds jitter (plan 8.6).
 _SNAPSHOT_RETRY = RetryPolicy(
     initial_interval=timedelta(seconds=1),
@@ -164,6 +179,21 @@ _RESOLVE_APPROVAL_RETRY = RetryPolicy(
     maximum_interval=timedelta(seconds=15),
     maximum_attempts=5,
 )
+
+
+async def _work_request_finished(handle: ChildWorkflowHandle[Any, Any]) -> bool:
+    """Await one WorkRequestTaskWorkflow, reporting only whether it finished.
+
+    Deliberately never raises. A colleague whose run died is not the
+    requester's failure, and the requester may stop waiting before the child
+    is done: an exception left unretrieved on an abandoned wait would surface
+    long after anyone cared about it.
+    """
+    try:
+        await handle
+    except Exception:
+        return False
+    return True
 
 
 @workflow.defn(name="AgentTaskWorkflow")
@@ -469,9 +499,13 @@ class AgentTaskWorkflow:
             if delegation_failed:
                 break
 
-            # Accepted work requests (coordination release) run as
-            # abandoned, non-blocking children; a duplicate start (retry)
-            # is a no-op.
+            # Accepted work requests (coordination release) run as abandoned
+            # children; a duplicate start (retry) is a no-op. The requester
+            # then waits a bounded while for the answer so it can report it
+            # itself — the responder, holding the same record for the task it
+            # accepted, does not. Two asks in one step are waited on one after
+            # the other: rare enough not to justify racing them, and each hop
+            # is bounded, so the worst case is still finite.
             for accepted in step.work_request_starts:
                 await self._start_work_request_task(params, accepted)
 
@@ -718,7 +752,7 @@ class AgentTaskWorkflow:
         self, params: AgentTaskInput, accepted: WorkRequestStart
     ) -> None:
         try:
-            await workflow.start_child_workflow(
+            handle = await workflow.start_child_workflow(
                 "WorkRequestTaskWorkflow",
                 WorkRequestTaskInput(
                     workspace_id=params.workspace_id,
@@ -728,8 +762,12 @@ class AgentTaskWorkflow:
                 ),
                 id=work_request_workflow_id(accepted.work_request_id),
                 parent_close_policy=ParentClosePolicy.ABANDON,
+                result_type=WorkRequestTaskResult,
             )
         except WorkflowAlreadyStartedError:
+            # A retried tool call reported the same accepted request. The
+            # first start owns the wait and Temporal offers no way to attach
+            # to a child already running, so this one only stays a no-op.
             return
         except Exception:
             # The request row is already `accepted` with a task that will now
@@ -750,6 +788,71 @@ class AgentTaskWorkflow:
                     start_to_close_timeout=timedelta(seconds=30),
                     retry_policy=_FINALIZE_RETRY,
                 )
+            return
+        await self._await_work_request_answer(params, accepted, handle)
+
+    async def _await_work_request_answer(
+        self,
+        params: AgentTaskInput,
+        accepted: WorkRequestStart,
+        handle: ChildWorkflowHandle[Any, Any],
+    ) -> None:
+        """Hold the REQUESTER's turn open until the colleague answers.
+
+        A person asked their agent to ask somebody. Firing the request off and
+        ending the turn left the person with a promise and the colleague's
+        reply arriving beside it, addressed to nobody; the agent has to come
+        back with the answer itself. So the requester parks here, and its next
+        model step reads the colleague's ``result`` message — which
+        ``finalize_work_request`` commits on *this* task before the child
+        workflow completes — and composes one reply that carries the answer.
+
+        Only the requester may park. The responder reaches this same code with
+        the task it just accepted *for itself*: waiting there would be waiting
+        on its own work, and the run would never move again. ``side`` states
+        which one this is, and the agent-id check is the second lock on that
+        door — the created task always belongs to the request's target, so an
+        agent that owns it cannot be the one asking.
+        """
+        if accepted.side != WORK_REQUEST_SIDE_REQUESTER:
+            return
+        if accepted.agent_id == params.agent_id:
+            return
+        if not workflow.patched(WORK_REQUEST_REQUESTER_WAIT_PATCH):
+            return  # replaying a run recorded while requests never parked
+        answered = asyncio.ensure_future(_work_request_finished(handle))
+        self._status = "waiting_work_request"
+        self._waiting_reason = f"work_request:{accepted.work_request_id}"
+        # Bounded, and released early by a cancel signal — the wait must
+        # never be the reason a run cannot be stopped. The child is
+        # ABANDONed either way, so giving up here costs the colleague
+        # nothing: their answer still reaches the conversation.
+        with contextlib.suppress(asyncio.TimeoutError):
+            await workflow.wait_condition(
+                lambda: answered.done() or self._cancelled,
+                timeout=_WORK_REQUEST_ANSWER_WAIT,
+            )
+        self._waiting_reason = None
+        self._status = "running"
+        if self._cancelled:
+            return  # the outer loop finalizes as cancelled
+        if answered.done() and answered.result():
+            return  # the colleague's result message is already on this task
+        # Nothing to read yet: say so on the task, so the next step tells the
+        # person plainly rather than inventing an answer or promising one.
+        # Best-effort by contract — a missing courtesy note must not fail a
+        # run whose own work is unrelated to the colleague's.
+        with contextlib.suppress(Exception):
+            await workflow.execute_activity(
+                ACTIVITY_NOTE_WORK_REQUEST_UNANSWERED,
+                NoteWorkRequestUnansweredInput(
+                    workspace_id=params.workspace_id,
+                    work_request_id=accepted.work_request_id,
+                ),
+                result_type=str,
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=_FINALIZE_RETRY,
+            )
 
     async def _finalize(
         self,

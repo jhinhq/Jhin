@@ -125,10 +125,6 @@ _PRESERVED_FINAL_ERRORS = frozenset(
         "tool_step_manifest_not_lossless",
     }
 )
-# Tools whose executed output can carry a work-request task to start.
-_WORK_REQUEST_START_TOOLS = frozenset(
-    {"organization.respond_work_request", "organization.request_work"}
-)
 _AGENT_RUNS_METRIC = "agent_runs_total"
 _AGENT_DURATION_METRIC = "agent_run_duration_seconds"
 _AGENT_FAILURES_METRIC = "agent_run_failures_total"
@@ -915,13 +911,15 @@ class AgentProjectionActivities:
         second execution path: ``organization.respond_work_request`` (the
         target explicitly accepting) and ``organization.request_work`` (the
         request auto-activated its target, so the *requester's* workflow
-        starts the colleague's abandoned child).
+        starts the colleague's abandoned child). Which of the two it was
+        decides whether that workflow may park on the answer, so the tool
+        name is carried into the lift rather than left behind here.
         """
         if result.status != "executed":
             return None
-        if result.manifest.tool_name not in _WORK_REQUEST_START_TOOLS:
-            return None
-        return work_request_start_from_output(result.row.sanitized_output_json)
+        return work_request_start_from_output(
+            result.row.sanitized_output_json, tool_name=result.manifest.tool_name
+        )
 
     @activity.defn(name=ACTIVITY_COMMIT_AGENT_STEP)
     async def commit_agent_step_activity(self, params: CommitAgentStepInput) -> StepResult:

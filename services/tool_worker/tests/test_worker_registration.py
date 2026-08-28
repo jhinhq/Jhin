@@ -79,6 +79,7 @@ AGENT_ACTIVITY_NAMES = {
     "generate_avatar",
     "fail_avatar_generation",
     "finalize_work_request",
+    "note_work_request_unanswered",
     "load_periodic_review_policy",
     "open_periodic_review",
 }
@@ -104,6 +105,7 @@ AGENT_ACTIVITY_ORDER = [
     "generate_avatar",
     "fail_avatar_generation",
     "finalize_work_request",
+    "note_work_request_unanswered",
     "load_periodic_review_policy",
     "open_periodic_review",
 ]

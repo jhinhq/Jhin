@@ -13,10 +13,11 @@ Integration points for ``AgentActivities`` (documented in
   ``pending_review`` and ``commit_agent_step`` lifts it into
   ``StepResult.waiting_review_id`` so the workflow parks; ``blocked`` is a
   recorded denial carrying the feedback.
-- ``commit_agent_step`` → for each executed ``organization.respond_work_request``
-  call, lift the outcome with :func:`work_request_start_from_output` into
-  ``StepResult.work_request_starts``; for each executed
-  ``organization.review.submit`` call, lift it with
+- ``commit_agent_step`` → for each executed work-request call, lift the
+  outcome with :func:`work_request_start_from_output` into
+  ``StepResult.work_request_starts`` — carrying which *side* of the ask the
+  running agent is on, since only the requester parks on the answer; for
+  each executed ``organization.review.submit`` call, lift it with
   :func:`review_decision_from_output` into ``StepResult.review_decisions`` so
   the workflow signals the source task (both ride in the committed bundle so
   replays keep them).
@@ -44,8 +45,13 @@ from jhin_policy import GrantEffect
 from jhin_tools.directory import build_roster, render_roster
 from jhin_tools.reviews import open_periodic_review
 from jhin_tools.rollups import build_manager_rollup, render_manager_rollup
-from jhin_tools.work_requests import finalize_work_request
-from jhin_workflows.agent_task.shared import ReviewDecisionSignal, WorkRequestStart
+from jhin_tools.work_requests import finalize_work_request, note_unanswered_work_request
+from jhin_workflows.agent_task.shared import (
+    WORK_REQUEST_SIDE_REQUESTER,
+    WORK_REQUEST_SIDE_RESPONDER,
+    ReviewDecisionSignal,
+    WorkRequestStart,
+)
 from jhin_workflows.memory_maintenance import (
     SOURCE_KIND_MESSAGE,
     MemoryMaintenanceInput,
@@ -61,17 +67,34 @@ from jhin_workflows.periodic_review import (
 )
 from jhin_workflows.work_request_task import (
     ACTIVITY_FINALIZE_WORK_REQUEST,
+    ACTIVITY_NOTE_WORK_REQUEST_UNANSWERED,
     FinalizeWorkRequestInput,
+    NoteWorkRequestUnansweredInput,
 )
 
 logger = get_logger(__name__)
 _WINDOW_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
-def work_request_start_from_output(output: dict[str, Any] | None) -> WorkRequestStart | None:
-    """Lift an executed ``organization.respond_work_request`` output into the
-    workflow contract when it created a task (accept); None otherwise."""
-    if not output:
+# Which side of the ask each tool speaks for. This is the authority for
+# ``WorkRequestStart.side``, and it is a structural fact rather than a guess:
+# ``organization.request_work`` is the requester's own tool, and
+# ``organization.respond_work_request`` is limited by its validator to the
+# request's target. Only the requester may then park on the answer.
+_WORK_REQUEST_SIDE_BY_TOOL = {
+    "organization.request_work": WORK_REQUEST_SIDE_REQUESTER,
+    "organization.respond_work_request": WORK_REQUEST_SIDE_RESPONDER,
+}
+
+
+def work_request_start_from_output(
+    output: dict[str, Any] | None, *, tool_name: str
+) -> WorkRequestStart | None:
+    """Lift an executed work-request tool output into the workflow contract
+    when it created a task (an accept, or an auto-activated request); None
+    for any other tool or outcome."""
+    side = _WORK_REQUEST_SIDE_BY_TOOL.get(tool_name)
+    if side is None or not output:
         return None
     task_id = output.get("created_task_id")
     request_id = output.get("work_request_id")
@@ -82,6 +105,7 @@ def work_request_start_from_output(output: dict[str, Any] | None) -> WorkRequest
         work_request_id=request_id,
         task_id=task_id,
         agent_id=str(agent_id) if isinstance(agent_id, str) else "",
+        side=side,
     )
 
 
@@ -204,6 +228,27 @@ class CoordinationActivities:
             except Exception as error:
                 logger.warning("memory.maintenance_start_failed", error_type=type(error).__name__)
         return status
+
+    @activity.defn(name=ACTIVITY_NOTE_WORK_REQUEST_UNANSWERED)
+    async def note_work_request_unanswered_activity(
+        self, params: NoteWorkRequestUnansweredInput
+    ) -> str:
+        """The requester's bounded wait elapsed. Idempotent; Postgres is the
+        authority — a request that finished while the timer was firing gets
+        no "still waiting" line."""
+        async with self._resources.session_factory() as session:
+            outcome = await note_unanswered_work_request(
+                session,
+                UUID(params.workspace_id),
+                UUID(params.work_request_id),
+            )
+            await session.commit()
+        logger.info(
+            "work_request.unanswered",
+            work_request_id=params.work_request_id,
+            outcome=outcome,
+        )
+        return outcome
 
     @activity.defn(name=ACTIVITY_LOAD_PERIODIC_REVIEW_POLICY)
     async def load_periodic_review_policy_activity(

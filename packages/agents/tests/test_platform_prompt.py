@@ -111,7 +111,7 @@ def test_old_snapshots_without_workspace_name_still_render() -> None:
 
 
 def test_preamble_is_versioned() -> None:
-    assert PLATFORM_PREAMBLE_VERSION == 6
+    assert PLATFORM_PREAMBLE_VERSION == 7
 
 
 def test_preamble_tells_agents_to_look_before_saying_they_do_not_know() -> None:
@@ -123,6 +123,20 @@ def test_preamble_tells_agents_to_look_before_saying_they_do_not_know() -> None:
     assert "If one of your tools answers the question, call it" in text
     # ...and being told to ask a colleague means actually asking one.
     assert "ask them with your work-request tool" in text
+
+
+def test_preamble_tells_agents_to_wait_for_the_colleague_and_answer_themselves() -> None:
+    """The old wording told agents to send the request and end the turn, so a
+    person got a promise and the colleague's reply landed beside it addressed
+    to nobody. The requester now waits and reports the answer itself."""
+    text = render_platform_preamble(agent_name="Connie")
+    assert "Then wait for the reply" in text
+    assert "answer the person yourself" in text
+    # The instruction that produced the promise must be gone for good.
+    assert "finish your turn once the request is sent" not in text
+    assert "arrives on its own" not in text
+    # And a wait that elapses is reported honestly, not papered over.
+    assert "still waiting" in text
     assert '"can you ask him"' in text
     assert "actually send that request" in text
     # The look-first rule comes before the "say what you cannot do" rule, so
