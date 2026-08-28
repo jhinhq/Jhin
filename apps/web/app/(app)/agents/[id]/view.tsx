@@ -5,9 +5,9 @@
  * (admins) and under an Advanced disclosure. */
 
 import { useMutation } from "@tanstack/react-query";
-import { ArrowLeft, ImagePlus, MessageSquare, Pause, Pencil, Play } from "lucide-react";
+import { ArrowLeft, ImagePlus, MessageSquare, Pause, Pencil, Play, Trash2 } from "lucide-react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useMemo, useState } from "react";
 import { ActivityFeed } from "@/components/activity/activity-feed";
 import { AvatarDialog } from "@/components/agents/avatar-dialog";
@@ -30,7 +30,7 @@ import {
 import { Chip, Disclosure, LoadError, SectionCard, StatusPill, Tabs } from "@/components/company/bits";
 import { useWorkingAgentIds } from "@/components/company/use-working";
 import { AgentDrawer } from "@/components/org/agent-drawer";
-import { Button, ErrorNote, Spinner } from "@/components/ui";
+import { Button, Dialog, ErrorNote, Spinner } from "@/components/ui";
 import { useSegmentAfter } from "@/lib/use-route-segment";
 import { api, ApiError } from "@/lib/api";
 import { timeAgo } from "@/lib/activity";
@@ -135,7 +135,22 @@ function AgentProfileView() {
   const [tab, setTab] = useState<TabId>(TAB_IDS.has(linkedTab) ? (linkedTab as TabId) : "about");
   const [editing, setEditing] = useState(false);
   const [changingAvatar, setChangingAvatar] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const router = useRouter();
   const [actionError, setActionError] = useState<string | null>(null);
+
+  const remove = useMutation({
+    mutationFn: () =>
+      api<void>(`/api/v1/workspaces/${workspaceId}/agents/${agentId}`, { method: "DELETE" }),
+    onSuccess: () => {
+      invalidate();
+      router.replace("/agents");
+    },
+    onError: (error) =>
+      setActionError(
+        `${error instanceof ApiError ? error.detail : "The agent could not be deleted"}. Try again in a moment.`,
+      ),
+  });
 
   const toggle = useMutation({
     mutationFn: (next: "pause" | "resume") =>
@@ -258,6 +273,12 @@ function AgentProfileView() {
                       )}
                     </Button>
                   ) : null}
+                  {/* Deleting an agent lived only in the org drawer under
+                      Advanced, so the obvious place to look — the agent's own
+                      page — had no way to do it. */}
+                  <Button onClick={() => setConfirmDelete(true)} disabled={remove.isPending}>
+                    <Trash2 size={14} /> Delete
+                  </Button>
                 </>
               ) : null}
             </div>
@@ -416,6 +437,29 @@ function AgentProfileView() {
       </div>
 
       <AvatarDialog workspaceId={workspaceId} agent={agent} open={changingAvatar} onClose={() => setChangingAvatar(false)} />
+      <Dialog
+        title={`Delete ${agent.name}?`}
+        open={confirmDelete}
+        onClose={() => setConfirmDelete(false)}
+      >
+        <p className="text-sm text-dim">
+          This cannot be undone. Their chats and past work stay where they are, and any automation
+          that gave them work is switched off. Nothing else is deleted.
+        </p>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button onClick={() => setConfirmDelete(false)}>Keep {agent.name}</Button>
+          <Button
+            variant="danger"
+            disabled={remove.isPending}
+            onClick={() => {
+              setConfirmDelete(false);
+              remove.mutate();
+            }}
+          >
+            Delete {agent.name}
+          </Button>
+        </div>
+      </Dialog>
 
       {editing && graph.data ? (
         <AgentDrawer

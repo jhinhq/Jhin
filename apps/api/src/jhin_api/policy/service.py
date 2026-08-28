@@ -68,14 +68,17 @@ async def create_grant(
         )
     )
     requested_scope = dict(scope)
-    if any(row.scope_json == requested_scope for row in same_capability_rows):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                f"An identical '{effect}' grant for '{capability}' and this scope "
-                "already exists on this agent"
-            ),
-        )
+    # Idempotent, not a conflict. A grant is a statement that this agent may do
+    # something, so asking for one it already has is a no-op -- and since every
+    # new agent is now created holding the default baseline, the create-then-
+    # apply-a-preset flow the wizard uses asks for several of them by
+    # definition. Refusing that told the person their agent could not be
+    # created, when it already had exactly what they were asking for.
+    existing = next(
+        (row for row in same_capability_rows if row.scope_json == requested_scope), None
+    )
+    if existing is not None:
+        return existing
 
     grant = AgentCapabilityGrant(
         workspace_id=ctx.workspace_id,

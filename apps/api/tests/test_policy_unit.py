@@ -1,7 +1,6 @@
 """Capability grant and tool-catalog API contracts."""
 
 import pytest
-from fastapi import HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -68,9 +67,15 @@ async def test_same_capability_can_have_distinct_scoped_grants(
     assert {row.scope_json["repository"] for row in rows} == {"acme/api", "acme/web"}
 
 
-async def test_exact_duplicate_scoped_grant_still_conflicts(
+async def test_asking_for_a_grant_an_agent_already_has_is_a_no_op(
     session: AsyncSession, admin_ctx: WorkspaceContext
 ) -> None:
+    """A grant states that this agent may do something, so asking twice is not
+    a conflict. It became reachable in normal use once every new agent started
+    holding the default baseline: the wizard creates an agent and then applies
+    a preset, which asks for several of those by definition, and refusing told
+    the person their agent could not be created when it already had exactly
+    what they were asking for."""
     agent = await _agent(session, admin_ctx)
     kwargs = {
         "capability": "github.repository.read",
@@ -79,17 +84,43 @@ async def test_exact_duplicate_scoped_grant_still_conflicts(
         "request_id": new_uuid7(),
         "ip_hash": "test",
     }
-    await service.create_grant(session, admin_ctx, agent.id, **kwargs)  # type: ignore[arg-type]
+    first = await service.create_grant(session, admin_ctx, agent.id, **kwargs)  # type: ignore[arg-type]
+    again = await service.create_grant(session, admin_ctx, agent.id, **kwargs)  # type: ignore[arg-type]
 
-    with pytest.raises(HTTPException) as excinfo:
-        await service.create_grant(
-            session,
-            admin_ctx,
-            agent.id,
-            **kwargs,  # type: ignore[arg-type]
+    assert again.id == first.id
+    rows = list(
+        await session.scalars(
+            select(AgentCapabilityGrant).where(AgentCapabilityGrant.agent_id == agent.id)
         )
+    )
+    assert len(rows) == 1
 
-    assert excinfo.value.status_code == 409
+
+async def test_a_different_scope_is_still_a_separate_grant(
+    session: AsyncSession, admin_ctx: WorkspaceContext
+) -> None:
+    agent = await _agent(session, admin_ctx)
+    base = {
+        "capability": "github.repository.read",
+        "effect": "allow",
+        "request_id": new_uuid7(),
+        "ip_hash": "test",
+    }
+    first = await service.create_grant(
+        session,
+        admin_ctx,
+        agent.id,
+        scope={"repository": "acme/api"},
+        **base,  # type: ignore[arg-type]
+    )
+    other = await service.create_grant(
+        session,
+        admin_ctx,
+        agent.id,
+        scope={"repository": "acme/web"},
+        **base,  # type: ignore[arg-type]
+    )
+    assert other.id != first.id
 
 
 async def test_tool_catalog_exposes_declared_and_required_scope_keys(
