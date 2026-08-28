@@ -27,6 +27,10 @@ PHASE10_TOOL_WORKER_PATCH = "phase10-tool-worker-boundary-v1"
 # activity to the command history, so in-flight runs recorded before it must
 # keep replaying the old, non-blocking shape.
 WORK_REQUEST_REQUESTER_WAIT_PATCH = "work-request-requester-wait-v1"
+# Pause is written when the run actually parks, not when the signal is
+# accepted, so it adds an activity to the history of any run that pauses.
+PAUSE_IS_OBSERVED_PATCH = "pause-is-observed-v1"
+ACTIVITY_MARK_TASK_PAUSED = "mark_task_paused"
 ACTIVITY_RESOLVE_ADVERTISED_TOOLS = "resolve_advertised_tools"
 ACTIVITY_REASON_AGENT_STEP = "reason_agent_step"
 ACTIVITY_EXECUTE_BOUND_TOOL = "execute_bound_tool"
@@ -124,6 +128,15 @@ class ReviewDecisionSignal:
 # and waits for the answer; the responder is the colleague doing the work.
 WORK_REQUEST_SIDE_REQUESTER = "requester"
 WORK_REQUEST_SIDE_RESPONDER = "responder"
+
+
+@dataclass
+class MarkTaskPausedInput:
+    """Record that a run has genuinely stopped between steps, or resumed."""
+
+    workspace_id: str
+    task_id: str
+    paused: bool
 
 
 @dataclass

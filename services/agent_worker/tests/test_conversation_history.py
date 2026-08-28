@@ -492,3 +492,55 @@ async def test_a_colleagues_answer_reaches_the_requesters_next_step(world: World
     assert role == "user"
     assert text.startswith("[result] ")
     assert "Migrating the billing service to 2.0." in text
+
+
+async def test_a_colleagues_task_does_not_read_the_chat_it_reports_into(world: World) -> None:
+    """Work handed to a colleague carries the requester's conversation id so
+    its answer lands in that chat. Appearing there is not the same as being
+    part of it.
+
+    Reading the thread as its own history let two colleagues asked in one turn
+    see each other: the first one's reply was already posted, so the second
+    adopted it, and both answered on each other's behalf -- and because both
+    saw the coordinator's framing naming the other person, a colleague would
+    invent an answer "from" somebody else, which the coordinator then relayed
+    with their name on it.
+    """
+    async with world.session_factory() as session:
+        chat = make_task(world, seconds=0, description="Ask both of them")
+        colleague = make_task(world, seconds=100, description="Hazel asked you this.")
+        colleague.metadata_json = {"origin": "work_request"}
+        session.add_all([chat, colleague])
+        await session.flush()
+        session.add_all(
+            [
+                make_message(world, chat, seconds=0, text="Ask both of them"),
+                # The sibling's answer, already posted into the shared chat.
+                make_message(world, chat, seconds=1, text="Bracken: VELOR", agent=True),
+                make_message(world, colleague, seconds=100, text="Hazel asked you this."),
+            ]
+        )
+        await session.commit()
+        turns = await load(world, session, colleague)
+
+    assert turns == [("user", "text", "Hazel asked you this.")]
+    assert not any("VELOR" in text for _, _, text in turns)
+
+
+async def test_a_persons_chat_turn_still_reads_the_conversation(world: World) -> None:
+    async with world.session_factory() as session:
+        earlier = make_task(world, seconds=0, description="First ask")
+        current = make_task(world, seconds=100, description="Second ask")
+        session.add_all([earlier, current])
+        await session.flush()
+        session.add_all(
+            [
+                make_message(world, earlier, seconds=0, text="First ask"),
+                make_message(world, earlier, seconds=1, text="On it", agent=True),
+                make_message(world, current, seconds=100, text="Second ask"),
+            ]
+        )
+        await session.commit()
+        turns = await load(world, session, current)
+
+    assert ("user", "text", "First ask") in turns

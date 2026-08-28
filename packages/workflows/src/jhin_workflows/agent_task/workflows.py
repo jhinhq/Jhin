@@ -27,6 +27,7 @@ from jhin_workflows.agent_task.shared import (
     ACTIVITY_EXECUTE_BOUND_TOOL,
     ACTIVITY_FINALIZE_RUN,
     ACTIVITY_FINALIZE_RUN_PROJECTION,
+    ACTIVITY_MARK_TASK_PAUSED,
     ACTIVITY_REASON_AGENT_STEP,
     ACTIVITY_RESOLVE_ADVERTISED_TOOLS,
     ACTIVITY_RESOLVE_APPROVAL,
@@ -35,6 +36,7 @@ from jhin_workflows.agent_task.shared import (
     ACTIVITY_RESOLVE_SNAPSHOT,
     ACTIVITY_RUN_AGENT_STEP,
     ORDINARY_TOOL_FAILURE_MESSAGE,
+    PAUSE_IS_OBSERVED_PATCH,
     PHASE10_TOOL_WORKER_PATCH,
     SIGNAL_REVIEW_DECISION,
     WORK_REQUEST_REQUESTER_WAIT_PATCH,
@@ -51,6 +53,7 @@ from jhin_workflows.agent_task.shared import (
     DelegationRequest,
     ExecuteBoundToolInput,
     FinalizeInput,
+    MarkTaskPausedInput,
     ReasonAgentStepInput,
     ReasonAgentStepResult,
     ResolveAdvertisedToolsInput,
@@ -347,8 +350,17 @@ class AgentTaskWorkflow:
             if self._paused:
                 self._status = "paused"
                 self._waiting_reason = "paused_by_user"
+                # Only now is the run genuinely stopped. The API used to write
+                # "paused" the moment the signal was accepted, which was a
+                # promise it could not keep: a run with no further step
+                # boundary -- a single long generation, the case where pausing
+                # matters most -- never reaches here, so the person was shown
+                # a paused task and a Resume button for a run that carried on
+                # and billed.
+                await self._mark_paused(params, paused=True)
                 await workflow.wait_condition(lambda: not self._paused or self._cancelled)
                 self._waiting_reason = None
+                await self._mark_paused(params, paused=False)
                 continue
 
             self._status = "running"
@@ -848,6 +860,27 @@ class AgentTaskWorkflow:
                 NoteWorkRequestUnansweredInput(
                     workspace_id=params.workspace_id,
                     work_request_id=accepted.work_request_id,
+                ),
+                result_type=str,
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=_FINALIZE_RETRY,
+            )
+
+    async def _mark_paused(self, params: AgentTaskInput, *, paused: bool) -> None:
+        """Persist the pause the run is actually observing.
+
+        Best-effort by contract: the workflow's own flag is the authority, and
+        a failed projection must not strand a run that is otherwise fine.
+        """
+        if not workflow.patched(PAUSE_IS_OBSERVED_PATCH):
+            return  # replaying a run recorded while the API wrote the state
+        with contextlib.suppress(Exception):
+            await workflow.execute_activity(
+                ACTIVITY_MARK_TASK_PAUSED,
+                MarkTaskPausedInput(
+                    workspace_id=params.workspace_id,
+                    task_id=params.task_id,
+                    paused=paused,
                 ),
                 result_type=str,
                 start_to_close_timeout=timedelta(seconds=30),

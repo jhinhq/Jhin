@@ -31,15 +31,15 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio import activity
 from temporalio.client import Client as TemporalClient
 from temporalio.exceptions import ApplicationError
 
 from jhin_agent_worker.resources import Resources
-from jhin_db.models import Agent, AgentCapabilityGrant, ReviewPolicy
-from jhin_domain import ReviewMode
+from jhin_db.models import Agent, AgentCapabilityGrant, ReviewPolicy, Task
+from jhin_domain import ReviewMode, TaskState
 from jhin_observability import get_logger
 from jhin_policy import GrantEffect
 from jhin_tools.directory import build_roster, render_roster
@@ -47,8 +47,10 @@ from jhin_tools.reviews import open_periodic_review
 from jhin_tools.rollups import build_manager_rollup, render_manager_rollup
 from jhin_tools.work_requests import finalize_work_request, note_unanswered_work_request
 from jhin_workflows.agent_task.shared import (
+    ACTIVITY_MARK_TASK_PAUSED,
     WORK_REQUEST_SIDE_REQUESTER,
     WORK_REQUEST_SIDE_RESPONDER,
+    MarkTaskPausedInput,
     ReviewDecisionSignal,
     WorkRequestStart,
 )
@@ -249,6 +251,36 @@ class CoordinationActivities:
             outcome=outcome,
         )
         return outcome
+
+    @activity.defn(name=ACTIVITY_MARK_TASK_PAUSED)
+    async def mark_task_paused_activity(self, params: MarkTaskPausedInput) -> str:
+        """Write the pause the run is actually observing.
+
+        Only ever moves between running and paused: a task that reached a
+        terminal state while the signal was in flight keeps its real outcome.
+        """
+        want = TaskState.PAUSED.value if params.paused else TaskState.RUNNING.value
+        allowed = (
+            (TaskState.RUNNING.value, TaskState.QUEUED.value)
+            if params.paused
+            else (TaskState.PAUSED.value,)
+        )
+        async with self._resources.session_factory() as session:
+            await session.execute(
+                update(Task)
+                .where(
+                    Task.id == UUID(params.task_id),
+                    Task.workspace_id == UUID(params.workspace_id),
+                    Task.state.in_(allowed),
+                )
+                .values(state=want)
+            )
+            await session.commit()
+            changed = (
+                await session.scalar(select(Task.state).where(Task.id == UUID(params.task_id)))
+            ) == want
+        logger.info("task.pause_observed", task_id=params.task_id, paused=params.paused)
+        return "updated" if changed else "unchanged"
 
     @activity.defn(name=ACTIVITY_LOAD_PERIODIC_REVIEW_POLICY)
     async def load_periodic_review_policy_activity(

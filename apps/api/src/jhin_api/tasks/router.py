@@ -30,7 +30,6 @@ from jhin_api.tasks.schemas import (
     TaskTreeOut,
     ToolCallOut,
 )
-from jhin_domain import TaskState
 
 tasks_router = APIRouter(
     prefix="/api/v1/workspaces/{workspace_id}/tasks",
@@ -146,10 +145,12 @@ async def pause_task(
         task_id,
         signal="pause",
         action="task.paused",
-        # The workflow keeps the pause in memory until the run ends, so the
-        # row has to carry it or the chat shows "Working…" with no way back.
-        new_state=TaskState.PAUSED.value,
-        from_states=(TaskState.QUEUED.value, TaskState.RUNNING.value),
+        # Deliberately no state write. The run pauses between steps, and one
+        # that never reaches another step boundary -- a single long generation,
+        # the case where pausing matters most -- cannot honour it. Claiming
+        # "paused" here showed a stopped task and a Resume button for a run
+        # that carried on and billed. The workflow records the pause it is
+        # actually observing.
         request_id=req_id(request),
         ip_hash=ip_hash(request),
     )
@@ -167,8 +168,6 @@ async def resume_task(
         task_id,
         signal="resume",
         action="task.resumed",
-        new_state=TaskState.RUNNING.value,
-        from_states=(TaskState.PAUSED.value,),
         request_id=req_id(request),
         ip_hash=ip_hash(request),
     )

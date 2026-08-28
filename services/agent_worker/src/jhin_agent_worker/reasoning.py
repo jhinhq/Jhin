@@ -89,7 +89,14 @@ from jhin_workflows.agent_task.shared import (
 )
 
 _MAX_ARGUMENTS_CHARS = 8_192
-_MAX_MODEL_TEXT_CHARS = 8_192
+# The agent's own answer, and the ceiling on what a person can be shown. This
+# string is both the telemetry record and the chat message, so at 8k a long
+# deliverable -- a report, a spec, a migration doc -- was cut off mid-word
+# while the run reported finish_reason "stop" and the full generation was
+# billed. Big enough for anything a model will actually produce in one turn,
+# and a cut is announced rather than silent.
+_MAX_MODEL_TEXT_CHARS = 120_000
+_TRUNCATION_NOTICE = "\n\n[This answer was cut off here because it exceeded the maximum length.]"
 _MAX_PROVIDER_TEXT_CHARS = 200
 _MAX_TRANSITIONS = 128
 _MAX_TRANSITION_DETAIL_CHARS = 2_000
@@ -566,6 +573,17 @@ def _is_chat_turn(task: Task, own_history: tuple[ConversationTurn, ...]) -> bool
     )
 
 
+def _reads_conversation_history(task: Task) -> bool:
+    """Whether this task's own context includes the conversation it posts to.
+
+    True for a person's chat turn. False for work another agent handed over,
+    which reports *into* a conversation without being a participant in it.
+    """
+    metadata = task.metadata_json if isinstance(task.metadata_json, dict) else {}
+    origin = metadata.get("origin")
+    return origin is None or origin in _CONVERSATION_ORIGINS
+
+
 async def _load_conversation_history(
     session: AsyncSession, task: Task
 ) -> tuple[ConversationTurn, ...]:
@@ -577,6 +595,17 @@ async def _load_conversation_history(
     truncation is announced with one ``[earlier messages omitted]`` turn.
     """
     if task.conversation_id is None:
+        return ()
+    # A colleague's task carries the requester's conversation id so its answer
+    # lands in that chat -- appearing there is not the same as being part of
+    # it. Reading that thread as its own history let two colleagues asked in
+    # one turn see each other: the first one's reply was already posted, so
+    # the second adopted it, and both answered on each other's behalf. Worse,
+    # both saw the coordinator's framing naming the other person, so a
+    # colleague would invent an answer "from" someone else and the coordinator
+    # relayed it with their name on it. A task given to somebody has its brief
+    # and its own transcript; the chat it reports into is not its context.
+    if not _reads_conversation_history(task):
         return ()
     earlier_tasks = select(Task.id).where(
         Task.workspace_id == task.workspace_id,
@@ -721,6 +750,16 @@ async def _load_task_history(session: AsyncSession, task: Task) -> tuple[Convers
         # omits the "Task: ..." brief for a chat turn so it is stated once.
         turns.append(ConversationTurn(role=role, text=text))
     return tuple(turns)
+
+
+def _bounded_completion(text: str) -> str:
+    """The agent's answer, cut only if it truly cannot be stored -- and never
+    silently. A reader who is handed a document that stops mid-sentence has no
+    way to tell that from a model that simply stopped there."""
+    if len(text) <= _MAX_MODEL_TEXT_CHARS:
+        return text
+    keep = _MAX_MODEL_TEXT_CHARS - len(_TRUNCATION_NOTICE)
+    return text[:keep].rstrip() + _TRUNCATION_NOTICE
 
 
 def _normalize_provider_type(value: object) -> str:
@@ -1487,7 +1526,7 @@ class AgentReasoningActivities:
             )
             reasoning = AgentStepReasoningRecord(
                 step=params.step_index,
-                completion_sanitized=redact_text(outcome.text)[:_MAX_MODEL_TEXT_CHARS],
+                completion_sanitized=_bounded_completion(redact_text(outcome.text)),
                 model=redact_text(outcome.model)[:_MAX_PROVIDER_TEXT_CHARS],
                 finish_reason=redact_text(outcome.finish_reason)[:_MAX_PROVIDER_TEXT_CHARS],
                 provider_request_id=redact_text(outcome.provider_request_id or "")[

@@ -116,6 +116,12 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
     },
     # The requester gave up waiting inside its own run; the request itself is
     # still open and its answer still reaches the conversation later.
+    # The run genuinely stopped (or resumed) between steps -- as opposed to a
+    # pause having merely been asked for.
+    "task.pause_observed": {
+        "task_id": FieldKind.ID,
+        "paused": FieldKind.BOOL,
+    },
     "work_request.unanswered": {
         "work_request_id": FieldKind.ID,
         "outcome": FieldKind.ENUM,

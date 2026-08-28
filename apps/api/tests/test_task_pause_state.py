@@ -1,8 +1,11 @@
-"""Pausing a task has to reach the database.
+"""Pausing a task has to be honest about whether the run actually stopped.
 
-The workflow holds the pause in memory and only writes the task row when the
-run reaches a terminal state, so before this the chat showed "Working…"
-forever and never offered Resume (the control is gated on the paused state).
+The workflow observes a pause between steps. A run with no further step
+boundary -- a single long generation, which is exactly when a person reaches
+for Pause -- never reaches one. Writing "paused" when the signal was accepted
+therefore showed a stopped task and a Resume button for a run that carried on
+and billed, so the state is now written by the workflow when it genuinely
+parks.
 """
 
 from __future__ import annotations
@@ -37,9 +40,7 @@ class FakeTemporal:
         return FakeHandle(self, workflow_id)
 
 
-async def make_task(
-    session: AsyncSession, ctx: WorkspaceContext, *, state: str
-) -> tuple[Agent, Task]:
+async def make_task(session: AsyncSession, ctx: WorkspaceContext, *, state: str) -> Task:
     agent = Agent(workspace_id=ctx.workspace_id, name="Atlas", slug="atlas", role_title="CTO")
     session.add(agent)
     await session.flush()
@@ -54,7 +55,7 @@ async def make_task(
     )
     session.add(task)
     await session.flush()
-    return agent, task
+    return task
 
 
 async def signal(
@@ -63,90 +64,51 @@ async def signal(
     temporal: FakeTemporal,
     task_id: UUID,
     *,
-    signal: str,
-    new_state: str,
-    from_states: tuple[str, ...],
+    name: str,
 ) -> Task:
     return await tasks_service.signal_task(
         session,
         ctx,
         temporal,  # type: ignore[arg-type]
         task_id,
-        signal=signal,
-        action=f"task.{signal}d",
-        new_state=new_state,
-        from_states=from_states,
+        signal=name,
+        action=f"task.{name}d",
         request_id=new_uuid7(),
         ip_hash="h",
     )
 
 
-async def test_pause_records_paused_and_resume_records_running(
+async def test_pause_is_delivered_but_not_claimed(
     session: AsyncSession, admin_ctx: WorkspaceContext
 ) -> None:
     temporal = FakeTemporal()
-    _, task = await make_task(session, admin_ctx, state=TaskState.RUNNING.value)
+    task = await make_task(session, admin_ctx, state=TaskState.RUNNING.value)
 
-    paused = await signal(
-        session,
-        admin_ctx,
-        temporal,
-        task.id,
-        signal="pause",
-        new_state=TaskState.PAUSED.value,
-        from_states=(TaskState.QUEUED.value, TaskState.RUNNING.value),
-    )
-    assert paused.state == TaskState.PAUSED.value
+    result = await signal(session, admin_ctx, temporal, task.id, name="pause")
+
     assert temporal.signals == [("wf-1", "pause", ())]
-
-    resumed = await signal(
-        session,
-        admin_ctx,
-        temporal,
-        task.id,
-        signal="resume",
-        new_state=TaskState.RUNNING.value,
-        from_states=(TaskState.PAUSED.value,),
-    )
-    assert resumed.state == TaskState.RUNNING.value
+    # Still running, because it still is: the run stops at its next step, and
+    # a run that never reaches one never stops at all.
+    assert result.state == TaskState.RUNNING.value
 
 
-async def test_state_is_only_written_from_the_state_it_was_read_in(
+async def test_resume_is_delivered_but_not_claimed(
     session: AsyncSession, admin_ctx: WorkspaceContext
 ) -> None:
-    # The write is conditional on the state the transition expects, so a run
-    # that moved on between the signal and this write keeps its real outcome
-    # instead of being rewritten. Resuming a task that is not paused is the
-    # reachable case: the signal goes through, the row is left alone.
     temporal = FakeTemporal()
-    _, task = await make_task(session, admin_ctx, state=TaskState.RUNNING.value)
+    task = await make_task(session, admin_ctx, state=TaskState.PAUSED.value)
 
-    result = await signal(
-        session,
-        admin_ctx,
-        temporal,
-        task.id,
-        signal="resume",
-        new_state=TaskState.RUNNING.value,
-        from_states=(TaskState.PAUSED.value,),
-    )
-    assert result.state == TaskState.RUNNING.value
+    result = await signal(session, admin_ctx, temporal, task.id, name="resume")
+
     assert temporal.signals == [("wf-1", "resume", ())]
+    assert result.state == TaskState.PAUSED.value
 
 
 async def test_signalling_a_finished_task_still_conflicts(
     session: AsyncSession, admin_ctx: WorkspaceContext
 ) -> None:
     temporal = FakeTemporal()
-    _, task = await make_task(session, admin_ctx, state=TaskState.COMPLETED.value)
+    task = await make_task(session, admin_ctx, state=TaskState.COMPLETED.value)
     with pytest.raises(HTTPException) as excinfo:
-        await signal(
-            session,
-            admin_ctx,
-            temporal,
-            task.id,
-            signal="pause",
-            new_state=TaskState.PAUSED.value,
-            from_states=(TaskState.QUEUED.value, TaskState.RUNNING.value),
-        )
+        await signal(session, admin_ctx, temporal, task.id, name="pause")
     assert excinfo.value.status_code == 409

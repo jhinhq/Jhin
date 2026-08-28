@@ -222,7 +222,14 @@ MEMORY_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor, ToolValidator | None], .
         ToolDefinition(
             name="memory.propose",
             description=(
-                "Propose one concise, durable memory from the current task. Use "
+                "Propose one concise, durable memory from the current task. "
+                "**When a person corrects something you have remembered, or "
+                "tells you a stored fact has changed, call this** with the new "
+                'wording -- saying "got it, I\'ll use that from now on" '
+                "records nothing, and you will state the old value again in the "
+                "next conversation. A correction supersedes the memory it "
+                "replaces; propose it the same way you proposed the original. "
+                "Use "
                 "requested_scope 'agent' unless you know the source was wider: "
                 "an ordinary chat with a person is private to the two of you, "
                 "so it can only become your own memory. Team memory needs a "
