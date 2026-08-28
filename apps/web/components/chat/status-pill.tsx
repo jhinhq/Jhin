@@ -2,8 +2,7 @@
 
 /** Small live status pill (text + color, never color alone). */
 
-import { statusLabelFor, type LiveStatus } from "@/lib/chat";
-import type { Conversation } from "@/lib/types";
+import { statusLabelFor, type LiveStatus, type LiveStatusSource } from "@/lib/chat";
 
 const TONES: Record<LiveStatus["tone"], string> = {
   accent: "bg-accent-soft text-accent-strong border-accent/30",
@@ -15,7 +14,7 @@ export function LiveStatusPill({
   conversation,
   className = "",
 }: {
-  conversation: Pick<Conversation, "active_task_state" | "active_run_status">;
+  conversation: LiveStatusSource;
   className?: string;
 }) {
   const status = statusLabelFor(conversation);
@@ -32,7 +31,11 @@ export function LiveStatusPill({
           className="h-1.5 w-1.5 shrink-0 rounded-full bg-current motion-safe:animate-pulse"
         />
       ) : null}
-      <span className="truncate">{status.label}</span>
+      {/* An activity sentence is longer than "Working…" and this pill lives in
+       * tight rows, so a truncated one is still readable on hover. */}
+      <span className="truncate" title={status.specific ? status.label : undefined}>
+        {status.label}
+      </span>
     </span>
   );
 }

@@ -10,6 +10,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApprovalCard } from "@/components/approval-card";
 import { Avatar } from "@/components/avatar";
+import { MemoryCard } from "@/components/chat/memory-card";
 import { QuestionCard, type AnswerQuestion } from "@/components/chat/question-card";
 import { Timestamp } from "@/components/chat/timestamp";
 import { Markdown } from "@/components/markdown";
@@ -19,6 +20,7 @@ import {
   exchangeSuffix,
   friendlyMessageLabel,
   instructionDeliveryState,
+  isMemorySavedMessage,
   isUserQuestionMessage,
   isWorkCard,
   messageText,
@@ -331,10 +333,20 @@ function WorkingIndicator({
 }) {
   if (status.kind === "working") {
     return (
-      <div data-testid="working-indicator" className="flex items-center gap-2.5 text-sm text-dim">
+      // `aria-live="off"` against the transcript's own polite region: this row
+      // is rewritten every few seconds as the agent moves from step to step,
+      // and announcing each one would talk over the messages a screen-reader
+      // user is actually here to read. The work itself still announces when it
+      // lands, as a message.
+      <div
+        data-testid="working-indicator"
+        data-specific={status.specific ? "true" : undefined}
+        aria-live="off"
+        className="flex items-center gap-2.5 text-sm text-dim"
+      >
         <Avatar name={name} size="sm" {...avatarProps(avatar)} />
-        <span className="inline-flex items-center gap-2 rounded-2xl rounded-bl-md border border-line bg-surface px-4 py-2.5">
-          <span aria-hidden className="flex items-center gap-1">
+        <span className="inline-flex min-w-0 items-center gap-2 rounded-2xl rounded-bl-md border border-line bg-surface px-4 py-2.5">
+          <span aria-hidden className="flex shrink-0 items-center gap-1">
             {[0, 1, 2].map((index) => (
               <span
                 key={index}
@@ -343,7 +355,18 @@ function WorkingIndicator({
               />
             ))}
           </span>
-          {name} is working…
+          {/* The API's sentence stands on its own next to the avatar, the way
+           * the header pill shows it. Only the generic state keeps the "…is
+           * working" phrasing, so nothing shifts when there is nothing more
+           * specific to say. */}
+          {status.specific ? (
+            <span className="min-w-0 break-words">
+              <span className="sr-only">{name}: </span>
+              {status.label}
+            </span>
+          ) : (
+            <span className="min-w-0 break-words">{name} is working…</span>
+          )}
         </span>
       </div>
     );
@@ -506,6 +529,12 @@ export function Transcript({
           onAnswer={onAnswer}
         />
       );
+    }
+    // Also before the work-card branch: a memory receipt is a `status`
+    // message, and the generic card would clamp the remembered words into a
+    // preview under "Shared an update".
+    if (isMemorySavedMessage(message)) {
+      return <MemoryCard key={item.id} message={message} name={name} avatar={avatar} />;
     }
     if (isWorkCard(message)) {
       return <WorkCard key={item.id} message={message} name={name} avatar={avatar} />;

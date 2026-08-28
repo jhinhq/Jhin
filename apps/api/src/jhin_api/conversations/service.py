@@ -47,6 +47,7 @@ from jhin_db.models import (
     Conversation,
     Message,
     Task,
+    ToolCall,
     User,
     WorkRequest,
     WorkReview,
@@ -55,6 +56,8 @@ from jhin_db.models import (
 from jhin_domain import (
     ACTIVITY_LABELS,
     AGENT_MESSAGE_TYPES,
+    RUN_ACTIVE_STATUSES,
+    WORK_REQUEST_ACTIVE_STATUSES,
     ActivityKind,
     AgentStatus,
     ApprovalStatus,
@@ -66,11 +69,14 @@ from jhin_domain import (
     RunStatus,
     SenderType,
     TaskState,
+    ToolCallStatus,
     WorkRequestStatus,
     WorkReviewStatus,
     WorkspaceRole,
+    activity_phrase,
     new_uuid7,
     role_satisfies,
+    waiting_for_colleague_phrase,
 )
 from jhin_events import EventEnvelope, EventPublisher, EventSource
 from jhin_observability import get_logger, normalize_event_family
@@ -229,11 +235,102 @@ def _active_task(tasks: list[Task]) -> Task | None:
     return next((t for t in tasks if t.state in tasks_service.ACTIVE_TASK_STATES), None)
 
 
+# A call whose name the registry recognized, or one still in flight. A
+# ``denied`` row persists whatever name the model asked for, and a name the
+# model invented must never become a sentence on somebody's screen; ``failed``
+# and ``execution_unknown`` are not what the agent is doing *now*.
+_ACTIVITY_TOOL_STATUSES = (
+    ToolCallStatus.PENDING_APPROVAL.value,
+    ToolCallStatus.PENDING_REVIEW.value,
+    ToolCallStatus.EXECUTING.value,
+    ToolCallStatus.COMPLETED.value,
+)
+# How long a finished tool call still describes what the agent is doing. A
+# model call between steps takes seconds, so a call older than this is a step
+# the agent has already moved on from; saying otherwise is a small, constant
+# lie on the one surface whose whole job is to say what is happening now. A
+# call parked on an approval is exempt -- it can wait for a person for hours
+# and is still exactly what the run is doing.
+ACTIVITY_FRESH_FOR = timedelta(seconds=90)
+_ACTIVITY_PARKED_STATUSES = (
+    ToolCallStatus.PENDING_APPROVAL.value,
+    ToolCallStatus.PENDING_REVIEW.value,
+)
+
+
+async def _active_activity(db: AsyncSession, workspace_id: UUID, task: Task) -> str | None:
+    """What the agent on this task is doing right now, as a whole sentence.
+
+    Derived from the newest tool call on a still-live run of this task, and
+    from the tool's *name* only — see :mod:`jhin_domain.activity` for why no
+    argument is passed in. ``None`` between steps, or for a tool whose name
+    would tell a person nothing; the caller then shows the generic "Working".
+
+    One query (a second only for the colleague's name), and only on the
+    conversation *detail*: the chat list polls every row it shows, and a
+    query per row there is a poll that gets more expensive the more
+    conversations a workspace has.
+    """
+    newest = (
+        await db.execute(
+            select(ToolCall.tool_name, ToolCall.run_id)
+            .join(AgentRun, AgentRun.id == ToolCall.run_id)
+            .where(
+                ToolCall.workspace_id == workspace_id,
+                AgentRun.workspace_id == workspace_id,
+                AgentRun.task_id == task.id,
+                AgentRun.status.in_([s.value for s in RUN_ACTIVE_STATUSES]),
+                ToolCall.status.in_(_ACTIVITY_TOOL_STATUSES),
+                # Recent, or it is not what the agent is doing *now*. Without
+                # this the newest call is announced in the present tense for as
+                # long as the run lives -- "Saving this to memory" while the
+                # agent has moved on to writing the answer, and a step that
+                # finished hours ago still described as current. A step that
+                # outlives the window is honestly unknown, and the caller falls
+                # back to the generic "Working".
+                or_(
+                    ToolCall.status.in_(_ACTIVITY_PARKED_STATUSES),
+                    ToolCall.created_at >= _now() - ACTIVITY_FRESH_FOR,
+                ),
+            )
+            .order_by(ToolCall.created_at.desc(), ToolCall.id.desc())
+            .limit(1)
+        )
+    ).first()
+    if newest is None:
+        return None
+    tool_name, run_id = newest
+    phrase = activity_phrase(tool_name)
+    if tool_name != "organization.request_work":
+        return phrase
+    # A colleague's name is worth the extra query: parked on an answer, this
+    # thread otherwise shows "Working…" for up to two minutes. The name comes
+    # from the work_request row the platform wrote, never from the tool's
+    # arguments.
+    colleague = await db.scalar(
+        select(WorkRequest.metadata_json)
+        .where(
+            WorkRequest.workspace_id == workspace_id,
+            WorkRequest.requester_run_id == run_id,
+            WorkRequest.status.in_([s.value for s in WORK_REQUEST_ACTIVE_STATUSES]),
+        )
+        .order_by(WorkRequest.created_at.desc())
+        .limit(1)
+    )
+    if colleague is None:
+        return phrase
+    return waiting_for_colleague_phrase(str(colleague.get("target_agent_name", "") or ""))
+
+
 # --- Projection ---
 
 
 async def project_conversations(
-    db: AsyncSession, workspace_id: UUID, conversations: list[Conversation]
+    db: AsyncSession,
+    workspace_id: UUID,
+    conversations: list[Conversation],
+    *,
+    with_activity: bool = False,
 ) -> list[ConversationOut]:
     if not conversations:
         return []
@@ -301,6 +398,11 @@ async def project_conversations(
                 active_task_id=active.id if active else None,
                 active_task_state=active.state if active else None,
                 active_run_status=run_status.get(active.id) if active else None,
+                active_activity=(
+                    await _active_activity(db, workspace_id, active)
+                    if with_activity and active is not None
+                    else None
+                ),
                 last_message_preview=(
                     _truncate(_message_text(last_message.content_json), PREVIEW_CHARS) or None
                     if last_message is not None
@@ -320,7 +422,9 @@ async def project_conversations(
 async def project_conversation(
     db: AsyncSession, workspace_id: UUID, conversation: Conversation
 ) -> ConversationOut:
-    return (await project_conversations(db, workspace_id, [conversation]))[0]
+    """One conversation, with ``active_activity``. Single-row callers only —
+    the list projection deliberately leaves that field None."""
+    return (await project_conversations(db, workspace_id, [conversation], with_activity=True))[0]
 
 
 async def project_messages(

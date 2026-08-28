@@ -107,6 +107,7 @@ describe("AttentionInbox", () => {
           active_task_id: "task-4",
           active_task_state: "running",
           active_run_status: "waiting_approval",
+          active_activity: null,
           last_message_preview: "Should I announce on Monday?",
           last_message_sender_type: "agent",
           agent_name: "Marketing Lead",

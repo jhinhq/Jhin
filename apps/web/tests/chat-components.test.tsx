@@ -38,6 +38,7 @@ function conversation(overrides: Partial<Conversation> = {}): Conversation {
     active_task_id: null,
     active_task_state: null,
     active_run_status: null,
+    active_activity: null,
     last_message_preview: "Here is what happened",
     last_message_sender_type: "agent",
     agent_name: "Scout",

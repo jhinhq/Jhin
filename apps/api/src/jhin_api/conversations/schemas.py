@@ -31,6 +31,12 @@ class ConversationOut(BaseModel):
     active_task_id: UUID | None = None
     active_task_state: str | None = None
     active_run_status: str | None = None
+    # What the agent is doing right now, as a finished sentence ("Saving this
+    # to memory"). Rendered by the API from the tool *name* alone — never by
+    # the browser, and never from tool arguments. Only the conversation
+    # detail carries it: the chat list polls every row, and this costs a
+    # query. See ``_active_activity``.
+    active_activity: str | None = None
     last_message_preview: str | None = None
     last_message_sender_type: str | None = None
     agent_name: str | None = None

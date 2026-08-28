@@ -398,6 +398,19 @@ class TestApply:
             assert audit.metadata_json["activated"] == 1
             assert "concise" not in str(audit.metadata_json)
 
+    async def test_automatic_extraction_writes_no_memory_card(self, world: World) -> None:
+        """``memory.propose`` writes a visible "memory_saved" card so a person
+        can see what the agent stored. This path must not: it runs after every
+        completed run, and a card per extracted candidate would bury the
+        transcript under memories nobody asked for."""
+        result = await ActivityEnvironment().run(
+            world.activities.apply_memory_candidates_activity, apply_input(world)
+        )
+        assert result.activated == 1
+        async with world.session_factory() as session:
+            rows = await session.scalars(select(Message))
+            assert [m for m in rows if m.content_json.get("kind") == "memory_saved"] == []
+
     async def test_reapplication_is_idempotent(self, world: World) -> None:
         env = ActivityEnvironment()
         first = await env.run(world.activities.apply_memory_candidates_activity, apply_input(world))

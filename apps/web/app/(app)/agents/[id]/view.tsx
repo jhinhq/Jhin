@@ -7,7 +7,8 @@
 import { useMutation } from "@tanstack/react-query";
 import { ArrowLeft, ImagePlus, MessageSquare, Pause, Pencil, Play } from "lucide-react";
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { Suspense, useMemo, useState } from "react";
 import { ActivityFeed } from "@/components/activity/activity-feed";
 import { AvatarDialog } from "@/components/agents/avatar-dialog";
 import { HelpDirectory } from "@/components/agents/help-directory";
@@ -47,7 +48,7 @@ import {
 } from "@/lib/hooks";
 import { avatarProps, identityAvatarProps } from "@/lib/media";
 import { formatScope } from "@/lib/policy";
-import type { Agent, AgentAvatar } from "@/lib/types";
+import type { Agent, AgentAvatar, MemoryScope } from "@/lib/types";
 import { useWorkspace } from "@/lib/workspace-context";
 
 type TabId =
@@ -101,18 +102,37 @@ function PersonRow({
   );
 }
 
+const TAB_IDS: ReadonlySet<string> = new Set(TABS.map((entry) => entry.id));
+const MEMORY_SCOPES: ReadonlySet<string> = new Set(["agent", "team", "workspace"]);
+
 export default function AgentProfilePage() {
+  // `useSearchParams` needs a Suspense boundary for the static export build.
+  return (
+    <Suspense fallback={<Spinner />}>
+      <AgentProfileView />
+    </Suspense>
+  );
+}
+
+function AgentProfileView() {
   const agentId = useSegmentAfter("agents");
   const { workspace, can } = useWorkspace();
   const workspaceId = workspace.workspace_id;
   const isAdmin = can("admin");
+
+  // Deep link, so "review or change this memory" from a chat lands on the
+  // memory rather than on the profile's front page. Only the first render
+  // reads it: after that the tabs are the person's to move around in.
+  const search = useSearchParams();
+  const linkedTab = search.get("tab") ?? "";
+  const linkedScope = search.get("memory_scope") ?? "";
 
   const agentQuery = useAgent(workspaceId, agentId);
   const graph = useOrgGraph(workspaceId);
   const avatars = useAgentAvatarMap(workspaceId);
   const working = useWorkingAgentIds(workspaceId);
   const invalidate = useInvalidateOrg(workspaceId);
-  const [tab, setTab] = useState<TabId>("about");
+  const [tab, setTab] = useState<TabId>(TAB_IDS.has(linkedTab) ? (linkedTab as TabId) : "about");
   const [editing, setEditing] = useState(false);
   const [changingAvatar, setChangingAvatar] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -366,7 +386,13 @@ export default function AgentProfilePage() {
         ) : null}
 
         {tab === "memory" ? (
-          <MemoryPanel workspaceId={workspaceId} agent={agent} canWrite={can("member")} isAdmin={isAdmin} />
+          <MemoryPanel
+            workspaceId={workspaceId}
+            agent={agent}
+            canWrite={can("member")}
+            isAdmin={isAdmin}
+            initialScope={MEMORY_SCOPES.has(linkedScope) ? (linkedScope as MemoryScope) : undefined}
+          />
         ) : null}
 
         {tab === "skills" ? (

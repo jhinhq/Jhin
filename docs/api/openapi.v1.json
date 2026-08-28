@@ -3800,6 +3800,17 @@
       },
       "ConversationOut": {
         "properties": {
+          "active_activity": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Activity"
+          },
           "active_run_status": {
             "anyOf": [
               {

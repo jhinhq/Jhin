@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import UUID
 
 import pytest
 from sqlalchemy import select
@@ -17,6 +18,7 @@ from jhin_db.models import (
     Agent,
     AgentCapabilityGrant,
     MemoryRecord,
+    Message,
     Task,
     Team,
     User,
@@ -470,3 +472,155 @@ class TestAnsweredScopeGrant:
         assert output["outcome"] == "activate"
         record = await session.scalar(select(MemoryRecord))
         assert record is not None and record.created_by_type == "agent"
+
+
+async def cards(session: AsyncSession) -> list[Message]:
+    """Every visible memory card in the workspace, oldest first."""
+    rows = await session.scalars(select(Message).order_by(Message.created_at, Message.id))
+    return [m for m in rows if m.content_json.get("kind") == "memory_saved"]
+
+
+class TestMemorySavedCard:
+    """The chat has to show that a memory was written, because the agent
+    saying so is a claim and the two bugs that produced this feature were
+    both a false one."""
+
+    async def test_a_saved_memory_writes_one_card_the_person_can_read(
+        self, session: AsyncSession, org: Org
+    ) -> None:
+        await grant(session, org, org.me, "memory.propose")
+        outcome = await propose(
+            session, org, org.me, content="We deploy on Mondays at 9am PST.", subject="deploy.day"
+        )
+        record_id = (outcome.sanitized_output or {})["memory_id"]
+        written = await cards(session)
+        assert len(written) == 1
+        card = written[0]
+        assert card.message_type == "status"
+        assert card.visibility == "visible"
+        assert card.sender_type == "agent"
+        assert card.sender_id == org.me.id
+        assert card.task_id == org.task.id
+        assert card.content_json["memory_id"] == record_id
+        assert card.content_json["action"] == "saved"
+        assert card.content_json["scope"] == "agent"
+        assert card.content_json["scope_label"] == "just you and me"
+        assert card.content_json["content"] == "We deploy on Mondays at 9am PST."
+        assert card.content_json["superseded"] == ""
+        # Readable by a renderer that has never heard of this card.
+        assert card.content_json["summary"] == "We deploy on Mondays at 9am PST."
+
+    async def test_a_refused_proposal_writes_no_card(self, session: AsyncSession, org: Org) -> None:
+        """The chat must never show "saved" for something that was not."""
+        await grant(session, org, org.me, "memory.propose")
+        outcome = await propose(session, org, org.me, requested_scope="team")
+        assert (outcome.sanitized_output or {})["outcome"] == "reject"
+        assert await cards(session) == []
+
+    async def test_a_duplicate_writes_no_second_card(self, session: AsyncSession, org: Org) -> None:
+        """Also the gateway-replay case: re-running the same call re-proposes
+        content that is now an exact duplicate of itself."""
+        await grant(session, org, org.me, "memory.propose")
+        await propose(session, org, org.me)
+        second = await propose(session, org, org.me)
+        assert (second.sanitized_output or {})["outcome"] == "duplicate"
+        assert len(await cards(session)) == 1
+
+    async def test_two_proposals_in_one_run_get_one_card_each(
+        self, session: AsyncSession, org: Org
+    ) -> None:
+        await grant(session, org, org.me, "memory.propose")
+        run_id = new_uuid7()
+        await propose(session, org, org.me, run_id=run_id, content="We deploy on Mondays.")
+        await propose(session, org, org.me, run_id=run_id, content="Standup is at 10am.")
+        written = await cards(session)
+        assert [c.content_json["content"] for c in written] == [
+            "We deploy on Mondays.",
+            "Standup is at 10am.",
+        ]
+
+    async def test_a_correction_says_updated_and_shows_what_it_replaced(
+        self, session: AsyncSession, org: Org
+    ) -> None:
+        """The bug this card exists for: a correction the agent acknowledged
+        and never stored. When it IS stored, the card has to show both the new
+        words and the ones they replaced."""
+        await grant(session, org, org.me, "memory.propose")
+        await propose(
+            session, org, org.me, content="We deploy on Mondays at 9am.", subject="deploy.day"
+        )
+        await propose(
+            session,
+            org,
+            org.me,
+            content="We deploy on Mondays at 10am now, not 9am.",
+            subject="deploy.day",
+            confidence=0.95,
+        )
+        written = await cards(session)
+        assert len(written) == 2
+        latest = written[-1]
+        assert latest.content_json["action"] == "updated"
+        assert latest.content_json["content"] == "We deploy on Mondays at 10am now, not 9am."
+        assert latest.content_json["superseded"] == "We deploy on Mondays at 9am."
+
+    async def test_a_team_memory_names_the_real_team(self, session: AsyncSession, org: Org) -> None:
+        await grant(session, org, org.me, "memory.propose")
+        outcome = await propose(
+            session, org, org.me, org.team_task, requested_scope="team", subject="deploy.day"
+        )
+        assert (outcome.sanitized_output or {})["outcome"] == "activate"
+        card = (await cards(session))[0]
+        assert card.content_json["scope"] == "team"
+        assert card.content_json["scope_label"] == "the Engineering team"
+
+    async def test_the_authorised_path_writes_the_card_too(
+        self, session: AsyncSession, org: Org
+    ) -> None:
+        """A memory a person authorised through a question is the one they are
+        most likely to have a wrong idea about, so it is the one that most
+        needs the card."""
+        await grant(session, org, org.me, "memory.propose")
+        run_id = new_uuid7()
+        person = User(
+            email=f"v-{new_uuid7().hex[:8]}@example.com", display_name="Varand", password_hash="x"
+        )
+        session.add(person)
+        await session.flush()
+        question = await TestAnsweredScopeGrant.answered_question(
+            session,
+            org,
+            run_id=run_id,
+            granted_scope="workspace",
+            granted_authority="workspace",
+            answered_by=person,
+        )
+        outcome = await propose(
+            session,
+            org,
+            org.me,
+            run_id=run_id,
+            content="We deploy on Mondays at 9am PST.",
+            requested_scope="workspace",
+            authorized_by_question_id=str(question.id),
+        )
+        assert (outcome.sanitized_output or {})["outcome"] == "activate"
+        card = (await cards(session))[0]
+        assert card.content_json["scope"] == "workspace"
+        assert card.content_json["scope_label"] == "everyone in the workspace"
+
+    async def test_the_scope_label_comes_from_the_stored_record(
+        self, session: AsyncSession, org: Org
+    ) -> None:
+        """The label is written from the record's own scope, never from what
+        the agent asked for: a card reading "the Engineering team" over an
+        agent-scoped write is the mislabelling bug one surface along."""
+        await grant(session, org, org.me, "memory.propose")
+        outcome = await propose(
+            session, org, org.me, content="We deploy on Mondays.", requested_scope="agent"
+        )
+        record = await session.get(
+            MemoryRecord, UUID((outcome.sanitized_output or {})["memory_id"])
+        )
+        assert record is not None and record.scope == "agent"
+        assert (await cards(session))[0].content_json["scope_label"] == "just you and me"

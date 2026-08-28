@@ -125,6 +125,7 @@ function conversation(id: string, title: string): Conversation {
     active_task_id: "task-1",
     active_task_state: "running",
     active_run_status: "running",
+    active_activity: null,
     last_message_preview: "Looking into the flaky test now",
     last_message_sender_type: "agent",
     agent_name: "Ada",

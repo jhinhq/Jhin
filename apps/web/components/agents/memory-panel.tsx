@@ -240,19 +240,26 @@ export function MemoryPanel({
   agent,
   canWrite,
   isAdmin,
+  initialScope,
 }: {
   workspaceId: string;
   agent: Agent;
   canWrite: boolean;
   isAdmin: boolean;
+  /** Which scope to open on, when the person arrived from a link to one
+   * particular memory. Ignored for a team scope on an agent with no team,
+   * whose segmented control has no such option to land on. */
+  initialScope?: MemoryScope;
 }) {
-  const [scope, setScope] = useState<MemoryScope>("agent");
+  const hasTeam = Boolean(agent.team_id);
+  const [scope, setScope] = useState<MemoryScope>(
+    initialScope && (initialScope !== "team" || hasTeam) ? initialScope : "agent",
+  );
   const [filter, setFilter] = useState<MemoryStatusFilter>("active");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [composing, setComposing] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const hasTeam = Boolean(agent.team_id);
   const invalidate = useInvalidateMemories(workspaceId);
   const query = useMemories(
     workspaceId,

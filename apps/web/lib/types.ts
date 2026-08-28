@@ -883,6 +883,14 @@ export interface Conversation {
   active_task_id: string | null;
   active_task_state: TaskState | null;
   active_run_status: string | null;
+  /**
+   * A finished sentence for what the agent is doing right now ("Saving this to
+   * memory"), written by the API from the newest tool call — never assembled
+   * here, so the tool vocabulary lives in one place and no tool argument can
+   * reach a label. Null between steps, and on the conversation *list*, which
+   * does not pay for it per row.
+   */
+  active_activity: string | null;
   last_message_preview: string | null;
   last_message_sender_type: string | null;
   agent_name: string | null;
@@ -954,6 +962,36 @@ export interface UserQuestionContent {
 
 /** Exactly one of the two, never both, never neither. */
 export type AnswerQuestionIn = { option_value: string } | { other_text: string };
+
+/**
+ * The `content_json` of the `message_type: "status"` row a memory tool writes
+ * when a record was **actually stored** — the receipt behind an agent saying
+ * it remembered something. A refused proposal writes no such row, and neither
+ * does the automatic post-run extraction: this shape only ever describes a
+ * write the agent made deliberately, in the conversation, where the person can
+ * see it and correct it.
+ *
+ * `scope_label` is written by the platform from the scope and the real team
+ * name, never by the model — mislabelling the audience of a memory is the
+ * exact bug this card exists to catch.
+ */
+export interface MemorySavedContent {
+  kind: "memory_saved";
+  memory_id: string;
+  /** "updated" means it superseded an earlier record. */
+  action: "saved" | "updated";
+  /** Null when the payload carried a scope this build doesn't know. */
+  scope: MemoryScope | null;
+  /** "just you and me" | "the Platform team" | "everyone in the workspace". */
+  scope_label: string;
+  /** The remembered words, as stored. */
+  content: string;
+  /** The words it replaced, or "". */
+  superseded: string;
+  /** An older memory on the same subject this one did NOT replace, so the
+   * agent will now recall both. Empty when there is no conflict. */
+  still_standing: string;
+}
 
 export interface QuestionOut {
   id: string;

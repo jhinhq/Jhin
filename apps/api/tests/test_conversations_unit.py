@@ -3,13 +3,15 @@ and attention — against in-memory SQLite with a fake Temporal client."""
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from jhin_api.conversations import service
@@ -25,6 +27,7 @@ from jhin_db.models import (
     Task,
     ToolCall,
     User,
+    WorkRequest,
     WorkReview,
     Workspace,
 )
@@ -987,3 +990,264 @@ async def test_failed_activity_card_explains_the_run_failure(
     [card] = [c for c in feed.items if c.task_id == task.id]
     assert card.summary.endswith("openai: HTTP 429: You exceeded your current quota")
     assert card.detail_json["error_message"].startswith("openai: HTTP 429")
+
+
+# --- What the agent is doing right now -----------------------------------
+
+
+@contextlib.contextmanager
+def counted_statements(session: AsyncSession) -> Iterator[list[str]]:
+    """Every SQL statement issued inside the block, so a cost claim can be
+    asserted instead of believed."""
+    statements: list[str] = []
+
+    def record(conn: Any, cursor: Any, statement: str, *rest: Any) -> None:
+        statements.append(statement)
+
+    engine = session.get_bind()
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        yield statements
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+
+async def working(
+    session: AsyncSession,
+    admin_ctx: WorkspaceContext,
+    temporal: FakeTemporal,
+    agent: Agent,
+    *,
+    text: str = "Remember our deploy day",
+    run_status: str = RunStatus.RUNNING.value,
+) -> tuple[Conversation, Task, AgentRun]:
+    """A conversation whose newest task has a live run to hang tool calls on."""
+    conversation, result = await start(session, admin_ctx, temporal, agent, text=text)
+    result.task.state = TaskState.RUNNING.value
+    run = AgentRun(
+        workspace_id=admin_ctx.workspace_id,
+        agent_id=agent.id,
+        task_id=result.task.id,
+        status=run_status,
+    )
+    session.add(run)
+    await session.flush()
+    return conversation, result.task, run
+
+
+async def called(
+    session: AsyncSession,
+    admin_ctx: WorkspaceContext,
+    agent: Agent,
+    run: AgentRun,
+    tool_name: str,
+    *,
+    status: str = ToolCallStatus.COMPLETED.value,
+    sanitized_input: dict[str, Any] | None = None,
+) -> ToolCall:
+    call = ToolCall(
+        workspace_id=admin_ctx.workspace_id,
+        run_id=run.id,
+        agent_id=agent.id,
+        tool_name=tool_name,
+        status=status,
+        sanitized_input_json=sanitized_input or {},
+    )
+    session.add(call)
+    await session.flush()
+    return call
+
+
+async def activity(
+    session: AsyncSession, admin_ctx: WorkspaceContext, conversation: Conversation
+) -> str | None:
+    detail = await service.get_detail(session, admin_ctx.workspace_id, conversation.id)
+    return detail.conversation.active_activity
+
+
+async def test_activity_says_what_the_agent_is_doing_not_that_it_is_working(
+    session: AsyncSession, admin_ctx: WorkspaceContext, temporal: FakeTemporal, agent: Agent
+) -> None:
+    conversation, _task, run = await working(session, admin_ctx, temporal, agent)
+    await called(session, admin_ctx, agent, run, "memory.propose")
+    await session.commit()
+
+    assert await activity(session, admin_ctx, conversation) == "Saving this to memory"
+
+
+async def test_activity_is_the_newest_call_not_the_first(
+    session: AsyncSession, admin_ctx: WorkspaceContext, temporal: FakeTemporal, agent: Agent
+) -> None:
+    conversation, _task, run = await working(session, admin_ctx, temporal, agent)
+    await called(session, admin_ctx, agent, run, "memory.search")
+    await called(session, admin_ctx, agent, run, "cli.test.run")
+    await session.commit()
+
+    assert await activity(session, admin_ctx, conversation) == "Running the tests"
+
+
+async def test_no_tool_argument_can_reach_the_label(
+    session: AsyncSession, admin_ctx: WorkspaceContext, temporal: FakeTemporal, agent: Agent
+) -> None:
+    """Tool arguments carry workspace content and credentials-adjacent
+    material. The label is built from the tool's name, so there is nothing to
+    leak — this is the assertion that keeps it that way."""
+    secret = "sk-proj-abcdefghijklmnopqrstuvwxyz123456"
+    conversation, _task, run = await working(session, admin_ctx, temporal, agent)
+    await called(
+        session,
+        admin_ctx,
+        agent,
+        run,
+        "cli.command.execute",
+        sanitized_input={"command": f"deploy --token {secret}", "cwd": "/srv/app"},
+    )
+    await session.commit()
+
+    label = await activity(session, admin_ctx, conversation)
+    assert label == "Running a command"
+    assert secret not in (label or "")
+    assert "deploy" not in (label or "") and "/srv/app" not in (label or "")
+
+
+async def test_an_unknown_mcp_tool_names_the_server_not_the_identifier(
+    session: AsyncSession, admin_ctx: WorkspaceContext, temporal: FakeTemporal, agent: Agent
+) -> None:
+    conversation, _task, run = await working(session, admin_ctx, temporal, agent)
+    await called(session, admin_ctx, agent, run, "mcp.notion.search_pages")
+    await session.commit()
+
+    label = await activity(session, admin_ctx, conversation)
+    assert label == "Using notion"
+    assert "search_pages" not in (label or "")
+
+
+async def test_a_tool_worth_no_words_falls_through_to_working(
+    session: AsyncSession, admin_ctx: WorkspaceContext, temporal: FakeTemporal, agent: Agent
+) -> None:
+    conversation, _task, run = await working(session, admin_ctx, temporal, agent)
+    await called(session, admin_ctx, agent, run, "system.echo")
+    await session.commit()
+
+    assert await activity(session, admin_ctx, conversation) is None
+
+
+async def test_a_denied_call_never_becomes_a_sentence(
+    session: AsyncSession, admin_ctx: WorkspaceContext, temporal: FakeTemporal, agent: Agent
+) -> None:
+    """A denied row persists whatever name the model asked for. That name is
+    not a fact about the workspace and must not be rendered as one."""
+    conversation, _task, run = await working(session, admin_ctx, temporal, agent)
+    await called(session, admin_ctx, agent, run, "memory.search")
+    await called(
+        session,
+        admin_ctx,
+        agent,
+        run,
+        "mcp.payroll.export_everything",
+        status=ToolCallStatus.DENIED.value,
+    )
+    await session.commit()
+
+    assert await activity(session, admin_ctx, conversation) == "Checking what it remembers"
+
+
+async def test_a_finished_run_is_not_doing_anything(
+    session: AsyncSession, admin_ctx: WorkspaceContext, temporal: FakeTemporal, agent: Agent
+) -> None:
+    conversation, _task, run = await working(
+        session, admin_ctx, temporal, agent, run_status=RunStatus.COMPLETED.value
+    )
+    await called(session, admin_ctx, agent, run, "cli.test.run")
+    await session.commit()
+
+    assert await activity(session, admin_ctx, conversation) is None
+
+
+async def test_parked_on_a_colleague_names_the_colleague(
+    session: AsyncSession, admin_ctx: WorkspaceContext, temporal: FakeTemporal, agent: Agent
+) -> None:
+    """Two minutes of "Working…" while it is really waiting on somebody else."""
+    ws = admin_ctx.workspace_id
+    conversation, task, run = await working(session, admin_ctx, temporal, agent)
+    colleague = Agent(workspace_id=ws, name="Nova", slug="nova", role_title="SRE")
+    session.add(colleague)
+    await session.flush()
+    await called(session, admin_ctx, agent, run, "organization.request_work")
+    session.add(
+        WorkRequest(
+            workspace_id=ws,
+            conversation_id=conversation.id,
+            requester_agent_id=agent.id,
+            requester_task_id=task.id,
+            requester_run_id=run.id,
+            target_agent_id=colleague.id,
+            title="Check the deploy window",
+            description="d",
+            expected_output="e",
+            idempotency_key=new_uuid7().hex,
+            status="accepted",
+            metadata_json={"target_agent_name": "Nova", "requester_agent_name": "Atlas"},
+        )
+    )
+    await session.commit()
+
+    assert await activity(session, admin_ctx, conversation) == "Waiting for Nova"
+
+
+async def test_a_settled_request_goes_back_to_the_plain_phrase(
+    session: AsyncSession, admin_ctx: WorkspaceContext, temporal: FakeTemporal, agent: Agent
+) -> None:
+    ws = admin_ctx.workspace_id
+    conversation, task, run = await working(session, admin_ctx, temporal, agent)
+    colleague = Agent(workspace_id=ws, name="Nova", slug="nova", role_title="SRE")
+    session.add(colleague)
+    await session.flush()
+    await called(session, admin_ctx, agent, run, "organization.request_work")
+    session.add(
+        WorkRequest(
+            workspace_id=ws,
+            conversation_id=conversation.id,
+            requester_agent_id=agent.id,
+            requester_task_id=task.id,
+            requester_run_id=run.id,
+            target_agent_id=colleague.id,
+            title="Check the deploy window",
+            description="d",
+            expected_output="e",
+            idempotency_key=new_uuid7().hex,
+            status="completed",
+            metadata_json={"target_agent_name": "Nova"},
+        )
+    )
+    await session.commit()
+
+    assert await activity(session, admin_ctx, conversation) == "Asking a colleague"
+
+
+async def test_the_chat_list_pays_nothing_for_activity(
+    session: AsyncSession, admin_ctx: WorkspaceContext, temporal: FakeTemporal, agent: Agent
+) -> None:
+    """The list polls every conversation it shows. Deriving the activity there
+    would be one tool_call query per row; the detail polls one, and pays one."""
+    ws = admin_ctx.workspace_id
+    conversations = []
+    for index in range(3):
+        conversation, _task, run = await working(
+            session, admin_ctx, temporal, agent, text=f"Turn {index}"
+        )
+        await called(session, admin_ctx, agent, run, "memory.propose")
+        conversations.append(conversation)
+    await session.commit()
+
+    with counted_statements(session) as listed:
+        items, _total = await service.list_conversations(session, ws)
+        projected = await service.project_conversations(session, ws, items)
+    assert len(projected) == 3
+    assert [c.active_activity for c in projected] == [None, None, None]
+    assert [s for s in listed if "tool_call" in s] == []
+
+    with counted_statements(session) as detailed:
+        detail = await service.get_detail(session, ws, conversations[-1].id)
+    assert detail.conversation.active_activity == "Saving this to memory"
+    assert len([s for s in detailed if "tool_call" in s]) == 1

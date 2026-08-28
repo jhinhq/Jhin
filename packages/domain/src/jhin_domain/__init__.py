@@ -5,6 +5,7 @@ db, events, API, workers — can depend on it without dragging in SQLAlchemy,
 Pydantic, or NATS.
 """
 
+from jhin_domain.activity import activity_phrase, waiting_for_colleague_phrase
 from jhin_domain.enums import (
     ACTIVITY_LABELS,
     AGENT_MESSAGE_TYPES,
@@ -139,6 +140,7 @@ __all__ = [
     "WorkReviewStatus",
     "WorkspaceRole",
     "WorkspaceStatus",
+    "activity_phrase",
     "artifact",
     "effective_scopes",
     "expand_scopes",
@@ -148,4 +150,5 @@ __all__ = [
     "scopes_above_role",
     "scopes_for_role",
     "structured_content",
+    "waiting_for_colleague_phrase",
 ]

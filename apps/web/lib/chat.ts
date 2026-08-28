@@ -10,6 +10,8 @@ import type {
   ActivityKind,
   Conversation,
   ConversationMessage,
+  MemoryScope,
+  MemorySavedContent,
   UserQuestionContent,
   UserQuestionOption,
   UserQuestionStatus,
@@ -55,12 +57,23 @@ export interface LiveStatus {
   label: string;
   tone: LiveStatusTone;
   kind: "working" | "queued" | "review" | "waiting_review" | "question" | "paused";
+  /** True when `label` is the agent's actual current step rather than the
+   * generic state text, so a surface can show it in place of "… is working"
+   * instead of alongside it. */
+  specific?: boolean;
 }
 
+/**
+ * What a live status can be read from. `active_activity` is optional because
+ * only the open conversation carries it: deriving it costs a lookup per
+ * conversation, so the rail keeps the generic label and the thread you are
+ * actually watching says what the agent is doing.
+ */
+export type LiveStatusSource = Pick<Conversation, "active_task_state" | "active_run_status"> &
+  Partial<Pick<Conversation, "active_activity">>;
+
 /** Small live status for a conversation, or null when nothing is happening. */
-export function statusLabelFor(
-  conversation: Pick<Conversation, "active_task_state" | "active_run_status">,
-): LiveStatus | null {
+export function statusLabelFor(conversation: LiveStatusSource): LiveStatus | null {
   if (conversation.active_run_status === "waiting_person") {
     // The whole thread is blocked on a question in the transcript. Saying
     // "Working…" here would be a lie the reader can act on: they would wait
@@ -75,8 +88,16 @@ export function statusLabelFor(
     return { label: "Waiting for a review", tone: "neutral", kind: "waiting_review" };
   }
   switch (conversation.active_task_state) {
-    case "running":
+    case "running": {
+      // "Working…" says only that the agent has not stopped. When the API can
+      // say which step it is on, say that instead — same tone and kind, so
+      // every surface that keys off `kind` (the pill's dot, the composer hint)
+      // behaves exactly as before. The three waits above still win: they are
+      // things the person has to act on, not progress to watch.
+      const activity = conversation.active_activity?.trim() ?? "";
+      if (activity) return { label: activity, tone: "accent", kind: "working", specific: true };
       return { label: "Working…", tone: "accent", kind: "working" };
+    }
     case "queued":
       return { label: "Waiting for a free slot", tone: "neutral", kind: "queued" };
     case "paused":
@@ -161,6 +182,64 @@ export function readUserQuestion(
   };
 }
 
+/* ------------------------------------------------------------------ */
+/* Memories the agent wrote during the conversation                     */
+/* ------------------------------------------------------------------ */
+
+/** A `status` message the memory tool wrote because a record was stored. */
+export function isMemorySavedMessage(
+  message: Pick<ConversationMessage, "content_json" | "sender_type" | "message_type">,
+): boolean {
+  // Sender and type as well as the key. This is the one card whose entire
+  // purpose is to be evidence rather than a claim, so it must not render for
+  // anything a person could have written. No client can set content_json
+  // today -- the turn endpoints take only text -- but the guard belongs on the
+  // card that would be worth forging.
+  return (
+    message.content_json.kind === "memory_saved" &&
+    message.sender_type === "agent" &&
+    message.message_type === "status"
+  );
+}
+
+const MEMORY_SCOPES: ReadonlySet<string> = new Set(["agent", "team", "workspace"]);
+
+/** Last resort when the payload has no `scope_label`. Deliberately vague
+ * about *which* team: the platform owns the real name, and inventing one here
+ * would be the mislabelling this card exists to catch. */
+const SCOPE_FALLBACKS: Record<MemoryScope, string> = {
+  agent: "just you and me",
+  team: "your team",
+  workspace: "everyone in the workspace",
+};
+
+/**
+ * Normalize a `memory_saved` receipt into something the card can render
+ * without guarding every field. Returns null when the message is not one.
+ *
+ * `action` decides the heading; the replaced words are shown whenever they
+ * are there, so a payload that forgot to say "updated" still shows the change
+ * rather than quietly dropping what was overwritten.
+ */
+export function readMemorySaved(
+  message: Pick<ConversationMessage, "content_json" | "sender_type" | "message_type">,
+): MemorySavedContent | null {
+  if (!isMemorySavedMessage(message)) return null;
+  const content = message.content_json;
+  const rawScope = str(content.scope);
+  const scope = MEMORY_SCOPES.has(rawScope) ? (rawScope as MemoryScope) : null;
+  return {
+    kind: "memory_saved",
+    memory_id: str(content.memory_id),
+    action: str(content.action) === "updated" ? "updated" : "saved",
+    scope,
+    scope_label: str(content.scope_label) || (scope ? SCOPE_FALLBACKS[scope] : "this agent"),
+    content: str(content.content),
+    superseded: str(content.superseded),
+    still_standing: str(content.still_standing),
+  };
+}
+
 /** Who a structured message was aimed at, when the backend recorded it. */
 function messageTarget(message: Pick<ConversationMessage, "content_json">): string {
   const content = message.content_json;
@@ -175,6 +254,10 @@ export function friendlyMessageLabel(
 ): string {
   const content = message.content_json;
   if (isWorkRequestMessage(message)) return workRequestMessageLabel({ content_json: content, sender_id: null });
+  const memory = readMemorySaved(message);
+  if (memory !== null) {
+    return memory.action === "updated" ? "Updated a memory" : "Remembered something";
+  }
   const question = readUserQuestion(message);
   if (question !== null) {
     const agent = question.asked_by_agent_name || "Your agent";
@@ -240,6 +323,10 @@ export function isWorkCard(
   // card, with the controls the whole thread is blocked on. Explicit rather
   // than incidental, so a later change to WORK_CARD_TYPES cannot bury it.
   if (isUserQuestionMessage(message)) return false;
+  // Same story for a memory receipt: it arrives as a `status` message, and the
+  // generic work card would render it as "Shared an update" with the
+  // remembered words clamped into a preview. It has its own card.
+  if (isMemorySavedMessage(message)) return false;
   return message.sender_type === "agent" && WORK_CARD_TYPES.has(message.message_type);
 }
 
@@ -371,6 +458,11 @@ function messageExchangeInfo(
   // folding it into a collapsed exchange row would hide the one control the
   // conversation is waiting on behind a disclosure triangle.
   if (isUserQuestionMessage(message)) return null;
+  // Nor is a memory receipt, wherever it came from. A memory written while a
+  // colleague was doing the work is still a memory in this workspace, and the
+  // moment the person is most likely to catch a wrong one is when it appears
+  // — not behind a disclosure triangle they have no reason to open.
+  if (isMemorySavedMessage(message)) return null;
   const content = message.content_json;
   const sender: ExchangeParty = { id: message.agent_id, name: message.sender_name ?? "" };
   const target: ExchangeParty = {

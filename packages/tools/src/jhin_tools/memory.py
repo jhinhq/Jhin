@@ -6,6 +6,12 @@ subject, so another agent's private memory can never be returned, and a
 proposal is routed through deterministic policy with the current task as its
 source (the model cannot pick a source, activate workspace memory, or
 broaden visibility).
+
+A proposal that actually stores something also writes one visible chat card
+(``kind: "memory_saved"``), because "I recorded that" in the agent's prose is
+a claim and not evidence: the two bugs this card exists for were a correction
+the agent acknowledged and never stored, and a save the person believed was
+company-wide that landed on one agent. See :func:`_write_memory_card`.
 """
 
 from __future__ import annotations
@@ -17,11 +23,24 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
-from jhin_db.models import UserQuestion
-from jhin_domain import ActorType, MemoryKind, MemoryScope, UserQuestionStatus
+from jhin_db.models import Conversation, MemoryRecord, Message, Team, UserQuestion
+from jhin_domain import (
+    MEMORY_RETRIEVABLE_STATUSES,
+    ActorType,
+    MemoryKind,
+    MemoryScope,
+    MessageType,
+    MessageVisibility,
+    RecipientType,
+    SenderType,
+    UserQuestionStatus,
+    new_uuid7,
+    structured_content,
+)
 from jhin_memory import (
     ActorFacts,
     MemoryCandidate,
+    SourceFacts,
     apply_candidates,
     build_memory_context,
     derive_source_facts,
@@ -278,6 +297,130 @@ async def _authorized_actor(
     )
 
 
+# The scope, in the words a person uses about it. Written here from the
+# stored record, never by the model — for the same reason the ask_person
+# options are not: a card reading "the Platform team" over a workspace-wide
+# write is the mislabelling bug again, one surface along.
+_SCOPE_LABELS: dict[str, str] = {
+    MemoryScope.AGENT.value: "just you and me",
+    MemoryScope.WORKSPACE.value: "everyone in the workspace",
+}
+
+# Memory the agent will actually recall. A record still ``proposed`` pending
+# human review is stored but not yet memory, and the card must not say it is.
+_RECALLABLE_STATUSES = frozenset(s.value for s in MEMORY_RETRIEVABLE_STATUSES)
+
+
+async def _scope_label(ctx: ToolExecutionContext, record: MemoryRecord) -> str:
+    if record.scope != MemoryScope.TEAM.value:
+        return _SCOPE_LABELS.get(record.scope, "just you and me")
+    # ``scope_id`` is the team the record was actually filed under, which is
+    # not necessarily the calling agent's own team.
+    name = await ctx.session.scalar(
+        select(Team.name).where(Team.id == record.scope_id, Team.workspace_id == ctx.workspace_id)
+    )
+    return f"the {name} team" if name else "your team"
+
+
+async def _conflicting_memory(ctx: ToolExecutionContext, record: MemoryRecord) -> str:
+    """An older recallable memory on the same subject and scope that this one
+    did not replace. Empty when there is none, or when the subject is blank --
+    without a subject there is nothing to be confident is the same topic, and
+    a false "still active" warning would be its own kind of noise."""
+    subject = (record.subject or "").strip()
+    if not subject:
+        return ""
+    previous = await ctx.session.scalar(
+        select(MemoryRecord)
+        .where(
+            MemoryRecord.workspace_id == ctx.workspace_id,
+            MemoryRecord.id != record.id,
+            MemoryRecord.scope == record.scope,
+            MemoryRecord.scope_id == record.scope_id,
+            MemoryRecord.subject == record.subject,
+            MemoryRecord.status.in_(_RECALLABLE_STATUSES),
+        )
+        .order_by(MemoryRecord.created_at.desc())
+        .limit(1)
+    )
+    return previous.content if previous is not None else ""
+
+
+async def _write_memory_card(
+    ctx: ToolExecutionContext, record: MemoryRecord, source: SourceFacts
+) -> None:
+    """One visible chat row saying what was stored, at which scope, in whose words.
+
+    Written from the persisted record inside the same transaction as the
+    record itself, so the card and the memory are true together or neither
+    exists. Exactly one card per stored record follows from that: a proposal
+    that stores nothing (rejected, duplicate) never reaches here, a run that
+    proposes twice stores two records and gets two cards, and a gateway
+    replay of the same call re-proposes content that is now an exact
+    duplicate of itself — outcome ``duplicate``, no second card.
+
+    Only memory the agent will actually recall gets a card. A record still
+    ``proposed`` pending human review is not memory yet, and a card saying
+    "saved · everyone in the workspace" over one would be exactly the
+    over-claim this whole surface exists to stop.
+    """
+    if record.status not in _RECALLABLE_STATUSES:
+        return
+    superseded = ""
+    if record.supersedes_id is not None:
+        previous = await ctx.session.get(MemoryRecord, record.supersedes_id)
+        if previous is not None:
+            superseded = previous.content
+    # A correction the near-duplicate policy did not recognise as one stores a
+    # second record and leaves the first live, so the agent will recall both
+    # Wednesday and Thursday. The card is the surface meant to settle exactly
+    # that, and saying only "Remembered" sides against itself while the
+    # agent's own prose claims it replaced something. Name what is still
+    # standing so the person can retire it.
+    still_standing = ""
+    if record.supersedes_id is None:
+        still_standing = await _conflicting_memory(ctx, record)
+    conversation_id = source.ref.conversation_id
+    recipient_id: UUID | None = None
+    if conversation_id is not None:
+        recipient_id = await ctx.session.scalar(
+            select(Conversation.created_by_user_id).where(
+                Conversation.id == conversation_id,
+                Conversation.workspace_id == ctx.workspace_id,
+            )
+        )
+    ctx.session.add(
+        Message(
+            id=new_uuid7(),
+            workspace_id=ctx.workspace_id,
+            task_id=ctx.task_id,
+            run_id=ctx.run_id,
+            conversation_id=conversation_id,
+            sender_type=SenderType.AGENT.value,
+            sender_id=ctx.agent_id,
+            recipient_type=RecipientType.USER.value,
+            recipient_id=recipient_id,
+            message_type=MessageType.STATUS.value,
+            content_json=structured_content(
+                # The summary is the remembered words themselves, so a
+                # renderer that does not know this card yet still shows what
+                # was stored rather than an empty row.
+                record.content,
+                kind="memory_saved",
+                memory_id=str(record.id),
+                action="updated" if record.supersedes_id is not None else "saved",
+                scope=record.scope,
+                scope_label=await _scope_label(ctx, record),
+                content=record.content,
+                superseded=superseded,
+                still_standing=still_standing,
+            ),
+            visibility=MessageVisibility.VISIBLE.value,
+        )
+    )
+    await ctx.session.flush()
+
+
 async def _memory_propose(ctx: ToolExecutionContext, payload: BaseModel) -> BaseModel:
     data = cast(MemoryProposeInput, payload)
     actor, problem = await _authorized_actor(ctx, data)
@@ -317,6 +460,7 @@ async def _memory_propose(ctx: ToolExecutionContext, payload: BaseModel) -> Base
     if result.created:
         record_id = str(result.created[0].id)
         status = result.created[0].status
+        await _write_memory_card(ctx, result.created[0], source)
     elif decision.duplicate_of is not None:
         record_id = str(decision.duplicate_of)
         status = "duplicate"
