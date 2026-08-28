@@ -111,7 +111,7 @@ def test_old_snapshots_without_workspace_name_still_render() -> None:
 
 
 def test_preamble_is_versioned() -> None:
-    assert PLATFORM_PREAMBLE_VERSION == 8
+    assert PLATFORM_PREAMBLE_VERSION == 11
 
 
 def test_preamble_tells_agents_to_look_before_saying_they_do_not_know() -> None:
@@ -144,3 +144,31 @@ def test_preamble_tells_agents_to_wait_for_the_colleague_and_answer_themselves()
     assert text.index("Before you tell anyone") < text.index(
         "You act only through the tools you have been granted"
     )
+
+
+def test_preamble_makes_the_agent_decide_who_a_fact_is_true_for() -> None:
+    """Left to itself the model files everything at 'agent' scope, so a fact
+    the whole company needs ends up private to one agent. The preamble states
+    the decision procedure, and says whose answer authorises a wider memory."""
+    text = render_platform_preamble(agent_name="Connie")
+    assert "decide who the fact is true for" in text
+    assert "save it at 'agent' scope" in text
+    assert "ask-a-person tool" in text
+    # Asking has to be the instruction, not a suggestion: measured live, agents
+    # asked on only 3 of 11 group facts and filed the rest as their own.
+    assert "**Ask.**" in text
+    assert "never your guess, is what authorises" in text
+    # And a memory the agent did not write is never reported as one.
+    assert '"noted"' in text
+    assert "stand in for a memory you did not write" in text
+
+
+def test_preamble_tells_agents_to_ask_rather_than_guess_a_missing_detail() -> None:
+    """And to state an assumption out loud when nobody answers, rather than
+    hanging or inventing one."""
+    text = render_platform_preamble(agent_name="Connie")
+    assert "ask them for it instead of guessing" in text
+    assert "two to four answers" in text
+    assert "room to type their own" in text
+    assert "Ask once, wait for the answer, and use it" in text
+    assert "did not hear back" in text

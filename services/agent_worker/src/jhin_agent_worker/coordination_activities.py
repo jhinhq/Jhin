@@ -13,6 +13,11 @@ Integration points for ``AgentActivities`` (documented in
   ``pending_review`` and ``commit_agent_step`` lifts it into
   ``StepResult.waiting_review_id`` so the workflow parks; ``blocked`` is a
   recorded denial carrying the feedback.
+- ``commit_agent_step`` → for each executed ``organization.ask_person`` call
+  that reached somebody, lift it with :func:`person_question_ask_from_output`
+  into ``StepResult.person_questions`` so the workflow holds the turn open
+  for the answer, and suppress that call's ``tool_result`` message — the
+  answer is written later, once, by ``deliver_question_answer``.
 - ``commit_agent_step`` → for each executed work-request call, lift the
   outcome with :func:`work_request_start_from_output` into
   ``StepResult.work_request_starts`` — carrying which *side* of the ask the
@@ -42,6 +47,7 @@ from jhin_db.models import Agent, AgentCapabilityGrant, ReviewPolicy, Task
 from jhin_domain import ReviewMode, TaskState
 from jhin_observability import get_logger
 from jhin_policy import GrantEffect
+from jhin_tools.ask_person import asked_question_id
 from jhin_tools.directory import build_roster, render_roster
 from jhin_tools.reviews import open_periodic_review
 from jhin_tools.rollups import build_manager_rollup, render_manager_rollup
@@ -51,6 +57,7 @@ from jhin_workflows.agent_task.shared import (
     WORK_REQUEST_SIDE_REQUESTER,
     WORK_REQUEST_SIDE_RESPONDER,
     MarkTaskPausedInput,
+    PersonQuestionAsk,
     ReviewDecisionSignal,
     WorkRequestStart,
 )
@@ -109,6 +116,22 @@ def work_request_start_from_output(
         agent_id=str(agent_id) if isinstance(agent_id, str) else "",
         side=side,
     )
+
+
+def person_question_ask_from_output(
+    output: dict[str, Any] | None, *, tool_name: str
+) -> PersonQuestionAsk | None:
+    """Lift an executed ask that reached somebody into the workflow contract.
+
+    The decision itself lives in :func:`jhin_tools.ask_person.asked_question_id`,
+    which the tool worker reads too: the projection's suppression, its lift,
+    and the tool worker's ``stop_reason`` must never disagree about whether a
+    step parked, and the tool worker cannot import this service.
+    """
+    question_id = asked_question_id(output, tool_name=tool_name)
+    if not question_id:
+        return None
+    return PersonQuestionAsk(question_id=question_id)
 
 
 def review_decision_from_output(output: dict[str, Any] | None) -> ReviewDecisionSignal | None:

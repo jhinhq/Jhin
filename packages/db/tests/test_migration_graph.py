@@ -167,10 +167,28 @@ def test_membership_settings_directly_follows_0028() -> None:
     assert membership_settings.down_revision == "0028"
 
 
-def test_mcp_server_slug_unique_directly_follows_0029_and_is_the_head() -> None:
+def test_mcp_server_slug_unique_directly_follows_0029() -> None:
     scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
     server_slug = scripts.get_revision("0030")
 
     assert server_slug is not None
     assert server_slug.down_revision == "0029"
-    assert list(scripts.get_heads()) == ["0030"], "the migration graph must stay linear"
+
+
+def test_user_questions_directly_follows_0030() -> None:
+    scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
+    questions = scripts.get_revision("0031")
+
+    assert questions is not None
+    assert questions.down_revision == "0030"
+
+
+def test_default_memory_grants_directly_follows_0031_and_is_the_head() -> None:
+    """The backfill lands after the table it has nothing to do with, because
+    a chain with two heads is a chain nobody can upgrade."""
+    scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
+    grants = scripts.get_revision("0032")
+
+    assert grants is not None
+    assert grants.down_revision == "0031"
+    assert list(scripts.get_heads()) == ["0032"], "the migration graph must stay linear"

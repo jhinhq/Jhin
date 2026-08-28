@@ -7,8 +7,9 @@ model configuration — so these tools handle identity and placement only:
 - ``organization.create_agent`` (elevated → human approval under the default
   balanced policy) creates an ACTIVE agent with safe defaults: the workspace
   default model profile, default run limits, a shape avatar, and the
-  safe-by-default *collaboration* baseline (find colleagues, ask peers for
-  help, respond to requests — :func:`jhin_policy.collaboration_grant_specs`).
+  platform default grant set (find colleagues, ask peers for help, respond
+  to requests, remember, and ask the person you are talking to —
+  :func:`jhin_policy.default_agent_grant_specs`).
   This baseline is a fixed platform default, not a capability the calling
   agent chooses; granting any *other* tool remains a human admin action, and
   higher-authority capabilities (delegation, connectors, sandbox, agent
@@ -53,7 +54,7 @@ from jhin_policy import (
     PolicyDecision,
     RiskLevel,
     ToolDefinition,
-    collaboration_grant_specs,
+    default_agent_grant_specs,
 )
 from jhin_tools.builtin import ToolExecutionContext, ToolExecutor, ToolValidator
 from jhin_tools.directory import (
@@ -308,10 +309,11 @@ async def _create_agent(ctx: ToolExecutionContext, payload: BaseModel) -> BaseMo
                 is_primary=True,
             )
         )
-    # Safe-by-default collaboration baseline (a fixed platform default, not
-    # an agent-chosen grant): the new teammate can find colleagues, ask peers
-    # for help, and answer requests. Nothing higher-authority is granted.
-    for capability, scope in collaboration_grant_specs():
+    # Safe-by-default baseline (a fixed platform default, not an agent-chosen
+    # grant): the new teammate can find colleagues, ask peers for help, answer
+    # requests, remember what it is told, and ask the person it is talking to
+    # when something is unclear. Nothing higher-authority is granted.
+    for capability, scope in default_agent_grant_specs():
         session.add(
             AgentCapabilityGrant(
                 workspace_id=ctx.workspace_id,

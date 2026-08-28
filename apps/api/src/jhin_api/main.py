@@ -43,6 +43,7 @@ from jhin_api.openapi import (
 from jhin_api.openapi import router as openapi_router
 from jhin_api.org.router import router as org_router
 from jhin_api.policy.router import router as policy_router
+from jhin_api.questions.router import router as questions_router
 from jhin_api.secrets.router import router as secrets_router
 from jhin_api.security.headers import SecurityHeadersMiddleware
 from jhin_api.security.limits import RequestSizeLimitMiddleware
@@ -445,6 +446,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(agent_skills_router)
     app.include_router(policy_router)
     app.include_router(approvals_router)
+    app.include_router(questions_router)
     app.include_router(connectors_catalog_router)
     app.include_router(connections_router)
     app.include_router(triggers_router)

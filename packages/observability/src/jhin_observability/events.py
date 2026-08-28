@@ -122,6 +122,19 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
         "task_id": FieldKind.ID,
         "paused": FieldKind.BOOL,
     },
+    # The person's answer (or the fact that nobody answered) reached the run
+    # that parked on the question.
+    "question.delivered": {
+        "question_id": FieldKind.ID,
+        "outcome": FieldKind.ENUM,
+        "status": FieldKind.ENUM,
+    },
+    # Best-effort tidy-up of a question whose run ended before it was
+    # answered; the row is closed so the card stops inviting an answer.
+    "question.close_failed": {
+        "run_id": FieldKind.ID,
+        "error_type": FieldKind.ERROR_TYPE,
+    },
     "work_request.unanswered": {
         "work_request_id": FieldKind.ID,
         "outcome": FieldKind.ENUM,

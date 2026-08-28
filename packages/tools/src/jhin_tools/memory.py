@@ -10,11 +10,15 @@ broaden visibility).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import cast
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
 
-from jhin_domain import ActorType, MemoryKind, MemoryScope
+from jhin_db.models import UserQuestion
+from jhin_domain import ActorType, MemoryKind, MemoryScope, UserQuestionStatus
 from jhin_memory import (
     ActorFacts,
     MemoryCandidate,
@@ -93,6 +97,10 @@ class MemoryProposeInput(BaseModel):
     confidence: float = Field(default=0.7, ge=0.0, le=1.0)
     importance: float = Field(default=0.5, ge=0.0, le=1.0)
     requested_scope: MemoryScope = MemoryScope.AGENT
+    # The id of an answered organization.ask_person question whose answer
+    # authorises a scope wider than this chat could reach on its own. It is
+    # only a pointer: every fact that matters is re-read from the row.
+    authorized_by_question_id: str | None = Field(default=None, max_length=64)
 
 
 class MemoryProposeOutput(BaseModel):
@@ -111,11 +119,11 @@ class MemoryProposeOutput(BaseModel):
 # sentence rather than a code.
 _REASON_DETAIL: dict[str, str] = {
     "non_amplification": (
-        "Not saved. This conversation is only visible to you and the person in "
-        "it, so what is said here can become your own memory but not the "
-        "team's. Propose it again with requested_scope 'agent' to remember it "
-        "yourself, and tell the person that a team-wide memory has to be added "
-        "by someone on the Memories page."
+        "Not saved at that scope. A chat is between you and one person, so it "
+        "can become your own memory on its own. To remember it for the team or "
+        "the company, ask them with organization.ask_person (kind "
+        "'memory_scope') and propose again with authorized_by_question_id set "
+        "to their answer."
     ),
     "insufficient_authority": (
         "Not saved: that scope is wider than the person asking is allowed to "
@@ -159,8 +167,128 @@ def _propose_detail(outcome: str, status: str, reasons: tuple[str, ...] | list[s
     return "Recorded."
 
 
+# Why a cited answer did not authorise this memory. Each one is a way the
+# model could otherwise have widened a memory on its own say-so, so none of
+# them falls back to an agent-scoped save: a memory quietly filed as the
+# agent's own, when the person believes it is company-wide, is worse than a
+# refusal the agent has to relay.
+_GRANT_DETAIL: dict[str, str] = {
+    "question_not_found": (
+        "Not saved. There is no such question in this workspace, so nothing "
+        "authorises a wider memory. Ask them with organization.ask_person "
+        "first, then propose once with the id that call returns."
+    ),
+    "question_not_yours": (
+        "Not saved. That question was asked by a different agent, and their "
+        "answer is not yours to spend. Ask the person yourself."
+    ),
+    "question_not_this_run": (
+        "Not saved. That answer was given in an earlier run and no longer "
+        "authorises anything. Ask again now if you still need the scope."
+    ),
+    "question_not_answered": (
+        "Not saved. They have not answered that question yet, so nothing is "
+        "authorised. Wait for the answer rather than assuming it."
+    ),
+    "scope_not_authorized": (
+        "Not saved. Their answer did not authorise a wider memory. Propose it "
+        "again with requested_scope 'agent' and no authorized_by_question_id, "
+        "and tell them who could record it more widely."
+    ),
+    "scope_mismatch": (
+        "Not saved. They authorised a different scope from the one you asked "
+        "for. Propose it with requested_scope set to exactly the scope in "
+        "the answer."
+    ),
+    "grant_already_used": (
+        "Not saved. You already used their answer for one memory. Ask again "
+        "if there is a second fact to record."
+    ),
+}
+
+
+def _grant_problem(
+    row: UserQuestion | None, ctx: ToolExecutionContext, requested_scope: MemoryScope
+) -> str | None:
+    """The first reason this answer does not authorise this memory.
+
+    Every check reads the Postgres row, never the tool arguments: the model
+    supplies an id and nothing else, and an id is not a claim.
+    """
+    if row is None:
+        return "question_not_found"
+    if row.agent_id != ctx.agent_id:
+        return "question_not_yours"
+    # An answer authorises the turn it was given in. Without this, a question
+    # answered last month would still be authorising memories today.
+    if row.run_id != ctx.run_id:
+        return "question_not_this_run"
+    if row.status != UserQuestionStatus.ANSWERED.value:
+        return "question_not_answered"
+    if not row.granted_scope:
+        return "scope_not_authorized"
+    if row.granted_scope != requested_scope.value:
+        return "scope_mismatch"
+    # One answer is worth exactly one memory. The tool-call escape keeps a
+    # gateway replay of the *same* call idempotent rather than refusing it.
+    if row.grant_consumed_at is not None and row.grant_consumed_tool_call_id != ctx.tool_call_id:
+        return "grant_already_used"
+    return None
+
+
+async def _authorized_actor(
+    ctx: ToolExecutionContext, data: MemoryProposeInput
+) -> tuple[ActorFacts, str | None]:
+    """The actor this proposal is made as, and why it could not be widened.
+
+    Without a cited question it is the agent itself, exactly as before. With
+    one, it becomes the person who answered — carrying the RBAC ceiling the
+    API recorded at answer time — and ``authored_by_model`` keeps the quality
+    screens on, because they authorised the scope and not the wording.
+    """
+    agent_actor = ActorFacts(actor_type=ActorType.AGENT, actor_id=ctx.agent_id)
+    if not data.authorized_by_question_id:
+        return agent_actor, None
+    try:
+        question_id = UUID(data.authorized_by_question_id)
+    except ValueError:
+        return agent_actor, "question_not_found"
+    row = await ctx.session.scalar(
+        select(UserQuestion)
+        .where(
+            UserQuestion.id == question_id,
+            UserQuestion.workspace_id == ctx.workspace_id,
+        )
+        .with_for_update()
+    )
+    problem = _grant_problem(row, ctx, data.requested_scope)
+    if problem is not None or row is None:
+        return agent_actor, problem or "question_not_found"
+    row.grant_consumed_at = datetime.now(UTC)
+    row.grant_consumed_tool_call_id = ctx.tool_call_id
+    return (
+        ActorFacts(
+            actor_type=ActorType.USER,
+            actor_id=row.answered_by_user_id,
+            explicit=True,
+            authority=MemoryScope(row.granted_authority),
+            authored_by_model=True,
+        ),
+        None,
+    )
+
+
 async def _memory_propose(ctx: ToolExecutionContext, payload: BaseModel) -> BaseModel:
     data = cast(MemoryProposeInput, payload)
+    actor, problem = await _authorized_actor(ctx, data)
+    if problem is not None:
+        return MemoryProposeOutput(
+            outcome="reject",
+            status="none",
+            memory_id="",
+            reasons=[problem],
+            detail=_GRANT_DETAIL[problem],
+        )
     source = await derive_source_facts(
         ctx.session, workspace_id=ctx.workspace_id, agent_id=ctx.agent_id, task_id=ctx.task_id
     )
@@ -181,7 +309,7 @@ async def _memory_propose(ctx: ToolExecutionContext, payload: BaseModel) -> Base
         ctx.session,
         candidates=[candidate],
         source=source,
-        actor=ActorFacts(actor_type=ActorType.AGENT, actor_id=ctx.agent_id),
+        actor=actor,
     )
     decision = result.decisions[0]
     record_id = ""
@@ -229,12 +357,18 @@ MEMORY_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor, ToolValidator | None], .
                 "records nothing, and you will state the old value again in the "
                 "next conversation. A correction supersedes the memory it "
                 "replaces; propose it the same way you proposed the original. "
-                "Use "
-                "requested_scope 'agent' unless you know the source was wider: "
-                "an ordinary chat with a person is private to the two of you, "
-                "so it can only become your own memory. Team memory needs a "
-                "team-visible source such as work shared with a teammate, and "
-                "workspace memory is queued for human review. A rejected "
+                "Use requested_scope 'agent' by default: an ordinary chat is "
+                "between you and one person, and what is said there is your "
+                "memory unless they say otherwise. When the fact is about a "
+                "team or the whole company, first ask them with "
+                "organization.ask_person (kind 'memory_scope'), then propose "
+                "once with requested_scope set to the scope they chose and "
+                "authorized_by_question_id set to that question's id -- their "
+                "answer is what authorises the wider memory, not your reading "
+                "of the conversation. Never pass authorized_by_question_id for "
+                "a question they did not answer, and never propose a wider "
+                "scope than the one they picked; both are refused and the "
+                "memory is lost. A rejected "
                 "proposal comes back with a `detail` sentence saying what would "
                 "work instead -- relay that, not the reason codes. Never "
                 "include secrets or credentials."

@@ -346,6 +346,7 @@ BUILTIN_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor], ...] = (
 
 def builtin_tool_definitions() -> tuple[ToolDefinition, ...]:
     """Built-in definitions without importing any executor into the caller."""
+    from jhin_tools.ask_person import ASK_PERSON_TOOLS
     from jhin_tools.directory import DIRECTORY_TOOLS
     from jhin_tools.memory import MEMORY_TOOLS
     from jhin_tools.organization import ORGANIZATION_TOOLS
@@ -363,6 +364,7 @@ def builtin_tool_definitions() -> tuple[ToolDefinition, ...]:
             *WORK_REQUEST_TOOLS,
             *REVIEW_TOOLS,
             *MEMORY_TOOLS,
+            *ASK_PERSON_TOOLS,
             *SKILL_TOOLS,
         )
     )
@@ -375,6 +377,7 @@ def build_builtin_catalog() -> ToolCatalog:
     definitions and executors."""
     # Local import: jhin_tools.organization imports ToolExecutionContext
     # from this module.
+    from jhin_tools.ask_person import ASK_PERSON_TOOLS
     from jhin_tools.directory import DIRECTORY_TOOLS
     from jhin_tools.memory import MEMORY_TOOLS
     from jhin_tools.organization import ORGANIZATION_TOOLS
@@ -395,6 +398,7 @@ def build_builtin_catalog() -> ToolCatalog:
         *WORK_REQUEST_TOOLS,
         *REVIEW_TOOLS,
         *MEMORY_TOOLS,
+        *ASK_PERSON_TOOLS,
         *SKILL_TOOLS,
     ):
         catalog.register(definition, org_executor, validator)
@@ -455,17 +459,45 @@ def task_expects_a_reported_result(task: Task | None) -> bool:
     return not (metadata.get("origin") in _CONVERSATION_ORIGINS or task.conversation_id is not None)
 
 
+# Tools that put something on a person's screen and wait. They mean nothing
+# on work nobody is watching: a trigger-fired run, a delegated child, an
+# accepted work request. Withheld there by default — the inverse of
+# DELEGATION_REPORTING_TOOLS, which is withheld only on chat turns.
+PERSON_FACING_TOOLS = frozenset({"organization.ask_person"})
+
+
+def task_has_a_person_watching(task: Task | None) -> bool:
+    """True only for a turn in a chat thread a person opened.
+
+    ``None`` (task unknown) is False, deliberately the opposite default to
+    ``task_expects_a_reported_result``: withholding a report is prompt
+    economy, withholding an interruption is a promise to the person.
+    """
+    if task is None:
+        return False
+    # A delegated or review child reports into its parent; the person is
+    # watching that thread, and a box on the child's task page would land
+    # where nobody is looking.
+    if task.parent_task_id is not None:
+        return False
+    metadata = task.metadata_json if isinstance(task.metadata_json, dict) else {}
+    if metadata.get("delegation") or metadata.get("work_request"):
+        return False
+    return task.conversation_id is not None or metadata.get("origin") in _CONVERSATION_ORIGINS
+
+
 def task_scoped_tool_definitions(
     definitions: Sequence[ToolDefinition], task: Task | None
 ) -> tuple[ToolDefinition, ...]:
     """Narrow advertised definitions to those meaningful for ``task``."""
-    if task_expects_a_reported_result(task):
+    withheld: set[str] = set()
+    if not task_expects_a_reported_result(task):
+        withheld |= DELEGATION_REPORTING_TOOLS
+    if not task_has_a_person_watching(task):
+        withheld |= PERSON_FACING_TOOLS
+    if not withheld:
         return tuple(definitions)
-    return tuple(
-        definition
-        for definition in definitions
-        if definition.name not in DELEGATION_REPORTING_TOOLS
-    )
+    return tuple(definition for definition in definitions if definition.name not in withheld)
 
 
 def connection_hints(

@@ -5,6 +5,7 @@ routed (never activates workspace memory, never amplifies visibility)."""
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -12,8 +13,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from jhin_db.base import Base
-from jhin_db.models import Agent, AgentCapabilityGrant, MemoryRecord, Task, Team, Workspace
-from jhin_domain import MemoryScope, MemoryStatus, TaskState, new_uuid7
+from jhin_db.models import (
+    Agent,
+    AgentCapabilityGrant,
+    MemoryRecord,
+    Task,
+    Team,
+    User,
+    UserQuestion,
+    Workspace,
+)
+from jhin_domain import MemoryScope, MemoryStatus, TaskState, UserQuestionStatus, new_uuid7
 from jhin_tools.builtin import ToolExecutionContext, build_builtin_catalog
 from jhin_tools.gateway import GatewayOutcome, ToolGateway
 
@@ -26,12 +36,18 @@ class Org:
     task: Task
     team_task: Task
 
-    def gateway(self, session: AsyncSession, agent: Agent, task: Task | None = None) -> ToolGateway:
+    def gateway(
+        self,
+        session: AsyncSession,
+        agent: Agent,
+        task: Task | None = None,
+        run_id: Any = None,
+    ) -> ToolGateway:
         ctx = ToolExecutionContext(
             session=session,
             workspace_id=self.workspace.id,
             task_id=(task or self.task).id,
-            run_id=new_uuid7(),
+            run_id=run_id or new_uuid7(),
             agent_id=agent.id,
             agent_name=agent.name,
         )
@@ -122,10 +138,17 @@ async def search(session: AsyncSession, org: Org, agent: Agent, query: str) -> G
 
 
 async def propose(
-    session: AsyncSession, org: Org, agent: Agent, task: Task | None = None, **body: Any
+    session: AsyncSession,
+    org: Org,
+    agent: Agent,
+    task: Task | None = None,
+    run_id: Any = None,
+    **body: Any,
 ) -> GatewayOutcome:
     payload = {"content": "We deploy on Tuesdays.", **body}
-    return await org.gateway(session, agent, task).request("memory.propose", json.dumps(payload))
+    return await org.gateway(session, agent, task, run_id).request(
+        "memory.propose", json.dumps(payload)
+    )
 
 
 class TestSearch:
@@ -231,3 +254,219 @@ class TestPropose:
         await grant(session, org, org.me, "memory.propose")
         outcome = await propose(session, org, org.me, status="active")
         assert outcome.status != "executed"
+
+
+class TestAnsweredScopeGrant:
+    """A memory wider than the chat it came from is authorised by a row the
+    API wrote, and by nothing the model says. Every check re-reads that row.
+    """
+
+    @staticmethod
+    async def answered_question(
+        session: AsyncSession,
+        org: Org,
+        *,
+        run_id: Any,
+        agent: Agent | None = None,
+        granted_scope: str = "team",
+        granted_authority: str = "workspace",
+        status: str = UserQuestionStatus.ANSWERED.value,
+        answered_by: User | None = None,
+        consumed_at: Any = None,
+    ) -> UserQuestion:
+        question = UserQuestion(
+            workspace_id=org.workspace.id,
+            conversation_id=None,
+            task_id=org.task.id,
+            run_id=run_id,
+            agent_id=(agent or org.me).id,
+            kind="memory_scope",
+            question="Is this only for Engineering, or company wide?",
+            options_json=[{"value": "team", "label": "Only Engineering"}],
+            dedupe_hash=new_uuid7().hex,
+            idempotency_key=new_uuid7().hex,
+            status=status,
+            asked_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(minutes=30),
+            answered_at=datetime.now(UTC),
+            answered_by_user_id=answered_by.id if answered_by is not None else None,
+            answer_kind="option",
+            answer_option_value=granted_scope or "team",
+            answer_text="Only the Engineering team",
+            granted_scope=granted_scope,
+            granted_authority=granted_authority,
+            grant_consumed_at=consumed_at,
+        )
+        session.add(question)
+        await session.flush()
+        return question
+
+    async def test_an_answer_lets_a_team_memory_out_of_a_private_chat(
+        self, session: AsyncSession, org: Org
+    ) -> None:
+        """The case the whole feature exists for: a 1:1 chat is agent-visible,
+        so without the answer this is `non_amplification`."""
+        await grant(session, org, org.me, "memory.propose")
+        run_id = new_uuid7()
+        person = User(
+            email=f"v-{new_uuid7().hex[:8]}@example.com", display_name="Varand", password_hash="x"
+        )
+        session.add(person)
+        await session.flush()
+        question = await self.answered_question(session, org, run_id=run_id, answered_by=person)
+        outcome = await propose(
+            session,
+            org,
+            org.me,
+            run_id=run_id,
+            content="Engineering deploys on Mondays at 9am PST.",
+            requested_scope="team",
+            authorized_by_question_id=str(question.id),
+        )
+        output = outcome.sanitized_output or {}
+        assert output["outcome"] == "activate", output
+        record = await session.scalar(select(MemoryRecord))
+        assert record is not None
+        assert record.scope == "team"
+        assert record.scope_id == org.team.id
+        # The memory is attributed to the person whose authority it used.
+        assert record.created_by_type == "user"
+        assert record.created_by_id == person.id
+        # And the answer is spent.
+        assert question.grant_consumed_at is not None
+
+    @pytest.mark.parametrize(
+        ("mutate", "expected"),
+        [
+            ({"granted_scope": ""}, "scope_not_authorized"),
+            ({"granted_scope": "workspace"}, "scope_mismatch"),
+            ({"status": UserQuestionStatus.PENDING.value}, "question_not_answered"),
+        ],
+    )
+    async def test_the_row_decides_not_the_argument(
+        self, session: AsyncSession, org: Org, mutate: dict[str, Any], expected: str
+    ) -> None:
+        await grant(session, org, org.me, "memory.propose")
+        run_id = new_uuid7()
+        question = await self.answered_question(session, org, run_id=run_id, **mutate)
+        outcome = await propose(
+            session,
+            org,
+            org.me,
+            run_id=run_id,
+            content="Engineering deploys on Mondays at 9am PST.",
+            requested_scope="team",
+            authorized_by_question_id=str(question.id),
+        )
+        output = outcome.sanitized_output or {}
+        assert output["outcome"] == "reject"
+        assert output["reasons"] == [expected]
+        assert output["detail"] and expected not in output["detail"]
+        assert (await session.scalar(select(MemoryRecord))) is None
+
+    async def test_a_question_that_does_not_exist_authorises_nothing(
+        self, session: AsyncSession, org: Org
+    ) -> None:
+        await grant(session, org, org.me, "memory.propose")
+        outcome = await propose(
+            session,
+            org,
+            org.me,
+            content="Engineering deploys on Mondays at 9am PST.",
+            requested_scope="team",
+            authorized_by_question_id=str(new_uuid7()),
+        )
+        output = outcome.sanitized_output or {}
+        assert output["reasons"] == ["question_not_found"]
+        assert (await session.scalar(select(MemoryRecord))) is None
+
+    async def test_another_agents_answer_is_not_yours_to_spend(
+        self, session: AsyncSession, org: Org
+    ) -> None:
+        await grant(session, org, org.me, "memory.propose")
+        run_id = new_uuid7()
+        question = await self.answered_question(session, org, run_id=run_id, agent=org.other)
+        outcome = await propose(
+            session,
+            org,
+            org.me,
+            run_id=run_id,
+            content="Engineering deploys on Mondays at 9am PST.",
+            requested_scope="team",
+            authorized_by_question_id=str(question.id),
+        )
+        assert (outcome.sanitized_output or {})["reasons"] == ["question_not_yours"]
+
+    async def test_an_answer_from_an_earlier_run_no_longer_authorises(
+        self, session: AsyncSession, org: Org
+    ) -> None:
+        """What stops a question answered last month authorising a memory
+        today."""
+        await grant(session, org, org.me, "memory.propose")
+        question = await self.answered_question(session, org, run_id=new_uuid7())
+        outcome = await propose(
+            session,
+            org,
+            org.me,
+            run_id=new_uuid7(),
+            content="Engineering deploys on Mondays at 9am PST.",
+            requested_scope="team",
+            authorized_by_question_id=str(question.id),
+        )
+        assert (outcome.sanitized_output or {})["reasons"] == ["question_not_this_run"]
+
+    async def test_one_answer_is_worth_one_memory(self, session: AsyncSession, org: Org) -> None:
+        await grant(session, org, org.me, "memory.propose")
+        run_id = new_uuid7()
+        question = await self.answered_question(session, org, run_id=run_id)
+        first = await propose(
+            session,
+            org,
+            org.me,
+            run_id=run_id,
+            content="Engineering deploys on Mondays at 9am PST.",
+            requested_scope="team",
+            authorized_by_question_id=str(question.id),
+        )
+        assert (first.sanitized_output or {})["outcome"] == "activate"
+        second = await propose(
+            session,
+            org,
+            org.me,
+            run_id=run_id,
+            content="Engineering also freezes deploys in December.",
+            requested_scope="team",
+            authorized_by_question_id=str(question.id),
+        )
+        assert (second.sanitized_output or {})["reasons"] == ["grant_already_used"]
+        assert len(list(await session.scalars(select(MemoryRecord)))) == 1
+
+    async def test_a_refused_grant_never_falls_back_to_the_agents_own_memory(
+        self, session: AsyncSession, org: Org
+    ) -> None:
+        """A downgrade would file a memory as the agent's own while the
+        person believes it is company-wide. Nothing is saved instead."""
+        await grant(session, org, org.me, "memory.propose")
+        run_id = new_uuid7()
+        question = await self.answered_question(session, org, run_id=run_id, granted_scope="")
+        outcome = await propose(
+            session,
+            org,
+            org.me,
+            run_id=run_id,
+            content="Engineering deploys on Mondays at 9am PST.",
+            requested_scope="team",
+            authorized_by_question_id=str(question.id),
+        )
+        assert (outcome.sanitized_output or {})["outcome"] == "reject"
+        assert (await session.scalar(select(MemoryRecord))) is None
+
+    async def test_proposing_without_a_question_is_unchanged(
+        self, session: AsyncSession, org: Org
+    ) -> None:
+        await grant(session, org, org.me, "memory.propose")
+        outcome = await propose(session, org, org.me)
+        output = outcome.sanitized_output or {}
+        assert output["outcome"] == "activate"
+        record = await session.scalar(select(MemoryRecord))
+        assert record is not None and record.created_by_type == "agent"

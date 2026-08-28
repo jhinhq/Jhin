@@ -113,8 +113,9 @@ def evaluate_candidate(
     # 1b. Deterministic quality screening for model-proposed candidates: the
     # agent memorising its own identity, and near-empty content, are never
     # memory. An explicit human "remember this" bypasses (their statement,
-    # their call).
-    if not human_explicit:
+    # their call) — unless the person only authorised the *scope* and a model
+    # wrote the words, in which case nobody has vouched for the wording.
+    if not human_explicit or actor.authored_by_model:
         if is_self_referential(screened.content, agent_name):
             reasons.append("self_reference")
             return MemoryDecision(candidate=candidate, outcome="reject", reasons=tuple(reasons))

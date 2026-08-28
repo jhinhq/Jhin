@@ -914,6 +914,80 @@ export interface TurnOut {
   mode: "new_task" | "instruction";
 }
 
+// --- Questions an agent asks the person (ask-user contract §5) ---
+
+export type UserQuestionStatus = "pending" | "answered" | "expired" | "cancelled";
+
+export interface UserQuestionOption {
+  value: string;
+  label: string;
+  detail: string;
+}
+
+/**
+ * The `content_json` of a `message_type: "question"` row whose `kind` is
+ * `"user_question"`. It arrives on the ordinary messages poll and is
+ * **mutated in place** when the question is answered, expires, or is
+ * cancelled: same `Message.id`, different content. Nothing that reads it may
+ * memoise on the id alone.
+ */
+export interface UserQuestionContent {
+  kind: "user_question";
+  question_id: string;
+  question: string;
+  context: string;
+  question_kind: "open" | "memory_scope";
+  options: UserQuestionOption[];
+  allow_other: boolean;
+  other_label: string;
+  other_placeholder: string;
+  status: UserQuestionStatus;
+  expires_at: string;
+  asked_by_agent_name: string;
+  /** Present only once `status === "answered"`. */
+  answer_kind?: "option" | "other";
+  answer_option_value?: string;
+  answer?: string;
+  answered_by_name?: string;
+  answered_at?: string;
+}
+
+/** Exactly one of the two, never both, never neither. */
+export type AnswerQuestionIn = { option_value: string } | { other_text: string };
+
+export interface QuestionOut {
+  id: string;
+  workspace_id: string;
+  conversation_id: string | null;
+  task_id: string | null;
+  message_id: string | null;
+  agent_id: string;
+  agent_name: string | null;
+  kind: "open" | "memory_scope";
+  question: string;
+  context: string;
+  options: UserQuestionOption[];
+  allow_other: boolean;
+  status: UserQuestionStatus;
+  asked_at: string;
+  expires_at: string;
+  answered_at: string | null;
+  answered_by_user_id: string | null;
+  answered_by_name: string | null;
+  answer_kind: "" | "option" | "other";
+  answer_option_value: string;
+  answer_text: string;
+  granted_scope: "" | "agent" | "team" | "workspace";
+  grant_denied_reason: string;
+}
+
+export interface AnswerQuestionOut {
+  question: QuestionOut;
+  /** False when the answer was recorded but the run had already stopped
+   * waiting — the person is told to send it as a message instead. */
+  resumed: boolean;
+}
+
 export interface ConversationAgentSummary {
   id: string;
   name: string;

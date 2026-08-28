@@ -92,6 +92,12 @@ class ActorFacts(BaseModel):
     actor_id: UUID | None = None
     explicit: bool = False
     authority: MemoryScope = MemoryScope.AGENT
+    # True when a person authorised the *scope* but a model wrote the
+    # *words* (an agent's memory.propose citing an answered question). The
+    # explicit path still bypasses non-amplification — that is the point —
+    # but the quality screens stay on, because the person never vouched for
+    # the wording.
+    authored_by_model: bool = False
 
 
 class ScreeningResult(BaseModel):

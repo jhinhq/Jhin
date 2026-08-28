@@ -19,6 +19,7 @@ from jhin_api.org.hierarchy import would_create_cycle
 from jhin_api.slugs import slugify, with_suffix
 from jhin_db.models import (
     Agent,
+    AgentCapabilityGrant,
     AgentRelationship,
     AgentTeamMembership,
     ModelProfile,
@@ -26,6 +27,7 @@ from jhin_db.models import (
     Trigger,
 )
 from jhin_domain import AgentStatus, AvatarKind
+from jhin_policy import GrantEffect, default_agent_grant_specs
 
 
 async def list_agents(db: AsyncSession, workspace_id: UUID) -> list[Agent]:
@@ -439,6 +441,23 @@ async def create_agent(
         primary_team_id=primary_team_id,
         secondary_team_ids=secondary_team_ids,
     )
+    # The safe-by-default baseline every new teammate starts with: find a
+    # colleague, ask one for help, answer one, remember what it is told, and
+    # ask the person a question when it is genuinely unsure. Created with
+    # nothing at all, an agent could not do any of it, and the first thing
+    # anyone noticed was that it quietly failed to remember. Deny-by-default
+    # is unchanged -- this is what the default *is*, and delegation stays out
+    # of it.
+    for capability, scope in default_agent_grant_specs():
+        db.add(
+            AgentCapabilityGrant(
+                workspace_id=ctx.workspace_id,
+                agent_id=agent.id,
+                capability=capability,
+                scope_json=dict(scope),
+                effect=GrantEffect.ALLOW.value,
+            )
+        )
     audit.record(
         db,
         action="agent.created",

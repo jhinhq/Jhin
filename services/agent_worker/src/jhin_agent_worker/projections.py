@@ -17,6 +17,7 @@ from temporalio.client import Client as TemporalClient
 from temporalio.exceptions import ApplicationError
 
 from jhin_agent_worker.coordination_activities import (
+    person_question_ask_from_output,
     review_decision_from_output,
     work_request_start_from_output,
 )
@@ -36,6 +37,7 @@ from jhin_db.models import (
     RunEvent,
     Task,
     ToolCall,
+    UserQuestion,
     WorkReview,
     Workspace,
 )
@@ -47,6 +49,7 @@ from jhin_domain import (
     SenderType,
     TaskState,
     ToolCallStatus,
+    UserQuestionStatus,
     WorkReviewStatus,
 )
 from jhin_events import EventEnvelope, EventSource
@@ -71,6 +74,7 @@ from jhin_workflows.agent_task.shared import (
     CommitReviewProjectionInput,
     DelegationRequest,
     FinalizeInput,
+    PersonQuestionAsk,
     ReviewDecisionSignal,
     StepResult,
     WorkRequestStart,
@@ -206,6 +210,46 @@ async def _cancel_pending_run_approvals(
             stale_call.status = ToolCallStatus.REJECTED.value
             stale_call.completed_at = now
             stale_call.error_code = "run_ended"
+    return len(pending)
+
+
+async def _close_pending_run_questions(
+    session: AsyncSession,
+    *,
+    workspace_id: UUID,
+    run_id: UUID,
+) -> int:
+    """Close every question this run left on somebody's screen.
+
+    The agent that asked is gone, so an answer would reach nobody. Marking
+    the rows cancelled and stamping their messages is what turns a live
+    choice box into "… stopped before you answered" instead of a control
+    that silently does nothing. Best-effort inside the caller's
+    transaction: a failure here must never change the run's recorded
+    outcome.
+    """
+    pending = list(
+        await session.scalars(
+            select(UserQuestion)
+            .where(
+                UserQuestion.run_id == run_id,
+                UserQuestion.workspace_id == workspace_id,
+                UserQuestion.status == UserQuestionStatus.PENDING.value,
+            )
+            .with_for_update()
+        )
+    )
+    for question in pending:
+        question.status = UserQuestionStatus.CANCELLED.value
+        if question.message_id is None:
+            continue
+        message = await session.get(Message, question.message_id)
+        if message is None:
+            continue
+        message.content_json = {
+            **message.content_json,
+            "status": UserQuestionStatus.CANCELLED.value,
+        }
     return len(pending)
 
 
@@ -591,6 +635,16 @@ class AgentProjectionActivities:
                 type="step_result_malformed",
                 non_retryable=True,
             )
+        # Older bundles have no such key and simply carry none; a retry that
+        # dropped a live ask would leave the run reasoning again with no
+        # observation for a call the person is still looking at.
+        raw_person_questions = raw_result.get("person_questions", [])
+        if not isinstance(raw_person_questions, list):
+            raise ApplicationError(
+                "committed step person questions are malformed",
+                type="step_result_malformed",
+                non_retryable=True,
+            )
         try:
             result = StepResult(
                 done=bool(raw_result["done"]),
@@ -609,6 +663,11 @@ class AgentProjectionActivities:
                 review_decisions=[
                     ReviewDecisionSignal(**item)
                     for item in raw_review_decisions
+                    if isinstance(item, dict)
+                ],
+                person_questions=[
+                    PersonQuestionAsk(**item)
+                    for item in raw_person_questions
                     if isinstance(item, dict)
                 ],
                 execution_unknown_tool_call_id=raw_result.get("execution_unknown_tool_call_id"),
@@ -921,6 +980,21 @@ class AgentProjectionActivities:
             result.row.sanitized_output_json, tool_name=result.manifest.tool_name
         )
 
+    @staticmethod
+    def _person_question(result: _ProjectedToolOutcome) -> PersonQuestionAsk | None:
+        """An executed ask that reached somebody; the workflow holds the turn
+        open and the answer becomes this call's one observation."""
+        if result.status != "executed":
+            return None
+        ask = person_question_ask_from_output(
+            result.row.sanitized_output_json, tool_name=result.manifest.tool_name
+        )
+        if ask is None:
+            return None
+        ask.provider_call_id = result.provider_call_id
+        ask.gateway_tool_call_id = str(result.row.id)
+        return ask
+
     @activity.defn(name=ACTIVITY_COMMIT_AGENT_STEP)
     async def commit_agent_step_activity(self, params: CommitAgentStepInput) -> StepResult:
         workspace_id = UUID(params.workspace_id)
@@ -1059,6 +1133,7 @@ class AgentProjectionActivities:
                 permitted_stop = (
                     final.status in {"needs_approval", "needs_review", "execution_unknown"}
                     or (delegation is not None and delegation.blocking)
+                    or self._person_question(final) is not None
                     or params.cancelled_after_tool_call_id is not None
                 )
                 if not permitted_stop:
@@ -1071,6 +1146,7 @@ class AgentProjectionActivities:
             delegations: list[DelegationRequest] = []
             work_request_starts: list[WorkRequestStart] = []
             review_decisions: list[ReviewDecisionSignal] = []
+            person_questions: list[PersonQuestionAsk] = []
             for result in projected:
                 delegation = self._delegation_request(result)
                 if delegation is not None:
@@ -1083,6 +1159,9 @@ class AgentProjectionActivities:
                 decided_review = self._review_decision(result)
                 if decided_review is not None:
                     review_decisions.append(decided_review)
+                asked = self._person_question(result)
+                if asked is not None:
+                    person_questions.append(asked)
                 if result.status == "needs_approval" and result.approval is not None:
                     waiting_approval_id = str(result.approval.id)
                 if result.status == "needs_review":
@@ -1113,6 +1192,7 @@ class AgentProjectionActivities:
                 delegations=delegations,
                 work_request_starts=work_request_starts,
                 review_decisions=review_decisions,
+                person_questions=person_questions,
                 execution_unknown_tool_call_id=execution_unknown_tool_call_id,
             )
 
@@ -1127,6 +1207,8 @@ class AgentProjectionActivities:
                 run.status = RunStatus.WAITING_REVIEW.value
             elif blocking_delegation is not None:
                 run.status = RunStatus.WAITING_DELEGATION.value
+            elif person_questions:
+                run.status = RunStatus.WAITING_PERSON.value
             if execution_unknown_tool_call_id is not None:
                 run.status = RunStatus.FAILED.value
                 run.error_code = "tool_execution_unknown"
@@ -1214,8 +1296,14 @@ class AgentProjectionActivities:
                     result=result,
                 )
                 delegation = self._delegation_request(result)
-                if result.status in ("needs_approval", "needs_review") or (
-                    delegation is not None and delegation.blocking
+                if (
+                    result.status in ("needs_approval", "needs_review")
+                    or (delegation is not None and delegation.blocking)
+                    # A parked ask gets exactly one observation, written later
+                    # by deliver_question_answer. Two tool_result rows with the
+                    # same tool_call_id become two tool_use_id-matched blocks
+                    # and the provider rejects the request outright.
+                    or self._person_question(result) is not None
                 ):
                     continue
                 self._add_tool_message(
@@ -2042,6 +2130,25 @@ class AgentProjectionActivities:
                     workspace_id=workspace_id,
                     run_id=run_id,
                 )
+                # Inside a SAVEPOINT, so a failure here rolls back the
+                # question closure alone. Suppressing the exception without
+                # one would be theatre: on Postgres a failed statement aborts
+                # the whole transaction, and the commit below would fail
+                # anyway — turning a cosmetic card update into a run that
+                # never reaches a terminal state.
+                try:
+                    async with session.begin_nested():
+                        await _close_pending_run_questions(
+                            session,
+                            workspace_id=workspace_id,
+                            run_id=run_id,
+                        )
+                except Exception as error:
+                    logger.warning(
+                        "question.close_failed",
+                        run_id=params.run_id,
+                        error_type=type(error).__name__,
+                    )
                 freed_agent_id = run.agent_id
                 if run.error_code in _PRESERVED_FINAL_ERRORS:
                     effective_error_code = run.error_code

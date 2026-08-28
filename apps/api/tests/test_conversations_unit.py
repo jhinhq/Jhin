@@ -658,6 +658,30 @@ async def test_attention_summary_counts(
     assert out.counts.approvals == 1 and out.counts.failures == 1 and out.counts.total == 3
 
 
+async def test_a_chat_waiting_on_an_answer_needs_the_person_too(
+    session: AsyncSession, admin_ctx: WorkspaceContext, temporal: FakeTemporal, agent: Agent
+) -> None:
+    """A run parked on a question it asked is waiting on a person exactly as
+    much as one parked on an approval, and the badge has to say so."""
+    ws = admin_ctx.workspace_id
+    asked, asked_turn = await start(session, admin_ctx, temporal, agent, text="We deploy Mondays")
+    session.add(
+        AgentRun(
+            workspace_id=ws,
+            agent_id=agent.id,
+            task_id=asked_turn.task.id,
+            status=RunStatus.WAITING_PERSON.value,
+        )
+    )
+    await session.commit()
+    _calm, _ = await start(session, admin_ctx, temporal, agent, text="Just chatting")
+
+    out = await service.attention(session, ws)
+    assert [c.id for c in out.waiting_conversations] == [asked.id]
+    assert out.waiting_conversations[0].active_run_status == RunStatus.WAITING_PERSON.value
+    assert out.counts.total == 1
+
+
 def _failed_task(ws: UUID, agent: Agent, title: str) -> Task:
     return Task(
         workspace_id=ws,

@@ -174,6 +174,10 @@ TAG_DESCRIPTIONS: dict[str, str] = {
         "work requests, and the attention queue that gathers them."
     ),
     "approvals": "Actions an agent paused on until somebody approves or rejects them.",
+    "questions": (
+        "Questions an agent asked the person it is talking to, and their answers — "
+        "a choice among the options it offered, or something typed instead."
+    ),
     "policy": "Autonomy policy and the capability grants that bound what an agent may do.",
     "memory": (
         "Curated long-term memory: what agents have learned, what was pinned, "

@@ -5,12 +5,18 @@ This package performs no I/O. The tool gateway (jhin-tools) loads grants and
 rules from the database and calls :func:`evaluate`.
 """
 
+from jhin_policy.agent_defaults import (
+    ask_person_grant_specs,
+    default_agent_grant_specs,
+    memory_grant_specs,
+)
 from jhin_policy.approvals import (
     PRESET_RULES,
     ApprovalPreset,
     matching_preset,
     rules_for_preset,
 )
+from jhin_policy.ask_person import ASK_PERSON_CAPABILITY
 from jhin_policy.capabilities import (
     FORBIDDEN_CAPABILITY_PREFIXES,
     CapabilityRegistry,
@@ -74,6 +80,7 @@ from jhin_policy.work_requests import (
 )
 
 __all__ = [
+    "ASK_PERSON_CAPABILITY",
     "DIRECTORY_READ_CAPABILITY",
     "FORBIDDEN_CAPABILITY_PREFIXES",
     "MEMORY_CAPABILITIES",
@@ -111,9 +118,11 @@ __all__ = [
     "ToolDefinition",
     "WorkRequestDecision",
     "WorkRequestFacts",
+    "ask_person_grant_specs",
     "capability_matches",
     "collaboration_grant_specs",
     "coordination_settings",
+    "default_agent_grant_specs",
     "delegation_settings",
     "evaluate",
     "evaluate_delegation",
@@ -122,6 +131,7 @@ __all__ = [
     "is_forbidden_capability",
     "is_valid_capability",
     "matching_preset",
+    "memory_grant_specs",
     "policy_spec_from_row",
     "resolve_reviewer",
     "rules_for_preset",

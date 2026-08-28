@@ -22,6 +22,7 @@ from jhin_tools.builtin import (
     build_builtin_catalog,
     connection_hints,
     task_expects_a_reported_result,
+    task_has_a_person_watching,
     task_scoped_tool_definitions,
 )
 
@@ -210,7 +211,75 @@ def test_task_scoping_drops_only_the_reporting_tool_on_a_chat_turn() -> None:
     delegated = task_scoped_tool_definitions(granted, _task(parent_task_id=new_uuid7()))
 
     assert {d.name for d in granted} - {d.name for d in chat} == {"organization.report_result"}
-    assert delegated == granted
+    # A delegated child keeps everything it can act on; the one thing it
+    # loses is the ask, because it has nobody to ask.
+    assert {d.name for d in granted} - {d.name for d in delegated} == {"organization.ask_person"}
+
+
+@pytest.mark.parametrize(
+    ("task", "expected"),
+    [
+        # A chat thread a person opened: the only place there is somebody to
+        # interrupt.
+        (
+            _task(
+                conversation_id=new_uuid7(),
+                metadata_json={"origin": "conversation", "conversation_id": "c"},
+            ),
+            True,
+        ),
+        (_task(metadata_json={"origin": "message"}), True),
+        (_task(conversation_id=new_uuid7()), True),
+        # A delegated child reports into its parent; the person is watching
+        # that thread, not this task's page.
+        (
+            _task(
+                parent_task_id=new_uuid7(),
+                conversation_id=new_uuid7(),
+                metadata_json={"delegation": {"kind": "delegation"}},
+            ),
+            False,
+        ),
+        # An accepted work request is linked to the requester's chat, so
+        # conversation_id must not decide alone.
+        (
+            _task(
+                conversation_id=new_uuid7(),
+                metadata_json={"origin": "work_request", "work_request": {"id": "w"}},
+            ),
+            False,
+        ),
+        # Nobody is sitting in front of a trigger-fired run or a standalone
+        # task from the Tasks UI.
+        (_task(metadata_json={"origin": "trigger"}), False),
+        (_task(), False),
+        # Unknown task: the opposite default to task_expects_a_reported_result.
+        # Withholding a report is prompt economy; withholding an interruption
+        # is a promise to the person.
+        (None, False),
+    ],
+)
+def test_only_a_chat_turn_has_a_person_to_ask(task: Task | None, expected: bool) -> None:
+    assert task_has_a_person_watching(task) is expected
+
+
+def test_asking_a_person_is_not_advertised_where_nobody_is_watching() -> None:
+    catalog = build_builtin_catalog()
+    grants = [Grant(capability="organization.*", scope={}, effect=GrantEffect.ALLOW)]
+    granted = allowed_tool_definitions(catalog, grants)
+    assert "organization.ask_person" in {d.name for d in granted}
+
+    chat = task_scoped_tool_definitions(granted, _task(conversation_id=new_uuid7()))
+    delegated = task_scoped_tool_definitions(granted, _task(parent_task_id=new_uuid7()))
+    triggered = task_scoped_tool_definitions(granted, _task(metadata_json={"origin": "trigger"}))
+
+    assert "organization.ask_person" in {d.name for d in chat}
+    assert "organization.ask_person" not in {d.name for d in delegated}
+    assert "organization.ask_person" not in {d.name for d in triggered}
+    # The two filters are independent: a chat turn loses the reporting tool
+    # and keeps the ask; a delegated child does the reverse.
+    assert "organization.report_result" not in {d.name for d in chat}
+    assert "organization.report_result" in {d.name for d in delegated}
 
 
 def test_the_reporting_tool_never_reads_as_how_to_end_a_chat() -> None:

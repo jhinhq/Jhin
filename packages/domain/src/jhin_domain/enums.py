@@ -132,6 +132,10 @@ class RunStatus(StrEnum):
     # tool call is persisted as ``pending_review`` and the workflow resumes
     # on the ``review_decision`` signal, exactly like an approval wait.
     WAITING_REVIEW = "waiting_review"
+    # Parked on a question the agent put to a person (``organization.ask_person``):
+    # the ``user_question`` row is pending and the workflow resumes on the
+    # ``question_answer`` signal, or when its bounded wait elapses.
+    WAITING_PERSON = "waiting_person"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -150,6 +154,7 @@ RUN_ACTIVE_STATUSES = frozenset(
         RunStatus.WAITING_APPROVAL,
         RunStatus.WAITING_DELEGATION,
         RunStatus.WAITING_REVIEW,
+        RunStatus.WAITING_PERSON,
     }
 )
 
@@ -221,6 +226,22 @@ class ConversationStatus(StrEnum):
 
     ACTIVE = "active"
     ARCHIVED = "archived"
+
+
+class UserQuestionStatus(StrEnum):
+    """Lifecycle of one question an agent put to a person.
+
+    ``expired`` means the run stopped waiting, not that the question is
+    void: a person who answers late is still recorded, and the lateness is
+    readable from ``expires_at < answered_at``. ``cancelled`` is written by
+    the finalizing run — the agent that asked is gone, so nothing would read
+    the answer.
+    """
+
+    PENDING = "pending"
+    ANSWERED = "answered"
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
 
 
 class ActivityKind(StrEnum):

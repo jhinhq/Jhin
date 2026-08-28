@@ -1396,7 +1396,14 @@ async def attention(db: AsyncSession, workspace_id: UUID) -> AttentionOut:
         )
     )
     projected = await project_conversations(db, workspace_id, active_conversations)
-    waiting = [c for c in projected if c.active_run_status == RunStatus.WAITING_APPROVAL.value]
+    # A run parked on a question needs the person exactly as much as one
+    # parked on an approval does. The question itself lives in its chat, so
+    # the badge only has to be honest about which chat is waiting.
+    waiting = [
+        c
+        for c in projected
+        if c.active_run_status in (RunStatus.WAITING_APPROVAL.value, RunStatus.WAITING_PERSON.value)
+    ]
     # Work reviews assigned to a human (including fail-closed mandatory
     # reviews with no resolvable AI reviewer) need a person now; the ones an
     # AI colleague is handling are listed so a person can step in.

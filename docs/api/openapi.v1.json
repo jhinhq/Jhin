@@ -1175,6 +1175,55 @@
         "title": "AgentUpdate",
         "type": "object"
       },
+      "AnswerQuestionIn": {
+        "additionalProperties": false,
+        "description": "Exactly one of the two, never both, never neither.\n\nWhich field arrives is what makes a picked option distinguishable from a\ntyped one, forever: the service never infers ``answer_kind`` by comparing\nthe text to the labels, so a person who types the exact words of an option\nstill typed them — and typing grants no memory scope.",
+        "properties": {
+          "option_value": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Option Value"
+          },
+          "other_text": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Other Text"
+          }
+        },
+        "title": "AnswerQuestionIn",
+        "type": "object"
+      },
+      "AnswerQuestionOut": {
+        "properties": {
+          "question": {
+            "$ref": "#/components/schemas/QuestionOut"
+          },
+          "resumed": {
+            "title": "Resumed",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "question",
+          "resumed"
+        ],
+        "title": "AnswerQuestionOut",
+        "type": "object"
+      },
       "ApiKeyCreate": {
         "additionalProperties": false,
         "properties": {
@@ -7422,6 +7471,236 @@
           "detail"
         ],
         "title": "ProviderVerifyResult",
+        "type": "object"
+      },
+      "QuestionListOut": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/QuestionOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "QuestionListOut",
+        "type": "object"
+      },
+      "QuestionOptionOut": {
+        "description": "One offered choice. ``value`` is the machine key the answer names.",
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "label",
+          "detail"
+        ],
+        "title": "QuestionOptionOut",
+        "type": "object"
+      },
+      "QuestionOut": {
+        "properties": {
+          "agent_id": {
+            "format": "uuid",
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "agent_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Name"
+          },
+          "allow_other": {
+            "title": "Allow Other",
+            "type": "boolean"
+          },
+          "answer_kind": {
+            "title": "Answer Kind",
+            "type": "string"
+          },
+          "answer_option_value": {
+            "title": "Answer Option Value",
+            "type": "string"
+          },
+          "answer_text": {
+            "title": "Answer Text",
+            "type": "string"
+          },
+          "answered_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answered At"
+          },
+          "answered_by_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answered By Name"
+          },
+          "answered_by_user_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answered By User Id"
+          },
+          "asked_at": {
+            "format": "date-time",
+            "title": "Asked At",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "conversation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conversation Id"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "grant_denied_reason": {
+            "title": "Grant Denied Reason",
+            "type": "string"
+          },
+          "granted_scope": {
+            "title": "Granted Scope",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "message_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message Id"
+          },
+          "options": {
+            "items": {
+              "$ref": "#/components/schemas/QuestionOptionOut"
+            },
+            "title": "Options",
+            "type": "array"
+          },
+          "question": {
+            "title": "Question",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "task_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Id"
+          },
+          "workspace_id": {
+            "format": "uuid",
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "workspace_id",
+          "conversation_id",
+          "task_id",
+          "message_id",
+          "agent_id",
+          "agent_name",
+          "kind",
+          "question",
+          "context",
+          "options",
+          "allow_other",
+          "status",
+          "asked_at",
+          "expires_at",
+          "answered_at",
+          "answered_by_user_id",
+          "answered_by_name",
+          "answer_kind",
+          "answer_option_value",
+          "answer_text",
+          "granted_scope",
+          "grant_denied_reason"
+        ],
+        "title": "QuestionOut",
         "type": "object"
       },
       "QueueState": {
@@ -19862,6 +20141,257 @@
         "x-jhin-scope": "workspace:read"
       }
     },
+    "/api/v1/workspaces/{workspace_id}/questions": {
+      "get": {
+        "description": "**Scope.** An API key needs `chats:read`.",
+        "operationId": "list_questions_api_v1_workspaces__workspace_id__questions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "conversation_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Conversation Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuestionListOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": [
+              "chats:read"
+            ]
+          }
+        ],
+        "summary": "List Questions",
+        "tags": [
+          "questions"
+        ],
+        "x-jhin-scope": "chats:read"
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/questions/{question_id}": {
+      "get": {
+        "description": "**Scope.** An API key needs `chats:read`.",
+        "operationId": "get_question_api_v1_workspaces__workspace_id__questions__question_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "question_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Question Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuestionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": [
+              "chats:read"
+            ]
+          }
+        ],
+        "summary": "Get Question",
+        "tags": [
+          "questions"
+        ],
+        "x-jhin-scope": "chats:read"
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/questions/{question_id}/answer": {
+      "post": {
+        "description": "**Scope.** An API key needs `chats:write`.",
+        "operationId": "answer_question_api_v1_workspaces__workspace_id__questions__question_id__answer_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "question_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Question Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnswerQuestionIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnswerQuestionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": [
+              "chats:write"
+            ]
+          }
+        ],
+        "summary": "Answer Question",
+        "tags": [
+          "questions"
+        ],
+        "x-jhin-scope": "chats:write"
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/review-policies": {
       "get": {
         "description": "**Scope.** An API key needs `reviews:read`.",
@@ -24251,6 +24781,10 @@
     {
       "description": "Actions an agent paused on until somebody approves or rejects them.",
       "name": "approvals"
+    },
+    {
+      "description": "Questions an agent asked the person it is talking to, and their answers — a choice among the options it offered, or something typed instead.",
+      "name": "questions"
     },
     {
       "description": "Autonomy policy and the capability grants that bound what an agent may do.",

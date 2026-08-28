@@ -224,6 +224,7 @@ async def main() -> None:
             activities.finalize_run_projection_activity,
             activities.summarize_delegation_activity,
             activities.deliver_delegation_result_activity,
+            activities.deliver_question_answer_activity,
             compatibility.run_agent_step_activity,
             compatibility.resolve_approval_activity,
             compatibility.finalize_run_activity,

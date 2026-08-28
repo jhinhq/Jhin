@@ -127,6 +127,12 @@ ROUTE_SCOPES: dict[tuple[str, ...], RouteRule] = {
     ("approvals",): _rule("approvals:read", None),
     ("approvals", "approve"): _rule(None, "approvals:decide"),
     ("approvals", "reject"): _rule(None, "approvals:decide"),
+    # A question an agent asked lives in its chat and is read and answered by
+    # whoever is in that chat, so it takes the chat scopes rather than a pair
+    # of its own: there is no way to hold a question without holding the
+    # conversation it was asked in.
+    ("questions",): _rule("chats:read", None),
+    ("questions", "answer"): _rule(None, "chats:write"),
     ("reviews",): _rule("reviews:read", None),
     ("reviews", "decide"): _rule(None, "reviews:decide"),
     ("review-policies",): _rule("reviews:read", "reviews:write"),

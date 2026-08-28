@@ -652,6 +652,20 @@ async def _load_conversation_history(
         ):
             turns.append(ConversationTurn(role="user", text=CONVERSATION_UNANSWERED_MARKER))
         previous_task_id = message.task_id
+        # Whose words these are, not merely whether an agent wrote them. A
+        # colleague's answer is relayed onto this conversation by another
+        # agent, so mapping every agent-sent row to "assistant" handed the
+        # running agent somebody else's reply as its own previous turn -- it
+        # would then claim it had checked something itself, or refuse to ask
+        # again because it believed it already knew.
+        speaker = _other_agent_name(message, task)
+        if speaker:
+            turns.append(
+                ConversationTurn(
+                    role="user", text=f"{speaker} replied: {text[:_MAX_STRUCTURED_TURN_CHARS]}"
+                )
+            )
+            continue
         role = "agent" if message.sender_type == SenderType.AGENT.value else "user"
         turns.append(ConversationTurn(role=role, text=text[:_MAX_STRUCTURED_TURN_CHARS]))
     if previous_task_id is not None and previous_task_id in unfinished:
@@ -666,6 +680,17 @@ async def _load_conversation_history(
     if truncated:
         turns.insert(0, ConversationTurn(role="user", text=CONVERSATION_HISTORY_OMITTED_MARKER))
     return tuple(turns)
+
+
+def _other_agent_name(message: Message, task: Task) -> str:
+    """The colleague who actually spoke, when this row is not the running
+    agent's own words. Empty for the agent's own turns and for people."""
+    if message.sender_type != SenderType.AGENT.value:
+        return ""
+    if message.sender_id is not None and message.sender_id == task.assigned_agent_id:
+        return ""
+    content = message.content_json if isinstance(message.content_json, dict) else {}
+    return str(content.get("from_agent_name", "") or "A colleague")
 
 
 async def _load_task_history(session: AsyncSession, task: Task) -> tuple[ConversationTurn, ...]:

@@ -54,6 +54,7 @@ from jhin_tools import (
     stable_tool_invocation_id,
     task_scoped_tool_definitions,
 )
+from jhin_tools.ask_person import asked_question_id
 from jhin_tools.telemetry import (
     ToolTelemetryDescription,
     _tool_status_authority,
@@ -477,6 +478,11 @@ def _bound_result(outcome: GatewayOutcome) -> BoundToolResult:
         and bool((outcome.sanitized_output or {}).get("blocking", True))
     ):
         stop_reason = "blocking_delegation"
+    elif asked_question_id(outcome.sanitized_output, tool_name=outcome.tool_name):
+        # A question is on somebody's screen and the run is about to park on
+        # it. Executing the rest of the manifest would run work whose premise
+        # is the answer nobody has given yet.
+        stop_reason = "awaiting_person"
     return BoundToolResult(
         tool_call_id=str(outcome.tool_call_id),
         status=outcome.status,

@@ -24,6 +24,7 @@ import {
   withDaySeparators,
 } from "@/lib/chat";
 import {
+  useAnswerQuestion,
   useConversation,
   useConversationActivity,
   useConversationMessages,
@@ -32,6 +33,7 @@ import {
   useAgentAvatarMap,
 } from "@/lib/hooks";
 import type {
+  AnswerQuestionIn,
   ConversationMessage,
   ConversationUpdate,
   TurnOut,
@@ -220,6 +222,20 @@ export default function ChatThreadPage() {
       setActionError(describeError(error, "Couldn't record your decision. Try again.")),
   });
 
+  const answerQuestion = useAnswerQuestion(workspaceId);
+
+  // The card owns its own optimistic and error state (it is one of possibly
+  // several in the transcript), so this hands the result straight back to it
+  // and only takes the one action the card cannot: putting the cursor in the
+  // composer when the run had already stopped waiting.
+  const onAnswer = async (questionId: string, body: AnswerQuestionIn) => {
+    setActionError(null);
+    setRecentlySent(true);
+    const result = await answerQuestion.mutateAsync({ questionId, body });
+    if (!result.resumed) composerRef.current?.focus();
+    return result;
+  };
+
   const taskAction = useMutation({
     mutationFn: ({ taskId, action }: { taskId: string; action: "pause" | "resume" | "cancel" }) =>
       api(`/api/v1/workspaces/${workspaceId}/tasks/${taskId}/${action}`, { method: "POST" }),
@@ -325,6 +341,9 @@ export default function ChatThreadPage() {
           deciding={decide.isPending}
           onApprove={(id) => decide.mutate({ id, decision: "approve" })}
           onReject={(id) => decide.mutate({ id, decision: "reject" })}
+          canAnswer={canWrite}
+          answering={answerQuestion.isPending}
+          onAnswer={onAnswer}
           liveStatus={liveStatus}
           loading={messages.isPending}
           agentAvatars={avatars}

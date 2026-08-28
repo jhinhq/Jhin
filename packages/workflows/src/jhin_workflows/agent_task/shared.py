@@ -65,6 +65,16 @@ ACTIVITY_COMMIT_REVIEW_PROJECTION = "commit_review_projection"
 # ``organization.review.submit`` call into the source task workflow.
 SIGNAL_REVIEW_DECISION = "review_decision"
 
+# An agent can now ask the person it is talking to a question and hold its
+# turn open for the answer. That adds a timer, a wait and an activity to the
+# command history, so runs recorded before it must keep replaying the old
+# shape, in which an ask simply completed like any other tool call.
+ASK_PERSON_WAIT_PATCH = "ask-person-wait-v1"
+# Delivered by the questions API when a person answers. It carries an id and
+# nothing else: the activity re-reads the Postgres row as the authority.
+SIGNAL_QUESTION_ANSWER = "question_answer"
+ACTIVITY_DELIVER_QUESTION_ANSWER = "deliver_question_answer"
+
 
 @dataclass
 class AgentTaskInput:
@@ -164,6 +174,38 @@ class WorkRequestStart:
     # responder: that is what every bundle recorded before this field meant,
     # so rehydrated histories keep their non-blocking behaviour.
     side: str = WORK_REQUEST_SIDE_RESPONDER
+
+
+@dataclass
+class PersonQuestionAsk:
+    """One ``organization.ask_person`` call that actually reached somebody.
+
+    The workflow parks on it and the delivery activity writes the answer as
+    this call's one observation, exactly as a blocking delegation does.
+    """
+
+    question_id: str
+    # The model's tool-call id, so the answer can be stitched back into the
+    # transcript as this call's observation.
+    provider_call_id: str = ""
+    # Canonical gateway invocation id used for durable transcript pairing.
+    gateway_tool_call_id: str = ""
+
+
+@dataclass
+class DeliverQuestionAnswerInput:
+    """Resume a run parked on a question. ``outcome`` is advisory routing
+    only — the activity re-reads the ``user_question`` row, which is the sole
+    authority on whether anybody answered."""
+
+    workspace_id: str
+    task_id: str
+    run_id: str
+    agent_id: str
+    question_id: str
+    provider_call_id: str = ""
+    gateway_tool_call_id: str = ""
+    outcome: str = "answered"  # "answered" | "timed_out"
 
 
 @dataclass
@@ -303,6 +345,10 @@ class StepResult:
     # Reviews this agent decided during the step as the assigned AI
     # reviewer: the workflow signals each source task workflow.
     review_decisions: list[ReviewDecisionSignal] = field(default_factory=list)
+    # Questions this agent put to a person during the step. At most one can
+    # survive a step (the ask truncates the manifest), and the workflow holds
+    # the turn open for it.
+    person_questions: list[PersonQuestionAsk] = field(default_factory=list)
     # A claimed mutation whose terminal outcome cannot be proven. The
     # activity persists this before failing non-retryably so the workflow
     # cannot advance to another model step and repeat the effect.

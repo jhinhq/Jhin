@@ -3,7 +3,7 @@
 from jhin_db.models.access import ApiKey, ApiKeyUsage, WorkspaceInvitation
 from jhin_db.models.audit import AuditEvent
 from jhin_db.models.connection import Connection, WebhookDelivery
-from jhin_db.models.conversation import Conversation
+from jhin_db.models.conversation import Conversation, UserQuestion
 from jhin_db.models.coordination import ReviewPolicy, WorkRequest, WorkReview
 from jhin_db.models.identity import User, UserSession
 from jhin_db.models.media import AvatarGeneration, MediaAsset
@@ -61,6 +61,7 @@ __all__ = [
     "Trigger",
     "TriggerInvocation",
     "User",
+    "UserQuestion",
     "UserSession",
     "WebhookDelivery",
     "WorkRequest",

@@ -160,6 +160,85 @@ class TestNonAmplification:
         assert decision.status is MemoryStatus.ACTIVE
         assert decision.scope_id == WS
 
+    def test_a_person_may_vouch_for_words_they_wrote(self) -> None:
+        """The explicit path skips the quality screens because the human is
+        the authority on their own statement. ``authored_by_model=False`` is
+        the default, so every existing caller keeps that."""
+        admin = ActorFacts(
+            actor_type=ActorType.USER,
+            actor_id=new_uuid7(),
+            explicit=True,
+            authority=MemoryScope.WORKSPACE,
+        )
+        decision = evaluate_candidate(
+            MemoryCandidate(content="ok", requested_scope=MemoryScope.WORKSPACE),
+            source(MemoryScope.AGENT),
+            admin,
+        )
+        assert decision.outcome == "activate"
+
+    def test_a_scope_a_person_authorised_does_not_vouch_for_the_wording(self) -> None:
+        """An agent citing an answered question widens the *scope* on the
+        person's authority. Nobody looked at the words, so the quality
+        screens stay on — otherwise "ok" becomes company-wide memory."""
+        authorised = ActorFacts(
+            actor_type=ActorType.USER,
+            actor_id=new_uuid7(),
+            explicit=True,
+            authority=MemoryScope.WORKSPACE,
+            authored_by_model=True,
+        )
+        decision = evaluate_candidate(
+            MemoryCandidate(content="ok", requested_scope=MemoryScope.WORKSPACE),
+            source(MemoryScope.AGENT),
+            authorised,
+        )
+        assert decision.outcome == "reject"
+        assert "low_information" in decision.reasons
+
+    def test_a_model_authored_memory_still_bypasses_non_amplification(self) -> None:
+        """The widening is the whole point: a chat is agent-visible, and the
+        person's answer is what lets a real fact out of it."""
+        authorised = ActorFacts(
+            actor_type=ActorType.USER,
+            actor_id=new_uuid7(),
+            explicit=True,
+            authority=MemoryScope.WORKSPACE,
+            authored_by_model=True,
+        )
+        decision = evaluate_candidate(
+            MemoryCandidate(
+                content="Engineering deploys on Mondays at 9am PST.",
+                requested_scope=MemoryScope.TEAM,
+            ),
+            source(MemoryScope.AGENT),
+            authorised,
+        )
+        assert decision.outcome == "activate"
+        assert decision.status is MemoryStatus.ACTIVE
+        assert decision.scope is MemoryScope.TEAM
+        assert decision.scope_id == TEAM
+        assert "non_amplification" not in decision.reasons
+
+    def test_a_model_authored_memory_still_needs_the_authority(self) -> None:
+        authorised = ActorFacts(
+            actor_type=ActorType.USER,
+            actor_id=new_uuid7(),
+            explicit=True,
+            authority=MemoryScope.AGENT,
+            authored_by_model=True,
+        )
+        decision = evaluate_candidate(
+            MemoryCandidate(
+                content="The company holiday is the first Friday of July.",
+                requested_scope=MemoryScope.WORKSPACE,
+            ),
+            source(MemoryScope.AGENT),
+            authorised,
+        )
+        assert decision.outcome == "reject"
+        assert "insufficient_authority" in decision.reasons
+
     def test_agent_actor_cannot_claim_explicit(self) -> None:
         """``explicit`` only means something for authenticated humans."""
         fake = ActorFacts(

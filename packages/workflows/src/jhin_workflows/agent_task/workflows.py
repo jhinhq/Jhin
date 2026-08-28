@@ -24,6 +24,7 @@ from jhin_workflows.agent_task.shared import (
     ACTIVITY_COMMIT_AGENT_STEP,
     ACTIVITY_COMMIT_APPROVAL_PROJECTION,
     ACTIVITY_COMMIT_REVIEW_PROJECTION,
+    ACTIVITY_DELIVER_QUESTION_ANSWER,
     ACTIVITY_EXECUTE_BOUND_TOOL,
     ACTIVITY_FINALIZE_RUN,
     ACTIVITY_FINALIZE_RUN_PROJECTION,
@@ -35,9 +36,11 @@ from jhin_workflows.agent_task.shared import (
     ACTIVITY_RESOLVE_BOUND_TOOL_REVIEW,
     ACTIVITY_RESOLVE_SNAPSHOT,
     ACTIVITY_RUN_AGENT_STEP,
+    ASK_PERSON_WAIT_PATCH,
     ORDINARY_TOOL_FAILURE_MESSAGE,
     PAUSE_IS_OBSERVED_PATCH,
     PHASE10_TOOL_WORKER_PATCH,
+    SIGNAL_QUESTION_ANSWER,
     SIGNAL_REVIEW_DECISION,
     WORK_REQUEST_REQUESTER_WAIT_PATCH,
     WORK_REQUEST_SIDE_REQUESTER,
@@ -51,9 +54,11 @@ from jhin_workflows.agent_task.shared import (
     CommitApprovalProjectionInput,
     CommitReviewProjectionInput,
     DelegationRequest,
+    DeliverQuestionAnswerInput,
     ExecuteBoundToolInput,
     FinalizeInput,
     MarkTaskPausedInput,
+    PersonQuestionAsk,
     ReasonAgentStepInput,
     ReasonAgentStepResult,
     ResolveAdvertisedToolsInput,
@@ -156,6 +161,13 @@ _QUEUE_POLL_INTERVAL = timedelta(seconds=30)
 # the requester says so and the answer still lands in the conversation later.
 _WORK_REQUEST_ANSWER_WAIT = timedelta(minutes=2)
 
+# How long a run holds its turn open waiting for a person to answer a
+# question it asked. Long enough to survive a meeting or a coffee break;
+# short enough that a question nobody noticed does not hold the agent's
+# concurrency slot for a working day. When it elapses the agent is told
+# plainly that nobody answered, and the box stays on screen.
+_PERSON_ANSWER_WAIT = timedelta(minutes=30)
+
 # Bounded exponential backoff; Temporal adds jitter (plan 8.6).
 _SNAPSHOT_RETRY = RetryPolicy(
     initial_interval=timedelta(seconds=1),
@@ -216,6 +228,11 @@ class AgentTaskWorkflow:
         # when it arrives before the run parks, so a decision that races the
         # park still resumes the workflow.
         self._review_decisions: dict[str, str] = {}
+        # question_id -> True, delivered by the question_answer signal from
+        # the API. Stored even when it arrives before the run parks, so an
+        # answer that races the park still resumes the workflow (same
+        # reasoning as _review_decisions).
+        self._question_answers: dict[str, bool] = {}
         # Set by the slot_available signal: a concurrency slot may have freed
         # (plan 30); wakes the queued admission loop early.
         self._slot_kick = False
@@ -254,6 +271,13 @@ class AgentTaskWorkflow:
         ``work_review`` row as the authority before resuming the call."""
         if review_id and status in ("approved", "changes_requested", "escalated"):
             self._review_decisions[review_id] = status
+
+    @workflow.signal(name=SIGNAL_QUESTION_ANSWER)
+    def question_answer(self, question_id: str) -> None:
+        """A person answered. The signal carries an id and nothing else: the
+        activity re-reads the Postgres user_question row as the authority."""
+        if question_id:
+            self._question_answers[question_id] = True
 
     @workflow.signal
     def slot_available(self) -> None:
@@ -510,6 +534,13 @@ class AgentTaskWorkflow:
                     break
             if delegation_failed:
                 break
+
+            # A question the agent put to the person it is talking to. It
+            # comes before the work-request starts so a step that asks both a
+            # person and a colleague settles the person first — they are the
+            # one sitting in the chat.
+            for ask in step.person_questions[:1]:
+                await self._await_person_answer(params, snapshot.run_id, ask)
 
             # Accepted work requests (coordination release) run as abandoned
             # children; a duplicate start (retry) is a no-op. The requester
@@ -862,6 +893,53 @@ class AgentTaskWorkflow:
                     work_request_id=accepted.work_request_id,
                 ),
                 result_type=str,
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=_FINALIZE_RETRY,
+            )
+
+    async def _await_person_answer(
+        self, params: AgentTaskInput, run_id: str, ask: PersonQuestionAsk
+    ) -> None:
+        """Hold the turn open until the person answers, or 30 minutes pass.
+
+        Bounded and cancel-releasable by contract: this wait must never be
+        the reason a run cannot be stopped. The observation is written either
+        way, so the next model step reads an answer or a plain "nobody
+        answered" rather than inventing one.
+        """
+        if not workflow.patched(ASK_PERSON_WAIT_PATCH):
+            return  # replaying a run recorded before agents could ask
+        self._status = "waiting_person"
+        self._waiting_reason = f"question:{ask.question_id}"
+        timed_out = False
+        try:
+            await workflow.wait_condition(
+                lambda: ask.question_id in self._question_answers or self._cancelled,
+                timeout=_PERSON_ANSWER_WAIT,
+            )
+        except TimeoutError:
+            timed_out = True
+        self._waiting_reason = None
+        self._status = "running"
+        if self._cancelled:
+            return  # the outer loop finalizes as cancelled; finalize closes the row
+        self._question_answers.pop(ask.question_id, None)
+        # Best-effort by contract, like the work-request courtesy note: the
+        # tool call already has a durable outcome row, so a failed delivery
+        # costs the model an observation, not the run.
+        with contextlib.suppress(Exception):
+            await workflow.execute_activity(
+                ACTIVITY_DELIVER_QUESTION_ANSWER,
+                DeliverQuestionAnswerInput(
+                    workspace_id=params.workspace_id,
+                    task_id=params.task_id,
+                    run_id=run_id,
+                    agent_id=params.agent_id,
+                    question_id=ask.question_id,
+                    provider_call_id=ask.provider_call_id,
+                    gateway_tool_call_id=ask.gateway_tool_call_id,
+                    outcome="timed_out" if timed_out else "answered",
+                ),
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=_FINALIZE_RETRY,
             )

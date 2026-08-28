@@ -10,6 +10,8 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApprovalCard } from "@/components/approval-card";
 import { Avatar } from "@/components/avatar";
+import { QuestionCard, type AnswerQuestion } from "@/components/chat/question-card";
+import { Timestamp } from "@/components/chat/timestamp";
 import { Markdown } from "@/components/markdown";
 import { MessageTypeBadge, StructuredMessageBody } from "@/components/task-bits";
 import {
@@ -17,9 +19,9 @@ import {
   exchangeSuffix,
   friendlyMessageLabel,
   instructionDeliveryState,
+  isUserQuestionMessage,
   isWorkCard,
   messageText,
-  relativeTime,
   workRequestDetailLines,
   type DaySeparatorItem,
   type DeliveryEvidence,
@@ -29,18 +31,9 @@ import {
   type TranscriptItem,
 } from "@/lib/chat";
 import { isWorkRequestMessage } from "@/lib/coordination";
-import { formatDateTime } from "@/lib/format";
 import { avatarProps } from "@/lib/media";
 import { isInsufficientFunds, isModelIncompatibleRequest } from "@/lib/models";
 import type { ActivityCard, AgentAvatar, Approval, ConversationMessage } from "@/lib/types";
-
-function Timestamp({ iso, className = "" }: { iso: string; className?: string }) {
-  return (
-    <time dateTime={iso} title={formatDateTime(iso)} className={`text-[11px] text-faint ${className}`}>
-      {relativeTime(iso)}
-    </time>
-  );
-}
 
 function UserBubble({
   message,
@@ -360,7 +353,9 @@ function WorkingIndicator({
       ? `${name} is waiting for a free slot and will start shortly.`
       : status.kind === "review"
         ? "Waiting for your review — see the request above."
-        : `${name} is paused. Resume from Details when you're ready.`;
+        : status.kind === "question"
+          ? "Waiting for your answer — see the question above."
+          : `${name} is paused. Resume from Details when you're ready.`;
   return (
     <div data-testid="working-indicator" className="flex justify-center">
       <span className="rounded-full border border-line bg-raised px-3 py-1 text-xs text-dim">{text}</span>
@@ -401,6 +396,9 @@ export function Transcript({
   deciding = false,
   onApprove,
   onReject,
+  canAnswer = false,
+  answering = false,
+  onAnswer,
   liveStatus = null,
   loading = false,
   agentAvatars,
@@ -415,6 +413,10 @@ export function Transcript({
   deciding?: boolean;
   onApprove?: (id: string) => void;
   onReject?: (id: string) => void;
+  /** Member or above: a viewer sees the question but cannot answer it. */
+  canAnswer?: boolean;
+  answering?: boolean;
+  onAnswer?: AnswerQuestion;
   liveStatus?: LiveStatus | null;
   loading?: boolean;
   /** Agent id → avatar visuals for messages from other agents. */
@@ -489,6 +491,22 @@ export function Transcript({
     }
     const name = message.sender_name ?? agentName;
     const avatar = message.agent_id ? (agentAvatars?.[message.agent_id] ?? null) : agentAvatar;
+    // Before the work-card branch: a question to the person shares its
+    // `message_type` with agent-to-agent work requests, and it is the one
+    // card the thread is actually blocked on.
+    if (isUserQuestionMessage(message)) {
+      return (
+        <QuestionCard
+          key={item.id}
+          message={message}
+          userName={userName}
+          avatar={avatar}
+          canAnswer={canAnswer}
+          answering={answering}
+          onAnswer={onAnswer}
+        />
+      );
+    }
     if (isWorkCard(message)) {
       return <WorkCard key={item.id} message={message} name={name} avatar={avatar} />;
     }

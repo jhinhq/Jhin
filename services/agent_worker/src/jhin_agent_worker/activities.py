@@ -39,24 +39,39 @@ from jhin_agent_worker.resources import Resources
 from jhin_agents import resolve_snapshot
 from jhin_agents.snapshot import SnapshotError
 from jhin_db.budget import budget_denial_message
-from jhin_db.models import Agent, AgentRun, AuditEvent, Message, RunEvent, Task, Workspace
+from jhin_db.models import (
+    Agent,
+    AgentRun,
+    AuditEvent,
+    Message,
+    RunEvent,
+    Task,
+    User,
+    UserQuestion,
+    Workspace,
+)
 from jhin_domain import (
     RUN_ACTIVE_STATUSES,
     ActorType,
+    MemoryScope,
     MessageType,
     MessageVisibility,
     RecipientType,
     RunStatus,
     SenderType,
     TaskState,
+    UserQuestionStatus,
     new_uuid7,
     structured_content,
 )
 from jhin_observability import get_logger
 from jhin_secrets.redaction import redact_text
+from jhin_tools.ask_person import PERSON_ANSWER_WAIT
 from jhin_workflows.agent_task import (
+    ACTIVITY_DELIVER_QUESTION_ANSWER,
     ACTIVITY_RESOLVE_SNAPSHOT,
     AgentTaskInput,
+    DeliverQuestionAnswerInput,
     SnapshotResult,
 )
 from jhin_workflows.delegated_task import (
@@ -95,6 +110,119 @@ def _workspace_run_limit(workspace: Workspace | None) -> int | None:
     except (TypeError, ValueError):
         return None
     return limit if limit >= 1 else None
+
+
+# --- asking a person, and hearing back ---
+
+_ASK_PERSON_TOOL = "organization.ask_person"
+_ASK_WAIT_MINUTES = int(PERSON_ANSWER_WAIT.total_seconds() // 60)
+
+_DETAIL_QUESTION_TIMED_OUT = (
+    f"Nobody answered within {_ASK_WAIT_MINUTES} minutes. Say plainly that you asked and "
+    "did not hear back, state the assumption you are going with, and carry on. "
+    "Do not ask this again in this run."
+)
+_DETAIL_GRANT_FREE_TEXT = (
+    "They typed their own answer rather than picking a scope, so nothing wider "
+    "than your own memory is authorised. Remember it at 'agent' scope, quote "
+    "what they said, and offer to ask again with the right options."
+)
+
+
+def _grant_denied_detail(reason: str, *, who: str, answer: str) -> str:
+    if reason == "free_text_answer":
+        return _DETAIL_GRANT_FREE_TEXT
+    if reason == "insufficient_authority":
+        return (
+            f"{who} chose {answer}, but recording memory at that scope needs an "
+            "admin. Remember it at 'agent' scope, tell them plainly that an "
+            "admin has to record it more widely, and point them at the "
+            "Memories page."
+        )
+    return (
+        "Their answer did not authorise a wider memory. Remember it at 'agent' "
+        "scope and say who could record it more widely."
+    )
+
+
+def _memory_scope_grant(question: UserQuestion, *, who: str) -> dict[str, Any]:
+    """What the answer authorises, in the model's next-step vocabulary.
+
+    Read from the row's ``granted_*`` columns, which only the API writes and
+    only from the answering person's RBAC. The model is handed a question id
+    to cite, never a scope it may assert.
+    """
+    if question.granted_scope:
+        scope = MemoryScope(question.granted_scope)
+        return {
+            "granted_scope": scope.value,
+            "authorized_by_question_id": str(question.id),
+            "detail": (
+                f"{who} authorised a {scope.value}-scoped memory. Call "
+                f"memory.propose once with requested_scope '{scope.value}' and "
+                "authorized_by_question_id set to this question id."
+            ),
+        }
+    return {
+        "granted_scope": "",
+        "denied_reason": question.grant_denied_reason or "scope_not_authorized",
+        "detail": _grant_denied_detail(
+            question.grant_denied_reason, who=who, answer=question.answer_text or "that scope"
+        ),
+    }
+
+
+def _question_observation(question: UserQuestion, *, who: str) -> dict[str, Any]:
+    """The JSON the model reads back as the ask's result.
+
+    It re-enters the prompt behind ``UNTRUSTED_LABEL``, which is exactly
+    right: a person's typed words are data, and the authority they carry
+    lives in the row, not in this text.
+    """
+    if question.status != UserQuestionStatus.ANSWERED.value:
+        return {
+            "status": "timed_out",
+            "question_id": str(question.id),
+            "detail": _DETAIL_QUESTION_TIMED_OUT,
+        }
+    if question.answer_kind == "other":
+        detail = f"{who} answered in their own words: {question.answer_text}"
+    else:
+        detail = f"{who} answered: {question.answer_text}. Use this and reply to them yourself."
+    observation: dict[str, Any] = {
+        "status": "answered",
+        "question_id": str(question.id),
+        "answer_kind": question.answer_kind,
+        "option_value": question.answer_option_value,
+        "answer": question.answer_text,
+        "answered_by": who,
+        "detail": detail,
+    }
+    # Only a scope question has a scope to grant. Attaching one to an open
+    # question would invite the model to remember something nobody discussed.
+    if question.kind == "memory_scope":
+        observation["memory_scope_grant"] = _memory_scope_grant(question, who=who)
+    return observation
+
+
+def _question_tool_call_id(params: DeliverQuestionAnswerInput) -> str:
+    if params.gateway_tool_call_id:
+        try:
+            return str(UUID(params.gateway_tool_call_id))
+        except ValueError:
+            raise ApplicationError(
+                "question answer has an invalid canonical tool call identity",
+                type="question_tool_call_binding_invalid",
+                non_retryable=True,
+            ) from None
+    fallback: str = redact_text(params.provider_call_id)[:200]
+    if not fallback:
+        raise ApplicationError(
+            "question answer is missing its canonical tool call identity",
+            type="question_tool_call_binding_missing",
+            non_retryable=True,
+        )
+    return fallback
 
 
 class AgentActivities(AgentReasoningActivities, AgentProjectionActivities):
@@ -637,5 +765,150 @@ class AgentActivities(AgentReasoningActivities, AgentProjectionActivities):
                 "task_id": params.task_id,
                 "child_task_id": params.child_task_id,
                 "delegation_status": params.summary.status,
+            },
+        )
+
+    @activity.defn(name=ACTIVITY_DELIVER_QUESTION_ANSWER)
+    async def deliver_question_answer_activity(self, params: DeliverQuestionAnswerInput) -> None:
+        """Resume a run parked on a question: write the person's answer — or
+        a plain "nobody answered" — as the ask's one and only observation.
+
+        The step projection deliberately suppressed the ask's ``tool_result``
+        (two rows for one call become two ``tool_use_id``-matched blocks and
+        the provider rejects the request), so this is where it lands, and it
+        is idempotent on the tool call id across an activity retry.
+        """
+        workspace_id = UUID(params.workspace_id)
+        task_id = UUID(params.task_id)
+        run_id = UUID(params.run_id)
+        agent_id = UUID(params.agent_id)
+        question_id = UUID(params.question_id)
+        tool_call_id = _question_tool_call_id(params)
+
+        async with self._resources.session_factory() as session:
+            run = await session.scalar(
+                select(AgentRun)
+                .where(
+                    AgentRun.id == run_id,
+                    AgentRun.workspace_id == workspace_id,
+                    AgentRun.task_id == task_id,
+                    AgentRun.agent_id == agent_id,
+                )
+                .with_for_update()
+            )
+            if run is None:
+                raise ApplicationError(
+                    "question answer does not match its run",
+                    type="question_run_binding_mismatch",
+                    non_retryable=True,
+                )
+            question = await session.scalar(
+                select(UserQuestion)
+                .where(
+                    UserQuestion.id == question_id,
+                    UserQuestion.workspace_id == workspace_id,
+                    UserQuestion.run_id == run_id,
+                    UserQuestion.agent_id == agent_id,
+                )
+                .with_for_update()
+            )
+            if question is None:
+                raise ApplicationError(
+                    "question answer does not match the question that was asked",
+                    type="question_binding_mismatch",
+                    non_retryable=True,
+                )
+            # The timer fired — but a question answered while it was firing is
+            # answered, and Postgres is the authority. Only a still-pending row
+            # becomes expired.
+            pending = question.status == UserQuestionStatus.PENDING.value
+            if params.outcome == "timed_out" and pending:
+                question.status = UserQuestionStatus.EXPIRED.value
+
+            who = "They"
+            if question.answered_by_user_id is not None:
+                answerer = await session.get(User, question.answered_by_user_id)
+                if answerer is not None and answerer.display_name:
+                    who = answerer.display_name
+            observation = _question_observation(question, who=who)
+
+            existing_results = await session.scalars(
+                select(Message).where(
+                    Message.workspace_id == workspace_id,
+                    Message.task_id == task_id,
+                    Message.run_id == run_id,
+                    Message.message_type == "tool_result",
+                )
+            )
+            delivered = any(
+                message.content_json.get("tool_call_id") == tool_call_id
+                for message in existing_results
+            )
+            run.status = RunStatus.RUNNING.value
+            if not delivered:
+                self._add_tool_message(
+                    session,
+                    workspace_id=workspace_id,
+                    task_id=task_id,
+                    run_id=run_id,
+                    agent_id=agent_id,
+                    message_type="tool_result",
+                    content={
+                        "tool_call_id": tool_call_id,
+                        "provider_call_id": redact_text(params.provider_call_id)[:200],
+                        "tool_name": _ASK_PERSON_TOOL,
+                        "status": "executed",
+                        "result": json.dumps(observation, ensure_ascii=False),
+                    },
+                )
+                seq = await self._next_seq(session, run_id)
+                self._add_run_event(
+                    session,
+                    workspace_id=workspace_id,
+                    run_id=run_id,
+                    task_id=task_id,
+                    seq=seq,
+                    event_type=(
+                        "question.answered"
+                        if question.status == UserQuestionStatus.ANSWERED.value
+                        else "question.expired"
+                    ),
+                    # Never the question or the answer text: those live in the
+                    # message and the question row, where forgetting a
+                    # conversation removes them.
+                    payload={
+                        "question_id": str(question.id),
+                        "tool_call_id": tool_call_id,
+                        "answer_kind": question.answer_kind,
+                        "option_value": question.answer_option_value,
+                        "granted_scope": question.granted_scope,
+                    },
+                )
+            # Repair path only: the API stamps the card in the same
+            # transaction as the answer. This catches a commit whose own
+            # message update raced, and is otherwise a no-op.
+            if question.message_id is not None:
+                card = await session.get(Message, question.message_id)
+                if card is not None and card.content_json.get("status") != question.status:
+                    card.content_json = {
+                        **card.content_json,
+                        "status": question.status,
+                    }
+            await session.commit()
+
+        logger.info(
+            "question.delivered",
+            question_id=params.question_id,
+            outcome=params.outcome,
+            status=observation["status"],
+        )
+        await self._publish(
+            workspace_id,
+            "agent.run.resumed",
+            {
+                "run_id": params.run_id,
+                "task_id": params.task_id,
+                "question_id": params.question_id,
+                "question_status": observation["status"],
             },
         )

@@ -10,7 +10,10 @@ import {
   friendlyMessageLabel,
   groupExchanges,
   instructionDeliveryState,
+  isUserQuestionMessage,
+  isWorkCard,
   mergeTimeline,
+  readUserQuestion,
   relativeTime,
   sortByActivity,
   statusLabelFor,
@@ -495,5 +498,112 @@ describe("groupExchanges never hides a user/instruction message (regression)", (
     const kinds = grouped.map((item) => item.kind);
     expect(kinds).toContain("message");
     expect(grouped.some((item) => item.kind === "message" && item.message.id === "u2")).toBe(true);
+  });
+});
+
+describe("questions an agent asks the person", () => {
+  const question = message({
+    id: "q1",
+    message_type: "question",
+    sender_id: "a1",
+    agent_id: "a1",
+    sender_name: "Ada",
+    content_json: {
+      kind: "user_question",
+      question_id: "uq-1",
+      question: "Only Engineering, or the whole company?",
+      question_kind: "memory_scope",
+      options: [
+        { value: "team", label: "Only the Engineering team", detail: "Saved for your team" },
+        { value: "workspace", label: "Company wide" },
+      ],
+      allow_other: true,
+      status: "pending",
+      asked_by_agent_name: "Ada",
+      summary: "Only Engineering, or the whole company?",
+    },
+  });
+  const workRequest = message({
+    id: "wr1",
+    message_type: "question",
+    sender_id: "a1",
+    agent_id: "a1",
+    sender_name: "Ada",
+    content_json: {
+      kind: "work_request",
+      work_request_id: "wr-1",
+      status: "pending",
+      target_agent_id: "a2",
+      target_agent_name: "Linus",
+      summary: "Check the retry logic",
+    },
+  });
+
+  it("tells a question to the person apart from an agent-to-agent work request", () => {
+    expect(isUserQuestionMessage(question)).toBe(true);
+    expect(isUserQuestionMessage(workRequest)).toBe(false);
+    expect(readUserQuestion(workRequest)).toBeNull();
+  });
+
+  it("is never a work card, even though it shares the message type", () => {
+    expect(isWorkCard(question)).toBe(false);
+    expect(isWorkCard(workRequest)).toBe(true);
+  });
+
+  it("is never folded into a collapsed exchange row", () => {
+    const grouped = groupExchanges(mergeTimeline([question], []), {
+      primaryAgentId: "a2",
+      primaryAgentName: "Linus",
+    });
+    // Even attributed to a colleague rather than the primary agent — the case
+    // that turns an ordinary agent turn into quiet traffic — it stays loose.
+    expect(grouped.map((item) => item.kind)).toEqual(["message"]);
+  });
+
+  it("labels the rail preview by who the thread is waiting on", () => {
+    expect(friendlyMessageLabel(question)).toBe("Ada needs an answer");
+    expect(
+      friendlyMessageLabel(
+        message({
+          message_type: "question",
+          content_json: { ...question.content_json, status: "answered" },
+        }),
+      ),
+    ).toBe("You answered Ada");
+    expect(
+      friendlyMessageLabel(
+        message({
+          message_type: "question",
+          content_json: { ...question.content_json, status: "expired" },
+        }),
+      ),
+    ).toBe("Ada stopped waiting");
+  });
+
+  it("says the chat needs an answer rather than that the agent is working", () => {
+    expect(
+      statusLabelFor({ active_task_state: "running", active_run_status: "waiting_person" }),
+    ).toMatchObject({ label: "Needs your answer", kind: "question", tone: "warn" });
+  });
+
+  it("normalizes a question, dropping option entries with no value", () => {
+    const read = readUserQuestion(question);
+    expect(read?.options).toEqual([
+      { value: "team", label: "Only the Engineering team", detail: "Saved for your team" },
+      { value: "workspace", label: "Company wide", detail: "" },
+    ]);
+    expect(read?.other_label).toBe("Something else");
+    expect(read?.context).toBe("");
+  });
+
+  it("treats an unreadable status as still open rather than stranding the run", () => {
+    const read = readUserQuestion(
+      message({
+        message_type: "question",
+        content_json: { ...question.content_json, status: "who_knows", options: ["junk", null] },
+      }),
+    );
+    expect(read?.status).toBe("pending");
+    expect(read?.options).toEqual([]);
   });
 });

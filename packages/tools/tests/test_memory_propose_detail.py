@@ -15,9 +15,14 @@ from jhin_tools.memory import _propose_detail
 
 
 def test_a_private_chat_says_what_would_have_worked() -> None:
+    """It used to end at "someone has to add it on the Memories page", which
+    was the only route there was. Now the agent can ask, so the sentence has
+    to point at the thing it can actually do -- otherwise the model reads
+    team memory as unreachable and never tries."""
     detail = _propose_detail("reject", "none", ["non_amplification"])
-    assert "agent" in detail
-    assert "Memories" in detail
+    assert "organization.ask_person" in detail
+    assert "authorized_by_question_id" in detail
+    assert "your own memory" in detail
     # The words a person should never be shown.
     assert "non_amplification" not in detail
     assert "scope_exceeds" not in detail

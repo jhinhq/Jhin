@@ -2,11 +2,13 @@
 
 /** Shared data hooks (TanStack Query) for the authenticated app. */
 
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "@/lib/api";
 import type {
   ActivityList,
   Agent,
+  AnswerQuestionIn,
+  AnswerQuestionOut,
   AgentAvatar,
   AgentPolicy,
   Attention,
@@ -653,6 +655,27 @@ export function useInvalidateConversations(workspaceId: string) {
     void queryClient.invalidateQueries({ queryKey: ["attention", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["tasks", workspaceId] });
   };
+}
+
+/**
+ * Answer a question an agent asked in a chat (ask-user contract §2.1).
+ *
+ * One invalidation of the whole conversation family on success, not a
+ * targeted cache patch: answering rewrites the question message in place,
+ * flips the conversation off `waiting_person`, and clears an attention
+ * badge, and those three have to move together or the thread reads as
+ * still-blocked after the person has already answered.
+ */
+export function useAnswerQuestion(workspaceId: string) {
+  const invalidate = useInvalidateConversations(workspaceId);
+  return useMutation({
+    mutationFn: ({ questionId, body }: { questionId: string; body: AnswerQuestionIn }) =>
+      api<AnswerQuestionOut>(
+        `/api/v1/workspaces/${workspaceId}/questions/${questionId}/answer`,
+        { method: "POST", body },
+      ),
+    onSuccess: () => invalidate(),
+  });
 }
 
 // --- Memory (docs/architecture/memory.md) ---

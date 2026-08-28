@@ -47,6 +47,8 @@ from jhin_tools.builtin import (
 )
 from jhin_tools.directory import (
     DirectoryEntry,
+    OrganizationRoster,
+    _line,
     build_roster,
     find_agent_by_reference,
     render_roster,
@@ -1588,3 +1590,50 @@ async def test_a_prose_answer_is_relayed_not_reported_as_empty(
     summary = result.content_json["summary"]
     assert "retry branch" in summary
     assert not summary.startswith("Finished:")
+
+
+def test_a_colleague_with_no_team_says_so_rather_than_leaving_a_gap() -> None:
+    """Omitting the team read as "unstated" rather than "none". Asked which
+    team such a colleague was on, an agent invented one out of their expertise
+    tags -- a Chief of Staff with "operations, planning" became "on the
+    Operations team", stated to the person as fact."""
+    entry = DirectoryEntry(
+        id="01a0",
+        name="Alder",
+        slug="alder",
+        role_title="Chief of Staff",
+        expertise=["operations", "planning", "routing"],
+    )
+    line = _line(entry, with_id=False)
+    assert "not on a team" in line
+
+    on_a_team = entry.model_copy(update={"primary_team_name": "Platform"})
+    assert "Platform team" in _line(on_a_team, with_id=False)
+    assert "not on a team" not in _line(on_a_team, with_id=False)
+
+
+def test_the_agent_states_its_own_missing_team_and_manager() -> None:
+    """The colleague line was fixed; the self line and the manager section had
+    the identical gap. A teamless agent rendered "You are Alder, Chief of
+    Staff." and, asked what team it was on, invented one from its own role."""
+    alone = DirectoryEntry(
+        id="01a0",
+        name="Alder",
+        slug="alder",
+        role_title="Chief of Staff",
+        expertise=["operations", "planning"],
+    )
+    text = render_roster(
+        OrganizationRoster(
+            self_entry=alone,
+            manager=None,
+            reports=[],
+            primary_team_members=[],
+            collaborators=[],
+            secondary_team_members=[],
+            others=[DirectoryEntry(id="01a1", name="Rowan", slug="rowan")],
+            truncated=False,
+        )
+    )
+    assert "you are not on a team" in text
+    assert "no manager in this workspace" in text

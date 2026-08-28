@@ -203,8 +203,10 @@ async def test_create_agent_is_approval_gated_and_seeds_collaboration_grants(
     assert connie.avatar_shape == shape and shape in AVATAR_SHAPES
     assert connie.avatar_color == color and color in AVATAR_COLORS
 
-    # A created agent holds exactly the safe-by-default collaboration
-    # baseline — and never delegation or any higher-authority capability.
+    # A created agent holds exactly the platform default grant set — find
+    # colleagues, ask them for help, answer them, remember, and ask the
+    # person it is talking to — and never delegation or any other
+    # higher-authority capability.
     grants = list(
         await session.scalars(
             select(AgentCapabilityGrant).where(AgentCapabilityGrant.agent_id == connie.id)
@@ -216,6 +218,9 @@ async def test_create_agent_is_approval_gated_and_seeds_collaboration_grants(
         "organization.directory.read": {},
         "organization.work.request": {"targets": "any"},
         "organization.work.respond": {},
+        "memory.read": {},
+        "memory.propose": {},
+        "organization.ask_person": {},
     }
     assert "organization.delegate" not in by_capability
 

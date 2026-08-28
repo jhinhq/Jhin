@@ -551,6 +551,12 @@ def _line(entry: DirectoryEntry, *, with_id: bool) -> str:
         line += f" — {entry.role_title}"
     if entry.primary_team_name:
         line += f", {entry.primary_team_name} team"
+    else:
+        # Say it rather than leave a gap. Omitting the team read as "unstated"
+        # rather than "none", and asked which team such a colleague was on, an
+        # agent invented one out of their expertise tags -- a Chief of Staff
+        # with "operations, planning" became "on the Operations team".
+        line += ", not on a team"
     if entry.availability != "available":
         line += f" (currently {entry.availability})"
     if entry.expertise:
@@ -600,12 +606,19 @@ def render_roster(
         ("Other teams you belong to", roster.secondary_team_members),
         ("Others in this workspace", roster.others),
     ]
+    # The same silence that made an agent invent a colleague's team, now about
+    # itself and its own manager. Asked "what team are you on?" with nothing
+    # stated, a teamless agent built one out of its role and expertise; asked
+    # "who do you report to?", it named whoever sounded most senior. Say both,
+    # including when the answer is nobody.
     lines = [
         ROSTER_HEADER,
         f"You are {roster.self_entry.name}"
         + (f", {roster.self_entry.role_title}" if roster.self_entry.role_title else "")
-        + (f" on the {team} team." if team else "."),
+        + (f" on the {team} team." if team else ", and you are not on a team."),
     ]
+    if roster.manager is None:
+        lines.append("You have no manager in this workspace.")
     listed = 0
     for title, entries in sections:
         if not entries:

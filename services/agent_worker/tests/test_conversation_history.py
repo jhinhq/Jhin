@@ -544,3 +544,37 @@ async def test_a_persons_chat_turn_still_reads_the_conversation(world: World) ->
         turns = await load(world, session, current)
 
     assert ("user", "text", "First ask") in turns
+
+
+async def test_a_colleagues_relayed_answer_is_not_the_agents_own_words(world: World) -> None:
+    """A colleague's answer is relayed onto the requester's conversation by the
+    platform. Mapping every agent-sent row to "assistant" handed the running
+    agent somebody else's reply as its own previous turn, so it would claim it
+    had checked something itself -- or refuse to ask again, believing it
+    already knew."""
+    async with world.session_factory() as session:
+        earlier = make_task(world, seconds=0, description="Ask the CTO")
+        current = make_task(world, seconds=100, description="So what did they say?")
+        session.add_all([earlier, current])
+        await session.flush()
+        relayed = make_message(world, earlier, seconds=2, text="We deploy on Mondays.", agent=True)
+        relayed.sender_id = None  # a different agent, not this task's assignee
+        relayed.content_json = {"text": "We deploy on Mondays.", "from_agent_name": "CTO"}
+        session.add_all(
+            [
+                make_message(world, earlier, seconds=0, text="Ask the CTO"),
+                relayed,
+                make_message(world, earlier, seconds=3, text="I asked them.", agent=True),
+                make_message(world, current, seconds=100, text="So what did they say?"),
+            ]
+        )
+        await session.commit()
+        turns = await load(world, session, current)
+
+    relayed_turns = [t for t in turns if "We deploy on Mondays" in t[2]]
+    assert relayed_turns, turns
+    role, _, text = relayed_turns[0]
+    assert role == "user"
+    assert text.startswith("CTO replied:")
+    # The agent's own turn on that task is still its own.
+    assert ("agent", "text", "I asked them.") in turns

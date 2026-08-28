@@ -23,6 +23,7 @@ from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
+from jhin_agent_worker import projections as projections_module
 from jhin_agent_worker.projections import AgentProjectionActivities
 from jhin_agent_worker.reasoning import AgentStepReasoningRecord, AgentStepUsage
 from jhin_db.base import Base
@@ -34,6 +35,7 @@ from jhin_db.models import (
     RunEvent,
     Task,
     ToolCall,
+    UserQuestion,
     Workspace,
 )
 from jhin_domain import (
@@ -43,6 +45,7 @@ from jhin_domain import (
     SenderType,
     TaskState,
     ToolCallStatus,
+    UserQuestionStatus,
     new_uuid7,
 )
 from jhin_observability import noop_metrics, noop_tracer
@@ -64,6 +67,7 @@ from jhin_workflows.agent_task.shared import (
     CommitAgentStepInput,
     ExecuteBoundToolInput,
     FinalizeInput,
+    PersonQuestionAsk,
     ReasonAgentStepInput,
     ReasonAgentStepResult,
     ResolveAdvertisedToolsInput,
@@ -980,6 +984,149 @@ async def test_auto_activated_request_is_lifted_from_the_requester_step(
     ]
     assert first.work_request_starts == expected
     assert replay.work_request_starts == expected
+
+
+async def test_an_ask_that_reached_somebody_parks_the_run_and_writes_no_observation(
+    world: ProjectionWorld,
+) -> None:
+    """The answer is the ask's one and only observation, written later by
+    ``deliver_question_answer``. A ``tool_result`` here would give the call
+    two ``tool_use_id``-matched blocks and the provider rejects that."""
+    question_id = str(new_uuid7())
+    await world.seed_step(
+        statuses=[ToolCallStatus.COMPLETED.value],
+        manifest_count=2,
+        tool_names=["organization.ask_person", "system.echo"],
+        outputs=[{"status": "asked", "question_id": question_id, "detail": "Asked."}],
+    )
+    ids = [str(stable_tool_invocation_id(world.run_id, 0, 0))]
+
+    first = await world.projections.commit_agent_step_activity(world.commit_params(ids=ids))
+    replay = await world.projections.commit_agent_step_activity(world.commit_params(ids=ids))
+
+    expected = [
+        PersonQuestionAsk(
+            question_id=question_id,
+            provider_call_id="private-provider-call-1",
+            gateway_tool_call_id=ids[0],
+        )
+    ]
+    assert first.person_questions == expected
+    assert replay.person_questions == expected
+    payload = await world.load_commit_payload()
+    assert payload["result"]["person_questions"] == [asdict(expected[0])]
+    # A run holding a question open still owns its concurrency slot.
+    assert (await world.load_run()).status == RunStatus.WAITING_PERSON.value
+    # One tool_call message, and no tool_result for it.
+    async with world.sessions() as session:
+        kinds = [
+            message.message_type
+            for message in await session.scalars(
+                select(Message).where(Message.run_id == world.run_id)
+            )
+        ]
+    assert kinds == ["tool_call"]
+
+
+async def test_an_ask_nobody_saw_is_observed_in_the_same_step(
+    world: ProjectionWorld,
+) -> None:
+    """A repeat or an over-budget refusal never reached anyone, so there is
+    nothing to wait for and the sentence is useful immediately."""
+    await world.seed_step(
+        statuses=[ToolCallStatus.COMPLETED.value],
+        tool_names=["organization.ask_person"],
+        outputs=[
+            {
+                "status": "already_answered",
+                "question_id": str(new_uuid7()),
+                "answer": "Only the Engineering team",
+                "detail": "Not asked again.",
+            }
+        ],
+    )
+    ids = [str(stable_tool_invocation_id(world.run_id, 0, 0))]
+
+    result = await world.projections.commit_agent_step_activity(world.commit_params(ids=ids))
+
+    assert result.person_questions == []
+    assert (await world.load_run()).status != RunStatus.WAITING_PERSON.value
+    async with world.sessions() as session:
+        kinds = sorted(
+            message.message_type
+            for message in await session.scalars(
+                select(Message).where(Message.run_id == world.run_id)
+            )
+        )
+    assert kinds == ["tool_call", "tool_result"]
+
+
+async def test_finalizing_a_run_closes_the_box_it_left_on_screen(
+    world: ProjectionWorld,
+) -> None:
+    """The agent that asked is gone, so an answer would reach nobody. The
+    card has to say so instead of looking like a live control."""
+    async with world.sessions() as session:
+        card = Message(
+            workspace_id=world.workspace_id,
+            task_id=world.task_id,
+            run_id=world.run_id,
+            sender_type=SenderType.AGENT.value,
+            sender_id=world.agent_id,
+            recipient_type="user",
+            recipient_id=None,
+            message_type="question",
+            content_json={"kind": "user_question", "status": "pending"},
+            visibility=MessageVisibility.VISIBLE.value,
+        )
+        session.add(card)
+        await session.flush()
+        question = UserQuestion(
+            workspace_id=world.workspace_id,
+            task_id=world.task_id,
+            run_id=world.run_id,
+            agent_id=world.agent_id,
+            message_id=card.id,
+            kind="memory_scope",
+            question="Only Engineering, or company wide?",
+            options_json=[{"value": "team", "label": "Only Engineering"}],
+            dedupe_hash="d",
+            idempotency_key="k",
+            asked_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC),
+        )
+        session.add(question)
+        await session.commit()
+        question_id, card_id = question.id, card.id
+
+    await _finalize(world, RunStatus.CANCELLED.value)
+
+    async with world.sessions() as session:
+        closed = await session.get(UserQuestion, question_id)
+        assert closed is not None and closed.status == UserQuestionStatus.CANCELLED.value
+        stamped = await session.get(Message, card_id)
+        assert stamped is not None
+        assert stamped.content_json["status"] == UserQuestionStatus.CANCELLED.value
+
+
+async def test_a_failure_closing_the_box_never_strands_the_run(
+    world: ProjectionWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The card is cosmetic; the run reaching a terminal state is not. The
+    closure runs in a SAVEPOINT so a failure rolls back itself alone —
+    without one, Postgres would abort the whole transaction and the finalize
+    would fail forever on retry."""
+
+    async def explode(*_args: Any, **_kwargs: Any) -> int:
+        raise RuntimeError("closing the question failed")
+
+    monkeypatch.setattr(projections_module, "_close_pending_run_questions", explode)
+
+    await _finalize(world, RunStatus.COMPLETED.value)
+
+    run = await world.load_run()
+    assert run.status == RunStatus.COMPLETED.value
+    assert run.completed_at is not None
 
 
 class _StartRecorder:

@@ -5,7 +5,15 @@
  */
 
 import { isWorkRequestMessage, reviewVerdictLabel, workRequestMessageLabel } from "@/lib/coordination";
-import type { ActivityCard, ActivityKind, Conversation, ConversationMessage } from "@/lib/types";
+import type {
+  ActivityCard,
+  ActivityKind,
+  Conversation,
+  ConversationMessage,
+  UserQuestionContent,
+  UserQuestionOption,
+  UserQuestionStatus,
+} from "@/lib/types";
 
 export const LAST_AGENT_STORAGE_KEY = "jhin-last-agent";
 
@@ -46,13 +54,19 @@ type LiveStatusTone = "accent" | "neutral" | "warn";
 export interface LiveStatus {
   label: string;
   tone: LiveStatusTone;
-  kind: "working" | "queued" | "review" | "waiting_review" | "paused";
+  kind: "working" | "queued" | "review" | "waiting_review" | "question" | "paused";
 }
 
 /** Small live status for a conversation, or null when nothing is happening. */
 export function statusLabelFor(
   conversation: Pick<Conversation, "active_task_state" | "active_run_status">,
 ): LiveStatus | null {
+  if (conversation.active_run_status === "waiting_person") {
+    // The whole thread is blocked on a question in the transcript. Saying
+    // "Working…" here would be a lie the reader can act on: they would wait
+    // for an agent that is waiting for them.
+    return { label: "Needs your answer", tone: "warn", kind: "question" };
+  }
   if (conversation.active_run_status === "waiting_approval") {
     return { label: "Needs your review", tone: "warn", kind: "review" };
   }
@@ -76,6 +90,77 @@ function str(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+/* ------------------------------------------------------------------ */
+/* Questions an agent asked the person                                  */
+/* ------------------------------------------------------------------ */
+
+/** A `question` message the agent addressed to the person, not the
+ * agent-to-agent work request that shares the same `message_type`. */
+export function isUserQuestionMessage(
+  message: Pick<ConversationMessage, "content_json">,
+): boolean {
+  return message.content_json.kind === "user_question";
+}
+
+const QUESTION_STATUSES: ReadonlySet<string> = new Set([
+  "pending",
+  "answered",
+  "expired",
+  "cancelled",
+]);
+
+function questionOptions(raw: unknown): UserQuestionOption[] {
+  if (!Array.isArray(raw)) return [];
+  const options: UserQuestionOption[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const record = entry as Record<string, unknown>;
+    const value = str(record.value);
+    if (!value) continue;
+    options.push({ value, label: str(record.label) || value, detail: str(record.detail) });
+  }
+  return options;
+}
+
+/**
+ * Normalize a question message's `content_json` into something the card can
+ * render without guarding every field. The keys are guaranteed by the API
+ * contract, but this row is mutated in place as the question is answered or
+ * closed, and a half-written or older shape must degrade to a readable card
+ * rather than throw in the middle of a transcript. Returns null when the
+ * message is not a question at all.
+ */
+export function readUserQuestion(
+  message: Pick<ConversationMessage, "content_json">,
+): UserQuestionContent | null {
+  if (!isUserQuestionMessage(message)) return null;
+  const content = message.content_json;
+  const status = str(content.status);
+  const answerKind = str(content.answer_kind);
+  return {
+    kind: "user_question",
+    question_id: str(content.question_id),
+    question: str(content.question),
+    context: str(content.context),
+    question_kind: str(content.question_kind) === "memory_scope" ? "memory_scope" : "open",
+    options: questionOptions(content.options),
+    allow_other: content.allow_other !== false,
+    other_label: str(content.other_label) || "Something else",
+    other_placeholder: str(content.other_placeholder) || "Tell me in your own words…",
+    // An unrecognized status is treated as still open: showing the buttons on
+    // a question that turns out to be closed costs one refused POST, while
+    // hiding them on a live one strands the run until it times out.
+    status: (QUESTION_STATUSES.has(status) ? status : "pending") as UserQuestionStatus,
+    expires_at: str(content.expires_at),
+    asked_by_agent_name: str(content.asked_by_agent_name),
+    ...(answerKind === "option" || answerKind === "other" ? { answer_kind: answerKind } : {}),
+    answer_option_value: str(content.answer_option_value),
+    answer: str(content.answer),
+    answered_by_name: str(content.answered_by_name),
+    answered_at: str(content.answered_at),
+  };
+}
+
 /** Who a structured message was aimed at, when the backend recorded it. */
 function messageTarget(message: Pick<ConversationMessage, "content_json">): string {
   const content = message.content_json;
@@ -90,6 +175,13 @@ export function friendlyMessageLabel(
 ): string {
   const content = message.content_json;
   if (isWorkRequestMessage(message)) return workRequestMessageLabel({ content_json: content, sender_id: null });
+  const question = readUserQuestion(message);
+  if (question !== null) {
+    const agent = question.asked_by_agent_name || "Your agent";
+    if (question.status === "answered") return `You answered ${agent}`;
+    if (question.status === "pending") return `${agent} needs an answer`;
+    return `${agent} stopped waiting`;
+  }
   const target = messageTarget(message);
   const from = str(content.from_agent_name);
   switch (message.message_type) {
@@ -141,8 +233,13 @@ export function workRequestDetailLines(message: Pick<ConversationMessage, "conte
 }
 
 export function isWorkCard(
-  message: Pick<ConversationMessage, "message_type" | "sender_type">,
+  message: Pick<ConversationMessage, "message_type" | "sender_type" | "content_json">,
 ): boolean {
+  // A question addressed to the person shares `message_type: "question"` with
+  // agent-to-agent work requests, and it is not a work card: it has its own
+  // card, with the controls the whole thread is blocked on. Explicit rather
+  // than incidental, so a later change to WORK_CARD_TYPES cannot bury it.
+  if (isUserQuestionMessage(message)) return false;
   return message.sender_type === "agent" && WORK_CARD_TYPES.has(message.message_type);
 }
 
@@ -270,6 +367,10 @@ function messageExchangeInfo(
   message: ConversationMessage,
   primary: { id: string | null; name: string | null },
 ): { key: string; ids: string[]; other: ExchangeParty; taskIds: string[] } | null {
+  // A question the person has to answer is never quiet background traffic —
+  // folding it into a collapsed exchange row would hide the one control the
+  // conversation is waiting on behind a disclosure triangle.
+  if (isUserQuestionMessage(message)) return null;
   const content = message.content_json;
   const sender: ExchangeParty = { id: message.agent_id, name: message.sender_name ?? "" };
   const target: ExchangeParty = {
