@@ -14310,7 +14310,7 @@
     },
     "/api/v1/connectors/catalog": {
       "get": {
-        "description": "The curated Apps library: known apps with native connectors or MCP\nendpoints (docs/architecture/mcp.md). Static public data.\n\n``logo_url`` is the same-origin icon-proxy path, never the upstream URL:\nthe entry's ``icon_url`` is an instruction to the proxy and stays on the\nserver (``CatalogAppOut`` declares no such field, so the dump's copy is\ndropped on validation).\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
+        "description": "The curated Apps library: known apps with native connectors or MCP\nendpoints (docs/architecture/mcp.md). Static public data.\n\nEntries flagged ``dev_only`` (the dev stack's test doubles) never leave a\nproduction-like install. ``logo_url`` is the same-origin icon-proxy path,\nnever the upstream URL: the entry's ``icon_url`` is an instruction to the\nproxy and stays on the server (``CatalogAppOut`` declares no such field,\nso the dump's copy is dropped on validation).\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
         "operationId": "list_catalog_api_v1_connectors_catalog_get",
         "responses": {
           "200": {

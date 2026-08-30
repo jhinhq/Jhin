@@ -59,6 +59,7 @@ from jhin_api.catalog.schemas import (
     TransportHint,
 )
 from jhin_api.deps import WorkspaceContext
+from jhin_api.settings import get_settings
 from jhin_catalog_sync.risk import DEFAULT_RISK_BY_TRUST, default_risk, risk_rank
 from jhin_catalog_sync.wire import clean_text, safe_icon_url
 from jhin_connectors.catalog import CatalogApp, load_catalog
@@ -171,6 +172,9 @@ class _Builtin:
 
 @cache
 def _builtins() -> tuple[_Builtin, ...]:
+    # A production-like install never lists the dev stack's test doubles.
+    # APP_ENV is process-constant, so caching the filtered tuple is safe.
+    production_like = get_settings().is_production_like
     return tuple(
         _Builtin(
             app=app,
@@ -180,6 +184,7 @@ def _builtins() -> tuple[_Builtin, ...]:
             ],
         )
         for app in load_catalog()
+        if not (app.dev_only and production_like)
     )
 
 

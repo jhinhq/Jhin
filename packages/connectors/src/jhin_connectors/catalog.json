@@ -565,6 +565,7 @@
   {
     "slug": "fake",
     "name": "Fake MCP (dev)",
+    "dev_only": true,
     "category": "Developer tools",
     "icon": "flask",
     "description": "The dev stack's fake MCP server: echo, notes, a destructive tool, an image, and huge text.",
@@ -616,6 +617,7 @@
   {
     "slug": "fake_websearch",
     "name": "Fake web search (dev)",
+    "dev_only": true,
     "category": "Search & web",
     "icon": "flask",
     "description": "The dev stack's deterministic search + fetch double speaking the Tavily, Brave, and Exa shapes.",

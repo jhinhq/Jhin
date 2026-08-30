@@ -16,6 +16,7 @@ from jhin_api.connections.router import list_catalog
 from jhin_api.connections.schemas import CatalogAppOut, ConnectionToolsOut
 from jhin_api.deps import WorkspaceContext
 from jhin_api.policy.router import list_tools
+from jhin_api.settings import Settings
 from jhin_connectors.mcp import DISCOVERY_KEY, OVERRIDES_KEY
 from jhin_connectors.testing.fake_mcp import DEFAULT_TOKEN, FakeMcpServer
 from jhin_db.models import Agent, AgentCapabilityGrant, AuditEvent, Connection
@@ -299,7 +300,7 @@ async def test_workspace_tool_catalog_and_access_summary_include_mcp_tools(
 
 
 async def test_catalog_endpoint_returns_public_entries() -> None:
-    entries = await list_catalog(_auth=None)  # type: ignore[arg-type]
+    entries = await list_catalog(_auth=None, settings=Settings())  # type: ignore[arg-type]
     assert all(isinstance(entry, CatalogAppOut) for entry in entries)
     github = next(entry for entry in entries if entry.slug == "github")
     assert github.connector_type == "github"
@@ -309,6 +310,20 @@ async def test_catalog_endpoint_returns_public_entries() -> None:
         entry.setup_note or entry.auth_note or entry.docs_url for entry in unverified
     )
     assert not any("token" in (entry.mcp_url or "") for entry in entries)
+    # The dev stack's test doubles are listed on a dev install…
+    assert any(entry.slug == "fake" for entry in entries)
+
+
+async def test_catalog_endpoint_hides_dev_doubles_on_production() -> None:
+    # …and never on a production-like one: a real deployment must not
+    # advertise fake services (or any "(dev)"-suffixed entry) to its users.
+    entries = await list_catalog(
+        _auth=None,  # type: ignore[arg-type]
+        settings=Settings(app_env="production"),
+    )
+    assert entries, "the curated library itself still lists"
+    assert not any(entry.slug in {"fake", "fake_websearch"} for entry in entries)
+    assert not any("(dev)" in entry.name for entry in entries)
 
 
 async def test_a_reconnect_draft_survives_both_gates_that_used_to_reject_it(

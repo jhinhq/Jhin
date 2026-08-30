@@ -74,6 +74,10 @@ class CatalogApp(BaseModel):
     docs_url: str = ""
     setup_note: str = ""
     stdio_only: bool = False
+    # True for the dev stack's test doubles ("Fake MCP (dev)", …). The API
+    # drops these from every listing on a production-like install so a real
+    # deployment never advertises a fake service.
+    dev_only: bool = False
     # Non-secret connection config values the Connect dialog pre-fills for a
     # native connector (e.g. the web connector's pre-selected search_backend).
     connector_config: dict[str, str] = {}
@@ -132,18 +136,10 @@ def load_catalog() -> tuple[CatalogApp, ...]:
     return entries
 
 
-def catalog_by_slug(slug: str) -> CatalogApp | None:
-    for entry in load_catalog():
-        if entry.slug == slug:
-            return entry
-    return None
-
-
 __all__ = [
     "CATALOG_CATEGORIES",
     "ICON_URL_GITHUB_RE",
     "AuthHint",
     "CatalogApp",
-    "catalog_by_slug",
     "load_catalog",
 ]

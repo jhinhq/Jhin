@@ -431,6 +431,15 @@ async def seed(session: AsyncSession) -> str:
 
 
 async def run() -> None:
+    # The seed writes a documented password and a fake model provider; that
+    # combination must never land in a real deployment, whatever the operator
+    # typed. (It already refuses whenever any user exists.)
+    if os.environ.get("APP_ENV", "").lower() in {"staging", "production"}:
+        raise SystemExit(
+            "jhin-seed-dev is development-only: it creates a publicly documented "
+            "owner password and a fake model provider. Refusing under "
+            f"APP_ENV={os.environ['APP_ENV']}."
+        )
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise SystemExit("DATABASE_URL environment variable is required")

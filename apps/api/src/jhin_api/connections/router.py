@@ -143,17 +143,19 @@ async def list_connectors(_auth: CurrentAuth) -> list[ConnectorOut]:
 
 
 @catalog_router.get("/catalog")
-async def list_catalog(_auth: CurrentAuth) -> list[CatalogAppOut]:
+async def list_catalog(_auth: CurrentAuth, settings: OAuthSettingsDep) -> list[CatalogAppOut]:
     """The curated Apps library: known apps with native connectors or MCP
     endpoints (docs/architecture/mcp.md). Static public data.
 
-    ``logo_url`` is the same-origin icon-proxy path, never the upstream URL:
-    the entry's ``icon_url`` is an instruction to the proxy and stays on the
-    server (``CatalogAppOut`` declares no such field, so the dump's copy is
-    dropped on validation)."""
+    Entries flagged ``dev_only`` (the dev stack's test doubles) never leave a
+    production-like install. ``logo_url`` is the same-origin icon-proxy path,
+    never the upstream URL: the entry's ``icon_url`` is an instruction to the
+    proxy and stays on the server (``CatalogAppOut`` declares no such field,
+    so the dump's copy is dropped on validation)."""
     return [
         CatalogAppOut.model_validate({**entry.model_dump(), "logo_url": builtin_logo_url(entry)})
         for entry in load_catalog()
+        if not (entry.dev_only and settings.is_production_like)
     ]
 
 
