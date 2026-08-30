@@ -9,7 +9,11 @@ Security posture mirrors the other connectors' HTTP clients:
 - redirects are never followed (the SDK default would follow them);
 - every request is bounded by a timeout; tool calls and discovery run inside
   one short-lived session that is closed on every path;
-- no error crossing this module carries the URL, headers, or credential.
+- no error crossing this module carries the URL, headers, or credential;
+- a ``401``/``403`` is surfaced as :class:`McpAuthChallengeError` carrying
+  the status and the raw ``WWW-Authenticate`` header, so the OAuth path can
+  tell "renew this token" from "a person must widen this grant". Reading
+  that header is :mod:`jhin_connectors.mcp.oauth`'s job, not this module's.
 """
 
 from __future__ import annotations
@@ -50,6 +54,28 @@ _RESERVED_HEADERS = frozenset(
 
 class McpConnectionError(Exception):
     """A display-safe transport/handshake failure (never URL, headers, token)."""
+
+
+class McpAuthChallengeError(McpConnectionError):
+    """The server answered ``401``/``403`` with an authentication challenge.
+
+    A refused credential is not a transport failure, and the two need
+    different cures: a token that OAuth can renew, a scope a person has to
+    widen, or a static token an admin has to replace. So the status code and
+    the raw ``WWW-Authenticate`` header travel with the error instead of
+    being flattened into prose.
+
+    The *message* stays what it always was — a status code and nothing else.
+    Parsing the header is deliberately somebody else's job
+    (:func:`jhin_connectors.mcp.oauth.challenge_from_response`): this module
+    stays free of OAuth so the bearer and custom-header schemes keep their
+    original, minimal dependency surface.
+    """
+
+    def __init__(self, *, status_code: int, www_authenticate: str = "") -> None:
+        super().__init__(f"the MCP server refused the credential (HTTP {status_code})")
+        self.status_code = status_code
+        self.www_authenticate = www_authenticate
 
 
 def validate_mcp_server_url(raw: str, *, allowlist_env: str = ALLOWLIST_ENV) -> str:
@@ -155,10 +181,17 @@ class McpClient:
             try:
                 return await self._run_with(transport, body)
             except _BodyFailure as wrapped:
+                _raise_auth_challenge(wrapped.cause)
                 raise wrapped.cause from None
+            except McpAuthChallengeError:
+                raise
             except McpConnectionError as error:
                 failures.append(f"{transport}: {error}")
             except Exception as error:  # transport/handshake failure, body not run
+                # A refused credential answers both transports the same way,
+                # so there is nothing to fall back to and a precise error is
+                # worth more than a second round trip.
+                _raise_auth_challenge(error)
                 failures.append(f"{transport}: {_describe(error)}")
         raise McpConnectionError(
             "could not connect to the MCP server (" + "; ".join(failures) + ")"
@@ -210,6 +243,48 @@ class McpClient:
         return cast(T, outcome)
 
 
+_MAX_CAUSE_DEPTH = 8
+
+
+def _auth_challenge(error: BaseException, *, depth: int = 0) -> tuple[int, str] | None:
+    """The ``(status, WWW-Authenticate)`` of a ``401``/``403`` hiding anywhere
+    inside a failure.
+
+    The SDK raises ``raise_for_status`` errors from inside the transport's
+    task group, so the refusal usually arrives wrapped in an exception group,
+    and sometimes as the cause of a stream error raised when that group tore
+    down. Both shapes are walked, to a fixed depth.
+    """
+    if depth >= _MAX_CAUSE_DEPTH:
+        return None
+    if isinstance(error, McpAuthChallengeError):
+        return error.status_code, error.www_authenticate
+    if isinstance(error, httpx.HTTPStatusError) and error.response.status_code in (401, 403):
+        header = error.response.headers.get("www-authenticate", "")
+        return error.response.status_code, header if isinstance(header, str) else ""
+    if isinstance(error, BaseExceptionGroup):
+        for member in error.exceptions:
+            found = _auth_challenge(member, depth=depth + 1)
+            if found is not None:
+                return found
+        return None
+    for nested in (error.__cause__, error.__context__):
+        if nested is not None:
+            found = _auth_challenge(nested, depth=depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def _raise_auth_challenge(error: BaseException) -> None:
+    """Re-raise a hidden ``401``/``403`` as :class:`McpAuthChallengeError`."""
+    challenge = _auth_challenge(error)
+    if challenge is None:
+        return
+    status_code, header = challenge
+    raise McpAuthChallengeError(status_code=status_code, www_authenticate=header) from None
+
+
 def _describe(error: BaseException) -> str:
     """Type-only description; exception messages can echo URLs or bodies."""
     if isinstance(error, BaseExceptionGroup):
@@ -222,6 +297,8 @@ def _describe(error: BaseException) -> str:
 
 __all__ = [
     "ALLOWLIST_ENV",
+    "DEFAULT_TIMEOUT_SECONDS",
+    "McpAuthChallengeError",
     "McpClient",
     "McpConnectionError",
     "auth_headers",

@@ -78,6 +78,21 @@ class Settings(ObservabilitySettings):
     # endpoint is paginated on top of that.
     api_key_usage_retention_days: int = 30
 
+    # --- OAuth (docs/architecture/oauth.md) ---
+    # Origin the provider redirects the browser back to. Empty means "use
+    # APP_URL", which is right for every deployment where the web app and the
+    # API share an origin through the Next.js proxy. Set it only when the
+    # browser reaches Jhin at a different origin than APP_URL.
+    oauth_redirect_base_url: str = ""
+    # How long a pending authorization stays claimable. Ten minutes is the
+    # MCP security-considerations recommendation for state lifetime.
+    oauth_state_ttl_seconds: int = 600
+    # client_name sent during dynamic client registration; what the user sees
+    # on the provider's consent screen.
+    oauth_client_name: str = "Jhin"
+    # Proactive refresh sweep cadence, in seconds.
+    oauth_refresh_interval_seconds: int = 300
+
     # --- Request limits ---
     # Global ceiling on any request body, enforced by middleware. Set above the
     # largest legitimate upload (8 MiB media, 5 MiB skill bundles) so per-route
@@ -148,6 +163,63 @@ class Settings(ObservabilitySettings):
                 f"APP_ENV={self.app_env} with a plaintext APP_URL ({self.app_url!r}). "
                 "Terminate TLS in front of Jhin and set APP_URL=https://... with "
                 "COOKIE_SECURE=true, or set APP_ENV=dev for a local install."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_oauth_redirect(self) -> Settings:
+        """Refuse at startup to compute a redirect URI nobody can use safely.
+
+        The redirect URI is one constant for the whole instance, recomputed
+        from these settings at every call site and registered with every
+        provider. A base URL carrying a path, a query, a fragment, or
+        userinfo produces a URI that either will not match what was
+        registered or hands part of the destination to whoever can influence
+        it — so the shape is checked once, here, rather than discovered when
+        a provider rejects the tenth authorization of the day.
+
+        The TLS rule is the same posture ``COOKIE_SECURE`` already takes: an
+        authorization code arriving over plaintext on a public origin is an
+        account takeover, so a production-like install must terminate TLS or
+        stay on loopback.
+        """
+        base = self.oauth_redirect_base_url.strip()
+        source = "OAUTH_REDIRECT_BASE_URL"
+        if not base:
+            base, source = self.app_url.strip(), "APP_URL"
+        if not base:
+            raise InsecureDeploymentError(
+                "APP_URL is empty, so Jhin cannot compute the OAuth redirect URI that "
+                "providers must be told to send people back to. Set APP_URL."
+            )
+        parsed = urlsplit(base)
+        scheme = parsed.scheme.lower()
+        host = (parsed.hostname or "").lower()
+        if scheme not in {"http", "https"} or not host:
+            raise InsecureDeploymentError(
+                f"{source} ({base!r}) must be an absolute http:// or https:// URL with a host."
+            )
+        if parsed.query or parsed.fragment or parsed.username or parsed.password:
+            raise InsecureDeploymentError(
+                f"{source} ({base!r}) must be a bare origin: no query string, no fragment, "
+                "and no username or password."
+            )
+        if parsed.path not in {"", "/"}:
+            raise InsecureDeploymentError(
+                f"{source} ({base!r}) must be a bare origin with no path. Jhin appends its "
+                "own callback path, and a provider matches the registered redirect URI "
+                "exactly."
+            )
+        if (
+            self.is_production_like
+            and scheme != "https"
+            and host not in _LOOPBACK_HOSTS
+            and not host.endswith(".localhost")
+        ):
+            raise InsecureDeploymentError(
+                f"{source} ({base!r}) is plaintext HTTP on a public host. An OAuth "
+                "authorization code sent back over plaintext can be stolen in transit; "
+                "serve Jhin over HTTPS or set APP_ENV=dev for a local install."
             )
         return self
 

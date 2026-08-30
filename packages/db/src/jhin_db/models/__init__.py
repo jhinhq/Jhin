@@ -2,6 +2,7 @@
 
 from jhin_db.models.access import ApiKey, ApiKeyUsage, WorkspaceInvitation
 from jhin_db.models.audit import AuditEvent
+from jhin_db.models.catalog import CatalogEntry, CatalogIcon, CatalogVersion
 from jhin_db.models.connection import Connection, WebhookDelivery
 from jhin_db.models.conversation import Conversation, UserQuestion
 from jhin_db.models.coordination import ReviewPolicy, WorkRequest, WorkReview
@@ -14,6 +15,7 @@ from jhin_db.models.models import (
     ModelProvider,
     PriceCatalogSnapshot,
 )
+from jhin_db.models.oauth import OAuthAuthorization, OAuthClientRegistration
 from jhin_db.models.org import (
     Agent,
     AgentRelationship,
@@ -41,6 +43,9 @@ __all__ = [
     "Approval",
     "AuditEvent",
     "AvatarGeneration",
+    "CatalogEntry",
+    "CatalogIcon",
+    "CatalogVersion",
     "Connection",
     "Conversation",
     "MediaAsset",
@@ -49,6 +54,8 @@ __all__ = [
     "ModelObservedPrice",
     "ModelProfile",
     "ModelProvider",
+    "OAuthAuthorization",
+    "OAuthClientRegistration",
     "PriceCatalogSnapshot",
     "ReviewPolicy",
     "RunEvent",

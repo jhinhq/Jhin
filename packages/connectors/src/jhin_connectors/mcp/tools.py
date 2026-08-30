@@ -19,7 +19,7 @@ every observation as data, not instructions.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Literal, cast
 
 from mcp import ClientSession
@@ -27,8 +27,13 @@ from mcp import types as mcp_types
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from jhin_connectors.endpoints import EndpointPolicyError
-from jhin_connectors.execution import ConnectionResolutionError, resolve_connection
+from jhin_connectors.execution import (
+    ConnectionResolutionError,
+    ResolvedConnection,
+    resolve_connection,
+)
 from jhin_connectors.mcp.client import (
+    McpAuthChallengeError,
     McpClient,
     McpConnectionError,
     auth_headers,
@@ -45,6 +50,15 @@ from jhin_connectors.mcp.discovery import (
     stored_tools,
 )
 from jhin_connectors.mcp.manifest import MCP_CONNECTOR_TYPE, TRANSPORT_AUTO
+from jhin_connectors.mcp.oauth import (
+    AUTH_OAUTH,
+    challenge_from_response,
+    oauth_auth_headers,
+    reauthorized_headers,
+    reconnect_message,
+    record_scope_step_up,
+)
+from jhin_oauth.errors import TransientOAuthError
 from jhin_policy import RiskLevel, ToolDefinition
 from jhin_tools.builtin import ToolExecutionContext, ToolExecutor
 from jhin_tools.errors import ToolExecutionError
@@ -58,6 +72,10 @@ UNTRUSTED_NOTICE = (
 )
 
 SCOPE_KEYS: tuple[str, ...] = ("connection_id", "tool")
+
+#: Shown to the agent when the authorization server itself was briefly
+#: unreachable — the one OAuth failure that is worth trying again.
+UNAVAILABLE_HINT = "This app's sign-in could not be renewed right now; try again shortly."
 
 
 class McpToolOutput(BaseModel):
@@ -151,19 +169,43 @@ def connection_tools(config: Mapping[str, Any]) -> tuple[tuple[ToolDefinition, T
     )
 
 
-def client_for(
-    config: Mapping[str, Any], credentials: Mapping[str, str], *, auth_type: str
-) -> McpClient:
-    """Transport for one resolved connection; re-validates the URL policy at
+def validated_server_url(config: Mapping[str, Any]) -> str:
+    """The connection's endpoint, re-checked against the outbound policy at
     use time so an allow-list change takes effect without re-creating rows."""
     server_url = config.get("server_url")
     if not isinstance(server_url, str):
         raise ValueError("this MCP connection has no server URL")
-    validated = validate_mcp_server_url(server_url)
+    return validate_mcp_server_url(server_url)
+
+
+def client_for(
+    config: Mapping[str, Any], credentials: Mapping[str, str], *, auth_type: str
+) -> McpClient:
+    """Transport for one resolved connection.
+
+    OAuth connections take a separate header path because they carry a second
+    check the static schemes have no need of: the token's recorded audience
+    must still be the canonical URI of the endpoint about to be dialled. Every
+    other scheme falls through to :func:`auth_headers` unchanged.
+    """
+    validated = validated_server_url(config)
+    if auth_type == AUTH_OAUTH:
+        headers = oauth_auth_headers(credentials, config, validated_server_url=validated)
+    else:
+        headers = auth_headers(auth_type, credentials, config)
+    return client_with_headers(config, headers=headers, server_url=validated)
+
+
+def client_with_headers(
+    config: Mapping[str, Any], *, headers: Mapping[str, str], server_url: str | None = None
+) -> McpClient:
+    """The same transport with headers the caller already built — how the
+    on-401 retry dials again with a freshly minted access token."""
+    validated = server_url if server_url is not None else validated_server_url(config)
     transport = config.get("transport", TRANSPORT_AUTO)
     return McpClient(
         validated,
-        headers=auth_headers(auth_type, credentials, config),
+        headers=headers,
         transport=transport if isinstance(transport, str) else TRANSPORT_AUTO,
     )
 
@@ -224,6 +266,109 @@ def convert_result(tool_name: str, result: mcp_types.CallToolResult) -> McpToolO
     )
 
 
+async def _retry_after_challenge(
+    ctx: ToolExecutionContext,
+    resolved: ResolvedConnection,
+    error: McpAuthChallengeError,
+    *,
+    body: Callable[[ClientSession], Awaitable[mcp_types.CallToolResult]],
+    tool_name: str,
+    validated: str,
+) -> mcp_types.CallToolResult:
+    """Diagnose a refused credential and, where a refresh is the cure, run
+    the call once more with a new token.
+
+    A ``401`` is the only case worth retrying, and only for OAuth: the server
+    rejected a token Jhin believed was live, which one forced exchange
+    usually fixes. It is safe to retry because a refused request is a request
+    the server did not act on. A ``403 insufficient_scope`` cannot be fixed
+    by any token — it is parked for the Reconnect button and a person is
+    asked. Every other refusal is terminal here.
+
+    Static-token connections keep the exact error they have always produced.
+
+    The cure travels as the error's ``hint``: the gateway persists a failure's
+    code, not its message, and the hint is the one part of a tool failure that
+    is allowed to reach the model. Every hint here is a Jhin-authored sentence
+    with at most a bounded connection name in it — never a word the server
+    chose.
+    """
+    connection = resolved.connection
+    if connection.auth_type != AUTH_OAUTH:
+        raise ToolExecutionError(
+            str(error), code="mcp_unreachable", side_effect_possible=False
+        ) from None
+
+    challenge = challenge_from_response(
+        error.status_code, {"www-authenticate": error.www_authenticate}
+    )
+    if challenge is not None and challenge.needs_more_scope:
+        message = record_scope_step_up(connection, tool_name=tool_name, challenge=challenge)
+        raise ToolExecutionError(
+            message,
+            code="mcp_oauth_scope_required",
+            side_effect_possible=False,
+            hint=message,
+        ) from None
+    if challenge is None or not challenge.token_rejected:
+        message = reconnect_message(connection.name)
+        raise ToolExecutionError(
+            message,
+            code="mcp_oauth_forbidden",
+            side_effect_possible=False,
+            hint=message,
+        ) from None
+
+    try:
+        headers = await reauthorized_headers(
+            ctx,
+            connection,
+            resolved.config,
+            credentials=resolved.credentials,
+            validated_server_url=validated,
+        )
+    except TransientOAuthError:
+        raise ToolExecutionError(
+            UNAVAILABLE_HINT,
+            code="mcp_oauth_unavailable",
+            side_effect_possible=False,
+            hint=UNAVAILABLE_HINT,
+        ) from None
+    if headers is None:
+        message = reconnect_message(connection.name)
+        raise ToolExecutionError(
+            message,
+            code="mcp_oauth_reauth_required",
+            side_effect_possible=False,
+            hint=message,
+        ) from None
+
+    try:
+        return await client_with_headers(
+            resolved.config, headers=headers, server_url=validated
+        ).run(body)
+    except ToolExecutionError:
+        raise
+    except McpAuthChallengeError:
+        # A second refusal with a token minted seconds ago is not a race; the
+        # authorization itself no longer covers this server.
+        message = reconnect_message(connection.name)
+        raise ToolExecutionError(
+            message,
+            code="mcp_oauth_reauth_required",
+            side_effect_possible=False,
+            hint=message,
+        ) from None
+    except McpConnectionError as retry_error:
+        raise ToolExecutionError(
+            str(retry_error), code="mcp_unreachable", side_effect_possible=False
+        ) from None
+    except Exception as retry_error:
+        raise ToolExecutionError(
+            f"MCP call failed: {type(retry_error).__name__}", code="mcp_call_failed"
+        ) from None
+
+
 def make_executor(server_slug: str, tool: DiscoveredTool) -> ToolExecutor:
     async def _execute(ctx: ToolExecutionContext, payload: BaseModel) -> BaseModel:
         data = payload.model_dump(mode="json")
@@ -251,6 +396,7 @@ def make_executor(server_slug: str, tool: DiscoveredTool) -> ToolExecutor:
             )
         reviewed_risk = effective_risk(stored, stored_overrides(config))
         try:
+            validated = validated_server_url(config)
             client = client_for(
                 config, resolved.credentials, auth_type=resolved.connection.auth_type
             )
@@ -284,6 +430,15 @@ def make_executor(server_slug: str, tool: DiscoveredTool) -> ToolExecutor:
             result = await client.run(body)
         except ToolExecutionError:
             raise
+        except McpAuthChallengeError as error:
+            result = await _retry_after_challenge(
+                ctx,
+                resolved,
+                error,
+                body=body,
+                tool_name=tool_name_for(server_slug, stored.slug),
+                validated=validated,
+            )
         except McpConnectionError as error:
             raise ToolExecutionError(
                 str(error), code="mcp_unreachable", side_effect_possible=False
@@ -309,9 +464,11 @@ __all__ = [
     "build_input_model",
     "capability_pattern_for",
     "client_for",
+    "client_with_headers",
     "connection_tool_definitions",
     "connection_tools",
     "convert_result",
     "make_executor",
     "tool_name_for",
+    "validated_server_url",
 ]

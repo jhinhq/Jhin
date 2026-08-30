@@ -1,5 +1,7 @@
 /** TypeScript mirrors of the API's Pydantic contracts. */
 
+import type { ConfigSchema } from "@/lib/config-schema";
+
 export type WorkspaceRole = "viewer" | "member" | "admin" | "owner";
 export type AgentStatus = "active" | "paused" | "disabled";
 export type AutonomyLevel = "manual" | "supervised" | "autonomous";
@@ -701,7 +703,17 @@ export interface ConnectorInfo {
   docs_url: string;
 }
 
-type ConnectionStatus = "active" | "error" | "disabled";
+/** `needs_reauth` is an OAuth connection whose tokens can no longer be
+ * refreshed: the setup is intact, the permission is not. */
+type ConnectionStatus = "active" | "error" | "disabled" | "needs_reauth";
+
+/** Whose provider account an OAuth connection acts with. Every agent granted
+ * the connection inherits that person's permissions, so the name is shown. */
+export interface UserSummary {
+  /** Mirrors the API's `ConnectionAuthorizedByOut.user_id`, not `id`. */
+  user_id: string;
+  display_name: string;
+}
 
 export interface ConnectionInfo {
   id: string;
@@ -716,6 +728,10 @@ export interface ConnectionInfo {
   last_verified_at: string | null;
   last_error: string | null;
   webhook_secret_configured: boolean;
+  /** OAuth only, and absent on an API that predates the OAuth work. */
+  authorized_by?: UserSummary | null;
+  oauth_expires_at?: string | null;
+  needs_reauth?: boolean;
 }
 
 export interface WebhookSetup {
@@ -767,6 +783,110 @@ export interface VerifyResult {
   message: string;
   status: string;
   details: Record<string, string>;
+}
+
+// --- OAuth connect (docs/architecture/oauth.md) ---
+
+/**
+ * How this app should be connected, as the server's probe decided it.
+ *
+ * The probe asks the server rather than trusting the catalog's `auth_hint`,
+ * so this is the one signal the connect flow routes on.
+ */
+export type OAuthConnectMethod =
+  | "oauth_discovery"
+  | "oauth_static"
+  | "device_code"
+  | "oauth_needs_client"
+  | "api_key";
+
+/** `POST /oauth/probe`. Carries no credential material of any kind: `reason`
+ * is a Jhin-authored constant, never text the provider wrote. */
+export interface OAuthProbeOut {
+  method: OAuthConnectMethod;
+  supports_oauth: boolean;
+  supports_dcr: boolean;
+  issuer: string;
+  /** Host only — what the consent sentence names. */
+  authorization_server_display: string;
+  scopes: string[];
+  resource: string;
+  /** A usable client registration already exists for this workspace. */
+  client_configured: boolean;
+  requires_client_secret: boolean;
+  reason: string;
+}
+
+/** `POST /oauth/start` and `POST /connections/{id}/reauthorize`. The URL is
+ * the provider's authorization endpoint; it holds no secret. */
+export interface OAuthStartOut {
+  authorization_url: string;
+  state_expires_at: string;
+  issuer: string;
+  scopes: string[];
+  resource: string;
+  authorized_as_user_id: string;
+  client_source: "dcr" | "manual" | "static";
+}
+
+/** `POST /oauth/device/start`. `handle` is the opaque poll handle — never the
+ * device code, which the browser is not trusted with. */
+export interface OAuthDeviceStartOut {
+  handle: string;
+  user_code: string;
+  verification_uri: string;
+  verification_uri_complete: string | null;
+  expires_at: string;
+  interval_seconds: number;
+}
+
+export interface OAuthDevicePollOut {
+  status: "pending" | "slow_down" | "connected" | "denied" | "expired";
+  interval_seconds: number | null;
+  connection: ConnectionInfo | null;
+}
+
+/** One registered OAuth app, per workspace per authorization server. The
+ * secret is never returned — only whether one is stored. */
+export interface OAuthClientOut {
+  id: string;
+  issuer: string;
+  redirect_uri: string;
+  client_id: string;
+  client_secret_configured: boolean;
+  token_endpoint_auth_method: string;
+  source: "dcr" | "manual" | "static";
+  scopes: string;
+  created_at: string;
+  last_used_at: string | null;
+  connection_count: number;
+}
+
+export interface OAuthClientCreate {
+  issuer: string;
+  client_id: string;
+  client_secret?: string | null;
+  token_endpoint_auth_method?: "none" | "client_secret_post" | "client_secret_basic";
+  scopes?: string;
+}
+
+/** `GET /oauth/redirect-uri` — the one callback URL this instance registers
+ * with every provider, computed from settings. */
+export interface OAuthRedirectOut {
+  redirect_uri: string;
+  github_app_redirect_uri: string;
+  is_https: boolean;
+  is_loopback: boolean;
+  configured_via: "OAUTH_REDIRECT_BASE_URL" | "APP_URL";
+}
+
+/** `POST /oauth/github-app/manifest`. The browser POSTs `manifest` and
+ * `state` to `post_url` as an ordinary form; GitHub creates the app. */
+export interface GitHubAppManifestOut {
+  post_url: string;
+  manifest: Record<string, unknown>;
+  state: string;
+  expires_at: string;
 }
 
 export interface ToolCallRecord {
@@ -1443,6 +1563,138 @@ export interface CatalogApp {
   stdio_only: boolean;
   /** Non-secret connection config pre-filled for a native connector. */
   connector_config: Record<string, string>;
+  /** Same-origin icon-proxy path when a real logo exists; never an upstream URL. */
+  logo_url?: string | null;
+}
+
+// --- The synced app/skill catalog (docs/architecture/catalog.md) ---
+//
+// A second, much larger index sitting behind the 50 curated entries above:
+// MCP servers and agent skills discovered from public registries, refreshed
+// by the `jhin-catalog-sync` job. Everything here is an index entry, not a
+// connection — nothing is dialled until somebody presses Connect. `source`
+// says which half a row came from, so a synced entry can never pass itself
+// off as a curated one.
+
+export type CatalogKind = "mcp" | "skill";
+export type CatalogSource = "builtin" | "synced";
+export type CatalogTrustTier =
+  | "curated"
+  | "registry_verified"
+  | "smithery_verified"
+  | "reviewed"
+  | "indexed";
+
+export interface CatalogEntry {
+  slug: string;
+  kind: CatalogKind;
+  source: CatalogSource;
+  name: string;
+  summary: string;
+  category: string;
+  icon: string;
+  trust_tier: CatalogTrustTier;
+  /** The floor this entry's provenance justifies, not an observed behaviour. */
+  default_risk: RiskLevel;
+  popularity: number;
+  connector_type: string | null;
+  mcp_url: string | null;
+  url_unverified: boolean;
+  transport: "streamable_http" | "sse" | "unknown";
+  auth_hint: CatalogAuthHint;
+  stdio_only: boolean;
+  deprecated: boolean;
+  connectable: boolean;
+  docs_url: string;
+  /** Same-origin icon-proxy path when a real logo exists; never an upstream URL. */
+  logo_url?: string | null;
+}
+
+export interface CatalogMcpDetail {
+  tool_count: number | null;
+  registry_name: string;
+  npm_package: string;
+  verified_upstream: boolean;
+  package_identifiers: string[];
+  remote_urls: string[];
+}
+
+export interface CatalogSkillDetail {
+  skill_name: string;
+  source_ref: string;
+  skill_path: string;
+  commit_sha: string;
+  marketplace: string;
+  plugin: string;
+  model_invocable: boolean;
+  allowed_tools: string[];
+}
+
+export interface CatalogEntryDetail extends CatalogEntry {
+  description: string;
+  homepage: string;
+  auth_note: string;
+  setup_note: string;
+  license: string;
+  tags: string[];
+  connector_config: Record<string, string>;
+  sources: { source_id: string; upstream_id: string; url: string }[];
+  /** The safe render contract for the Connect form; null when unavailable. */
+  config_schema: ConfigSchema | null;
+  mcp: CatalogMcpDetail | null;
+  skill: CatalogSkillDetail | null;
+}
+
+export interface CatalogFacetBucket {
+  value: string;
+  label: string;
+  count: number;
+}
+
+export interface CatalogFacets {
+  kind: CatalogFacetBucket[];
+  category: CatalogFacetBucket[];
+  trust_tier: CatalogFacetBucket[];
+  transport: CatalogFacetBucket[];
+  auth_hint: CatalogFacetBucket[];
+  total: number;
+}
+
+export interface CatalogVersion {
+  release_tag: string;
+  source_repo: string;
+  data_sha256: string;
+  entry_count: number;
+  mcp_count: number;
+  skill_count: number;
+  activated_at: string | null;
+}
+
+export interface CatalogSearchResult {
+  items: CatalogEntry[];
+  total: number;
+  /** Null until the first catalog release has been synced and activated. */
+  version: CatalogVersion | null;
+}
+
+export interface CatalogSearchParams {
+  q?: string;
+  kind?: CatalogKind;
+  category?: string;
+  trust_tier?: CatalogTrustTier;
+  transport?: string;
+  auth_hint?: string;
+  connectable?: boolean;
+  include_indexed?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+export interface RiskFloorApplied {
+  connection_id: string;
+  floor: RiskLevel;
+  tools_raised: number;
+  tools_unchanged: number;
 }
 
 export interface ConnectionToolInfo {
@@ -1573,6 +1825,9 @@ export interface BrowseInstallResult {
   skill: Skill;
   status: "installed" | "already_installed";
 }
+
+/** Installing from the reviewed catalog reuses the browse-install response. */
+export type CatalogInstallResult = BrowseInstallResult;
 
 /* --- People, invitations, and API keys (docs/architecture/rbac.md) --- */
 

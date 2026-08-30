@@ -80,6 +80,18 @@ class CredentialsRotate(BaseModel):
     credentials: dict[str, str] = Field(min_length=1)
 
 
+class ConnectionAuthorizedByOut(BaseModel):
+    """Whose provider account an OAuth connection acts as.
+
+    Named on every connection because the consequence is real: every agent
+    granted this connection acts with this person's permissions at the
+    provider, and an admin should never have to ask around to find out whose.
+    """
+
+    user_id: UUID
+    display_name: str
+
+
 class ConnectionOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -95,6 +107,12 @@ class ConnectionOut(BaseModel):
     last_verified_at: datetime | None
     last_error: str | None
     webhook_secret_configured: bool = False
+    # --- OAuth (docs/architecture/oauth.md). Never a token, never a secret. ---
+    authorized_by: ConnectionAuthorizedByOut | None = None
+    oauth_expires_at: datetime | None = None
+    # A convenience mirror of ``status``, so the web app's banner does not have
+    # to know the status vocabulary to render the one case that needs a person.
+    needs_reauth: bool = False
 
 
 class ConnectionGrantSummaryOut(BaseModel):
@@ -214,6 +232,9 @@ class CatalogAppOut(BaseModel):
     category: str
     icon: str
     description: str
+    # Same-origin icon-proxy path when the entry ships a logo; never the
+    # upstream URL.
+    logo_url: str | None = None
     connector_type: str | None = None
     mcp_url: str | None = None
     url_unverified: bool = False

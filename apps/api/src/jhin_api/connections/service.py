@@ -9,6 +9,7 @@ tool executors at execution time — plaintext is never returned by any route.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import secrets as stdlib_secrets
@@ -44,6 +45,7 @@ from jhin_connectors.mcp import (
     tool_name_for,
 )
 from jhin_connectors.mcp.discovery import discovered_at as mcp_discovered_at
+from jhin_connectors.mcp.oauth import OAUTH_CONFIG_KEYS as MCP_OAUTH_CONFIG_KEYS
 from jhin_db.models import (
     Agent,
     AgentCapabilityGrant,
@@ -54,6 +56,7 @@ from jhin_db.models import (
 )
 from jhin_db.models.connection import new_public_id
 from jhin_domain import ConnectionStatus, SecretType
+from jhin_oauth.lifecycle import ConnectionTokenService
 from jhin_policy import RiskLevel, ToolDefinition, capability_matches, scope_matches
 from jhin_secrets import (
     SecretCrypto,
@@ -838,6 +841,115 @@ async def create_connection(
     return connection, webhook_plaintext
 
 
+OAUTH_AUTH_TYPE = "oauth"
+# Internal, non-secret OAuth bookkeeping written onto ``config_json`` by the
+# callback. They are deliberately not manifest fields: ``public_connection_config``
+# serializes only manifest-declared settings, so these stay server-side while
+# still travelling with the connection they describe.
+#
+# Built from the connector package's own list rather than restated, because
+# these two halves must agree exactly: a key the connector writes but this
+# tuple omits falls through to ``normalize_config``, which rejects any key the
+# manifest does not declare, and turns a reconnect into a 400. The endpoint
+# pair is added here because the API writes those two, not the connector.
+OAUTH_CONFIG_KEYS = (
+    *MCP_OAUTH_CONFIG_KEYS,
+    "oauth_token_endpoint",
+    "oauth_revocation_endpoint",
+)
+
+
+async def create_connection_from_oauth(
+    db: AsyncSession,
+    *,
+    workspace_id: UUID,
+    connection_id: UUID | None,
+    connector_type: str,
+    name: str,
+    config: dict[str, object],
+    created_by_user_id: UUID,
+) -> Connection:
+    """Create (or re-authorize) a connection whose credential is an OAuth grant.
+
+    Deliberately separate from :func:`create_connection`: there are no
+    credential fields to validate here, because the credential does not exist
+    until the token exchange succeeds and is written by
+    ``ConnectionTokenService.store_tokens`` in the same transaction. The row
+    is flushed, not committed — the caller owns the commit, so a connection
+    and its tokens are never half-written.
+
+    Re-authorization keeps the existing row: its id is what every grant, every
+    trigger, and every recorded tool call points at, and replacing it to
+    refresh a token would quietly revoke every agent's access to the app.
+    """
+    connector = get_connector(connector_type)
+    internal = {key: config[key] for key in OAUTH_CONFIG_KEYS if key in config}
+    public = {key: value for key, value in config.items() if key not in OAUTH_CONFIG_KEYS}
+    try:
+        normalized = normalize_config(connector.manifest, OAUTH_AUTH_TYPE, public)
+        normalized = connector.validate_settings(OAUTH_AUTH_TYPE, normalized)
+    except ValueError as exc:
+        raise _bad_request(str(exc)) from None
+    merged: dict[str, Any] = {**normalized, **internal}
+
+    if connection_id is not None:
+        connection = await get_connection(db, workspace_id, connection_id)
+        await ensure_server_slug_is_free(
+            db, workspace_id, connector_type, merged, exclude_id=connection.id
+        )
+        # Reconnecting replaces the grant, not the row's accumulated knowledge.
+        # Anything already on the row that is neither a manifest setting nor
+        # OAuth bookkeeping — the discovered tool list and when it was
+        # discovered, the per-tool risk overrides an admin set — is carried
+        # across, so a reconnect does not silently empty an app's tool list.
+        carried = {
+            key: value
+            for key, value in connection.config_json.items()
+            if key not in merged and key not in OAUTH_CONFIG_KEYS
+        }
+        connection.config_json = {**carried, **merged}
+        connection.auth_type = OAUTH_AUTH_TYPE
+        await db.flush()
+        return connection
+
+    await ensure_server_slug_is_free(db, workspace_id, connector_type, merged)
+    connection = Connection(
+        workspace_id=workspace_id,
+        connector_type=connector_type,
+        name=name,
+        auth_type=OAUTH_AUTH_TYPE,
+        public_id=new_public_id(),
+        config_json=merged,
+        created_by_user_id=created_by_user_id,
+        oauth_authorized_by_user_id=created_by_user_id,
+    )
+    db.add(connection)
+    try:
+        await db.flush()
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A connection with this name already exists in the workspace",
+        ) from exc
+    return connection
+
+
+async def authorized_by(db: AsyncSession, connection: Connection) -> tuple[UUID, str] | None:
+    """Whose provider account this connection acts as, if it is an OAuth one.
+
+    Surfaced on every connection so an admin can see, without asking anybody,
+    whose permissions the workspace's agents are borrowing when they use it.
+    """
+    if connection.oauth_authorized_by_user_id is None:
+        return None
+    from jhin_db.models import User
+
+    user = await db.get(User, connection.oauth_authorized_by_user_id)
+    if user is None:
+        return None
+    return user.id, user.display_name
+
+
 async def set_webhook_secret(
     db: AsyncSession,
     crypto: SecretCrypto,
@@ -970,7 +1082,14 @@ async def verify_connection(
             connection.config_json = {**connection.config_json, **discovery}
     else:
         if not was_disabled:
-            connection.status = ConnectionStatus.ERROR.value
+            # A connector that recognised the failure as a dead sign-in says so
+            # in ``details``. Honouring it is the difference between "something
+            # is broken" and a row the UI can offer a Reconnect button on.
+            connection.status = (
+                ConnectionStatus.NEEDS_REAUTH.value
+                if health.details.get("needs_reauth") == "true"
+                else ConnectionStatus.ERROR.value
+            )
         connection.last_error = health.message[:2000]
     if was_disabled:
         # The stored last_error keeps the provider's own words; only the
@@ -1105,8 +1224,22 @@ async def delete_connection(
     *,
     request_id: UUID,
     ip_hash: str,
+    tokens: ConnectionTokenService | None = None,
 ) -> None:
+    """Remove a connection, and hand any OAuth grant back to the provider first.
+
+    Deleting our copy of a token is not the same as ending the grant: the
+    provider keeps honouring an access token it was never told to forget, and
+    a refresh token can outlive the row that referenced it by months. So when
+    the caller supplies a ``ConnectionTokenService`` and this connection holds
+    an OAuth grant, the grant is revoked upstream *before* the row goes. That
+    revocation is best-effort — a provider being down must not strand an admin
+    who is trying to disconnect an app — but the local erasure below is not.
+    """
     connection = await get_connection(db, ctx.workspace_id, connection_id)
+    if tokens is not None and connection.auth_type == OAUTH_AUTH_TYPE:
+        with contextlib.suppress(Exception):
+            await tokens.revoke_and_clear(connection)
     store_ids = [connection.encrypted_secret_id, connection.webhook_secret_id]
     audit.record(
         db,

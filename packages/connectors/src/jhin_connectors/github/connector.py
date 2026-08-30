@@ -15,11 +15,14 @@ from jhin_connectors.base import (
     WebhookVerificationError,
 )
 from jhin_connectors.github.auth import (
+    AUTH_DEVICE,
     AUTH_GITHUB_APP,
+    AUTH_OAUTH,
     AUTH_PAT,
     GitHubAuthError,
     build_app_jwt,
     mint_installation_token,
+    oauth_access_token,
 )
 from jhin_connectors.github.client import (
     DEFAULT_BASE_URL,
@@ -60,6 +63,8 @@ class GitHubConnector(Connector):
         try:
             if ctx.auth_type == AUTH_PAT:
                 return await self._verify_pat(base_url, ctx.credentials)
+            if ctx.auth_type in (AUTH_OAUTH, AUTH_DEVICE):
+                return await self._verify_oauth(ctx.auth_type, base_url, ctx.credentials)
             if ctx.auth_type == AUTH_GITHUB_APP:
                 return await self._verify_app(base_url, ctx.credentials)
         except (GitHubApiError, GitHubAuthError) as exc:
@@ -76,6 +81,23 @@ class GitHubConnector(Connector):
             ok=True,
             message=f"Authenticated as {login}",
             details={"login": login, "auth": "pat"},
+        )
+
+    async def _verify_oauth(
+        self, auth_type: str, base_url: str, credentials: dict[str, str]
+    ) -> ConnectionHealth:
+        """One live call with the token the sign-in produced: who is this?
+
+        Deliberately the same check as a PAT — the token is a bearer token
+        whichever way it was obtained — so a connection made in the browser
+        and one made with a device code prove themselves identically.
+        """
+        user = await github_request("GET", base_url, "/user", oauth_access_token(credentials))
+        login = str(user.get("login", "unknown"))
+        return ConnectionHealth(
+            ok=True,
+            message=f"Authenticated as {login}",
+            details={"login": login, "auth": auth_type},
         )
 
     async def _verify_app(self, base_url: str, credentials: dict[str, str]) -> ConnectionHealth:

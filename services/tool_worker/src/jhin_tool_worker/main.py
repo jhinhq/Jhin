@@ -22,6 +22,7 @@ from jhin_observability import (
 from jhin_secrets.redaction import redact_event_dict
 from jhin_tool_worker.activities import ToolActivities
 from jhin_tool_worker.cleanup_activities import CleanupActivities
+from jhin_tool_worker.oauth_refresh import install_refresh_on_use
 from jhin_tool_worker.resources import ToolWorkerResources
 from jhin_tool_worker.settings import ToolWorkerSettings
 from jhin_tool_worker.trigger_activities import TriggerToolActivities
@@ -159,6 +160,10 @@ async def main() -> None:
         tools = ToolActivities(resources, catalog)
         triggers = TriggerToolActivities(resources, catalog)
         cleanup = CleanupActivities(resources)
+        # This process runs the connector tools and holds a master key, so a
+        # tool call reaching a nearly-stale OAuth token can renew it in the
+        # moment rather than waiting for the next sweep.
+        install_refresh_on_use()
 
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()

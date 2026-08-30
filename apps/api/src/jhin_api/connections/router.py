@@ -6,16 +6,21 @@ No route here ever returns credential plaintext; the webhook signing secret
 appears once, in the creation response.
 """
 
-from typing import Any
+from collections.abc import Sequence
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from jhin_api.catalog.service import builtin_logo_url
 from jhin_api.connections import service
 from jhin_api.connections.schemas import (
     CatalogAppOut,
     ConnectionAccessSummaryOut,
+    ConnectionAuthorizedByOut,
     ConnectionCreate,
     ConnectionCreated,
     ConnectionOut,
@@ -27,17 +32,31 @@ from jhin_api.connections.schemas import (
     WebhookSecretWrite,
     WebhookSetupOut,
 )
-from jhin_api.deps import AdminCtx, CurrentAuth, DbSession, SecretCryptoDep
+from jhin_api.deps import (
+    AdminCtx,
+    CurrentAuth,
+    DbSession,
+    OAuthHttpClientDep,
+    SecretCryptoDep,
+    get_settings_dep,
+)
 from jhin_api.deps import client_ip_hash as ip_hash
 from jhin_api.deps import get_request_id as req_id
+from jhin_api.oauth import service as oauth_service
+from jhin_api.oauth.schemas import OAuthStartIn, OAuthStartOut
 from jhin_api.security.csrf import csrf_protect
+from jhin_api.settings import Settings
 from jhin_api.tasks.schemas import ToolCallOut
 from jhin_connectors import default_registry
 from jhin_connectors.catalog import load_catalog
-from jhin_db.models import Connection
+from jhin_db.models import Connection, User
+from jhin_domain import ConnectionStatus
+from jhin_oauth.lifecycle import ConnectionTokenService
 from jhin_tools.sanitize import strict_json_loads
 
 MAX_SENSITIVE_CONNECTION_BODY_BYTES = 65_536
+
+OAuthSettingsDep = Annotated[Settings, Depends(get_settings_dep)]
 
 catalog_router = APIRouter(prefix="/api/v1/connectors", tags=["connectors"])
 
@@ -48,8 +67,12 @@ router = APIRouter(
 )
 
 
-def _json_request_body(model: type[BaseModel]) -> dict[str, Any]:
-    """Keep request schemas visible after moving validation behind a safe boundary."""
+def json_request_body(model: type[BaseModel]) -> dict[str, Any]:
+    """Keep request schemas visible after moving validation behind a safe boundary.
+
+    Public because the OAuth router reads its credential-bearing bodies
+    through the same bounded path: one implementation, one set of limits, one
+    place to audit."""
     return {
         "requestBody": {
             "required": True,
@@ -62,7 +85,7 @@ def _json_request_body(model: type[BaseModel]) -> dict[str, Any]:
     }
 
 
-def _optional_nonnegative_content_length(request: Request) -> int | None:
+def optional_nonnegative_content_length(request: Request) -> int | None:
     raw = request.headers.get("content-length")
     if raw is None:
         return None
@@ -73,8 +96,8 @@ def _optional_nonnegative_content_length(request: Request) -> int | None:
     return parsed if parsed >= 0 else None
 
 
-async def _read_sensitive_body(request: Request, *, too_large_detail: str) -> bytes:
-    content_length = _optional_nonnegative_content_length(request)
+async def read_sensitive_body(request: Request, *, too_large_detail: str) -> bytes:
+    content_length = optional_nonnegative_content_length(request)
     if content_length is not None and content_length > MAX_SENSITIVE_CONNECTION_BODY_BYTES:
         raise HTTPException(
             status_code=status.HTTP_413_CONTENT_TOO_LARGE,
@@ -92,14 +115,14 @@ async def _read_sensitive_body(request: Request, *, too_large_detail: str) -> by
     return bytes(body)
 
 
-async def _parse_sensitive_json[SensitivePayloadT: BaseModel](
+async def parse_sensitive_json[SensitivePayloadT: BaseModel](
     request: Request,
     model: type[SensitivePayloadT],
     *,
     invalid_detail: str,
     too_large_detail: str,
 ) -> SensitivePayloadT:
-    body = await _read_sensitive_body(request, too_large_detail=too_large_detail)
+    body = await read_sensitive_body(request, too_large_detail=too_large_detail)
     try:
         decoded = strict_json_loads(body.decode("utf-8"))
         return model.model_validate(decoded, strict=True)
@@ -122,18 +145,78 @@ async def list_connectors(_auth: CurrentAuth) -> list[ConnectorOut]:
 @catalog_router.get("/catalog")
 async def list_catalog(_auth: CurrentAuth) -> list[CatalogAppOut]:
     """The curated Apps library: known apps with native connectors or MCP
-    endpoints (docs/architecture/mcp.md). Static public data."""
-    return [CatalogAppOut.model_validate(entry.model_dump()) for entry in load_catalog()]
+    endpoints (docs/architecture/mcp.md). Static public data.
+
+    ``logo_url`` is the same-origin icon-proxy path, never the upstream URL:
+    the entry's ``icon_url`` is an instruction to the proxy and stays on the
+    server (``CatalogAppOut`` declares no such field, so the dump's copy is
+    dropped on validation)."""
+    return [
+        CatalogAppOut.model_validate({**entry.model_dump(), "logo_url": builtin_logo_url(entry)})
+        for entry in load_catalog()
+    ]
 
 
-def _out(connection: Connection) -> ConnectionOut:
+def _out(
+    connection: Connection, *, authorized_by: ConnectionAuthorizedByOut | None = None
+) -> ConnectionOut:
     output = ConnectionOut.model_validate(connection, from_attributes=True)
     return output.model_copy(
         update={
             "config_json": service.public_connection_config(connection),
             "webhook_secret_configured": connection.webhook_secret_id is not None,
+            "authorized_by": authorized_by,
+            "needs_reauth": connection.status == ConnectionStatus.NEEDS_REAUTH.value,
         }
     )
+
+
+async def _authorizing_users(
+    db: AsyncSession, connections: Sequence[Connection]
+) -> dict[UUID, ConnectionAuthorizedByOut]:
+    """Display names for whoever authorized these connections, in one query.
+
+    Resolved in a batch rather than per row: the Apps page lists every
+    connection a workspace has, and "whose access is this?" should not cost a
+    query each to answer.
+    """
+    ids = {
+        connection.oauth_authorized_by_user_id
+        for connection in connections
+        if connection.oauth_authorized_by_user_id is not None
+    }
+    if not ids:
+        return {}
+    rows = (await db.execute(select(User.id, User.display_name).where(User.id.in_(ids)))).all()
+    return {
+        user_id: ConnectionAuthorizedByOut(user_id=user_id, display_name=display_name)
+        for user_id, display_name in rows
+    }
+
+
+async def serialize_connection(db: AsyncSession, connection: Connection) -> ConnectionOut:
+    names = await _authorizing_users(db, [connection])
+    return _out(
+        connection,
+        authorized_by=names.get(connection.oauth_authorized_by_user_id)
+        if connection.oauth_authorized_by_user_id is not None
+        else None,
+    )
+
+
+async def serialize_connections(
+    db: AsyncSession, connections: Sequence[Connection]
+) -> list[ConnectionOut]:
+    names = await _authorizing_users(db, connections)
+    return [
+        _out(
+            connection,
+            authorized_by=names.get(connection.oauth_authorized_by_user_id)
+            if connection.oauth_authorized_by_user_id is not None
+            else None,
+        )
+        for connection in connections
+    ]
 
 
 def webhook_url_path(connection: Connection) -> str:
@@ -156,13 +239,13 @@ def _webhook_setup(connection: Connection, secret: str | None) -> WebhookSetupOu
 
 @router.get("")
 async def list_connections(ctx: AdminCtx, db: DbSession) -> list[ConnectionOut]:
-    return [_out(row) for row in await service.list_connections(db, ctx.workspace_id)]
+    return await serialize_connections(db, await service.list_connections(db, ctx.workspace_id))
 
 
 @router.post(
     "",
     status_code=201,
-    openapi_extra=_json_request_body(ConnectionCreate),
+    openapi_extra=json_request_body(ConnectionCreate),
 )
 async def create_connection(
     request: Request,
@@ -170,7 +253,7 @@ async def create_connection(
     db: DbSession,
     crypto: SecretCryptoDep,
 ) -> ConnectionCreated:
-    payload = await _parse_sensitive_json(
+    payload = await parse_sensitive_json(
         request,
         ConnectionCreate,
         invalid_detail="Connection payload is invalid",
@@ -189,12 +272,14 @@ async def create_connection(
         ip_hash=ip_hash(request),
     )
     webhook = _webhook_setup(connection, webhook_secret)
-    return ConnectionCreated(connection=_out(connection), webhook=webhook)
+    return ConnectionCreated(connection=await serialize_connection(db, connection), webhook=webhook)
 
 
 @router.get("/{connection_id}")
 async def get_connection(connection_id: UUID, ctx: AdminCtx, db: DbSession) -> ConnectionOut:
-    return _out(await service.get_connection(db, ctx.workspace_id, connection_id))
+    return await serialize_connection(
+        db, await service.get_connection(db, ctx.workspace_id, connection_id)
+    )
 
 
 @router.get("/{connection_id}/access-summary")
@@ -287,9 +372,55 @@ async def verify_connection(
     )
 
 
+@router.post("/{connection_id}/reauthorize", status_code=201)
+async def reauthorize_connection(
+    connection_id: UUID,
+    request: Request,
+    ctx: AdminCtx,
+    db: DbSession,
+    crypto: SecretCryptoDep,
+    settings: OAuthSettingsDep,
+    http_client: OAuthHttpClientDep,
+) -> OAuthStartOut:
+    """Start a fresh authorization for a connection that needs reconnecting.
+
+    Keeps the connection row — its id is what every grant, trigger, and
+    recorded tool call points at — and replaces only the grant behind it. This
+    is what the amber "needs reconnecting" banner's one button calls, and it
+    is why reconnecting an app does not silently revoke every agent's access
+    to it.
+
+    Only the *manifest-declared* settings are carried forward. ``config_json``
+    also holds server-side bookkeeping — the recorded issuer and token
+    endpoint, the discovered tool list, any pending step-up scope — and none of
+    it belongs in a draft: the pending-authorization store refuses a draft key
+    that looks like a credential (``oauth_token_endpoint`` contains "token"),
+    and ``normalize_config`` refuses any key the manifest does not declare. The
+    values that actually matter on the way back in are re-derived from the
+    connection row itself, not from the draft.
+    """
+    connection = await service.get_connection(db, ctx.workspace_id, connection_id)
+    return await oauth_service.start_authorization(
+        db,
+        crypto,
+        ctx,
+        http_client,
+        settings,
+        OAuthStartIn(
+            connector_type=connection.connector_type,
+            name=connection.name,
+            config=service.public_connection_config(connection),
+            connection_id=connection.id,
+            provider_key=oauth_service.provider_key_for(connection),
+        ),
+        request_id=req_id(request),
+        ip_hash=ip_hash(request),
+    )
+
+
 @router.post(
     "/{connection_id}/rotate",
-    openapi_extra=_json_request_body(CredentialsRotate),
+    openapi_extra=json_request_body(CredentialsRotate),
 )
 async def rotate_credentials(
     connection_id: UUID,
@@ -298,7 +429,7 @@ async def rotate_credentials(
     db: DbSession,
     crypto: SecretCryptoDep,
 ) -> ConnectionOut:
-    payload = await _parse_sensitive_json(
+    payload = await parse_sensitive_json(
         request,
         CredentialsRotate,
         invalid_detail="Credential rotation payload is invalid",
@@ -313,13 +444,13 @@ async def rotate_credentials(
         request_id=req_id(request),
         ip_hash=ip_hash(request),
     )
-    return _out(connection)
+    return await serialize_connection(db, connection)
 
 
 @router.put(
     "/{connection_id}/webhook-secret",
     status_code=204,
-    openapi_extra=_json_request_body(WebhookSecretWrite),
+    openapi_extra=json_request_body(WebhookSecretWrite),
 )
 async def store_webhook_secret(
     connection_id: UUID,
@@ -328,7 +459,7 @@ async def store_webhook_secret(
     db: DbSession,
     crypto: SecretCryptoDep,
 ) -> None:
-    payload = await _parse_sensitive_json(
+    payload = await parse_sensitive_json(
         request,
         WebhookSecretWrite,
         invalid_detail="Webhook secret payload is invalid",
@@ -352,7 +483,7 @@ async def disable_connection(
     connection = await service.set_status(
         db, ctx, connection_id, disabled=True, request_id=req_id(request), ip_hash=ip_hash(request)
     )
-    return _out(connection)
+    return await serialize_connection(db, connection)
 
 
 @router.post("/{connection_id}/enable")
@@ -362,13 +493,24 @@ async def enable_connection(
     connection = await service.set_status(
         db, ctx, connection_id, disabled=False, request_id=req_id(request), ip_hash=ip_hash(request)
     )
-    return _out(connection)
+    return await serialize_connection(db, connection)
 
 
 @router.delete("/{connection_id}", status_code=204)
 async def delete_connection(
-    connection_id: UUID, request: Request, ctx: AdminCtx, db: DbSession
+    connection_id: UUID,
+    request: Request,
+    ctx: AdminCtx,
+    db: DbSession,
+    crypto: SecretCryptoDep,
+    http_client: OAuthHttpClientDep,
 ) -> None:
+    """Disconnect an app, telling the provider so when it was an OAuth grant."""
     await service.delete_connection(
-        db, ctx, connection_id, request_id=req_id(request), ip_hash=ip_hash(request)
+        db,
+        ctx,
+        connection_id,
+        request_id=req_id(request),
+        ip_hash=ip_hash(request),
+        tokens=ConnectionTokenService(db, crypto, http_client),
     )

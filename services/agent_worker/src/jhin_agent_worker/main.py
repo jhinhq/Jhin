@@ -19,6 +19,7 @@ from jhin_agent_worker.coordination_activities import CoordinationActivities
 from jhin_agent_worker.engineering_activities import EngineeringActivities
 from jhin_agent_worker.media_activities import MediaActivities
 from jhin_agent_worker.memory_activities import MemoryActivities
+from jhin_agent_worker.oauth_activities import OAuthActivities
 from jhin_agent_worker.resources import Resources
 from jhin_agent_worker.settings import Settings
 from jhin_agent_worker.trigger_activities import (
@@ -41,6 +42,7 @@ from jhin_workflows.avatar_generation import AvatarGenerationWorkflow
 from jhin_workflows.delegated_task import DelegatedTaskWorkflow
 from jhin_workflows.engineering_ticket import EngineeringTicketWorkflow
 from jhin_workflows.memory_maintenance import MemoryMaintenanceWorkflow
+from jhin_workflows.oauth_refresh import OAuthRefreshWorkflow
 from jhin_workflows.periodic_review import PeriodicReviewWorkflow
 from jhin_workflows.triggered_task import TriggeredTaskWorkflow
 from jhin_workflows.work_request_task import WorkRequestTaskWorkflow
@@ -194,6 +196,10 @@ async def main() -> None:
         memory_activities = MemoryActivities(resources)
         coordination_activities = CoordinationActivities(resources, temporal_client=client)
         media_activities = MediaActivities(resources)
+        oauth_activities = OAuthActivities(resources)
+        # Only the proactive sweep runs here. Refresh-on-use is installed by
+        # the tool worker, the one process that runs connector tools and can
+        # therefore reach the hook in jhin_connectors.execution.
         logger.info(
             "temporal.connected",
             task_queue=AGENT_TASK_QUEUE,
@@ -214,6 +220,7 @@ async def main() -> None:
             WorkRequestTaskWorkflow,
             MemoryMaintenanceWorkflow,
             PeriodicReviewWorkflow,
+            OAuthRefreshWorkflow,
         ]
         agent_activities: list[Callable[..., Any]] = [
             activities.resolve_snapshot_activity,
@@ -242,6 +249,7 @@ async def main() -> None:
             coordination_activities.mark_task_paused_activity,
             coordination_activities.load_periodic_review_policy_activity,
             coordination_activities.open_periodic_review_activity,
+            oauth_activities.refresh_due_oauth_connections,
         ]
         heartbeat_task = asyncio.create_task(run_heartbeat())
         worker = build_temporal_worker(

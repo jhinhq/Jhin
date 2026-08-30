@@ -1,12 +1,18 @@
 """GitHub authentication (plan 11.2, 13.6).
 
-Two schemes:
+Four schemes, in the order the product prefers them:
 
+- **Browser sign-in** (``oauth``) and **device code** (``device``): the stored
+  credential is the OAuth token map every OAuth connection holds, and the
+  bearer token is read straight out of it. Refreshing an expiring token is the
+  connection layer's job, not this module's — by the time credentials arrive
+  here they are already current. Nobody types anything to get one of these.
 - **PAT** (``pat``): the stored token is used directly. Simple self-hosted
-  path.
-- **GitHub App** (``github_app``): preferred for production — scopeable and
-  revocable. The stored app credential (app/client id + RS256 private key +
-  installation id) is exchanged for a short-lived installation token via
+  path, and the only one that asks a human to paste a secret.
+- **GitHub App** (``github_app``): preferred where an app can be installed —
+  scopeable and revocable. The stored app credential (app/client id + RS256
+  private key + installation id) is exchanged for a short-lived installation
+  token via
   ``POST /app/installations/{id}/access_tokens`` (expires after one hour;
   docs.github.com, API version 2026-03-10). Tokens are cached in process
   memory keyed by a credential fingerprint, refreshed with a safety margin,
@@ -22,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -39,6 +45,17 @@ from jhin_secrets.redaction import get_redactor
 
 AUTH_PAT = "pat"
 AUTH_GITHUB_APP = "github_app"
+AUTH_OAUTH = "oauth"
+AUTH_DEVICE = "device"
+
+#: Where the bearer token sits in an OAuth connection's credential map. The
+#: same flat ``str -> str`` shape every OAuth connection stores.
+ACCESS_TOKEN_KEY = "access_token"
+
+# A header value containing any of these could smuggle a second header (or
+# truncate the request) into the connection. httpx refuses them too; refusing
+# here as well means the reason is a sentence rather than a transport error.
+_HEADER_UNSAFE_CHARACTERS = ("\r", "\n", "\0")
 
 # App JWTs: issued 60s in the past for clock drift, valid 9 minutes
 # (10 minutes is GitHub's hard maximum).
@@ -176,6 +193,23 @@ async def mint_installation_token(
     return _CachedToken(token=token, expires_at=_parse_expires_at(str(payload.get("expires_at"))))
 
 
+def oauth_access_token(credentials: Mapping[str, str]) -> str:
+    """The bearer token from a browser or device-code sign-in.
+
+    The stored map is the ordinary OAuth token map; this reads the one field
+    it needs and proves the value cannot forge a header. It never refreshes:
+    an expired token is a question for the connection layer that owns the
+    refresh token, and answering it here would race every other worker.
+    """
+    token = credentials.get(ACCESS_TOKEN_KEY, "")
+    if not token:
+        raise GitHubAuthError("GitHub OAuth credential is missing access_token")
+    if any(character in token for character in _HEADER_UNSAFE_CHARACTERS):
+        raise GitHubAuthError("GitHub OAuth access token contains characters a header cannot carry")
+    get_redactor().register(token)
+    return token
+
+
 async def resolve_access_token(
     auth_type: str,
     credentials: dict[str, str],
@@ -190,6 +224,8 @@ async def resolve_access_token(
             raise GitHubAuthError("PAT credential is missing token")
         get_redactor().register(token)
         return token
+    if auth_type in (AUTH_OAUTH, AUTH_DEVICE):
+        return oauth_access_token(credentials)
     if auth_type == AUTH_GITHUB_APP:
         active_cache = cache if cache is not None else _installation_tokens
         key = _credential_fingerprint(base_url, credentials)
@@ -198,12 +234,16 @@ async def resolve_access_token(
 
 
 __all__ = [
+    "ACCESS_TOKEN_KEY",
+    "AUTH_DEVICE",
     "AUTH_GITHUB_APP",
+    "AUTH_OAUTH",
     "AUTH_PAT",
     "GitHubApiError",
     "GitHubAuthError",
     "InstallationTokenCache",
     "build_app_jwt",
     "mint_installation_token",
+    "oauth_access_token",
     "resolve_access_token",
 ]

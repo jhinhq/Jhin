@@ -7,7 +7,7 @@ import pytest
 from mcp import types as mcp_types
 
 from jhin_connectors.base import VerifyContext
-from jhin_connectors.catalog import CATALOG_CATEGORIES, load_catalog
+from jhin_connectors.catalog import CATALOG_CATEGORIES, CatalogApp, load_catalog
 from jhin_connectors.endpoints import EndpointPolicyError
 from jhin_connectors.mcp import (
     DISCOVERY_KEY,
@@ -286,6 +286,30 @@ def test_registry_ships_mcp_and_catalog_is_well_formed() -> None:
     # endpoint, or an explicitly unverified URL the user supplies.
     assert all(entry.connector_type or entry.mcp_url or entry.url_unverified for entry in entries)
     assert all(entry.setup_note for entry in entries if entry.stdio_only)
+
+
+def test_catalog_icon_url_accepts_only_the_github_avatar_shape() -> None:
+    """The producer projects ``icon_url`` in exactly one shape (GitHub's owner
+    avatar); the model here is the consumer's own reading of that rule, so a
+    catalog.json from anything else cannot point the icon proxy off-host."""
+    base = {
+        "slug": "acme",
+        "name": "Acme",
+        "category": "Developer tools",
+        "icon": "mcp",
+        "description": "Acme tools.",
+    }
+    entry = CatalogApp.model_validate({**base, "icon_url": "https://github.com/acme.png?size=128"})
+    assert entry.icon_url == "https://github.com/acme.png?size=128"
+    assert CatalogApp.model_validate(base).icon_url == ""
+    for hostile in (
+        "https://evil.example/acme.png?size=128",
+        "https://github.com/acme/repo.png?size=128",
+        "https://github.com/acme.png",
+        "javascript:alert(1)",
+    ):
+        with pytest.raises(ValueError):
+            CatalogApp.model_validate({**base, "icon_url": hostile})
 
 
 async def test_verify_reports_policy_failures_without_values(

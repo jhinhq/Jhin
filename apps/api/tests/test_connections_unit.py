@@ -1908,7 +1908,9 @@ async def test_access_summary_fails_closed_for_malformed_target_legacy_scope(
     ("kwargs", "fragment"),
     [
         ({"connector_type": "sharepoint"}, "Unknown connector type"),
-        ({"auth_type": "oauth"}, "not supported"),
+        # A scheme the GitHub manifest genuinely does not declare. ("oauth"
+        # used to serve here and no longer can: GitHub really does offer it.)
+        ({"auth_type": "kerberos"}, "not supported"),
         ({"credentials": {}}, "Missing required credential fields: token"),
         ({"credentials": {"token": "x", "extra": "y"}}, "Unknown credential fields"),
         ({"config": {"bogus": 1}}, "bogus"),

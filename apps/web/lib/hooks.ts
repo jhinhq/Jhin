@@ -3,7 +3,9 @@
 /** Shared data hooks (TanStack Query) for the authenticated app. */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useRef } from "react";
 import { api, ApiError } from "@/lib/api";
+import { devicePollDelayMs, SLOW_DOWN_STEP_MS } from "@/lib/oauth";
 import type {
   ActivityList,
   Agent,
@@ -27,6 +29,11 @@ import type {
   AuditEventPage,
   BootstrapStatus,
   CatalogApp,
+  CatalogEntryDetail,
+  CatalogFacets,
+  CatalogSearchParams,
+  CatalogSearchResult,
+  CatalogVersion,
   ConnectionInfo,
   ConnectionAccessSummaryOut,
   ConnectionToolsOut,
@@ -37,17 +44,27 @@ import type {
   IdentityResponse,
   ModelProfile,
   ModelProvider,
+  GitHubAppManifestOut,
+  OAuthClientCreate,
+  OAuthClientOut,
+  OAuthDevicePollOut,
+  OAuthDeviceStartOut,
+  OAuthProbeOut,
+  OAuthRedirectOut,
+  OAuthStartOut,
   OnboardingState,
   OnboardingStatus,
   ProviderBalance,
   PricingStatus,
   ProviderModels,
   OrgGraph,
+  RiskFloorApplied,
   RunEvent,
   RunList,
   ScopeCatalog,
   SecretOut,
   AgentSkillInfo,
+  BrowseInstallResult,
   BrowseListResult,
   SkillDetail,
   SkillList,
@@ -472,6 +489,94 @@ export function useAppCatalog() {
   });
 }
 
+// --- The synced app/skill catalog (docs/architecture/catalog.md) ---
+
+/**
+ * Query-string form of the catalog filters.
+ *
+ * `api` drops `undefined` and empty strings, so an unset facet simply never
+ * reaches the wire; booleans are stringified because a `false` that matters
+ * (`include_indexed`) has to survive that same filter.
+ */
+function catalogParams(
+  params: CatalogSearchParams,
+): Record<string, string | number | undefined> {
+  return {
+    q: params.q || undefined,
+    kind: params.kind,
+    category: params.category || undefined,
+    trust_tier: params.trust_tier,
+    transport: params.transport || undefined,
+    auth_hint: params.auth_hint || undefined,
+    connectable: params.connectable === undefined ? undefined : String(params.connectable),
+    include_indexed:
+      params.include_indexed === undefined ? undefined : String(params.include_indexed),
+    limit: params.limit,
+    offset: params.offset,
+  };
+}
+
+/**
+ * One page of catalog hits: the curated entries first, then whatever the last
+ * sync indexed. The previous page stays on screen while the next one loads so
+ * typing in the search box never blanks the grid.
+ */
+export function useCatalogSearch(params: CatalogSearchParams) {
+  return useQuery({
+    queryKey: ["catalog-search", params],
+    queryFn: () =>
+      api<CatalogSearchResult>("/api/v1/catalog/entries", { params: catalogParams(params) }),
+    placeholderData: (previous) => previous,
+    staleTime: 60_000,
+  });
+}
+
+/** Bucket counts for the filter chips, under the same filters as the search. */
+export function useCatalogFacets(params: Omit<CatalogSearchParams, "limit" | "offset">) {
+  return useQuery({
+    queryKey: ["catalog-facets", params],
+    queryFn: () =>
+      api<CatalogFacets>("/api/v1/catalog/facets", { params: catalogParams(params) }),
+    placeholderData: (previous) => previous,
+    staleTime: 60_000,
+  });
+}
+
+/** Everything one entry knows, including the Connect form's render contract. */
+export function useCatalogEntry(slug: string | null) {
+  return useQuery({
+    queryKey: ["catalog-entry", slug],
+    queryFn: () => api<CatalogEntryDetail>(`/api/v1/catalog/entries/${slug}`),
+    enabled: slug !== null,
+  });
+}
+
+/** Which catalog release is live, or null before the first sync lands. */
+export function useCatalogVersion() {
+  return useQuery({
+    queryKey: ["catalog-version"],
+    queryFn: () => api<CatalogVersion | null>("/api/v1/catalog/version"),
+    staleTime: 300_000,
+  });
+}
+
+/**
+ * Raise a connection's discovered tools to the risk floor its catalog entry
+ * justifies. Only ever raises: a tool an admin already set higher is left
+ * alone, so pressing it twice changes nothing.
+ */
+export function useApplyRiskFloor(workspaceId: string) {
+  const invalidate = useInvalidateConnections(workspaceId);
+  return useMutation({
+    mutationFn: (body: { connection_id: string; slug: string }) =>
+      api<RiskFloorApplied>(`/api/v1/workspaces/${workspaceId}/catalog/apply-risk-floor`, {
+        method: "POST",
+        body,
+      }),
+    onSuccess: () => invalidate(),
+  });
+}
+
 /** Tools reachable through one connection with their enforced risk (admin). */
 export function useConnectionTools(workspaceId: string, connectionId: string | null) {
   return useQuery({
@@ -502,6 +607,177 @@ export function useMarkConnectionWebhookConfigured(workspaceId: string) {
       },
     );
   };
+}
+
+// --- OAuth connect (docs/architecture/oauth.md) ---
+
+/**
+ * The one callback URL this instance registers with every provider.
+ *
+ * Computed by the server from `OAUTH_REDIRECT_BASE_URL` or `APP_URL` and
+ * shown verbatim wherever an admin has to paste it into a provider's app
+ * settings. Cached hard: it only changes when the deployment does.
+ */
+export function useRedirectUri() {
+  return useQuery({
+    queryKey: ["oauth-redirect-uri"],
+    queryFn: () => api<OAuthRedirectOut>("/api/v1/oauth/redirect-uri"),
+    staleTime: 300_000,
+    retry: false,
+  });
+}
+
+/**
+ * Ask the server how this app actually signs in.
+ *
+ * A mutation rather than a query because it is an action with a side effect
+ * on the far side — the server dials the app's endpoint — and because the
+ * connect panel wants it once per Connect, not on a cache schedule.
+ */
+export function useOAuthProbe(workspaceId: string) {
+  return useMutation({
+    mutationFn: (body: { connector_type: string; server_url?: string | null }) =>
+      api<OAuthProbeOut>(`/api/v1/workspaces/${workspaceId}/oauth/probe`, {
+        method: "POST",
+        body,
+      }),
+  });
+}
+
+/** Begin an authorization-code flow. The response's URL is where the browser
+ * goes next; nothing is connected until the provider redirects back. */
+export function useOAuthStart(workspaceId: string) {
+  return useMutation({
+    mutationFn: (body: {
+      connector_type: string;
+      name: string;
+      config?: Record<string, unknown>;
+      connection_id?: string;
+      provider_key?: string;
+    }) =>
+      api<OAuthStartOut>(`/api/v1/workspaces/${workspaceId}/oauth/start`, {
+        method: "POST",
+        body,
+      }),
+  });
+}
+
+/** Re-authorize an existing connection in place: same row, same grants, new
+ * tokens. This is what the Reconnect buttons call. */
+export function useReauthorizeConnection(workspaceId: string) {
+  return useMutation({
+    mutationFn: (connectionId: string) =>
+      api<OAuthStartOut>(
+        `/api/v1/workspaces/${workspaceId}/connections/${connectionId}/reauthorize`,
+        { method: "POST" },
+      ),
+  });
+}
+
+/** Start the device flow: the server holds the device code, the browser gets
+ * a display code and an opaque poll handle. */
+export function useOAuthDeviceStart(workspaceId: string) {
+  return useMutation({
+    mutationFn: (body: {
+      connector_type: string;
+      name: string;
+      config?: Record<string, unknown>;
+    }) =>
+      api<OAuthDeviceStartOut>(`/api/v1/workspaces/${workspaceId}/oauth/device/start`, {
+        method: "POST",
+        body,
+      }),
+  });
+}
+
+/**
+ * Poll a device authorization until it lands.
+ *
+ * `intervalMs` is a floor, not the cadence: the server can raise it mid-flow,
+ * and each `slow_down` adds five seconds that are never given back — backing
+ * off and then quietly speeding up again is how a client gets rate-limited
+ * out of the flow entirely. The backoff lives in a ref rather than in state
+ * because it changes the poll timer, not the picture on screen, and it is
+ * applied once per response rather than once per render.
+ *
+ * Polling stops itself on any terminal status: a connected, denied, or
+ * expired authorization is never asked about twice.
+ */
+export function useOAuthDevicePoll(
+  workspaceId: string,
+  handle: string | null,
+  intervalMs: number,
+) {
+  const backoffMs = useRef(0);
+  const handledAt = useRef(0);
+  return useQuery({
+    queryKey: ["oauth-device-poll", workspaceId, handle],
+    queryFn: () =>
+      api<OAuthDevicePollOut>(`/api/v1/workspaces/${workspaceId}/oauth/device/poll`, {
+        method: "POST",
+        body: { handle },
+      }),
+    enabled: handle !== null,
+    gcTime: 0,
+    retry: false,
+    refetchInterval: (query) => {
+      const { data, dataUpdatedAt } = query.state;
+      if (data?.status === "slow_down" && dataUpdatedAt !== handledAt.current) {
+        handledAt.current = dataUpdatedAt;
+        backoffMs.current += SLOW_DOWN_STEP_MS;
+      }
+      return devicePollDelayMs(intervalMs, data?.status, data?.interval_seconds, backoffMs.current);
+    },
+  });
+}
+
+/** The OAuth apps registered for this workspace, one per authorization
+ * server. Admin-only on the server; the page gates on the same role. */
+export function useOAuthClients(workspaceId: string, enabled = true) {
+  return useQuery({
+    queryKey: ["oauth-clients", workspaceId],
+    queryFn: () => api<OAuthClientOut[]>(`/api/v1/workspaces/${workspaceId}/oauth/clients`),
+    enabled,
+  });
+}
+
+export function useCreateOAuthClient(workspaceId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: OAuthClientCreate) =>
+      api<OAuthClientOut>(`/api/v1/workspaces/${workspaceId}/oauth/clients`, {
+        method: "POST",
+        body,
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["oauth-clients", workspaceId] });
+    },
+  });
+}
+
+export function useDeleteOAuthClient(workspaceId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (registrationId: string) =>
+      api<void>(`/api/v1/workspaces/${workspaceId}/oauth/clients/${registrationId}`, {
+        method: "DELETE",
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["oauth-clients", workspaceId] });
+    },
+  });
+}
+
+/** Ask the server to describe a GitHub App this instance would own. The
+ * browser posts the returned manifest to GitHub as an ordinary form. */
+export function useGitHubAppManifest(workspaceId: string) {
+  return useMutation({
+    mutationFn: (body: { app_name: string; organization?: string | null }) =>
+      api<GitHubAppManifestOut>(`/api/v1/workspaces/${workspaceId}/oauth/github-app/manifest`, {
+        method: "POST",
+        body,
+      }),
+  });
 }
 
 // --- Phase 7: triggers ---
@@ -873,6 +1149,29 @@ export function useBrowseSkills(workspaceId: string, source: string, q: string) 
       }),
     enabled: source !== "",
     placeholderData: (previous) => previous,
+  });
+}
+
+/**
+ * Install one reviewed catalog skill by slug. The server resolves the slug to
+ * a repository itself and refuses anything outside the reviewed tier, so the
+ * client never gets to pick where the bytes come from. Success refreshes the
+ * installed list, the browse gallery's `installed` flags, and the catalog
+ * search pages that render the Install button's state.
+ */
+export function useInstallCatalogSkill(workspaceId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (slug: string) =>
+      api<BrowseInstallResult>(`/api/v1/workspaces/${workspaceId}/skills/install-from-catalog`, {
+        method: "POST",
+        body: { slug },
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["skills", workspaceId] });
+      void queryClient.invalidateQueries({ queryKey: ["skills-browse", workspaceId] });
+      void queryClient.invalidateQueries({ queryKey: ["catalog-search"] });
+    },
   });
 }
 

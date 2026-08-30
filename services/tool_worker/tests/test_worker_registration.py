@@ -29,6 +29,7 @@ from jhin_workflows.avatar_generation import AvatarGenerationWorkflow
 from jhin_workflows.delegated_task import DelegatedTaskWorkflow
 from jhin_workflows.engineering_ticket import EngineeringTicketWorkflow
 from jhin_workflows.memory_maintenance import MemoryMaintenanceWorkflow
+from jhin_workflows.oauth_refresh import OAuthRefreshWorkflow
 from jhin_workflows.periodic_review import PeriodicReviewWorkflow
 from jhin_workflows.tool_compat import (
     AdvertisedToolsCompatibilityWorkflow,
@@ -84,6 +85,7 @@ AGENT_ACTIVITY_NAMES = {
     "mark_task_paused",
     "load_periodic_review_policy",
     "open_periodic_review",
+    "refresh_due_oauth_connections",
 }
 AGENT_ACTIVITY_ORDER = [
     "resolve_snapshot",
@@ -112,6 +114,7 @@ AGENT_ACTIVITY_ORDER = [
     "mark_task_paused",
     "load_periodic_review_policy",
     "open_periodic_review",
+    "refresh_due_oauth_connections",
 ]
 
 
@@ -341,6 +344,9 @@ async def test_agent_worker_registration_uses_only_agent_and_legacy_coordinators
         WorkRequestTaskWorkflow,
         MemoryMaintenanceWorkflow,
         PeriodicReviewWorkflow,
+        # One durable refresher per workspace keeps OAuth connections alive
+        # without a tool call to trigger it (docs/architecture/oauth.md).
+        OAuthRefreshWorkflow,
     ]
     assert cast(Any, captured["worker"]).workflows is captured["workflows"]
     assert cast(Any, captured["worker"]).activities is captured["activities"]

@@ -23,8 +23,14 @@ SEALED_SIGNATURES = {
     ("secrets",),
     ("secrets", "rotate"),
     ("connections", "rotate"),
+    ("connections", "reauthorize"),
     ("connections", "webhook-secret"),
     ("model-providers", "verify-draft"),
+    ("oauth", "start"),
+    ("oauth", "device", "start"),
+    ("oauth", "device", "poll"),
+    ("oauth", "clients"),
+    ("oauth", "github-app", "manifest"),
 }
 
 # Signatures whose DELETE alone is sealed: the route's write scope buys the

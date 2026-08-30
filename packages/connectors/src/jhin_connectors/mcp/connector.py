@@ -11,6 +11,7 @@ from mcp import types as mcp_types
 from jhin_connectors.base import ConnectionHealth, Connector, VerifyContext
 from jhin_connectors.endpoints import EndpointPolicyError
 from jhin_connectors.mcp.client import (
+    McpAuthChallengeError,
     McpClient,
     McpConnectionError,
     validate_header_name,
@@ -25,6 +26,13 @@ from jhin_connectors.mcp.discovery import (
     is_valid_server_slug,
 )
 from jhin_connectors.mcp.manifest import AUTH_HEADER, MCP_MANIFEST, TRANSPORT_AUTO
+from jhin_connectors.mcp.oauth import (
+    AUTH_OAUTH,
+    OAUTH_RESOURCE_KEY,
+    challenge_from_response,
+    resource_binding,
+    validate_oauth_config,
+)
 from jhin_connectors.mcp.tools import client_for
 from jhin_connectors.mcp.tools import connection_tool_definitions as _definitions_for
 from jhin_policy import ToolDefinition
@@ -51,6 +59,37 @@ async def discover(ctx: VerifyContext) -> tuple[McpClient, list[DiscoveredTool]]
     return client, discovered_from_mcp(listed)
 
 
+def _refused_credential(ctx: VerifyContext, error: McpAuthChallengeError) -> ConnectionHealth:
+    """Report a ``401``/``403`` as the specific thing it is.
+
+    A static token that stopped working needs a new token; an OAuth
+    connection needs somebody to sign in again, or — when the server says the
+    grant is too narrow — a reconnect that asks for more. The health record
+    carries a ``needs_reauth`` flag so the API can move the row to
+    ``needs_reauth`` rather than the generic ``error``, which is the
+    difference between "something is broken" and "here is the button".
+
+    The status code is the only part of the server's answer that is repeated.
+    """
+    if ctx.auth_type != AUTH_OAUTH:
+        return ConnectionHealth(ok=False, message=str(error))
+    challenge = challenge_from_response(
+        error.status_code, {"www-authenticate": error.www_authenticate}
+    )
+    if challenge is not None and challenge.needs_more_scope:
+        message = (
+            "this app's sign-in does not cover everything Jhin needs; "
+            "reconnect it to grant the extra permission"
+        )
+    else:
+        message = "this app's sign-in is no longer accepted; reconnect it"
+    return ConnectionHealth(
+        ok=False,
+        message=f"{message} (HTTP {error.status_code})",
+        details={"needs_reauth": "true"},
+    )
+
+
 class McpConnector(Connector):
     manifest = MCP_MANIFEST
 
@@ -73,11 +112,21 @@ class McpConnector(Connector):
         normalized["transport"] = validate_transport(normalized.get("transport", TRANSPORT_AUTO))
         if auth_type == AUTH_HEADER:
             normalized["header_name"] = validate_header_name(normalized.get("header_name"))
+        # The OAuth settings are written by the authorization flow rather than
+        # typed into a form, so they are checked for shape and kept. An OAuth
+        # connection created without a recorded audience gets the one its own
+        # endpoint implies, which is the only value that can ever match at
+        # call time anyway.
+        normalized.update(validate_oauth_config(normalized))
+        if auth_type == AUTH_OAUTH and not normalized.get(OAUTH_RESOURCE_KEY):
+            normalized[OAUTH_RESOURCE_KEY] = resource_binding(normalized["server_url"])
         return normalized
 
     async def verify_connection(self, ctx: VerifyContext) -> ConnectionHealth:
         try:
             client, tools = await discover(ctx)
+        except McpAuthChallengeError as error:
+            return _refused_credential(ctx, error)
         except McpConnectionError as error:
             return ConnectionHealth(ok=False, message=str(error))
         except (EndpointPolicyError, ValueError) as error:

@@ -2727,6 +2727,17 @@
             "title": "Icon",
             "type": "string"
           },
+          "logo_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Logo Url"
+          },
           "mcp_url": {
             "anyOf": [
               {
@@ -2775,6 +2786,528 @@
           "description"
         ],
         "title": "CatalogAppOut",
+        "type": "object"
+      },
+      "CatalogEntryDetailOut": {
+        "description": "Everything the detail dialog shows. Still read-only: nothing here dials\n``mcp_url``, and ``config_schema`` only pre-fills a form the person submits.",
+        "properties": {
+          "auth_hint": {
+            "default": "bearer",
+            "enum": [
+              "none",
+              "bearer",
+              "header",
+              "oauth"
+            ],
+            "title": "Auth Hint",
+            "type": "string"
+          },
+          "auth_note": {
+            "default": "",
+            "title": "Auth Note",
+            "type": "string"
+          },
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "config_schema": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConfigSchemaOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "connectable": {
+            "title": "Connectable",
+            "type": "boolean"
+          },
+          "connector_config": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "title": "Connector Config",
+            "type": "object"
+          },
+          "connector_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Connector Type"
+          },
+          "default_risk": {
+            "enum": [
+              "read",
+              "write",
+              "elevated",
+              "destructive"
+            ],
+            "title": "Default Risk",
+            "type": "string"
+          },
+          "deprecated": {
+            "default": false,
+            "title": "Deprecated",
+            "type": "boolean"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "docs_url": {
+            "default": "",
+            "title": "Docs Url",
+            "type": "string"
+          },
+          "homepage": {
+            "default": "",
+            "title": "Homepage",
+            "type": "string"
+          },
+          "icon": {
+            "title": "Icon",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "mcp",
+              "skill"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "license": {
+            "default": "",
+            "title": "License",
+            "type": "string"
+          },
+          "logo_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Logo Url"
+          },
+          "mcp": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CatalogMcpDetailOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "mcp_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mcp Url"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "popularity": {
+            "title": "Popularity",
+            "type": "number"
+          },
+          "setup_note": {
+            "default": "",
+            "title": "Setup Note",
+            "type": "string"
+          },
+          "skill": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CatalogSkillDetailOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "builtin",
+              "synced"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "sources": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/CatalogSourceOut"
+            },
+            "title": "Sources",
+            "type": "array"
+          },
+          "stdio_only": {
+            "default": false,
+            "title": "Stdio Only",
+            "type": "boolean"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          },
+          "transport": {
+            "default": "unknown",
+            "enum": [
+              "streamable_http",
+              "sse",
+              "unknown"
+            ],
+            "title": "Transport",
+            "type": "string"
+          },
+          "trust_tier": {
+            "enum": [
+              "curated",
+              "registry_verified",
+              "smithery_verified",
+              "reviewed",
+              "indexed"
+            ],
+            "title": "Trust Tier",
+            "type": "string"
+          },
+          "url_unverified": {
+            "default": true,
+            "title": "Url Unverified",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "slug",
+          "kind",
+          "source",
+          "name",
+          "summary",
+          "category",
+          "icon",
+          "trust_tier",
+          "default_risk",
+          "popularity",
+          "connectable"
+        ],
+        "title": "CatalogEntryDetailOut",
+        "type": "object"
+      },
+      "CatalogEntryOut": {
+        "description": "One search hit. Every string here is bounded and already sanitised.",
+        "properties": {
+          "auth_hint": {
+            "default": "bearer",
+            "enum": [
+              "none",
+              "bearer",
+              "header",
+              "oauth"
+            ],
+            "title": "Auth Hint",
+            "type": "string"
+          },
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "connectable": {
+            "title": "Connectable",
+            "type": "boolean"
+          },
+          "connector_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Connector Type"
+          },
+          "default_risk": {
+            "enum": [
+              "read",
+              "write",
+              "elevated",
+              "destructive"
+            ],
+            "title": "Default Risk",
+            "type": "string"
+          },
+          "deprecated": {
+            "default": false,
+            "title": "Deprecated",
+            "type": "boolean"
+          },
+          "docs_url": {
+            "default": "",
+            "title": "Docs Url",
+            "type": "string"
+          },
+          "icon": {
+            "title": "Icon",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "mcp",
+              "skill"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "logo_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Logo Url"
+          },
+          "mcp_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mcp Url"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "popularity": {
+            "title": "Popularity",
+            "type": "number"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "builtin",
+              "synced"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "stdio_only": {
+            "default": false,
+            "title": "Stdio Only",
+            "type": "boolean"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "transport": {
+            "default": "unknown",
+            "enum": [
+              "streamable_http",
+              "sse",
+              "unknown"
+            ],
+            "title": "Transport",
+            "type": "string"
+          },
+          "trust_tier": {
+            "enum": [
+              "curated",
+              "registry_verified",
+              "smithery_verified",
+              "reviewed",
+              "indexed"
+            ],
+            "title": "Trust Tier",
+            "type": "string"
+          },
+          "url_unverified": {
+            "default": true,
+            "title": "Url Unverified",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "slug",
+          "kind",
+          "source",
+          "name",
+          "summary",
+          "category",
+          "icon",
+          "trust_tier",
+          "default_risk",
+          "popularity",
+          "connectable"
+        ],
+        "title": "CatalogEntryOut",
+        "type": "object"
+      },
+      "CatalogFacetBucket": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "label",
+          "count"
+        ],
+        "title": "CatalogFacetBucket",
+        "type": "object"
+      },
+      "CatalogFacetsOut": {
+        "description": "Counts per dimension under the current filters, each dimension counted\nwith its own filter lifted — so a chosen category still shows the other\ncategories a person could switch to.",
+        "properties": {
+          "auth_hint": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/CatalogFacetBucket"
+            },
+            "title": "Auth Hint",
+            "type": "array"
+          },
+          "category": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/CatalogFacetBucket"
+            },
+            "title": "Category",
+            "type": "array"
+          },
+          "kind": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/CatalogFacetBucket"
+            },
+            "title": "Kind",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "transport": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/CatalogFacetBucket"
+            },
+            "title": "Transport",
+            "type": "array"
+          },
+          "trust_tier": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/CatalogFacetBucket"
+            },
+            "title": "Trust Tier",
+            "type": "array"
+          }
+        },
+        "required": [
+          "total"
+        ],
+        "title": "CatalogFacetsOut",
+        "type": "object"
+      },
+      "CatalogMcpDetailOut": {
+        "properties": {
+          "npm_package": {
+            "default": "",
+            "title": "Npm Package",
+            "type": "string"
+          },
+          "package_identifiers": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Package Identifiers",
+            "type": "array"
+          },
+          "registry_name": {
+            "default": "",
+            "title": "Registry Name",
+            "type": "string"
+          },
+          "remote_urls": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Remote Urls",
+            "type": "array"
+          },
+          "tool_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Count"
+          },
+          "verified_upstream": {
+            "default": false,
+            "title": "Verified Upstream",
+            "type": "boolean"
+          }
+        },
+        "title": "CatalogMcpDetailOut",
         "type": "object"
       },
       "CatalogRefreshResultOut": {
@@ -2835,6 +3368,161 @@
           "repriced"
         ],
         "title": "CatalogRefreshResultOut",
+        "type": "object"
+      },
+      "CatalogSearchOut": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/CatalogEntryOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CatalogVersionOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "CatalogSearchOut",
+        "type": "object"
+      },
+      "CatalogSkillDetailOut": {
+        "properties": {
+          "allowed_tools": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Tools",
+            "type": "array"
+          },
+          "commit_sha": {
+            "default": "",
+            "title": "Commit Sha",
+            "type": "string"
+          },
+          "marketplace": {
+            "default": "",
+            "title": "Marketplace",
+            "type": "string"
+          },
+          "model_invocable": {
+            "default": true,
+            "title": "Model Invocable",
+            "type": "boolean"
+          },
+          "plugin": {
+            "default": "",
+            "title": "Plugin",
+            "type": "string"
+          },
+          "skill_name": {
+            "default": "",
+            "title": "Skill Name",
+            "type": "string"
+          },
+          "skill_path": {
+            "default": "",
+            "title": "Skill Path",
+            "type": "string"
+          },
+          "source_ref": {
+            "default": "",
+            "title": "Source Ref",
+            "type": "string"
+          }
+        },
+        "title": "CatalogSkillDetailOut",
+        "type": "object"
+      },
+      "CatalogSourceOut": {
+        "description": "One upstream registry this entry was seen in. Provenance, for a person.",
+        "properties": {
+          "source_id": {
+            "title": "Source Id",
+            "type": "string"
+          },
+          "upstream_id": {
+            "title": "Upstream Id",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_id",
+          "upstream_id",
+          "url"
+        ],
+        "title": "CatalogSourceOut",
+        "type": "object"
+      },
+      "CatalogVersionOut": {
+        "description": "Which generation of the index answered this request.\n\nShown in the gallery footer so a stale index is visible rather than\nsilently old. ``null`` on a fresh install: the built-in entries are all\nthere is until the first sync runs.",
+        "properties": {
+          "activated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Activated At"
+          },
+          "data_sha256": {
+            "title": "Data Sha256",
+            "type": "string"
+          },
+          "entry_count": {
+            "title": "Entry Count",
+            "type": "integer"
+          },
+          "mcp_count": {
+            "title": "Mcp Count",
+            "type": "integer"
+          },
+          "release_tag": {
+            "title": "Release Tag",
+            "type": "string"
+          },
+          "skill_count": {
+            "title": "Skill Count",
+            "type": "integer"
+          },
+          "source_repo": {
+            "title": "Source Repo",
+            "type": "string"
+          }
+        },
+        "required": [
+          "release_tag",
+          "source_repo",
+          "data_sha256",
+          "entry_count",
+          "mcp_count",
+          "skill_count"
+        ],
+        "title": "CatalogVersionOut",
         "type": "object"
       },
       "ChangePasswordRequest": {
@@ -3010,6 +3698,190 @@
         "title": "ConfigFieldOut",
         "type": "object"
       },
+      "ConfigSchemaAuth": {
+        "description": "How the provider expects to be authenticated, in the entry's own words.",
+        "properties": {
+          "note": {
+            "default": "",
+            "title": "Note",
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "none",
+              "bearer",
+              "header",
+              "oauth"
+            ],
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "title": "ConfigSchemaAuth",
+        "type": "object"
+      },
+      "ConfigSchemaField": {
+        "description": "One control the Connect dialog should render.\n\nField definitions come from the installed connector manifest; the catalog\nonly ever supplies a *value* for a name the manifest already declared.\nA renderer that meets a ``type`` it does not know falls back to a text\ninput rather than refusing the form.",
+        "properties": {
+          "default": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default"
+          },
+          "enum": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Enum",
+            "type": "array"
+          },
+          "help": {
+            "default": "",
+            "title": "Help",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "max_length": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Length"
+          },
+          "maximum": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Maximum"
+          },
+          "minimum": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Minimum"
+          },
+          "multiline": {
+            "default": false,
+            "title": "Multiline",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "placeholder": {
+            "default": "",
+            "title": "Placeholder",
+            "type": "string"
+          },
+          "required": {
+            "default": false,
+            "title": "Required",
+            "type": "boolean"
+          },
+          "secret": {
+            "default": false,
+            "title": "Secret",
+            "type": "boolean"
+          },
+          "type": {
+            "enum": [
+              "string",
+              "integer",
+              "boolean",
+              "string_list"
+            ],
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "label",
+          "type"
+        ],
+        "title": "ConfigSchemaField",
+        "type": "object"
+      },
+      "ConfigSchemaOut": {
+        "description": "The whole render contract for one entry, or nothing when no installed\nconnector can reach it. ``degraded`` names the fields the server could not\ndescribe faithfully, so the dialog can say so instead of guessing.",
+        "properties": {
+          "auth": {
+            "$ref": "#/components/schemas/ConfigSchemaAuth"
+          },
+          "connector_type": {
+            "title": "Connector Type",
+            "type": "string"
+          },
+          "degraded": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Degraded",
+            "type": "array"
+          },
+          "fields": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ConfigSchemaField"
+            },
+            "title": "Fields",
+            "type": "array"
+          },
+          "version": {
+            "const": 1,
+            "default": 1,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "connector_type",
+          "auth"
+        ],
+        "title": "ConfigSchemaOut",
+        "type": "object"
+      },
       "ConnectionAccessSummaryOut": {
         "description": "Workspace-local connection access diagnostics for administrators.",
         "properties": {
@@ -3079,6 +3951,26 @@
           "grants"
         ],
         "title": "ConnectionAgentAccessOut",
+        "type": "object"
+      },
+      "ConnectionAuthorizedByOut": {
+        "description": "Whose provider account an OAuth connection acts as.\n\nNamed on every connection because the consequence is real: every agent\ngranted this connection acts with this person's permissions at the\nprovider, and an admin should never have to ask around to find out whose.",
+        "properties": {
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "user_id": {
+            "format": "uuid",
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "display_name"
+        ],
+        "title": "ConnectionAuthorizedByOut",
         "type": "object"
       },
       "ConnectionCreated": {
@@ -3183,6 +4075,16 @@
             "title": "Auth Type",
             "type": "string"
           },
+          "authorized_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConnectionAuthorizedByOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "config_json": {
             "additionalProperties": true,
             "title": "Config Json",
@@ -3240,6 +4142,23 @@
           "name": {
             "title": "Name",
             "type": "string"
+          },
+          "needs_reauth": {
+            "default": false,
+            "title": "Needs Reauth",
+            "type": "boolean"
+          },
+          "oauth_expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oauth Expires At"
           },
           "public_id": {
             "title": "Public Id",
@@ -4350,6 +5269,65 @@
           "dimensions"
         ],
         "title": "EmbedMissingOut",
+        "type": "object"
+      },
+      "GitHubAppManifestIn": {
+        "additionalProperties": false,
+        "properties": {
+          "app_name": {
+            "maxLength": 34,
+            "minLength": 1,
+            "title": "App Name",
+            "type": "string"
+          },
+          "organization": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Organization"
+          }
+        },
+        "required": [
+          "app_name"
+        ],
+        "title": "GitHubAppManifestIn",
+        "type": "object"
+      },
+      "GitHubAppManifestOut": {
+        "description": "The form the browser POSTs to GitHub to create this instance's own app.",
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "manifest": {
+            "additionalProperties": true,
+            "title": "Manifest",
+            "type": "object"
+          },
+          "post_url": {
+            "title": "Post Url",
+            "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "post_url",
+          "manifest",
+          "state",
+          "expires_at"
+        ],
+        "title": "GitHubAppManifestOut",
         "type": "object"
       },
       "GrantCreate": {
@@ -6210,6 +7188,406 @@
           }
         },
         "title": "ModelProviderUpdate",
+        "type": "object"
+      },
+      "OAuthClientOut": {
+        "description": "One stored registration. Never the secret — only whether there is one.",
+        "properties": {
+          "client_id": {
+            "title": "Client Id",
+            "type": "string"
+          },
+          "client_secret_configured": {
+            "title": "Client Secret Configured",
+            "type": "boolean"
+          },
+          "connection_count": {
+            "title": "Connection Count",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "issuer": {
+            "title": "Issuer",
+            "type": "string"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Used At"
+          },
+          "redirect_uri": {
+            "title": "Redirect Uri",
+            "type": "string"
+          },
+          "scopes": {
+            "title": "Scopes",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "dcr",
+              "manual",
+              "static"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "token_endpoint_auth_method": {
+            "title": "Token Endpoint Auth Method",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "issuer",
+          "redirect_uri",
+          "client_id",
+          "client_secret_configured",
+          "token_endpoint_auth_method",
+          "source",
+          "scopes",
+          "created_at",
+          "last_used_at",
+          "connection_count"
+        ],
+        "title": "OAuthClientOut",
+        "type": "object"
+      },
+      "OAuthDevicePollIn": {
+        "additionalProperties": false,
+        "properties": {
+          "handle": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Handle",
+            "type": "string"
+          }
+        },
+        "required": [
+          "handle"
+        ],
+        "title": "OAuthDevicePollIn",
+        "type": "object"
+      },
+      "OAuthDevicePollOut": {
+        "properties": {
+          "connection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConnectionOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "interval_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interval Seconds"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "slow_down",
+              "connected",
+              "denied",
+              "expired"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "OAuthDevicePollOut",
+        "type": "object"
+      },
+      "OAuthDeviceStartIn": {
+        "additionalProperties": false,
+        "properties": {
+          "config": {
+            "additionalProperties": true,
+            "title": "Config",
+            "type": "object"
+          },
+          "connector_type": {
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Connector Type",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "connector_type",
+          "name"
+        ],
+        "title": "OAuthDeviceStartIn",
+        "type": "object"
+      },
+      "OAuthDeviceStartOut": {
+        "description": "The device-flow display payload.\n\n``handle`` is Jhin's opaque poll token, not the provider's ``device_code``\n— that stays encrypted server-side. ``user_code`` is meant to be read\naloud and typed into a provider's website; on its own it authorizes\nnothing.",
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "handle": {
+            "title": "Handle",
+            "type": "string"
+          },
+          "interval_seconds": {
+            "title": "Interval Seconds",
+            "type": "integer"
+          },
+          "user_code": {
+            "title": "User Code",
+            "type": "string"
+          },
+          "verification_uri": {
+            "title": "Verification Uri",
+            "type": "string"
+          },
+          "verification_uri_complete": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verification Uri Complete"
+          }
+        },
+        "required": [
+          "handle",
+          "user_code",
+          "verification_uri",
+          "expires_at",
+          "interval_seconds"
+        ],
+        "title": "OAuthDeviceStartOut",
+        "type": "object"
+      },
+      "OAuthProbeIn": {
+        "additionalProperties": false,
+        "properties": {
+          "connector_type": {
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Connector Type",
+            "type": "string"
+          },
+          "server_url": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Server Url"
+          }
+        },
+        "required": [
+          "connector_type"
+        ],
+        "title": "OAuthProbeIn",
+        "type": "object"
+      },
+      "OAuthProbeOut": {
+        "description": "What asking the server (never guessing from a catalog hint) established.",
+        "properties": {
+          "authorization_server_display": {
+            "default": "",
+            "title": "Authorization Server Display",
+            "type": "string"
+          },
+          "client_configured": {
+            "default": false,
+            "title": "Client Configured",
+            "type": "boolean"
+          },
+          "issuer": {
+            "default": "",
+            "title": "Issuer",
+            "type": "string"
+          },
+          "method": {
+            "enum": [
+              "oauth_discovery",
+              "oauth_static",
+              "device_code",
+              "oauth_needs_client",
+              "api_key"
+            ],
+            "title": "Method",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "requires_client_secret": {
+            "default": false,
+            "title": "Requires Client Secret",
+            "type": "boolean"
+          },
+          "resource": {
+            "default": "",
+            "title": "Resource",
+            "type": "string"
+          },
+          "scopes": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Scopes",
+            "type": "array"
+          },
+          "supports_dcr": {
+            "title": "Supports Dcr",
+            "type": "boolean"
+          },
+          "supports_oauth": {
+            "title": "Supports Oauth",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "method",
+          "supports_oauth",
+          "supports_dcr"
+        ],
+        "title": "OAuthProbeOut",
+        "type": "object"
+      },
+      "OAuthRedirectOut": {
+        "description": "The redirect URI an operator pastes into a provider's app settings.\n\nShown verbatim, with a copy button, on every bring-your-own-app screen.\n``is_loopback`` exists so the UI can say the honest thing on a laptop\ninstall: a provider on the internet cannot reach ``localhost``, and the\ndevice-code flow is the answer there rather than a redirect.",
+        "properties": {
+          "configured_via": {
+            "enum": [
+              "OAUTH_REDIRECT_BASE_URL",
+              "APP_URL"
+            ],
+            "title": "Configured Via",
+            "type": "string"
+          },
+          "github_app_redirect_uri": {
+            "title": "Github App Redirect Uri",
+            "type": "string"
+          },
+          "is_https": {
+            "title": "Is Https",
+            "type": "boolean"
+          },
+          "is_loopback": {
+            "title": "Is Loopback",
+            "type": "boolean"
+          },
+          "redirect_uri": {
+            "title": "Redirect Uri",
+            "type": "string"
+          }
+        },
+        "required": [
+          "redirect_uri",
+          "github_app_redirect_uri",
+          "is_https",
+          "is_loopback",
+          "configured_via"
+        ],
+        "title": "OAuthRedirectOut",
+        "type": "object"
+      },
+      "OAuthStartOut": {
+        "description": "Everything the browser needs to leave, and nothing it should not have.",
+        "properties": {
+          "authorization_url": {
+            "title": "Authorization Url",
+            "type": "string"
+          },
+          "authorized_as_user_id": {
+            "format": "uuid",
+            "title": "Authorized As User Id",
+            "type": "string"
+          },
+          "client_source": {
+            "enum": [
+              "dcr",
+              "manual",
+              "static"
+            ],
+            "title": "Client Source",
+            "type": "string"
+          },
+          "issuer": {
+            "title": "Issuer",
+            "type": "string"
+          },
+          "resource": {
+            "title": "Resource",
+            "type": "string"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Scopes",
+            "type": "array"
+          },
+          "state_expires_at": {
+            "format": "date-time",
+            "title": "State Expires At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_url",
+          "state_expires_at",
+          "issuer",
+          "scopes",
+          "resource",
+          "authorized_as_user_id",
+          "client_source"
+        ],
+        "title": "OAuthStartOut",
         "type": "object"
       },
       "ObservedRateOut": {
@@ -8368,6 +9746,64 @@
         "title": "ReviewerSelector",
         "type": "object"
       },
+      "RiskFloorAppliedOut": {
+        "properties": {
+          "connection_id": {
+            "format": "uuid",
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "floor": {
+            "enum": [
+              "read",
+              "write",
+              "elevated",
+              "destructive"
+            ],
+            "title": "Floor",
+            "type": "string"
+          },
+          "tools_raised": {
+            "title": "Tools Raised",
+            "type": "integer"
+          },
+          "tools_unchanged": {
+            "title": "Tools Unchanged",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "connection_id",
+          "floor",
+          "tools_raised",
+          "tools_unchanged"
+        ],
+        "title": "RiskFloorAppliedOut",
+        "type": "object"
+      },
+      "RiskFloorApply": {
+        "additionalProperties": false,
+        "description": "Raise a connection's discovered tools to the floor its catalog entry\nimplies. The floor itself is never in the request: it is resolved from the\nentry's trust tier, so this can only ever be applied, never chosen.",
+        "properties": {
+          "connection_id": {
+            "format": "uuid",
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "slug": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Slug",
+            "type": "string"
+          }
+        },
+        "required": [
+          "connection_id",
+          "slug"
+        ],
+        "title": "RiskFloorApply",
+        "type": "object"
+      },
       "RollupItem": {
         "properties": {
           "agent_id": {
@@ -8918,6 +10354,8 @@
           "password",
           "connection_credentials",
           "webhook_secret",
+          "oauth_state",
+          "oauth_client",
           "other"
         ],
         "title": "SecretType",
@@ -12315,6 +13753,530 @@
         ]
       }
     },
+    "/api/v1/catalog/entries": {
+      "get": {
+        "description": "Search the library: the curated built-ins merged with the active synced\ngeneration.\n\nCurated entries always come first — not because they scored higher, but\nbecause a reviewed integration is what somebody should be offered first.\nCrawled entries (``trust_tier`` ``indexed``) stay hidden unless\n``include_indexed`` asks for them. ``total`` counts both halves, so paging\nwith ``limit`` and ``offset`` walks the merged list once.\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
+        "operationId": "list_catalog_entries_api_v1_catalog_entries_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 120,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Q"
+            }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "mcp",
+                    "skill"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            }
+          },
+          {
+            "in": "query",
+            "name": "category",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Category"
+            }
+          },
+          {
+            "in": "query",
+            "name": "trust_tier",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "curated",
+                    "registry_verified",
+                    "smithery_verified",
+                    "reviewed",
+                    "indexed"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Trust Tier"
+            }
+          },
+          {
+            "in": "query",
+            "name": "transport",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "streamable_http",
+                    "sse",
+                    "unknown"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Transport"
+            }
+          },
+          {
+            "in": "query",
+            "name": "auth_hint",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "none",
+                    "bearer",
+                    "header",
+                    "oauth"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Auth Hint"
+            }
+          },
+          {
+            "in": "query",
+            "name": "connectable",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Connectable"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_indexed",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Indexed",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 40,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogSearchOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "List Catalog Entries",
+        "tags": [
+          "catalog"
+        ]
+      }
+    },
+    "/api/v1/catalog/entries/{slug}": {
+      "get": {
+        "description": "One entry in full, including the Connect dialog's render contract.\n\nA reserved slug always resolves to the curated entry, whatever a synced row\nclaims. The ``config_schema`` field list is built here from the manifest of\na connector this install actually has — catalog data only ever supplies\nvalues for names that manifest already declared, so nothing published\nupstream can add a field, rename one, or mark one secret.\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
+        "operationId": "get_catalog_entry_api_v1_catalog_entries__slug__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 32,
+              "minLength": 1,
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogEntryDetailOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Get Catalog Entry",
+        "tags": [
+          "catalog"
+        ]
+      }
+    },
+    "/api/v1/catalog/entries/{slug}/icon": {
+      "get": {
+        "description": "One entry's logo, served same-origin.\n\nThis is the only place the stored upstream icon URL is ever acted on: the\nproxy re-validates it against the sync's own allowlist, follows at most a\ncouple of equally-validated redirects, keeps only bytes whose magic\nnumbers name a raster image, and caches the result — success or failure —\nin ``catalog_icon``. 404 means \"no logo\"; the library card falls back to\nits glyph tile.\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
+        "operationId": "get_catalog_entry_icon_api_v1_catalog_entries__slug__icon_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 32,
+              "minLength": 1,
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "image/*": {}
+            },
+            "description": "The entry's logo bytes."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Get Catalog Entry Icon",
+        "tags": [
+          "catalog"
+        ]
+      }
+    },
+    "/api/v1/catalog/facets": {
+      "get": {
+        "description": "How many entries each filter value would leave, under the filters\nalready applied.\n\nTakes the same parameters as ``/entries`` minus the page window. Each\ndimension is counted with its own selection released, so the chips beside\nthe one you picked still say what picking them instead would give.\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
+        "operationId": "catalog_facets_api_v1_catalog_facets_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 120,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Q"
+            }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "mcp",
+                    "skill"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            }
+          },
+          {
+            "in": "query",
+            "name": "category",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Category"
+            }
+          },
+          {
+            "in": "query",
+            "name": "trust_tier",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "curated",
+                    "registry_verified",
+                    "smithery_verified",
+                    "reviewed",
+                    "indexed"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Trust Tier"
+            }
+          },
+          {
+            "in": "query",
+            "name": "transport",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "streamable_http",
+                    "sse",
+                    "unknown"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Transport"
+            }
+          },
+          {
+            "in": "query",
+            "name": "auth_hint",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "none",
+                    "bearer",
+                    "header",
+                    "oauth"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Auth Hint"
+            }
+          },
+          {
+            "in": "query",
+            "name": "connectable",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Connectable"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_indexed",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Indexed",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogFacetsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Catalog Facets",
+        "tags": [
+          "catalog"
+        ]
+      }
+    },
+    "/api/v1/catalog/version": {
+      "get": {
+        "description": "Which generation of the index is being served, or ``null`` before the\nfirst sync has run. Shown in the library footer so a stale index is visible\nrather than silently old.\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
+        "operationId": "get_catalog_version_api_v1_catalog_version_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/CatalogVersionOut"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Get Catalog Version Api V1 Catalog Version Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Get Catalog Version",
+        "tags": [
+          "catalog"
+        ]
+      }
+    },
     "/api/v1/connectors": {
       "get": {
         "description": "Manifests of every installed connector (gallery data, plan 17.9).\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
@@ -12348,7 +14310,7 @@
     },
     "/api/v1/connectors/catalog": {
       "get": {
-        "description": "The curated Apps library: known apps with native connectors or MCP\nendpoints (docs/architecture/mcp.md). Static public data.\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
+        "description": "The curated Apps library: known apps with native connectors or MCP\nendpoints (docs/architecture/mcp.md). Static public data.\n\n``logo_url`` is the same-origin icon-proxy path, never the upstream URL:\nthe entry's ``icon_url`` is an instruction to the proxy and stays on the\nserver (``CatalogAppOut`` declares no such field, so the dump's copy is\ndropped on validation).\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
         "operationId": "list_catalog_api_v1_connectors_catalog_get",
         "responses": {
           "200": {
@@ -12528,6 +14490,197 @@
         "summary": "Accept Invitation",
         "tags": [
           "invitations"
+        ]
+      }
+    },
+    "/api/v1/oauth/callback": {
+      "get": {
+        "description": "Where a provider sends the browser back. The security-critical route.\n\nFive checks stand between this request and a stored token, and all five\nmust pass: the handle is well formed, a row exists for its hash, the\nsingle-use claim wins, the live session belongs to the user who started\nthe flow, and ``iss`` byte-matches the issuer recorded before we\nredirected. Every failure returns the same 400 with the same body, so a\nprobe learns nothing from which one it tripped.\n\n``error_description`` and ``error_uri`` are accepted by the URL and read\nby nothing. They are text whoever reached this URL chose, and rendering\nthem would let them write our error page. ``error`` itself is used as a\nboolean and never shown.\n\nThe ``Location`` is built by :func:`redirect_module.app_return_url` from\nsettings plus a connection id proven to be thirty-two hex characters.\nNothing from this request can reach it, which is what closes the\nopen-redirect surface by construction rather than by filtering.\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
+        "operationId": "oauth_callback_api_v1_oauth_callback_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "state",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "title": "State",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "code",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2048,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Code"
+            }
+          },
+          {
+            "in": "query",
+            "name": "iss",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2048,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Iss"
+            }
+          },
+          {
+            "in": "query",
+            "name": "error",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2048,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Error"
+            }
+          }
+        ],
+        "responses": {
+          "303": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Oauth Callback",
+        "tags": [
+          "oauth"
+        ]
+      }
+    },
+    "/api/v1/oauth/github-app/callback": {
+      "get": {
+        "description": "Where GitHub sends the browser after creating this instance's own app.\n\nSame five checks as the OAuth callback, same single refusal. The\nconversion code is worth a full set of app credentials for exactly one\nhour, which is why the pending row for this flow is the only one with a\nTTL longer than ten minutes and why it is still single-use.\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
+        "operationId": "github_app_callback_api_v1_oauth_github_app_callback_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "state",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "title": "State",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "code",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2048,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Code"
+            }
+          }
+        ],
+        "responses": {
+          "303": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Github App Callback",
+        "tags": [
+          "oauth"
+        ]
+      }
+    },
+    "/api/v1/oauth/redirect-uri": {
+      "get": {
+        "description": "The callback URL an operator pastes into a provider's app settings.\n\nShown verbatim, with a copy button, wherever somebody is asked to bring\ntheir own OAuth app, and again in Settings → OAuth — because \"what\nexactly do I paste?\" is the one question that stalls a self-hosted OAuth\nsetup.\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
+        "operationId": "get_redirect_uri_api_v1_oauth_redirect_uri_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthRedirectOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Get Redirect Uri",
+        "tags": [
+          "oauth"
         ]
       }
     },
@@ -15679,6 +17832,71 @@
         "x-jhin-scope": "audit:read"
       }
     },
+    "/api/v1/workspaces/{workspace_id}/catalog/apply-risk-floor": {
+      "post": {
+        "description": "Raise a connection's discovered tools to the risk floor its catalog\nentry implies (admin).\n\nThe floor is never in the request: it is resolved from the entry's own\ntrust tier, so this can be applied but not chosen. Idempotent and\none-directional — a tool already at or above the floor is left exactly as\nit is, and nothing an admin raised by hand is ever undone.\n\n**Scope.** An API key needs `apps:write`.",
+        "operationId": "apply_catalog_risk_floor_api_v1_workspaces__workspace_id__catalog_apply_risk_floor_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RiskFloorApply"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RiskFloorAppliedOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": [
+              "apps:write"
+            ]
+          }
+        ],
+        "summary": "Apply Catalog Risk Floor",
+        "tags": [
+          "catalog"
+        ],
+        "x-jhin-scope": "apps:write"
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/connections": {
       "get": {
         "description": "**Scope.** An API key needs `apps:read`.",
@@ -15842,7 +18060,7 @@
     },
     "/api/v1/workspaces/{workspace_id}/connections/{connection_id}": {
       "delete": {
-        "description": "**Scope.** An API key needs `apps:write`.",
+        "description": "Disconnect an app, telling the provider so when it was an OAuth grant.\n\n**Scope.** An API key needs `apps:write`.",
         "operationId": "delete_connection_api_v1_workspaces__workspace_id__connections__connection_id__delete",
         "parameters": [
           {
@@ -16221,6 +18439,65 @@
           "connections"
         ],
         "x-jhin-scope": "apps:read"
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/connections/{connection_id}/reauthorize": {
+      "post": {
+        "description": "Start a fresh authorization for a connection that needs reconnecting.\n\nKeeps the connection row — its id is what every grant, trigger, and\nrecorded tool call points at — and replaces only the grant behind it. This\nis what the amber \"needs reconnecting\" banner's one button calls, and it\nis why reconnecting an app does not silently revoke every agent's access\nto it.\n\nOnly the *manifest-declared* settings are carried forward. ``config_json``\nalso holds server-side bookkeeping — the recorded issuer and token\nendpoint, the discovered tool list, any pending step-up scope — and none of\nit belongs in a draft: the pending-authorization store refuses a draft key\nthat looks like a credential (``oauth_token_endpoint`` contains \"token\"),\nand ``normalize_config`` refuses any key the manifest does not declare. The\nvalues that actually matter on the way back in are re-derived from the\nconnection row itself, not from the draft.\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
+        "operationId": "reauthorize_connection_api_v1_workspaces__workspace_id__connections__connection_id__reauthorize_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Connection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthStartOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Reauthorize Connection",
+        "tags": [
+          "connections"
+        ]
       }
     },
     "/api/v1/workspaces/{workspace_id}/connections/{connection_id}/rotate": {
@@ -19977,6 +22254,567 @@
           "model-providers"
         ],
         "x-jhin-scope": "models:write"
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/oauth/clients": {
+      "get": {
+        "description": "This workspace's OAuth app registrations. Client ids, never secrets.\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
+        "operationId": "list_oauth_clients_api_v1_workspaces__workspace_id__oauth_clients_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/OAuthClientOut"
+                  },
+                  "title": "Response List Oauth Clients Api V1 Workspaces  Workspace Id  Oauth Clients Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "List Oauth Clients",
+        "tags": [
+          "oauth"
+        ]
+      },
+      "post": {
+        "description": "Store a client id (and secret) an admin registered by hand.\n\nNeeded once per workspace per server that has no dynamic registration.\nEvery later connection to that same server skips this entirely — which is\nthe difference between a one-time setup and a tax on every connection.\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
+        "operationId": "create_oauth_client_api_v1_workspaces__workspace_id__oauth_clients_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "An admin registering Jhin by hand at a server with no dynamic registration.",
+                "properties": {
+                  "client_id": {
+                    "maxLength": 500,
+                    "minLength": 1,
+                    "title": "Client Id",
+                    "type": "string"
+                  },
+                  "client_secret": {
+                    "anyOf": [
+                      {
+                        "maxLength": 4096,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Client Secret"
+                  },
+                  "issuer": {
+                    "maxLength": 500,
+                    "minLength": 1,
+                    "title": "Issuer",
+                    "type": "string"
+                  },
+                  "scopes": {
+                    "default": "",
+                    "maxLength": 2048,
+                    "title": "Scopes",
+                    "type": "string"
+                  },
+                  "token_endpoint_auth_method": {
+                    "default": "none",
+                    "enum": [
+                      "none",
+                      "client_secret_post",
+                      "client_secret_basic"
+                    ],
+                    "title": "Token Endpoint Auth Method",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "issuer",
+                  "client_id"
+                ],
+                "title": "OAuthClientCreate",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthClientOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Create Oauth Client",
+        "tags": [
+          "oauth"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/oauth/clients/{registration_id}": {
+      "delete": {
+        "description": "Forget a registration and every secret it owns.\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
+        "operationId": "delete_oauth_client_api_v1_workspaces__workspace_id__oauth_clients__registration_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "registration_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Registration Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Delete Oauth Client",
+        "tags": [
+          "oauth"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/oauth/device/poll": {
+      "post": {
+        "description": "Ask whether the person has approved the device code yet.\n\nThe handle is Jhin's own; the provider's device code never leaves this\nserver. A ``slow_down`` answer raises the poll interval permanently, as\nRFC 8628 requires — a client that returns to its old cadence gets\nthrottled and then rejected.\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
+        "operationId": "poll_device_flow_api_v1_workspaces__workspace_id__oauth_device_poll_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OAuthDevicePollIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthDevicePollOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Poll Device Flow",
+        "tags": [
+          "oauth"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/oauth/device/start": {
+      "post": {
+        "description": "Begin a device-code sign-in: a short code, no redirect, no secret.\n\nThe answer for an install the internet cannot reach — a laptop, a private\nnetwork, anything without a public HTTPS origin — where a redirect-based\nflow cannot work at all and pasting a personal access token used to be the\nonly remaining option.\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
+        "operationId": "start_device_flow_api_v1_workspaces__workspace_id__oauth_device_start_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OAuthDeviceStartIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthDeviceStartOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Start Device Flow",
+        "tags": [
+          "oauth"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/oauth/github-app/manifest": {
+      "post": {
+        "description": "The form the browser POSTs to GitHub to create this instance's own app.\n\nOne click instead of a page of copy-paste: GitHub creates the app, sends\nthe browser to Jhin's callback with a conversion code, and Jhin exchanges\nthat for the app's id, client id, client secret, webhook secret, and\nprivate key. The whole handshake has to finish inside an hour, so this is\nthe only pending authorization whose TTL is longer than ten minutes.\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
+        "operationId": "create_github_app_manifest_api_v1_workspaces__workspace_id__oauth_github_app_manifest_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GitHubAppManifestIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GitHubAppManifestOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Create Github App Manifest",
+        "tags": [
+          "oauth"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/oauth/probe": {
+      "post": {
+        "description": "Ask a connector how it signs in, before showing anybody a form.\n\nThis is what demotes API-key entry: the panel never offers a key field\nuntil the server itself has said it has nothing better on offer. The\ncatalog's ``auth_hint`` is not consulted — it labels the Apps library, and\nas a protocol signal it is wrong more often than right.\n\n**Scope.** An API key needs `apps:write`.",
+        "operationId": "probe_connector_api_v1_workspaces__workspace_id__oauth_probe_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OAuthProbeIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthProbeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": [
+              "apps:write"
+            ]
+          }
+        ],
+        "summary": "Probe Connector",
+        "tags": [
+          "oauth"
+        ],
+        "x-jhin-scope": "apps:write"
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/oauth/start": {
+      "post": {
+        "description": "Mint a pending authorization and return the URL the browser leaves for.\n\nThe returned URL carries the client id, the PKCE challenge, the state\nhandle, the scopes, and the resource — and no secret of any kind. The\nverifier stays encrypted on this side until the callback needs it.\n\nRead through the bounded sensitive-body path: the configuration in this\npayload is meant to be non-secret, but it is admin-supplied and adjacent\nto credentials, and the cheap thing is to keep it off the generic path.\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
+        "operationId": "start_authorization_api_v1_workspaces__workspace_id__oauth_start_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "config": {
+                    "additionalProperties": true,
+                    "title": "Config",
+                    "type": "object"
+                  },
+                  "connection_id": {
+                    "anyOf": [
+                      {
+                        "format": "uuid",
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Connection Id"
+                  },
+                  "connector_type": {
+                    "maxLength": 50,
+                    "minLength": 1,
+                    "title": "Connector Type",
+                    "type": "string"
+                  },
+                  "name": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "title": "Name",
+                    "type": "string"
+                  },
+                  "provider_key": {
+                    "anyOf": [
+                      {
+                        "maxLength": 50,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Provider Key"
+                  }
+                },
+                "required": [
+                  "connector_type",
+                  "name"
+                ],
+                "title": "OAuthStartIn",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthStartOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Start Authorization",
+        "tags": [
+          "oauth"
+        ]
       }
     },
     "/api/v1/workspaces/{workspace_id}/onboarding": {
@@ -24814,8 +27652,16 @@
       "name": "connectors"
     },
     {
+      "description": "The searchable index of MCP servers and agent skills, synced from the public jhin-catalog. An index only: nothing here is connected until somebody connects it.",
+      "name": "catalog"
+    },
+    {
       "description": "Live connections to outside apps: credentials, the tools they enable, access summaries, and their call history.",
       "name": "connections"
+    },
+    {
+      "description": "Connecting an app by signing in to it instead of pasting a key: what a server offers, starting an authorization, the callback it returns to, and the app registrations a workspace holds. No route here returns a token, a client secret, or a device code.",
+      "name": "oauth"
     },
     {
       "description": "Schedules and incoming events that start work on their own, plus the record of every invocation.",

@@ -22,6 +22,8 @@ from jhin_api.agents.router import router as agents_router
 from jhin_api.approvals.router import router as approvals_router
 from jhin_api.audit.router import router as audit_router
 from jhin_api.auth.router import router as auth_router
+from jhin_api.catalog.router import catalog_router as catalog_search_router
+from jhin_api.catalog.router import router as catalog_workspace_router
 from jhin_api.connections.router import catalog_router as connectors_catalog_router
 from jhin_api.connections.router import router as connections_router
 from jhin_api.conversations.router import conversations_router, workspace_feed_router
@@ -31,6 +33,7 @@ from jhin_api.health.router import router as health_router
 from jhin_api.media.router import router as media_router
 from jhin_api.memory.router import router as memory_router
 from jhin_api.models.router import profiles_router, providers_router, spend_router
+from jhin_api.oauth.router import oauth_public_router, oauth_router
 from jhin_api.onboarding.router import router as onboarding_router
 from jhin_api.openapi import (
     CONTACT_INFO,
@@ -449,6 +452,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(questions_router)
     app.include_router(connectors_catalog_router)
     app.include_router(connections_router)
+    app.include_router(oauth_public_router)
+    app.include_router(oauth_router)
+    app.include_router(catalog_search_router)
+    app.include_router(catalog_workspace_router)
     app.include_router(triggers_router)
     app.include_router(webhooks_router)
     app.include_router(media_router)

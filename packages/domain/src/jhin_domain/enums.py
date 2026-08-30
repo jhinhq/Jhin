@@ -76,6 +76,14 @@ class SecretType(StrEnum):
     CONNECTION_CREDENTIALS = "connection_credentials"
     # Per-connection webhook signing secret (plan 19); shown once at creation.
     WEBHOOK_SECRET = "webhook_secret"
+    # The PKCE code verifier (or device code) of one pending OAuth
+    # authorization (docs/architecture/oauth.md). A verifier plus an
+    # intercepted authorization code is a token, so it is credential material
+    # and lives here rather than in a column or a browser cookie.
+    OAUTH_STATE = "oauth_state"
+    # An OAuth client secret: dynamically registered, pasted by an admin, or
+    # configured for the instance. Public clients store nothing.
+    OAUTH_CLIENT = "oauth_client"
     OTHER = "other"
 
 
@@ -85,6 +93,11 @@ class ConnectionStatus(StrEnum):
     ACTIVE = "active"
     ERROR = "error"
     DISABLED = "disabled"
+    # An OAuth connection whose tokens can no longer be renewed: the refresh
+    # token was revoked, rotated out from under us, or has expired. Distinct
+    # from ERROR because the cure is specific and a person has to perform it —
+    # somebody must authorize the app again (docs/architecture/oauth.md).
+    NEEDS_REAUTH = "needs_reauth"
 
 
 class ModelProviderType(StrEnum):

@@ -169,7 +169,30 @@ ROUTE_SCOPES: dict[tuple[str, ...], RouteRule] = {
     ("connections", "enable"): _rule(None, "apps:write"),
     ("connections", "disable"): _rule(None, "apps:write"),
     ("connections", "rotate"): _SEALED,
+    # Re-authorizing mints a fresh grant and a fresh token for a connection:
+    # credential material, on the same footing as rotating one by hand.
+    ("connections", "reauthorize"): _SEALED,
     ("connections", "webhook-secret"): _SEALED,
+    # Raising a connection's tools to the floor its catalog entry implies is a
+    # change to how that app may be used, so it takes the same scope as editing
+    # the app itself. There is no read side: the catalog is read off
+    # /api/v1/catalog, which is not workspace-scoped and has no rule here.
+    ("catalog", "apply-risk-floor"): _rule(None, "apps:write"),
+    # OAuth (docs/architecture/oauth.md). Everything that mints, holds, or
+    # hands out material that becomes a credential is sealed: starting an
+    # authorization returns a URL that a browser turns into a token, the
+    # device routes hold a device code, /clients stores a client secret, and
+    # the GitHub manifest route produces a form that creates one. All four are
+    # browser-session-only, forever.
+    ("oauth", "start"): _SEALED,
+    ("oauth", "device", "start"): _SEALED,
+    ("oauth", "device", "poll"): _SEALED,
+    ("oauth", "clients"): _SEALED,
+    ("oauth", "github-app", "manifest"): _SEALED,
+    # Probing returns no credential material — it answers "does this server
+    # speak OAuth?" — and is a legitimate step for a script setting an
+    # instance up, so it takes the same scope as editing an app.
+    ("oauth", "probe"): _rule(None, "apps:write"),
     ("secrets",): _SEALED,
     ("secrets", "rotate"): _SEALED,
     ("tools",): _rule("agents:read", None),

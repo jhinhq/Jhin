@@ -5,9 +5,11 @@ tools themselves are not static: they are discovered from the server at
 verification time and registered per connection as ``mcp.<server_slug>.<tool>``
 (see :mod:`jhin_connectors.mcp.discovery`).
 
-Auth schemes: none, bearer token, or a custom header carrying a secret.
-OAuth 2.0 (authorization-code or client-credentials) is deliberately out of
-scope for this release — see docs/architecture/mcp.md "Roadmap".
+Auth schemes: OAuth sign-in, none, bearer token, or a custom header carrying
+a secret. OAuth is declared first and declares **no secret fields at all** —
+its tokens arrive from the authorization flow (docs/architecture/oauth.md),
+never from a form, so a create request for it carries nothing to validate and
+nothing for a person to paste.
 """
 
 from jhin_connectors.manifest import (
@@ -16,6 +18,7 @@ from jhin_connectors.manifest import (
     ConnectorManifest,
     SecretFieldSpec,
 )
+from jhin_connectors.mcp.oauth import AUTH_OAUTH
 
 MCP_CONNECTOR_TYPE = "mcp"
 
@@ -39,6 +42,19 @@ MCP_MANIFEST = ConnectorManifest(
     ),
     auth_schemes=(
         AuthSchemeSpec(
+            type=AUTH_OAUTH,
+            label="Sign in with OAuth",
+            description=(
+                "Jhin discovers the server's authorization service, registers itself, and "
+                "sends you there to approve. Nothing is typed and nothing is pasted; the "
+                "access token is renewed automatically until you disconnect."
+            ),
+            # No secret fields on purpose: the tokens come from the
+            # authorization flow, so there is nothing to collect at create
+            # time and nothing for the credential validator to require.
+            secret_fields=(),
+        ),
+        AuthSchemeSpec(
             type=AUTH_NONE,
             label="No authentication",
             description="The server accepts unauthenticated requests (local or test servers).",
@@ -56,7 +72,7 @@ MCP_MANIFEST = ConnectorManifest(
             label="Custom header",
             description=(
                 "Sent as a header you name (e.g. `X-API-Key`) with the secret as its value. "
-                "OAuth 2.0 sign-in is not supported yet; use a token the provider issues."
+                "Use this only when the server offers no OAuth sign-in."
             ),
             secret_fields=(
                 SecretFieldSpec(name="token", label="Header value (secret)", placeholder="…"),
@@ -111,6 +127,7 @@ __all__ = [
     "AUTH_BEARER",
     "AUTH_HEADER",
     "AUTH_NONE",
+    "AUTH_OAUTH",
     "MCP_CONNECTOR_TYPE",
     "MCP_MANIFEST",
     "TRANSPORTS",

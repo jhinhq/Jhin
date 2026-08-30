@@ -240,12 +240,49 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
     },
     "rootless_transport.ready": {},
     "rootless_transport.failed": {"error_code": FieldKind.ENUM},
+    # OAuth. Every one of these is a refusal, and every one is deliberately
+    # field-poor: an authorization server's own prose is attacker-influenced
+    # text, so what is recorded is the machine-readable code and nothing the
+    # provider wrote. The discovery and registration events are debug-level
+    # because a rejected candidate document is the normal case while probing.
+    "oauth.metadata_field_refused": {"field": FieldKind.ENUM},
+    "oauth.metadata_fetch_failed": {},
+    "oauth.metadata_candidate_skipped": {"status_code": FieldKind.COUNT},
+    "oauth.authorization_server_refused": {},
+    "oauth.authorization_server_document_rejected": {},
+    "oauth.challenge_metadata_url_refused": {},
+    "oauth.protected_resource_document_rejected": {},
+    "oauth.protected_resource_scope_mismatch": {},
+    "oauth.registration_client_uri_refused": {},
+    "oauth.registration_retry_native": {},
+    "oauth.registration_delete_failed": {},
+    "oauth.token_request_refused": {
+        "status_code": FieldKind.COUNT,
+        "error_code": FieldKind.ENUM,
+    },
+    "oauth.revocation_failed": {},
+    "oauth.device_verification_complete_refused": {},
+    "oauth.code_exchange_failed": {"connector_type": FieldKind.ENUM},
+    "oauth.connection_not_created": {"connector_type": FieldKind.ENUM},
+    "oauth.github_app_conversion_failed": {},
+    "oauth.refresher_not_started": {},
+    "oauth.refresh_signal_failed": {"error_type": FieldKind.ERROR_TYPE},
+    "oauth.refresh_start_failed": {"error_type": FieldKind.ERROR_TYPE},
+    "oauth.refresh_sweep_needs_reauth": {
+        "needs_reauth": FieldKind.COUNT,
+        "refreshed": FieldKind.COUNT,
+    },
+    "oauth.refresh_on_use_failed": {},
     "stdlib.message": {},
     "log.event_rejected": {},
 }
 
 ENVIRONMENTS = frozenset({"dev", "test", "staging", "production"})
-CONNECTOR_TYPES = frozenset({"github", "linear", "vercel", "supabase", "cli"})
+# "mcp" is a first-class connector type (jhin_connectors.mcp.manifest), and it
+# is the *dominant* value on the OAuth failure events -- an MCP server is the
+# only thing Jhin discovers an authorization server for. Omitting it would log
+# those failures as "other" and erase the one field that says what broke.
+CONNECTOR_TYPES = frozenset({"github", "linear", "vercel", "supabase", "cli", "mcp"})
 EVENT_FAMILIES = frozenset({"connector", "task", "run", "tool", "approval"})
 SANDBOX_OUTCOMES = frozenset(
     {
@@ -291,7 +328,7 @@ def normalize_sandbox_outcome(raw: object) -> str:
 
 
 FIELD_ENUM_VALUES: dict[str, frozenset[str]] = {
-    "connector_type": frozenset({"github", "linear", "vercel", "supabase", "cli", "other"}),
+    "connector_type": frozenset({"github", "linear", "vercel", "supabase", "cli", "mcp", "other"}),
     "consumer": frozenset({"event-worker", "event-worker-ingress", "other"}),
     "error_code": frozenset(code.value for code in SafeErrorCode),
     "event_type": frozenset({"connector", "task", "run", "tool", "approval", "other"}),
@@ -323,6 +360,38 @@ EVENT_FIELD_ENUM_VALUES: dict[tuple[str, str], frozenset[str]] = {
     ("telemetry.export_failed", "error_code"): frozenset({"export_timeout", "export_failed"}),
     ("rootless_transport.failed", "error_code"): frozenset(
         {"configuration_error", "upstream_unavailable"}
+    ),
+    # The OAuth 2.0 error codes, not Jhin's SafeErrorCode taxonomy that the
+    # global "error_code" vocabulary carries. Mirrors
+    # jhin_oauth.errors.KNOWN_ERROR_CODES plus its UNKNOWN_ERROR_CODE
+    # fallback, kept literal here so this registry stays a leaf package that
+    # imports no other Jhin package.
+    ("oauth.token_request_refused", "error_code"): frozenset(
+        {
+            "access_denied",
+            "authorization_pending",
+            "device_flow_disabled",
+            "expired_token",
+            "incorrect_client_credentials",
+            "incorrect_device_code",
+            "invalid_client",
+            "invalid_grant",
+            "invalid_request",
+            "invalid_scope",
+            "invalid_target",
+            "server_error",
+            "slow_down",
+            "temporarily_unavailable",
+            "unauthorized_client",
+            "unsupported_grant_type",
+            "unsupported_response_type",
+            "unknown",
+        }
+    ),
+    # Only the optional endpoints reach this event; a refused *required* URL
+    # raises instead of logging.
+    ("oauth.metadata_field_refused", "field"): frozenset(
+        {"registration_endpoint", "revocation_endpoint", "device_authorization_endpoint"}
     ),
 }
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")

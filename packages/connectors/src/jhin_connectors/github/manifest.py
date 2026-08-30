@@ -29,20 +29,35 @@ GITHUB_MANIFEST = ConnectorManifest(
     icon="github",
     description="Repositories, branches, issues, pull requests, checks, and Actions.",
     auth_schemes=(
+        # Ordered by what the product wants people to reach for first: the two
+        # schemes that ask for nothing at all, then the app, then the key.
         AuthSchemeSpec(
-            type="pat",
-            label="Personal access token",
-            description="Simple self-hosted path: one fine-grained or classic PAT.",
-            secret_fields=(
-                SecretFieldSpec(name="token", label="Personal access token", placeholder="ghp_…"),
+            type="oauth",
+            label="Sign in with GitHub",
+            description=(
+                "Approve Jhin in your browser. Nothing to paste, and you can "
+                "withdraw the access from GitHub at any time."
             ),
+            # None: the tokens arrive from the callback and are written
+            # straight into the encrypted store. There is no field for a
+            # person to fill in, and no credential a person ever sees.
+            secret_fields=(),
+        ),
+        AuthSchemeSpec(
+            type="device",
+            label="Sign in with a device code",
+            description=(
+                "For instances GitHub cannot redirect a browser back to: Jhin "
+                "shows a short code you enter on github.com."
+            ),
+            secret_fields=(),
         ),
         AuthSchemeSpec(
             type="github_app",
             label="GitHub App",
             description=(
-                "Recommended for production: scopeable, revocable, short-lived "
-                "installation tokens minted on demand."
+                "Scopeable and revocable, with short-lived installation tokens "
+                "minted on demand. Jhin can create the app for you in one click."
             ),
             secret_fields=(
                 SecretFieldSpec(
@@ -55,6 +70,14 @@ GITHUB_MANIFEST = ConnectorManifest(
                     multiline=True,
                 ),
                 SecretFieldSpec(name="installation_id", label="Installation ID"),
+            ),
+        ),
+        AuthSchemeSpec(
+            type="pat",
+            label="Personal access token",
+            description="Simple self-hosted path: one fine-grained or classic PAT.",
+            secret_fields=(
+                SecretFieldSpec(name="token", label="Personal access token", placeholder="ghp_…"),
             ),
         ),
     ),

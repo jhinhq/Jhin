@@ -1,10 +1,15 @@
 "use client";
 
 /** Connector gallery (plan 17.9). Pure presentational so it is
- * component-testable. */
+ * component-testable.
+ *
+ * A connector that declares a sign-in scheme says so on the card, because
+ * "Connect" means something different there: no key to find, no key to paste,
+ * and a permission that can be revoked at the provider. */
 
 import { Cable, GitBranch, Globe, Plug, Search, Terminal } from "lucide-react";
 import { Badge, Button } from "@/components/ui";
+import { connectorSignsIn } from "@/lib/oauth";
 import type { ConnectorInfo } from "@/lib/types";
 
 function ConnectorIcon({ icon }: { icon: string }) {
@@ -43,6 +48,7 @@ export function ConnectorsGallery({
                 {connector.auth_schemes.map((scheme) => scheme.label).join(" · ")}
               </p>
             </div>
+            {connectorSignsIn(connector) ? <Badge tone="accent">Sign-in</Badge> : null}
             <Badge tone="ok">live</Badge>
           </header>
           <p className="text-sm leading-relaxed text-dim">{connector.description}</p>

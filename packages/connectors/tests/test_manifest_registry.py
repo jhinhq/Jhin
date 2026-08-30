@@ -370,7 +370,12 @@ def test_manifest_auth_scheme_lookup_and_required_fields() -> None:
     app = manifest.auth_scheme("github_app")
     assert app is not None
     assert set(app.required_field_names()) == {"app_id", "private_key", "installation_id"}
-    assert manifest.auth_scheme("oauth") is None
+    # Signing in with GitHub asks for nothing: the tokens arrive from the
+    # callback, so the scheme declares no field for anyone to fill in.
+    signed_in = manifest.auth_scheme("oauth")
+    assert signed_in is not None
+    assert signed_in.required_field_names() == ()
+    assert manifest.auth_scheme("carrier_pigeon") is None
 
 
 def test_default_catalog_contains_builtins_and_github_tools() -> None:

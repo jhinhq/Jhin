@@ -15,10 +15,12 @@ members = [
     "services/agent_worker",
     "services/tool_worker",
     "services/sandbox_runner",
+    "packages/catalog",
     "packages/db",
     "packages/domain",
     "packages/events",
     "packages/workflows",
+    "packages/oauth",
     "packages/observability",
     "packages/secrets",
     "packages/models",
@@ -54,10 +56,12 @@ src = [
     "services/agent_worker/src",
     "services/tool_worker/src",
     "services/sandbox_runner/src",
+    "packages/catalog/src",
     "packages/db/src",
     "packages/domain/src",
     "packages/events/src",
     "packages/workflows/src",
+    "packages/oauth/src",
     "packages/observability/src",
     "packages/secrets/src",
     "packages/models/src",
@@ -97,10 +101,12 @@ files = [
     "services/agent_worker/src",
     "services/tool_worker/src",
     "services/sandbox_runner/src",
+    "packages/catalog/src",
     "packages/db/src",
     "packages/domain/src",
     "packages/events/src",
     "packages/workflows/src",
+    "packages/oauth/src",
     "packages/observability/src",
     "packages/secrets/src",
     "packages/models/src",
@@ -144,12 +150,21 @@ disallow_untyped_calls = false
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 pythonpath = [".", "services/agent_worker/tests"]
+# Two package test suites (packages/catalog/tests, packages/oauth/tests) carry
+# an __init__.py, which without this makes pytest name both of them the
+# top-level package `tests` -- colliding with each other and shadowing the
+# repo-root `tests/` package. Resolving through namespace parents names them
+# `packages.catalog.tests` and `packages.oauth.tests` instead, so each test
+# module's import name is its path and no two can collide.
+consider_namespace_packages = true
 testpaths = [
     "apps/api/tests",
+    "packages/catalog/tests",
     "packages/domain/tests",
     "packages/events/tests",
     "packages/workflows/tests",
     "packages/db/tests",
+    "packages/oauth/tests",
     "packages/observability/tests",
     "packages/secrets/tests",
     "packages/models/tests",

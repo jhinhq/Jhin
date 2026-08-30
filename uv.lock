@@ -12,6 +12,7 @@ members = [
     "jhin-agent-worker",
     "jhin-agents",
     "jhin-api",
+    "jhin-catalog-sync",
     "jhin-connectors",
     "jhin-db",
     "jhin-domain",
@@ -20,6 +21,7 @@ members = [
     "jhin-media",
     "jhin-memory",
     "jhin-models",
+    "jhin-oauth",
     "jhin-observability",
     "jhin-policy",
     "jhin-sandbox-runner",
@@ -817,6 +819,7 @@ dependencies = [
     { name = "jhin-media" },
     { name = "jhin-memory" },
     { name = "jhin-models" },
+    { name = "jhin-oauth" },
     { name = "jhin-observability" },
     { name = "jhin-secrets" },
     { name = "jhin-tools" },
@@ -836,6 +839,7 @@ requires-dist = [
     { name = "jhin-media", editable = "packages/media" },
     { name = "jhin-memory", editable = "packages/memory" },
     { name = "jhin-models", editable = "packages/models" },
+    { name = "jhin-oauth", editable = "packages/oauth" },
     { name = "jhin-observability", editable = "packages/observability" },
     { name = "jhin-secrets", editable = "packages/secrets" },
     { name = "jhin-tools", editable = "packages/tools" },
@@ -872,6 +876,7 @@ source = { editable = "apps/api" }
 dependencies = [
     { name = "argon2-cffi" },
     { name = "fastapi" },
+    { name = "jhin-catalog-sync" },
     { name = "jhin-connectors" },
     { name = "jhin-db" },
     { name = "jhin-domain" },
@@ -879,6 +884,7 @@ dependencies = [
     { name = "jhin-media" },
     { name = "jhin-memory" },
     { name = "jhin-models" },
+    { name = "jhin-oauth" },
     { name = "jhin-observability" },
     { name = "jhin-policy" },
     { name = "jhin-secrets" },
@@ -901,6 +907,7 @@ dependencies = [
 requires-dist = [
     { name = "argon2-cffi", specifier = ">=23.1" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "jhin-catalog-sync", editable = "packages/catalog" },
     { name = "jhin-connectors", editable = "packages/connectors" },
     { name = "jhin-db", editable = "packages/db" },
     { name = "jhin-domain", editable = "packages/domain" },
@@ -908,6 +915,7 @@ requires-dist = [
     { name = "jhin-media", editable = "packages/media" },
     { name = "jhin-memory", editable = "packages/memory" },
     { name = "jhin-models", editable = "packages/models" },
+    { name = "jhin-oauth", editable = "packages/oauth" },
     { name = "jhin-observability", editable = "packages/observability" },
     { name = "jhin-policy", editable = "packages/policy" },
     { name = "jhin-secrets", editable = "packages/secrets" },
@@ -924,6 +932,33 @@ requires-dist = [
     { name = "starlette", specifier = ">=1.6,<2" },
     { name = "temporalio", specifier = ">=1.31" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34" },
+]
+
+[[package]]
+name = "jhin-catalog-sync"
+version = "0.1.0"
+source = { editable = "packages/catalog" }
+dependencies = [
+    { name = "httpx" },
+    { name = "jhin-db" },
+    { name = "jhin-domain" },
+    { name = "jhin-policy" },
+    { name = "jhin-secrets" },
+    { name = "jhin-tools" },
+    { name = "pydantic" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.28" },
+    { name = "jhin-db", editable = "packages/db" },
+    { name = "jhin-domain", editable = "packages/domain" },
+    { name = "jhin-policy", editable = "packages/policy" },
+    { name = "jhin-secrets", editable = "packages/secrets" },
+    { name = "jhin-tools", editable = "packages/tools" },
+    { name = "pydantic", specifier = ">=2.10" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.36" },
 ]
 
 [[package]]
@@ -1006,6 +1041,7 @@ dependencies = [
     { name = "jhin-db" },
     { name = "jhin-domain" },
     { name = "jhin-events" },
+    { name = "jhin-oauth" },
     { name = "jhin-observability" },
     { name = "jhin-secrets" },
     { name = "jhin-triggers" },
@@ -1021,6 +1057,7 @@ requires-dist = [
     { name = "jhin-db", editable = "packages/db" },
     { name = "jhin-domain", editable = "packages/domain" },
     { name = "jhin-events", editable = "packages/events" },
+    { name = "jhin-oauth", editable = "packages/oauth" },
     { name = "jhin-observability", editable = "packages/observability" },
     { name = "jhin-secrets", editable = "packages/secrets" },
     { name = "jhin-triggers", editable = "packages/triggers" },
@@ -1116,6 +1153,31 @@ requires-dist = [
     { name = "jhin-observability", editable = "packages/observability" },
     { name = "opentelemetry-api", specifier = ">=1.38,<2" },
     { name = "pydantic", specifier = ">=2.10" },
+]
+
+[[package]]
+name = "jhin-oauth"
+version = "0.1.0"
+source = { editable = "packages/oauth" }
+dependencies = [
+    { name = "httpx" },
+    { name = "jhin-connectors" },
+    { name = "jhin-db" },
+    { name = "jhin-domain" },
+    { name = "jhin-observability" },
+    { name = "jhin-secrets" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.28" },
+    { name = "jhin-connectors", editable = "packages/connectors" },
+    { name = "jhin-db", editable = "packages/db" },
+    { name = "jhin-domain", editable = "packages/domain" },
+    { name = "jhin-observability", editable = "packages/observability" },
+    { name = "jhin-secrets", editable = "packages/secrets" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.36" },
 ]
 
 [[package]]
@@ -1222,6 +1284,7 @@ dependencies = [
     { name = "jhin-db" },
     { name = "jhin-domain" },
     { name = "jhin-events" },
+    { name = "jhin-oauth" },
     { name = "jhin-observability" },
     { name = "jhin-secrets" },
     { name = "jhin-tools" },
@@ -1238,6 +1301,7 @@ requires-dist = [
     { name = "jhin-db", editable = "packages/db" },
     { name = "jhin-domain", editable = "packages/domain" },
     { name = "jhin-events", editable = "packages/events" },
+    { name = "jhin-oauth", editable = "packages/oauth" },
     { name = "jhin-observability", editable = "packages/observability" },
     { name = "jhin-secrets", editable = "packages/secrets" },
     { name = "jhin-tools", editable = "packages/tools" },

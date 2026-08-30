@@ -15,6 +15,7 @@ dependencies = [
     "jhin-media",
     "jhin-memory",
     "jhin-models",
+    "jhin-oauth",
     "jhin-observability",
     "jhin-secrets",
     "jhin-tools",
@@ -29,6 +30,7 @@ jhin-events = { workspace = true }
 jhin-media = { workspace = true }
 jhin-memory = { workspace = true }
 jhin-models = { workspace = true }
+jhin-oauth = { workspace = true }
 jhin-observability = { workspace = true }
 jhin-secrets = { workspace = true }
 jhin-tools = { workspace = true }

@@ -17,6 +17,7 @@ from ipaddress import IPv4Network, IPv6Network, ip_address
 from typing import Annotated, Any
 from uuid import UUID
 
+import httpx
 import nats
 from fastapi import Depends, HTTPException, Request, status
 from nats.aio.client import Client as NatsClient
@@ -199,6 +200,34 @@ async def get_current_auth(
 CurrentAuth = Annotated[AuthContext, Depends(get_current_auth)]
 
 
+async def get_current_auth_optional(
+    request: Request,
+    db: DbSession,
+    settings: Annotated[Settings, Depends(get_settings_dep)],
+) -> AuthContext | None:
+    """:func:`get_current_auth`, but ``None`` instead of a 401.
+
+    For the one route that a *provider* redirects a browser to, where a raw
+    ``401 {"detail": "Not authenticated"}`` would be the last thing a person
+    sees after a slow consent screen outlived their session. Every check in
+    :func:`get_current_auth` still runs and still has the same effect —
+    including revoking a session that fails client binding — so this grants
+    nothing; it only lets the caller render the failure as a page.
+
+    Not a general-purpose dependency. A route that needs a user must use
+    :data:`CurrentAuth`; this one exists so the callback can redirect.
+    """
+    try:
+        return await get_current_auth(request, db, settings)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_401_UNAUTHORIZED:
+            return None
+        raise
+
+
+OptionalAuth = Annotated[AuthContext | None, Depends(get_current_auth_optional)]
+
+
 @dataclass(frozen=True)
 class ApiKeyUsageRecord:
     """Stashed on ``request.state`` for :class:`ApiKeyUsageMiddleware`."""
@@ -352,6 +381,27 @@ def get_secret_crypto(request: Request) -> SecretCrypto:
 
 
 SecretCryptoDep = Annotated[SecretCrypto, Depends(get_secret_crypto)]
+
+
+#: Every outbound OAuth call is bounded and redirect-free. Redirects are
+#: refused rather than followed because a 302 on a metadata or token endpoint
+#: is a way to move a request to a host the SSRF policy never approved, and
+#: the timeout is short because a provider that cannot answer in ten seconds
+#: is a provider the person waiting at a consent screen has already given up
+#: on.
+OAUTH_HTTP_TIMEOUT_SECONDS = 10.0
+
+
+async def get_oauth_http_client() -> AsyncIterator[httpx.AsyncClient]:
+    """A short-lived HTTP client for one request's OAuth work."""
+    async with httpx.AsyncClient(
+        follow_redirects=False,
+        timeout=httpx.Timeout(OAUTH_HTTP_TIMEOUT_SECONDS),
+    ) as client:
+        yield client
+
+
+OAuthHttpClientDep = Annotated[httpx.AsyncClient, Depends(get_oauth_http_client)]
 
 
 async def get_temporal_client(request: Request) -> TemporalClient:

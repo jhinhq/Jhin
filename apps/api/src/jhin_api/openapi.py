@@ -187,9 +187,20 @@ TAG_DESCRIPTIONS: dict[str, str] = {
         "The skill library — install, import, browse, and attach reusable instructions to agents."
     ),
     "connectors": "The catalogue of connectable app types and the tools each one exposes.",
+    "catalog": (
+        "The searchable index of MCP servers and agent skills, synced from the "
+        "public jhin-catalog. An index only: nothing here is connected until "
+        "somebody connects it."
+    ),
     "connections": (
         "Live connections to outside apps: credentials, the tools they enable, "
         "access summaries, and their call history."
+    ),
+    "oauth": (
+        "Connecting an app by signing in to it instead of pasting a key: what a "
+        "server offers, starting an authorization, the callback it returns to, "
+        "and the app registrations a workspace holds. No route here returns a "
+        "token, a client secret, or a device code."
     ),
     "triggers": (
         "Schedules and incoming events that start work on their own, plus the "

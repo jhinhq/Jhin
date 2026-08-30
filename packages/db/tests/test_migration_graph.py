@@ -183,7 +183,7 @@ def test_user_questions_directly_follows_0030() -> None:
     assert questions.down_revision == "0030"
 
 
-def test_default_memory_grants_directly_follows_0031_and_is_the_head() -> None:
+def test_default_memory_grants_directly_follows_0031() -> None:
     """The backfill lands after the table it has nothing to do with, because
     a chain with two heads is a chain nobody can upgrade."""
     scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
@@ -191,4 +191,26 @@ def test_default_memory_grants_directly_follows_0031_and_is_the_head() -> None:
 
     assert grants is not None
     assert grants.down_revision == "0031"
-    assert list(scripts.get_heads()) == ["0032"], "the migration graph must stay linear"
+
+
+def test_catalog_index_directly_follows_0032() -> None:
+    scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
+    catalog = scripts.get_revision("0033")
+    assert catalog is not None
+    assert catalog.down_revision == "0032"
+
+
+def test_catalog_logos_directly_follows_0033() -> None:
+    """0034 sits on 0033. It is no longer the head: OAuth (0035) chains on it."""
+    scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
+    logos = scripts.get_revision("0034")
+    assert logos is not None
+    assert logos.down_revision == "0033"
+
+
+def test_oauth_directly_follows_0034_and_is_the_head() -> None:
+    scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
+    oauth = scripts.get_revision("0035")
+    assert oauth is not None
+    assert oauth.down_revision == "0034"
+    assert list(scripts.get_heads()) == ["0035"], "the migration graph must stay linear"

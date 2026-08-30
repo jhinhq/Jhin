@@ -14,9 +14,12 @@ from jhin_connectors.github.auth import (
     InstallationTokenCache,
     _CachedToken,
     build_app_jwt,
+    oauth_access_token,
     resolve_access_token,
 )
 from jhin_connectors.github.client import github_headers
+
+BASE_URL = "https://api.github.com"
 
 
 def _test_private_key() -> str:
@@ -40,7 +43,26 @@ async def test_pat_missing_token_fails() -> None:
 
 async def test_unsupported_auth_type_fails() -> None:
     with pytest.raises(GitHubAuthError, match="unsupported"):
-        await resolve_access_token("oauth", {}, "https://api.github.com")
+        await resolve_access_token("basic", {}, "https://api.github.com")
+
+
+@pytest.mark.parametrize("auth_type", ["oauth", "device"])
+async def test_signed_in_tokens_are_used_directly(auth_type: str) -> None:
+    """A browser sign-in and a device code produce the same bearer token."""
+    credentials = {"access_token": "ghu_fake_access_token", "refresh_token": "ghr_fake_refresh"}
+    token = await resolve_access_token(auth_type, credentials, "https://api.github.com")
+    assert token == "ghu_fake_access_token"
+
+
+async def test_signed_in_credentials_without_a_token_fail() -> None:
+    with pytest.raises(GitHubAuthError, match="missing access_token"):
+        await resolve_access_token("oauth", {"refresh_token": "ghr_fake_refresh"}, BASE_URL)
+
+
+def test_a_token_that_could_forge_a_header_is_refused() -> None:
+    with pytest.raises(GitHubAuthError, match="header cannot carry") as excinfo:
+        oauth_access_token({"access_token": "ghu_fake\r\nX-Injected: 1"})
+    assert "X-Injected" not in str(excinfo.value)
 
 
 def test_bearer_header_and_pinned_api_version() -> None:

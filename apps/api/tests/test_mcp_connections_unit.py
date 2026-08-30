@@ -309,3 +309,98 @@ async def test_catalog_endpoint_returns_public_entries() -> None:
         entry.setup_note or entry.auth_note or entry.docs_url for entry in unverified
     )
     assert not any("token" in (entry.mcp_url or "") for entry in entries)
+
+
+async def test_a_reconnect_draft_survives_both_gates_that_used_to_reject_it(
+    session: AsyncSession,
+    crypto: SecretCrypto,
+    admin_ctx: WorkspaceContext,
+    fake_mcp: FakeMcpServer,
+) -> None:
+    """Reconnect used to be a guaranteed 500 for every OAuth connection.
+
+    A live OAuth connection's ``config_json`` carries server-side bookkeeping
+    beside its manifest settings: the recorded token endpoint, the discovered
+    tool list, any pending step-up scope. Passing that whole dict into the
+    start payload hit two independent refusals — the pending store rejects a
+    draft key containing "token", and ``normalize_config`` rejects any key the
+    manifest does not declare — and neither is caught, so the amber banner's
+    only button answered 500. Sending just the public config clears both.
+    """
+    connection = await _create(session, crypto, admin_ctx, fake_mcp)
+    # Everything a real authorized-and-used connection accumulates.
+    connection.auth_type = "oauth"
+    connection.config_json = {
+        **connection.config_json,
+        "oauth_issuer": "https://auth.example.com",
+        "oauth_resource": fake_mcp.mcp_url,
+        "oauth_scope": "read",
+        "oauth_token_endpoint": "https://auth.example.com/token",
+        "oauth_revocation_endpoint": "https://auth.example.com/revoke",
+        "oauth_pending_scope": "read write",
+        "oauth_scope_step_ups": {"echo": "2026-01-01T00:00:00Z"},
+        DISCOVERY_KEY: [{"slug": "echo", "name": "echo"}],
+        "mcp_discovered_at": "2026-01-01T00:00:00Z",
+    }
+    await session.commit()
+
+    carried = service.public_connection_config(connection)
+    assert "oauth_token_endpoint" not in carried
+    assert "oauth_scope_step_ups" not in carried
+    assert DISCOVERY_KEY not in carried
+    assert carried["server_url"] == fake_mcp.mcp_url
+
+    # Gate one: the pending-authorization store's credential-key screen.
+    from jhin_oauth.persistence import _validated_draft
+
+    _validated_draft({"name": connection.name, "config": carried})
+
+    # Gate two: the connector's own config validator, which the callback runs
+    # on the way back in.
+    from jhin_connectors import normalize_config
+
+    normalize_config(service.get_connector("mcp").manifest, "oauth", dict(carried))
+
+
+async def test_reconnecting_keeps_the_discovered_tool_list(
+    session: AsyncSession,
+    crypto: SecretCrypto,
+    admin_ctx: WorkspaceContext,
+    fake_mcp: FakeMcpServer,
+) -> None:
+    """Re-authorizing replaces the grant, not the row's accumulated knowledge."""
+    connection = await _create(session, crypto, admin_ctx, fake_mcp)
+    connection.auth_type = "oauth"
+    connection.config_json = {
+        **connection.config_json,
+        DISCOVERY_KEY: [{"slug": "echo", "name": "echo"}],
+        OVERRIDES_KEY: {"echo": "low"},
+        "oauth_pending_scope": "read write",
+    }
+    await session.commit()
+
+    reauthorized = await service.create_connection_from_oauth(
+        session,
+        workspace_id=admin_ctx.workspace_id,
+        connection_id=connection.id,
+        connector_type="mcp",
+        name=connection.name,
+        config={
+            "server_url": fake_mcp.mcp_url,
+            "server_slug": "fake",
+            "oauth_issuer": "https://auth.example.com",
+            "oauth_resource": fake_mcp.mcp_url,
+            "oauth_scope": "read write",
+            "oauth_token_endpoint": "https://auth.example.com/token",
+        },
+        created_by_user_id=admin_ctx.user.id,
+    )
+    await session.commit()
+
+    assert reauthorized.id == connection.id
+    assert reauthorized.config_json[DISCOVERY_KEY] == [{"slug": "echo", "name": "echo"}]
+    assert reauthorized.config_json[OVERRIDES_KEY] == {"echo": "low"}
+    assert reauthorized.config_json["oauth_scope"] == "read write"
+    # The satisfied step-up is not carried forward, or every later reconnect
+    # would keep asking for a scope the grant already has.
+    assert "oauth_pending_scope" not in reauthorized.config_json
