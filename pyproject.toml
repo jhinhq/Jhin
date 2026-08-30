@@ -43,6 +43,7 @@ dev = [
     "httpx>=0.28",
     # In-memory async SQLite for gateway/persistence unit tests.
     "aiosqlite>=0.20",
+    "tzdata>=2026.3",
 ]
 
 [tool.ruff]

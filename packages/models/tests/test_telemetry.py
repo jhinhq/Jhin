@@ -3252,7 +3252,11 @@ def test_exact_production_model_factory_owners_supply_semantic_handles() -> None
         for area in ("apps", "packages", "services")
         for path in (REPO_ROOT / area).glob("*/src/**/*.py")
     )
-    sources = {str(path.relative_to(REPO_ROOT)): path.read_text() for path in candidates}
+    # as_posix keys: expected_handles uses forward slashes on every platform.
+    sources = {
+        path.relative_to(REPO_ROOT).as_posix(): path.read_text(encoding="utf-8")
+        for path in candidates
+    }
     assert (
         _factory_audit(
             sources,

@@ -1,0 +1,5 @@
+# Frozen Temporal history fixtures are asserted byte-for-byte (sha256) by
+# packages/workflows/tests/test_phase10_history_replay.py. A CRLF checkout
+# (core.autocrlf=true on Windows) would rewrite them and fail the digest, so
+# they must never go through text conversion.
+packages/workflows/tests/fixtures/phase9_temporal/** -text

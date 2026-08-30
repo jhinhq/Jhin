@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -115,7 +116,9 @@ def test_repository_preflight_passes_for_this_checkout() -> None:
 def test_cli_changelog_excerpt_matches_version_file() -> None:
     version = preflight.read_version_file(ROOT)
     result = subprocess.run(
-        ["python", "scripts/release_preflight.py", "changelog-excerpt", "--version", version],
+        # sys.executable, not a bare "python": on Windows the bare name can
+        # resolve to a system interpreter without the workspace deps.
+        [sys.executable, "scripts/release_preflight.py", "changelog-excerpt", "--version", version],
         check=True,
         capture_output=True,
         cwd=ROOT,
