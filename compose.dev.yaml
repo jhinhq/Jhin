@@ -31,7 +31,7 @@ services:
   # Dev/test-only PostgreSQL 17 target for Supabase database connector tests.
   # It is intentionally separate from Jhin's own postgres service and data.
   fake-supabase-db:
-    image: postgres:17-alpine
+    image: postgres:18-alpine
     environment:
       POSTGRES_DB: supabase_fixture
       POSTGRES_USER: postgres
