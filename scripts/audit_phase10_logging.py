@@ -31,7 +31,11 @@ class AuditFailure:
 
 
 AUDIT_EXCLUDED_PARTS = frozenset({"tests", "testing", "alembic", "__pycache__"})
-AUDIT_EXCLUDED_FILES = frozenset({"seed.py", "migrate.py"})
+# Operator entry points, not services. Their stdout *is* the interface a
+# scheduler or a person reads, so a structured log line would be the wrong
+# output rather than the safer one. ``cli.py`` is jhin-catalog-sync, whose
+# ``--json`` outcome object is documented in docs/architecture/catalog.md.
+AUDIT_EXCLUDED_FILES = frozenset({"seed.py", "migrate.py", "cli.py"})
 
 
 def application_python_paths(root: Path) -> tuple[Path, ...]:

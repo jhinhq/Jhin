@@ -31,8 +31,11 @@ COPY packages/triggers/pyproject.toml packages/triggers/
 COPY packages/policy/pyproject.toml packages/policy/
 COPY packages/tools/pyproject.toml packages/tools/
 COPY packages/connectors/pyproject.toml packages/connectors/
+COPY packages/oauth/pyproject.toml packages/oauth/
+COPY packages/skills/pyproject.toml packages/skills/
 COPY packages/memory/pyproject.toml packages/memory/
 COPY packages/media/pyproject.toml packages/media/
+COPY packages/catalog/pyproject.toml packages/catalog/
 
 ARG SERVICE_PACKAGE
 RUN --mount=type=cache,target=/root/.cache/uv \

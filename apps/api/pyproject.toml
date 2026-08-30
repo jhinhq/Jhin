@@ -16,6 +16,9 @@ dependencies = [
     "pillow>=11.0",
     "opentelemetry-api>=1.38,<2",
     "starlette>=1.6,<2",
+    # The catalog index: risk mapping and ingest-side text cleaning, reused
+    # by the read side so the two halves cannot disagree.
+    "jhin-catalog-sync",
     "jhin-connectors",
     "jhin-db",
     "jhin-domain",
@@ -23,6 +26,7 @@ dependencies = [
     "jhin-media",
     "jhin-memory",
     "jhin-models",
+    "jhin-oauth",
     "jhin-observability",
     "jhin-policy",
     "jhin-secrets",
@@ -36,6 +40,7 @@ dependencies = [
 jhin-seed-dev = "jhin_api.seed:main"
 
 [tool.uv.sources]
+jhin-catalog-sync = { workspace = true }
 jhin-connectors = { workspace = true }
 jhin-db = { workspace = true }
 jhin-domain = { workspace = true }
@@ -43,6 +48,7 @@ jhin-events = { workspace = true }
 jhin-media = { workspace = true }
 jhin-memory = { workspace = true }
 jhin-models = { workspace = true }
+jhin-oauth = { workspace = true }
 jhin-observability = { workspace = true }
 jhin-policy = { workspace = true }
 jhin-secrets = { workspace = true }

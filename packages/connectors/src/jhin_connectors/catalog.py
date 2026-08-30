@@ -12,9 +12,10 @@ processes are flagged ``stdio_only`` — Jhin does not spawn stdio servers yet.
 from __future__ import annotations
 
 import json
+import re
 from functools import cache
 from importlib import resources
-from typing import Literal
+from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -22,6 +23,15 @@ from jhin_connectors.mcp.discovery import SERVER_SLUG_RE
 
 AuthHint = Literal["none", "bearer", "header", "oauth"]
 TransportHint = Literal["streamable_http", "sse", "unknown"]
+
+# The one URL shape ``icon_url`` may hold here: GitHub's owner avatar,
+# byte-identical to ``ICON_URL_GITHUB_RE`` in the producer that writes
+# ``catalog.json``. The bound is the SSRF posture — the icon proxy dials
+# whatever this field names, so the field names one reviewed host and
+# nothing a publisher typed into a manifest.
+ICON_URL_GITHUB_RE: Final[re.Pattern[str]] = re.compile(
+    r"^https://github\.com/[A-Za-z0-9-]{1,39}\.png\?size=128$"
+)
 
 CATALOG_CATEGORIES: tuple[str, ...] = (
     "Developer tools",
@@ -49,6 +59,10 @@ class CatalogApp(BaseModel):
     category: str
     icon: str
     description: str
+    # Upstream logo URL for the API's icon proxy to fetch; "" when the entry
+    # ships no logo. Never handed to a browser — readers publish the
+    # same-origin proxy path instead.
+    icon_url: str = ""
     # Native Jhin connector type when one exists (GitHub, Linear, …).
     connector_type: str | None = None
     # Official remote MCP endpoint when known.
@@ -72,6 +86,13 @@ class CatalogApp(BaseModel):
         for key, entry in value.items():
             if not key or len(key) > 64 or len(entry) > 500:
                 raise ValueError("connector_config entries are too long")
+        return value
+
+    @field_validator("icon_url")
+    @classmethod
+    def _icon_url(cls, value: str) -> str:
+        if value and ICON_URL_GITHUB_RE.fullmatch(value) is None:
+            raise ValueError("catalog icon_url must be a GitHub owner avatar URL")
         return value
 
     @field_validator("slug")
@@ -118,4 +139,11 @@ def catalog_by_slug(slug: str) -> CatalogApp | None:
     return None
 
 
-__all__ = ["CATALOG_CATEGORIES", "AuthHint", "CatalogApp", "catalog_by_slug", "load_catalog"]
+__all__ = [
+    "CATALOG_CATEGORIES",
+    "ICON_URL_GITHUB_RE",
+    "AuthHint",
+    "CatalogApp",
+    "catalog_by_slug",
+    "load_catalog",
+]

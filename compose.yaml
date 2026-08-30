@@ -218,6 +218,36 @@ services:
     command: ["true"]
     restart: "no"
 
+  # One-shot refresh of the app/skill index (docs/architecture/catalog.md).
+  # Never part of the running stack: it is behind the "catalog" profile and
+  # meant for cron —
+  #   docker compose --profile catalog run --rm catalog-sync
+  # It fetches one published release, verifies its digest before writing
+  # anything, loads it into a new catalog_version, and flips that version
+  # active in a single transaction. Re-running is a no-op, an interrupted run
+  # resumes from its shard cursor, and two concurrent runs are serialised by
+  # the partial unique index over the active status.
+  catalog-sync:
+    profiles: ["catalog"]
+    build:
+      <<: *python-build
+      args:
+        SERVICE_PACKAGE: jhin-catalog-sync
+    command: ["jhin-catalog-sync", "--json"]
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-jhin}:${POSTGRES_PASSWORD:-jhin}@postgres:5432/${POSTGRES_DB:-jhin}
+      CATALOG_SOURCE_REPO: ${CATALOG_SOURCE_REPO:-jhinhq/jhin-catalog}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Public reference data: no master key, no NATS, no Temporal, no inbound
+    # port. The data bridge reaches Postgres and provides the one egress the
+    # job needs (api.github.com).
+    networks: [data]
+    restart: "no"
+
   event-worker:
     build:
       <<: *python-build
