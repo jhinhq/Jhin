@@ -117,7 +117,7 @@ export function ChatRail({ selectedId }: { selectedId: string | null }) {
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Search chats"
-            className="h-10 w-full rounded-xl border border-line bg-raised pl-9 pr-3 text-sm text-ink placeholder:text-faint outline-none focus:border-accent focus:ring-2 focus:ring-accent/25"
+            className="h-10 w-full rounded-xl border border-line bg-raised pl-9 pr-3 text-base text-ink placeholder:text-faint outline-none focus:border-accent focus:ring-2 focus:ring-accent/25 md:text-sm"
           />
         </label>
       </div>

@@ -201,7 +201,13 @@ export function Segmented<T extends string>({
   label: string;
 }) {
   return (
-    <div role="radiogroup" aria-label={label} className="inline-flex rounded-xl border border-line bg-raised p-0.5">
+    // max-w-full + overflow-x-auto: four options don't fit a 320px phone;
+    // the control scrolls inside itself instead of widening the page.
+    <div
+      role="radiogroup"
+      aria-label={label}
+      className="inline-flex max-w-full overflow-x-auto rounded-xl border border-line bg-raised p-0.5"
+    >
       {options.map((option) => {
         const active = option.id === value;
         return (

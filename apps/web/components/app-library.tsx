@@ -166,7 +166,7 @@ function CuratedCard({
       {entry.stdio_only && entry.setup_note ? (
         <p className="text-xs text-faint">{entry.setup_note}</p>
       ) : null}
-      <footer className="mt-auto flex items-center justify-between gap-2 border-t border-line pt-3">
+      <footer className="mt-auto flex flex-wrap items-center justify-between gap-2 border-t border-line pt-3">
         {entry.docs_url ? (
           <a
             href={entry.docs_url}
@@ -270,7 +270,7 @@ function CatalogCard({
       </p>
       {/* No category here: it truncated badly next to the buttons, and the
         * rail plus the detail sheet already carry it. */}
-      <footer className="mt-auto flex items-center justify-end gap-2 border-t border-line pt-3">
+      <footer className="mt-auto flex flex-wrap items-center justify-end gap-2 border-t border-line pt-3">
         <div className="flex shrink-0 items-center gap-2">
           {isSafeExternalUrl(docsUrl) ? (
             <a

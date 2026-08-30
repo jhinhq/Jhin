@@ -109,6 +109,12 @@ body {
   font-size: 15px;
   font-feature-settings: "tnum", "cv02";
   transition: background-color 0.3s ease, color 0.3s ease;
+  /* The document itself never pans sideways: `clip` forbids horizontal
+   * scrolling without creating a scroll container, so a single overflowing
+   * element clips at the edge instead of dragging the whole page (worst on
+   * phones, where iOS also leaves the page panned after an input zoom).
+   * Regions that mean to scroll sideways have their own overflow-x-auto. */
+  overflow-x: clip;
 }
 
 ::selection {

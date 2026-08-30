@@ -147,7 +147,7 @@ export const Composer = forwardRef<
             placeholder={disabled && disabledReason ? disabledReason : placeholder}
             onChange={(event) => onChange(event.target.value)}
             onKeyDown={onKeyDown}
-            className={`block w-full resize-none bg-transparent leading-relaxed text-ink placeholder:text-faint outline-none disabled:cursor-not-allowed ${fieldPad}`}
+            className={`block w-full resize-none bg-transparent text-base leading-relaxed text-ink placeholder:text-faint outline-none disabled:cursor-not-allowed md:text-[15px] ${fieldPad}`}
           />
         </label>
         <div

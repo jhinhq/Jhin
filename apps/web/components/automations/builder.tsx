@@ -528,7 +528,7 @@ function TestPanel({
       ) : null}
       <Textarea
         rows={8}
-        className="font-mono text-xs"
+        className="font-mono text-base md:text-xs"
         aria-label="Sample event JSON"
         value={sample ?? initial}
         onChange={(event) => setSample(event.target.value)}
