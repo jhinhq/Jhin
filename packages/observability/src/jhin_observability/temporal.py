@@ -201,14 +201,6 @@ def _nexus_trace_carrier_within_limit(traceparent: str, tracestate: str) -> bool
         return False
 
 
-def _nexus_trace_carrier_size(headers: Mapping[str, str]) -> int:
-    traceparent = headers.get(_TRACEPARENT, "")
-    tracestate = headers.get(_TRACESTATE, "")
-    return len(f"traceparent:{traceparent}\n".encode()) + (
-        len(f"tracestate:{tracestate}\n".encode()) if tracestate else 0
-    )
-
-
 def _copy_nexus_business_headers(headers: Mapping[str, str] | None) -> dict[str, str]:
     try:
         copied = dict(headers or {})

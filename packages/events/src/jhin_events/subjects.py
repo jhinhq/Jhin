@@ -62,12 +62,6 @@ def ingress_subject(workspace_id: str, connector: str, event: str) -> str:
     return f"{SUBJECT_PREFIX}.{workspace_id}.ingress.{connector}.{'.'.join(event_parts)}"
 
 
-def audit_subject(workspace_id: str, action: str) -> str:
-    _validate_token(workspace_id, field="workspace_id")
-    _validate_token(action, field="action")
-    return f"{SUBJECT_PREFIX}.{workspace_id}.audit.{action}"
-
-
 def dlq_subject(origin_stream: str) -> str:
     _validate_token(origin_stream, field="origin_stream")
     return f"jhin.dlq.{origin_stream.lower()}"

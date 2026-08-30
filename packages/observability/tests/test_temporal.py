@@ -909,7 +909,6 @@ async def test_nexus_uses_bounded_string_carrier_and_preserves_business_headers(
     assert encoded["traceparent"] == TRACEPARENT
     assert encoded["tracestate"] == tracestate
     assert set(encoded).isdisjoint({"TraceParent", "baggage", "_TRACER-DATA"})
-    assert module._nexus_trace_carrier_size(encoded) == 592
     assert module._nexus_trace_carrier_within_limit("x" * 1_011, "") is True
     assert module._nexus_trace_carrier_within_limit("x" * 1_012, "") is False
     assert original["TraceParent"] == SECOND_TRACEPARENT

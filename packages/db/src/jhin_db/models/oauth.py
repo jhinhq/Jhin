@@ -42,21 +42,6 @@ from jhin_db.columns import (
     UuidPkMixin,
 )
 
-#: How a pending authorization is being completed. ``authorization_code`` is
-#: the browser redirect flow, ``device_code`` is RFC 8628 polling, and
-#: ``github_app_manifest`` is GitHub's one-click app creation handshake.
-OAUTH_FLOWS = ("authorization_code", "device_code", "github_app_manifest")
-
-#: Where a client registration came from: dynamic registration (RFC 7591), an
-#: admin who pasted a client id for a server with no DCR, or an app the
-#: operator configured for the whole instance.
-OAUTH_CLIENT_SOURCES = ("dcr", "manual", "static")
-
-#: The three token-endpoint client authentication methods Jhin implements.
-#: ``none`` is a public client authenticating with PKCE alone, and is what we
-#: ask for whenever an authorization server will allow it.
-OAUTH_AUTH_METHODS = ("none", "client_secret_post", "client_secret_basic")
-
 
 class OAuthClientRegistration(Base, UuidPkMixin, TimestampMixin):
     """One workspace's OAuth client identity at one authorization server.

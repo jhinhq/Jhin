@@ -34,7 +34,7 @@ keeps asking is not going to stop.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
@@ -489,12 +489,6 @@ def _bounded_step_ups(raw: object, *, now: datetime | None = None) -> dict[str, 
     return {name: moment_at.isoformat() for moment_at, name in dated[:MAX_STEP_UP_ENTRIES]}
 
 
-def describe_scopes(scopes: Iterable[str]) -> str:
-    """A bounded, grammar-checked rendering of a scope list for a log line.
-    Never used in a message that reaches a person or a model."""
-    return " ".join(parse_scope(" ".join(scopes)))
-
-
 __all__ = [
     "ACCESS_TOKEN_FIELD",
     "AUTH_OAUTH",
@@ -515,7 +509,6 @@ __all__ = [
     "McpChallenge",
     "McpOAuthConfigError",
     "challenge_from_response",
-    "describe_scopes",
     "merge_scope",
     "oauth_auth_headers",
     "parse_scope",

@@ -121,7 +121,6 @@ UNREACHABLE_MESSAGE: Final = (
 )
 SAVE_FAILED_MESSAGE: Final = "Reconnecting is required: the access token could not be saved."
 REFRESHED_MESSAGE: Final = "Access renewed."
-NOT_DUE_MESSAGE: Final = "Access is still current."
 TRANSIENT_MESSAGE: Final = "The provider could not be reached; will try again."
 
 

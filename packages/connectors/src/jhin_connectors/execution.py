@@ -69,11 +69,6 @@ def set_connection_token_renewer(renewer: ConnectionTokenRenewer | None) -> None
     _renewer = renewer
 
 
-def connection_token_renewer() -> ConnectionTokenRenewer | None:
-    """The installed renewer, if this process has one."""
-    return _renewer
-
-
 @dataclass(frozen=True)
 class ResolvedConnection:
     """One usable connection with its decrypted credential fields."""

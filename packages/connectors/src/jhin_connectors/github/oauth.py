@@ -1,26 +1,17 @@
 """GitHub sign-in that never asks anyone to paste a token.
 
-Three GitHub-shaped paths sit on top of the generic OAuth core in
-:mod:`jhin_oauth`, and none of them ends with a human typing a credential:
-
-- **Device flow** (:func:`start_github_device_authorization`,
-  :func:`poll_github_device_token`) — a client id and nothing else. No
-  redirect URI, no client secret, at start, at poll, or at refresh. That is
-  precisely why it is the answer for an instance GitHub cannot redirect a
-  browser back to: localhost, a private network, or anything without TLS.
-  GitHub answers a poll that is not ready yet with **HTTP 200** and the error
-  in the body, so the status code alone never decides anything here.
-- **App-manifest provisioning** (:func:`build_app_manifest`,
-  :func:`manifest_post_target`, :func:`convert_app_manifest`) — the operator
-  clicks once, GitHub creates this instance's own GitHub App, and a single
-  exchange hands back its client id, client secret, webhook secret, and
-  private key. Nothing is copied by hand and no secret crosses a screen.
-- **Installation** (:func:`installation_url`, :func:`installation_credentials`)
-  — the app is installed on an account, GitHub returns an installation id,
-  and that plus the app's private key is exactly the credential
-  :func:`jhin_connectors.github.auth.resolve_access_token` already mints
-  short-lived installation tokens from. This module hands that path its
-  credential map; it does not re-implement the minting.
+**App-manifest provisioning** (:func:`build_app_manifest`,
+:func:`manifest_post_target`, :func:`convert_app_manifest`) sits on top of the
+generic OAuth core in :mod:`jhin_oauth`, and it never ends with a human typing
+a credential: the operator clicks once, GitHub creates this instance's own
+GitHub App, and a single exchange hands back its client id, client secret,
+webhook secret, and private key. Nothing is copied by hand and no secret
+crosses a screen. Once the app is installed on an account, GitHub returns an
+installation id (:func:`normalize_installation_id`), and that plus the app's
+private key is exactly the credential
+:func:`jhin_connectors.github.auth.resolve_access_token` already mints
+short-lived installation tokens from; this module does not re-implement the
+minting.
 
 Two rules hold throughout. Every credential is registered with the process
 redactor at the moment of first possession, so it cannot survive into a log
@@ -35,7 +26,6 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
-from urllib.parse import urlencode
 
 from httpx import AsyncClient
 
@@ -43,9 +33,7 @@ from jhin_connectors.github.client import API_VERSION, USER_AGENT
 from jhin_connectors.github.manifest import GITHUB_CAPABILITIES
 from jhin_connectors.github.webhook import WEBHOOK_EVENTS
 from jhin_connectors.http_client import send_bounded_json
-from jhin_oauth.errors import OAuthError, TokenError
-from jhin_oauth.tokens import poll_device_token, start_device_authorization
-from jhin_oauth.types import DeviceCodeGrant, DeviceTokenPending, TokenResponse
+from jhin_oauth.errors import OAuthError
 from jhin_oauth.urls import validate_oauth_url
 from jhin_secrets.redaction import get_redactor
 
@@ -84,53 +72,17 @@ PRIVATE_KEY_KEY: Final[str] = "private_key"
 HTML_URL_KEY: Final[str] = "html_url"
 INSTALLATION_ID_KEY: Final[str] = "installation_id"
 
-_REQUIRED_APP_KEYS: Final[tuple[str, ...]] = (
-    APP_ID_KEY,
-    SLUG_KEY,
-    CLIENT_ID_KEY,
-    CLIENT_SECRET_KEY,
-    PRIVATE_KEY_KEY,
-)
-
 # GitHub's own naming rules, applied before any of these reach a URL or a
 # form: an app name, an account login, an app slug, a one-time manifest code,
-# an opaque state handle, an installation id, and a client id.
+# and an installation id.
 _APP_NAME_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,33}$")
 _LOGIN_RE: Final = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$")
 _SLUG_RE: Final = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$")
 _MANIFEST_CODE_RE: Final = re.compile(r"^[A-Za-z0-9._~-]{1,256}$")
-_STATE_RE: Final = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
 _INSTALLATION_ID_RE: Final = re.compile(r"^[1-9][0-9]{0,19}$")
-_CLIENT_ID_RE: Final = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 
 # --- Messages, all of them ours ---------------------------------------------
-
-_DEVICE_FLOW_MESSAGES: Final[Mapping[str, str]] = {
-    "device_flow_disabled": (
-        "This GitHub app has device flow switched off. An admin needs to tick "
-        "'Enable Device Flow' in the app's settings on GitHub, then try again."
-    ),
-    "incorrect_client_credentials": (
-        "GitHub does not recognise this app's client ID. Check it in Settings, then try again."
-    ),
-    "incorrect_device_code": (
-        "GitHub no longer recognises this sign-in attempt. Start again from Apps."
-    ),
-    "unsupported_grant_type": (
-        "GitHub refused a device sign-in for this app. Create the app again "
-        "with device flow enabled, or connect GitHub in the browser instead."
-    ),
-    "expired_token": "That code expired before it was approved. Start again to get a new one.",
-    "access_denied": "The sign-in was declined on GitHub.",
-    "invalid_request": "GitHub rejected this sign-in request. Start again from Apps.",
-    "invalid_client": (
-        "GitHub does not recognise this app's client ID. Check it in Settings, then try again."
-    ),
-}
-_DEFAULT_DEVICE_FLOW_MESSAGE: Final[str] = (
-    "GitHub could not finish this sign-in. Start again from Apps."
-)
 
 _CONVERSION_FAILED_MESSAGE: Final[str] = (
     "GitHub did not accept this app-creation code. Each code is single-use and "
@@ -158,89 +110,6 @@ _CAPABILITY_PERMISSIONS: Final[Mapping[str, tuple[str, str]]] = {
     "github.workflow_run.read": ("actions", "read"),
 }
 _ACCESS_RANK: Final[Mapping[str, int]] = {"read": 1, "write": 2, "admin": 3}
-
-
-def device_flow_message(error_code: str) -> str:
-    """The operator-facing sentence for one GitHub device-flow error code.
-
-    Constant text only. GitHub's ``error_description`` is attacker-influenced
-    prose and never reaches a user, a log, or an exception; the machine
-    readable code — already narrowed to a known value by
-    :mod:`jhin_oauth.errors` — chooses one of Jhin's own sentences instead.
-    """
-    return _DEVICE_FLOW_MESSAGES.get(error_code, _DEFAULT_DEVICE_FLOW_MESSAGE)
-
-
-# --- Device flow ------------------------------------------------------------
-
-
-async def start_github_device_authorization(
-    client: AsyncClient,
-    *,
-    client_id: str,
-    scope: str = "",
-    device_authorization_endpoint: str = DEVICE_CODE_URL,
-) -> DeviceCodeGrant:
-    """Ask GitHub for a user code, the first half of the device flow.
-
-    Only the client id is sent. GitHub's device flow has no client secret and
-    no redirect URI at any step, which is the whole reason this is the flow
-    for an instance a provider cannot reach.
-
-    ``device_authorization_endpoint`` moves for GitHub Enterprise Server (and
-    for the in-process fake); it is put through Jhin's outbound URL policy
-    like any other endpoint.
-
-    Raises :class:`~jhin_oauth.errors.TokenError`,
-    :class:`~jhin_oauth.errors.TransientOAuthError`, and
-    :class:`~jhin_connectors.endpoints.EndpointPolicyError`.
-    """
-    endpoint = validate_oauth_url(
-        device_authorization_endpoint, kind="GitHub device authorization endpoint"
-    )
-    try:
-        return await start_device_authorization(
-            client,
-            device_authorization_endpoint=endpoint,
-            client_id=_validated_client_id(client_id),
-            scope=scope,
-        )
-    except TokenError as exc:
-        raise TokenError(device_flow_message(exc.error_code), error_code=exc.error_code) from None
-
-
-async def poll_github_device_token(
-    client: AsyncClient,
-    *,
-    client_id: str,
-    device_code: str,
-    token_endpoint: str = DEVICE_TOKEN_URL,
-) -> TokenResponse | DeviceTokenPending:
-    """Ask once whether the person has approved the device code yet.
-
-    There is deliberately no ``client_secret`` parameter: GitHub authenticates
-    a device grant by client id alone, and an instance on this path may well
-    have no secret to give. A :class:`~jhin_oauth.types.DeviceTokenPending`
-    result is not a failure — feed it through
-    :func:`jhin_oauth.tokens.next_poll_interval`, which is where the rule that
-    ``slow_down`` raises the cadence permanently lives, and ask again.
-
-    Raises :class:`~jhin_oauth.errors.DeviceAuthorizationDenied` when the
-    person declined, :class:`~jhin_oauth.errors.DeviceCodeExpired` when the
-    code timed out, :class:`~jhin_oauth.errors.TokenError` for anything else,
-    and :class:`~jhin_connectors.endpoints.EndpointPolicyError` for an
-    endpoint policy refuses.
-    """
-    endpoint = validate_oauth_url(token_endpoint, kind="GitHub token endpoint")
-    try:
-        return await poll_device_token(
-            client,
-            token_endpoint=endpoint,
-            client_id=_validated_client_id(client_id),
-            device_code=device_code,
-        )
-    except TokenError as exc:
-        raise TokenError(device_flow_message(exc.error_code), error_code=exc.error_code) from None
 
 
 # --- App-manifest provisioning ----------------------------------------------
@@ -431,22 +300,6 @@ async def convert_app_manifest(client: AsyncClient, code: str) -> GitHubAppCrede
 # --- Installation -----------------------------------------------------------
 
 
-def installation_url(slug: str, *, state: str) -> str:
-    """Where to send the operator to install the app on an account.
-
-    ``state`` is the opaque pending-authorization handle; GitHub returns it to
-    the setup URL alongside the installation id, which is what binds the
-    installation to the request that started it.
-
-    Raises :class:`ValueError` for a slug or handle that is not one.
-    """
-    handle = state.strip()
-    if not _STATE_RE.fullmatch(handle):
-        raise ValueError("that is not a pending-authorization handle")
-    query = urlencode({"state": handle})
-    return f"{GITHUB_WEB_ORIGIN}/apps/{_validated_slug(slug)}/installations/new?{query}"
-
-
 def normalize_installation_id(raw: str) -> str:
     """The installation id from GitHub's setup redirect, proved to be one.
 
@@ -460,77 +313,7 @@ def normalize_installation_id(raw: str) -> str:
     return candidate
 
 
-def app_credentials_map(credentials: GitHubAppCredentials) -> dict[str, str]:
-    """The flat ``str -> str`` map the encrypted secret store persists.
-
-    Flat and stringly-typed because that is what
-    :func:`~jhin_secrets.material.decode_string_secret_map` accepts, and
-    because :func:`~jhin_secrets.material.register_secret_material` walks
-    exactly these leaves into the redactor every time it is decrypted.
-    """
-    return {
-        APP_ID_KEY: credentials.app_id,
-        SLUG_KEY: credentials.slug,
-        CLIENT_ID_KEY: credentials.client_id,
-        CLIENT_SECRET_KEY: credentials.client_secret,
-        WEBHOOK_SECRET_KEY: credentials.webhook_secret,
-        PRIVATE_KEY_KEY: credentials.private_key_pem,
-        HTML_URL_KEY: credentials.html_url,
-    }
-
-
-def parse_app_credentials_map(material: Mapping[str, str]) -> GitHubAppCredentials:
-    """Rebuild the app from its stored secret map.
-
-    Raises :class:`ValueError` naming the missing keys and nothing else — a
-    stored value never appears in the message.
-    """
-    missing = [key for key in _REQUIRED_APP_KEYS if not str(material.get(key, "")).strip()]
-    if missing:
-        raise ValueError(f"stored GitHub App credential is missing: {', '.join(missing)}")
-    return GitHubAppCredentials(
-        app_id=str(material[APP_ID_KEY]),
-        slug=str(material[SLUG_KEY]),
-        client_id=str(material[CLIENT_ID_KEY]),
-        client_secret=str(material[CLIENT_SECRET_KEY]),
-        webhook_secret=str(material.get(WEBHOOK_SECRET_KEY, "")),
-        private_key_pem=str(material[PRIVATE_KEY_KEY]),
-        html_url=str(material.get(HTML_URL_KEY, "")),
-    )
-
-
-def installation_credentials(
-    credentials: GitHubAppCredentials, *, installation_id: str
-) -> dict[str, str]:
-    """The connection credential for one installation of this instance's app.
-
-    Exactly the three fields
-    :func:`jhin_connectors.github.auth.resolve_access_token` needs to mint a
-    short-lived installation token: nothing here is a long-lived API key, and
-    the app's client secret is deliberately absent because minting is signed
-    with the private key, not authenticated with the secret.
-
-    ``app_id`` carries the app's **client id**, which is what GitHub now
-    recommends as the JWT ``iss``; the numeric app id remains valid there and
-    both shapes already flow through :func:`~jhin_connectors.github.auth.build_app_jwt`.
-
-    Raises :class:`ValueError` for an installation id that is not one.
-    """
-    return {
-        APP_ID_KEY: credentials.client_id,
-        PRIVATE_KEY_KEY: credentials.private_key_pem,
-        INSTALLATION_ID_KEY: normalize_installation_id(installation_id),
-    }
-
-
 # --- Validation helpers -----------------------------------------------------
-
-
-def _validated_client_id(client_id: str) -> str:
-    candidate = client_id.strip()
-    if not _CLIENT_ID_RE.fullmatch(candidate):
-        raise ValueError("that is not a GitHub client ID")
-    return candidate
 
 
 def _validated_app_name(app_name: str) -> str:
@@ -609,16 +392,9 @@ __all__ = [
     "SLUG_KEY",
     "WEBHOOK_SECRET_KEY",
     "GitHubAppCredentials",
-    "app_credentials_map",
     "app_permissions",
     "build_app_manifest",
     "convert_app_manifest",
-    "device_flow_message",
-    "installation_credentials",
-    "installation_url",
     "manifest_post_target",
     "normalize_installation_id",
-    "parse_app_credentials_map",
-    "poll_github_device_token",
-    "start_github_device_authorization",
 ]

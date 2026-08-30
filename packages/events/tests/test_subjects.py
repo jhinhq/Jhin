@@ -1,7 +1,6 @@
 import pytest
 
 from jhin_events.subjects import (
-    audit_subject,
     dlq_subject,
     event_subject,
     ingress_subject,
@@ -16,11 +15,10 @@ def test_event_subject_canonical_form() -> None:
     )
 
 
-def test_ingress_and_audit_and_dlq_subjects() -> None:
+def test_ingress_and_dlq_subjects() -> None:
     assert ingress_subject("ws-1", "linear", "issue_updated") == (
         "jhin.v1.ws-1.ingress.linear.issue_updated"
     )
-    assert audit_subject("ws-1", "created") == "jhin.v1.ws-1.audit.created"
     assert dlq_subject("EVENTS") == "jhin.dlq.events"
 
 
@@ -38,7 +36,7 @@ def test_ingress_subject_rejects_empty_dotted_event_segments(event: str) -> None
 
 @pytest.mark.parametrize(
     "event_type",
-    ["", "created", "unknown.domain.event", "ingress.linear.x", "audit.x", "task.cre ated"],
+    ["", "created", "unknown.domain.event", "ingress.linear.x", "task.cre ated"],
 )
 def test_event_subject_rejects_invalid_event_types(event_type: str) -> None:
     with pytest.raises(ValueError):

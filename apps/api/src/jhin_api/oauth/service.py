@@ -58,16 +58,13 @@ from jhin_api.oauth.schemas import (
 from jhin_api.settings import Settings
 from jhin_connectors.endpoints import EndpointPolicyError
 from jhin_db.models import Connection, OAuthAuthorization
-from jhin_domain import ConnectionStatus
 from jhin_oauth.discovery import (
-    discover_authorization_server,
     probe_mcp_endpoint,
     select_scopes,
 )
 from jhin_oauth.errors import (
     DeviceAuthorizationDenied,
     DeviceCodeExpired,
-    DiscoveryError,
     OAuthError,
     TransientOAuthError,
 )
@@ -113,21 +110,6 @@ GITHUB_MANIFEST_TTL_SECONDS: Final[int] = 3_600
 GITHUB_ISSUER: Final[str] = "https://github.com"
 PURGE_OLDER_THAN_SECONDS: Final[int] = 3_600
 PURGE_LIMIT: Final[int] = 200
-
-#: Every ``reason`` an ``OAuthProbeOut`` may carry. A constant vocabulary,
-#: because the alternative is rendering a hostile server's prose in our UI.
-PROBE_REASONS: Final[frozenset[str]] = frozenset(
-    {
-        "",
-        "connector_has_no_oauth",
-        "server_url_required",
-        "server_url_not_allowed",
-        "server_refused_probe",
-        "no_oauth_offered",
-        "needs_client_credentials",
-        "discovery_failed",
-    }
-)
 
 _INVALID_ATTEMPT_DETAIL: Final[str] = PendingAuthorizationInvalid.MESSAGE
 
@@ -1341,26 +1323,3 @@ def provider_key_for(connection: Connection) -> str | None:
     """
     provider = _static_provider_for(connection.connector_type)
     return str(provider.key) if provider is not None else None
-
-
-async def needs_reauth_connections(db: AsyncSession, workspace_id: UUID) -> list[Connection]:
-    """Every connection in this workspace waiting for somebody to reconnect it."""
-    rows = await db.scalars(
-        select(Connection)
-        .where(
-            Connection.workspace_id == workspace_id,
-            Connection.status == ConnectionStatus.NEEDS_REAUTH.value,
-        )
-        .order_by(Connection.name)
-    )
-    return list(rows)
-
-
-async def rediscover_issuer(
-    http_client: httpx.AsyncClient, issuer: str
-) -> AuthorizationServerMetadata | None:
-    """Re-read an authorization server's metadata, or ``None`` if it will not."""
-    try:
-        return await discover_authorization_server(http_client, issuer)
-    except (DiscoveryError, OAuthError, EndpointPolicyError, httpx.HTTPError):
-        return None

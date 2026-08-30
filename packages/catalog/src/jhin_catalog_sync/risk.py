@@ -56,10 +56,6 @@ _UNVERIFIED_FLOOR: RiskLevel = RiskLevel.ELEVATED
 #: of the trust sort on nothing but its own say-so.
 UNASSERTABLE_TIERS: frozenset[str] = frozenset({"curated", "reviewed"})
 
-#: The original single-tier constant, kept so existing callers and tests keep
-#: reading; :data:`UNASSERTABLE_TIERS` is the set the gate actually checks.
-UNASSERTABLE_TIER: TrustTier = "curated"
-
 #: What an entry claiming an unassertable tier is demoted to. The entry is
 #: kept and stays searchable; only the claim is dropped.
 DEMOTED_TIER: TrustTier = "indexed"
@@ -103,7 +99,6 @@ __all__ = [
     "DEMOTED_TIER",
     "RISK_RANK",
     "TRUST_RANK",
-    "UNASSERTABLE_TIER",
     "UNASSERTABLE_TIERS",
     "default_risk",
     "risk_rank",

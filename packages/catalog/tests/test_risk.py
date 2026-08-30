@@ -14,7 +14,6 @@ import pytest
 from jhin_catalog_sync.risk import (
     DEFAULT_RISK_BY_TRUST,
     TRUST_RANK,
-    UNASSERTABLE_TIER,
     UNASSERTABLE_TIERS,
     default_risk,
     risk_rank,
@@ -111,10 +110,8 @@ def test_risk_rank_orders_the_four_levels() -> None:
 
 def test_the_unassertable_set_is_exactly_the_two_jhin_words() -> None:
     """``curated`` and ``reviewed`` both mean "somebody at Jhin looked", so
-    neither is upstream's to claim. The single-tier constant survives for the
-    callers that predate the set."""
+    neither is upstream's to claim."""
     assert frozenset({"curated", "reviewed"}) == UNASSERTABLE_TIERS
-    assert UNASSERTABLE_TIER in UNASSERTABLE_TIERS
 
 
 @pytest.mark.parametrize("tier", sorted(UNASSERTABLE_TIERS))

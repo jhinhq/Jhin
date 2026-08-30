@@ -189,17 +189,8 @@ def provider_metadata(provider: StaticOAuthProvider) -> AuthorizationServerMetad
     )
 
 
-def provider_for_connector(connector_type: str) -> StaticOAuthProvider | None:
-    """The entry for one connector type, or ``None`` when it has no OAuth."""
-    for provider in STATIC_PROVIDERS.values():
-        if provider.connector_type == connector_type:
-            return provider
-    return None
-
-
 __all__ = [
     "STATIC_PROVIDERS",
     "StaticOAuthProvider",
-    "provider_for_connector",
     "provider_metadata",
 ]

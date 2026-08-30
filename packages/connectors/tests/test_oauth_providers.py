@@ -15,7 +15,6 @@ import pytest
 from jhin_connectors.oauth_providers import (
     STATIC_PROVIDERS,
     StaticOAuthProvider,
-    provider_for_connector,
     provider_metadata,
 )
 
@@ -54,14 +53,6 @@ def test_github_publishes_no_revocation_endpoint() -> None:
     provider = STATIC_PROVIDERS["github"]
     assert provider.revocation_endpoint == ""
     assert provider_metadata(provider).revocation_endpoint is None
-
-
-def test_a_provider_is_reachable_by_connector_type_without_its_key() -> None:
-    """The panel names a connector, never this table's internal key."""
-    provider = provider_for_connector("github")
-    assert provider is not None
-    assert provider.key == "github"
-    assert provider_for_connector("definitely-not-a-connector") is None
 
 
 def test_metadata_never_claims_dynamic_registration() -> None:

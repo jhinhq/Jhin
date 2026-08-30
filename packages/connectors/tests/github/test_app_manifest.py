@@ -11,7 +11,6 @@ manifest path and the existing GitHub App path are one path, not two.
 from __future__ import annotations
 
 import dataclasses
-import json
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -32,16 +31,11 @@ from jhin_connectors.github.oauth import (
     GITHUB_API_ORIGIN,
     GITHUB_WEB_ORIGIN,
     MANIFEST_CONVERSION_PATH,
-    GitHubAppCredentials,
-    app_credentials_map,
     app_permissions,
     build_app_manifest,
     convert_app_manifest,
-    installation_credentials,
-    installation_url,
     manifest_post_target,
     normalize_installation_id,
-    parse_app_credentials_map,
 )
 from jhin_connectors.github.webhook import WEBHOOK_EVENTS
 from jhin_connectors.testing.fake_github import FakeGitHubServer
@@ -50,7 +44,6 @@ from jhin_connectors.testing.fake_github_oauth import (
     FakeGitHubOAuthServer,
 )
 from jhin_oauth.errors import OAuthError
-from jhin_secrets.material import decode_string_secret_map
 from jhin_secrets.redaction import REDACTED, get_redactor
 
 ALLOWLIST_ENV = "JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS"
@@ -253,63 +246,11 @@ def test_the_conversion_path_is_the_documented_one() -> None:
 # --- Installation -----------------------------------------------------------
 
 
-def test_the_installation_url_carries_the_handle_and_nothing_else() -> None:
-    url = installation_url("jhin-fake-instance", state="abcDEF-123_456")
-    assert url == (
-        f"{GITHUB_WEB_ORIGIN}/apps/jhin-fake-instance/installations/new?state=abcDEF-123_456"
-    )
-    for hostile_state in ("", "a b", "a&redirect_uri=https://evil.example", "x" * 257):
-        with pytest.raises(ValueError):
-            installation_url("jhin-fake-instance", state=hostile_state)
-    for hostile_slug in ("../../settings", "Jhin Fake", "slug?x=1"):
-        with pytest.raises(ValueError):
-            installation_url(hostile_slug, state="handle")
-
-
 def test_an_installation_id_is_a_number_or_it_is_nothing() -> None:
     assert normalize_installation_id(" 12345 ") == "12345"
     for hostile in ("", "0", "12a", "1/../2", "-1", "9" * 21):
         with pytest.raises(ValueError):
             normalize_installation_id(hostile)
-
-
-def test_app_credentials_survive_the_encrypted_secret_store_shape() -> None:
-    app = GitHubAppCredentials(
-        app_id="424242",
-        slug="jhin-fake-instance",
-        client_id="Iv1.fakeclientid",
-        client_secret="fake-github-client-secret",
-        webhook_secret="fake-github-webhook-secret",
-        private_key_pem="-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n",
-        html_url=f"{GITHUB_WEB_ORIGIN}/apps/jhin-fake-instance",
-    )
-    material = app_credentials_map(app)
-    # The store only accepts a flat string -> string object.
-    assert decode_string_secret_map(json.dumps(material)) == material
-    assert parse_app_credentials_map(material) == app
-
-    incomplete = dict(material)
-    del incomplete["private_key"]
-    with pytest.raises(ValueError, match="private_key"):
-        parse_app_credentials_map(incomplete)
-
-
-def test_installation_credentials_hold_the_key_and_never_the_secret() -> None:
-    app = GitHubAppCredentials(
-        app_id="424242",
-        slug="jhin-fake-instance",
-        client_id="Iv1.fakeclientid",
-        client_secret="fake-github-client-secret",
-        webhook_secret="fake-github-webhook-secret",
-        private_key_pem="-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n",
-        html_url="",
-    )
-    credentials = installation_credentials(app, installation_id="42")
-    assert set(credentials) == {"app_id", "private_key", "installation_id"}
-    # Minting is signed with the key, so the app's secret has no business here.
-    assert app.client_secret not in credentials.values()
-    # GitHub now recommends the client id as the JWT issuer.
-    assert credentials["app_id"] == app.client_id
 
 
 async def test_an_app_created_from_a_manifest_mints_installation_tokens() -> None:
@@ -320,7 +261,12 @@ async def test_an_app_created_from_a_manifest_mints_installation_tokens() -> Non
 
     # The fake's PEM is deliberately not a key; signing needs a real one.
     app = dataclasses.replace(converted, private_key_pem=_test_private_key())
-    credentials = installation_credentials(app, installation_id="42")
+    credentials = {
+        # GitHub now recommends the client id as the JWT issuer.
+        "app_id": app.client_id,
+        "private_key": app.private_key_pem,
+        "installation_id": "42",
+    }
 
     with FakeGitHubServer() as api:
         _allow(api.base_url)
