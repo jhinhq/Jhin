@@ -10,7 +10,6 @@ Start here if you are deploying, evaluating, or contributing to Jhin.
 | [Demo walkthrough](demo.md) | The seeded, credential-free demo flow and the screenshot list |
 | [Starter templates](templates.md) | Agent and organization templates the seed provides and how to adapt them |
 | [Release bundle](../deploy/README.md) | Pull-based Compose manifest using published GHCR images |
-| [Desktop client](../apps/desktop/README.md) | The light macOS/Windows/Linux app that connects to an instance with an API key: how it proxies, where the key lives, and what a key cannot reach |
 
 ## Architecture
 

@@ -22,15 +22,17 @@ out/
 .env
 .env.*
 !.env.example
+!deploy/.env.release.example
 *.local
 # Local key material (e.g. secrets/dev/jhin_master_key) — never the
 # packages/secrets source tree.
 /secrets/
 
-# Editors / OS
+# Editors / OS / local agent tooling
 .DS_Store
 .idea/
 .vscode/
+.claude/
 
 # Isolated implementation worktrees
 .worktrees/
