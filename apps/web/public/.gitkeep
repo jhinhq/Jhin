@@ -1,0 +1,2 @@
+# Keeps the directory in git: the web Dockerfile COPYs apps/web/public into
+# the runtime image, and an absent directory fails the whole build.
