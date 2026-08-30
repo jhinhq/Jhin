@@ -75,7 +75,7 @@ const ADVANCED_FILTER_ROWS: { key: FacetDimension; label: string }[] = [
 const MAX_CHIPS_PER_ROW = 12;
 
 const chipClass = (active: boolean) =>
-  `rounded-full border px-3 py-1 text-xs font-medium transition-colors ${focusRing} ${
+  `min-h-10 rounded-full border px-3 py-1 text-xs font-medium transition-colors md:min-h-0 ${focusRing} ${
     active
       ? "border-accent bg-accent-soft text-accent-strong"
       : "border-line bg-surface text-dim hover:text-ink"

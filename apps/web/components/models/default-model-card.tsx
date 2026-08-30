@@ -10,8 +10,9 @@ import { LogoTile } from "@/components/catalog/logo-tile";
 import { capabilitySummary, costTier, costTierLabel, formatPricePair } from "@/lib/models";
 import type { ModelProfile, ModelProvider } from "@/lib/types";
 
-/** "$$ Moderate" with the exact price pair one hover away; a warning line
- * when no price is set, because "unknown" must never render as "cheap". */
+/** "$$ Moderate" with the exact price pair spelled out beside it (a hover
+ * tooltip alone is invisible on touch); a warning line when no price is set,
+ * because "unknown" must never render as "cheap". */
 export function CostTierLine({ profile }: { profile: ModelProfile }) {
   const tier = costTier(
     profile.input_cost_micros_per_million,
@@ -29,7 +30,7 @@ export function CostTierLine({ profile }: { profile: ModelProfile }) {
       <span className="font-mono text-accent-strong" aria-hidden>
         {"$".repeat(tier)}
       </span>{" "}
-      {costTierLabel(tier)}
+      {costTierLabel(tier)} <span className="text-faint">{pair} per 1M tokens</span>
     </p>
   );
 }

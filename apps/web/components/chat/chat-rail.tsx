@@ -94,8 +94,10 @@ export function ChatRail({ selectedId }: { selectedId: string | null }) {
       <div className="space-y-3 px-3 pt-4">
         <div className="flex items-center justify-between gap-2 px-1">
           <h1 className="font-display text-lg font-semibold text-ink">Chats</h1>
+          {/* ?new=1 tells the chats layout to show the home pane on small
+              screens, where the rail otherwise fills the whole viewport. */}
           <Link
-            href="/chats"
+            href="/chats?new=1"
             aria-label="New chat"
             title="New chat"
             className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-accent-strong hover:bg-accent-soft"
@@ -180,7 +182,7 @@ export function ChatRail({ selectedId }: { selectedId: string | null }) {
               <>
                 <p>No chats yet.</p>
                 <Link
-                  href="/chats"
+                  href="/chats?new=1"
                   className="mt-2 inline-flex min-h-[40px] items-center gap-1 text-accent-strong hover:underline"
                 >
                   <Plus size={14} /> Start your first chat

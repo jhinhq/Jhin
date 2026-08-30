@@ -133,7 +133,10 @@ export default function HomePage() {
         />
 
         <div className="grid gap-4 lg:grid-cols-3">
-          <div className="space-y-4 lg:col-span-2">
+          {/* min-w-0: grid items default to min-width:auto, so one nowrap or
+              truncated descendant would widen the single mobile track past the
+              viewport and stretch every card with it. */}
+          <div className="min-w-0 space-y-4 lg:col-span-2">
             <RightNowPanel
               running={runningTasks.slice(0, RUNNING_SHOWN)}
               runningTotal={runningTasks.length}
@@ -161,7 +164,7 @@ export default function HomePage() {
             />
           </div>
 
-          <div className="space-y-4">
+          <div className="min-w-0 space-y-4">
             <TeamGlancePanel
               agents={graph.data?.agents ?? []}
               teamCount={graph.data?.teams.length ?? 0}

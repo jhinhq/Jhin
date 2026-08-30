@@ -351,7 +351,9 @@ export default function CompanyPage() {
   );
 
   const renderOutline = (move?: OrgMoveApi) => (
-    <ul className="grid gap-4 lg:grid-cols-2" aria-label="Teams">
+    // grid-cols-1 matters: with no explicit track the implicit auto column
+    // is floored at the cards' min-content width, which overflows phones.
+    <ul className="grid grid-cols-1 gap-4 lg:grid-cols-2" aria-label="Teams">
       {tree!.roots.map((node) => (
         <OutlineTeam
           key={node.team.id}

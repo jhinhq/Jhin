@@ -258,7 +258,7 @@ export function AutomationBuilder({
             <p className="text-sm text-faint">No conditions: every event matches.</p>
           ) : null}
           {rows.map((row, index) => (
-            <div key={index} className="flex items-center gap-2">
+            <div key={index} className="grid gap-2 sm:flex sm:items-center">
               <Input
                 className="flex-[2]"
                 value={row.path}
@@ -269,7 +269,7 @@ export function AutomationBuilder({
                 }
               />
               <Select
-                className="w-40 flex-none"
+                className="w-full flex-none sm:w-40"
                 value={row.op}
                 aria-label={`Condition ${index + 1} comparison`}
                 onChange={(event) =>
@@ -558,11 +558,11 @@ function TestPanel({
                 ) : (
                   <XCircle size={13} className="mt-0.5 shrink-0 text-danger" />
                 )}
-                <span className="font-mono text-dim">
+                <span className="min-w-0 font-mono text-dim [overflow-wrap:anywhere]">
                   {condition.path} {condition.op}{" "}
                   {condition.op === "exists" ? "" : JSON.stringify(condition.value)}
                 </span>
-                <span className="text-faint">
+                <span className="min-w-0 text-faint [overflow-wrap:anywhere]">
                   {condition.detail ||
                     (condition.actual_present
                       ? `actual: ${JSON.stringify(condition.actual)}`

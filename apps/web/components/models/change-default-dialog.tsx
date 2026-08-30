@@ -127,7 +127,14 @@ export function ChangeDefaultDialog({
                     <span className="font-mono text-accent-strong" aria-hidden>
                       {"$".repeat(tier)}
                     </span>{" "}
-                    {costTierLabel(tier)}
+                    {costTierLabel(tier)}{" "}
+                    <span className="text-faint">
+                      {formatPricePair(
+                        profile.input_cost_micros_per_million,
+                        profile.output_cost_micros_per_million,
+                      )}{" "}
+                      per 1M tokens
+                    </span>
                   </span>
                 ) : (
                   <span className="text-[13px] text-warn">No price set yet</span>

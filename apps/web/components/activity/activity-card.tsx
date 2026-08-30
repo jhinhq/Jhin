@@ -67,12 +67,12 @@ export function ActivityCard({
             {timeAgo(card.created_at, now)}
           </time>
         </div>
-        {card.summary ? <p className="mt-1.5 whitespace-pre-wrap text-sm text-ink/90">{card.summary}</p> : null}
+        {card.summary ? <p className="mt-1.5 whitespace-pre-wrap break-words text-sm text-ink/90">{card.summary}</p> : null}
         {card.task_title && !card.summary ? <p className="mt-1.5 text-sm text-dim">{card.task_title}</p> : null}
         {friendly.length > 0 ? (
           <ul data-testid="activity-friendly-detail" className="mt-1.5 space-y-0.5 text-[13px] text-dim">
             {friendly.map((line) => (
-              <li key={line} className="whitespace-pre-wrap">{line}</li>
+              <li key={line} className="whitespace-pre-wrap break-words">{line}</li>
             ))}
           </ul>
         ) : null}

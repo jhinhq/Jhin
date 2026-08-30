@@ -74,7 +74,7 @@ function CategoryChips({
         type="button"
         aria-pressed={isActive}
         onClick={() => onChange(isActive ? null : value)}
-        className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${focusRing} ${
+        className={`min-h-10 rounded-full border px-3 py-1 text-xs font-medium transition-colors md:min-h-0 ${focusRing} ${
           isActive
             ? "border-accent bg-accent-soft text-accent-strong"
             : "border-line bg-surface text-dim hover:text-ink"

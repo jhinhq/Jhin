@@ -266,15 +266,15 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
             {grantList.map((grant) => (
               <li
                 key={grant.id}
-                className="flex items-center gap-3 rounded-xl border border-line bg-raised px-3 py-2 text-sm"
+                className="flex flex-wrap items-center gap-3 rounded-xl border border-line bg-raised px-3 py-2 text-sm"
               >
                 {grant.effect === "allow" ? (
                   <ShieldCheck size={15} className="shrink-0 text-ok" />
                 ) : (
                   <ShieldOff size={15} className="shrink-0 text-danger" />
                 )}
-                <code className="min-w-0 flex-1 truncate font-mono text-[13px]">{grant.capability}</code>
-                <span className="text-xs text-faint">{formatScope(grant.scope_json)}</span>
+                <code className="min-w-0 flex-1 truncate font-mono text-[13px]" title={grant.capability}>{grant.capability}</code>
+                <span className="min-w-0 truncate text-xs text-faint" title={formatScope(grant.scope_json)}>{formatScope(grant.scope_json)}</span>
                 <Badge tone={grant.effect === "allow" ? "ok" : "danger"}>{grant.effect}</Badge>
                 {canEdit ? (
                   <Button
@@ -331,10 +331,11 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
               if (selectedTool && missingRequired.length === 0) addGrant.mutate();
             }}
           >
-            <div className="flex items-end gap-2">
-              <div className="flex-1">
+            <div className="flex flex-wrap items-end gap-2">
+              <div className="min-w-0 flex-1">
                 <Field label="Capability">
                   <Select
+                    className="max-w-full"
                     value={toolName}
                     onChange={(e) => {
                       setToolName(e.target.value);
@@ -461,8 +462,8 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
                 data-testid={`tool-${tool.name}`}
                 className="rounded-xl border border-line bg-surface px-3 py-2"
               >
-                <div className="flex items-center gap-2">
-                  <code className="font-mono text-[13px] font-medium">{tool.name}</code>
+                <div className="flex flex-wrap items-center gap-2">
+                  <code className="min-w-0 truncate font-mono text-[13px] font-medium" title={tool.name}>{tool.name}</code>
                   <Badge tone={riskTone(tool.risk)}>{tool.risk}</Badge>
                   {tool.supports_approval ? <Badge tone="neutral">approvable</Badge> : null}
                   <span className="ml-auto">

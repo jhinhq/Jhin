@@ -41,7 +41,9 @@ export function Button({
   variant?: ButtonVariant;
   size?: "sm" | "md";
 }) {
-  const sizing = size === "sm" ? "h-8 px-3 text-[13px]" : "h-10 px-4 text-sm";
+  // "sm" is a desktop density; below md (phones) it grows to the 40px touch
+  // floor the design brief requires.
+  const sizing = size === "sm" ? "h-10 px-3 text-[13px] md:h-8" : "h-10 px-4 text-sm";
   return (
     <button
       className={`inline-flex shrink-0 items-center justify-center gap-1.5 rounded-xl font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${focusRing} ${sizing} ${buttonStyles[variant]} ${className}`}
@@ -62,7 +64,7 @@ export function ButtonLink({
   variant?: ButtonVariant;
   size?: "sm" | "md";
 }) {
-  const sizing = size === "sm" ? "h-8 px-3 text-[13px]" : "h-10 px-4 text-sm";
+  const sizing = size === "sm" ? "h-10 px-3 text-[13px] md:h-8" : "h-10 px-4 text-sm";
   return (
     <Link
       className={`inline-flex shrink-0 items-center justify-center gap-1.5 rounded-xl font-medium transition-colors ${focusRing} ${sizing} ${buttonStyles[variant]} ${className}`}
@@ -86,7 +88,7 @@ function IconButton({
   variant?: ButtonVariant;
   children: React.ReactNode;
 }) {
-  const sizing = size === "sm" ? "h-8 w-8" : "h-10 w-10";
+  const sizing = size === "sm" ? "h-10 w-10 md:h-8 md:w-8" : "h-10 w-10";
   return (
     <button
       type="button"
@@ -104,8 +106,10 @@ function IconButton({
 /* Form fields                                                         */
 /* ------------------------------------------------------------------ */
 
+// text-base below md: iOS Safari zooms the whole page (and leaves it
+// scrolled sideways) when a focused control's font-size is under 16px.
 const fieldStyles =
-  "w-full rounded-xl border border-line bg-surface px-3.5 text-[15px] text-ink placeholder:text-faint outline-none transition-colors hover:border-line-strong focus:border-accent focus:ring-2 focus:ring-accent/25 disabled:opacity-50";
+  "w-full rounded-xl border border-line bg-surface px-3.5 text-base md:text-[15px] text-ink placeholder:text-faint outline-none transition-colors hover:border-line-strong focus:border-accent focus:ring-2 focus:ring-accent/25 disabled:opacity-50";
 
 export function Input(props: React.InputHTMLAttributes<HTMLInputElement>) {
   const { className = "", ...rest } = props;
@@ -337,7 +341,7 @@ export function Tabs({
             tabIndex={selected ? 0 : -1}
             onClick={() => !tab.disabled && onChange(tab.id)}
             onKeyDown={(event) => onKeyDown(event, tab.id)}
-            className={`inline-flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg px-3 text-[13px] font-medium transition-colors disabled:opacity-40 ${focusRing} ${
+            className={`inline-flex h-10 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg px-3 text-[13px] font-medium transition-colors disabled:opacity-40 md:h-8 ${focusRing} ${
               selected
                 ? "bg-surface text-ink shadow-card"
                 : "text-dim hover:bg-hover hover:text-ink"

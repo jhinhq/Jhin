@@ -15,7 +15,7 @@
  */
 
 import { Ban, Check, CornerUpRight } from "lucide-react";
-import { useCallback, useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { focusRing } from "@/components/ui";
 import { moveOptions, type MoveGraph, type MoveTarget } from "@/lib/org-move";
@@ -55,7 +55,7 @@ export function MoveMenu({
         aria-controls={open ? menuId : undefined}
         onClick={() => setOpen((value) => !value)}
         title={`Move ${agent.name}`}
-        className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-transparent text-dim transition-colors hover:border-line hover:bg-hover hover:text-ink ${focusRing}`}
+        className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-transparent text-dim transition-colors hover:border-line hover:bg-hover hover:text-ink md:h-8 md:w-8 ${focusRing}`}
       >
         <CornerUpRight size={14} aria-hidden />
         <span className="sr-only">Move {agent.name}</span>
@@ -93,12 +93,14 @@ function MovePopup({
   onPick: (target: MoveTarget) => void;
 }) {
   const groups = moveOptions(agent.id, graph);
+  const menuRef = useRef<HTMLDivElement | null>(null);
 
   /** Place the menu beside its trigger and move focus into it. A callback ref
    * keeps this a pure DOM side effect at commit time: no React state, and so
    * no cascading render. */
   const placeMenu = useCallback(
     (node: HTMLDivElement | null) => {
+      menuRef.current = node;
       if (!node) return;
       const rect = trigger?.getBoundingClientRect();
       if (rect && (rect.width > 0 || rect.height > 0)) {
@@ -122,11 +124,23 @@ function MovePopup({
 
   useEffect(() => {
     const dismiss = () => onClose(false);
+    // Scrolling *inside* the menu's own list must not dismiss it — on touch
+    // that would make options past the first screenful unreachable.
+    const dismissOnOutsideScroll = (event: Event) => {
+      if (
+        menuRef.current &&
+        event.target instanceof Node &&
+        menuRef.current.contains(event.target)
+      ) {
+        return;
+      }
+      onClose(false);
+    };
     window.addEventListener("resize", dismiss);
-    window.addEventListener("scroll", dismiss, true);
+    window.addEventListener("scroll", dismissOnOutsideScroll, true);
     return () => {
       window.removeEventListener("resize", dismiss);
-      window.removeEventListener("scroll", dismiss, true);
+      window.removeEventListener("scroll", dismissOnOutsideScroll, true);
     };
   }, [onClose]);
 

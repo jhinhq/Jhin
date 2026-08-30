@@ -352,7 +352,9 @@ export default function ChatThreadPage() {
           expandExchanges={detailed}
         />
 
-        <div className="border-t border-line bg-bg px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3 sm:px-8">
+        {/* The chats layout already budgets the safe-area inset into its
+            height, so plain padding here is enough. */}
+        <div className="border-t border-line bg-bg px-4 pb-3 pt-3 sm:px-8">
           <div className="mx-auto max-w-3xl space-y-2">
             <ErrorNote message={sendError} />
             <Composer

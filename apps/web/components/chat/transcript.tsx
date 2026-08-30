@@ -156,7 +156,7 @@ function WorkCard({
           <p className="text-sm font-medium text-ink">{label}</p>
           <Timestamp iso={message.created_at} />
         </div>
-        {short && !open ? <p className="mt-1 text-sm text-dim">{short}</p> : null}
+        {short && !open ? <p className="mt-1 break-words text-sm text-dim">{short}</p> : null}
         {extraLines.length > 0 && !open ? (
           <ul className="mt-1 space-y-0.5 text-[13px] text-dim">
             {extraLines.map((line) => (
@@ -324,7 +324,7 @@ function ExchangeRow({
           aria-expanded={open}
           aria-controls={regionId}
           onClick={() => setOpen((value) => !value)}
-          className="inline-flex min-h-[32px] max-w-[85%] items-center gap-2 rounded-full px-3 py-1 text-xs text-faint transition-colors hover:bg-hover hover:text-dim"
+          className="inline-flex min-h-11 max-w-[85%] items-center gap-2 rounded-full px-3 py-1 text-xs text-faint transition-colors hover:bg-hover hover:text-dim md:min-h-[32px]"
         >
           <Avatar name={exchange.withName} size="xs" {...avatarProps(avatar)} />
           <span className="truncate">

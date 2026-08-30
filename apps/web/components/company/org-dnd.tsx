@@ -246,7 +246,7 @@ function DragHandle({ agent }: { agent: OrgAgentNode }) {
       onKeyDown={listeners?.onKeyDown as React.KeyboardEventHandler<HTMLButtonElement> | undefined}
       title={`Drag ${agent.name} to another team or manager`}
       style={{ touchAction: "none" }}
-      className={`inline-flex h-8 w-6 shrink-0 cursor-grab items-center justify-center rounded-lg text-faint transition-colors hover:bg-hover hover:text-dim ${focusRing}`}
+      className={`inline-flex h-8 w-6 min-h-10 min-w-10 shrink-0 cursor-grab items-center justify-center rounded-lg text-faint transition-colors hover:bg-hover hover:text-dim md:min-h-0 md:min-w-0 ${focusRing}`}
     >
       <GripVertical size={14} aria-hidden />
       <span className="sr-only">Drag {agent.name}</span>

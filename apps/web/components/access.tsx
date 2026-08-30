@@ -244,7 +244,7 @@ export function ExpiryPicker({
   onUnitChange: (value: ExpiryUnit) => void;
 }) {
   return (
-    <div className="flex items-end gap-3">
+    <div className="flex flex-wrap items-end gap-3">
       {unit === "never" ? null : (
         <div className="w-28">
           <Field label="Expires in">

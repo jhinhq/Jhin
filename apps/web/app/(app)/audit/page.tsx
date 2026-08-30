@@ -67,7 +67,7 @@ export default function AuditPage() {
       />
       <PageBody className="space-y-4">
         <form
-          className="grid grid-cols-2 items-end gap-3 lg:grid-cols-5"
+          className="grid grid-cols-1 items-end gap-3 sm:grid-cols-2 lg:grid-cols-5"
           onSubmit={(event) => {
             event.preventDefault();
             setOffset(0);

@@ -105,7 +105,7 @@ function TeamDialogForm({
             placeholder="What this team owns"
           />
         </Field>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Parent team">
             <Select
               value={parentTeamId}
@@ -136,7 +136,7 @@ function TeamDialogForm({
           </Field>
         </div>
         <Field label="Color">
-          <div className="flex gap-2 pt-1">
+          <div className="flex flex-wrap gap-2 pt-1">
             {TEAM_COLORS.map((color) => (
               <button
                 key={color}
@@ -145,7 +145,7 @@ function TeamDialogForm({
                 aria-label={`color ${color}`}
                 aria-pressed={colorToken === color}
                 onClick={() => setColorToken(color)}
-                className={`team-accent-${color} h-7 w-7 rounded-full border-2 transition-transform ${focusRing} ${
+                className={`team-accent-${color} h-10 w-10 rounded-full border-2 transition-transform md:h-7 md:w-7 ${focusRing} ${
                   colorToken === color
                     ? "scale-110 border-ink"
                     : "border-transparent opacity-70 hover:opacity-100"

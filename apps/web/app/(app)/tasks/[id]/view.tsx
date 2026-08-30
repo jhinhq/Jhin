@@ -269,7 +269,7 @@ export default function TaskDetailPage() {
           {task.description ? (
             <section className="rounded-2xl border border-line bg-surface px-5 py-4 shadow-card">
               <h2 className="mb-2 font-display text-base font-semibold text-ink">Instruction</h2>
-              <p className="whitespace-pre-wrap text-sm text-ink">{task.description}</p>
+              <p className="whitespace-pre-wrap break-words text-sm text-ink">{task.description}</p>
             </section>
           ) : null}
 
@@ -512,7 +512,7 @@ function Timeline({ events, live }: { events: RunEvent[]; live: boolean }) {
               </p>
             ) : null}
             {typeof payload.error_message === "string" && payload.error_message ? (
-              <p className="mt-0.5 text-xs text-danger">{payload.error_message}</p>
+              <p className="mt-0.5 break-words text-xs text-danger">{payload.error_message}</p>
             ) : null}
             {event.event_type === "sandbox.job" ? <SandboxJobEvent payload={payload} /> : null}
           </li>

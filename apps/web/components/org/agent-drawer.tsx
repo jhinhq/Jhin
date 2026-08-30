@@ -178,7 +178,7 @@ export function AgentDrawer({
                   <button
                     key={entry.id}
                     onClick={() => setTab(entry.id)}
-                    className={`whitespace-nowrap rounded-t-lg border-b-2 px-2.5 pb-2 text-[13px] transition-colors ${focusRing} ${
+                    className={`min-h-11 whitespace-nowrap rounded-t-lg border-b-2 px-2.5 pb-2 text-[13px] transition-colors md:min-h-0 ${focusRing} ${
                       tab === entry.id
                         ? "border-accent font-medium text-ink"
                         : "border-transparent text-dim hover:text-ink"
@@ -418,7 +418,7 @@ function ModelTab({
           ))}
         </Select>
       </Field>
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <Field label="Temperature" hint="Empty = provider default.">
           <Input
             type="number"
@@ -611,7 +611,7 @@ function SettingsTab({
           placeholder="python, github, testing"
         />
       </Field>
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <Field label="Team">
           <Select value={teamId} onChange={(e) => setTeamId(e.target.value)}>
             <option value="">No team</option>
@@ -635,7 +635,7 @@ function SettingsTab({
           </Select>
         </Field>
       </div>
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
         <Field label="Autonomy">
           <Select
             value={autonomy}

@@ -38,8 +38,13 @@ export function Chip({ children, href }: { children: React.ReactNode; href?: str
   const className =
     "inline-flex max-w-full items-center truncate rounded-full border border-line bg-raised px-2.5 py-0.5 text-xs text-dim";
   if (href) {
+    // Tappable chips grow to the 40px touch floor below md; static ones stay
+    // compact everywhere.
     return (
-      <Link href={href} className={`${className} hover:border-line-strong hover:text-ink`}>
+      <Link
+        href={href}
+        className={`${className} min-h-10 hover:border-line-strong hover:text-ink md:min-h-0`}
+      >
         {children}
       </Link>
     );
@@ -62,7 +67,9 @@ export function SectionCard({
 }) {
   return (
     <section className={`rounded-2xl border border-line bg-surface p-5 ${className}`}>
-      <header className="mb-3 flex items-start justify-between gap-3">
+      {/* flex-wrap: a busy action cluster (badge + several buttons) must drop
+          below the title at phone widths instead of crushing it. */}
+      <header className="mb-3 flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="font-display text-base font-semibold tracking-tight">{title}</h2>
           {description ? <p className="mt-0.5 text-[13px] text-dim">{description}</p> : null}
@@ -105,7 +112,7 @@ export function Disclosure({
         aria-expanded={open}
         aria-controls={id}
         onClick={() => setOpen((value) => !value)}
-        className="text-xs font-medium text-accent-strong hover:underline"
+        className="inline-flex min-h-10 items-center text-xs font-medium text-accent-strong hover:underline md:min-h-0"
       >
         {open ? (openLabel ?? `Hide ${label.replace(/^Show /, "")}`) : label}
       </button>
@@ -203,7 +210,7 @@ export function Segmented<T extends string>({
             role="radio"
             aria-checked={active}
             onClick={() => onChange(option.id)}
-            className={`inline-flex h-9 items-center gap-1.5 rounded-[10px] px-3 text-[13px] transition-colors ${
+            className={`inline-flex h-10 items-center gap-1.5 rounded-[10px] px-3 text-[13px] transition-colors md:h-9 ${
               active ? "bg-surface font-medium text-ink shadow-sm" : "text-dim hover:text-ink"
             }`}
           >

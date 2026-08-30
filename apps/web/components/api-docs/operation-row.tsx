@@ -182,7 +182,7 @@ export function OperationRow({
             className={`shrink-0 text-faint transition-transform ${expanded ? "rotate-90" : ""}`}
           />
           <MethodTag method={endpoint.method} className="w-16" />
-          <code className="shrink-0 break-all font-mono text-[13px] text-ink">{endpoint.path}</code>
+          <code className="min-w-0 break-all font-mono text-[13px] text-ink">{endpoint.path}</code>
           <span className="min-w-0 flex-1 truncate text-[13px] text-dim">{endpoint.title}</span>
           {endpoint.scope ? (
             <code className="ml-auto hidden shrink-0 rounded-md bg-hover px-1.5 py-0.5 font-mono text-[11px] text-dim sm:inline">

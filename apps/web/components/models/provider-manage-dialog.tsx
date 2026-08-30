@@ -305,7 +305,7 @@ export function BalanceBlock({
               min="0"
               step="any"
               aria-label="Loaded credits in dollars"
-              className="h-6 w-24 rounded-md border border-line bg-surface px-1.5 text-xs tabular-nums text-ink"
+              className="h-10 w-28 rounded-md border border-line bg-surface px-1.5 text-xs tabular-nums text-ink"
               value={creditsValue}
               disabled={!isAdmin || saveCredits.isPending}
               onChange={(e) => setCredits(e.target.value)}

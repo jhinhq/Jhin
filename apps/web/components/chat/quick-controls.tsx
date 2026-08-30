@@ -118,7 +118,7 @@ export function ChatQuickControls({
           role="dialog"
           aria-label={`Settings for ${agentName}`}
           data-testid="quick-controls-panel"
-          className="absolute right-0 top-full z-40 mt-1 max-h-[min(32rem,70vh)] w-[20rem] max-w-[calc(100vw-1.5rem)] space-y-4 overflow-y-auto overscroll-contain rounded-2xl border border-line bg-surface p-4 text-sm shadow-card"
+          className="absolute right-0 top-full z-40 mt-1 max-h-[min(32rem,calc(100dvh-12rem))] w-[20rem] max-w-[calc(100vw-1.5rem)] space-y-4 overflow-y-auto overscroll-contain rounded-2xl border border-line bg-surface p-4 text-sm shadow-card"
         >
           <ErrorNote message={error} />
           {agentId ? (
@@ -285,7 +285,7 @@ function QuickControlsBody({
                     aria-pressed={active}
                     disabled={setPreset.isPending}
                     onClick={() => setPreset.mutate(preset)}
-                    className={`flex-1 rounded-lg border px-2 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 ${
+                    className={`min-h-10 flex-1 rounded-lg border px-2 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 md:min-h-0 ${
                       active
                         ? "border-accent bg-accent-soft text-accent-strong"
                         : "border-line text-dim hover:border-line-strong hover:text-ink"

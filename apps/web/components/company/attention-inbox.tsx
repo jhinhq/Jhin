@@ -383,7 +383,7 @@ export function AttentionInbox({
                     <p className="text-sm font-medium text-ink">
                       {request.requester_agent_name ?? "An agent"} asked {request.target_agent_name ?? "a colleague"}: {request.title}
                     </p>
-                    {request.description ? <p className="mt-0.5 line-clamp-3 whitespace-pre-wrap text-[13px] text-dim">{request.description}</p> : null}
+                    {request.description ? <p className="mt-0.5 line-clamp-3 whitespace-pre-wrap break-words text-[13px] text-dim">{request.description}</p> : null}
                     {request.expected_output ? <p className="mt-1 text-[13px] text-dim">Expected: {request.expected_output}</p> : null}
                     <p className="mt-1 text-xs text-faint">
                       <StatusPill status={workRequestStatus(request.status)} />{" "}
@@ -439,7 +439,7 @@ export function AttentionInbox({
           <ul className="space-y-2">
             {proposedMemories.map((memory) => (
               <li key={memory.id} data-testid={`proposed-memory-${memory.id}`} className="rounded-xl border border-line bg-raised px-4 py-3">
-                <p className="whitespace-pre-wrap text-sm text-ink">{memory.content}</p>
+                <p className="whitespace-pre-wrap break-words text-sm text-ink">{memory.content}</p>
                 <p className="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-dim">
                   <Chip>{scopeLabel(memory.scope)}</Chip>
                   <Chip>{kindLabel(memory.kind)}</Chip>

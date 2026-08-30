@@ -293,9 +293,9 @@ export default function ApiDocsPage() {
                         id={`tag-${group.name}`}
                         data-tag={group.name}
                         data-testid="tag-section"
-                        className="scroll-mt-20"
+                        className="scroll-mt-[7.75rem] md:scroll-mt-20"
                       >
-                        <div className="sticky top-16 z-[5] -mx-1 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-line bg-bg/95 px-1 py-2 backdrop-blur">
+                        <div className="sticky top-[6.75rem] z-[5] -mx-1 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-line bg-bg/95 px-1 py-2 backdrop-blur md:top-16">
                           <div className="flex items-baseline gap-2">
                             <h2 className="font-display text-lg font-semibold text-ink">
                               {group.name}

@@ -173,7 +173,7 @@ function AutomationCard({
   });
 
   return (
-    <li className="flex flex-col gap-3 rounded-2xl border border-line bg-surface p-5 shadow-card">
+    <li className="flex min-w-0 flex-col gap-3 rounded-2xl border border-line bg-surface p-5 shadow-card">
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2.5">
           <span
@@ -195,9 +195,9 @@ function AutomationCard({
             assign to{" "}
             <Link
               href={trigger.target_agent_id ? `/agents/${trigger.target_agent_id}` : "/agents"}
-              className="inline-flex items-center gap-1 font-medium text-accent-strong hover:underline"
+              className="inline-flex max-w-full items-center gap-1 font-medium text-accent-strong hover:underline"
             >
-              <Avatar name={agentName} size="xs" /> {agentName}
+              <Avatar name={agentName} size="xs" /> <span className="truncate">{agentName}</span>
             </Link>
           </>
         ) : trigger.target_team_id ? (
@@ -228,7 +228,7 @@ function AutomationCard({
         </p>
       ) : null}
       <ErrorNote message={error} />
-      <div className="mt-auto flex items-center justify-between gap-2 pt-1">
+      <div className="mt-auto flex flex-wrap items-center justify-between gap-2 pt-1">
         <StatusPill status={run} />
         <button
           type="button"
@@ -241,7 +241,7 @@ function AutomationCard({
       </div>
       {showRuns ? <RecentRuns triggerId={trigger.id} /> : null}
       {isAdmin ? (
-        <div className="flex items-center gap-1.5 border-t border-line pt-3">
+        <div className="flex flex-wrap items-center gap-1.5 border-t border-line pt-3">
           <Button
             size="sm"
             onClick={() => toggle.mutate()}

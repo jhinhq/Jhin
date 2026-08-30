@@ -196,7 +196,7 @@ function OnboardingTour({
                     data-testid={`tour-step-${step.id}`}
                     aria-current={active ? "step" : undefined}
                     onClick={() => setIndex(position)}
-                    className={`flex min-h-8 items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 text-xs font-medium transition-colors ${focusRing} ${
+                    className={`flex min-h-10 items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 text-xs font-medium transition-colors md:min-h-8 ${focusRing} ${
                       active
                         ? "border-accent bg-accent-soft text-accent-strong"
                         : "border-line bg-raised text-dim hover:text-ink"

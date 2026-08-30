@@ -254,7 +254,7 @@ function AvatarDialogBody({
                           aria-label={color.label}
                           title={color.label}
                           onClick={() => setSelColor(color.hex)}
-                          className={`h-8 w-8 rounded-full border transition-transform ${focusRing} ${
+                          className={`h-10 w-10 rounded-full border transition-transform md:h-8 md:w-8 ${focusRing} ${
                             active ? "scale-110 border-ink ring-2 ring-accent/40" : "border-line"
                           }`}
                           style={{ backgroundColor: color.hex }}

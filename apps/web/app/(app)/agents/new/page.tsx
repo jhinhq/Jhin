@@ -404,7 +404,7 @@ function WizardInner() {
                           aria-label={color.label}
                           title={color.label}
                           onClick={() => patch({ avatarColor: color.hex })}
-                          className={`h-7 w-7 rounded-full border transition-transform ${focusRing} ${
+                          className={`h-10 w-10 rounded-full border transition-transform md:h-7 md:w-7 ${focusRing} ${
                             active ? "scale-110 border-ink" : "border-line"
                           }`}
                           style={{ backgroundColor: color.hex }}
@@ -551,13 +551,16 @@ function WizardInner() {
                               className="mt-0.5 accent-[var(--accent)]"
                             />
                             <span className="min-w-0 flex-1">
-                              <span className="flex items-center gap-2">
-                                <code className="font-mono text-[13px] font-medium">{tool.name}</code>
+                              <span className="flex flex-wrap items-center gap-2">
+                                <code className="min-w-0 truncate font-mono text-[13px] font-medium" title={tool.name}>{tool.name}</code>
                                 <Badge tone={riskTone(tool.risk)}>{tool.risk}</Badge>
                               </span>
                               <span className="mt-0.5 block text-xs text-dim">{tool.description}</span>
                               {tool.required_capability !== tool.name ? (
-                                <code className="mt-1 block font-mono text-xs text-faint">
+                                <code
+                                  className="mt-1 block truncate font-mono text-xs text-faint"
+                                  title={tool.required_capability}
+                                >
                                   {tool.required_capability}
                                 </code>
                               ) : null}
@@ -953,12 +956,12 @@ function WizardInner() {
 
         {errors.length > 0 ? <ErrorNote message={errors.join(" ")} /> : null}
 
-        <footer className="flex items-center justify-between border-t border-line pt-4">
+        <footer className="flex flex-wrap items-center justify-between gap-y-2 border-t border-line pt-4">
           <Button variant="ghost" onClick={() => goTo(step - 1)} disabled={step === 1}>
             <ChevronLeft size={14} /> Back
           </Button>
           {step < REVIEW_STEP ? (
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-2">
               {WIZARD_STEPS.some((entry) => entry.id === step + 1 && entry.optional) ? (
                 <Button variant="ghost" data-testid="wizard-skip" onClick={() => goTo(REVIEW_STEP)}>
                   Skip advanced setup

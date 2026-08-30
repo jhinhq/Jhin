@@ -566,7 +566,9 @@ export function PageHeader({
   compact?: boolean;
 }) {
   return (
-    <header className="sticky top-0 z-10 border-b border-line bg-bg/85 backdrop-blur md:top-0">
+    // top-14 below md: the mobile top bar (h-14, z-30) shares this scroll
+    // context, and a top-0 header would pin invisibly underneath it.
+    <header className="sticky top-14 z-10 border-b border-line bg-bg/85 backdrop-blur md:top-0">
       <div
         className={`mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-x-6 gap-y-3 px-5 md:px-8 ${
           compact ? "py-3" : "py-5"

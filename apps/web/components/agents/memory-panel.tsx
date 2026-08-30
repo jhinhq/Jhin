@@ -143,7 +143,7 @@ export function MemoryItemCard({
             title={pinned ? "Unpin" : "Pin so it's always recalled"}
             disabled={busy}
             onClick={() => onAction(memory, { type: "pin", pinned: !pinned })}
-            className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl transition-colors hover:bg-hover ${pinned ? "text-accent-strong" : "text-faint"}`}
+            className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-colors hover:bg-hover md:h-9 md:w-9 ${pinned ? "text-accent-strong" : "text-faint"}`}
           >
             <Star size={16} fill={pinned ? "currentColor" : "none"} aria-hidden />
           </button>
@@ -315,8 +315,12 @@ export function MemoryPanel({
       setError(err instanceof ApiError ? memoryErrorMessage(err.status, err.detail) : "Cleanup failed. Check your connection and try again."),
   });
 
+  // Agent names run up to 200 chars; the segmented control never wraps, so a
+  // long name would push the whole page sideways on a phone.
+  const shortName =
+    agent.name.length > 24 ? `${agent.name.slice(0, 24).trimEnd()}…` : agent.name;
   const scopeOptions: { id: MemoryScope; label: string }[] = [
-    { id: "agent", label: `${SCOPE_LABELS.agent} (just ${agent.name})` },
+    { id: "agent", label: `${SCOPE_LABELS.agent} (just ${shortName})` },
     ...(hasTeam ? [{ id: "team" as const, label: SCOPE_LABELS.team }] : []),
     { id: "workspace", label: SCOPE_LABELS.workspace },
   ];
