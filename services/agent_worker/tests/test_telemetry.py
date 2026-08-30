@@ -9,6 +9,7 @@ import json
 import logging
 import textwrap
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
@@ -144,8 +145,9 @@ class _Telemetry:
     order: list[str]
 
 
-@pytest.fixture
-def telemetry() -> Iterator[_Telemetry]:
+@contextmanager
+def _owned_telemetry() -> Iterator[_Telemetry]:
+    """One isolated telemetry world; loop-folded tests open a fresh one per case."""
     entry_context = otel_context.get_current()
     entry_span = trace.get_current_span()
     order: list[str] = []
@@ -176,6 +178,12 @@ def telemetry() -> Iterator[_Telemetry]:
         assert trace.get_current_span() is entry_span
         trace_provider.shutdown()
         metric_provider.shutdown()
+
+
+@pytest.fixture
+def telemetry() -> Iterator[_Telemetry]:
+    with _owned_telemetry() as owned:
+        yield owned
 
 
 def _metric_points(telemetry: _Telemetry, name: str) -> list[Any]:
@@ -646,13 +654,16 @@ class AgentWorld:
             await session.commit()
 
 
-@pytest.fixture
-async def world(
+@asynccontextmanager
+async def _owned_world(
     monkeypatch: pytest.MonkeyPatch,
     telemetry: _Telemetry,
     tmp_path: Path,
 ) -> AsyncIterator[AgentWorld]:
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'agent-telemetry.db'}")
+    """One isolated database world; loop-folded tests open a fresh one per case."""
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / f'agent-telemetry-{new_uuid7().hex}.db'}"
+    )
     async with engine.begin() as connection:
         await connection.exec_driver_sql("PRAGMA journal_mode=WAL")
         await connection.run_sync(Base.metadata.create_all)
@@ -776,6 +787,16 @@ async def world(
         await engine.dispose()
 
 
+@pytest.fixture
+async def world(
+    monkeypatch: pytest.MonkeyPatch,
+    telemetry: _Telemetry,
+    tmp_path: Path,
+) -> AsyncIterator[AgentWorld]:
+    async with _owned_world(monkeypatch, telemetry, tmp_path) as owned:
+        yield owned
+
+
 def _orm_row_payload(row: Any) -> tuple[tuple[str, object], ...]:
     return tuple(
         (column.name, deepcopy(getattr(row, column.name))) for column in row.__table__.columns
@@ -876,16 +897,10 @@ def test_all_agent_activity_groups_bind_one_exact_falsey_runtime_graph() -> None
     assert compatibility._projections._temporal_client is temporal
 
 
-@pytest.mark.parametrize(
-    "owner_kind",
-    ["reasoning", "projection", "composite", "compatibility"],
-)
-@pytest.mark.parametrize("missing", ["runtime", "metrics", "tracer"])
 def test_agent_activity_constructors_reject_missing_runtime_handles_without_fallback(
     monkeypatch: pytest.MonkeyPatch,
-    owner_kind: str,
-    missing: str,
 ) -> None:
+    # Loop-folded parametrize matrix: same full cross-product, one collected item.
     fallback_calls: list[str] = []
 
     def forbidden_metrics() -> object:
@@ -900,31 +915,34 @@ def test_agent_activity_constructors_reject_missing_runtime_handles_without_fall
     monkeypatch.setattr(projections_module, "noop_metrics", forbidden_metrics)
     monkeypatch.setattr(reasoning_module, "noop_tracer", forbidden_tracer, raising=False)
     monkeypatch.setattr(projections_module, "noop_tracer", forbidden_tracer, raising=False)
-    metrics = cast(JhinMetrics, object())
-    tracer = cast(Tracer, object())
-    if missing == "runtime":
-        resources = SimpleNamespace()
-    elif missing == "metrics":
-        resources = SimpleNamespace(runtime=SimpleNamespace(tracer=tracer))
-    else:
-        resources = SimpleNamespace(runtime=SimpleNamespace(metrics=metrics))
-    temporal = cast(Any, object())
+    for missing in ("runtime", "metrics", "tracer"):
+        for owner_kind in ("reasoning", "projection", "composite", "compatibility"):
+            case = f"missing={missing}, owner_kind={owner_kind}"
+            metrics = cast(JhinMetrics, object())
+            tracer = cast(Tracer, object())
+            if missing == "runtime":
+                resources = SimpleNamespace()
+            elif missing == "metrics":
+                resources = SimpleNamespace(runtime=SimpleNamespace(tracer=tracer))
+            else:
+                resources = SimpleNamespace(runtime=SimpleNamespace(metrics=metrics))
+            temporal = cast(Any, object())
 
-    caught: BaseException | None = None
-    try:
-        if owner_kind == "reasoning":
-            AgentReasoningActivities(cast(Any, resources))
-        elif owner_kind == "projection":
-            AgentProjectionActivities(cast(Any, resources), temporal_client=temporal)
-        elif owner_kind == "composite":
-            AgentActivities(cast(Any, resources), temporal_client=temporal)
-        else:
-            AgentCompatibilityActivities(cast(Any, resources), temporal)
-    except BaseException as error:
-        caught = error
+            caught: BaseException | None = None
+            try:
+                if owner_kind == "reasoning":
+                    AgentReasoningActivities(cast(Any, resources))
+                elif owner_kind == "projection":
+                    AgentProjectionActivities(cast(Any, resources), temporal_client=temporal)
+                elif owner_kind == "composite":
+                    AgentActivities(cast(Any, resources), temporal_client=temporal)
+                else:
+                    AgentCompatibilityActivities(cast(Any, resources), temporal)
+            except BaseException as error:
+                caught = error
 
-    assert isinstance(caught, AttributeError)
-    assert fallback_calls == []
+            assert isinstance(caught, AttributeError), case
+            assert fallback_calls == [], case
 
 
 def test_composite_agent_constructor_calls_both_base_initializers_once_with_exact_graph(
@@ -955,141 +973,92 @@ def test_composite_agent_constructor_calls_both_base_initializers_once_with_exac
     ]
 
 
-@pytest.mark.parametrize(
-    ("mutation", "invalid_value"),
-    [
-        pytest.param("_REASON_SPAN_NAME", "agent.unregistered", id="span-name"),
-        pytest.param(
-            "_REASON_WORKSPACE_ATTRIBUTE",
-            "jhin.unregistered",
-            id="workspace-attribute",
-        ),
-        pytest.param(
-            "_REASON_TASK_ATTRIBUTE",
-            "jhin.unregistered",
-            id="task-attribute",
-        ),
-        pytest.param(
-            "_REASON_RUN_ATTRIBUTE",
-            "jhin.unregistered",
-            id="run-attribute",
-        ),
-        pytest.param(
-            "_REASON_CORRELATION_ATTRIBUTE",
-            "jhin.unregistered",
-            id="correlation-attribute",
-        ),
-        pytest.param("_REASON_OUTCOME_KEY", "jhin.unregistered", id="late-attribute"),
-        pytest.param(
-            "_REASON_COMPLETED_VALUE",
-            "unregistered_outcome",
-            id="completed-value",
-        ),
-        pytest.param(
-            "_REASON_FAILED_VALUE",
-            "unregistered_outcome",
-            id="failed-value",
-        ),
-        pytest.param(
-            "_REASON_CANCELLED_VALUE",
-            "unregistered_outcome",
-            id="cancelled-value",
-        ),
-        pytest.param("_TOKEN_METRIC", "unregistered_metric", id="token-metric-name"),
-        pytest.param("_COST_METRIC", "unregistered_metric", id="cost-metric-name"),
-        pytest.param(
-            "_TOKEN_PROVIDER_LABEL",
-            "unregistered_label",
-            id="token-provider-label",
-        ),
-        pytest.param(
-            "_TOKEN_DIRECTION_LABEL",
-            "unregistered_label",
-            id="token-direction-label",
-        ),
-        pytest.param(
-            "_TOKEN_INPUT_VALUE",
-            "unregistered_direction",
-            id="input-direction-value",
-        ),
-        pytest.param(
-            "_TOKEN_OUTPUT_VALUE",
-            "unregistered_direction",
-            id="output-direction-value",
-        ),
-        pytest.param(
-            "_TOKEN_CACHED_VALUE",
-            "unregistered_direction",
-            id="cached-direction-value",
-        ),
-        pytest.param(
-            "_COST_PROVIDER_LABEL",
-            "unregistered_label",
-            id="cost-provider-label",
-        ),
-        pytest.param(
-            "_USAGE_VALIDATION_MEASUREMENT",
-            -1,
-            id="usage-measurement",
-        ),
-    ],
+_REASONING_SCHEMA_MUTATIONS: tuple[tuple[str, object], ...] = (
+    ("_REASON_SPAN_NAME", "agent.unregistered"),
+    ("_REASON_WORKSPACE_ATTRIBUTE", "jhin.unregistered"),
+    ("_REASON_TASK_ATTRIBUTE", "jhin.unregistered"),
+    ("_REASON_RUN_ATTRIBUTE", "jhin.unregistered"),
+    ("_REASON_CORRELATION_ATTRIBUTE", "jhin.unregistered"),
+    ("_REASON_OUTCOME_KEY", "jhin.unregistered"),
+    ("_REASON_COMPLETED_VALUE", "unregistered_outcome"),
+    ("_REASON_FAILED_VALUE", "unregistered_outcome"),
+    ("_REASON_CANCELLED_VALUE", "unregistered_outcome"),
+    ("_TOKEN_METRIC", "unregistered_metric"),
+    ("_COST_METRIC", "unregistered_metric"),
+    ("_TOKEN_PROVIDER_LABEL", "unregistered_label"),
+    ("_TOKEN_DIRECTION_LABEL", "unregistered_label"),
+    ("_TOKEN_INPUT_VALUE", "unregistered_direction"),
+    ("_TOKEN_OUTPUT_VALUE", "unregistered_direction"),
+    ("_TOKEN_CACHED_VALUE", "unregistered_direction"),
+    ("_COST_PROVIDER_LABEL", "unregistered_label"),
+    ("_USAGE_VALIDATION_MEASUREMENT", -1),
 )
-@pytest.mark.parametrize("entrypoint", ["activity", "legacy"])
+
+
 async def test_invalid_reasoning_telemetry_schema_fails_before_every_product_or_backend_touch(
     world: AgentWorld,
-    monkeypatch: pytest.MonkeyPatch,
-    mutation: str,
-    invalid_value: object,
-    entrypoint: str,
 ) -> None:
-    monkeypatch.setattr(reasoning_module, mutation, invalid_value, raising=False)
-    if entrypoint == "legacy":
-        await world.seed_manifest_only()
-    backend_metrics = _BackendTouchMetrics()
-    backend_tracer = _BackendTouchTracer()
-    world.resources.runtime.metrics = cast(JhinMetrics, backend_metrics)
-    world.resources.runtime.tracer = cast(Tracer, backend_tracer)
-    world.reasoning = _ProbeReasoning(world.resources, world.telemetry.order)
-    _ProbeSession.scalar_statements = []
-    secret_probe = _SecretStoreProbe("private-prevalidation-secret")
-    monkeypatch.setattr(
-        reasoning_module,
-        "SecretStore",
-        lambda *_args, **_kwargs: secret_probe,
-    )
-    snapshot = world.snapshot.model_copy(
-        update={
-            "model_profile": world.snapshot.model_profile.model_copy(
-                update={"secret_id": new_uuid7()}
-            )
-        }
-    )
-    params = replace(world.params, snapshot_json=snapshot.model_dump_json())
-    world.raw_model.responses.append(world.response())
+    # Loop-folded parametrize matrix: every mutation runs against both entrypoints,
+    # one collected item.  Each mutation is applied in its own monkeypatch context so
+    # exactly one schema constant is invalid per case.  A single world is safe because
+    # every case asserts the activity fails before touching the database, telemetry
+    # backends, secrets, or the model factory - state cannot drift between cases.
+    # The "activity" pass runs first (no manifest rows); the "legacy" pass then seeds
+    # its manifest-only row once, exactly as each fresh parametrized world did.
+    for entrypoint in ("activity", "legacy"):
+        if entrypoint == "legacy":
+            await world.seed_manifest_only()
+        for mutation, invalid_value in _REASONING_SCHEMA_MUTATIONS:
+            case = f"entrypoint={entrypoint}, mutation={mutation}, invalid_value={invalid_value!r}"
+            with pytest.MonkeyPatch.context() as monkeypatch:
+                monkeypatch.setattr(reasoning_module, mutation, invalid_value, raising=False)
+                backend_metrics = _BackendTouchMetrics()
+                backend_tracer = _BackendTouchTracer()
+                world.resources.runtime.metrics = cast(JhinMetrics, backend_metrics)
+                world.resources.runtime.tracer = cast(Tracer, backend_tracer)
+                world.reasoning = _ProbeReasoning(world.resources, world.telemetry.order)
+                _ProbeSession.scalar_statements = []
+                secret_probe = _SecretStoreProbe("private-prevalidation-secret")
+                monkeypatch.setattr(
+                    reasoning_module,
+                    "SecretStore",
+                    lambda *_args, _probe=secret_probe, **_kwargs: _probe,
+                )
+                snapshot = world.snapshot.model_copy(
+                    update={
+                        "model_profile": world.snapshot.model_profile.model_copy(
+                            update={"secret_id": new_uuid7()}
+                        )
+                    }
+                )
+                params = replace(world.params, snapshot_json=snapshot.model_dump_json())
+                world.raw_model.responses.append(world.response())
 
-    caught: ValueError | None = None
-    try:
-        if entrypoint == "activity":
-            await world.reasoning.reason_agent_step_activity(params)
-        else:
-            await world.reasoning.reason_agent_step(
-                params,
-                legacy_sidecar_repair=True,
-            )
-    except ValueError as error:
-        caught = error
+                caught: ValueError | None = None
+                try:
+                    if entrypoint == "activity":
+                        await world.reasoning.reason_agent_step_activity(params)
+                    else:
+                        await world.reasoning.reason_agent_step(
+                            params,
+                            legacy_sidecar_repair=True,
+                        )
+                except ValueError as error:
+                    caught = error
 
-    assert caught is not None
-    assert _ProbeSession.scalar_statements == []
-    assert secret_probe.reveals == 0
-    assert world.factory_calls == []
-    assert world.raw_model.requests == []
-    assert await world.count_events("agent.step.tool_manifest") == int(entrypoint == "legacy")
-    assert await world.count_events("agent.step.reasoning") == 0
-    assert backend_metrics.calls == 0
-    assert backend_tracer.calls == 0
-    assert _spans(world.telemetry, "agent.reason_step") == []
-    assert _spans(world.telemetry, "model.request") == []
+                assert caught is not None, case
+                assert _ProbeSession.scalar_statements == [], case
+                assert secret_probe.reveals == 0, case
+                assert world.factory_calls == [], case
+                assert world.raw_model.requests == [], case
+                assert await world.count_events("agent.step.tool_manifest") == int(
+                    entrypoint == "legacy"
+                ), case
+                assert await world.count_events("agent.step.reasoning") == 0, case
+                assert backend_metrics.calls == 0, case
+                assert backend_tracer.calls == 0, case
+                assert _spans(world.telemetry, "agent.reason_step") == [], case
+                assert _spans(world.telemetry, "model.request") == [], case
 
 
 async def test_fresh_commit_hook_owns_current_reason_span_model_child_and_usage(
@@ -1300,9 +1269,13 @@ async def _add_other_task(
     return task
 
 
-@pytest.mark.parametrize(
-    "mismatch",
-    [
+async def test_every_reasoning_identity_mismatch_rejects_before_secret_factory_or_span(
+    tmp_path: Path,
+) -> None:
+    # Loop-folded parametrize list: same cases, one collected item.  Each mismatch
+    # mutates persisted rows destructively, so every case gets its own fresh world
+    # (exactly the isolation the parametrized fixtures provided).
+    mismatches = (
         "missing_workspace",
         "missing_task",
         "missing_run",
@@ -1319,12 +1292,19 @@ async def _add_other_task(
         "task_assignment",
         "snapshot_workspace",
         "snapshot_agent",
-    ],
-)
-async def test_every_reasoning_identity_mismatch_rejects_before_secret_factory_or_span(
+    )
+    for mismatch in mismatches:
+        case = f"mismatch={mismatch}"
+        with _owned_telemetry() as telemetry, pytest.MonkeyPatch.context() as monkeypatch:
+            async with _owned_world(monkeypatch, telemetry, tmp_path) as world:
+                await _assert_identity_mismatch_rejects(world, monkeypatch, mismatch, case)
+
+
+async def _assert_identity_mismatch_rejects(
     world: AgentWorld,
     monkeypatch: pytest.MonkeyPatch,
     mismatch: str,
+    case: str,
 ) -> None:
     params = replace(world.params)
     snapshot = world.snapshot
@@ -1398,11 +1378,11 @@ async def test_every_reasoning_identity_mismatch_rejects_before_secret_factory_o
     with pytest.raises(ApplicationError):
         await world.reasoning.reason_agent_step_activity(params)
 
-    assert secret_probe.reveals == 0
-    assert world.factory_calls == []
-    assert world.raw_model.requests == []
-    assert _spans(world.telemetry, "agent.reason_step") == []
-    assert _spans(world.telemetry, "model.request") == []
+    assert secret_probe.reveals == 0, case
+    assert world.factory_calls == [], case
+    assert world.raw_model.requests == [], case
+    assert _spans(world.telemetry, "agent.reason_step") == [], case
+    assert _spans(world.telemetry, "model.request") == [], case
 
 
 class _HostileCorrelation:
@@ -1600,27 +1580,44 @@ class _SelectiveAgentLifecycleTracer:
         return proxy
 
 
-@pytest.mark.parametrize(
-    "phase",
-    [
-        "construction",
-        "manager_enter",
-        "late_set",
-        "error_status",
-        "error_attribute",
-        "manager_exit",
-        "end",
-        "detach",
-    ],
+_REASON_SPAN_PHASES = (
+    "construction",
+    "manager_enter",
+    "late_set",
+    "error_status",
+    "error_attribute",
+    "manager_exit",
+    "end",
+    "detach",
 )
-@pytest.mark.parametrize("mode", ["success", "failure", "cancellation"])
-@pytest.mark.parametrize("diagnostic_kind", ["ordinary", "cancellation"])
+
+
 async def test_hostile_reason_span_lifecycle_preserves_product_db_and_context_authority(
+    tmp_path: Path,
+) -> None:
+    # Loop-folded parametrize matrix: same full cross-product, one collected item.
+    # Each case owns a fresh telemetry+database world, matching the old per-item fixtures.
+    for diagnostic_kind in ("ordinary", "cancellation"):
+        for mode in ("success", "failure", "cancellation"):
+            for phase in _REASON_SPAN_PHASES:
+                case = f"diagnostic_kind={diagnostic_kind}, mode={mode}, phase={phase}"
+                with (
+                    _owned_telemetry() as telemetry,
+                    pytest.MonkeyPatch.context() as monkeypatch,
+                ):
+                    async with _owned_world(monkeypatch, telemetry, tmp_path) as world:
+                        await _assert_hostile_reason_span_lifecycle(
+                            world, monkeypatch, phase, mode, diagnostic_kind, case
+                        )
+
+
+async def _assert_hostile_reason_span_lifecycle(
     world: AgentWorld,
     monkeypatch: pytest.MonkeyPatch,
     phase: str,
     mode: str,
     diagnostic_kind: str,
+    case: str,
 ) -> None:
     diagnostic: BaseException = _HostileAgentTelemetryError("private-agent-span-diagnostic")
     if diagnostic_kind == "cancellation":
@@ -1664,10 +1661,10 @@ async def test_hostile_reason_span_lifecycle_preserves_product_db_and_context_au
         caught = error
 
     if mode == "success":
-        assert caught is None
-        assert result == ReasonAgentStepResult(call_count=0)
-        assert await world.count_events("agent.step.tool_manifest") == 1
-        assert await world.count_events("agent.step.reasoning") == 1
+        assert caught is None, case
+        assert result == ReasonAgentStepResult(call_count=0), case
+        assert await world.count_events("agent.step.tool_manifest") == 1, case
+        assert await world.count_events("agent.step.reasoning") == 1, case
         assert (
             _metric_sum(
                 world.telemetry,
@@ -1676,47 +1673,52 @@ async def test_hostile_reason_span_lifecycle_preserves_product_db_and_context_au
                 direction="input",
             )
             == 7
-        )
+        ), case
     elif mode == "failure":
-        assert isinstance(caught, ApplicationError)
-        assert caught.type == "model_provider_error"
-        assert await world.count_events("agent.step.tool_manifest") == 0
-        assert await world.count_events("agent.step.reasoning") == 0
-        assert _metric_points(world.telemetry, "model_tokens_total") == []
+        assert isinstance(caught, ApplicationError), case
+        assert caught.type == "model_provider_error", case
+        assert await world.count_events("agent.step.tool_manifest") == 0, case
+        assert await world.count_events("agent.step.reasoning") == 0, case
+        assert _metric_points(world.telemetry, "model_tokens_total") == [], case
     else:
-        assert caught is product_error
-        assert _traceback_contains(caught.__traceback__, world.raw_model.raised_traceback)
-        assert await world.count_events("agent.step.tool_manifest") == 0
-        assert await world.count_events("agent.step.reasoning") == 0
-        assert _metric_points(world.telemetry, "model_tokens_total") == []
-    assert tracer.agent_calls == 1
-    assert len(world.raw_model.requests) == 1
-    assert otel_context.get_current() is entry_context
-    assert trace.get_current_span() is entry_span
+        assert caught is product_error, case
+        assert _traceback_contains(caught.__traceback__, world.raw_model.raised_traceback), case
+        assert await world.count_events("agent.step.tool_manifest") == 0, case
+        assert await world.count_events("agent.step.reasoning") == 0, case
+        assert _metric_points(world.telemetry, "model_tokens_total") == [], case
+    assert tracer.agent_calls == 1, case
+    assert len(world.raw_model.requests) == 1, case
+    assert otel_context.get_current() is entry_context, case
+    assert trace.get_current_span() is entry_span, case
     expected_reason_spans = 0 if phase in {"construction", "manager_enter"} else 1
-    assert len(_spans(world.telemetry, "agent.reason_step")) == expected_reason_spans
-    assert len(_spans(world.telemetry, "model.request")) == 1
+    assert len(_spans(world.telemetry, "agent.reason_step")) == expected_reason_spans, case
+    assert len(_spans(world.telemetry, "model.request")) == 1, case
 
 
-@pytest.mark.parametrize(
-    "phase",
-    [
-        "construction",
-        "manager_enter",
-        "late_set",
-        "error_status",
-        "error_attribute",
-        "manager_exit",
-        "end",
-        "detach",
-    ],
-)
-@pytest.mark.parametrize("diagnostic_kind", ["ordinary", "cancellation"])
 async def test_hostile_reason_span_preserves_exact_application_error_and_durable_payload(
+    tmp_path: Path,
+) -> None:
+    # Loop-folded parametrize matrix: same full cross-product, one collected item.
+    # Each case owns a fresh telemetry+database world, matching the old per-item fixtures.
+    for diagnostic_kind in ("ordinary", "cancellation"):
+        for phase in _REASON_SPAN_PHASES:
+            case = f"diagnostic_kind={diagnostic_kind}, phase={phase}"
+            with (
+                _owned_telemetry() as telemetry,
+                pytest.MonkeyPatch.context() as monkeypatch,
+            ):
+                async with _owned_world(monkeypatch, telemetry, tmp_path) as world:
+                    await _assert_hostile_reason_span_preserves_error(
+                        world, monkeypatch, phase, diagnostic_kind, case
+                    )
+
+
+async def _assert_hostile_reason_span_preserves_error(
     world: AgentWorld,
     monkeypatch: pytest.MonkeyPatch,
     phase: str,
     diagnostic_kind: str,
+    case: str,
 ) -> None:
     product_error = ModelProviderError("bounded-control-provider-failure")
     world.raw_model.generate_error = product_error
@@ -1752,10 +1754,10 @@ async def test_hostile_reason_span_preserves_exact_application_error_and_durable
     hostile = await _capture_reason_application_error(world)
     hostile_payload = await _durable_reasoning_payload(world)
 
-    assert clean_payload == before
-    assert hostile_payload == clean_payload
-    assert _application_error_public(hostile) == clean_public
-    assert _traceback_frame_names(hostile.__traceback__) == clean_traceback
+    assert clean_payload == before, case
+    assert hostile_payload == clean_payload, case
+    assert _application_error_public(hostile) == clean_public, case
+    assert _traceback_frame_names(hostile.__traceback__) == clean_traceback, case
     assert clean_public == {
         "message": "bounded-control-provider-failure",
         "args": ("model_provider_error: bounded-control-provider-failure",),
@@ -1767,13 +1769,13 @@ async def test_hostile_reason_span_preserves_exact_application_error_and_durable
         "suppress_context": True,
         "cause_type": None,
         "cause_args": None,
-    }
-    assert len(world.raw_model.requests) == 2
-    assert len(world.factory_calls) == 2
+    }, case
+    assert len(world.raw_model.requests) == 2, case
+    assert len(world.factory_calls) == 2, case
 
 
 _FATAL_REASON_CASES = [
-    pytest.param(phase, mode, id=f"{phase}-{mode}")
+    (phase, mode)
     for phase, modes in (
         ("construction", ("success", "failure", "cancellation")),
         ("manager_enter", ("success", "failure", "cancellation")),
@@ -1787,151 +1789,162 @@ _FATAL_REASON_CASES = [
     for mode in modes
 ]
 
+_FATAL_REASON_PHASE_FRAMES = {
+    "construction": (
+        "__enter__",
+        "_reason_span",
+        "__enter__",
+        "safe_span",
+        "start_as_current_span",
+        "_raise_owned",
+    ),
+    "manager_enter": (
+        "__enter__",
+        "_reason_span",
+        "__enter__",
+        "safe_span",
+        "__enter__",
+        "_raise_owned",
+    ),
+    "late_set": (
+        "_finish_reason_span",
+        "_run_agent_diagnostic",
+        "<lambda>",
+        "set_span_attributes",
+        "set_attribute",
+        "_raise_owned",
+    ),
+    "error_status": (
+        "_finish_reason_span",
+        "_run_agent_diagnostic",
+        "<lambda>",
+        "record_span_error",
+        "set_status",
+        "_raise_owned",
+    ),
+    "error_attribute": (
+        "_finish_reason_span",
+        "_run_agent_diagnostic",
+        "<lambda>",
+        "record_span_error",
+        "set_attribute",
+        "_raise_owned",
+    ),
+    "manager_exit": (
+        "__exit__",
+        "_reason_span",
+        "__exit__",
+        "safe_span",
+        "__exit__",
+        "_raise_owned",
+    ),
+    "end": (
+        "__exit__",
+        "_reason_span",
+        "__exit__",
+        "safe_span",
+        "__exit__",
+        "__exit__",
+        "use_span",
+        "end",
+        "_raise_owned",
+    ),
+    "detach": (
+        "__exit__",
+        "_reason_span",
+        "__exit__",
+        "safe_span",
+        "__exit__",
+        "__exit__",
+        "use_span",
+        "fatal_agent_detach",
+        "_raise_owned",
+    ),
+}
 
-@pytest.mark.parametrize(("phase", "mode"), _FATAL_REASON_CASES)
-@pytest.mark.parametrize("fatal_type", [KeyboardInterrupt, SystemExit])
+
 async def test_fatal_reason_span_backend_error_propagates_exactly_with_bound_timing(
-    world: AgentWorld,
-    monkeypatch: pytest.MonkeyPatch,
-    phase: str,
-    mode: str,
-    fatal_type: type[BaseException],
+    tmp_path: Path,
 ) -> None:
-    fatal = fatal_type("fatal-agent-span-backend")
-    tracer = _SelectiveAgentLifecycleTracer(world.telemetry.tracer, phase, fatal)
-    world.resources.runtime.tracer = cast(Tracer, tracer)
-    world.reasoning = _ProbeReasoning(world.resources, world.telemetry.order)
-    detach_calls = 0
-    if phase == "detach":
-        original_detach = otel_context.detach
+    # Loop-folded parametrize matrix: same full cross-product, one collected item.
+    # Each case owns a fresh telemetry+database world.  The reasoning call stays
+    # lexically inside this function because the expected traceback frame names
+    # begin with this test function's own name.
+    for fatal_type in (KeyboardInterrupt, SystemExit):
+        for phase, mode in _FATAL_REASON_CASES:
+            case = f"fatal_type={fatal_type.__name__}, phase={phase}, mode={mode}"
+            with (
+                _owned_telemetry() as telemetry,
+                pytest.MonkeyPatch.context() as monkeypatch,
+            ):
+                async with _owned_world(monkeypatch, telemetry, tmp_path) as world:
+                    fatal = fatal_type("fatal-agent-span-backend")
+                    tracer = _SelectiveAgentLifecycleTracer(world.telemetry.tracer, phase, fatal)
+                    world.resources.runtime.tracer = cast(Tracer, tracer)
+                    world.reasoning = _ProbeReasoning(world.resources, world.telemetry.order)
+                    detach_calls = 0
+                    if phase == "detach":
+                        original_detach = otel_context.detach
 
-        def fatal_agent_detach(token: object) -> None:
-            nonlocal detach_calls
-            original_detach(token)
-            detach_calls += 1
-            if detach_calls == 2:
-                tracer._raise_owned()
+                        def fatal_agent_detach(
+                            token: object,
+                            original_detach: Callable[[object], None] = original_detach,
+                            tracer: _SelectiveAgentLifecycleTracer = tracer,
+                        ) -> None:
+                            nonlocal detach_calls
+                            original_detach(token)
+                            detach_calls += 1
+                            if detach_calls == 2:
+                                tracer._raise_owned()
 
-        monkeypatch.setattr(otel_context, "detach", fatal_agent_detach)
+                        monkeypatch.setattr(otel_context, "detach", fatal_agent_detach)
 
-    product_error: BaseException | None = None
-    if mode == "success":
-        world.raw_model.responses.append(world.response())
-    elif mode == "failure":
-        product_error = ModelProviderError("active-agent-product-failure")
-        world.raw_model.generate_error = product_error
-    else:
-        product_error = asyncio.CancelledError("active-agent-product-cancellation")
-        world.raw_model.generate_error = product_error
-    entry_context = otel_context.get_current()
-    entry_span = trace.get_current_span()
+                    product_error: BaseException | None = None
+                    if mode == "success":
+                        world.raw_model.responses.append(world.response())
+                    elif mode == "failure":
+                        product_error = ModelProviderError("active-agent-product-failure")
+                        world.raw_model.generate_error = product_error
+                    else:
+                        product_error = asyncio.CancelledError("active-agent-product-cancellation")
+                        world.raw_model.generate_error = product_error
+                    entry_context = otel_context.get_current()
+                    entry_span = trace.get_current_span()
 
-    with pytest.raises(fatal_type) as caught:
-        await world.reasoning.reason_agent_step_activity(world.params)
+                    with pytest.raises(fatal_type) as caught:
+                        await world.reasoning.reason_agent_step_activity(world.params)
 
-    assert caught.value is fatal
-    raise_sites = [
-        site
-        for site in (
-            tracer.raised_traceback,
-            None if tracer.manager is None else tracer.manager.raised_traceback,
-            None if tracer.span is None else tracer.span.raised_traceback,
-        )
-        if site is not None
-    ]
-    assert len(raise_sites) == 1
-    assert _traceback_tail(caught.value.__traceback__) is raise_sites[0]
-    common_frames = (
-        "test_fatal_reason_span_backend_error_propagates_exactly_with_bound_timing",
-        "reason_agent_step_activity",
-        "reason_agent_step",
-    )
-    phase_frames = {
-        "construction": (
-            "__enter__",
-            "_reason_span",
-            "__enter__",
-            "safe_span",
-            "start_as_current_span",
-            "_raise_owned",
-        ),
-        "manager_enter": (
-            "__enter__",
-            "_reason_span",
-            "__enter__",
-            "safe_span",
-            "__enter__",
-            "_raise_owned",
-        ),
-        "late_set": (
-            "_finish_reason_span",
-            "_run_agent_diagnostic",
-            "<lambda>",
-            "set_span_attributes",
-            "set_attribute",
-            "_raise_owned",
-        ),
-        "error_status": (
-            "_finish_reason_span",
-            "_run_agent_diagnostic",
-            "<lambda>",
-            "record_span_error",
-            "set_status",
-            "_raise_owned",
-        ),
-        "error_attribute": (
-            "_finish_reason_span",
-            "_run_agent_diagnostic",
-            "<lambda>",
-            "record_span_error",
-            "set_attribute",
-            "_raise_owned",
-        ),
-        "manager_exit": (
-            "__exit__",
-            "_reason_span",
-            "__exit__",
-            "safe_span",
-            "__exit__",
-            "_raise_owned",
-        ),
-        "end": (
-            "__exit__",
-            "_reason_span",
-            "__exit__",
-            "safe_span",
-            "__exit__",
-            "__exit__",
-            "use_span",
-            "end",
-            "_raise_owned",
-        ),
-        "detach": (
-            "__exit__",
-            "_reason_span",
-            "__exit__",
-            "safe_span",
-            "__exit__",
-            "__exit__",
-            "use_span",
-            "fatal_agent_detach",
-            "_raise_owned",
-        ),
-    }
-    assert _traceback_frame_names(caught.value.__traceback__) == (
-        common_frames + phase_frames[phase]
-    )
-    assert tracer.agent_calls == 1
-    expected_product_calls = 0 if phase in {"construction", "manager_enter"} else 1
-    assert len(world.raw_model.requests) == expected_product_calls
-    if expected_product_calls and mode == "success":
-        assert await world.count_events("agent.step.tool_manifest") == 1
-        assert await world.count_events("agent.step.reasoning") == 1
-    else:
-        assert await world.count_events("agent.step.tool_manifest") == 0
-        assert await world.count_events("agent.step.reasoning") == 0
-    assert otel_context.get_current() is entry_context
-    assert trace.get_current_span() is entry_span
+                    assert caught.value is fatal, case
+                    raise_sites = [
+                        site
+                        for site in (
+                            tracer.raised_traceback,
+                            None if tracer.manager is None else tracer.manager.raised_traceback,
+                            None if tracer.span is None else tracer.span.raised_traceback,
+                        )
+                        if site is not None
+                    ]
+                    assert len(raise_sites) == 1, case
+                    assert _traceback_tail(caught.value.__traceback__) is raise_sites[0], case
+                    common_frames = (
+                        "test_fatal_reason_span_backend_error_propagates_exactly_with_bound_timing",
+                        "reason_agent_step_activity",
+                        "reason_agent_step",
+                    )
+                    assert _traceback_frame_names(caught.value.__traceback__) == (
+                        common_frames + _FATAL_REASON_PHASE_FRAMES[phase]
+                    ), case
+                    assert tracer.agent_calls == 1, case
+                    expected_product_calls = 0 if phase in {"construction", "manager_enter"} else 1
+                    assert len(world.raw_model.requests) == expected_product_calls, case
+                    if expected_product_calls and mode == "success":
+                        assert await world.count_events("agent.step.tool_manifest") == 1, case
+                        assert await world.count_events("agent.step.reasoning") == 1, case
+                    else:
+                        assert await world.count_events("agent.step.tool_manifest") == 0, case
+                        assert await world.count_events("agent.step.reasoning") == 0, case
+                    assert otel_context.get_current() is entry_context, case
+                    assert trace.get_current_span() is entry_span, case
 
 
 class _IntSubclass(int):
@@ -1967,36 +1980,55 @@ class _HostileIntSubclass(_IntSubclass):
         self._touch()
 
 
-_USAGE_CASES = [
-    pytest.param(False, None, id="bool"),
-    pytest.param(-1, None, id="negative"),
-    pytest.param(1.5, None, id="float"),
-    pytest.param(0, None, id="zero"),
-    pytest.param(_HostileIntSubclass(9), None, id="int-subclass"),
-    pytest.param(9, 9, id="valid"),
-    pytest.param(10**300, 10**300, id="large-finite"),
-    pytest.param(10**400, None, id="overflow"),
+_USAGE_CASES: list[tuple[object, int | None]] = [
+    (False, None),
+    (-1, None),
+    (1.5, None),
+    (0, None),
+    (_HostileIntSubclass(9), None),
+    (9, 9),
+    (10**300, 10**300),
+    (10**400, None),
 ]
 
 
-@pytest.mark.parametrize(
-    ("field", "direction"),
-    [
+async def test_each_late_persisted_usage_value_is_independently_bounded_after_commit(
+    tmp_path: Path,
+) -> None:
+    # Loop-folded parametrize matrix: same full cross-product, one collected item.
+    # Each case owns a fresh telemetry+database world, matching the old per-item
+    # fixtures (each case commits durable rows and records metric points).
+    field_directions: tuple[tuple[str, str | None], ...] = (
         ("input_tokens", "input"),
         ("output_tokens", "output"),
         ("cached_tokens", "cached"),
         ("cost_micros", None),
-    ],
-)
-@pytest.mark.parametrize(("late_value", "expected_target"), _USAGE_CASES)
-@pytest.mark.parametrize("owner", ["fresh", "legacy"])
-async def test_each_late_persisted_usage_value_is_independently_bounded_after_commit(
+    )
+    for owner in ("fresh", "legacy"):
+        for late_value, expected_target in _USAGE_CASES:
+            for field, direction in field_directions:
+                case = (
+                    f"owner={owner}, field={field}, late_value={late_value!r}"
+                    f" ({type(late_value).__name__}), expected_target={expected_target!r}"
+                )
+                with (
+                    _owned_telemetry() as telemetry,
+                    pytest.MonkeyPatch.context() as monkeypatch,
+                ):
+                    async with _owned_world(monkeypatch, telemetry, tmp_path) as world:
+                        await _assert_late_usage_value_bounded(
+                            world, field, direction, late_value, expected_target, owner, case
+                        )
+
+
+async def _assert_late_usage_value_bounded(
     world: AgentWorld,
     field: str,
     direction: str | None,
     late_value: object,
     expected_target: int | None,
     owner: str,
+    case: str,
 ) -> None:
     if isinstance(late_value, _HostileIntSubclass):
         type(late_value).touches = 0
@@ -2030,11 +2062,11 @@ async def test_each_late_persisted_usage_value_is_independently_bounded_after_co
     else:
         result = await world.reasoning.reason_agent_step_activity(world.params)
 
-    assert result == ReasonAgentStepResult(call_count=0)
-    assert len(durable_payloads) == 1
+    assert result == ReasonAgentStepResult(call_count=0), case
+    assert len(durable_payloads) == 1, case
     durable = await world.load_event("agent.step.reasoning")
-    assert durable is not None
-    assert durable.payload_json == durable_payloads[0]
+    assert durable is not None, case
+    assert durable.payload_json == durable_payloads[0], case
     expected_tokens: dict[str, int | None] = {
         "input": 7,
         "output": 3,
@@ -2061,15 +2093,15 @@ async def test_each_late_persisted_usage_value_is_independently_bounded_after_co
             if dict(point.attributes) == expected_labels
         ]
         if expected is None:
-            assert raw_adds == []
-            assert points == []
+            assert raw_adds == [], case
+            assert points == [], case
         else:
-            assert len(raw_adds) == 1
-            assert type(raw_adds[0][2]) is int
-            assert raw_adds[0][2] == expected
-            assert len(points) == 1
-            assert type(points[0].value) is float
-            assert points[0].value == float(expected)
+            assert len(raw_adds) == 1, case
+            assert type(raw_adds[0][2]) is int, case
+            assert raw_adds[0][2] == expected, case
+            assert len(points) == 1, case
+            assert type(points[0].value) is float, case
+            assert points[0].value == float(expected), case
     raw_cost_adds = [
         call
         for call in counting_metrics.calls
@@ -2083,36 +2115,36 @@ async def test_each_late_persisted_usage_value_is_independently_bounded_after_co
         if dict(point.attributes) == {"provider_type": "ollama"}
     ]
     if expected_cost is None:
-        assert raw_cost_adds == []
-        assert cost_points == []
+        assert raw_cost_adds == [], case
+        assert cost_points == [], case
     else:
         expected_cost_value = expected_cost / 1_000_000
-        assert len(raw_cost_adds) == 1
-        assert type(raw_cost_adds[0][2]) is float
-        assert raw_cost_adds[0][2] == expected_cost_value
-        assert len(cost_points) == 1
-        assert type(cost_points[0].value) is float
-        assert cost_points[0].value == expected_cost_value
+        assert len(raw_cost_adds) == 1, case
+        assert type(raw_cost_adds[0][2]) is float, case
+        assert raw_cost_adds[0][2] == expected_cost_value, case
+        assert len(cost_points) == 1, case
+        assert type(cost_points[0].value) is float, case
+        assert cost_points[0].value == expected_cost_value, case
     expected_token_calls = sum(value is not None for value in expected_tokens.values())
     expected_cost_calls = int(expected_cost is not None)
     assert (
         sum(call[:2] == ("counter", "model_tokens_total") for call in counting_metrics.calls)
         == expected_token_calls
-    )
+    ), case
     assert (
         sum(call[:2] == ("add", "model_tokens_total") for call in counting_metrics.calls)
         == expected_token_calls
-    )
+    ), case
     assert (
         sum(call[:2] == ("counter", "model_cost_estimate") for call in counting_metrics.calls)
         == expected_cost_calls
-    )
+    ), case
     assert (
         sum(call[:2] == ("add", "model_cost_estimate") for call in counting_metrics.calls)
         == expected_cost_calls
-    )
+    ), case
     if isinstance(late_value, _HostileIntSubclass):
-        assert type(late_value).touches == 0
+        assert type(late_value).touches == 0, case
 
     _ProbeSession.usage_read_override = None
     calls_before_replay = list(counting_metrics.calls)
@@ -2121,18 +2153,18 @@ async def test_each_late_persisted_usage_value_is_independently_bounded_after_co
         for name in ("model_tokens_total", "model_cost_estimate")
     }
 
-    assert await world.reasoning.reason_agent_step_activity(world.params) == result
+    assert await world.reasoning.reason_agent_step_activity(world.params) == result, case
 
     replayed = await world.load_event("agent.step.reasoning")
-    assert replayed is not None
-    assert replayed.payload_json == durable_payloads[0]
-    assert counting_metrics.calls == calls_before_replay
+    assert replayed is not None, case
+    assert replayed.payload_json == durable_payloads[0], case
+    assert counting_metrics.calls == calls_before_replay, case
     assert {
         name: tuple(_stable_point_payload(point) for point in _metric_points(world.telemetry, name))
         for name in ("model_tokens_total", "model_cost_estimate")
-    } == points_before_replay
-    assert len(world.raw_model.requests) == 1
-    assert len(world.factory_calls) == 1
+    } == points_before_replay, case
+    assert len(world.raw_model.requests) == 1, case
+    assert len(world.factory_calls) == 1, case
 
 
 def _assert_positive_finite_helper_shape(source: str) -> None:
@@ -3151,110 +3183,63 @@ def _histogram_point_map(
     return mapped
 
 
-@pytest.mark.parametrize(
-    ("mutation", "invalid_value"),
-    [
-        pytest.param("_AGENT_RUNS_METRIC", "unregistered_metric", id="run-name"),
-        pytest.param(
-            "_AGENT_DURATION_METRIC",
-            "unregistered_metric",
-            id="duration-name",
-        ),
-        pytest.param(
-            "_AGENT_FAILURES_METRIC",
-            "unregistered_metric",
-            id="failure-name",
-        ),
-        pytest.param(
-            "_AGENT_SERVICE_LABEL",
-            "unregistered_label",
-            id="service-label",
-        ),
-        pytest.param(
-            "_AGENT_OUTCOME_LABEL",
-            "unregistered_label",
-            id="outcome-label",
-        ),
-        pytest.param(
-            "_AGENT_FAILURE_LABEL",
-            "unregistered_label",
-            id="failure-label",
-        ),
-        pytest.param(
-            "_AGENT_SERVICE_VALUE",
-            "unregistered_service",
-            id="service-value",
-        ),
-        pytest.param(
-            "_AGENT_COMPLETED_VALUE",
-            "unregistered_outcome",
-            id="completed-value",
-        ),
-        pytest.param(
-            "_AGENT_FAILED_VALUE",
-            "unregistered_outcome",
-            id="failed-value",
-        ),
-        pytest.param(
-            "_AGENT_CANCELLED_VALUE",
-            "unregistered_outcome",
-            id="cancelled-value",
-        ),
-        pytest.param(
-            "_AGENT_EXECUTION_UNKNOWN_VALUE",
-            "unregistered_failure",
-            id="execution-unknown-value",
-        ),
-        pytest.param(
-            "_AGENT_BUDGET_VALUE",
-            "unregistered_failure",
-            id="budget-value",
-        ),
-        pytest.param(
-            "_AGENT_INTERNAL_VALUE",
-            "unregistered_failure",
-            id="internal-value",
-        ),
-        pytest.param(
-            "_FINALIZATION_VALIDATION_MEASUREMENT",
-            -1,
-            id="measurement",
-        ),
-    ],
+_FINALIZATION_SCHEMA_MUTATIONS: tuple[tuple[str, object], ...] = (
+    ("_AGENT_RUNS_METRIC", "unregistered_metric"),
+    ("_AGENT_DURATION_METRIC", "unregistered_metric"),
+    ("_AGENT_FAILURES_METRIC", "unregistered_metric"),
+    ("_AGENT_SERVICE_LABEL", "unregistered_label"),
+    ("_AGENT_OUTCOME_LABEL", "unregistered_label"),
+    ("_AGENT_FAILURE_LABEL", "unregistered_label"),
+    ("_AGENT_SERVICE_VALUE", "unregistered_service"),
+    ("_AGENT_COMPLETED_VALUE", "unregistered_outcome"),
+    ("_AGENT_FAILED_VALUE", "unregistered_outcome"),
+    ("_AGENT_CANCELLED_VALUE", "unregistered_outcome"),
+    ("_AGENT_EXECUTION_UNKNOWN_VALUE", "unregistered_failure"),
+    ("_AGENT_BUDGET_VALUE", "unregistered_failure"),
+    ("_AGENT_INTERNAL_VALUE", "unregistered_failure"),
+    ("_FINALIZATION_VALIDATION_MEASUREMENT", -1),
 )
-@pytest.mark.parametrize("run_id_kind", ["present", "none"])
+
+
 async def test_invalid_finalization_metric_schema_fails_before_db_product_or_backend_touch(
     world: AgentWorld,
-    monkeypatch: pytest.MonkeyPatch,
-    mutation: str,
-    invalid_value: object,
-    run_id_kind: str,
 ) -> None:
-    monkeypatch.setattr(projections_module, mutation, invalid_value, raising=False)
-    backend_metrics = _BackendTouchMetrics()
-    world.resources.runtime.metrics = cast(JhinMetrics, backend_metrics)
-    world.projections = AgentProjectionActivities(cast(Any, world.resources))
-    _ProbeSession.scalar_statements = []
-
-    caught: ValueError | None = None
-    try:
-        await world.projections.finalize_run_projection_activity(
-            _finalize_params(
-                world,
-                run_id=None if run_id_kind == "none" else _UNSET,
+    # Loop-folded parametrize matrix: every mutation runs against both run_id kinds,
+    # one collected item.  Each mutation is applied in its own monkeypatch context so
+    # exactly one schema constant is invalid per case.  A single world is safe because
+    # every case asserts finalization fails before touching the database, publisher,
+    # or metric backend - state cannot drift between cases.
+    for run_id_kind in ("present", "none"):
+        for mutation, invalid_value in _FINALIZATION_SCHEMA_MUTATIONS:
+            case = (
+                f"run_id_kind={run_id_kind}, mutation={mutation}, invalid_value={invalid_value!r}"
             )
-        )
-    except ValueError as error:
-        caught = error
+            with pytest.MonkeyPatch.context() as monkeypatch:
+                monkeypatch.setattr(projections_module, mutation, invalid_value, raising=False)
+                backend_metrics = _BackendTouchMetrics()
+                world.resources.runtime.metrics = cast(JhinMetrics, backend_metrics)
+                world.projections = AgentProjectionActivities(cast(Any, world.resources))
+                _ProbeSession.scalar_statements = []
 
-    assert caught is not None
-    assert _ProbeSession.scalar_statements == []
-    run = await world.load_run()
-    assert run.status == RunStatus.RUNNING.value
-    assert run.completed_at is None
-    assert await world.count_events("run.completed") == 0
-    assert world.resources.publisher.events == []
-    assert backend_metrics.calls == 0
+                caught: ValueError | None = None
+                try:
+                    await world.projections.finalize_run_projection_activity(
+                        _finalize_params(
+                            world,
+                            run_id=None if run_id_kind == "none" else _UNSET,
+                        )
+                    )
+                except ValueError as error:
+                    caught = error
+
+                assert caught is not None, case
+                assert _ProbeSession.scalar_statements == [], case
+                run = await world.load_run()
+                assert run.status == RunStatus.RUNNING.value, case
+                assert run.completed_at is None, case
+                assert await world.count_events("run.completed") == 0, case
+                assert world.resources.publisher.events == [], case
+                assert backend_metrics.calls == 0, case
 
 
 @pytest.mark.parametrize("start_zone", [UTC, timezone(timedelta(hours=5, minutes=30))])
@@ -3995,25 +3980,46 @@ class _SelectiveHostileAgentMetrics:
         self._wrapped.set_observable(cast(Any, name), cast(Any, observations))
 
 
-@pytest.mark.parametrize("phase", ["getter", "write"])
-@pytest.mark.parametrize(
-    ("target", "status", "error_code"),
-    [
-        ("agent_runs_total", RunStatus.COMPLETED.value, None),
-        ("agent_runs_total", RunStatus.FAILED.value, "provider_failed"),
-        ("agent_run_duration_seconds", RunStatus.COMPLETED.value, None),
-        ("agent_run_duration_seconds", RunStatus.FAILED.value, "provider_failed"),
-        ("agent_run_failures_total", RunStatus.FAILED.value, "provider_failed"),
-    ],
+_FINALIZATION_METRIC_TARGET_CASES: tuple[tuple[str, str, str | None], ...] = (
+    ("agent_runs_total", RunStatus.COMPLETED.value, None),
+    ("agent_runs_total", RunStatus.FAILED.value, "provider_failed"),
+    ("agent_run_duration_seconds", RunStatus.COMPLETED.value, None),
+    ("agent_run_duration_seconds", RunStatus.FAILED.value, "provider_failed"),
+    ("agent_run_failures_total", RunStatus.FAILED.value, "provider_failed"),
 )
-@pytest.mark.parametrize("diagnostic_kind", ["ordinary", "cancellation"])
+
+
 async def test_hostile_finalization_metric_seams_preserve_commit_and_other_points(
+    tmp_path: Path,
+) -> None:
+    # Loop-folded parametrize matrix: same full cross-product, one collected item.
+    # Each case owns a fresh telemetry+database world, matching the old per-item
+    # fixtures (each case compares exact cumulative metric point maps).
+    for diagnostic_kind in ("ordinary", "cancellation"):
+        for target, status, error_code in _FINALIZATION_METRIC_TARGET_CASES:
+            for phase in ("getter", "write"):
+                case = (
+                    f"diagnostic_kind={diagnostic_kind}, target={target}, "
+                    f"status={status}, error_code={error_code!r}, phase={phase}"
+                )
+                with (
+                    _owned_telemetry() as telemetry,
+                    pytest.MonkeyPatch.context() as monkeypatch,
+                ):
+                    async with _owned_world(monkeypatch, telemetry, tmp_path) as world:
+                        await _assert_hostile_finalization_metric_seam(
+                            world, phase, target, status, error_code, diagnostic_kind, case
+                        )
+
+
+async def _assert_hostile_finalization_metric_seam(
     world: AgentWorld,
     phase: str,
     target: str,
     status: str,
     error_code: str | None,
     diagnostic_kind: str,
+    case: str,
 ) -> None:
     initial_state = await _finalization_product_state(world)
     started_at = datetime.now(UTC) - timedelta(seconds=5)
@@ -4023,7 +4029,7 @@ async def test_hostile_finalization_metric_seams_preserve_commit_and_other_point
     await world.projections.finalize_run_projection_activity(params)
 
     clean_completed_at = _ProbeSession.committed_completed_at
-    assert clean_completed_at is not None
+    assert clean_completed_at is not None, case
     clean_state = await _finalization_product_state(world)
     clean_publisher = _publisher_product_payload(world)
     run_labels = tuple(sorted({"service": "agent-worker", "outcome": status}.items()))
@@ -4036,9 +4042,9 @@ async def test_hostile_finalization_metric_seams_preserve_commit_and_other_point
     )
     clean_failures = _counter_point_map(world.telemetry, "agent_run_failures_total")
     clean_duration = (clean_completed_at - started_at).total_seconds()
-    assert clean_runs == {run_labels: 1}
-    assert clean_durations == {duration_labels: (1, clean_duration)}
-    assert clean_failures == ({failure_labels: 1} if status == RunStatus.FAILED.value else {})
+    assert clean_runs == {run_labels: 1}, case
+    assert clean_durations == {duration_labels: (1, clean_duration)}, case
+    assert clean_failures == ({failure_labels: 1} if status == RunStatus.FAILED.value else {}), case
 
     await _restore_pre_finalization_state(world, initial_state)
     world.resources.publisher.events.clear()
@@ -4059,15 +4065,15 @@ async def test_hostile_finalization_metric_seams_preserve_commit_and_other_point
     await world.projections.finalize_run_projection_activity(params)
 
     hostile_completed_at = _ProbeSession.committed_completed_at
-    assert hostile_completed_at is not None
+    assert hostile_completed_at is not None, case
     hostile_state = await _finalization_product_state(world)
     comparable_clean_state = deepcopy(clean_state)
     cast(dict[str, object], comparable_clean_state["run"])["completed_at"] = cast(
         Mapping[str, object], hostile_state["run"]
     )["completed_at"]
-    assert hostile_state == comparable_clean_state
-    assert _publisher_product_payload(world) == clean_publisher
-    assert any(call.startswith(f"{target}:") for call in hostile.calls)
+    assert hostile_state == comparable_clean_state, case
+    assert _publisher_product_payload(world) == clean_publisher, case
+    assert any(call.startswith(f"{target}:") for call in hostile.calls), case
     hostile_duration = (hostile_completed_at - started_at).total_seconds()
     expected_writes: list[tuple[Any, ...]] = []
     if target != "agent_runs_total":
@@ -4099,10 +4105,12 @@ async def test_hostile_finalization_metric_seams_preserve_commit_and_other_point
         )
     assert [
         call for call in observed_metrics.calls if call[0] in {"add", "record"}
-    ] == expected_writes
+    ] == expected_writes, case
 
     after_runs = _counter_point_map(world.telemetry, "agent_runs_total")
-    assert after_runs == {run_labels: clean_runs[run_labels] + int(target != "agent_runs_total")}
+    assert after_runs == {run_labels: clean_runs[run_labels] + int(target != "agent_runs_total")}, (
+        case
+    )
     after_durations = _histogram_point_map(
         world.telemetry,
         "agent_run_duration_seconds",
@@ -4111,100 +4119,107 @@ async def test_hostile_finalization_metric_seams_preserve_commit_and_other_point
     expected_duration_sum = clean_duration + (
         0 if target == "agent_run_duration_seconds" else hostile_duration
     )
-    assert after_durations == {duration_labels: (expected_duration_count, expected_duration_sum)}
+    assert after_durations == {duration_labels: (expected_duration_count, expected_duration_sum)}, (
+        case
+    )
     after_failures = _counter_point_map(world.telemetry, "agent_run_failures_total")
     if status == RunStatus.FAILED.value:
         assert after_failures == {
             failure_labels: clean_failures[failure_labels]
             + int(target != "agent_run_failures_total")
-        }
+        }, case
     else:
-        assert after_failures == {}
+        assert after_failures == {}, case
 
 
-@pytest.mark.parametrize("phase", ["getter", "write"])
-@pytest.mark.parametrize(
-    ("target", "status", "error_code"),
-    [
-        ("agent_runs_total", RunStatus.COMPLETED.value, None),
-        ("agent_runs_total", RunStatus.FAILED.value, "provider_failed"),
-        ("agent_run_duration_seconds", RunStatus.COMPLETED.value, None),
-        ("agent_run_duration_seconds", RunStatus.FAILED.value, "provider_failed"),
-        ("agent_run_failures_total", RunStatus.FAILED.value, "provider_failed"),
-    ],
-)
-@pytest.mark.parametrize("fatal_type", [KeyboardInterrupt, SystemExit])
 async def test_fatal_finalization_metric_error_propagates_after_durable_commit(
-    world: AgentWorld,
-    phase: str,
-    target: str,
-    status: str,
-    error_code: str | None,
-    fatal_type: type[BaseException],
+    tmp_path: Path,
 ) -> None:
-    fatal = fatal_type("fatal-agent-metric")
-    hostile = _SelectiveHostileAgentMetrics(
-        world.telemetry.metrics,
-        target=target,
-        phase=phase,
-        error=fatal,
-    )
-    world.resources.runtime.metrics = cast(JhinMetrics, hostile)
-    world.projections = AgentProjectionActivities(cast(Any, world.resources))
-    _ProbeSession.run_started_override = datetime.now(UTC) - timedelta(seconds=5)
+    # Loop-folded parametrize matrix: same full cross-product, one collected item.
+    # Each case owns a fresh telemetry+database world.  The finalization call stays
+    # lexically inside this function because the expected traceback frame names
+    # begin with this test function's own name.
+    for fatal_type in (KeyboardInterrupt, SystemExit):
+        for target, status, error_code in _FINALIZATION_METRIC_TARGET_CASES:
+            for phase in ("getter", "write"):
+                case = (
+                    f"fatal_type={fatal_type.__name__}, target={target}, "
+                    f"status={status}, error_code={error_code!r}, phase={phase}"
+                )
+                with (
+                    _owned_telemetry() as telemetry,
+                    pytest.MonkeyPatch.context() as monkeypatch,
+                ):
+                    async with _owned_world(monkeypatch, telemetry, tmp_path) as world:
+                        fatal = fatal_type("fatal-agent-metric")
+                        hostile = _SelectiveHostileAgentMetrics(
+                            world.telemetry.metrics,
+                            target=target,
+                            phase=phase,
+                            error=fatal,
+                        )
+                        world.resources.runtime.metrics = cast(JhinMetrics, hostile)
+                        world.projections = AgentProjectionActivities(cast(Any, world.resources))
+                        _ProbeSession.run_started_override = datetime.now(UTC) - timedelta(
+                            seconds=5
+                        )
 
-    with pytest.raises(fatal_type) as caught:
-        await world.projections.finalize_run_projection_activity(
-            _finalize_params(world, status=status, error_code=error_code)
-        )
+                        with pytest.raises(fatal_type) as caught:
+                            await world.projections.finalize_run_projection_activity(
+                                _finalize_params(world, status=status, error_code=error_code)
+                            )
 
-    assert caught.value is fatal
-    raise_site = hostile.raised_traceback
-    if raise_site is None and hostile.instrument is not None:
-        raise_site = hostile.instrument.raised_traceback
-    assert raise_site is not None
-    assert _traceback_tail(caught.value.__traceback__) is raise_site
-    instrument_helper = (
-        "_record_agent_histogram"
-        if target == "agent_run_duration_seconds"
-        else "_record_agent_counter"
-    )
-    backend_method = (
-        "histogram"
-        if target == "agent_run_duration_seconds" and phase == "getter"
-        else "record"
-        if target == "agent_run_duration_seconds"
-        else "counter"
-        if phase == "getter"
-        else "add"
-    )
-    expected_frames = (
-        "test_fatal_finalization_metric_error_propagates_after_durable_commit",
-        "finalize_run_projection_activity",
-        instrument_helper,
-        "_run_agent_metric",
-        "<lambda>",
-        backend_method,
-    )
-    if phase == "getter":
-        expected_frames += ("_raise_owned",)
-    assert _traceback_frame_names(caught.value.__traceback__) == expected_frames
-    run = await world.load_run()
-    assert run.status == status
-    assert run.completed_at is not None
-    assert await world.count_events(f"run.{status}") == 1
-    expected_run = 0 if target == "agent_runs_total" else 1
-    assert (
-        _metric_sum(
-            world.telemetry,
-            "agent_runs_total",
-            service="agent-worker",
-            outcome=status,
-        )
-        == expected_run
-    )
-    assert len(_metric_points(world.telemetry, "agent_run_duration_seconds")) == int(
-        target == "agent_run_failures_total"
-    )
-    assert _metric_points(world.telemetry, "agent_run_failures_total") == []
-    assert world.resources.publisher.events == []
+                        assert caught.value is fatal, case
+                        raise_site = hostile.raised_traceback
+                        if raise_site is None and hostile.instrument is not None:
+                            raise_site = hostile.instrument.raised_traceback
+                        assert raise_site is not None, case
+                        assert _traceback_tail(caught.value.__traceback__) is raise_site, case
+                        instrument_helper = (
+                            "_record_agent_histogram"
+                            if target == "agent_run_duration_seconds"
+                            else "_record_agent_counter"
+                        )
+                        backend_method = (
+                            "histogram"
+                            if target == "agent_run_duration_seconds" and phase == "getter"
+                            else "record"
+                            if target == "agent_run_duration_seconds"
+                            else "counter"
+                            if phase == "getter"
+                            else "add"
+                        )
+                        expected_frames = (
+                            "test_fatal_finalization_metric_error_propagates_after_durable_commit",
+                            "finalize_run_projection_activity",
+                            instrument_helper,
+                            "_run_agent_metric",
+                            "<lambda>",
+                            backend_method,
+                        )
+                        if phase == "getter":
+                            expected_frames += ("_raise_owned",)
+                        assert (
+                            _traceback_frame_names(caught.value.__traceback__) == expected_frames
+                        ), case
+                        run = await world.load_run()
+                        assert run.status == status, case
+                        assert run.completed_at is not None, case
+                        assert await world.count_events(f"run.{status}") == 1, case
+                        expected_run = 0 if target == "agent_runs_total" else 1
+                        assert (
+                            _metric_sum(
+                                world.telemetry,
+                                "agent_runs_total",
+                                service="agent-worker",
+                                outcome=status,
+                            )
+                            == expected_run
+                        ), case
+                        assert len(
+                            _metric_points(world.telemetry, "agent_run_duration_seconds")
+                        ) == int(target == "agent_run_failures_total"), case
+                        assert _metric_points(world.telemetry, "agent_run_failures_total") == [], (
+                            case
+                        )
+                        assert world.resources.publisher.events == [], case

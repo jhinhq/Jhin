@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import contextlib
 import contextvars
 import importlib
 import inspect
@@ -106,8 +107,8 @@ class _Telemetry:
     trace_provider: TracerProvider
 
 
-@pytest.fixture
-def telemetry() -> Iterator[_Telemetry]:
+@contextlib.contextmanager
+def _fresh_telemetry() -> Iterator[_Telemetry]:
     entry_context = otel_context.get_current()
     entry_span = trace.get_current_span()
     resource = Resource.create(
@@ -137,6 +138,27 @@ def telemetry() -> Iterator[_Telemetry]:
         trace_provider.shutdown()
         assert otel_context.get_current() is entry_context
         assert trace.get_current_span() is entry_span
+
+
+@pytest.fixture
+def telemetry() -> Iterator[_Telemetry]:
+    with _fresh_telemetry() as owned:
+        yield owned
+
+
+@contextlib.contextmanager
+def _named_case(case_id: str) -> Iterator[None]:
+    """Attach the folded-loop case identity to any escaping failure.
+
+    Loop-folded tests iterate the exact former parametrize matrix inside one
+    test function; this note makes any failure name its case exactly as the
+    old parametrize id did.
+    """
+    try:
+        yield
+    except BaseException as error:
+        error.add_note(f"[folded case] {case_id}")
+        raise
 
 
 def _metric_points(telemetry: _Telemetry, name: str) -> list[Any]:
@@ -724,8 +746,8 @@ class ToolWorld:
         self.activities.authority_sql_deltas.clear()
 
 
-@pytest.fixture
-async def world(telemetry: _Telemetry) -> AsyncIterator[ToolWorld]:
+@contextlib.asynccontextmanager
+async def _fresh_world(telemetry: _Telemetry) -> AsyncIterator[ToolWorld]:
     entry_context = otel_context.get_current()
     entry_span = trace.get_current_span()
     engine = create_async_engine("sqlite+aiosqlite://")
@@ -833,6 +855,25 @@ async def world(telemetry: _Telemetry) -> AsyncIterator[ToolWorld]:
         await engine.dispose()
         assert otel_context.get_current() is entry_context
         assert trace.get_current_span() is entry_span
+
+
+@pytest.fixture
+async def world(telemetry: _Telemetry) -> AsyncIterator[ToolWorld]:
+    async with _fresh_world(telemetry) as owned:
+        yield owned
+
+
+@contextlib.asynccontextmanager
+async def _fresh_world_context() -> AsyncIterator[ToolWorld]:
+    """One fully isolated telemetry+world pair, exactly as the fixtures build it.
+
+    Used by loop-folded tests so every iteration of a former parametrize matrix
+    gets the same per-case isolation (fresh DB, fresh telemetry providers,
+    fresh probe state) that a separate collected item used to get.
+    """
+    with _fresh_telemetry() as telemetry:
+        async with _fresh_world(telemetry) as owned:
+            yield owned
 
 
 _RESULT_APPROVAL_AUTHORITY_UNSET = object()
@@ -1853,21 +1894,36 @@ async def _mutate_one_persisted_authority_field(
         await session.commit()
 
 
-@pytest.mark.parametrize(
-    ("activity_kind", "field"),
-    [
-        *(
-            (activity_kind, field)
-            for field in _COMMON_PERSISTED_AUTHORITY_FIELDS
-            for activity_kind in ("execute", "approval")
-        ),
-        *(("approval", field) for field in _APPROVAL_PERSISTED_AUTHORITY_FIELDS),
-    ],
-)
-async def test_each_persisted_authority_field_is_freshly_loaded_not_synthesized(
+_PERSISTED_AUTHORITY_FIELD_CASES = [
+    *(
+        (activity_kind, field)
+        for field in _COMMON_PERSISTED_AUTHORITY_FIELDS
+        for activity_kind in ("execute", "approval")
+    ),
+    *(("approval", field) for field in _APPROVAL_PERSISTED_AUTHORITY_FIELDS),
+]
+
+
+async def test_each_persisted_authority_field_is_freshly_loaded_not_synthesized() -> None:
+    # Loop-folded: the exact former parametrize matrix, one isolated world per case.
+    for activity_kind, field in _PERSISTED_AUTHORITY_FIELD_CASES:
+        ctx = f"activity_kind={activity_kind} field={field}"
+        with _named_case(ctx):
+            async with _fresh_world_context() as world:
+                await _check_persisted_authority_field_case(
+                    world,
+                    activity_kind=activity_kind,
+                    field=field,
+                    ctx=ctx,
+                )
+
+
+async def _check_persisted_authority_field_case(
     world: ToolWorld,
+    *,
     activity_kind: str,
     field: str,
+    ctx: str,
 ) -> None:
     parked = await _prepare_terminal_case(
         world,
@@ -1890,32 +1946,32 @@ async def test_each_persisted_authority_field_is_freshly_loaded_not_synthesized(
         parked=parked,
     )
 
-    assert error is None
-    assert frames == ()
+    assert error is None, ctx
+    assert frames == (), ctx
     assert result == BoundToolResult(
         tool_call_id=str(world.invocation_id),
         status="executed",
         approval_id=None if parked is None else parked.approval_id,
         stop_reason=None,
-    )
-    assert len(snapshots) == 2
-    assert snapshots[0] != snapshots[1]
-    assert await world.product_snapshot() == snapshots[1]
-    assert world.effects == ["private-input-canary"]
-    assert world.activities.authority_fresh_session_deltas == [1]
-    assert len(world.activities.authority_sql_deltas) == 1
-    assert world.activities.authority_sql_deltas[0] >= 1
-    assert _metric_point_multiset(world.telemetry) == []
+    ), ctx
+    assert len(snapshots) == 2, ctx
+    assert snapshots[0] != snapshots[1], ctx
+    assert await world.product_snapshot() == snapshots[1], ctx
+    assert world.effects == ["private-input-canary"], ctx
+    assert world.activities.authority_fresh_session_deltas == [1], ctx
+    assert len(world.activities.authority_sql_deltas) == 1, ctx
+    assert world.activities.authority_sql_deltas[0] >= 1, ctx
+    assert _metric_point_multiset(world.telemetry) == [], ctx
     spans = _tool_spans(world.telemetry)
-    assert len(spans) == 1
+    assert len(spans) == 1, ctx
     assert dict(spans[0].attributes) == {
         "jhin.tool_family": "other",
         "jhin.risk": "other",
         "jhin.outcome": "other",
-    }
-    assert spans[0].status.status_code is StatusCode.UNSET
-    assert spans[0].events == ()
-    assert not ({"error.code", "error.type"} & set(spans[0].attributes))
+    }, ctx
+    assert spans[0].status.status_code is StatusCode.UNSET, ctx
+    assert spans[0].events == (), ctx
+    assert not ({"error.code", "error.type"} & set(spans[0].attributes)), ctx
 
 
 _NON_SUCCESS_PERSISTED_AUTHORITY_CASES = [
@@ -2006,11 +2062,26 @@ async def _invoke_persisted_authority_state(
         return None, error
 
 
-@pytest.mark.parametrize(("case", "field"), _NON_SUCCESS_PERSISTED_AUTHORITY_CASES)
-async def test_non_success_states_load_every_persisted_authority_field_from_fresh_db(
+async def test_non_success_states_load_every_persisted_authority_field_from_fresh_db() -> None:
+    # Loop-folded: the exact former parametrize matrix, one isolated world per case.
+    for case, field in _NON_SUCCESS_PERSISTED_AUTHORITY_CASES:
+        ctx = f"case={case} field={field}"
+        with _named_case(ctx):
+            async with _fresh_world_context() as world:
+                await _check_non_success_persisted_authority_case(
+                    world,
+                    case=case,
+                    field=field,
+                    ctx=ctx,
+                )
+
+
+async def _check_non_success_persisted_authority_case(
     world: ToolWorld,
+    *,
     case: str,
     field: str,
+    ctx: str,
 ) -> None:
     control = await world.clone_isolated()
     _use_noop_activity_runtime(control)
@@ -2042,24 +2113,24 @@ async def test_non_success_states_load_every_persisted_authority_field_from_fres
         parked=parked,
     )
 
-    assert len(snapshots) == 2
+    assert len(snapshots) == 2, ctx
     assert _canonical_product_snapshot(world, snapshots[0]) == (
         _canonical_product_snapshot(control, control_snapshot)
-    )
-    assert snapshots[0] != snapshots[1]
-    assert await world.product_snapshot() == snapshots[1]
-    assert len(world.effects) - target_effects_before == control_effect_delta
+    ), ctx
+    assert snapshots[0] != snapshots[1], ctx
+    assert await world.product_snapshot() == snapshots[1], ctx
+    assert len(world.effects) - target_effects_before == control_effect_delta, ctx
     if control_error is not None:
-        assert result is None
-        assert error is not None
-        assert _application_error_public(error) == _application_error_public(control_error)
+        assert result is None, ctx
+        assert error is not None, ctx
+        assert _application_error_public(error) == _application_error_public(control_error), ctx
         assert _traceback_frame_names(error.__traceback__) == _traceback_frame_names(
             control_error.__traceback__
-        )
+        ), ctx
     else:
-        assert control_result is not None
-        assert result is not None
-        assert error is None
+        assert control_result is not None, ctx
+        assert result is not None, ctx
+        assert error is None, ctx
         target_approval_authority = _bound_result_approval_authority(
             result,
             parked,
@@ -2078,21 +2149,21 @@ async def test_non_success_states_load_every_persisted_authority_field_from_fres
             control,
             {"result": asdict(control_result)},
             result_approval_authority=control_approval_authority,
-        )
-    assert world.activities.authority_fresh_session_deltas == [1]
-    assert len(world.activities.authority_sql_deltas) == 1
-    assert world.activities.authority_sql_deltas[0] >= 1
-    assert _metric_point_multiset(world.telemetry) == []
+        ), ctx
+    assert world.activities.authority_fresh_session_deltas == [1], ctx
+    assert len(world.activities.authority_sql_deltas) == 1, ctx
+    assert world.activities.authority_sql_deltas[0] >= 1, ctx
+    assert _metric_point_multiset(world.telemetry) == [], ctx
     spans = _tool_spans(world.telemetry)
-    assert len(spans) == 1
+    assert len(spans) == 1, ctx
     assert dict(spans[0].attributes) == {
         "jhin.tool_family": "other",
         "jhin.risk": "other",
         "jhin.outcome": "other",
-    }
-    assert spans[0].status.status_code is StatusCode.UNSET
-    assert spans[0].events == ()
-    assert not ({"error.code", "error.type"} & set(spans[0].attributes))
+    }, ctx
+    assert spans[0].status.status_code is StatusCode.UNSET, ctx
+    assert spans[0].events == (), ctx
+    assert not ({"error.code", "error.type"} & set(spans[0].attributes)), ctx
 
 
 @pytest.mark.parametrize("activity_kind", ["execute", "approval"])
@@ -3035,9 +3106,9 @@ async def test_coordinated_wrong_real_row_and_outcome_id_cannot_prove_telemetry(
     assert spans[0].events == ()
 
 
-@pytest.mark.parametrize(
-    ("field", "replacement"),
-    [
+async def test_every_postcommit_authority_tuple_mismatch_suppresses_diagnostics_only() -> None:
+    # Loop-folded: the exact former parametrize matrix, one isolated world per case.
+    cases: list[tuple[str, object]] = [
         ("outcome_tool_call_id", new_uuid7()),
         ("outcome_status", "failed"),
         ("outcome_tool_name", "system.other"),
@@ -3072,37 +3143,37 @@ async def test_coordinated_wrong_real_row_and_outcome_id_cannot_prove_telemetry(
         ("approval_requested_by_agent_id", new_uuid7()),
         ("approval_action_type", "system.other"),
         ("approval_status", ApprovalStatus.APPROVED.value),
-    ],
-)
-async def test_every_postcommit_authority_tuple_mismatch_suppresses_diagnostics_only(
-    world: ToolWorld,
-    field: str,
-    replacement: object,
-) -> None:
-    world.activities.authority_mutator = lambda authority: replace(
-        cast(Any, authority),
-        **{field: replacement},
-    )
+    ]
+    for field, replacement in cases:
+        ctx = f"field={field} replacement={replacement!r}"
+        with _named_case(ctx):
+            async with _fresh_world_context() as world:
+                world.activities.authority_mutator = (
+                    lambda authority, _field=field, _replacement=replacement: replace(
+                        cast(Any, authority),
+                        **{_field: _replacement},
+                    )
+                )
 
-    result = await world.activities.execute_bound_tool_activity(world.execute_params())
+                result = await world.activities.execute_bound_tool_activity(world.execute_params())
 
-    assert result.status == "executed"
-    assert world.effects == ["private-input-canary"]
-    row = await world.tool_call()
-    assert row is not None
-    assert row.status == ToolCallStatus.COMPLETED.value
-    assert _metric_points(world.telemetry, "tool_calls_total") == []
-    assert _metric_points(world.telemetry, "tool_call_failures_total") == []
-    spans = _tool_spans(world.telemetry)
-    assert len(spans) == 1
-    assert spans[0].attributes["jhin.outcome"] == "other"
-    assert spans[0].status.status_code is StatusCode.UNSET
-    assert "error.code" not in spans[0].attributes
+                assert result.status == "executed", ctx
+                assert world.effects == ["private-input-canary"], ctx
+                row = await world.tool_call()
+                assert row is not None, ctx
+                assert row.status == ToolCallStatus.COMPLETED.value, ctx
+                assert _metric_points(world.telemetry, "tool_calls_total") == [], ctx
+                assert _metric_points(world.telemetry, "tool_call_failures_total") == [], ctx
+                spans = _tool_spans(world.telemetry)
+                assert len(spans) == 1, ctx
+                assert spans[0].attributes["jhin.outcome"] == "other", ctx
+                assert spans[0].status.status_code is StatusCode.UNSET, ctx
+                assert "error.code" not in spans[0].attributes, ctx
 
 
-@pytest.mark.parametrize(
-    ("field", "replacement"),
-    [
+async def test_every_approval_postcommit_authority_field_mismatch_is_diagnostic_only() -> None:
+    # Loop-folded: the exact former parametrize matrix, one isolated world per case.
+    cases: list[tuple[str, object]] = [
         ("outcome_tool_call_id", new_uuid7()),
         ("outcome_status", "rejected"),
         ("outcome_tool_name", "system.other"),
@@ -3137,40 +3208,40 @@ async def test_every_postcommit_authority_tuple_mismatch_suppresses_diagnostics_
         ("approval_requested_by_agent_id", new_uuid7()),
         ("approval_action_type", "system.other"),
         ("approval_status", ApprovalStatus.REJECTED.value),
-    ],
-)
-async def test_every_approval_postcommit_authority_field_mismatch_is_diagnostic_only(
-    world: ToolWorld,
-    field: str,
-    replacement: object,
-) -> None:
-    parked = await world.park()
-    await world.decide(parked.approval_id or "", ApprovalStatus.APPROVED.value)
-    world.telemetry.exporter.clear()
-    world.activities.authority_calls.clear()
-    world.activities.authority_mutator = lambda authority: replace(
-        cast(Any, authority),
-        **{field: replacement},
-    )
+    ]
+    for field, replacement in cases:
+        ctx = f"field={field} replacement={replacement!r}"
+        with _named_case(ctx):
+            async with _fresh_world_context() as world:
+                parked = await world.park()
+                await world.decide(parked.approval_id or "", ApprovalStatus.APPROVED.value)
+                world.telemetry.exporter.clear()
+                world.activities.authority_calls.clear()
+                world.activities.authority_mutator = (
+                    lambda authority, _field=field, _replacement=replacement: replace(
+                        cast(Any, authority),
+                        **{_field: _replacement},
+                    )
+                )
 
-    result = await world.activities.resolve_bound_tool_approval_activity(
-        world.approval_params(parked.approval_id or "")
-    )
+                result = await world.activities.resolve_bound_tool_approval_activity(
+                    world.approval_params(parked.approval_id or "")
+                )
 
-    assert result.status == "executed"
-    assert world.effects == ["private-input-canary"]
-    row = await world.tool_call()
-    assert row is not None
-    assert row.status == ToolCallStatus.COMPLETED.value
-    assert _metric_points(world.telemetry, "tool_calls_total") == []
-    assert _metric_points(world.telemetry, "tool_call_failures_total") == []
-    spans = _tool_spans(world.telemetry)
-    assert len(spans) == 1
-    assert spans[0].name == "tool.approval.resolve"
-    assert spans[0].attributes["jhin.outcome"] == "other"
-    assert spans[0].status.status_code is StatusCode.UNSET
-    assert spans[0].events == ()
-    assert not ({"error.code", "error.type"} & set(spans[0].attributes))
+                assert result.status == "executed", ctx
+                assert world.effects == ["private-input-canary"], ctx
+                row = await world.tool_call()
+                assert row is not None, ctx
+                assert row.status == ToolCallStatus.COMPLETED.value, ctx
+                assert _metric_points(world.telemetry, "tool_calls_total") == [], ctx
+                assert _metric_points(world.telemetry, "tool_call_failures_total") == [], ctx
+                spans = _tool_spans(world.telemetry)
+                assert len(spans) == 1, ctx
+                assert spans[0].name == "tool.approval.resolve", ctx
+                assert spans[0].attributes["jhin.outcome"] == "other", ctx
+                assert spans[0].status.status_code is StatusCode.UNSET, ctx
+                assert spans[0].events == (), ctx
+                assert not ({"error.code", "error.type"} & set(spans[0].attributes)), ctx
 
 
 @pytest.mark.parametrize("activity_kind", ["execute", "approval"])
@@ -3323,9 +3394,9 @@ async def test_tool_telemetry_inherits_predecessor_context_without_copying_paren
         assert not any("id" in key for key in point.attributes)
 
 
-@pytest.mark.parametrize(
-    "invalid_case",
-    [
+async def test_execute_span_begins_only_after_manifest_and_runtime_identity_validation() -> None:
+    # Loop-folded: the exact former parametrize matrix, one isolated world per case.
+    for invalid_case in (
         "invalid-workspace",
         "invalid-run-id",
         "wrong-workspace",
@@ -3339,11 +3410,22 @@ async def test_tool_telemetry_inherits_predecessor_context_without_copying_paren
         "task-agent-mismatch",
         "missing-agent-row",
         "agent-workspace-mismatch",
-    ],
-)
-async def test_execute_span_begins_only_after_manifest_and_runtime_identity_validation(
+    ):
+        ctx = f"invalid_case={invalid_case}"
+        with _named_case(ctx):
+            async with _fresh_world_context() as world:
+                await _check_execute_span_prevalidation_case(
+                    world,
+                    invalid_case=invalid_case,
+                    ctx=ctx,
+                )
+
+
+async def _check_execute_span_prevalidation_case(
     world: ToolWorld,
+    *,
     invalid_case: str,
+    ctx: str,
 ) -> None:
     params = world.execute_params()
     if invalid_case == "invalid-workspace":
@@ -3449,17 +3531,17 @@ async def test_execute_span_begins_only_after_manifest_and_runtime_identity_vali
     with pytest.raises(ApplicationError):
         await world.activities.execute_bound_tool_activity(params)
 
-    assert world.effects == []
-    assert await world.tool_call() is None
-    assert world.activities.authority_calls == []
-    assert _tool_spans(world.telemetry) == []
-    assert _metric_points(world.telemetry, "tool_calls_total") == []
-    assert _metric_points(world.telemetry, "tool_call_failures_total") == []
+    assert world.effects == [], ctx
+    assert await world.tool_call() is None, ctx
+    assert world.activities.authority_calls == [], ctx
+    assert _tool_spans(world.telemetry) == [], ctx
+    assert _metric_points(world.telemetry, "tool_calls_total") == [], ctx
+    assert _metric_points(world.telemetry, "tool_call_failures_total") == [], ctx
 
 
-@pytest.mark.parametrize(
-    "invalid_case",
-    [
+async def test_approval_span_begins_only_after_full_durable_and_manifest_validation() -> None:
+    # Loop-folded: the exact former parametrize matrix, one isolated world per case.
+    for invalid_case in (
         "invalid-workspace-uuid",
         "invalid-task-uuid",
         "invalid-run-uuid",
@@ -3483,11 +3565,22 @@ async def test_execute_span_begins_only_after_manifest_and_runtime_identity_vali
         "tool-call-run-mismatch",
         "tool-call-agent-mismatch",
         "invalid-decision",
-    ],
-)
-async def test_approval_span_begins_only_after_full_durable_and_manifest_validation(
+    ):
+        ctx = f"invalid_case={invalid_case}"
+        with _named_case(ctx):
+            async with _fresh_world_context() as world:
+                await _check_approval_span_prevalidation_case(
+                    world,
+                    invalid_case=invalid_case,
+                    ctx=ctx,
+                )
+
+
+async def _check_approval_span_prevalidation_case(
     world: ToolWorld,
+    *,
     invalid_case: str,
+    ctx: str,
 ) -> None:
     if invalid_case.startswith("invalid-") and invalid_case.endswith("-uuid"):
         params = world.approval_params(new_uuid7())
@@ -3588,32 +3681,48 @@ async def test_approval_span_begins_only_after_full_durable_and_manifest_validat
     with pytest.raises(ApplicationError):
         await world.activities.resolve_bound_tool_approval_activity(params)
 
-    assert world.effects == []
-    assert world.activities.authority_calls == []
-    assert _tool_spans(world.telemetry) == []
-    assert _metric_points(world.telemetry, "tool_calls_total") == []
-    assert _metric_points(world.telemetry, "tool_call_failures_total") == []
+    assert world.effects == [], ctx
+    assert world.activities.authority_calls == [], ctx
+    assert _tool_spans(world.telemetry) == [], ctx
+    assert _metric_points(world.telemetry, "tool_calls_total") == [], ctx
+    assert _metric_points(world.telemetry, "tool_call_failures_total") == [], ctx
 
 
-@pytest.mark.parametrize(
-    ("activity_kind", "product_kind"),
-    [
-        ("execute", "success"),
-        ("execute", "failure"),
-        ("approval", "success"),
-        ("approval", "failure"),
-    ],
-)
-@pytest.mark.parametrize(
-    "diagnostic_type",
-    [RuntimeError, ValueError, KeyError, AttributeError, _WorkerDiagnostic],
-)
-async def test_hostile_postcommit_reload_preserves_exact_product_authority(
+async def test_hostile_postcommit_reload_preserves_exact_product_authority() -> None:
+    # Loop-folded: the exact former parametrize cross-product, one isolated
+    # world and monkeypatch scope per case.
+    for diagnostic_type in (RuntimeError, ValueError, KeyError, AttributeError, _WorkerDiagnostic):
+        for activity_kind, product_kind in (
+            ("execute", "success"),
+            ("execute", "failure"),
+            ("approval", "success"),
+            ("approval", "failure"),
+        ):
+            ctx = (
+                f"diagnostic_type={diagnostic_type.__name__}"
+                f" activity_kind={activity_kind} product_kind={product_kind}"
+            )
+            with _named_case(ctx):
+                async with _fresh_world_context() as world:
+                    with pytest.MonkeyPatch.context() as monkeypatch:
+                        await _check_hostile_postcommit_reload_case(
+                            world,
+                            monkeypatch,
+                            activity_kind=activity_kind,
+                            product_kind=product_kind,
+                            diagnostic_type=diagnostic_type,
+                            ctx=ctx,
+                        )
+
+
+async def _check_hostile_postcommit_reload_case(
     world: ToolWorld,
     monkeypatch: pytest.MonkeyPatch,
+    *,
     activity_kind: str,
     product_kind: str,
     diagnostic_type: type[Exception],
+    ctx: str,
 ) -> None:
     control = await world.clone_isolated()
     bound_results: list[BoundToolResult] = []
@@ -3674,17 +3783,17 @@ async def test_hostile_postcommit_reload_preserves_exact_product_authority(
     target_product_snapshot = await world.product_snapshot()
 
     if control_error is not None:
-        assert error is not None
-        assert result is None
-        assert _application_error_public(error) == _application_error_public(control_error)
-        assert frames == control_frames
-        assert raised_errors[-1][0] is error
-        assert _traceback_tail(error.__traceback__) is _traceback_tail(raised_errors[-1][1])
+        assert error is not None, ctx
+        assert result is None, ctx
+        assert _application_error_public(error) == _application_error_public(control_error), ctx
+        assert frames == control_frames, ctx
+        assert raised_errors[-1][0] is error, ctx
+        assert _traceback_tail(error.__traceback__) is _traceback_tail(raised_errors[-1][1]), ctx
     else:
-        assert control_result is not None
-        assert result is not None
-        assert error is None
-        assert result is bound_results[-1]
+        assert control_result is not None, ctx
+        assert result is not None, ctx
+        assert error is None, ctx
+        assert result is bound_results[-1], ctx
         target_approval_authority = _bound_result_approval_authority(
             result,
             parked,
@@ -3703,45 +3812,59 @@ async def test_hostile_postcommit_reload_preserves_exact_product_authority(
             control,
             {"result": asdict(control_result)},
             result_approval_authority=control_approval_authority,
-        )
+        ), ctx
 
-    assert _canonical_product_snapshot(world, target_product_snapshot) == control_snapshot
-    assert len(world.effects) - before_effect_count == control_effect_delta
+    assert _canonical_product_snapshot(world, target_product_snapshot) == control_snapshot, ctx
+    assert len(world.effects) - before_effect_count == control_effect_delta, ctx
     assert _ProbeSession.activity_commit_callers == [
         "execute_bound_tool_activity"
         if activity_kind == "execute"
         else "resolve_bound_tool_approval_activity"
-    ]
-    assert len(world.activities.authority_calls) == 1
+    ], ctx
+    assert len(world.activities.authority_calls) == 1, ctx
     assert {
         name: len(_metric_points(world.telemetry, name))
         for name in ("tool_calls_total", "tool_call_failures_total")
-    } == before_points
+    } == before_points, ctx
     spans = _tool_spans(world.telemetry)
-    assert len(spans) == 1
-    assert spans[0].attributes["jhin.outcome"] == "other"
-    assert spans[0].status.status_code is StatusCode.UNSET
-    assert not ({"error.code", "error.type"} & set(spans[0].attributes))
+    assert len(spans) == 1, ctx
+    assert spans[0].attributes["jhin.outcome"] == "other", ctx
+    assert spans[0].status.status_code is StatusCode.UNSET, ctx
+    assert not ({"error.code", "error.type"} & set(spans[0].attributes)), ctx
 
 
-@pytest.mark.parametrize(
-    "failure_type",
-    [asyncio.CancelledError, KeyboardInterrupt, SystemExit],
-)
-@pytest.mark.parametrize(
-    ("activity_kind", "product_kind"),
-    [
-        ("execute", "success"),
-        ("execute", "failure"),
-        ("approval", "success"),
-        ("approval", "failure"),
-    ],
-)
-async def test_postcommit_reload_cancellation_and_fatal_authority_propagate_exactly(
+async def test_postcommit_reload_cancellation_and_fatal_authority_propagate_exactly() -> None:
+    # Loop-folded: the exact former parametrize cross-product, one isolated
+    # world per case.
+    for failure_type in (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+        for activity_kind, product_kind in (
+            ("execute", "success"),
+            ("execute", "failure"),
+            ("approval", "success"),
+            ("approval", "failure"),
+        ):
+            ctx = (
+                f"failure_type={failure_type.__name__}"
+                f" activity_kind={activity_kind} product_kind={product_kind}"
+            )
+            with _named_case(ctx):
+                async with _fresh_world_context() as world:
+                    await _check_postcommit_reload_fatal_case(
+                        world,
+                        failure_type=failure_type,
+                        activity_kind=activity_kind,
+                        product_kind=product_kind,
+                        ctx=ctx,
+                    )
+
+
+async def _check_postcommit_reload_fatal_case(
     world: ToolWorld,
+    *,
     failure_type: type[BaseException],
     activity_kind: str,
     product_kind: str,
+    ctx: str,
 ) -> None:
     control = await world.clone_isolated()
     control_parked = await _prepare_terminal_case(
@@ -3783,31 +3906,33 @@ async def test_postcommit_reload_cancellation_and_fatal_authority_propagate_exac
                 world.approval_params(parked.approval_id or "")
             )
 
-    assert caught.value is failure
-    assert world.activities.authority_raised_traceback is not None
+    assert caught.value is failure, ctx
+    assert world.activities.authority_raised_traceback is not None, ctx
     assert _traceback_tail(caught.value.__traceback__) is (
         world.activities.authority_raised_traceback
-    )
+    ), ctx
     assert (
         _traceback_frame_names(caught.value.__traceback__).count("_load_tool_telemetry_authority")
         == 1
-    )
-    assert _canonical_product_snapshot(world, await world.product_snapshot()) == control_snapshot
-    assert len(world.effects) - before_effect_count == control_effect_delta
+    ), ctx
+    assert _canonical_product_snapshot(world, await world.product_snapshot()) == (
+        control_snapshot
+    ), ctx
+    assert len(world.effects) - before_effect_count == control_effect_delta, ctx
     assert _ProbeSession.activity_commit_callers == [
         "execute_bound_tool_activity"
         if activity_kind == "execute"
         else "resolve_bound_tool_approval_activity"
-    ]
+    ], ctx
     assert {
         name: len(_metric_points(world.telemetry, name))
         for name in ("tool_calls_total", "tool_call_failures_total")
-    } == before_points
+    } == before_points, ctx
     spans = _tool_spans(world.telemetry)
-    assert len(spans) == 1
-    assert spans[0].attributes["jhin.outcome"] == "other"
-    assert spans[0].status.status_code is StatusCode.UNSET
-    assert not ({"error.code", "error.type"} & set(spans[0].attributes))
+    assert len(spans) == 1, ctx
+    assert spans[0].attributes["jhin.outcome"] == "other", ctx
+    assert spans[0].status.status_code is StatusCode.UNSET, ctx
+    assert not ({"error.code", "error.type"} & set(spans[0].attributes)), ctx
 
 
 @pytest.mark.parametrize("activity_kind", ["execute", "approval"])
@@ -4189,25 +4314,41 @@ async def test_every_package_description_field_drives_worker_span_and_metric_aut
         assert _metric_point_multiset(world.telemetry) == []
 
 
-@pytest.mark.parametrize(
-    ("activity_kind", "product_kind"),
-    [
-        ("execute", "success"),
-        ("execute", "failure"),
-        ("approval", "success"),
-        ("approval", "failure"),
-    ],
-)
-@pytest.mark.parametrize(
-    "diagnostic_type",
-    [RuntimeError, ValueError, KeyError, AttributeError, _WorkerDiagnostic],
-)
-async def test_ordinary_package_mapper_failure_is_unproven_diagnostic_fallback(
+async def test_ordinary_package_mapper_failure_is_unproven_diagnostic_fallback() -> None:
+    # Loop-folded: the exact former parametrize cross-product, one isolated
+    # world and monkeypatch scope per case.
+    for diagnostic_type in (RuntimeError, ValueError, KeyError, AttributeError, _WorkerDiagnostic):
+        for activity_kind, product_kind in (
+            ("execute", "success"),
+            ("execute", "failure"),
+            ("approval", "success"),
+            ("approval", "failure"),
+        ):
+            ctx = (
+                f"diagnostic_type={diagnostic_type.__name__}"
+                f" activity_kind={activity_kind} product_kind={product_kind}"
+            )
+            with _named_case(ctx):
+                async with _fresh_world_context() as world:
+                    with pytest.MonkeyPatch.context() as monkeypatch:
+                        await _check_package_mapper_diagnostic_case(
+                            world,
+                            monkeypatch,
+                            activity_kind=activity_kind,
+                            product_kind=product_kind,
+                            diagnostic_type=diagnostic_type,
+                            ctx=ctx,
+                        )
+
+
+async def _check_package_mapper_diagnostic_case(
     world: ToolWorld,
     monkeypatch: pytest.MonkeyPatch,
+    *,
     activity_kind: str,
     product_kind: str,
     diagnostic_type: type[Exception],
+    ctx: str,
 ) -> None:
     control = await world.clone_isolated()
     _use_noop_activity_runtime(control)
@@ -4256,7 +4397,9 @@ async def test_ordinary_package_mapper_failure_is_unproven_diagnostic_fallback(
         if activity_kind == "execute"
         else "resolve_bound_tool_approval_activity"
     )
-    assert _ProbeSession.activity_commit_callers[control_commits_before:] == [expected_commit_owner]
+    assert _ProbeSession.activity_commit_callers[control_commits_before:] == (
+        [expected_commit_owner]
+    ), ctx
     control_product_snapshot = await control.product_snapshot()
     control_snapshot = _canonical_product_snapshot(control, control_product_snapshot)
     world.telemetry.exporter.clear()
@@ -4279,20 +4422,20 @@ async def test_ordinary_package_mapper_failure_is_unproven_diagnostic_fallback(
     )
     target_product_snapshot = await world.product_snapshot()
 
-    assert mapper_calls == 1
+    assert mapper_calls == 1, ctx
     if control_error is not None:
-        assert result is None
-        assert error is not None
-        assert _application_error_public(error) == _application_error_public(control_error)
-        assert frames == control_frames
+        assert result is None, ctx
+        assert error is not None, ctx
+        assert _application_error_public(error) == _application_error_public(control_error), ctx
+        assert frames == control_frames, ctx
         owned_error, owned_traceback = raised_errors[world.invocation_id][-1]
-        assert error is owned_error
-        assert _traceback_tail(error.__traceback__) is _traceback_tail(owned_traceback)
+        assert error is owned_error, ctx
+        assert _traceback_tail(error.__traceback__) is _traceback_tail(owned_traceback), ctx
     else:
-        assert control_result is not None
-        assert error is None
-        assert result is not None
-        assert result is bound_results[world.invocation_id][-1]
+        assert control_result is not None, ctx
+        assert error is None, ctx
+        assert result is not None, ctx
+        assert result is bound_results[world.invocation_id][-1], ctx
         target_approval_authority = _bound_result_approval_authority(
             result,
             parked,
@@ -4311,32 +4454,56 @@ async def test_ordinary_package_mapper_failure_is_unproven_diagnostic_fallback(
             control,
             {"result": asdict(control_result)},
             result_approval_authority=control_approval_authority,
-        )
-    assert _canonical_product_snapshot(world, target_product_snapshot) == control_snapshot
-    assert len(world.effects) - target_effects_before == control_effect_delta
-    assert _ProbeSession.activity_commit_callers[target_commits_before:] == [expected_commit_owner]
-    assert _metric_point_multiset(world.telemetry) == []
+        ), ctx
+    assert _canonical_product_snapshot(world, target_product_snapshot) == control_snapshot, ctx
+    assert len(world.effects) - target_effects_before == control_effect_delta, ctx
+    assert _ProbeSession.activity_commit_callers[target_commits_before:] == (
+        [expected_commit_owner]
+    ), ctx
+    assert _metric_point_multiset(world.telemetry) == [], ctx
     spans = _tool_spans(world.telemetry)
-    assert len(spans) == 1
+    assert len(spans) == 1, ctx
     assert dict(spans[0].attributes) == {
         "jhin.tool_family": "other",
         "jhin.risk": "other",
         "jhin.outcome": "other",
-    }
-    assert spans[0].status.status_code is StatusCode.UNSET
-    assert spans[0].events == ()
-    assert spans[0].links == ()
+    }, ctx
+    assert spans[0].status.status_code is StatusCode.UNSET, ctx
+    assert spans[0].events == (), ctx
+    assert spans[0].links == (), ctx
 
 
-@pytest.mark.parametrize("failure_type", [asyncio.CancelledError, KeyboardInterrupt, SystemExit])
-@pytest.mark.parametrize("activity_kind", ["execute", "approval"])
-@pytest.mark.parametrize("product_kind", ["success", "failure"])
-async def test_package_mapper_cancellation_and_fatal_authority_propagate_exactly(
+async def test_package_mapper_cancellation_and_fatal_authority_propagate_exactly() -> None:
+    # Loop-folded: the exact former parametrize cross-product, one isolated
+    # world and monkeypatch scope per case.
+    for product_kind in ("success", "failure"):
+        for activity_kind in ("execute", "approval"):
+            for failure_type in (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+                ctx = (
+                    f"product_kind={product_kind} activity_kind={activity_kind}"
+                    f" failure_type={failure_type.__name__}"
+                )
+                with _named_case(ctx):
+                    async with _fresh_world_context() as world:
+                        with pytest.MonkeyPatch.context() as monkeypatch:
+                            await _check_package_mapper_fatal_case(
+                                world,
+                                monkeypatch,
+                                failure_type=failure_type,
+                                activity_kind=activity_kind,
+                                product_kind=product_kind,
+                                ctx=ctx,
+                            )
+
+
+async def _check_package_mapper_fatal_case(
     world: ToolWorld,
     monkeypatch: pytest.MonkeyPatch,
+    *,
     failure_type: type[BaseException],
     activity_kind: str,
     product_kind: str,
+    ctx: str,
 ) -> None:
     parked = await _prepare_terminal_case(
         world,
@@ -4365,12 +4532,12 @@ async def test_package_mapper_cancellation_and_fatal_authority_propagate_exactly
                 world.approval_params(parked.approval_id or "")
             )
 
-    assert caught.value is failure
-    assert raised_traceback is not None
-    assert _traceback_tail(caught.value.__traceback__) is raised_traceback
-    assert _traceback_frame_names(caught.value.__traceback__).count("fail_mapper") == 1
+    assert caught.value is failure, ctx
+    assert raised_traceback is not None, ctx
+    assert _traceback_tail(caught.value.__traceback__) is raised_traceback, ctx
+    assert _traceback_frame_names(caught.value.__traceback__).count("fail_mapper") == 1, ctx
     row = await world.tool_call()
-    assert row is not None
+    assert row is not None, ctx
     assert (
         row.status
         == {
@@ -4379,90 +4546,112 @@ async def test_package_mapper_cancellation_and_fatal_authority_propagate_exactly
             ("approval", "success"): ToolCallStatus.COMPLETED.value,
             ("approval", "failure"): ToolCallStatus.REJECTED.value,
         }[(activity_kind, product_kind)]
-    )
-    assert _metric_point_multiset(world.telemetry) == []
+    ), ctx
+    assert _metric_point_multiset(world.telemetry) == [], ctx
     spans = _tool_spans(world.telemetry)
-    assert len(spans) == 1
+    assert len(spans) == 1, ctx
     assert dict(spans[0].attributes) == {
         "jhin.tool_family": "other",
         "jhin.risk": "other",
         "jhin.outcome": "other",
-    }
-    assert spans[0].status.status_code is StatusCode.UNSET
+    }, ctx
+    assert spans[0].status.status_code is StatusCode.UNSET, ctx
 
 
-@pytest.mark.parametrize(
-    ("constant", "invalid"),
-    [
-        ("_TOOL_EXECUTE_SPAN_NAME", "unregistered.span"),
-        ("_TOOL_APPROVAL_SPAN_NAME", "unregistered.span"),
-        ("_TOOL_EXECUTE_SPAN_NAME", "tool.approval.resolve"),
-        ("_TOOL_APPROVAL_SPAN_NAME", "tool.gateway.execute"),
-        ("_TOOL_FAMILY_ATTRIBUTE", "unregistered.attribute"),
-        ("_TOOL_RISK_ATTRIBUTE", "unregistered.attribute"),
-        ("_TOOL_OUTCOME_ATTRIBUTE", "unregistered.attribute"),
-        ("_TOOL_FAMILY_ATTRIBUTE", "jhin.risk"),
-        ("_TOOL_RISK_ATTRIBUTE", "jhin.outcome"),
-        ("_TOOL_OUTCOME_ATTRIBUTE", "jhin.tool_family"),
-        ("_TOOL_CALLS_METRIC", "unregistered_metric"),
-        ("_TOOL_FAILURES_METRIC", "unregistered_metric"),
-        ("_TOOL_CALLS_METRIC", "tool_call_failures_total"),
-        ("_TOOL_FAILURES_METRIC", "tool_calls_total"),
-        ("_TOOL_FAMILY_LABEL", "workspace_id"),
-        ("_TOOL_RISK_LABEL", "workspace_id"),
-        ("_TOOL_OUTCOME_LABEL", "workspace_id"),
-        ("_TOOL_FAILURE_LABEL", "workspace_id"),
-        ("_TOOL_FAMILY_LABEL", "risk"),
-        ("_TOOL_RISK_LABEL", "outcome"),
-        ("_TOOL_OUTCOME_LABEL", "tool_family"),
-        ("_TOOL_FAILURE_LABEL", "risk"),
-        ("_TOOL_MEASUREMENT", True),
-        ("_TOOL_MEASUREMENT", 0),
-        ("_TOOL_MEASUREMENT", 2),
-        ("_TOOL_MEASUREMENT", 1.0),
-        ("_TOOL_ROW_COMPLETED", "failed"),
-        ("_TOOL_ROW_FAILED", "completed"),
-        ("_TOOL_ROW_DENIED", "rejected"),
-        ("_TOOL_ROW_REJECTED", "denied"),
-        ("_TOOL_ROW_EXECUTION_UNKNOWN", "executing"),
-        ("_TOOL_ROW_PENDING_APPROVAL", "completed"),
-        ("_TOOL_OUTCOME_COMPLETED", "healthy"),
-        ("_TOOL_OUTCOME_ACCEPTED", "started"),
-        ("_TOOL_OUTCOME_FAILED", "timeout"),
-        ("_TOOL_OUTCOME_DENIED", "rejected"),
-        ("_TOOL_OUTCOME_REJECTED", "denied"),
-        ("_TOOL_OUTCOME_EXECUTION_UNKNOWN", "other"),
-        ("_TOOL_OUTCOME_OTHER", "completed"),
-        ("_TOOL_OUTCOME_CANCELLED", "failed"),
-        ("_TOOL_FAILURE_INTERNAL", "other"),
-        ("_TOOL_FAILURE_POLICY", "authorization"),
-        ("_TOOL_FAILURE_EXECUTION_UNKNOWN", "internal"),
-        ("_TOOL_FAILURE_INTERNAL", "policy"),
-        ("_TOOL_FAILURE_POLICY", "execution_unknown"),
-        ("_TOOL_ERROR_TYPE_ATTRIBUTE", "error.kind"),
-        ("_TOOL_ERROR_CODE_ATTRIBUTE", "error.reason"),
-        ("_TOOL_ERROR_TYPE_ATTRIBUTE", "error.code"),
-        ("_TOOL_ERROR_CODE_ATTRIBUTE", "error.type"),
-        ("_TOOL_ERROR_TYPE_VALUE", "private invalid type"),
-        ("_TOOL_ERROR_TYPE_VALUE", "RuntimeError"),
-        ("_TOOL_INTERNAL_ERROR_CODE", "other"),
-        ("_TOOL_POLICY_ERROR_CODE", "policy"),
-        ("_TOOL_EXECUTION_UNKNOWN_ERROR_CODE", "unknown"),
-        ("_TOOL_INTERNAL_ERROR_CODE", SafeErrorCode.TIMEOUT.value),
-        ("_TOOL_POLICY_ERROR_CODE", SafeErrorCode.CONFLICT.value),
-        (
-            "_TOOL_EXECUTION_UNKNOWN_ERROR_CODE",
-            SafeErrorCode.INTERNAL_ERROR.value,
-        ),
-    ],
-)
-@pytest.mark.parametrize("activity_kind", ["execute", "approval"])
-async def test_invalid_fixed_tool_schema_fails_before_product_db_or_backend(
+_FIXED_TOOL_SCHEMA_INVALID_CASES: list[tuple[str, object]] = [
+    ("_TOOL_EXECUTE_SPAN_NAME", "unregistered.span"),
+    ("_TOOL_APPROVAL_SPAN_NAME", "unregistered.span"),
+    ("_TOOL_EXECUTE_SPAN_NAME", "tool.approval.resolve"),
+    ("_TOOL_APPROVAL_SPAN_NAME", "tool.gateway.execute"),
+    ("_TOOL_FAMILY_ATTRIBUTE", "unregistered.attribute"),
+    ("_TOOL_RISK_ATTRIBUTE", "unregistered.attribute"),
+    ("_TOOL_OUTCOME_ATTRIBUTE", "unregistered.attribute"),
+    ("_TOOL_FAMILY_ATTRIBUTE", "jhin.risk"),
+    ("_TOOL_RISK_ATTRIBUTE", "jhin.outcome"),
+    ("_TOOL_OUTCOME_ATTRIBUTE", "jhin.tool_family"),
+    ("_TOOL_CALLS_METRIC", "unregistered_metric"),
+    ("_TOOL_FAILURES_METRIC", "unregistered_metric"),
+    ("_TOOL_CALLS_METRIC", "tool_call_failures_total"),
+    ("_TOOL_FAILURES_METRIC", "tool_calls_total"),
+    ("_TOOL_FAMILY_LABEL", "workspace_id"),
+    ("_TOOL_RISK_LABEL", "workspace_id"),
+    ("_TOOL_OUTCOME_LABEL", "workspace_id"),
+    ("_TOOL_FAILURE_LABEL", "workspace_id"),
+    ("_TOOL_FAMILY_LABEL", "risk"),
+    ("_TOOL_RISK_LABEL", "outcome"),
+    ("_TOOL_OUTCOME_LABEL", "tool_family"),
+    ("_TOOL_FAILURE_LABEL", "risk"),
+    ("_TOOL_MEASUREMENT", True),
+    ("_TOOL_MEASUREMENT", 0),
+    ("_TOOL_MEASUREMENT", 2),
+    ("_TOOL_MEASUREMENT", 1.0),
+    ("_TOOL_ROW_COMPLETED", "failed"),
+    ("_TOOL_ROW_FAILED", "completed"),
+    ("_TOOL_ROW_DENIED", "rejected"),
+    ("_TOOL_ROW_REJECTED", "denied"),
+    ("_TOOL_ROW_EXECUTION_UNKNOWN", "executing"),
+    ("_TOOL_ROW_PENDING_APPROVAL", "completed"),
+    ("_TOOL_OUTCOME_COMPLETED", "healthy"),
+    ("_TOOL_OUTCOME_ACCEPTED", "started"),
+    ("_TOOL_OUTCOME_FAILED", "timeout"),
+    ("_TOOL_OUTCOME_DENIED", "rejected"),
+    ("_TOOL_OUTCOME_REJECTED", "denied"),
+    ("_TOOL_OUTCOME_EXECUTION_UNKNOWN", "other"),
+    ("_TOOL_OUTCOME_OTHER", "completed"),
+    ("_TOOL_OUTCOME_CANCELLED", "failed"),
+    ("_TOOL_FAILURE_INTERNAL", "other"),
+    ("_TOOL_FAILURE_POLICY", "authorization"),
+    ("_TOOL_FAILURE_EXECUTION_UNKNOWN", "internal"),
+    ("_TOOL_FAILURE_INTERNAL", "policy"),
+    ("_TOOL_FAILURE_POLICY", "execution_unknown"),
+    ("_TOOL_ERROR_TYPE_ATTRIBUTE", "error.kind"),
+    ("_TOOL_ERROR_CODE_ATTRIBUTE", "error.reason"),
+    ("_TOOL_ERROR_TYPE_ATTRIBUTE", "error.code"),
+    ("_TOOL_ERROR_CODE_ATTRIBUTE", "error.type"),
+    ("_TOOL_ERROR_TYPE_VALUE", "private invalid type"),
+    ("_TOOL_ERROR_TYPE_VALUE", "RuntimeError"),
+    ("_TOOL_INTERNAL_ERROR_CODE", "other"),
+    ("_TOOL_POLICY_ERROR_CODE", "policy"),
+    ("_TOOL_EXECUTION_UNKNOWN_ERROR_CODE", "unknown"),
+    ("_TOOL_INTERNAL_ERROR_CODE", SafeErrorCode.TIMEOUT.value),
+    ("_TOOL_POLICY_ERROR_CODE", SafeErrorCode.CONFLICT.value),
+    (
+        "_TOOL_EXECUTION_UNKNOWN_ERROR_CODE",
+        SafeErrorCode.INTERNAL_ERROR.value,
+    ),
+]
+
+
+async def test_invalid_fixed_tool_schema_fails_before_product_db_or_backend() -> None:
+    # Loop-folded: the exact former parametrize cross-product, one isolated
+    # world and monkeypatch scope per case. The guard test
+    # test_fixed_tool_schema_parameters_have_one_explicit_constant_owner proves
+    # this loop iterates _FIXED_TOOL_SCHEMA_INVALID_CASES and that the list
+    # covers every owned schema constant exactly once.
+    for activity_kind in ("execute", "approval"):
+        for constant, invalid in _FIXED_TOOL_SCHEMA_INVALID_CASES:
+            ctx = f"activity_kind={activity_kind} constant={constant} invalid={invalid!r}"
+            with _named_case(ctx):
+                async with _fresh_world_context() as world:
+                    with pytest.MonkeyPatch.context() as monkeypatch:
+                        await _check_invalid_fixed_tool_schema_case(
+                            world,
+                            monkeypatch,
+                            constant=constant,
+                            invalid=invalid,
+                            activity_kind=activity_kind,
+                            ctx=ctx,
+                        )
+
+
+async def _check_invalid_fixed_tool_schema_case(
     world: ToolWorld,
     monkeypatch: pytest.MonkeyPatch,
+    *,
     constant: str,
     invalid: object,
     activity_kind: str,
+    ctx: str,
 ) -> None:
     parked: BoundToolResult | None = None
     if activity_kind == "approval":
@@ -4494,41 +4683,32 @@ async def test_invalid_fixed_tool_schema_fails_before_product_db_or_backend(
                 world.approval_params(parked.approval_id or "")
             )
 
-    assert world.effects == effects_before
-    assert len(_ProbeSession.created_session_ids) == session_count_before
-    assert len(_ProbeSession.activity_commit_callers) == commit_count_before
-    assert metrics_trap.accesses == []
-    assert tracer_trap.accesses == []
-    assert world.activities.authority_calls == []
-    assert _metric_points(world.telemetry, "tool_calls_total") == []
-    assert _metric_points(world.telemetry, "tool_call_failures_total") == []
-    assert _tool_spans(world.telemetry) == []
-    assert await world.product_snapshot() == before
-    assert len(_ProbeSession.created_session_ids) == session_count_before + 1
+    assert world.effects == effects_before, ctx
+    assert len(_ProbeSession.created_session_ids) == session_count_before, ctx
+    assert len(_ProbeSession.activity_commit_callers) == commit_count_before, ctx
+    assert metrics_trap.accesses == [], ctx
+    assert tracer_trap.accesses == [], ctx
+    assert world.activities.authority_calls == [], ctx
+    assert _metric_points(world.telemetry, "tool_calls_total") == [], ctx
+    assert _metric_points(world.telemetry, "tool_call_failures_total") == [], ctx
+    assert _tool_spans(world.telemetry) == [], ctx
+    assert await world.product_snapshot() == before, ctx
+    assert len(_ProbeSession.created_session_ids) == session_count_before + 1, ctx
 
 
 def test_fixed_tool_schema_parameters_have_one_explicit_constant_owner() -> None:
     assert _PACKAGE_OWNED_TOOL_SCHEMA_CONSTANTS.isdisjoint(_ACTIVITY_OWNED_TOOL_SCHEMA_CONSTANTS)
+    # The loop-folded test must iterate the shared module-level case list, so
+    # reading that list here reads the exact set of exercised constants.
     source = inspect.getsource(test_invalid_fixed_tool_schema_fails_before_product_db_or_backend)
     function = cast(ast.AsyncFunctionDef, ast.parse(textwrap.dedent(source)).body[0])
-    parameter_names: list[str] = []
-    for decorator in function.decorator_list:
-        if not (
-            isinstance(decorator, ast.Call)
-            and isinstance(decorator.func, ast.Attribute)
-            and decorator.func.attr == "parametrize"
-            and len(decorator.args) >= 2
-            and isinstance(decorator.args[0], ast.Tuple)
-            and [item.value for item in decorator.args[0].elts if isinstance(item, ast.Constant)]
-            == ["constant", "invalid"]
-            and isinstance(decorator.args[1], ast.List)
-        ):
-            continue
-        for row in decorator.args[1].elts:
-            assert isinstance(row, ast.Tuple)
-            name = row.elts[0]
-            assert isinstance(name, ast.Constant) and type(name.value) is str
-            parameter_names.append(name.value)
+    loop_iterated_names = {
+        node.iter.id
+        for node in ast.walk(function)
+        if isinstance(node, ast.For) and isinstance(node.iter, ast.Name)
+    }
+    assert "_FIXED_TOOL_SCHEMA_INVALID_CASES" in loop_iterated_names
+    parameter_names = [constant for constant, _invalid in _FIXED_TOOL_SCHEMA_INVALID_CASES]
     assert parameter_names
     owners = _PACKAGE_OWNED_TOOL_SCHEMA_CONSTANTS | _ACTIVITY_OWNED_TOOL_SCHEMA_CONSTANTS
     assert set(parameter_names) == owners
@@ -5596,16 +5776,34 @@ _POSTCOMMIT_PRIMARY_CANCELLATION_CASES = [
 ]
 
 
-@pytest.mark.parametrize(
-    ("activity_kind", "product_kind", "phase"),
-    _POSTCOMMIT_PRIMARY_CANCELLATION_CASES,
-)
-async def test_postcommit_setter_and_metric_cancellation_is_primary_with_committed_product(
+async def test_postcommit_setter_and_metric_cancellation_is_primary_with_committed_product() -> (
+    None
+):
+    # Loop-folded: the exact former parametrize case list, one isolated world
+    # and monkeypatch scope per case.
+    for activity_kind, product_kind, phase in _POSTCOMMIT_PRIMARY_CANCELLATION_CASES:
+        ctx = f"activity_kind={activity_kind} product_kind={product_kind} phase={phase}"
+        with _named_case(ctx):
+            async with _fresh_world_context() as world:
+                with pytest.MonkeyPatch.context() as monkeypatch:
+                    await _check_postcommit_primary_cancellation_case(
+                        world,
+                        monkeypatch,
+                        activity_kind=activity_kind,
+                        product_kind=product_kind,
+                        phase=phase,
+                        ctx=ctx,
+                    )
+
+
+async def _check_postcommit_primary_cancellation_case(
     world: ToolWorld,
     monkeypatch: pytest.MonkeyPatch,
+    *,
     activity_kind: str,
     product_kind: str,
     phase: str,
+    ctx: str,
 ) -> None:
     control = await world.clone_isolated()
     _use_noop_activity_runtime(control)
@@ -5654,28 +5852,30 @@ async def test_postcommit_setter_and_metric_cancellation_is_primary_with_committ
         False,
         None,
         None,
-    )
-    assert otel_context.get_current() is entry_context
-    assert trace.get_current_span() is entry_span
+    ), ctx
+    assert otel_context.get_current() is entry_context, ctx
+    assert trace.get_current_span() is entry_span, ctx
     assert _ProbeSession.activity_commit_callers[commits_before_target:] == [
         (
             "execute_bound_tool_activity"
             if activity_kind == "execute"
             else "resolve_bound_tool_approval_activity"
         )
-    ]
-    assert len(gateway_calls[world.run_id]) == 1
-    assert _canonical_product_snapshot(world, await world.product_snapshot()) == control_snapshot
-    assert len(world.effects) - effects_before_target == control_effect_delta
+    ], ctx
+    assert len(gateway_calls[world.run_id]) == 1, ctx
+    assert _canonical_product_snapshot(world, await world.product_snapshot()) == (
+        control_snapshot
+    ), ctx
+    assert len(world.effects) - effects_before_target == control_effect_delta, ctx
     if tracer is not None:
-        assert tracer.manager.enter_calls == 1
-        assert tracer.manager.exit_calls == 1
-        assert tracer.span.end_calls == 1
-        assert tracer.manager.token is None
-        assert gateway_calls[world.run_id] == [tracer.span]
+        assert tracer.manager.enter_calls == 1, ctx
+        assert tracer.manager.exit_calls == 1, ctx
+        assert tracer.span.end_calls == 1, ctx
+        assert tracer.manager.token is None, ctx
+        assert gateway_calls[world.run_id] == [tracer.span], ctx
     else:
-        assert metrics is not None
-        assert gateway_calls[world.run_id][0] is not entry_span
+        assert metrics is not None, ctx
+        assert gateway_calls[world.run_id][0] is not entry_span, ctx
 
     expected_points = _expected_product_metric_points(
         activity_kind=activity_kind,
@@ -5685,7 +5885,7 @@ async def test_postcommit_setter_and_metric_cancellation_is_primary_with_committ
         expected_points = []
     elif phase.startswith("failures_"):
         expected_points = [point for point in expected_points if point[0] == "tool_calls_total"]
-    assert _metric_point_multiset(world.telemetry) == sorted(expected_points)
+    assert _metric_point_multiset(world.telemetry) == sorted(expected_points), ctx
 
 
 @pytest.mark.parametrize(
@@ -6117,20 +6317,45 @@ class _HostileProofEquality:
         raise AssertionError("unreachable")
 
 
-@pytest.mark.parametrize(
-    "failure_type",
-    [_WorkerDiagnostic, asyncio.CancelledError, KeyboardInterrupt, SystemExit],
-)
-@pytest.mark.parametrize("proof_seam", ["equality", "stable-derivation"])
-@pytest.mark.parametrize("activity_kind", ["execute", "approval"])
-@pytest.mark.parametrize("product_kind", ["success", "failure"])
-async def test_postcommit_proof_exceptions_preserve_exact_product_and_base_authority(
+async def test_postcommit_proof_exceptions_preserve_exact_product_and_base_authority() -> None:
+    # Loop-folded: the exact former parametrize cross-product, one isolated
+    # world and monkeypatch scope per case.
+    for product_kind in ("success", "failure"):
+        for activity_kind in ("execute", "approval"):
+            for proof_seam in ("equality", "stable-derivation"):
+                for failure_type in (
+                    _WorkerDiagnostic,
+                    asyncio.CancelledError,
+                    KeyboardInterrupt,
+                    SystemExit,
+                ):
+                    ctx = (
+                        f"product_kind={product_kind} activity_kind={activity_kind}"
+                        f" proof_seam={proof_seam} failure_type={failure_type.__name__}"
+                    )
+                    with _named_case(ctx):
+                        async with _fresh_world_context() as world:
+                            with pytest.MonkeyPatch.context() as monkeypatch:
+                                await _check_postcommit_proof_exception_case(
+                                    world,
+                                    monkeypatch,
+                                    failure_type=failure_type,
+                                    proof_seam=proof_seam,
+                                    activity_kind=activity_kind,
+                                    product_kind=product_kind,
+                                    ctx=ctx,
+                                )
+
+
+async def _check_postcommit_proof_exception_case(
     world: ToolWorld,
     monkeypatch: pytest.MonkeyPatch,
+    *,
     failure_type: type[BaseException],
     proof_seam: str,
     activity_kind: str,
     product_kind: str,
+    ctx: str,
 ) -> None:
     control = await world.clone_isolated()
     _use_noop_activity_runtime(control)
@@ -6201,14 +6426,16 @@ async def test_postcommit_proof_exceptions_preserve_exact_product_and_base_autho
             parked=parked,
         )
         if control_error is not None:
-            assert result is None
-            assert error is not None
-            assert _application_error_public(error) == _application_error_public(control_error)
-            assert frames == control_frames
+            assert result is None, ctx
+            assert error is not None, ctx
+            assert _application_error_public(error) == (_application_error_public(control_error)), (
+                ctx
+            )
+            assert frames == control_frames, ctx
         else:
-            assert control_result is not None
-            assert result is not None
-            assert error is None
+            assert control_result is not None, ctx
+            assert result is not None, ctx
+            assert error is None, ctx
             target_snapshot = await world.product_snapshot()
             target_approval_authority = _bound_result_approval_authority(
                 result,
@@ -6228,34 +6455,36 @@ async def test_postcommit_proof_exceptions_preserve_exact_product_and_base_autho
                 control,
                 {"result": asdict(control_result)},
                 result_approval_authority=control_approval_authority,
-            )
+            ), ctx
     else:
         with pytest.raises(failure_type) as caught:
             if activity_kind == "execute":
                 await world.activities.execute_bound_tool_activity(world.execute_params())
             else:
-                assert parked is not None
+                assert parked is not None, ctx
                 await world.activities.resolve_bound_tool_approval_activity(
                     world.approval_params(parked.approval_id or "")
                 )
-        assert caught.value is failure
-        assert owner.raised_traceback is not None
-        assert _traceback_tail(caught.value.__traceback__) is owner.raised_traceback
-        assert _traceback_frame_names(caught.value.__traceback__).count("raise_owned") == 1
+        assert caught.value is failure, ctx
+        assert owner.raised_traceback is not None, ctx
+        assert _traceback_tail(caught.value.__traceback__) is owner.raised_traceback, ctx
+        assert _traceback_frame_names(caught.value.__traceback__).count("raise_owned") == 1, ctx
 
-    assert owner.raised_traceback is not None
-    assert _canonical_product_snapshot(world, await world.product_snapshot()) == control_snapshot
-    assert len(world.effects) - target_effects_before == control_effect_delta
-    assert _metric_point_multiset(world.telemetry) == []
+    assert owner.raised_traceback is not None, ctx
+    assert _canonical_product_snapshot(world, await world.product_snapshot()) == (
+        control_snapshot
+    ), ctx
+    assert len(world.effects) - target_effects_before == control_effect_delta, ctx
+    assert _metric_point_multiset(world.telemetry) == [], ctx
     spans = _tool_spans(world.telemetry)
-    assert len(spans) == 1
+    assert len(spans) == 1, ctx
     assert dict(spans[0].attributes) == {
         "jhin.tool_family": "other",
         "jhin.risk": "other",
         "jhin.outcome": "other",
-    }
-    assert spans[0].status.status_code is StatusCode.UNSET
-    assert spans[0].events == ()
+    }, ctx
+    assert spans[0].status.status_code is StatusCode.UNSET, ctx
+    assert spans[0].events == (), ctx
 
 
 def _install_product_cancellation(
@@ -6361,25 +6590,47 @@ def _hostile_phase_is_reached(phase: str, product_kind: str) -> bool:
     raise AssertionError(f"unknown hostile phase {phase}")
 
 
-@pytest.mark.parametrize(
-    "diagnostic_type",
-    [
-        RuntimeError,
-        ValueError,
-        KeyError,
-        AttributeError,
-        _WorkerDiagnostic,
-    ],
-)
-@pytest.mark.parametrize(("activity_kind", "product_kind"), _HOSTILE_PRODUCT_CASES)
-@pytest.mark.parametrize("phase", _HOSTILE_PHASES)
-async def test_hostile_telemetry_is_diagnostic_only_after_valid_schema(
+async def test_hostile_telemetry_is_diagnostic_only_after_valid_schema() -> None:
+    # Loop-folded: the exact former parametrize cross-product
+    # (_HOSTILE_PHASES x _HOSTILE_PRODUCT_CASES x diagnostic types), one
+    # isolated world and monkeypatch scope per case.
+    for phase in _HOSTILE_PHASES:
+        for activity_kind, product_kind in _HOSTILE_PRODUCT_CASES:
+            for diagnostic_type in (
+                RuntimeError,
+                ValueError,
+                KeyError,
+                AttributeError,
+                _WorkerDiagnostic,
+            ):
+                ctx = (
+                    f"phase={phase} activity_kind={activity_kind}"
+                    f" product_kind={product_kind}"
+                    f" diagnostic_type={diagnostic_type.__name__}"
+                )
+                with _named_case(ctx):
+                    async with _fresh_world_context() as world:
+                        with pytest.MonkeyPatch.context() as monkeypatch:
+                            await _check_hostile_telemetry_diagnostic_case(
+                                world,
+                                monkeypatch,
+                                diagnostic_type=diagnostic_type,
+                                activity_kind=activity_kind,
+                                phase=phase,
+                                product_kind=product_kind,
+                                ctx=ctx,
+                            )
+
+
+async def _check_hostile_telemetry_diagnostic_case(
     world: ToolWorld,
     monkeypatch: pytest.MonkeyPatch,
+    *,
     diagnostic_type: type[BaseException],
     activity_kind: str,
     phase: str,
     product_kind: str,
+    ctx: str,
 ) -> None:
     control = await world.clone_isolated()
     _use_noop_activity_runtime(control)
@@ -6428,7 +6679,7 @@ async def test_hostile_telemetry_is_diagnostic_only_after_valid_schema(
             activity_kind=activity_kind,
             parked=control_parked,
         )
-        assert control_cancellation is cancellation_owners[control.run_id].failure
+        assert control_cancellation is cancellation_owners[control.run_id].failure, ctx
         control_result = None
         control_error = None
         control_frames: tuple[tuple[str, str, int], ...] = ()
@@ -6460,13 +6711,13 @@ async def test_hostile_telemetry_is_diagnostic_only_after_valid_schema(
             activity_kind=activity_kind,
             parked=parked,
         )
-        assert cancellation_owners is not None
-        assert product_cancellation is cancellation_owners[world.run_id].failure
-        assert product_cancel_frames == control_cancel_frames
-        assert cancellation_owners[world.run_id].raised_traceback is not None
+        assert cancellation_owners is not None, ctx
+        assert product_cancellation is cancellation_owners[world.run_id].failure, ctx
+        assert product_cancel_frames == control_cancel_frames, ctx
+        assert cancellation_owners[world.run_id].raised_traceback is not None, ctx
         assert _traceback_tail(product_cancellation.__traceback__) is (
             cancellation_owners[world.run_id].raised_traceback
-        )
+        ), ctx
     else:
         result, error, frames = await _invoke_terminal_case(
             world,
@@ -6475,18 +6726,20 @@ async def test_hostile_telemetry_is_diagnostic_only_after_valid_schema(
             parked=parked,
         )
         if control_error is not None:
-            assert result is None
-            assert error is not None
-            assert _application_error_public(error) == _application_error_public(control_error)
-            assert frames == control_frames
+            assert result is None, ctx
+            assert error is not None, ctx
+            assert _application_error_public(error) == (_application_error_public(control_error)), (
+                ctx
+            )
+            assert frames == control_frames, ctx
             owned_error, owned_traceback = raised_errors[world.invocation_id][-1]
-            assert error is owned_error
-            assert _traceback_tail(error.__traceback__) is _traceback_tail(owned_traceback)
+            assert error is owned_error, ctx
+            assert _traceback_tail(error.__traceback__) is _traceback_tail(owned_traceback), ctx
         else:
-            assert control_result is not None
-            assert result is not None
-            assert error is None
-            assert result is bound_results[world.invocation_id][-1]
+            assert control_result is not None, ctx
+            assert result is not None, ctx
+            assert error is None, ctx
+            assert result is bound_results[world.invocation_id][-1], ctx
             target_product_snapshot = await world.product_snapshot()
             target_approval_authority = _bound_result_approval_authority(
                 result,
@@ -6506,47 +6759,47 @@ async def test_hostile_telemetry_is_diagnostic_only_after_valid_schema(
                 control,
                 {"result": asdict(control_result)},
                 result_approval_authority=control_approval_authority,
-            )
+            ), ctx
 
     target_product_snapshot = await world.product_snapshot()
-    assert _canonical_product_snapshot(world, target_product_snapshot) == control_snapshot
-    assert len(world.effects) - effects_before_product == control_effect_delta
-    assert len(gateway_calls.get(control.run_id, [])) == 1
-    assert len(gateway_calls.get(world.run_id, [])) == 1
+    assert _canonical_product_snapshot(world, target_product_snapshot) == control_snapshot, ctx
+    assert len(world.effects) - effects_before_product == control_effect_delta, ctx
+    assert len(gateway_calls.get(control.run_id, [])) == 1, ctx
+    assert len(gateway_calls.get(world.run_id, [])) == 1, ctx
     reached = _hostile_phase_is_reached(phase, product_kind)
-    assert (owner.raised_traceback is not None) is reached
-    assert otel_context.get_current() is entry_context
-    assert trace.get_current_span() is entry_span
+    assert (owner.raised_traceback is not None) is reached, ctx
+    assert otel_context.get_current() is entry_context, ctx
+    assert trace.get_current_span() is entry_span, ctx
     if tracer is not None:
-        assert len(tracer.calls) == 1
+        assert len(tracer.calls) == 1, ctx
         expected_enter = int(phase != "tracer_start")
         expected_exit = int(phase not in {"tracer_start", "manager_enter"})
-        assert tracer.manager.enter_calls == expected_enter
-        assert tracer.manager.exit_calls == expected_exit
-        assert tracer.span.end_calls == expected_exit
-        assert tracer.manager.token is None
-        assert tracer.span.event_calls == []
-        assert tracer.span.name_calls == []
-        assert tracer.span.exception_calls == []
+        assert tracer.manager.enter_calls == expected_enter, ctx
+        assert tracer.manager.exit_calls == expected_exit, ctx
+        assert tracer.span.end_calls == expected_exit, ctx
+        assert tracer.manager.token is None, ctx
+        assert tracer.span.event_calls == [], ctx
+        assert tracer.span.name_calls == [], ctx
+        assert tracer.span.exception_calls == [], ctx
         downstream_span = gateway_calls[world.run_id][0]
         if phase in {"tracer_start", "manager_enter"}:
-            assert downstream_span is entry_span
+            assert downstream_span is entry_span, ctx
         else:
-            assert downstream_span is tracer.span
+            assert downstream_span is tracer.span, ctx
     else:
-        assert metrics is not None
+        assert metrics is not None, ctx
         expected_getters: list[str] = []
         if product_kind != "cancel":
             expected_getters.append("tool_calls_total")
         if product_kind in {"failure", "denied", "failed"}:
             expected_getters.append("tool_call_failures_total")
-        assert metrics.getter_calls == expected_getters
-        assert metrics.getter_calls.count(metrics.target) == int(reached)
+        assert metrics.getter_calls == expected_getters, ctx
+        assert metrics.getter_calls.count(metrics.target) == int(reached), ctx
         if metrics.instrument is not None:
-            assert metrics.instrument.calls == int(phase.endswith("_write") and reached)
+            assert metrics.instrument.calls == int(phase.endswith("_write") and reached), ctx
         spans = _tool_spans(world.telemetry)
-        assert len(spans) == 1
-        assert gateway_calls[world.run_id][0].get_span_context() == spans[0].context
+        assert len(spans) == 1, ctx
+        assert gateway_calls[world.run_id][0].get_span_context() == spans[0].context, ctx
 
     expected_points = _expected_product_metric_points(
         activity_kind=activity_kind,
@@ -6555,19 +6808,43 @@ async def test_hostile_telemetry_is_diagnostic_only_after_valid_schema(
     if reached and phase.startswith(("calls_", "failures_")):
         target = "tool_calls_total" if phase.startswith("calls_") else "tool_call_failures_total"
         expected_points = [point for point in expected_points if point[0] != target]
-    assert _metric_point_multiset(world.telemetry) == sorted(expected_points)
+    assert _metric_point_multiset(world.telemetry) == sorted(expected_points), ctx
 
 
-@pytest.mark.parametrize("fatal_type", [KeyboardInterrupt, SystemExit])
-@pytest.mark.parametrize(("activity_kind", "product_kind"), _HOSTILE_PRODUCT_CASES)
-@pytest.mark.parametrize("phase", _HOSTILE_PHASES)
-async def test_hostile_telemetry_never_swallows_or_reraises_fatal_authority(
+async def test_hostile_telemetry_never_swallows_or_reraises_fatal_authority() -> None:
+    # Loop-folded: the exact former parametrize cross-product
+    # (_HOSTILE_PHASES x _HOSTILE_PRODUCT_CASES x fatal types), one isolated
+    # world and monkeypatch scope per case.
+    for phase in _HOSTILE_PHASES:
+        for activity_kind, product_kind in _HOSTILE_PRODUCT_CASES:
+            for fatal_type in (KeyboardInterrupt, SystemExit):
+                ctx = (
+                    f"phase={phase} activity_kind={activity_kind}"
+                    f" product_kind={product_kind} fatal_type={fatal_type.__name__}"
+                )
+                with _named_case(ctx):
+                    async with _fresh_world_context() as world:
+                        with pytest.MonkeyPatch.context() as monkeypatch:
+                            await _check_hostile_telemetry_fatal_case(
+                                world,
+                                monkeypatch,
+                                fatal_type=fatal_type,
+                                activity_kind=activity_kind,
+                                phase=phase,
+                                product_kind=product_kind,
+                                ctx=ctx,
+                            )
+
+
+async def _check_hostile_telemetry_fatal_case(
     world: ToolWorld,
     monkeypatch: pytest.MonkeyPatch,
+    *,
     fatal_type: type[BaseException],
     activity_kind: str,
     phase: str,
     product_kind: str,
+    ctx: str,
 ) -> None:
     control = await world.clone_isolated()
     _use_noop_activity_runtime(control)
@@ -6596,7 +6873,7 @@ async def test_hostile_telemetry_never_swallows_or_reraises_fatal_authority(
             activity_kind=activity_kind,
             parked=control_parked,
         )
-        assert control_cancellation is cancellation_owners[control.run_id].failure
+        assert control_cancellation is cancellation_owners[control.run_id].failure, ctx
         control_result = None
         control_error = None
         control_frames: tuple[tuple[str, str, int], ...] = ()
@@ -6630,9 +6907,9 @@ async def test_hostile_telemetry_never_swallows_or_reraises_fatal_authority(
                 activity_kind=activity_kind,
                 parked=parked,
             )
-            assert cancellation_owners is not None
-            assert cancellation is cancellation_owners[world.run_id].failure
-            assert cancellation_frames == control_cancel_frames
+            assert cancellation_owners is not None, ctx
+            assert cancellation is cancellation_owners[world.run_id].failure, ctx
+            assert cancellation_frames == control_cancel_frames, ctx
             target_product_snapshot = await world.product_snapshot()
         else:
             result, error, result_frames = await _invoke_terminal_case(
@@ -6643,14 +6920,16 @@ async def test_hostile_telemetry_never_swallows_or_reraises_fatal_authority(
             )
             target_product_snapshot = await world.product_snapshot()
             if control_error is not None:
-                assert result is None
-                assert error is not None
-                assert _application_error_public(error) == _application_error_public(control_error)
-                assert result_frames == control_frames
+                assert result is None, ctx
+                assert error is not None, ctx
+                assert _application_error_public(error) == (
+                    _application_error_public(control_error)
+                ), ctx
+                assert result_frames == control_frames, ctx
             else:
-                assert control_result is not None
-                assert result is not None
-                assert error is None
+                assert control_result is not None, ctx
+                assert result is not None, ctx
+                assert error is None, ctx
                 target_approval_authority = _bound_result_approval_authority(
                     result,
                     parked,
@@ -6669,62 +6948,64 @@ async def test_hostile_telemetry_never_swallows_or_reraises_fatal_authority(
                     control,
                     {"result": asdict(control_result)},
                     result_approval_authority=control_approval_authority,
-                )
-        assert owner.raised_traceback is None
-        assert _canonical_product_snapshot(world, target_product_snapshot) == control_snapshot
-        assert len(gateway_calls.get(world.run_id, [])) == 1
-        assert len(world.effects) - effects_before_product == control_effect_delta
+                ), ctx
+        assert owner.raised_traceback is None, ctx
+        assert _canonical_product_snapshot(world, target_product_snapshot) == control_snapshot, ctx
+        assert len(gateway_calls.get(world.run_id, [])) == 1, ctx
+        assert len(world.effects) - effects_before_product == control_effect_delta, ctx
         assert _metric_point_multiset(world.telemetry) == _expected_product_metric_points(
             activity_kind=activity_kind,
             product_kind=product_kind,
-        )
-        assert otel_context.get_current() is entry_context
-        assert trace.get_current_span() is entry_span
+        ), ctx
+        assert otel_context.get_current() is entry_context, ctx
+        assert trace.get_current_span() is entry_span, ctx
         return
 
     with pytest.raises(fatal_type) as caught:
         if activity_kind == "execute":
             await world.activities.execute_bound_tool_activity(world.execute_params())
         else:
-            assert parked is not None
+            assert parked is not None, ctx
             await world.activities.resolve_bound_tool_approval_activity(
                 world.approval_params(parked.approval_id or "")
             )
 
-    assert caught.value is fatal
-    assert owner.raised_traceback is not None
-    assert _traceback_tail(caught.value.__traceback__) is owner.raised_traceback
+    assert caught.value is fatal, ctx
+    assert owner.raised_traceback is not None, ctx
+    assert _traceback_tail(caught.value.__traceback__) is owner.raised_traceback, ctx
     frames = _traceback_frame_names(caught.value.__traceback__)
-    assert frames[0] == "test_hostile_telemetry_never_swallows_or_reraises_fatal_authority"
-    assert frames[-1] == "raise_owned"
-    assert frames.count("raise_owned") == 1
-    assert otel_context.get_current() is entry_context
-    assert trace.get_current_span() is entry_span
+    # Same check as before the loop-fold: the frame that invoked the activity
+    # (now this extracted per-case helper) heads the propagated traceback.
+    assert frames[0] == "_check_hostile_telemetry_fatal_case", ctx
+    assert frames[-1] == "raise_owned", ctx
+    assert frames.count("raise_owned") == 1, ctx
+    assert otel_context.get_current() is entry_context, ctx
+    assert trace.get_current_span() is entry_span, ctx
     if tracer is not None:
-        assert tracer.span.event_calls == []
-        assert tracer.span.name_calls == []
-        assert tracer.span.exception_calls == []
+        assert tracer.span.event_calls == [], ctx
+        assert tracer.span.name_calls == [], ctx
+        assert tracer.span.exception_calls == [], ctx
     pre_product = phase in {"tracer_start", "manager_enter"}
     if pre_product:
         assert _canonical_product_snapshot(world, await world.product_snapshot()) == (
             initial_snapshot
-        )
-        assert gateway_calls.get(world.run_id, []) == []
-        assert len(world.effects) - effects_before_product == 0
+        ), ctx
+        assert gateway_calls.get(world.run_id, []) == [], ctx
+        assert len(world.effects) - effects_before_product == 0, ctx
     else:
         assert _canonical_product_snapshot(world, await world.product_snapshot()) == (
             control_snapshot
-        )
-        assert len(gateway_calls.get(world.run_id, [])) == 1
-        assert len(world.effects) - effects_before_product == control_effect_delta
+        ), ctx
+        assert len(gateway_calls.get(world.run_id, [])) == 1, ctx
+        assert len(world.effects) - effects_before_product == control_effect_delta, ctx
         downstream_span = gateway_calls[world.run_id][0]
         if tracer is not None:
-            assert downstream_span is tracer.span
+            assert downstream_span is tracer.span, ctx
         else:
-            assert metrics is not None
+            assert metrics is not None, ctx
             spans = _tool_spans(world.telemetry)
-            assert len(spans) == 1
-            assert downstream_span.get_span_context() == spans[0].context
+            assert len(spans) == 1, ctx
+            assert downstream_span.get_span_context() == spans[0].context, ctx
 
 
 @pytest.mark.parametrize("activity_kind", ["execute", "approval"])

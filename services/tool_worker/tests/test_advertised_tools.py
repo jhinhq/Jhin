@@ -287,28 +287,38 @@ def test_tool_worker_settings_ignore_unrelated_environment(
     assert marker not in repr(settings)
 
 
-@pytest.mark.parametrize("failure_kind", ["error", "base", "cancel"])
-@pytest.mark.parametrize(
-    "failure_stage",
-    [
-        "engine",
-        "session",
-        "connect",
-        "jetstream",
-        "ensure_streams",
-        "master_key",
-        "crypto",
-        "barrier",
-        "publisher",
-        "dataclass",
-        "logger",
-    ],
-)
-async def test_partial_resource_creation_closes_every_acquired_resource(
+async def test_partial_resource_creation_closes_every_acquired_resource() -> None:
+    # Loop-folded from a 3x11 parametrize cross-product (failure_kind x
+    # failure_stage): the full matrix still runs, each case inside its own
+    # MonkeyPatch context so patches (including the stage-specific logger and
+    # dataclass patches) are undone between cases exactly as the fixture did;
+    # every failure message names the (stage, kind) case.
+    for failure_kind in ("error", "base", "cancel"):
+        for failure_stage in (
+            "engine",
+            "session",
+            "connect",
+            "jetstream",
+            "ensure_streams",
+            "master_key",
+            "crypto",
+            "barrier",
+            "publisher",
+            "dataclass",
+            "logger",
+        ):
+            with pytest.MonkeyPatch.context() as monkeypatch:
+                await _assert_partial_creation_closes_every_acquired_resource(
+                    failure_stage, failure_kind, monkeypatch
+                )
+
+
+async def _assert_partial_creation_closes_every_acquired_resource(
     failure_stage: str,
     failure_kind: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    case = f"[failure_stage={failure_stage} failure_kind={failure_kind}]"
     events: list[str] = []
     engine = _DisposableEngine(events=events)
     nats_connection = _DrainableNats(events=events)
@@ -387,7 +397,7 @@ async def test_partial_resource_creation_closes_every_acquired_resource(
     class Publisher:
         def __init__(self, _js: object, *, tracer: object) -> None:
             events.append("publisher.create")
-            assert tracer is runtime.tracer
+            assert tracer is runtime.tracer, case
             if failure_stage == "publisher":
                 raise failure
 
@@ -416,16 +426,18 @@ async def test_partial_resource_creation_closes_every_acquired_resource(
     except BaseException as error:
         caught = error
 
-    assert caught is failure
-    assert settings.model_dump() == settings_before
-    assert runtime.tracer is tracer
-    assert engine.dispose_count == (0 if failure_stage == "engine" else 1)
+    assert caught is failure, f"{case} caught={caught!r}"
+    assert settings.model_dump() == settings_before, case
+    assert runtime.tracer is tracer, case
+    assert engine.dispose_count == (0 if failure_stage == "engine" else 1), (
+        f"{case} dispose_count={engine.dispose_count}"
+    )
     assert nats_connection.drain_count == (
         0 if failure_stage in {"engine", "session", "connect"} else 1
-    )
+    ), f"{case} drain_count={nats_connection.drain_count}"
     if failure_stage not in {"engine", "session", "connect"}:
-        assert events[-2:] == ["nats.drain", "engine.dispose"]
-    assert engine_tracers == [tracer]
+        assert events[-2:] == ["nats.drain", "engine.dispose"], f"{case} events={events}"
+    assert engine_tracers == [tracer], case
 
 
 @pytest.mark.asyncio

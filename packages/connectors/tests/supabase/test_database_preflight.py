@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import FrozenInstanceError
 from typing import Any, cast
 
@@ -265,6 +266,20 @@ def _error_code(exc_info: pytest.ExceptionInfo[DatabasePreflightError]) -> str:
     return exc_info.value.code
 
 
+@contextmanager
+def _case(**params: object) -> Iterator[None]:
+    """Stamp the folded-loop case identity onto any failure.
+
+    Mirrors the old per-case parametrize id: a failing iteration names its exact
+    parameter values, including a pytest.raises DID-NOT-RAISE failure.
+    """
+    try:
+        yield
+    except BaseException as exc:
+        exc.add_note(f"failed case: {params!r}")
+        raise
+
+
 async def test_verify_live_role_uses_cycle_safe_bounded_closure_on_same_connection() -> None:
     connection = FakeConnection()
     connection.role_rows = [
@@ -304,9 +319,10 @@ async def test_verify_live_role_accepts_64_and_rejects_65_reachable_roles() -> N
     assert _error_code(exc_info) == "database_role_not_least_privilege"
 
 
-@pytest.mark.parametrize(
-    "unsafe",
-    [
+# Loop-folded (was @pytest.mark.parametrize with 15 items): identical matrix, a
+# fresh FakeConnection per iteration, so the collected item count is 1.
+async def test_verify_live_role_rejects_unsafe_ancestors_without_details() -> None:
+    unsafe_cases: list[dict[str, object]] = [
         {"current_user": "other"},
         {"session_user": "other"},
         {"role_name": "postgres"},
@@ -322,19 +338,20 @@ async def test_verify_live_role_accepts_64_and_rejects_65_reachable_roles() -> N
         {"server_encoding": "LATIN1"},
         {"session_replication_role": "replica"},
         {"allowed_schema_count": 0},
-    ],
-)
-async def test_verify_live_role_rejects_unsafe_ancestors_without_details(
-    unsafe: dict[str, object],
-) -> None:
-    connection = FakeConnection()
-    connection.role_rows = [{**SAFE_ROLE, **unsafe}]
+    ]
 
-    with pytest.raises(DatabasePreflightError) as exc_info:
-        await verify_live_role(connection, ("public",))
+    for unsafe in unsafe_cases:
+        with _case(unsafe=unsafe):
+            connection = FakeConnection()
+            connection.role_rows = [{**SAFE_ROLE, **unsafe}]
 
-    assert _error_code(exc_info) == "database_role_not_least_privilege"
-    assert all(str(value) not in str(exc_info.value) for value in unsafe.values())
+            with pytest.raises(DatabasePreflightError) as exc_info:
+                await verify_live_role(connection, ("public",))
+
+            assert _error_code(exc_info) == "database_role_not_least_privilege", f"case {unsafe!r}"
+            assert all(str(value) not in str(exc_info.value) for value in unsafe.values()), (
+                f"case {unsafe!r}"
+            )
 
 
 @pytest.mark.parametrize(
@@ -623,9 +640,10 @@ async def test_constraint_cap_accepts_64_and_rejects_65() -> None:
     assert _error_code(exc_info) == "database_relation_not_allowed"
 
 
-@pytest.mark.parametrize(
-    ("field", "unsafe_value", "target"),
-    [
+# Loop-folded (was @pytest.mark.parametrize with 13 items): identical matrix, a
+# fresh FakeConnection per iteration, so the collected item count is 1.
+async def test_unsafe_relation_shapes_and_privileges_fail_before_lock() -> None:
+    cases: list[tuple[str, object, bool]] = [
         ("relkind", "v", False),
         ("relpersistence", "u", False),
         ("relispartition", True, False),
@@ -639,23 +657,26 @@ async def test_constraint_cap_accepts_64_and_rejects_65() -> None:
         ("has_user_triggers", True, True),
         ("has_unsafe_internal_triggers", True, True),
         ("has_write_lock_privilege", False, True),
-    ],
-)
-async def test_unsafe_relation_shapes_and_privileges_fail_before_lock(
-    field: str,
-    unsafe_value: object,
-    target: bool,
-) -> None:
-    connection = FakeConnection()
-    connection.relations[("public", "widgets")][field] = unsafe_value
-    ref = RelationRef("public", "widgets", "target" if target else "source")
-    validated = _validated(ref, statement_type="update", target=ref) if target else _validated(ref)
+    ]
 
-    with pytest.raises(DatabasePreflightError) as exc_info:
-        await preflight_and_lock(connection, validated, (700,))
+    for field, unsafe_value, target in cases:
+        with _case(field=field, unsafe_value=unsafe_value, target=target):
+            connection = FakeConnection()
+            connection.relations[("public", "widgets")][field] = unsafe_value
+            ref = RelationRef("public", "widgets", "target" if target else "source")
+            validated = (
+                _validated(ref, statement_type="update", target=ref) if target else _validated(ref)
+            )
 
-    assert _error_code(exc_info) == "database_relation_not_allowed"
-    assert not any(call[0] == "execute" for call in connection.calls)
+            with pytest.raises(DatabasePreflightError) as exc_info:
+                await preflight_and_lock(connection, validated, (700,))
+
+            assert _error_code(exc_info) == "database_relation_not_allowed", (
+                f"case ({field!r}, {unsafe_value!r}, {target!r})"
+            )
+            assert not any(call[0] == "execute" for call in connection.calls), (
+                f"case ({field!r}, {unsafe_value!r}, {target!r})"
+            )
 
 
 async def test_relation_owner_in_role_closure_uses_least_privilege_error() -> None:
@@ -726,9 +747,10 @@ async def test_non_whitelisted_or_mismatched_builtin_types_are_rejected(
     assert _error_code(exc_info) == "database_relation_not_allowed"
 
 
-@pytest.mark.parametrize(
-    ("field", "unsafe_value"),
-    [
+# Loop-folded (was @pytest.mark.parametrize with 15 items): identical matrix, a
+# fresh FakeConnection and index row per iteration, so the collected item count is 1.
+async def test_unsafe_indexes_fail_closed() -> None:
+    cases: list[tuple[str, object]] = [
         ("valid", False),
         ("ready", False),
         ("live", False),
@@ -744,21 +766,24 @@ async def test_non_whitelisted_or_mismatched_builtin_types_are_rejected(
         ("access_method_safe", False),
         ("key_columns", (-1,)),
         ("key_columns", (3,)),
-    ],
-)
-async def test_unsafe_indexes_fail_closed(field: str, unsafe_value: object) -> None:
-    connection = FakeConnection()
-    index = _safe_index(1_000)
-    index[field] = unsafe_value
-    connection.indexes[100] = [index]
+    ]
 
-    with pytest.raises(DatabasePreflightError) as exc_info:
-        await preflight_and_lock(
-            connection,
-            _validated(RelationRef("public", "widgets", "source")),
-            (700,),
-        )
-    assert _error_code(exc_info) == "database_relation_not_allowed"
+    for field, unsafe_value in cases:
+        with _case(field=field, unsafe_value=unsafe_value):
+            connection = FakeConnection()
+            index = _safe_index(1_000)
+            index[field] = unsafe_value
+            connection.indexes[100] = [index]
+
+            with pytest.raises(DatabasePreflightError) as exc_info:
+                await preflight_and_lock(
+                    connection,
+                    _validated(RelationRef("public", "widgets", "source")),
+                    (700,),
+                )
+            assert _error_code(exc_info) == "database_relation_not_allowed", (
+                f"case ({field!r}, {unsafe_value!r})"
+            )
 
 
 @pytest.mark.parametrize("kind", ["c", "t", "x"])

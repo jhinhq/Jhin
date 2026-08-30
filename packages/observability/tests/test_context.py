@@ -160,9 +160,9 @@ def test_safe_context_id_is_package_public_with_exact_type_guard_signature() -> 
     }
 
 
-@pytest.mark.parametrize(
-    "value",
-    [
+def test_safe_context_id_rejects_nonexact_and_unsafe_values_without_user_code() -> None:
+    validator = context_module.is_safe_context_id
+    for value in [
         None,
         7,
         "",
@@ -174,13 +174,8 @@ def test_safe_context_id_is_package_public_with_exact_type_guard_signature() -> 
         "line\nbreak",
         "tab\tvalue",
         "nul\x00value",
-    ],
-)
-def test_safe_context_id_rejects_nonexact_and_unsafe_values_without_user_code(
-    value: object,
-) -> None:
-    validator = context_module.is_safe_context_id
-    assert validator(value) is False
+    ]:
+        assert validator(value) is False, f"value={value!r}"
 
 
 def test_safe_context_id_does_not_execute_hostile_class_or_string_subclass_code() -> None:
@@ -385,9 +380,8 @@ def test_stream_is_an_exact_registered_model_operation() -> None:
     assert normalize_span_attributes({"jhin.operation": "stream"}) == {"jhin.operation": "stream"}
 
 
-@pytest.mark.parametrize(
-    ("key", "value", "expected"),
-    [
+def test_span_attributes_are_normalized_per_key() -> None:
+    for key, value, expected in [
         ("http.request.method", "GET", "GET"),
         ("http.request.method", "TRACE", "other"),
         ("http.route", "/api/customers/acme", "other"),
@@ -401,12 +395,10 @@ def test_stream_is_an_exact_registered_model_operation() -> None:
         ("jhin.connector_type", "customer-alphanumeric-canary", "other"),
         ("jhin.request_id", "request-123", "request-123"),
         ("http.response.status_code", 503, 503),
-    ],
-)
-def test_span_attributes_are_normalized_per_key(
-    key: str, value: str | int, expected: str | int
-) -> None:
-    assert normalize_span_attributes({key: value}) == {key: expected}
+    ]:
+        assert normalize_span_attributes({key: value}) == {key: expected}, (
+            f"key={key!r} value={value!r} expected={expected!r}"
+        )
 
 
 @pytest.mark.parametrize(

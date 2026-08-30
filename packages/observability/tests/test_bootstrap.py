@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import inspect
 import json
+import re
 import sys
 import threading
 import time
@@ -390,9 +391,8 @@ def test_valid_otlp_transport_configuration(endpoint: str, insecure: bool) -> No
     )
 
 
-@pytest.mark.parametrize(
-    ("changes", "message"),
-    [
+def test_invalid_otlp_transport_configuration() -> None:
+    for changes, message in [
         ({"otlp_endpoint": None, "otlp_insecure": True}, "requires an OTLP endpoint"),
         ({"otlp_endpoint": None, "otlp_ca_file": Path("ca.pem")}, "requires an OTLP endpoint"),
         (
@@ -454,11 +454,14 @@ def test_valid_otlp_transport_configuration(endpoint: str, insecure: bool) -> No
         ({"otlp_endpoint": "https://:4317"}, r"absolute HTTP\(S\) URL"),
         ({"otlp_client_certificate_file": Path("client.pem")}, "configured together"),
         ({"otlp_client_key_file": Path("client.key")}, "configured together"),
-    ],
-)
-def test_invalid_otlp_transport_configuration(changes: dict[str, object], message: str) -> None:
-    with pytest.raises(ValueError, match=message):
-        configured_config(**changes)
+    ]:
+        case = f"changes={changes!r} message={message!r}"
+        try:
+            configured_config(**changes)
+        except ValueError as error:
+            assert re.search(message, str(error)) is not None, f"{case} raised {error!r}"
+        else:
+            raise AssertionError(f"ValueError not raised: {case}")
 
 
 @pytest.mark.parametrize(
@@ -475,23 +478,27 @@ def test_direct_config_rejects_unregistered_trace_sampler() -> None:
         configured_config(trace_sampler="credential-canary")
 
 
-@pytest.mark.parametrize(
-    ("field", "ceiling"),
-    [
+def test_direct_numeric_limits_reject_wrong_types_and_nonpositive_values() -> None:
+    for field, ceiling in [
         ("span_queue_size", MAX_SPAN_QUEUE_SIZE),
         ("span_export_batch_size", MAX_SPAN_EXPORT_BATCH_SIZE),
         ("export_timeout_millis", MAX_EXPORT_TIMEOUT_MILLIS),
         ("metric_export_interval_millis", MAX_METRIC_EXPORT_INTERVAL_MILLIS),
-    ],
-)
-@pytest.mark.parametrize("invalid", [True, 0, -1, 1.5])
-def test_direct_numeric_limits_reject_wrong_types_and_nonpositive_values(
-    field: str, ceiling: int, invalid: object
-) -> None:
-    with pytest.raises(ValueError, match="positive integer"):
-        configured_config(**{field: invalid})
-    with pytest.raises(ValueError, match="maximum"):
-        configured_config(**{field: ceiling + 1})
+    ]:
+        for invalid in [True, 0, -1, 1.5]:
+            case = f"field={field!r} invalid={invalid!r}"
+            try:
+                configured_config(**{field: invalid})
+            except ValueError as error:
+                assert "positive integer" in str(error), f"{case} raised {error!r}"
+            else:
+                raise AssertionError(f"ValueError not raised: {case}")
+            try:
+                configured_config(**{field: ceiling + 1})
+            except ValueError as error:
+                assert "maximum" in str(error), f"{case} raised {error!r}"
+            else:
+                raise AssertionError(f"ValueError not raised above ceiling: {case}")
 
 
 def test_direct_numeric_limits_accept_exact_ceilings() -> None:
@@ -509,9 +516,8 @@ def test_export_batch_cannot_exceed_queue() -> None:
         configured_config(span_queue_size=4, span_export_batch_size=5)
 
 
-@pytest.mark.parametrize(
-    ("name", "value"),
-    [
+def test_settings_reject_noncanonical_numeric_environment_strings() -> None:
+    for name, value in [
         ("OTEL_BSP_MAX_QUEUE_SIZE", "01"),
         ("OTEL_BSP_MAX_QUEUE_SIZE", "+1"),
         ("OTEL_BSP_MAX_QUEUE_SIZE", "1.0"),
@@ -524,14 +530,15 @@ def test_export_batch_cannot_exceed_queue() -> None:
         ("OTEL_TRACES_SAMPLER_ARG", "nan"),
         ("OTEL_TRACES_SAMPLER_ARG", "inf"),
         ("OTEL_TRACES_SAMPLER_ARG", "true"),
-    ],
-)
-def test_settings_reject_noncanonical_numeric_environment_strings(
-    monkeypatch: pytest.MonkeyPatch, name: str, value: str
-) -> None:
-    monkeypatch.setenv(name, value)
-    with pytest.raises(ValueError):
-        ObservabilitySettings(_env_file=None)
+    ]:
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            monkeypatch.setenv(name, value)
+            try:
+                ObservabilitySettings(_env_file=None)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"ValueError not raised: name={name!r} value={value!r}")
 
 
 def test_settings_accept_canonical_numeric_environment_strings_and_blank_endpoint(

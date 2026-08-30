@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import math
+import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, cast, get_args
 
 import pytest
@@ -362,8 +365,8 @@ class _FailingMetricBackend:
         return object()
 
 
-@pytest.fixture
-def in_memory_metrics() -> Iterator[tuple[JhinMetrics, InMemoryMetricReader]]:
+@contextlib.contextmanager
+def _fresh_in_memory_metrics() -> Iterator[tuple[JhinMetrics, InMemoryMetricReader]]:
     reader = InMemoryMetricReader()
     provider = MeterProvider(metric_readers=(reader,), shutdown_on_exit=False)
     try:
@@ -373,6 +376,33 @@ def in_memory_metrics() -> Iterator[tuple[JhinMetrics, InMemoryMetricReader]]:
         yield metrics, reader
     finally:
         provider.shutdown()
+
+
+@pytest.fixture
+def in_memory_metrics() -> Iterator[tuple[JhinMetrics, InMemoryMetricReader]]:
+    with _fresh_in_memory_metrics() as pair:
+        yield pair
+
+
+def _expect_error(
+    case: str,
+    call: Callable[[], object],
+    expected: type[Exception],
+    match: str,
+) -> Exception:
+    """`pytest.raises(expected, match=match)` equivalent that names the folded case.
+
+    Replicates pytest.raises semantics (subclass catch, ``re.search`` on ``str(exc)``)
+    while prefixing every failure with the loop-folded case identity.
+    """
+    try:
+        call()
+    except expected as exc:
+        assert re.search(match, str(exc)), f"{case}: {exc!r} does not match {match!r}"
+        return exc
+    except Exception as exc:
+        pytest.fail(f"{case}: expected {expected.__name__}, got {exc!r}")
+    pytest.fail(f"{case}: {expected.__name__} was not raised")
 
 
 def _labels(label_names: frozenset[str]) -> dict[str, str]:
@@ -455,11 +485,11 @@ def _state_snapshot(
     ]
 
 
-def _assert_no_recorder_calls(meter: _RecordingMeter | None) -> None:
+def _assert_no_recorder_calls(meter: _RecordingMeter | None, case: str = "") -> None:
     if meter is None:
         return
-    assert all(not recorder.calls for recorder in meter.counters.values())
-    assert all(not recorder.calls for recorder in meter.histograms.values())
+    assert all(not recorder.calls for recorder in meter.counters.values()), case
+    assert all(not recorder.calls for recorder in meter.histograms.values()), case
 
 
 def test_registry_exactly_matches_required_contract() -> None:
@@ -491,185 +521,167 @@ def test_metric_name_has_one_authority_and_public_contract_exports() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    ("name", "kind", "label_names", "varied_label"),
-    CARDINALITY_CASES,
-)
-def test_each_instrument_label_normalizes_unregistered_values_to_one_series(
-    in_memory_metrics: tuple[JhinMetrics, InMemoryMetricReader],
-    name: str,
-    kind: str,
-    label_names: frozenset[str],
-    varied_label: str,
-) -> None:
-    metrics, reader = in_memory_metrics
-    expected = _labels(label_names)
-    expected[varied_label] = "other"
-    expected_series = {tuple(sorted(expected.items()))}
+def test_each_instrument_label_normalizes_unregistered_values_to_one_series() -> None:
+    # Loop-folded from parametrize over CARDINALITY_CASES; every case gets a fresh
+    # in-memory provider (as the old per-case fixture did) so series never mix.
+    for name, kind, label_names, varied_label in CARDINALITY_CASES:
+        case = f"name={name} kind={kind} varied_label={varied_label}"
+        with _fresh_in_memory_metrics() as (metrics, reader):
+            expected = _labels(label_names)
+            expected[varied_label] = "other"
+            expected_series = {tuple(sorted(expected.items()))}
 
-    for index in range(32):
-        labels = _labels(label_names)
-        labels[varied_label] = f"unregistered-{varied_label}-{index}"
-        _record(metrics, name, kind, labels)
-        if kind == "gauge":
-            assert series_for(reader, name) == expected_series
+            for index in range(32):
+                labels = _labels(label_names)
+                labels[varied_label] = f"unregistered-{varied_label}-{index}"
+                _record(metrics, name, kind, labels)
+                if kind == "gauge":
+                    assert series_for(reader, name) == expected_series, f"{case} index={index}"
 
-    assert series_for(reader, name) == expected_series
+            assert series_for(reader, name) == expected_series, case
 
 
-@pytest.mark.parametrize("facade_kind", ["configured", "noop"])
-@pytest.mark.parametrize(
-    ("name", "kind", "label_names", "forbidden"),
-    FORBIDDEN_CASES,
-)
-def test_every_identifier_label_is_rejected_before_recording(
-    facade_kind: str,
-    name: str,
-    kind: str,
-    label_names: frozenset[str],
-    forbidden: str,
-) -> None:
-    metrics, meter = _facade(facade_kind)
-    labels = _labels(label_names)
-    labels[forbidden] = "secret-canary"
-    before = _state_snapshot(facade_kind, meter, name) if kind == "gauge" else []
+def test_every_identifier_label_is_rejected_before_recording() -> None:
+    # Loop-folded from parametrize over facade_kind x FORBIDDEN_CASES: exact same
+    # matrix, one collected item. Each case builds its own facade, so no state leaks.
+    for facade_kind in ("configured", "noop"):
+        for name, kind, label_names, forbidden in FORBIDDEN_CASES:
+            case = f"facade={facade_kind} name={name} kind={kind} forbidden={forbidden}"
+            metrics, meter = _facade(facade_kind)
+            labels = _labels(label_names)
+            labels[forbidden] = "secret-canary"
+            before = _state_snapshot(facade_kind, meter, name) if kind == "gauge" else []
 
-    with pytest.raises(metrics_module.MetricLabelError, match=forbidden) as caught:
-        _record(metrics, name, kind, labels)
+            caught = _expect_error(
+                case,
+                partial(_record, metrics, name, kind, labels),
+                metrics_module.MetricLabelError,
+                forbidden,
+            )
 
-    assert "secret-canary" not in str(caught.value)
-    _assert_no_recorder_calls(meter)
-    if kind == "gauge":
-        assert _state_snapshot(facade_kind, meter, name) == before
+            assert "secret-canary" not in str(caught), case
+            _assert_no_recorder_calls(meter, case)
+            if kind == "gauge":
+                assert _state_snapshot(facade_kind, meter, name) == before, case
 
 
-@pytest.mark.parametrize("facade_kind", ["configured", "noop"])
-@pytest.mark.parametrize(
-    ("name", "kind", "label_names", "extra"),
-    EXTRA_CASES,
-)
-def test_every_globally_allowed_but_instrument_extra_label_is_rejected(
-    facade_kind: str,
-    name: str,
-    kind: str,
-    label_names: frozenset[str],
-    extra: str,
-) -> None:
-    metrics, meter = _facade(facade_kind)
-    labels = _labels(label_names)
-    labels[extra] = "other"
-    before = _state_snapshot(facade_kind, meter, name) if kind == "gauge" else []
+def test_every_globally_allowed_but_instrument_extra_label_is_rejected() -> None:
+    # Loop-folded from parametrize over facade_kind x EXTRA_CASES: exact same matrix.
+    for facade_kind in ("configured", "noop"):
+        for name, kind, label_names, extra in EXTRA_CASES:
+            case = f"facade={facade_kind} name={name} kind={kind} extra={extra}"
+            metrics, meter = _facade(facade_kind)
+            labels = _labels(label_names)
+            labels[extra] = "other"
+            before = _state_snapshot(facade_kind, meter, name) if kind == "gauge" else []
 
-    with pytest.raises(metrics_module.MetricLabelError, match=extra):
-        _record(metrics, name, kind, labels)
+            _expect_error(
+                case,
+                partial(_record, metrics, name, kind, labels),
+                metrics_module.MetricLabelError,
+                extra,
+            )
 
-    _assert_no_recorder_calls(meter)
-    if kind == "gauge":
-        assert _state_snapshot(facade_kind, meter, name) == before
+            _assert_no_recorder_calls(meter, case)
+            if kind == "gauge":
+                assert _state_snapshot(facade_kind, meter, name) == before, case
 
 
-@pytest.mark.parametrize("facade_kind", ["configured", "noop"])
-@pytest.mark.parametrize(
-    ("name", "kind", "label_names", "missing"),
-    MISSING_CASES,
-)
-def test_each_required_label_is_rejected_when_missing(
-    facade_kind: str,
-    name: str,
-    kind: str,
-    label_names: frozenset[str],
-    missing: str,
-) -> None:
-    metrics, meter = _facade(facade_kind)
-    labels = _labels(label_names)
-    del labels[missing]
-    before = _state_snapshot(facade_kind, meter, name) if kind == "gauge" else []
+def test_each_required_label_is_rejected_when_missing() -> None:
+    # Loop-folded from parametrize over facade_kind x MISSING_CASES: exact same matrix.
+    for facade_kind in ("configured", "noop"):
+        for name, kind, label_names, missing in MISSING_CASES:
+            case = f"facade={facade_kind} name={name} kind={kind} missing={missing}"
+            metrics, meter = _facade(facade_kind)
+            labels = _labels(label_names)
+            del labels[missing]
+            before = _state_snapshot(facade_kind, meter, name) if kind == "gauge" else []
 
-    with pytest.raises(metrics_module.MetricLabelError, match=missing):
-        _record(metrics, name, kind, labels)
+            _expect_error(
+                case,
+                partial(_record, metrics, name, kind, labels),
+                metrics_module.MetricLabelError,
+                missing,
+            )
 
-    _assert_no_recorder_calls(meter)
-    if kind == "gauge":
-        assert _state_snapshot(facade_kind, meter, name) == before
+            _assert_no_recorder_calls(meter, case)
+            if kind == "gauge":
+                assert _state_snapshot(facade_kind, meter, name) == before, case
 
 
-@pytest.mark.parametrize("facade_kind", ["configured", "noop"])
-@pytest.mark.parametrize(
-    ("name", "kind", "label_names", "invalid_label"),
-    NON_STRING_CASES,
-)
-def test_each_required_label_rejects_non_string_values(
-    facade_kind: str,
-    name: str,
-    kind: str,
-    label_names: frozenset[str],
-    invalid_label: str,
-) -> None:
-    metrics, meter = _facade(facade_kind)
-    labels: dict[str, object] = {}
-    labels.update(_labels(label_names))
-    labels[invalid_label] = 7
-    before = _state_snapshot(facade_kind, meter, name) if kind == "gauge" else []
+def test_each_required_label_rejects_non_string_values() -> None:
+    # Loop-folded from parametrize over facade_kind x NON_STRING_CASES: exact same matrix.
+    for facade_kind in ("configured", "noop"):
+        for name, kind, label_names, invalid_label in NON_STRING_CASES:
+            case = f"facade={facade_kind} name={name} kind={kind} invalid_label={invalid_label}"
+            metrics, meter = _facade(facade_kind)
+            labels: dict[str, object] = {}
+            labels.update(_labels(label_names))
+            labels[invalid_label] = 7
+            before = _state_snapshot(facade_kind, meter, name) if kind == "gauge" else []
 
-    with pytest.raises(metrics_module.MetricLabelError, match=invalid_label):
-        _record(metrics, name, kind, labels)
+            _expect_error(
+                case,
+                partial(_record, metrics, name, kind, labels),
+                metrics_module.MetricLabelError,
+                invalid_label,
+            )
 
-    _assert_no_recorder_calls(meter)
-    if kind == "gauge":
-        assert _state_snapshot(facade_kind, meter, name) == before
+            _assert_no_recorder_calls(meter, case)
+            if kind == "gauge":
+                assert _state_snapshot(facade_kind, meter, name) == before, case
 
 
-@pytest.mark.parametrize("facade_kind", ["configured", "noop"])
-@pytest.mark.parametrize(("name", "kind", "label_names"), INSTRUMENT_CASES)
-@pytest.mark.parametrize("measurement", INVALID_MEASUREMENTS)
-def test_each_public_path_rejects_invalid_measurements_before_state_change(
-    facade_kind: str,
-    name: str,
-    kind: str,
-    label_names: frozenset[str],
-    measurement: object,
-) -> None:
-    metrics, meter = _facade(facade_kind)
-    labels = _labels(label_names)
-    if kind == "gauge":
-        _record(metrics, name, kind, labels, 17)
-    before = _state_snapshot(facade_kind, meter, name) if kind == "gauge" else []
+def test_each_public_path_rejects_invalid_measurements_before_state_change() -> None:
+    # Loop-folded from parametrize over facade_kind x INSTRUMENT_CASES x
+    # INVALID_MEASUREMENTS: exact same cross-product, one collected item.
+    for facade_kind in ("configured", "noop"):
+        for name, kind, label_names in INSTRUMENT_CASES:
+            for measurement in INVALID_MEASUREMENTS:
+                case = f"facade={facade_kind} name={name} kind={kind} measurement={measurement!r}"
+                metrics, meter = _facade(facade_kind)
+                labels = _labels(label_names)
+                if kind == "gauge":
+                    _record(metrics, name, kind, labels, 17)
+                before = _state_snapshot(facade_kind, meter, name) if kind == "gauge" else []
 
-    with pytest.raises(ValueError, match="measurement"):
-        _record(metrics, name, kind, labels, measurement)
+                _expect_error(
+                    case,
+                    partial(_record, metrics, name, kind, labels, measurement),
+                    ValueError,
+                    "measurement",
+                )
 
-    if kind == "gauge":
-        assert _state_snapshot(facade_kind, meter, name) == before
-    else:
-        _assert_no_recorder_calls(meter)
+                if kind == "gauge":
+                    assert _state_snapshot(facade_kind, meter, name) == before, case
+                else:
+                    _assert_no_recorder_calls(meter, case)
 
 
-@pytest.mark.parametrize("facade_kind", ["configured", "noop"])
-@pytest.mark.parametrize(("name", "kind", "label_names"), INSTRUMENT_CASES)
-def test_each_instrument_rejects_every_wrong_requested_kind(
-    facade_kind: str,
-    name: str,
-    kind: str,
-    label_names: frozenset[str],
-) -> None:
-    metrics, meter = _facade(facade_kind)
-    metric_name = _metric_name(name)
-    wrong_calls: list[Callable[[], object]] = []
-    if kind != "counter":
-        wrong_calls.append(lambda: metrics.counter(metric_name))
-    if kind != "histogram":
-        wrong_calls.append(lambda: metrics.histogram(metric_name))
-    if kind != "gauge":
-        wrong_calls.append(lambda: metrics.set_observable(metric_name, ()))
+def test_each_instrument_rejects_every_wrong_requested_kind() -> None:
+    # Loop-folded from parametrize over facade_kind x INSTRUMENT_CASES: exact same matrix.
+    for facade_kind in ("configured", "noop"):
+        for name, kind, _label_names in INSTRUMENT_CASES:
+            case = f"facade={facade_kind} name={name} kind={kind}"
+            metrics, meter = _facade(facade_kind)
+            metric_name = _metric_name(name)
+            wrong_calls: list[tuple[str, Callable[[], object]]] = []
+            if kind != "counter":
+                wrong_calls.append(("counter", partial(metrics.counter, metric_name)))
+            if kind != "histogram":
+                wrong_calls.append(("histogram", partial(metrics.histogram, metric_name)))
+            if kind != "gauge":
+                wrong_calls.append(("gauge", partial(metrics.set_observable, metric_name, ())))
 
-    for wrong_call in wrong_calls:
-        with pytest.raises(
-            metrics_module.MetricLabelError,
-            match=r"non-|requires a gauge",
-        ):
-            wrong_call()
+            for wrong_kind, wrong_call in wrong_calls:
+                _expect_error(
+                    f"{case} requested={wrong_kind}",
+                    wrong_call,
+                    metrics_module.MetricLabelError,
+                    r"non-|requires a gauge",
+                )
 
-    _assert_no_recorder_calls(meter)
+            _assert_no_recorder_calls(meter, case)
 
 
 def test_bound_counter_contains_backend_add_after_strict_validation(

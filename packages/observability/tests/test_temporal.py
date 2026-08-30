@@ -1882,9 +1882,8 @@ async def test_each_public_wrapper_calls_downstream_once_under_hostile_telemetry
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("failure_seam", "business_fails"),
-    [
+async def test_hostile_span_lifecycle_restores_invocation_context_and_business_authority() -> None:
+    for failure_seam, business_fails in [
         ("manager-enter", False),
         ("manager-enter", True),
         ("manager-exit", False),
@@ -1899,13 +1898,17 @@ async def test_each_public_wrapper_calls_downstream_once_under_hostile_telemetry
         ("converter", True),
         ("span-status", True),
         ("span-attribute", True),
-    ],
-)
-async def test_hostile_span_lifecycle_restores_invocation_context_and_business_authority(
+    ]:
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            await _run_hostile_span_lifecycle_case(failure_seam, business_fails, monkeypatch)
+
+
+async def _run_hostile_span_lifecycle_case(
     failure_seam: str,
     business_fails: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    case = f"failure_seam={failure_seam!r} business_fails={business_fails!r}"
     module = _temporal()
     ambient_context = _span_context({"traceparent": TRACEPARENT})
     hostile_context = _span_context({"traceparent": SECOND_TRACEPARENT})
@@ -1946,7 +1949,7 @@ async def test_hostile_span_lifecycle_restores_invocation_context_and_business_a
                 raise RuntimeError("manager-exit-telemetry-canary")
             if failure_seam == "manager-exit-noop":
                 return
-            assert self.token is not None
+            assert self.token is not None, case
             original_detach(self.token)
             self.token = None
 
@@ -2010,14 +2013,14 @@ async def test_hostile_span_lifecycle_restores_invocation_context_and_business_a
             result = await wrapped.signal_workflow(_client_input("signal_workflow"))
         except BaseException as error:
             caught = error
-        assert terminal.calls == 1
-        assert original_get_current() is ambient_context
+        assert terminal.calls == 1, case
+        assert original_get_current() is ambient_context, case
         if business_fails:
-            assert caught is business_error
-            assert _traceback_tail(caught.__traceback__) is terminal.failure_traceback
+            assert caught is business_error, case
+            assert _traceback_tail(caught.__traceback__) is terminal.failure_traceback, case
         else:
-            assert caught is None
-            assert result is business_result
+            assert caught is None, case
+            assert result is business_result, case
     finally:
         if manager.token is not None:
             with suppress(BaseException):
@@ -2436,24 +2439,27 @@ async def test_fail_open_cleanup_never_clobbers_foreign_downstream_context(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "failure_seam",
-    [
-        "headers",
-        "get-current",
-        "set-context",
-        "attach",
-        "finalize",
-        "detach",
-        "detach-noop",
-    ],
-)
-@pytest.mark.parametrize("business_fails", [False, True])
-async def test_workflow_entry_is_fail_open_and_calls_terminal_once(
+async def test_workflow_entry_is_fail_open_and_calls_terminal_once() -> None:
+    for business_fails in [False, True]:
+        for failure_seam in [
+            "headers",
+            "get-current",
+            "set-context",
+            "attach",
+            "finalize",
+            "detach",
+            "detach-noop",
+        ]:
+            with pytest.MonkeyPatch.context() as monkeypatch:
+                await _run_workflow_entry_fail_open_case(failure_seam, business_fails, monkeypatch)
+
+
+async def _run_workflow_entry_fail_open_case(
     failure_seam: str,
     business_fails: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    case = f"failure_seam={failure_seam!r} business_fails={business_fails!r}"
     module = _temporal()
     business_error = RuntimeError("workflow-business-private-canary")
     business_result = object()
@@ -2543,14 +2549,14 @@ async def test_workflow_entry_is_fail_open_and_calls_terminal_once(
             result = await workflow.execute_workflow(cast(Any, input))
         except BaseException as error:
             caught = error
-        assert terminal.calls == 1
-        assert original_get_current() is ambient_context
+        assert terminal.calls == 1, case
+        assert original_get_current() is ambient_context, case
         if business_fails:
-            assert caught is business_error
-            assert _traceback_tail(caught.__traceback__) is terminal.failure_traceback
+            assert caught is business_error, case
+            assert _traceback_tail(caught.__traceback__) is terminal.failure_traceback, case
         else:
-            assert caught is None
-            assert result is business_result
+            assert caught is None, case
+            assert result is business_result, case
     finally:
         with suppress(BaseException):
             original_detach(ambient_token)
@@ -4655,10 +4661,8 @@ class _DrainableNats:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure_kind", ["error", "base", "cancel"])
-@pytest.mark.parametrize(
-    "stage",
-    [
+async def test_agent_resource_factory_is_transactional_at_every_acquisition_boundary() -> None:
+    for stage in [
         "engine",
         "session",
         "connect",
@@ -4670,13 +4674,18 @@ class _DrainableNats:
         "publisher",
         "dataclass",
         "logger",
-    ],
-)
-async def test_agent_resource_factory_is_transactional_at_every_acquisition_boundary(
+    ]:
+        for failure_kind in ["error", "base", "cancel"]:
+            with pytest.MonkeyPatch.context() as monkeypatch:
+                await _run_agent_resource_factory_boundary_case(stage, failure_kind, monkeypatch)
+
+
+async def _run_agent_resource_factory_boundary_case(
     stage: str,
     failure_kind: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    case = f"stage={stage!r} failure_kind={failure_kind!r}"
     events: list[str] = []
     engine = _DisposableEngine(events)
     connection = _DrainableNats(events)
@@ -4702,7 +4711,7 @@ async def test_agent_resource_factory_is_transactional_at_every_acquisition_boun
     settings_before = vars(settings).copy()
 
     def create_engine(_url: str, *, tracer: object) -> _DisposableEngine:
-        assert tracer is runtime.tracer
+        assert tracer is runtime.tracer, case
         events.append("engine.create")
         if stage == "engine":
             raise failure
@@ -4756,7 +4765,7 @@ async def test_agent_resource_factory_is_transactional_at_every_acquisition_boun
     class Publisher:
         def __init__(self, _js: object, *, tracer: object) -> None:
             events.append("publisher.create")
-            assert tracer is runtime.tracer
+            assert tracer is runtime.tracer, case
             if stage == "publisher":
                 raise failure
 
@@ -4785,12 +4794,12 @@ async def test_agent_resource_factory_is_transactional_at_every_acquisition_boun
         await agent_resources.Resources.create(cast(Any, settings), runtime=runtime)
     except BaseException as error:
         caught = error
-    assert caught is failure
-    assert vars(settings) == settings_before
-    assert runtime.tracer is tracer
-    assert events.count("engine.dispose") == (0 if stage == "engine" else 1)
+    assert caught is failure, case
+    assert vars(settings) == settings_before, case
+    assert runtime.tracer is tracer, case
+    assert events.count("engine.dispose") == (0 if stage == "engine" else 1), case
     if stage not in {"engine", "session", "connect"}:
-        assert events[-2:] == ["nats.drain", "engine.dispose"]
+        assert events[-2:] == ["nats.drain", "engine.dispose"], case
 
 
 @pytest.mark.asyncio

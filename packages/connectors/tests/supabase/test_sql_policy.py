@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import pytest
 from sqlglot import exp, tokenize
@@ -18,9 +20,24 @@ from jhin_connectors.supabase.sql_policy import (
 )
 
 
-@pytest.mark.parametrize(
-    ("expected", "sql"),
-    [
+@contextmanager
+def _case(**params: object) -> Iterator[None]:
+    """Stamp the folded-loop case identity onto any failure.
+
+    Mirrors the old per-case parametrize id: a failing iteration names its exact
+    parameter values, including a pytest.raises DID-NOT-RAISE failure.
+    """
+    try:
+        yield
+    except BaseException as exc:
+        exc.add_note(f"failed case: {params!r}")
+        raise
+
+
+# Loop-folded (was @pytest.mark.parametrize with 13 items): identical matrix,
+# iterated inside one test so the collected item count is 1.
+def test_exact_allowed_statement_matrix() -> None:
+    cases: list[tuple[str, str]] = [
         ("read", "SELECT 1"),
         ("read", "SELECT id FROM public.widgets"),
         (
@@ -66,22 +83,24 @@ from jhin_connectors.supabase.sql_policy import (
         ),
         ("destructive", "TRUNCATE public.widgets"),
         ("destructive", "TRUNCATE public.widgets CONTINUE IDENTITY RESTRICT"),
-    ],
-)
-def test_exact_allowed_statement_matrix(expected: str, sql: str) -> None:
-    validated = classify_and_validate_sql(
-        sql,
-        expected=expected,  # type: ignore[arg-type]
-        requested_schema="public",
-    )
+    ]
 
-    assert validated.sql_class == expected
-    assert validated.statement_type
+    for expected, sql in cases:
+        with _case(expected=expected, sql=sql):
+            validated = classify_and_validate_sql(
+                sql,
+                expected=expected,  # type: ignore[arg-type]
+                requested_schema="public",
+            )
+
+            assert validated.sql_class == expected, f"case ({expected!r}, {sql!r})"
+            assert validated.statement_type, f"case ({expected!r}, {sql!r})"
 
 
-@pytest.mark.parametrize(
-    ("expected", "sql"),
-    [
+# Loop-folded (was @pytest.mark.parametrize with 56 items): identical matrix,
+# iterated inside one test so the collected item count is 1.
+def test_exact_denied_statement_matrix() -> None:
+    cases: list[tuple[str, str]] = [
         ("read", ""),
         ("read", "-- comment only"),
         ("read", "SELECT 1;"),
@@ -150,15 +169,18 @@ def test_exact_allowed_statement_matrix(expected: str, sql: str) -> None:
         ("read", "DROP TABLE public.widgets"),
         ("read", "GRANT SELECT ON public.widgets TO someone"),
         ("read", "REVOKE SELECT ON public.widgets FROM someone"),
-    ],
-)
-def test_exact_denied_statement_matrix(expected: str, sql: str) -> None:
-    with pytest.raises(SqlPolicyError, match="unsupported SQL"):
-        classify_and_validate_sql(
-            sql,
-            expected=expected,  # type: ignore[arg-type]
-            requested_schema="public",
-        )
+    ]
+
+    for expected, sql in cases:
+        with (
+            _case(expected=expected, sql=sql),
+            pytest.raises(SqlPolicyError, match="unsupported SQL"),
+        ):
+            classify_and_validate_sql(
+                sql,
+                expected=expected,  # type: ignore[arg-type]
+                requested_schema="public",
+            )
 
 
 @pytest.mark.parametrize(
@@ -321,9 +343,10 @@ def test_identifier_limit_counts_strict_utf8_bytes_not_characters() -> None:
         )
 
 
-@pytest.mark.parametrize(
-    "sql",
-    [
+# Loop-folded (was @pytest.mark.parametrize with 25 items): identical matrix,
+# iterated inside one test so the collected item count is 1.
+def test_functions_operators_collations_and_unsafe_casts_are_denied() -> None:
+    cases: list[str] = [
         "SELECT pg_read_file('/etc/passwd')",
         "SELECT dblink('x', 'SELECT 1')",
         "SELECT setval('seq', 1)",
@@ -349,16 +372,17 @@ def test_identifier_limit_counts_strict_utf8_bytes_not_characters() -> None:
         "SELECT TRY_CAST(1 AS integer)",
         "SELECT 1::public.custom_type",
         "SELECT 1::integer[]",
-    ],
-)
-def test_functions_operators_collations_and_unsafe_casts_are_denied(sql: str) -> None:
-    with pytest.raises(SqlPolicyError, match="unsupported SQL"):
-        classify_and_validate_sql(sql, expected="read", requested_schema="public")
+    ]
+
+    for sql in cases:
+        with _case(sql=sql), pytest.raises(SqlPolicyError, match="unsupported SQL"):
+            classify_and_validate_sql(sql, expected="read", requested_schema="public")
 
 
-@pytest.mark.parametrize(
-    "sql",
-    [
+# Loop-folded (was @pytest.mark.parametrize with 16 items): identical matrix,
+# iterated inside one test so the collected item count is 1.
+def test_only_literal_casts_to_fixed_semantic_builtin_types_are_allowed() -> None:
+    cases: list[str] = [
         "SELECT CAST(1 AS boolean)",
         "SELECT CAST(-1 AS smallint)",
         "SELECT CAST(1 AS integer)",
@@ -375,16 +399,17 @@ def test_functions_operators_collations_and_unsafe_casts_are_denied(sql: str) ->
         "SELECT CAST('{}' AS json)",
         "SELECT CAST('{}' AS jsonb)",
         "SELECT CAST(CAST(1 AS integer) AS bigint)",
-    ],
-)
-def test_only_literal_casts_to_fixed_semantic_builtin_types_are_allowed(sql: str) -> None:
-    validated = classify_and_validate_sql(
-        sql,
-        expected="read",
-        requested_schema="public",
-    )
+    ]
 
-    assert validated.sql_class == "read"
+    for sql in cases:
+        with _case(sql=sql):
+            validated = classify_and_validate_sql(
+                sql,
+                expected="read",
+                requested_schema="public",
+            )
+
+            assert validated.sql_class == "read", f"case {sql!r}"
 
 
 def test_case_branches_remain_allowed_without_authorizing_if_function() -> None:

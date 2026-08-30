@@ -69,9 +69,10 @@ def test_normalized_sql_metadata_uses_a_closed_grammar(
     assert normalize(statement, known_tables=KNOWN_TABLES) == expected
 
 
-@pytest.mark.parametrize(
-    ("statement", "operation", "expected_table"),
-    [
+def test_normalized_sql_metadata_enforces_operation_specific_table_boundaries() -> None:
+    normalize = sqlalchemy_observability.normalized_sql_metadata
+
+    for statement, operation, expected_table in [
         ("SELECT value FROM secret", "SELECT", "secret"),
         ("SELECT value FROM secret;", "SELECT", "secret"),
         ("SELECT * FROM secret()", "SELECT", "other"),
@@ -113,25 +114,18 @@ def test_normalized_sql_metadata_uses_a_closed_grammar(
         ("DROP TABLE secret(", "DROP", "other"),
         ("DROP TABLE secret (", "DROP", "other"),
         ("DROP TABLE secret,", "DROP", "other"),
-    ],
-)
-def test_normalized_sql_metadata_enforces_operation_specific_table_boundaries(
-    statement: str,
-    operation: str,
-    expected_table: str,
-) -> None:
+    ]:
+        assert normalize(statement, known_tables=KNOWN_TABLES) == {
+            "db.system": "postgresql",
+            "db.operation": operation,
+            "db.table": expected_table,
+        }, f"statement={statement!r} operation={operation!r} expected_table={expected_table!r}"
+
+
+def test_normalized_sql_metadata_rejects_non_positional_table_canaries() -> None:
     normalize = sqlalchemy_observability.normalized_sql_metadata
 
-    assert normalize(statement, known_tables=KNOWN_TABLES) == {
-        "db.system": "postgresql",
-        "db.operation": operation,
-        "db.table": expected_table,
-    }
-
-
-@pytest.mark.parametrize(
-    ("statement", "operation"),
-    [
+    for statement, operation in [
         ("SELECT 'FROM secret'", "SELECT"),
         ("SELECT 1 UPDATE secret", "SELECT"),
         ("SELECT 1 /* FROM secret */", "SELECT"),
@@ -145,18 +139,12 @@ def test_normalized_sql_metadata_enforces_operation_specific_table_boundaries(
         ("CREATE INDEX secret ON workspace (id)", "CREATE"),
         ("ALTER secret ADD COLUMN value TEXT", "ALTER"),
         ("DROP VIEW secret", "DROP"),
-    ],
-)
-def test_normalized_sql_metadata_rejects_non_positional_table_canaries(
-    statement: str, operation: str
-) -> None:
-    normalize = sqlalchemy_observability.normalized_sql_metadata
-
-    assert normalize(statement, known_tables=KNOWN_TABLES) == {
-        "db.system": "postgresql",
-        "db.operation": operation,
-        "db.table": "other",
-    }
+    ]:
+        assert normalize(statement, known_tables=KNOWN_TABLES) == {
+            "db.system": "postgresql",
+            "db.operation": operation,
+            "db.table": "other",
+        }, f"statement={statement!r} operation={operation!r}"
 
 
 def test_normalized_sql_metadata_rejects_a_leading_comment() -> None:

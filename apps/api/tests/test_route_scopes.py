@@ -7,8 +7,6 @@ workspace route that nobody thought about is unreachable with an API key
 
 from __future__ import annotations
 
-import pytest
-
 from jhin_api.access.route_scopes import (
     ROUTE_SCOPES,
     WORKSPACE_PREFIX,
@@ -70,23 +68,24 @@ def test_the_app_actually_exposes_workspace_routes() -> None:
     assert len(ROUTES) > 100, f"only found {len(ROUTES)} workspace routes"
 
 
-@pytest.mark.parametrize(("method", "path", "signature"), ROUTES, ids=lambda value: str(value))
-def test_every_workspace_route_is_classified(
-    method: str, path: str, signature: tuple[str, ...]
-) -> None:
-    rule = ROUTE_SCOPES.get(signature)
-    assert rule is not None, (
-        f"{method} {path} has no entry in ROUTE_SCOPES. Add {signature!r} with the "
-        "scope it needs (or a sealed rule if no API key may ever call it)."
-    )
-    side = rule.scope_for(method)
-    if signature in SEALED_SIGNATURES or (
-        method == "DELETE" and signature in SEALED_DELETE_SIGNATURES
-    ):
-        assert side is None
-        return
-    assert side is not None, f"{method} {path} maps to {signature!r}, which has no scope for it"
-    assert side in ALL_SCOPE_KEYS
+def test_every_workspace_route_is_classified() -> None:
+    # Loop-folded from a per-route parametrize over the exact same ROUTES
+    # enumeration: every route is still checked, and every failure message
+    # names the route just as the old parametrize id did.
+    for method, path, signature in ROUTES:
+        rule = ROUTE_SCOPES.get(signature)
+        assert rule is not None, (
+            f"{method} {path} has no entry in ROUTE_SCOPES. Add {signature!r} with the "
+            "scope it needs (or a sealed rule if no API key may ever call it)."
+        )
+        side = rule.scope_for(method)
+        if signature in SEALED_SIGNATURES or (
+            method == "DELETE" and signature in SEALED_DELETE_SIGNATURES
+        ):
+            assert side is None, f"{method} {path} is sealed but resolved scope {side!r}"
+            continue
+        assert side is not None, f"{method} {path} maps to {signature!r}, which has no scope for it"
+        assert side in ALL_SCOPE_KEYS, f"{method} {path} resolved unknown scope {side!r}"
 
 
 def test_credential_routes_are_unreachable_with_any_api_key() -> None:

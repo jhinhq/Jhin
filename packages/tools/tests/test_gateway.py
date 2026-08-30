@@ -1148,9 +1148,15 @@ async def test_legacy_approval_format_fails_closed_and_is_audited(
     assert "demo.destructive.marker" not in await _audit_actions(session)
 
 
-@pytest.mark.parametrize(
-    ("field", "tampered"),
-    [
+async def test_approval_runtime_invocation_binding_is_required(
+    gateway: ToolGateway,
+    session: AsyncSession,
+    context: ToolExecutionContext,
+) -> None:
+    # Loop-folded from an 11-case (field, tampered) parametrize: the same
+    # matrix runs in full, with a freshly parked approval per case so no
+    # tampering leaks between cases; failure messages name the case.
+    cases: list[tuple[str, object]] = [
         ("workspace_id", "00000000-0000-0000-0000-000000000011"),
         ("agent_id", "00000000-0000-0000-0000-000000000012"),
         ("run_id", "00000000-0000-0000-0000-000000000013"),
@@ -1162,30 +1168,26 @@ async def test_legacy_approval_format_fails_closed_and_is_audited(
         ("invocation_id", "00000000-0000-0000-0000-000000000001"),
         ("invocation_format_version", None),
         ("invocation_format_version", 999),
-    ],
-)
-async def test_approval_runtime_invocation_binding_is_required(
-    gateway: ToolGateway,
-    session: AsyncSession,
-    context: ToolExecutionContext,
-    field: str,
-    tampered: object,
-) -> None:
-    parked, approval = await _park_approved_destructive_call(gateway, session, context)
-    payload = dict(approval.action_payload_sanitized)
-    if tampered is None:
-        payload.pop(field)
-    else:
-        payload[field] = tampered
-    approval.action_payload_sanitized = payload
-    await session.flush()
+    ]
+    for field, tampered in cases:
+        case = f"[field={field} tampered={tampered!r}]"
+        parked, approval = await _park_approved_destructive_call(gateway, session, context)
+        payload = dict(approval.action_payload_sanitized)
+        if tampered is None:
+            payload.pop(field)
+        else:
+            payload[field] = tampered
+        approval.action_payload_sanitized = payload
+        await session.flush()
 
-    outcome = await gateway.resolve_approved(cast(UUID, parked.approval_id))
+        outcome = await gateway.resolve_approved(cast(UUID, parked.approval_id))
 
-    assert outcome.status == "failed"
-    assert outcome.decision_code == "approval_binding_mismatch"
-    assert "tool.call.failed" in await _audit_actions(session)
-    assert "demo.destructive.marker" not in await _audit_actions(session)
+        assert outcome.status == "failed", f"{case} status={outcome.status}"
+        assert outcome.decision_code == "approval_binding_mismatch", (
+            f"{case} decision_code={outcome.decision_code}"
+        )
+        assert "tool.call.failed" in await _audit_actions(session), case
+        assert "demo.destructive.marker" not in await _audit_actions(session), case
 
 
 @pytest.mark.parametrize(

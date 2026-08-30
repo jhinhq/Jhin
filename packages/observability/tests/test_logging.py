@@ -219,9 +219,10 @@ def test_sensitive_key_name_is_one_public_authority() -> None:
     assert is_sensitive_key_name is redaction_predicate
 
 
-@pytest.mark.parametrize(
-    "key",
-    [
+def test_sensitive_key_name_recognizes_existing_families_and_suffixes() -> None:
+    from jhin_observability import is_sensitive_key_name
+
+    for key in [
         "authorization",
         "Authorization",
         "http_authorization",
@@ -262,17 +263,14 @@ def test_sensitive_key_name_is_one_public_authority() -> None:
         "database_dsn",
         "databaseDsn",
         "database-dsn",
-    ],
-)
-def test_sensitive_key_name_recognizes_existing_families_and_suffixes(key: str) -> None:
+    ]:
+        assert is_sensitive_key_name(key) is True, f"key={key!r}"
+
+
+def test_sensitive_key_name_recognizes_uppercase_and_acronym_families() -> None:
     from jhin_observability import is_sensitive_key_name
 
-    assert is_sensitive_key_name(key) is True
-
-
-@pytest.mark.parametrize(
-    "key",
-    [
+    for key in [
         "AUTHORIZATION",
         "COOKIE",
         "PASSWORD",
@@ -290,14 +288,8 @@ def test_sensitive_key_name_recognizes_existing_families_and_suffixes(key: str) 
         "signingPRIVATEKey",
         "databaseDSN",
         "xDSN",
-    ],
-)
-def test_sensitive_key_name_recognizes_uppercase_and_acronym_families(
-    key: str,
-) -> None:
-    from jhin_observability import is_sensitive_key_name
-
-    assert is_sensitive_key_name(key) is True
+    ]:
+        assert is_sensitive_key_name(key) is True, f"key={key!r}"
 
 
 @pytest.mark.parametrize(
@@ -320,9 +312,10 @@ def test_sensitive_key_name_preserves_exact_payload_field_authority(key: str) ->
     assert is_sensitive_key_name(key) is True
 
 
-@pytest.mark.parametrize(
-    "key",
-    [
+def test_sensitive_key_name_does_not_widen_benign_names() -> None:
+    from jhin_observability import is_sensitive_key_name
+
+    for key in [
         "secretary",
         "authorization_url",
         "cookie_count",
@@ -334,12 +327,8 @@ def test_sensitive_key_name_preserves_exact_payload_field_authority(key: str) ->
         "dsn_label",
         "",
         "  ",
-    ],
-)
-def test_sensitive_key_name_does_not_widen_benign_names(key: str) -> None:
-    from jhin_observability import is_sensitive_key_name
-
-    assert is_sensitive_key_name(key) is False
+    ]:
+        assert is_sensitive_key_name(key) is False, f"key={key!r}"
 
 
 @pytest.mark.parametrize(
@@ -573,28 +562,28 @@ def test_unknown_event_is_replaced_without_preserving_original_text() -> None:
     assert filtered == {"event": "log.event_rejected"}
 
 
-@pytest.mark.parametrize("event", sorted(EVENT_FIELD_RULES))
-def test_every_registered_event_rejects_an_unknown_canary_field(event: str) -> None:
-    filtered = filter_log_event({"event": event, "unregistered": "runtime-canary"})
-    assert "runtime-canary" not in json.dumps(filtered)
+def test_every_registered_event_rejects_an_unknown_canary_field() -> None:
+    for event in sorted(EVENT_FIELD_RULES):
+        filtered = filter_log_event({"event": event, "unregistered": "runtime-canary"})
+        assert "runtime-canary" not in json.dumps(filtered), f"event={event!r}"
 
 
-@pytest.mark.parametrize("event", sorted(EVENT_FIELD_RULES))
 def test_every_registered_event_survives_the_runtime_renderer(
-    event: str, capsys: pytest.CaptureFixture[str]
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    configure_json_logging(service="api", environment="test", level="INFO")
-    get_logger("jhin.contract").info(event)
-    record = json.loads(capsys.readouterr().out)
-    assert record["event"] == event
-    assert {
-        "schema_version",
-        "timestamp",
-        "level",
-        "service",
-        "environment",
-        "logger",
-    } <= record.keys()
+    for event in sorted(EVENT_FIELD_RULES):
+        configure_json_logging(service="api", environment="test", level="INFO")
+        get_logger("jhin.contract").info(event)
+        record = json.loads(capsys.readouterr().out)
+        assert record["event"] == event, f"event={event!r}"
+        assert {
+            "schema_version",
+            "timestamp",
+            "level",
+            "service",
+            "environment",
+            "logger",
+        } <= record.keys(), f"event={event!r}"
 
 
 def test_job_id_is_allowed_only_on_sandbox_job_finished() -> None:

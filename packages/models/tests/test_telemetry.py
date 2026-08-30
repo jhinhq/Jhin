@@ -15,6 +15,7 @@ import json
 import logging
 import math
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
@@ -282,8 +283,9 @@ class _Telemetry:
     trace_provider: TracerProvider
 
 
-@pytest.fixture
-def telemetry() -> Iterator[_Telemetry]:
+@contextmanager
+def _owned_telemetry() -> Iterator[_Telemetry]:
+    """One isolated telemetry world; loop-folded tests open a fresh one per case."""
     entry_context = otel_context.get_current()
     entry_span = trace.get_current_span()
     reader = InMemoryMetricReader()
@@ -305,6 +307,12 @@ def telemetry() -> Iterator[_Telemetry]:
         assert trace.get_current_span() is entry_span
         trace_provider.shutdown()
         metric_provider.shutdown()
+
+
+@pytest.fixture
+def telemetry() -> Iterator[_Telemetry]:
+    with _owned_telemetry() as owned:
+        yield owned
 
 
 def _metric_points(telemetry: _Telemetry, name: str) -> list[Any]:
@@ -630,95 +638,110 @@ async def test_generate_latency_has_exact_late_boundary_and_overflow_semantics(
         assert attributes["jhin.latency_ms"] == expected
 
 
-@pytest.mark.parametrize("cleanup_kind", ["ok", "failure", "cancellation"])
-@pytest.mark.parametrize("work_kind", ["exhaustion", "failure", "cancellation", "early"])
-async def test_stream_work_by_cleanup_matrix(
-    telemetry: _Telemetry, work_kind: str, cleanup_kind: str
-) -> None:
-    chunk = object()
-    work_error: BaseException | None = None
-    if work_kind == "failure":
-        work_error = WorkError("private-work-body")
-    elif work_kind == "cancellation":
-        work_error = asyncio.CancelledError("work-cancel")
-    cleanup_error: BaseException | None = None
-    if cleanup_kind == "failure":
-        cleanup_error = CleanupError("private-cleanup-body")
-    elif cleanup_kind == "cancellation":
-        cleanup_error = asyncio.CancelledError("cleanup-cancel")
-    iterator = CloseableIterator((chunk,), work_error=work_error, cleanup_error=cleanup_error)
-    raw = FakeModelClient(stream_factory=lambda: iterator)
-    stream = _instrumented(raw, telemetry, provider_type="ollama").stream(model_request())
+async def test_stream_work_by_cleanup_matrix() -> None:
+    # Loop-folded parametrize matrix: same full cross-product, one collected item.
+    for cleanup_kind in ("ok", "failure", "cancellation"):
+        for work_kind in ("exhaustion", "failure", "cancellation", "early"):
+            case = f"work_kind={work_kind}, cleanup_kind={cleanup_kind}"
+            with _owned_telemetry() as telemetry:
+                chunk = object()
+                work_error: BaseException | None = None
+                if work_kind == "failure":
+                    work_error = WorkError("private-work-body")
+                elif work_kind == "cancellation":
+                    work_error = asyncio.CancelledError("work-cancel")
+                cleanup_error: BaseException | None = None
+                if cleanup_kind == "failure":
+                    cleanup_error = CleanupError("private-cleanup-body")
+                elif cleanup_kind == "cancellation":
+                    cleanup_error = asyncio.CancelledError("cleanup-cancel")
+                iterator = CloseableIterator(
+                    (chunk,), work_error=work_error, cleanup_error=cleanup_error
+                )
+                raw = FakeModelClient(stream_factory=lambda iterator=iterator: iterator)
+                stream = _instrumented(raw, telemetry, provider_type="ollama").stream(
+                    model_request()
+                )
 
-    caught: BaseException | None = None
-    observed: list[object] = []
-    consumer_spans: list[tuple[bool, object]] = []
-    try:
-        if work_kind == "early":
-            observed.append(await anext(stream))
-            current = trace.get_current_span()
-            consumer_spans.append((current.is_recording(), current.get_span_context()))
-            await stream.aclose()
-        else:
-            async for item in stream:
-                observed.append(item)
-                current = trace.get_current_span()
-                consumer_spans.append((current.is_recording(), current.get_span_context()))
-    except BaseException as error:
-        caught = error
+                caught: BaseException | None = None
+                observed: list[object] = []
+                consumer_spans: list[tuple[bool, object]] = []
+                try:
+                    if work_kind == "early":
+                        observed.append(await anext(stream))
+                        current = trace.get_current_span()
+                        consumer_spans.append((current.is_recording(), current.get_span_context()))
+                        await stream.aclose()
+                    else:
+                        async for item in stream:
+                            observed.append(item)
+                            current = trace.get_current_span()
+                            consumer_spans.append(
+                                (current.is_recording(), current.get_span_context())
+                            )
+                except BaseException as error:
+                    caught = error
 
-    assert observed == [chunk]
-    assert observed[0] is chunk
-    assert raw.stream_calls == 1
-    assert iterator.aclose_calls == 1
-    if work_kind == "failure":
-        assert caught is work_error
-        assert _traceback_contains(caught.__traceback__, iterator.work_traceback)
-        expected_outcome = "failed"
-    elif work_kind == "cancellation":
-        assert caught is work_error
-        assert _traceback_contains(caught.__traceback__, iterator.work_traceback)
-        expected_outcome = "cancelled"
-    elif work_kind == "early":
-        assert caught is None
-        expected_outcome = "cancelled"
-    elif cleanup_kind == "failure":
-        assert caught is cleanup_error
-        assert _traceback_contains(caught.__traceback__, iterator.cleanup_traceback)
-        expected_outcome = "failed"
-    elif cleanup_kind == "cancellation":
-        assert caught is cleanup_error
-        assert _traceback_contains(caught.__traceback__, iterator.cleanup_traceback)
-        expected_outcome = "cancelled"
-    else:
-        assert caught is None
-        expected_outcome = "ok"
+                assert observed == [chunk], case
+                assert observed[0] is chunk, case
+                assert raw.stream_calls == 1, case
+                assert iterator.aclose_calls == 1, case
+                if work_kind == "failure":
+                    assert caught is work_error, case
+                    assert _traceback_contains(caught.__traceback__, iterator.work_traceback), case
+                    expected_outcome = "failed"
+                elif work_kind == "cancellation":
+                    assert caught is work_error, case
+                    assert _traceback_contains(caught.__traceback__, iterator.work_traceback), case
+                    expected_outcome = "cancelled"
+                elif work_kind == "early":
+                    assert caught is None, case
+                    expected_outcome = "cancelled"
+                elif cleanup_kind == "failure":
+                    assert caught is cleanup_error, case
+                    assert _traceback_contains(caught.__traceback__, iterator.cleanup_traceback), (
+                        case
+                    )
+                    expected_outcome = "failed"
+                elif cleanup_kind == "cancellation":
+                    assert caught is cleanup_error, case
+                    assert _traceback_contains(caught.__traceback__, iterator.cleanup_traceback), (
+                        case
+                    )
+                    expected_outcome = "cancelled"
+                else:
+                    assert caught is None, case
+                    expected_outcome = "ok"
 
-    assert (
-        metric_sum(
-            telemetry,
-            "model_requests_total",
-            provider_type="ollama",
-            outcome=expected_outcome,
-        )
-        == 1
-    )
-    span = _only_model_span(telemetry)
-    assert span.attributes["jhin.operation"] == "stream"
-    assert span.attributes["jhin.outcome"] == expected_outcome
-    if expected_outcome == "failed":
-        assert span.status.status_code is StatusCode.ERROR
-        assert span.attributes["error.code"] == "upstream_unavailable"
-    else:
-        assert span.status.status_code is StatusCode.UNSET
-        assert "error.code" not in span.attributes
-    assert iterator.seen_spans
-    assert all(
-        was_recording and context == span.context for was_recording, context in iterator.seen_spans
-    )
-    assert all(
-        was_recording and context == span.context for was_recording, context in consumer_spans
-    )
+                assert (
+                    metric_sum(
+                        telemetry,
+                        "model_requests_total",
+                        provider_type="ollama",
+                        outcome=expected_outcome,
+                    )
+                    == 1
+                ), case
+                spans = _model_spans(telemetry)
+                assert len(spans) == 1, case
+                span = spans[0]
+                assert span.attributes["jhin.operation"] == "stream", case
+                assert span.attributes["jhin.outcome"] == expected_outcome, case
+                if expected_outcome == "failed":
+                    assert span.status.status_code is StatusCode.ERROR, case
+                    assert span.attributes["error.code"] == "upstream_unavailable", case
+                else:
+                    assert span.status.status_code is StatusCode.UNSET, case
+                    assert "error.code" not in span.attributes, case
+                assert iterator.seen_spans, case
+                assert all(
+                    was_recording and context == span.context
+                    for was_recording, context in iterator.seen_spans
+                ), case
+                assert all(
+                    was_recording and context == span.context
+                    for was_recording, context in consumer_spans
+                ), case
 
 
 @pytest.mark.parametrize("work_kind", ["exhaustion", "failure", "cancellation", "early"])
@@ -1042,9 +1065,10 @@ async def test_hostile_telemetry_never_changes_generate_product_authority(
     assert not trace.get_current_span().is_recording()
 
 
-@pytest.mark.parametrize(
-    "phase",
-    [
+async def test_full_hostile_lifecycle_preserves_every_started_attempt_authority() -> None:
+    # Loop-folded parametrize matrix: same full cross-product, one collected item.
+    # Every case runs in its own telemetry world and monkeypatch context.
+    phases = (
         "construction",
         "manager_enter",
         "late_set",
@@ -1055,11 +1079,8 @@ async def test_hostile_telemetry_never_changes_generate_product_authority(
         "detach",
         "metric_getter",
         "metric_add",
-    ],
-)
-@pytest.mark.parametrize(
-    "mode",
-    [
+    )
+    modes = (
         "generate_success",
         "generate_failure",
         "generate_cancellation",
@@ -1069,103 +1090,105 @@ async def test_hostile_telemetry_never_changes_generate_product_authority(
         "stream_success",
         "stream_failure",
         "stream_cancellation",
-    ],
-)
-async def test_full_hostile_lifecycle_preserves_every_started_attempt_authority(
-    telemetry: _Telemetry,
-    monkeypatch: pytest.MonkeyPatch,
-    phase: str,
-    mode: str,
-) -> None:
-    entry_context = otel_context.get_current()
-    entry_span = trace.get_current_span()
-    product_error: BaseException | None = None
-    if mode.endswith("failure"):
-        product_error = ModelProviderError("private-product-failure")
-    elif mode.endswith("cancellation"):
-        product_error = asyncio.CancelledError("private-product-cancellation")
-
-    iterator = CloseableIterator(("same-chunk",), work_error=product_error)
-    response = ModelResponse(text="same-generate-result", latency_ms=23)
-    raw = FakeModelClient(
-        response=response,
-        generate_error=product_error,
-        verify_result="same-verify-result",
-        verify_error=product_error,
-        stream_factory=lambda: iterator,
     )
-    metrics: object = telemetry.metrics
-    if phase == "metric_getter":
-        metrics = _HostileMetrics()
-    elif phase == "metric_add":
-        metrics = _AddHostileMetrics()
-    tracer: object = _LifecycleTracer(telemetry.tracer, phase)
-    if phase == "detach":
-        original_detach = otel_context.detach
+    for mode in modes:
+        for phase in phases:
+            case = f"mode={mode}, phase={phase}"
+            with _owned_telemetry() as telemetry, pytest.MonkeyPatch.context() as monkeypatch:
+                entry_context = otel_context.get_current()
+                entry_span = trace.get_current_span()
+                product_error: BaseException | None = None
+                if mode.endswith("failure"):
+                    product_error = ModelProviderError("private-product-failure")
+                elif mode.endswith("cancellation"):
+                    product_error = asyncio.CancelledError("private-product-cancellation")
 
-        def hostile_detach(token: object) -> None:
-            original_detach(token)
-            raise HostileTelemetryError("detach-canary")
+                iterator = CloseableIterator(("same-chunk",), work_error=product_error)
+                response = ModelResponse(text="same-generate-result", latency_ms=23)
+                raw = FakeModelClient(
+                    response=response,
+                    generate_error=product_error,
+                    verify_result="same-verify-result",
+                    verify_error=product_error,
+                    stream_factory=lambda iterator=iterator: iterator,
+                )
+                metrics: object = telemetry.metrics
+                if phase == "metric_getter":
+                    metrics = _HostileMetrics()
+                elif phase == "metric_add":
+                    metrics = _AddHostileMetrics()
+                tracer: object = _LifecycleTracer(telemetry.tracer, phase)
+                if phase == "detach":
+                    original_detach = otel_context.detach
 
-        monkeypatch.setattr(otel_context, "detach", hostile_detach)
-    client = _instrumented(
-        raw,
-        telemetry,
-        metrics=cast(JhinMetrics, metrics),
-        tracer=cast(Tracer, tracer),
-    )
+                    def hostile_detach(
+                        token: object,
+                        original_detach: Callable[[object], None] = original_detach,
+                    ) -> None:
+                        original_detach(token)
+                        raise HostileTelemetryError("detach-canary")
 
-    caught: BaseException | None = None
-    result: object | None = None
-    try:
-        if mode.startswith("generate"):
-            result = await client.generate(model_request())
-        elif mode.startswith("verify"):
-            result = await client.verify()
-        else:
-            result = [chunk async for chunk in client.stream(model_request())]
-    except BaseException as error:
-        caught = error
+                    monkeypatch.setattr(otel_context, "detach", hostile_detach)
+                client = _instrumented(
+                    raw,
+                    telemetry,
+                    metrics=cast(JhinMetrics, metrics),
+                    tracer=cast(Tracer, tracer),
+                )
 
-    if product_error is None:
-        assert caught is None
-        expected_result: object = ["same-chunk"]
-        if mode.startswith("generate"):
-            expected_result = response
-        elif mode.startswith("verify"):
-            expected_result = "same-verify-result"
-        assert (
-            result is expected_result if mode.startswith("generate") else result == expected_result
-        )
-    else:
-        assert caught is product_error
-        expected_traceback = iterator.work_traceback
-        if mode.startswith(("generate", "verify")):
-            expected_traceback = raw.raised_traceback
-        assert _traceback_contains(caught.__traceback__, expected_traceback)
-    assert raw.generate_calls + raw.verify_calls + raw.stream_calls == 1
-    assert iterator.aclose_calls == (1 if mode.startswith("stream") else 0)
-    assert otel_context.get_current() is entry_context
-    assert trace.get_current_span() is entry_span
-    expected_outcome = {
-        "success": "ok",
-        "failure": "failed",
-        "cancellation": "cancelled",
-    }[mode.rsplit("_", 1)[1]]
-    expected_metric = 0 if phase in {"metric_getter", "metric_add"} else 1
-    assert (
-        metric_sum(
-            telemetry,
-            "model_requests_total",
-            provider_type="openai",
-            outcome=expected_outcome,
-        )
-        == expected_metric
-    )
-    spans = _model_spans(telemetry)
-    assert len(spans) == (0 if phase in {"construction", "manager_enter"} else 1)
-    if spans:
-        assert spans[0].end_time is not None
+                caught: BaseException | None = None
+                result: object | None = None
+                try:
+                    if mode.startswith("generate"):
+                        result = await client.generate(model_request())
+                    elif mode.startswith("verify"):
+                        result = await client.verify()
+                    else:
+                        result = [chunk async for chunk in client.stream(model_request())]
+                except BaseException as error:
+                    caught = error
+
+                if product_error is None:
+                    assert caught is None, case
+                    expected_result: object = ["same-chunk"]
+                    if mode.startswith("generate"):
+                        expected_result = response
+                    elif mode.startswith("verify"):
+                        expected_result = "same-verify-result"
+                    assert (
+                        result is expected_result
+                        if mode.startswith("generate")
+                        else result == expected_result
+                    ), case
+                else:
+                    assert caught is product_error, case
+                    expected_traceback = iterator.work_traceback
+                    if mode.startswith(("generate", "verify")):
+                        expected_traceback = raw.raised_traceback
+                    assert _traceback_contains(caught.__traceback__, expected_traceback), case
+                assert raw.generate_calls + raw.verify_calls + raw.stream_calls == 1, case
+                assert iterator.aclose_calls == (1 if mode.startswith("stream") else 0), case
+                assert otel_context.get_current() is entry_context, case
+                assert trace.get_current_span() is entry_span, case
+                expected_outcome = {
+                    "success": "ok",
+                    "failure": "failed",
+                    "cancellation": "cancelled",
+                }[mode.rsplit("_", 1)[1]]
+                expected_metric = 0 if phase in {"metric_getter", "metric_add"} else 1
+                assert (
+                    metric_sum(
+                        telemetry,
+                        "model_requests_total",
+                        provider_type="openai",
+                        outcome=expected_outcome,
+                    )
+                    == expected_metric
+                ), case
+                spans = _model_spans(telemetry)
+                assert len(spans) == (0 if phase in {"construction", "manager_enter"} else 1), case
+                if spans:
+                    assert spans[0].end_time is not None, case
 
 
 class _ExplodingMetrics:
@@ -1271,82 +1294,92 @@ async def test_backend_fatal_base_exceptions_propagate_exactly(
     assert trace.get_current_span() is entry_span
 
 
-@pytest.mark.parametrize("backend_phase", ["manager_exit", "end", "detach"])
-@pytest.mark.parametrize("backend_kind", ["cancellation", "keyboard", "system_exit"])
-@pytest.mark.parametrize("product_mode", ["success", "failure", "cancellation"])
-async def test_teardown_base_exceptions_preserve_exact_product_and_context_authority(
-    telemetry: _Telemetry,
-    monkeypatch: pytest.MonkeyPatch,
-    backend_phase: str,
-    backend_kind: str,
-    product_mode: str,
-) -> None:
-    backend_error: BaseException
-    if backend_kind == "cancellation":
-        backend_error = asyncio.CancelledError("diagnostic-teardown-cancellation")
-    elif backend_kind == "keyboard":
-        backend_error = KeyboardInterrupt("fatal-teardown-keyboard")
-    else:
-        backend_error = SystemExit("fatal-teardown-system-exit")
-    product_error: BaseException | None = None
-    if product_mode == "failure":
-        product_error = ModelProviderError("active-product-failure")
-    elif product_mode == "cancellation":
-        product_error = asyncio.CancelledError("first-product-cancellation")
-    response = ModelResponse(text="same-product-result", latency_ms=7)
-    raw = FakeModelClient(response=response, generate_error=product_error)
-    tracer = _BaseExceptionLifecycleTracer(
-        telemetry.tracer,
-        backend_phase,
-        backend_error,
-    )
-    detach_traceback: list[TracebackType | None] = []
-    if backend_phase == "detach":
-        original_detach = otel_context.detach
+async def test_teardown_base_exceptions_preserve_exact_product_and_context_authority() -> None:
+    # Loop-folded parametrize matrix: same full cross-product, one collected item.
+    # Every case runs in its own telemetry world and monkeypatch context.
+    for product_mode in ("success", "failure", "cancellation"):
+        for backend_kind in ("cancellation", "keyboard", "system_exit"):
+            for backend_phase in ("manager_exit", "end", "detach"):
+                case = (
+                    f"product_mode={product_mode}, backend_kind={backend_kind}, "
+                    f"backend_phase={backend_phase}"
+                )
+                with _owned_telemetry() as telemetry, pytest.MonkeyPatch.context() as monkeypatch:
+                    backend_error: BaseException
+                    if backend_kind == "cancellation":
+                        backend_error = asyncio.CancelledError("diagnostic-teardown-cancellation")
+                    elif backend_kind == "keyboard":
+                        backend_error = KeyboardInterrupt("fatal-teardown-keyboard")
+                    else:
+                        backend_error = SystemExit("fatal-teardown-system-exit")
+                    product_error: BaseException | None = None
+                    if product_mode == "failure":
+                        product_error = ModelProviderError("active-product-failure")
+                    elif product_mode == "cancellation":
+                        product_error = asyncio.CancelledError("first-product-cancellation")
+                    response = ModelResponse(text="same-product-result", latency_ms=7)
+                    raw = FakeModelClient(response=response, generate_error=product_error)
+                    tracer = _BaseExceptionLifecycleTracer(
+                        telemetry.tracer,
+                        backend_phase,
+                        backend_error,
+                    )
+                    detach_traceback: list[TracebackType | None] = []
+                    if backend_phase == "detach":
+                        original_detach = otel_context.detach
 
-        def raise_after_exact_detach(token: object) -> None:
-            original_detach(token)
-            try:
-                raise backend_error
-            except BaseException as error:
-                detach_traceback.append(error.__traceback__)
-                raise
+                        def raise_after_exact_detach(
+                            token: object,
+                            original_detach: Callable[[object], None] = original_detach,
+                            backend_error: BaseException = backend_error,
+                            detach_traceback: list[TracebackType | None] = detach_traceback,
+                        ) -> None:
+                            original_detach(token)
+                            try:
+                                raise backend_error
+                            except BaseException as error:
+                                detach_traceback.append(error.__traceback__)
+                                raise
 
-        monkeypatch.setattr(otel_context, "detach", raise_after_exact_detach)
-    client = _instrumented(raw, telemetry, tracer=cast(Tracer, tracer))
-    entry_context = otel_context.get_current()
-    entry_span = trace.get_current_span()
+                        monkeypatch.setattr(otel_context, "detach", raise_after_exact_detach)
+                    client = _instrumented(raw, telemetry, tracer=cast(Tracer, tracer))
+                    entry_context = otel_context.get_current()
+                    entry_span = trace.get_current_span()
 
-    caught: BaseException | None = None
-    result: object | None = None
-    try:
-        result = await client.generate(model_request())
-    except BaseException as error:
-        caught = error
+                    caught: BaseException | None = None
+                    result: object | None = None
+                    try:
+                        result = await client.generate(model_request())
+                    except BaseException as error:
+                        caught = error
 
-    if backend_kind == "cancellation":
-        if product_error is None:
-            assert caught is None
-            assert result is response
-        else:
-            assert caught is product_error
-            assert _traceback_contains(caught.__traceback__, raw.raised_traceback)
-    else:
-        assert caught is backend_error
-        backend_traceback = detach_traceback[0] if backend_phase == "detach" else None
-        if backend_phase == "manager_exit":
-            assert tracer.manager is not None
-            backend_traceback = tracer.manager.raised_traceback
-        elif backend_phase == "end":
-            assert tracer.span is not None
-            backend_traceback = tracer.span.raised_traceback
-        assert _traceback_contains(caught.__traceback__, backend_traceback)
+                    if backend_kind == "cancellation":
+                        if product_error is None:
+                            assert caught is None, case
+                            assert result is response, case
+                        else:
+                            assert caught is product_error, case
+                            assert _traceback_contains(
+                                caught.__traceback__, raw.raised_traceback
+                            ), case
+                    else:
+                        assert caught is backend_error, case
+                        backend_traceback = (
+                            detach_traceback[0] if backend_phase == "detach" else None
+                        )
+                        if backend_phase == "manager_exit":
+                            assert tracer.manager is not None, case
+                            backend_traceback = tracer.manager.raised_traceback
+                        elif backend_phase == "end":
+                            assert tracer.span is not None, case
+                            backend_traceback = tracer.span.raised_traceback
+                        assert _traceback_contains(caught.__traceback__, backend_traceback), case
 
-    assert raw.generate_calls == 1
-    assert otel_context.get_current() is entry_context
-    assert trace.get_current_span() is entry_span
-    assert len(_model_spans(telemetry)) == 1
-    assert _model_spans(telemetry)[0].end_time is not None
+                    assert raw.generate_calls == 1, case
+                    assert otel_context.get_current() is entry_context, case
+                    assert trace.get_current_span() is entry_span, case
+                    assert len(_model_spans(telemetry)) == 1, case
+                    assert _model_spans(telemetry)[0].end_time is not None, case
 
 
 async def test_synchronous_wrapped_stream_factory_failure_preserves_object_and_traceback(
@@ -2994,256 +3027,250 @@ def test_semantic_factory_auditor_handles_aliases_swaps_extra_callers_and_local_
     )
 
 
-@pytest.mark.parametrize(
-    ("extra_form", "extra_source"),
-    [
-        (
-            "tainted_attribute_root",
-            "import jhin_models\n"
-            "if condition:\n"
-            "    jhin_models = local_module\n"
-            "jhin_models.build_model_client('openai', metrics=metrics, tracer=tracer)\n",
-        ),
-        (
-            "aliased_factory_module",
-            "from jhin_models import factory as f\n"
-            "f.build_model_client('openai', metrics=metrics, tracer=tracer)\n",
-        ),
-        (
-            "package_wildcard",
-            "from jhin_models import *\n"
-            "build_model_client('openai', metrics=metrics, tracer=tracer)\n",
-        ),
-        (
-            "factory_wildcard",
-            "from jhin_models.factory import *\n"
-            "build_model_client('openai', metrics=metrics, tracer=tracer)\n",
-        ),
-        (
-            "assigned_function_alias",
-            "from jhin_models import build_model_client\n"
-            "factory_alias = build_model_client\n"
-            "factory_alias('openai', metrics=metrics, tracer=tracer)\n",
-        ),
-        (
-            "assigned_module_alias",
-            "import jhin_models\n"
-            "factory_alias = jhin_models.factory\n"
-            "factory_alias.build_model_client('openai', metrics=metrics, tracer=tracer)\n",
-        ),
-        (
-            "tuple_unpacked_function_alias",
-            "from jhin_models import build_model_client\n"
-            "(factory_alias,) = (build_model_client,)\n"
-            "factory_alias('openai', metrics=metrics, tracer=tracer)\n",
-        ),
-        (
-            "list_unpacked_function_alias",
-            "from jhin_models import build_model_client\n"
-            "[factory_alias] = [build_model_client]\n"
-            "factory_alias('openai', metrics=metrics, tracer=tracer)\n",
-        ),
-        (
-            "conditional_expression_alias",
-            "from jhin_models import build_model_client\n"
-            "factory_alias = build_model_client if condition else local_factory\n"
-            "factory_alias('openai', metrics=metrics, tracer=tracer)\n",
-        ),
-        (
-            "boolean_expression_alias",
-            "from jhin_models import build_model_client\n"
-            "factory_alias = build_model_client or local_factory\n"
-            "factory_alias('openai', metrics=metrics, tracer=tracer)\n",
-        ),
-        (
-            "direct_conditional_callee",
-            "from jhin_models import build_model_client\n"
-            "(build_model_client if condition else local_factory)("
-            "'openai', metrics=metrics, tracer=tracer)\n",
-        ),
-        (
-            "direct_boolean_callee",
-            "from jhin_models import build_model_client\n"
-            "(build_model_client or local_factory)("
-            "'openai', metrics=metrics, tracer=tracer)\n",
-        ),
-        (
-            "container_escape",
-            "from jhin_models import build_model_client\n"
-            "escaped = {'factory': build_model_client}\n",
-        ),
-        (
-            "return_escape",
-            "from jhin_models import build_model_client\n"
-            "def expose():\n"
-            "    return build_model_client\n",
-        ),
-        (
-            "argument_escape",
-            "from jhin_models import build_model_client\nconsume(build_model_client)\n",
-        ),
-    ],
+_HIDDEN_EXTRA_PACKAGE_CALLER_CASES = (
+    (
+        "tainted_attribute_root",
+        "import jhin_models\n"
+        "if condition:\n"
+        "    jhin_models = local_module\n"
+        "jhin_models.build_model_client('openai', metrics=metrics, tracer=tracer)\n",
+    ),
+    (
+        "aliased_factory_module",
+        "from jhin_models import factory as f\n"
+        "f.build_model_client('openai', metrics=metrics, tracer=tracer)\n",
+    ),
+    (
+        "package_wildcard",
+        "from jhin_models import *\nbuild_model_client('openai', metrics=metrics, tracer=tracer)\n",
+    ),
+    (
+        "factory_wildcard",
+        "from jhin_models.factory import *\n"
+        "build_model_client('openai', metrics=metrics, tracer=tracer)\n",
+    ),
+    (
+        "assigned_function_alias",
+        "from jhin_models import build_model_client\n"
+        "factory_alias = build_model_client\n"
+        "factory_alias('openai', metrics=metrics, tracer=tracer)\n",
+    ),
+    (
+        "assigned_module_alias",
+        "import jhin_models\n"
+        "factory_alias = jhin_models.factory\n"
+        "factory_alias.build_model_client('openai', metrics=metrics, tracer=tracer)\n",
+    ),
+    (
+        "tuple_unpacked_function_alias",
+        "from jhin_models import build_model_client\n"
+        "(factory_alias,) = (build_model_client,)\n"
+        "factory_alias('openai', metrics=metrics, tracer=tracer)\n",
+    ),
+    (
+        "list_unpacked_function_alias",
+        "from jhin_models import build_model_client\n"
+        "[factory_alias] = [build_model_client]\n"
+        "factory_alias('openai', metrics=metrics, tracer=tracer)\n",
+    ),
+    (
+        "conditional_expression_alias",
+        "from jhin_models import build_model_client\n"
+        "factory_alias = build_model_client if condition else local_factory\n"
+        "factory_alias('openai', metrics=metrics, tracer=tracer)\n",
+    ),
+    (
+        "boolean_expression_alias",
+        "from jhin_models import build_model_client\n"
+        "factory_alias = build_model_client or local_factory\n"
+        "factory_alias('openai', metrics=metrics, tracer=tracer)\n",
+    ),
+    (
+        "direct_conditional_callee",
+        "from jhin_models import build_model_client\n"
+        "(build_model_client if condition else local_factory)("
+        "'openai', metrics=metrics, tracer=tracer)\n",
+    ),
+    (
+        "direct_boolean_callee",
+        "from jhin_models import build_model_client\n"
+        "(build_model_client or local_factory)("
+        "'openai', metrics=metrics, tracer=tracer)\n",
+    ),
+    (
+        "container_escape",
+        "from jhin_models import build_model_client\nescaped = {'factory': build_model_client}\n",
+    ),
+    (
+        "return_escape",
+        "from jhin_models import build_model_client\n"
+        "def expose():\n"
+        "    return build_model_client\n",
+    ),
+    (
+        "argument_escape",
+        "from jhin_models import build_model_client\nconsume(build_model_client)\n",
+    ),
 )
-def test_semantic_factory_auditor_rejects_every_hidden_extra_package_caller(
-    extra_form: str,
-    extra_source: str,
-) -> None:
-    sources = {
-        "api.py": (
-            "from jhin_models import build_model_client as build\n"
-            "build('openai', metrics=metrics, tracer=tracer)\n"
-        ),
-        "agent.py": (
-            "import jhin_models.factory\n"
-            "jhin_models.factory.build_model_client("
-            "'openai', metrics=self.metrics, tracer=self.tracer)\n"
-        ),
-        "extra.py": extra_source,
-    }
-    failures = _factory_audit(
-        sources,
-        expected_handles={
-            "api.py": ("metrics", "tracer"),
-            "agent.py": ("self.metrics", "self.tracer"),
-        },
-    )
-    assert any("owners" in failure for failure in failures), extra_form
 
 
-@pytest.mark.parametrize(
-    ("binding_form", "api_source"),
-    [
-        (
-            "call_before_later_assignment",
-            "from jhin_models import build_model_client\n"
-            "def invoke():\n"
-            "    build_model_client('openai', metrics=metrics, tracer=tracer)\n"
-            "    build_model_client = local_factory\n",
-        ),
-        (
-            "lambda_parameter",
-            "from jhin_models import build_model_client\n"
-            "invoke = lambda build_model_client: build_model_client("
-            "'openai', metrics=metrics, tracer=tracer)\n",
-        ),
-        (
-            "dict_comprehension",
-            "from jhin_models import build_model_client\n"
-            "values = {build_model_client: build_model_client("
-            "'openai', metrics=metrics, tracer=tracer) "
-            "for build_model_client in factories}\n",
-        ),
-        (
-            "named_expression",
-            "from jhin_models import build_model_client\n"
-            "def invoke():\n"
-            "    (build_model_client := local_factory)\n"
-            "    return build_model_client('openai', metrics=metrics, tracer=tracer)\n",
-        ),
-        (
-            "for_target",
-            "from jhin_models import build_model_client\n"
-            "def invoke():\n"
-            "    for build_model_client in factories:\n"
-            "        build_model_client('openai', metrics=metrics, tracer=tracer)\n",
-        ),
-        (
-            "with_target",
-            "from jhin_models import build_model_client\n"
-            "def invoke():\n"
-            "    with manager as build_model_client:\n"
-            "        build_model_client('openai', metrics=metrics, tracer=tracer)\n",
-        ),
-        (
-            "except_target",
-            "from jhin_models import build_model_client\n"
-            "def invoke():\n"
-            "    try:\n"
-            "        operation()\n"
-            "    except Exception as build_model_client:\n"
-            "        build_model_client('openai', metrics=metrics, tracer=tracer)\n",
-        ),
-        (
-            "delete_target",
-            "from jhin_models import build_model_client\n"
-            "def invoke():\n"
-            "    del build_model_client\n"
-            "    return build_model_client('openai', metrics=metrics, tracer=tracer)\n",
-        ),
-        (
-            "class_local_not_closure",
-            "class Owner:\n"
-            "    from jhin_models import build_model_client\n"
-            "    def invoke(self):\n"
-            "        return build_model_client('openai', metrics=metrics, tracer=tracer)\n",
-        ),
-        (
-            "class_comprehension_does_not_close_over_class_local",
-            "build_model_client = local_factory\n"
-            "class Owner:\n"
-            "    from jhin_models import build_model_client\n"
-            "    values = [build_model_client('openai', metrics=metrics, tracer=tracer) "
-            "for _ in factories]\n",
-        ),
-        (
-            "match_capture_is_function_local",
-            "from jhin_models import build_model_client\n"
-            "def invoke(value):\n"
-            "    match value:\n"
-            "        case {'factory': build_model_client}:\n"
-            "            pass\n"
-            "    return build_model_client('openai', metrics=metrics, tracer=tracer)\n",
-        ),
-        (
-            "package_module_attribute_rebound",
-            "import jhin_models\n"
-            "jhin_models.build_model_client = local_factory\n"
-            "jhin_models.build_model_client('openai', metrics=metrics, tracer=tracer)\n",
-        ),
-        (
-            "package_factory_prefix_rebound",
-            "import jhin_models\n"
-            "jhin_models.factory = local_module\n"
-            "jhin_models.factory.build_model_client("
-            "'openai', metrics=metrics, tracer=tracer)\n",
-        ),
-        (
-            "conditional_package_import_is_ambiguous",
-            "build_model_client = local_factory\n"
-            "if condition:\n"
-            "    from jhin_models import build_model_client\n"
-            "build_model_client('openai', metrics=metrics, tracer=tracer)\n",
-        ),
-        (
-            "try_package_import_is_ambiguous",
-            "build_model_client = local_factory\n"
-            "try:\n"
-            "    from jhin_models import build_model_client\n"
-            "except ImportError:\n"
-            "    pass\n"
-            "build_model_client('openai', metrics=metrics, tracer=tracer)\n",
-        ),
-    ],
+def test_semantic_factory_auditor_rejects_every_hidden_extra_package_caller() -> None:
+    # Loop-folded parametrize list: same cases, one collected item.
+    for extra_form, extra_source in _HIDDEN_EXTRA_PACKAGE_CALLER_CASES:
+        sources = {
+            "api.py": (
+                "from jhin_models import build_model_client as build\n"
+                "build('openai', metrics=metrics, tracer=tracer)\n"
+            ),
+            "agent.py": (
+                "import jhin_models.factory\n"
+                "jhin_models.factory.build_model_client("
+                "'openai', metrics=self.metrics, tracer=self.tracer)\n"
+            ),
+            "extra.py": extra_source,
+        }
+        failures = _factory_audit(
+            sources,
+            expected_handles={
+                "api.py": ("metrics", "tracer"),
+                "agent.py": ("self.metrics", "self.tracer"),
+            },
+        )
+        assert any("owners" in failure for failure in failures), extra_form
+
+
+_LEXICAL_SHADOW_FORM_CASES = (
+    (
+        "call_before_later_assignment",
+        "from jhin_models import build_model_client\n"
+        "def invoke():\n"
+        "    build_model_client('openai', metrics=metrics, tracer=tracer)\n"
+        "    build_model_client = local_factory\n",
+    ),
+    (
+        "lambda_parameter",
+        "from jhin_models import build_model_client\n"
+        "invoke = lambda build_model_client: build_model_client("
+        "'openai', metrics=metrics, tracer=tracer)\n",
+    ),
+    (
+        "dict_comprehension",
+        "from jhin_models import build_model_client\n"
+        "values = {build_model_client: build_model_client("
+        "'openai', metrics=metrics, tracer=tracer) "
+        "for build_model_client in factories}\n",
+    ),
+    (
+        "named_expression",
+        "from jhin_models import build_model_client\n"
+        "def invoke():\n"
+        "    (build_model_client := local_factory)\n"
+        "    return build_model_client('openai', metrics=metrics, tracer=tracer)\n",
+    ),
+    (
+        "for_target",
+        "from jhin_models import build_model_client\n"
+        "def invoke():\n"
+        "    for build_model_client in factories:\n"
+        "        build_model_client('openai', metrics=metrics, tracer=tracer)\n",
+    ),
+    (
+        "with_target",
+        "from jhin_models import build_model_client\n"
+        "def invoke():\n"
+        "    with manager as build_model_client:\n"
+        "        build_model_client('openai', metrics=metrics, tracer=tracer)\n",
+    ),
+    (
+        "except_target",
+        "from jhin_models import build_model_client\n"
+        "def invoke():\n"
+        "    try:\n"
+        "        operation()\n"
+        "    except Exception as build_model_client:\n"
+        "        build_model_client('openai', metrics=metrics, tracer=tracer)\n",
+    ),
+    (
+        "delete_target",
+        "from jhin_models import build_model_client\n"
+        "def invoke():\n"
+        "    del build_model_client\n"
+        "    return build_model_client('openai', metrics=metrics, tracer=tracer)\n",
+    ),
+    (
+        "class_local_not_closure",
+        "class Owner:\n"
+        "    from jhin_models import build_model_client\n"
+        "    def invoke(self):\n"
+        "        return build_model_client('openai', metrics=metrics, tracer=tracer)\n",
+    ),
+    (
+        "class_comprehension_does_not_close_over_class_local",
+        "build_model_client = local_factory\n"
+        "class Owner:\n"
+        "    from jhin_models import build_model_client\n"
+        "    values = [build_model_client('openai', metrics=metrics, tracer=tracer) "
+        "for _ in factories]\n",
+    ),
+    (
+        "match_capture_is_function_local",
+        "from jhin_models import build_model_client\n"
+        "def invoke(value):\n"
+        "    match value:\n"
+        "        case {'factory': build_model_client}:\n"
+        "            pass\n"
+        "    return build_model_client('openai', metrics=metrics, tracer=tracer)\n",
+    ),
+    (
+        "package_module_attribute_rebound",
+        "import jhin_models\n"
+        "jhin_models.build_model_client = local_factory\n"
+        "jhin_models.build_model_client('openai', metrics=metrics, tracer=tracer)\n",
+    ),
+    (
+        "package_factory_prefix_rebound",
+        "import jhin_models\n"
+        "jhin_models.factory = local_module\n"
+        "jhin_models.factory.build_model_client("
+        "'openai', metrics=metrics, tracer=tracer)\n",
+    ),
+    (
+        "conditional_package_import_is_ambiguous",
+        "build_model_client = local_factory\n"
+        "if condition:\n"
+        "    from jhin_models import build_model_client\n"
+        "build_model_client('openai', metrics=metrics, tracer=tracer)\n",
+    ),
+    (
+        "try_package_import_is_ambiguous",
+        "build_model_client = local_factory\n"
+        "try:\n"
+        "    from jhin_models import build_model_client\n"
+        "except ImportError:\n"
+        "    pass\n"
+        "build_model_client('openai', metrics=metrics, tracer=tracer)\n",
+    ),
 )
-def test_semantic_factory_auditor_rejects_every_lexical_shadow_form(
-    binding_form: str,
-    api_source: str,
-) -> None:
-    sources = {
-        "api.py": api_source,
-        "agent.py": (
-            "from jhin_models.factory import build_model_client as build\n"
-            "build('ollama', metrics=self.metrics, tracer=self.tracer)\n"
-        ),
-    }
-    failures = _factory_audit(
-        sources,
-        expected_handles={
-            "api.py": ("metrics", "tracer"),
-            "agent.py": ("self.metrics", "self.tracer"),
-        },
-    )
-    assert any("owners" in failure for failure in failures), binding_form
+
+
+def test_semantic_factory_auditor_rejects_every_lexical_shadow_form() -> None:
+    # Loop-folded parametrize list: same cases, one collected item.
+    for binding_form, api_source in _LEXICAL_SHADOW_FORM_CASES:
+        sources = {
+            "api.py": api_source,
+            "agent.py": (
+                "from jhin_models.factory import build_model_client as build\n"
+                "build('ollama', metrics=self.metrics, tracer=self.tracer)\n"
+            ),
+        }
+        failures = _factory_audit(
+            sources,
+            expected_handles={
+                "api.py": ("metrics", "tracer"),
+                "agent.py": ("self.metrics", "self.tracer"),
+            },
+        )
+        assert any("owners" in failure for failure in failures), binding_form
 
 
 def test_exact_production_model_factory_owners_supply_semantic_handles() -> None:
