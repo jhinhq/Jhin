@@ -455,6 +455,52 @@ export function Dialog({
   );
 }
 
+/** The shared yes-or-no dialog that replaces `window.confirm`: a title, a body
+ * that can carry real consequences, and two buttons. `busy` freezes both while
+ * the confirmed action is in flight so a double-click cannot fire it twice. */
+export function ConfirmDialog({
+  open,
+  title,
+  body,
+  confirmLabel,
+  cancelLabel = "Cancel",
+  tone = "danger",
+  busy = false,
+  onConfirm,
+  onClose,
+}: {
+  open: boolean;
+  title: string;
+  body: React.ReactNode;
+  confirmLabel: string;
+  cancelLabel?: string;
+  tone?: "danger" | "primary";
+  busy?: boolean;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <Dialog title={title} open={open} onClose={onClose}>
+      <div className="space-y-5" data-testid="confirm-dialog">
+        <div className="text-sm text-dim">{body}</div>
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="ghost" disabled={busy} onClick={onClose}>
+            {cancelLabel}
+          </Button>
+          <Button
+            type="button"
+            variant={tone === "danger" ? "danger" : "primary"}
+            disabled={busy}
+            onClick={onConfirm}
+          >
+            {confirmLabel}
+          </Button>
+        </div>
+      </div>
+    </Dialog>
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /* Feedback                                                            */
 /* ------------------------------------------------------------------ */

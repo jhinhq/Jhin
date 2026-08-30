@@ -5,6 +5,9 @@ import {
   autofillForModel,
   balanceSourceLabel,
   buildProfileConfig,
+  capabilitySummary,
+  costTier,
+  costTierLabel,
   dollarInputToMicros,
   formatMicrosAsDollars,
   isInsufficientFunds,
@@ -13,7 +16,7 @@ import {
   summarizeBudget,
   webSearchSupport,
 } from "@/lib/models";
-import type { ProviderModelEntry } from "@/lib/types";
+import type { ModelProfile, ProviderModelEntry } from "@/lib/types";
 
 const ENTRIES: ProviderModelEntry[] = [
   {
@@ -155,6 +158,80 @@ describe("webSearchSupport", () => {
   it("rejects providers without built-in search", () => {
     expect(webSearchSupport("ollama", "llama3").supported).toBe(false);
     expect(webSearchSupport("openai_compatible", "fake-mini").supported).toBe(false);
+  });
+});
+
+function modelProfile(overrides: Partial<ModelProfile> = {}): ModelProfile {
+  return {
+    id: "p1",
+    workspace_id: "w1",
+    provider_id: "prov-1",
+    model_name: "gpt-5-mini",
+    display_name: "GPT-5 mini",
+    context_window: null,
+    input_cost_micros_per_million: null,
+    output_cost_micros_per_million: null,
+    price_source: null,
+    supports_tools: true,
+    supports_reasoning: false,
+    config_json: {},
+    created_at: "2026-08-01T00:00:00Z",
+    updated_at: "2026-08-01T00:00:00Z",
+    ...overrides,
+  };
+}
+
+describe("costTier", () => {
+  it("buckets combined dollars per 1M tokens into three tiers", () => {
+    expect(costTier(150_000, 600_000)).toBe(1); // $0.75 combined
+    expect(costTier(2_500_000, 500_000)).toBe(1); // exactly $3.00
+    expect(costTier(2_500_000, 10_000_000)).toBe(2); // $12.50
+    expect(costTier(5_000_000, 10_000_000)).toBe(2); // exactly $15.00
+    expect(costTier(15_000_000, 75_000_000)).toBe(3); // $90.00
+  });
+
+  it("treats a missing half as $0 but no price at all as unknown", () => {
+    expect(costTier(null, null)).toBeNull();
+    expect(costTier(2_000_000, null)).toBe(1);
+    expect(costTier(null, 20_000_000)).toBe(3);
+  });
+});
+
+describe("costTierLabel", () => {
+  it("names each tier", () => {
+    expect(costTierLabel(1)).toBe("Inexpensive");
+    expect(costTierLabel(2)).toBe("Moderate");
+    expect(costTierLabel(3)).toBe("Premium");
+  });
+});
+
+describe("capabilitySummary", () => {
+  it("grades the context window in plain language", () => {
+    expect(capabilitySummary(modelProfile({ context_window: 50_000 }))).toBe(
+      "Good for everyday tasks",
+    );
+    expect(capabilitySummary(modelProfile({ context_window: 100_000 }))).toBe(
+      "Handles long documents",
+    );
+    expect(capabilitySummary(modelProfile({ context_window: 400_000 }))).toBe(
+      "Reads very long documents",
+    );
+    // An unknown window earns no claim: the card says less, not the same
+    // sentence on every model.
+    expect(capabilitySummary(modelProfile({ context_window: null }))).toBe("");
+  });
+
+  it("appends the web-search line only when it is enabled", () => {
+    expect(
+      capabilitySummary(
+        modelProfile({ context_window: 200_000, config_json: { web_search: { enabled: true } } }),
+      ),
+    ).toBe("Handles long documents · Can search the web");
+    expect(
+      capabilitySummary(
+        modelProfile({ context_window: 200_000, config_json: { web_search: { enabled: false } } }),
+      ),
+    ).toBe("Handles long documents");
   });
 });
 

@@ -4,8 +4,13 @@
  * when a monthly budget is set (Settings → Budget). Shared by Models and
  * Home so both read the same numbers the same way. */
 
+import { useState } from "react";
 import { formatMicrosAsDollars, summarizeBudget, untrackedSpendNote } from "@/lib/models";
 import type { WorkspaceSpend } from "@/lib/types";
+
+/** Chips shown before the per-provider breakdown folds behind "+N more".
+ * Dev workspaces accumulate hundreds of providers; the tile stays a tile. */
+const CHIP_LIMIT = 8;
 
 export function SpendTile({
   spend,
@@ -29,22 +34,26 @@ export function SpendTile({
   // so it gets its own line here — otherwise the per-provider figures quietly
   // stop adding up to the number above them.
   const deletedMonth = spend.deleted_model_month_micros ?? 0;
+  // Biggest spenders first, so the capped row leads with what matters.
   const breakdown = [
-    ...spend.providers.map(
-      (p) => `${p.display_name} ${formatMicrosAsDollars(p.spent_month_micros)}`,
-    ),
+    ...[...spend.providers]
+      .sort((a, b) => b.spent_month_micros - a.spent_month_micros)
+      .map((p) => `${p.display_name} ${formatMicrosAsDollars(p.spent_month_micros)}`),
     ...(deletedMonth > 0 ? [`Deleted models ${formatMicrosAsDollars(deletedMonth)}`] : []),
   ];
+  const [showAllChips, setShowAllChips] = useState(false);
+  const visibleChips = showAllChips ? breakdown : breakdown.slice(0, CHIP_LIMIT);
+  const foldedChips = breakdown.length - visibleChips.length;
   return (
     <section
       data-testid="spend-tile"
       aria-label="Spend"
-      className={`flex flex-col gap-2 md:flex-row md:items-center md:gap-6 ${
+      className={`flex flex-col gap-2 md:flex-row md:items-start md:gap-6 ${
         bare ? "" : "rounded-2xl border border-line bg-surface px-5 py-4 shadow-card"
       }`}
     >
-      <div>
-        <p className="text-xs font-medium uppercase tracking-wider text-faint">Spend this month</p>
+      <div className="md:w-64 md:shrink-0">
+        <p className="whitespace-nowrap text-xs font-medium uppercase tracking-wider text-faint">Spend this month</p>
         <p className="font-display text-2xl font-semibold tabular-nums text-ink">
           {formatMicrosAsDollars(spend.spent_month_micros)}
         </p>
@@ -57,7 +66,7 @@ export function SpendTile({
           </p>
         ) : null}
       </div>
-      <div className="flex-1">
+      <div className="min-w-0 flex-1">
         {budget ? (
           <div>
             <div className="flex items-center justify-between text-xs">
@@ -79,9 +88,30 @@ export function SpendTile({
           <p className="text-xs text-faint">No monthly budget set — add one under Settings to get a warning bar here.</p>
         )}
         {breakdown.length > 1 ? (
-          <p data-testid="spend-breakdown" className="mt-1 truncate text-xs text-faint">
-            {breakdown.join(" · ")}
-          </p>
+          <ul data-testid="spend-breakdown" className="mt-2 flex flex-wrap items-center gap-1.5 text-xs text-faint">
+            {visibleChips.map((line) => (
+              // A chip wraps internally rather than ever pushing past the card
+              // edge — provider display names are user-entered and unbounded.
+              <li
+                key={line}
+                className="min-w-0 max-w-full break-words rounded-full border border-line bg-raised px-2.5 py-0.5 [overflow-wrap:anywhere]"
+              >
+                {line}
+              </li>
+            ))}
+            {foldedChips > 0 || showAllChips ? (
+              <li>
+                <button
+                  type="button"
+                  aria-expanded={showAllChips}
+                  onClick={() => setShowAllChips((open) => !open)}
+                  className="rounded-full border border-line px-2.5 py-0.5 text-accent-strong hover:underline"
+                >
+                  {showAllChips ? "Show fewer" : `+${foldedChips} more`}
+                </button>
+              </li>
+            ) : null}
+          </ul>
         ) : null}
       </div>
     </section>

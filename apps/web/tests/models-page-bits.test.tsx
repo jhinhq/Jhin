@@ -1,6 +1,6 @@
 /** Render tests: the Spend tile and the out-of-credit chat card. */
 
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { SpendTile } from "@/components/spend-tile";
 import type { WorkspaceSpend } from "@/lib/types";
@@ -50,6 +50,71 @@ describe("SpendTile", () => {
     const breakdown = screen.getByTestId("spend-breakdown").textContent ?? "";
     expect(breakdown).toContain("OpenAI $10.00");
     expect(breakdown).toContain("Deleted models $2.50");
+  });
+
+  it("keeps a long provider name inside its own wrapping chip — never clipped", () => {
+    const longName =
+      "Extremely Long Self-Hosted OpenAI-Compatible Endpoint For The Berlin Research Cluster (staging)";
+    const { container } = render(
+      <SpendTile
+        spend={spend({
+          providers: [
+            {
+              provider_id: "prov-long",
+              display_name: longName,
+              type: "openai_compatible",
+              spent_month_micros: 3_510,
+              spent_total_micros: 3_510,
+            },
+            {
+              provider_id: "prov-2",
+              display_name: "OpenAI",
+              type: "openai",
+              spent_month_micros: 10_000_000,
+              spent_total_micros: 10_000_000,
+            },
+          ],
+        })}
+      />,
+    );
+    const chips = Array.from(container.querySelectorAll('[data-testid="spend-breakdown"] li'));
+    expect(chips).toHaveLength(2);
+    const longChip = chips.find((chip) => chip.textContent?.includes(longName));
+    expect(longChip).toBeTruthy();
+    // The chip wraps within the card instead of forcing a one-line overflow:
+    // no nowrap, capped at the container, and breakable anywhere.
+    expect(longChip?.className).not.toContain("whitespace-nowrap");
+    expect(longChip?.className).toContain("max-w-full");
+    expect(longChip?.className).toContain("break-words");
+  });
+
+  it("caps the breakdown at eight chips, biggest spenders first, behind +N more", () => {
+    const providers = Array.from({ length: 12 }, (_, index) => ({
+      provider_id: `prov-${index}`,
+      display_name: `Provider ${index}`,
+      type: "openai" as const,
+      spent_month_micros: (index + 1) * 1_000_000,
+      spent_total_micros: (index + 1) * 1_000_000,
+    }));
+    const { container, getByRole } = render(<SpendTile spend={spend({ providers })} />);
+    const chipsOf = () =>
+      Array.from(container.querySelectorAll('[data-testid="spend-breakdown"] li')).map(
+        (chip) => chip.textContent ?? "",
+      );
+
+    let chips = chipsOf();
+    // 8 provider chips plus the toggle; the biggest spender leads.
+    expect(chips).toHaveLength(9);
+    expect(chips[0]).toBe("Provider 11 $12.00");
+    expect(chips[8]).toBe("+4 more");
+
+    fireEvent.click(getByRole("button", { name: "+4 more" }));
+    chips = chipsOf();
+    expect(chips).toHaveLength(13);
+    expect(chips[12]).toBe("Show fewer");
+
+    fireEvent.click(getByRole("button", { name: "Show fewer" }));
+    expect(chipsOf()).toHaveLength(9);
   });
 
   it("renders the budget bar with the spent share", () => {

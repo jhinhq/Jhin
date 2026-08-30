@@ -1,30 +1,28 @@
 "use client";
 
-/** Models page (plan 15, 17.2 nav): provider cards with verify, model
- * profiles with pricing, and the workspace default profile. API keys are
- * stored once in the encrypted secret store and only referenced here. */
+/** Models page (plan 15, 17.2 nav): the decisions first — the workspace
+ * default model, then the model cards, then simplified provider cards — with
+ * the machinery (verify, balances, price provenance, the pricing panel) in
+ * dialogs and one Advanced disclosure. API keys are stored once in the
+ * encrypted secret store and only referenced here. */
 
 import { useMutation } from "@tanstack/react-query";
-import {
-  CheckCircle2,
-  ChevronDown,
-  ChevronRight,
-  Cpu,
-  KeyRound,
-  Plus,
-  RefreshCw,
-  ShieldCheck,
-  Wallet,
-  XCircle,
-} from "lucide-react";
+import { CheckCircle2, ChevronDown, ChevronRight, Plus, RefreshCw, ShieldCheck } from "lucide-react";
 import { useId, useState } from "react";
 import { PageBody, PageHeader } from "@/components/app-shell";
+import { Disclosure } from "@/components/company/bits";
+import { ChangeDefaultDialog } from "@/components/models/change-default-dialog";
+import { DefaultModelCard } from "@/components/models/default-model-card";
+import { ProfileCard } from "@/components/models/profile-card";
+import { ProviderCard } from "@/components/models/provider-card";
+import { ProviderManageDialog } from "@/components/models/provider-manage-dialog";
 import { PricingPanel } from "@/components/pricing-panel";
 import { SpendTile } from "@/components/spend-tile";
 import { UnpricedModelNote } from "@/components/unpriced-model-note";
 import {
   Badge,
   Button,
+  ConfirmDialog,
   Dialog,
   EmptyState,
   ErrorNote,
@@ -34,12 +32,10 @@ import {
   Spinner,
 } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
-import { formatDateTime } from "@/lib/format";
 import {
   useInvalidateModels,
   useModelProfiles,
   useModelProviders,
-  useProviderBalance,
   useProviderModels,
   usePricingStatus,
   useSecrets,
@@ -48,12 +44,10 @@ import {
 } from "@/lib/hooks";
 import {
   autofillForModel,
-  balanceSourceLabel,
   buildProfileConfig,
   catalogStalenessNote,
   derivationLabel,
   dollarInputToMicros,
-  formatMicrosAsDollars,
   formatPricePair,
   microsToDollarInput,
   observedRateSummary,
@@ -80,6 +74,10 @@ const PROVIDER_TYPES: { value: ModelProviderType; label: string; needsKey: boole
   { value: "openai_compatible", label: "OpenAI-compatible endpoint", needsKey: false },
 ];
 
+function providerTypeLabel(type: ModelProviderType): string {
+  return PROVIDER_TYPES.find((t) => t.value === type)?.label ?? type;
+}
+
 function errText(error: unknown, fallback: string): string | null {
   if (!error) return null;
   return error instanceof ApiError ? error.detail : fallback;
@@ -97,8 +95,12 @@ export default function ModelsPage() {
   const invalidate = useInvalidateModels(workspaceId);
 
   const [providerDialog, setProviderDialog] = useState(false);
+  const [editingProviderId, setEditingProviderId] = useState<string | null>(null);
+  const [managingProviderId, setManagingProviderId] = useState<string | null>(null);
+  const [adminKeyProviderId, setAdminKeyProviderId] = useState<string | null>(null);
   const [profileDialog, setProfileDialog] = useState(false);
   const [editingProfile, setEditingProfile] = useState<ModelProfile | null>(null);
+  const [changeDefaultOpen, setChangeDefaultOpen] = useState(false);
   const [pageError, setPageError] = useState<string | null>(null);
   const [pricingError, setPricingError] = useState<string | null>(null);
   const [reconcileResult, setReconcileResult] = useState<ReconcilePricingResult | null>(null);
@@ -151,12 +153,21 @@ export default function ModelsPage() {
   const providerList = providers.data ?? [];
   const profileList = profiles.data ?? [];
   const defaultProfileId = detail.data?.default_model_profile_id ?? null;
+  const defaultProfile = profileList.find((profile) => profile.id === defaultProfileId) ?? null;
+  const defaultProvider = defaultProfile
+    ? (providerList.find((provider) => provider.id === defaultProfile.provider_id) ?? null)
+    : null;
+  // Dialogs hold ids, not rows, so a verify or edit re-renders them with the
+  // freshly invalidated data instead of a snapshot from when they opened.
+  const managingProvider = providerList.find((p) => p.id === managingProviderId) ?? null;
+  const editingProvider = providerList.find((p) => p.id === editingProviderId) ?? null;
+  const adminKeyProvider = providerList.find((p) => p.id === adminKeyProviderId) ?? null;
 
   return (
     <>
       <PageHeader
         title="Models"
-        description="Connect AI providers, name the models your agents can use, and pick a workspace default."
+        description="Choose the AI models your agents think with."
         actions={
           isAdmin ? (
             <>
@@ -179,21 +190,52 @@ export default function ModelsPage() {
 
         {spend.data ? <SpendTile spend={spend.data} /> : null}
 
-        <PricingPanel
-          status={pricing.data}
-          isPending={pricing.isPending}
-          isAdmin={isAdmin}
-          onReconcile={() => reconcile.mutate()}
-          onRefreshCatalog={() => refreshCatalog.mutate()}
-          reconciling={reconcile.isPending}
-          refreshing={refreshCatalog.isPending}
-          reconcileResult={reconcileResult}
-          catalogResult={catalogResult}
-          error={pricingError}
-        />
+        <section>
+          <h2 className="mb-3 font-display text-base font-semibold tracking-tight text-ink">
+            Default model
+          </h2>
+          <DefaultModelCard
+            profile={defaultProfile}
+            provider={defaultProvider}
+            isAdmin={isAdmin}
+            onChange={() => setChangeDefaultOpen(true)}
+          />
+        </section>
 
         <section>
-          <h2 className="mb-3 font-display text-base font-semibold tracking-tight text-ink">Providers</h2>
+          <h2 className="mb-3 font-display text-base font-semibold tracking-tight text-ink">
+            Models
+          </h2>
+          {profileList.length === 0 ? (
+            <EmptyState
+              title="No model profiles yet"
+              description="A profile is a named model on a provider with pricing — agents reference profiles, never raw providers."
+            />
+          ) : (
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {profileList.map((profile) => (
+                <ProfileCard
+                  key={profile.id}
+                  profile={profile}
+                  provider={providerList.find((p) => p.id === profile.provider_id)}
+                  isDefault={profile.id === defaultProfileId}
+                  isAdmin={isAdmin}
+                  workspaceId={workspaceId}
+                  pricing={pricingByProfile.get(profile.id)}
+                  pricingPages={pricing.data?.pricing_pages}
+                  onChanged={invalidate}
+                  onError={setPageError}
+                  onEdit={setEditingProfile}
+                />
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section>
+          <h2 className="mb-3 font-display text-base font-semibold tracking-tight text-ink">
+            Providers
+          </h2>
           {providerList.length === 0 ? (
             <EmptyState
               title="No model providers yet"
@@ -212,60 +254,32 @@ export default function ModelsPage() {
                 <ProviderCard
                   key={provider.id}
                   provider={provider}
-                  isAdmin={isAdmin}
-                  workspaceId={workspaceId}
+                  typeLabel={providerTypeLabel(provider.type)}
                   profileCount={profileList.filter((p) => p.provider_id === provider.id).length}
-                  isDefaultProvider={profileList.some(
-                    (p) => p.provider_id === provider.id && p.id === defaultProfileId,
-                  )}
-                  onChanged={invalidate}
-                  onError={setPageError}
+                  onManage={() => setManagingProviderId(provider.id)}
                 />
               ))}
             </div>
           )}
         </section>
 
-        <section>
-          <h2 className="mb-3 font-display text-base font-semibold tracking-tight text-ink">Model profiles</h2>
-          {profileList.length === 0 ? (
-            <EmptyState
-              title="No model profiles yet"
-              description="A profile is a named model on a provider with pricing — agents reference profiles, never raw providers."
-            />
-          ) : (
-            <div className="overflow-x-auto rounded-2xl border border-line bg-surface shadow-card">
-              <table className="w-full min-w-[640px] text-sm">
-                <thead className="text-left text-xs font-medium uppercase tracking-wider text-faint">
-                  <tr>
-                    <th className="px-4 py-3">Profile</th>
-                    <th className="px-4 py-3">Model</th>
-                    <th className="px-4 py-3">Provider</th>
-                    <th className="px-4 py-3">Cost / 1M in · out</th>
-                    <th className="px-4 py-3">Default</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {profileList.map((profile) => (
-                    <ProfileRow
-                      key={profile.id}
-                      profile={profile}
-                      provider={providerList.find((p) => p.id === profile.provider_id)}
-                      isDefault={profile.id === defaultProfileId}
-                      isAdmin={isAdmin}
-                      workspaceId={workspaceId}
-                      onChanged={invalidate}
-                      onError={setPageError}
-                      onEdit={setEditingProfile}
-                      pricing={pricingByProfile.get(profile.id)}
-                      pricingPages={pricing.data?.pricing_pages}
-                    />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
+        <Disclosure
+          label="Advanced — where prices come from"
+          openLabel="Hide where prices come from"
+        >
+          <PricingPanel
+            status={pricing.data}
+            isPending={pricing.isPending}
+            isAdmin={isAdmin}
+            onReconcile={() => reconcile.mutate()}
+            onRefreshCatalog={() => refreshCatalog.mutate()}
+            reconciling={reconcile.isPending}
+            refreshing={refreshCatalog.isPending}
+            reconcileResult={reconcileResult}
+            catalogResult={catalogResult}
+            error={pricingError}
+          />
+        </Disclosure>
       </PageBody>
 
       {providerDialog ? (
@@ -273,6 +287,41 @@ export default function ModelsPage() {
           workspaceId={workspaceId}
           onClose={() => setProviderDialog(false)}
           onCreated={invalidate}
+        />
+      ) : null}
+      {editingProvider ? (
+        <ProviderDialog
+          workspaceId={workspaceId}
+          existing={editingProvider}
+          onClose={() => setEditingProviderId(null)}
+          onCreated={invalidate}
+        />
+      ) : null}
+      {managingProvider ? (
+        <ProviderManageDialog
+          workspaceId={workspaceId}
+          provider={managingProvider}
+          typeLabel={providerTypeLabel(managingProvider.type)}
+          profileCount={profileList.filter((p) => p.provider_id === managingProvider.id).length}
+          isDefaultProvider={profileList.some(
+            (p) => p.provider_id === managingProvider.id && p.id === defaultProfileId,
+          )}
+          isAdmin={isAdmin}
+          onClose={() => setManagingProviderId(null)}
+          onChanged={invalidate}
+          onEdit={() => setEditingProviderId(managingProvider.id)}
+          onAddAdminKey={() => setAdminKeyProviderId(managingProvider.id)}
+        />
+      ) : null}
+      {adminKeyProvider ? (
+        <AdminKeyDialog
+          workspaceId={workspaceId}
+          provider={adminKeyProvider}
+          onClose={() => setAdminKeyProviderId(null)}
+          onSaved={() => {
+            setAdminKeyProviderId(null);
+            invalidate();
+          }}
         />
       ) : null}
       {profileDialog ? (
@@ -288,357 +337,23 @@ export default function ModelsPage() {
           workspaceId={workspaceId}
           providers={providerList}
           existing={editingProfile}
+          isDefault={editingProfile.id === defaultProfileId}
+          pricing={pricingByProfile.get(editingProfile.id)}
           onClose={() => setEditingProfile(null)}
           onCreated={invalidate}
         />
       ) : null}
+      {changeDefaultOpen ? (
+        <ChangeDefaultDialog
+          workspaceId={workspaceId}
+          profiles={profileList}
+          providers={providerList}
+          currentDefaultId={defaultProfileId}
+          onClose={() => setChangeDefaultOpen(false)}
+          onChanged={invalidate}
+        />
+      ) : null}
     </>
-  );
-}
-
-function ProviderCard({
-  provider,
-  isAdmin,
-  workspaceId,
-  profileCount,
-  isDefaultProvider,
-  onChanged,
-  onError,
-}: {
-  provider: ModelProvider;
-  isAdmin: boolean;
-  workspaceId: string;
-  profileCount: number;
-  isDefaultProvider: boolean;
-  onChanged: () => void;
-  onError: (message: string | null) => void;
-}) {
-  const [verifyResult, setVerifyResult] = useState<{ ok: boolean; detail: string } | null>(null);
-
-  const verify = useMutation({
-    mutationFn: () =>
-      api<{ ok: boolean; detail: string }>(
-        `/api/v1/workspaces/${workspaceId}/model-providers/${provider.id}/verify`,
-        { method: "POST" },
-      ),
-    onSuccess: (result) => {
-      setVerifyResult(result);
-      onChanged();
-    },
-    onError: (error) => onError(errText(error, "Verification failed.")),
-  });
-
-  const remove = useMutation({
-    mutationFn: () =>
-      api<void>(`/api/v1/workspaces/${workspaceId}/model-providers/${provider.id}`, {
-        method: "DELETE",
-      }),
-    onSuccess: () => {
-      onError(null);
-      onChanged();
-    },
-  });
-  const removeError = errText(remove.error, "Deleting the provider failed.");
-
-  const typeLabel =
-    PROVIDER_TYPES.find((t) => t.value === provider.type)?.label ?? provider.type;
-
-  return (
-    <article className="flex flex-col gap-3 rounded-2xl border border-line bg-surface px-5 py-4 shadow-card">
-      <header className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <h3 className="flex items-center gap-2 truncate font-display text-sm font-semibold text-ink">
-            <Cpu size={14} className="shrink-0 text-accent-strong" aria-hidden /> {provider.display_name}
-          </h3>
-          <p className="mt-0.5 text-xs text-dim">{typeLabel}</p>
-        </div>
-        <Badge tone={provider.enabled ? "ok" : "neutral"}>
-          {provider.enabled ? "enabled" : "disabled"}
-        </Badge>
-      </header>
-
-      <dl className="space-y-1 text-xs text-dim">
-        {provider.base_url ? (
-          <div className="truncate">
-            <dt className="inline text-faint">Endpoint: </dt>
-            <dd className="inline font-mono">{provider.base_url}</dd>
-          </div>
-        ) : null}
-        <div>
-          <dt className="inline text-faint">Credential: </dt>
-          <dd className="inline">
-            {provider.secret_id ? (
-              <span className="inline-flex items-center gap-1">
-                <KeyRound size={11} /> encrypted secret
-              </span>
-            ) : (
-              "none"
-            )}
-          </dd>
-        </div>
-        <div>
-          <dt className="inline text-faint">Profiles: </dt>
-          <dd className="inline">{profileCount}</dd>
-        </div>
-        <div>
-          <dt className="inline text-faint">Last verified: </dt>
-          <dd className="inline">
-            {provider.last_verified_at ? formatDateTime(provider.last_verified_at) : "never"}
-          </dd>
-        </div>
-      </dl>
-
-      {verifyResult ? (
-        <p
-          className={`flex items-start gap-1.5 rounded-xl px-3 py-2 text-xs ${
-            verifyResult.ok
-              ? "bg-ok-soft text-ok"
-              : "bg-danger-soft text-danger"
-          }`}
-        >
-          {verifyResult.ok ? (
-            <CheckCircle2 size={13} className="mt-0.5 shrink-0" />
-          ) : (
-            <XCircle size={13} className="mt-0.5 shrink-0" />
-          )}
-          <span className="min-w-0 break-words">{verifyResult.detail}</span>
-        </p>
-      ) : provider.last_error ? (
-        <p className="rounded-xl bg-danger-soft px-3 py-2 text-xs text-danger">
-          {provider.last_error}
-        </p>
-      ) : null}
-
-      {removeError ? (
-        <p role="alert" className="rounded-xl bg-danger-soft px-3 py-2 text-xs text-danger">
-          {removeError}
-        </p>
-      ) : null}
-
-      <BalanceBlock
-        provider={provider}
-        isAdmin={isAdmin}
-        workspaceId={workspaceId}
-        onChanged={onChanged}
-        onError={onError}
-      />
-
-      {isAdmin ? (
-        <footer className="mt-auto flex items-center gap-2 border-t border-line pt-3">
-          <Button size="sm" onClick={() => verify.mutate()} disabled={verify.isPending}>
-            <ShieldCheck size={13} /> {verify.isPending ? "Verifying…" : "Verify"}
-          </Button>
-          <Button
-            size="sm"
-            variant="danger"
-            className="ml-auto"
-            disabled={remove.isPending}
-            onClick={() => {
-              const extra =
-                profileCount > 0
-                  ? ` This also removes its ${profileCount === 1 ? "model profile" : `${profileCount} model profiles`}${isDefaultProvider ? " and clears the workspace default" : ""}.`
-                  : "";
-              if (window.confirm(`Delete provider “${provider.display_name}”?${extra}`)) {
-                remove.mutate();
-              }
-            }}
-          >
-            Delete
-          </Button>
-        </footer>
-      ) : null}
-    </article>
-  );
-}
-
-function ProfileRow({
-  profile,
-  provider,
-  isDefault,
-  isAdmin,
-  workspaceId,
-  onChanged,
-  onError,
-  onEdit,
-  pricing,
-  pricingPages,
-}: {
-  profile: ModelProfile;
-  provider: ModelProvider | undefined;
-  isDefault: boolean;
-  isAdmin: boolean;
-  workspaceId: string;
-  onChanged: () => void;
-  onError: (message: string | null) => void;
-  onEdit: (profile: ModelProfile) => void;
-  pricing: ProfilePricing | undefined;
-  pricingPages: Record<string, string> | undefined;
-}) {
-  const makeDefault = useMutation({
-    mutationFn: () =>
-      api(`/api/v1/workspaces/${workspaceId}`, {
-        method: "PATCH",
-        body: { default_model_profile_id: profile.id },
-      }),
-    onSuccess: () => {
-      onError(null);
-      onChanged();
-    },
-    onError: (error) => onError(errText(error, "Setting the default failed.")),
-  });
-
-  const remove = useMutation({
-    mutationFn: () =>
-      api<void>(`/api/v1/workspaces/${workspaceId}/model-profiles/${profile.id}`, {
-        method: "DELETE",
-      }),
-    onSuccess: () => {
-      onError(null);
-      onChanged();
-    },
-    onError: (error) => onError(errText(error, "Delete failed.")),
-  });
-
-  const [refreshNote, setRefreshNote] = useState<string | null>(null);
-  const refreshPrices = useMutation({
-    mutationFn: () =>
-      api<ProfilePricingRefresh>(
-        `/api/v1/workspaces/${workspaceId}/model-profiles/${profile.id}/refresh-pricing`,
-        { method: "POST" },
-      ),
-    onSuccess: (result) => {
-      onError(null);
-      setRefreshNote(result.detail);
-      if (result.updated) onChanged();
-    },
-    onError: (error) => onError(errText(error, "Refreshing prices failed.")),
-  });
-
-  // Saving a price straight from the row: the API stamps anything posted here
-  // as user-entered, so no later automatic refresh will move it.
-  const savePrices = useMutation({
-    mutationFn: (costs: { input: number | null; output: number | null }) =>
-      api<ModelProfile>(`/api/v1/workspaces/${workspaceId}/model-profiles/${profile.id}`, {
-        method: "PATCH",
-        body: {
-          input_cost_micros_per_million: costs.input,
-          output_cost_micros_per_million: costs.output,
-        },
-      }),
-    onSuccess: () => {
-      onError(null);
-      setRefreshNote(null);
-      onChanged();
-    },
-    onError: (error) => onError(errText(error, "Saving prices failed.")),
-  });
-
-  const cost = (micros: number | null) =>
-    micros === null ? "—" : `$${(micros / 1_000_000).toFixed(2)}`;
-  const priced =
-    profile.input_cost_micros_per_million !== null &&
-    profile.output_cost_micros_per_million !== null;
-  const badge = priceSourceBadge(profile.price_source, priced);
-  const providerType = provider?.type ?? "openai_compatible";
-
-  return (
-    <tr className="border-t border-line hover:bg-hover">
-      <td className="px-4 py-3 font-medium text-ink">{profile.display_name}</td>
-      <td className="px-4 py-3">
-        <code className="font-mono text-xs">{profile.model_name}</code>
-      </td>
-      <td className="px-4 py-3 text-dim">{provider?.display_name ?? "—"}</td>
-      <td className="px-4 py-3 tabular-nums text-dim">
-        {priced ? (
-          <>
-            <span>
-              {cost(profile.input_cost_micros_per_million)} ·{" "}
-              {cost(profile.output_cost_micros_per_million)}
-            </span>{" "}
-            <Badge tone={badge.tone}>{badge.text}</Badge>
-            <span className="mt-1 block text-[11px] text-faint">
-              {pricing?.price_source_label ?? priceSourceLabel(profile.price_source, priced)}
-            </span>
-            {pricing?.observed ? (
-              <span className="mt-1 block text-[11px] text-faint">
-                Measured: {observedRateSummary(pricing.observed)} —{" "}
-                {derivationLabel(pricing.observed.derivation)}
-              </span>
-            ) : null}
-            {pricing?.suggestion ? (
-              <span className="mt-1 block text-[11px] text-faint">
-                {pricing.suggestion_label} suggests{" "}
-                {formatPricePair(
-                  pricing.suggestion.input_cost_micros_per_million,
-                  pricing.suggestion.output_cost_micros_per_million,
-                )}
-                .
-              </span>
-            ) : null}
-          </>
-        ) : (
-          <UnpricedModelNote
-            modelName={profile.model_name}
-            providerType={providerType}
-            pricingPages={pricingPages}
-            runs={pricing?.runs_this_month ?? 0}
-            saving={savePrices.isPending}
-            onSave={
-              isAdmin
-                ? (input: number | null, output: number | null) =>
-                    savePrices.mutate({ input, output })
-                : undefined
-            }
-          />
-        )}
-        {refreshNote ? <p className="mt-1 text-[11px] text-faint">{refreshNote}</p> : null}
-      </td>
-      <td className="px-4 py-3">
-        <div className="flex flex-wrap items-center gap-2">
-          {isDefault ? (
-            <Badge tone="accent">workspace default</Badge>
-          ) : isAdmin ? (
-            <Button size="sm" variant="ghost" onClick={() => makeDefault.mutate()}>
-              Make default
-            </Button>
-          ) : null}
-          {isAdmin ? (
-            <>
-              <Button size="sm" variant="ghost" onClick={() => onEdit(profile)}>
-                Edit
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                title="Look the price up again from the provider or the public price list"
-                disabled={refreshPrices.isPending}
-                onClick={() => refreshPrices.mutate()}
-              >
-                <RefreshCw size={12} className={refreshPrices.isPending ? "animate-spin" : ""} />{" "}
-                Refresh prices
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                className="text-danger"
-                disabled={remove.isPending}
-                onClick={() => {
-                  const note = isDefault
-                    ? " It is the workspace default; agents will have no default model until you pick another."
-                    : "";
-                  if (window.confirm(`Delete profile “${profile.display_name}”?${note}`)) {
-                    remove.mutate();
-                  }
-                }}
-              >
-                Delete
-              </Button>
-            </>
-          ) : null}
-          {!isAdmin && !isDefault ? <span className="text-faint">—</span> : null}
-        </div>
-      </td>
-    </tr>
   );
 }
 
@@ -664,18 +379,24 @@ async function storeApiKey(workspaceId: string, baseName: string, value: string)
 
 function ProviderDialog({
   workspaceId,
+  existing,
   onClose,
   onCreated,
 }: {
   workspaceId: string;
+  /** When set, the dialog edits this provider (PATCH) instead of creating one. */
+  existing?: ModelProvider;
   onClose: () => void;
   onCreated: () => void;
 }) {
   const secrets = useSecrets(workspaceId);
-  const [type, setType] = useState<ModelProviderType>("openai");
-  const [displayName, setDisplayName] = useState("");
-  const [baseUrl, setBaseUrl] = useState("");
-  const [keyMode, setKeyMode] = useState<"new" | "existing" | "none">("new");
+  const editing = existing !== undefined;
+  const [type, setType] = useState<ModelProviderType>(existing?.type ?? "openai");
+  const [displayName, setDisplayName] = useState(existing?.display_name ?? "");
+  const [baseUrl, setBaseUrl] = useState(existing?.base_url ?? "");
+  const [keyMode, setKeyMode] = useState<"keep" | "new" | "existing" | "none">(
+    existing ? (existing.secret_id ? "keep" : "none") : "new",
+  );
   const [apiKey, setApiKey] = useState("");
   const [secretId, setSecretId] = useState("");
   const [adminKey, setAdminKey] = useState("");
@@ -686,6 +407,12 @@ function ProviderDialog({
   const draftKey = JSON.stringify({ type, baseUrl: baseUrl.trim(), keyMode, apiKey, secretId });
   const [verified, setVerified] = useState<{ key: string; detail: string } | null>(null);
   const verifiedForCurrent = verified?.key === draftKey;
+  const draftSecretId =
+    keyMode === "existing" && secretId
+      ? secretId
+      : keyMode === "keep"
+        ? (existing?.secret_id ?? null)
+        : null;
   const test = useMutation({
     mutationFn: () =>
       api<{ ok: boolean; detail: string }>(
@@ -696,7 +423,7 @@ function ProviderDialog({
             type,
             base_url: baseUrl.trim() || null,
             api_key: keyMode === "new" && apiKey.trim() ? apiKey.trim() : null,
-            secret_id: keyMode === "existing" && secretId ? secretId : null,
+            secret_id: draftSecretId,
           },
         },
       ),
@@ -708,7 +435,7 @@ function ProviderDialog({
   });
   const [testFailure, setTestFailure] = useState<string | null>(null);
 
-  const create = useMutation({
+  const save = useMutation({
     mutationFn: async () => {
       if (!verifiedForCurrent) {
         throw new ApiError(400, "Test the connection before saving.");
@@ -723,6 +450,23 @@ function ProviderDialog({
         );
       } else if (keyMode === "existing" && secretId) {
         resolvedSecretId = secretId;
+      }
+      if (existing) {
+        const body: Record<string, unknown> = {
+          display_name: displayName.trim(),
+          base_url: baseUrl.trim() || null,
+        };
+        // "Keep the current key" sends nothing, so the stored secret survives.
+        if (keyMode !== "keep") body.secret_id = resolvedSecretId;
+        await api<ModelProvider>(
+          `/api/v1/workspaces/${workspaceId}/model-providers/${existing.id}`,
+          { method: "PATCH", body },
+        );
+        // Stamp last_verified_at on the saved row (same check that just passed).
+        await api(`/api/v1/workspaces/${workspaceId}/model-providers/${existing.id}/verify`, {
+          method: "POST",
+        }).catch(() => undefined);
+        return existing;
       }
       let adminSecretId: string | null = null;
       if (type === "openai" && adminKey.trim()) {
@@ -758,16 +502,20 @@ function ProviderDialog({
   });
 
   return (
-    <Dialog title="Add model provider" open onClose={onClose}>
+    <Dialog title={editing ? "Edit model provider" : "Add model provider"} open onClose={onClose}>
       <form
         className="space-y-4"
         onSubmit={(event) => {
           event.preventDefault();
-          create.mutate();
+          save.mutate();
         }}
       >
         <Field label="Provider type">
-          <Select value={type} onChange={(e) => setType(e.target.value as ModelProviderType)}>
+          <Select
+            value={type}
+            disabled={editing}
+            onChange={(e) => setType(e.target.value as ModelProviderType)}
+          >
             {PROVIDER_TYPES.map((t) => (
               <option key={t.value} value={t.value}>
                 {t.label}
@@ -811,6 +559,9 @@ function ProviderDialog({
               value={keyMode}
               onChange={(e) => setKeyMode(e.target.value as typeof keyMode)}
             >
+              {editing && existing?.secret_id ? (
+                <option value="keep">Keep the current key</option>
+              ) : null}
               <option value="new">Enter a new key</option>
               <option value="existing">Use an existing secret</option>
               <option value="none">No key{typeMeta.needsKey ? "" : " (local endpoint)"}</option>
@@ -837,7 +588,7 @@ function ProviderDialog({
             ) : null}
           </div>
         </Field>
-        {type === "openai" ? (
+        {!editing && type === "openai" ? (
           <Field
             label="Admin key (for spend reporting)"
             hint={ADMIN_KEY_HINT}
@@ -862,7 +613,12 @@ function ProviderDialog({
         ) : (
           <ErrorNote message={testFailure} />
         )}
-        <ErrorNote message={errText(create.error, "Creating the provider failed.")} />
+        <ErrorNote
+          message={errText(
+            save.error,
+            editing ? "Saving the provider failed." : "Creating the provider failed.",
+          )}
+        />
         <div className="flex flex-wrap items-center justify-end gap-2">
           <Button type="button" variant="ghost" onClick={onClose}>
             Cancel
@@ -880,10 +636,10 @@ function ProviderDialog({
           <Button
             type="submit"
             variant="primary"
-            disabled={create.isPending || !verifiedForCurrent}
+            disabled={save.isPending || !verifiedForCurrent}
             title={verifiedForCurrent ? undefined : "Test the connection first"}
           >
-            {create.isPending ? "Adding…" : "Add provider"}
+            {save.isPending ? (editing ? "Saving…" : "Adding…") : editing ? "Save changes" : "Add provider"}
           </Button>
         </div>
         {!verifiedForCurrent ? (
@@ -901,6 +657,8 @@ function ProfileDialog({
   workspaceId,
   providers,
   existing,
+  isDefault = false,
+  pricing,
   onClose,
   onCreated,
 }: {
@@ -908,6 +666,10 @@ function ProfileDialog({
   providers: ModelProvider[];
   /** When set, the dialog edits this profile (PATCH) instead of creating one. */
   existing?: ModelProfile;
+  /** Whether the profile being edited is the workspace default. */
+  isDefault?: boolean;
+  /** The price provenance for the profile being edited, when known. */
+  pricing?: ProfilePricing;
   onClose: () => void;
   onCreated: () => void;
 }) {
@@ -931,6 +693,8 @@ function ProfileDialog({
   );
   const [pricingOpen, setPricingOpen] = useState(false);
   const [pricingNote, setPricingNote] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [refreshNote, setRefreshNote] = useState<string | null>(null);
   // The model the prices were last auto-filled for, so edits survive re-renders.
   const [autofilledFor, setAutofilledFor] = useState<string | null>(null);
   const providerModels = useProviderModels(workspaceId, providerId || null);
@@ -996,6 +760,34 @@ function ProfileDialog({
     },
   });
 
+  const refreshPrices = useMutation({
+    mutationFn: () =>
+      api<ProfilePricingRefresh>(
+        `/api/v1/workspaces/${workspaceId}/model-profiles/${existing?.id}/refresh-pricing`,
+        { method: "POST" },
+      ),
+    onSuccess: (result) => {
+      setRefreshNote(result.detail);
+      if (result.updated) {
+        setInputCost(microsToDollarInput(result.profile.input_cost_micros_per_million));
+        setOutputCost(microsToDollarInput(result.profile.output_cost_micros_per_million));
+        onCreated();
+      }
+    },
+  });
+
+  const remove = useMutation({
+    mutationFn: () =>
+      api<void>(`/api/v1/workspaces/${workspaceId}/model-profiles/${existing?.id}`, {
+        method: "DELETE",
+      }),
+    onSuccess: () => {
+      onCreated();
+      onClose();
+    },
+    onError: () => setConfirmDelete(false),
+  });
+
   const pricesKnown = Boolean(inputCost || outputCost);
   // List prices age. Saying how old they are is the difference between a
   // number the admin can trust and one they should go check.
@@ -1003,6 +795,13 @@ function ProfileDialog({
   const summary = pricesKnown
     ? `$${inputCost || "0"} in · $${outputCost || "0"} out per 1M tokens`
     : "No prices yet — runs will show $0.00 until you add them.";
+  // Provenance describes the stored price, not the unsaved form inputs.
+  const storedPriced = Boolean(
+    existing &&
+      existing.input_cost_micros_per_million !== null &&
+      existing.output_cost_micros_per_million !== null,
+  );
+  const storedBadge = existing ? priceSourceBadge(existing.price_source, storedPriced) : null;
 
   return (
     <Dialog title={existing ? "Edit model profile" : "New model profile"} open onClose={onClose}>
@@ -1143,170 +942,106 @@ function ProfileDialog({
                   placeholder="128000"
                 />
               </Field>
+              {existing && storedBadge ? (
+                <div className="space-y-1 text-[11px] text-faint" data-testid="price-provenance">
+                  <p>
+                    <Badge tone={storedBadge.tone}>{storedBadge.text}</Badge>{" "}
+                    {pricing?.price_source_label ??
+                      priceSourceLabel(existing.price_source, storedPriced)}
+                  </p>
+                  {pricing?.observed ? (
+                    <p>
+                      Measured: {observedRateSummary(pricing.observed)} —{" "}
+                      {derivationLabel(pricing.observed.derivation)}
+                    </p>
+                  ) : null}
+                  {pricing?.suggestion ? (
+                    <p>
+                      {pricing.suggestion_label} suggests{" "}
+                      {formatPricePair(
+                        pricing.suggestion.input_cost_micros_per_million,
+                        pricing.suggestion.output_cost_micros_per_million,
+                      )}
+                      .
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
           ) : pricingNote ? (
             <p className="border-t border-line px-3 py-2 text-xs text-dim">{pricingNote}</p>
           ) : null}
         </div>
 
+        {refreshNote ? <p className="text-xs text-faint">{refreshNote}</p> : null}
         <ErrorNote
-          message={errText(create.error, existing ? "Saving the profile failed." : "Creating the profile failed.")}
+          message={
+            errText(refreshPrices.error, "Refreshing prices failed.") ??
+            errText(remove.error, "Deleting the profile failed.") ??
+            errText(
+              create.error,
+              existing ? "Saving the profile failed." : "Creating the profile failed.",
+            )
+          }
         />
-        <div className="flex justify-end gap-2">
-          <Button type="button" variant="ghost" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button type="submit" variant="primary" disabled={create.isPending}>
-            {create.isPending ? "Saving…" : existing ? "Save changes" : "Create profile"}
-          </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          {existing ? (
+            <>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                title="Look the price up again from the provider or the public price list"
+                disabled={refreshPrices.isPending}
+                onClick={() => refreshPrices.mutate()}
+              >
+                <RefreshCw size={12} className={refreshPrices.isPending ? "animate-spin" : ""} />{" "}
+                Refresh prices
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="text-danger"
+                disabled={remove.isPending}
+                onClick={() => setConfirmDelete(true)}
+              >
+                Delete
+              </Button>
+            </>
+          ) : null}
+          <div className="ml-auto flex gap-2">
+            <Button type="button" variant="ghost" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button type="submit" variant="primary" disabled={create.isPending}>
+              {create.isPending ? "Saving…" : existing ? "Save changes" : "Create profile"}
+            </Button>
+          </div>
         </div>
       </form>
+
+      {existing ? (
+        <ConfirmDialog
+          open={confirmDelete}
+          title={`Delete profile “${existing.display_name}”?`}
+          body={
+            isDefault
+              ? "It is the workspace default; agents will have no default model until you pick another."
+              : "This cannot be undone."
+          }
+          confirmLabel="Delete profile"
+          busy={remove.isPending}
+          onConfirm={() => remove.mutate()}
+          onClose={() => setConfirmDelete(false)}
+        />
+      ) : null}
     </Dialog>
   );
 }
 
 const ADMIN_KEY_HINT =
   "Optional. OpenAI has no balance API; an admin key lets Jhin read month-to-date spend. Create one in the OpenAI dashboard → Settings → Organization → Admin keys. Stored encrypted, never displayed.";
-
-/** Balance and spend for one provider: live remaining when the provider
- * reports it, otherwise Jhin's tracked spend with an optional "loaded
- * credits" figure so an estimated remaining amount can be shown. */
-function BalanceBlock({
-  provider,
-  isAdmin,
-  workspaceId,
-  onChanged,
-  onError,
-}: {
-  provider: ModelProvider;
-  isAdmin: boolean;
-  workspaceId: string;
-  onChanged: () => void;
-  onError: (message: string | null) => void;
-}) {
-  const balance = useProviderBalance(workspaceId, provider.id);
-  const [adminKeyDialog, setAdminKeyDialog] = useState(false);
-  const [credits, setCredits] = useState<string | null>(null);
-
-  const saveCredits = useMutation({
-    mutationFn: (micros: number | null) =>
-      api<ModelProvider>(`/api/v1/workspaces/${workspaceId}/model-providers/${provider.id}`, {
-        method: "PATCH",
-        body: { credits_loaded_micros: micros },
-      }),
-    onSuccess: () => {
-      onError(null);
-      setCredits(null);
-      onChanged();
-      void balance.refetch();
-    },
-    onError: (error) => onError(errText(error, "Saving the loaded credits failed.")),
-  });
-
-  if (balance.isPending) {
-    return (
-      <div data-testid="balance-block" className="rounded-xl bg-raised px-3 py-2 text-xs text-faint">
-        Loading balance…
-      </div>
-    );
-  }
-  const data = balance.data;
-  if (!data) {
-    return (
-      <div data-testid="balance-block" className="rounded-xl bg-raised px-3 py-2 text-xs text-faint">
-        Balance unavailable.
-      </div>
-    );
-  }
-
-  const live = data.provider_remaining_micros !== null;
-  const creditsValue = credits ?? microsToDollarInput(data.credits_loaded_micros);
-  const showAddAdminKey = provider.type === "openai" && !provider.has_admin_key && isAdmin;
-
-  return (
-    <div data-testid="balance-block" className="space-y-1.5 rounded-xl bg-raised px-3 py-2 text-xs">
-      <p className="flex items-center gap-1.5 font-medium text-ink">
-        <Wallet size={12} aria-hidden /> Balance
-      </p>
-      {live ? (
-        <p className="text-sm tabular-nums text-ink">
-          {formatMicrosAsDollars(data.provider_remaining_micros)}{" "}
-          <span className="text-xs text-dim">remaining</span>
-        </p>
-      ) : (
-        <p className="text-dim">
-          {data.source === "openai_admin" && data.provider_spent_month_micros !== null ? (
-            <>
-              Spent this month: <span className="tabular-nums text-ink">{formatMicrosAsDollars(data.provider_spent_month_micros)}</span>
-            </>
-          ) : (
-            <>
-              Spent this month through Jhin:{" "}
-              <span className="tabular-nums text-ink">{formatMicrosAsDollars(data.tracked_spent_month_micros)}</span>
-            </>
-          )}
-        </p>
-      )}
-      {!live ? (
-        <div className="flex flex-wrap items-center gap-2">
-          <label className="flex items-center gap-1 text-faint">
-            Loaded credits $
-            <input
-              type="number"
-              min="0"
-              step="any"
-              aria-label="Loaded credits in dollars"
-              className="h-6 w-24 rounded-md border border-line bg-surface px-1.5 text-xs tabular-nums text-ink"
-              value={creditsValue}
-              disabled={!isAdmin || saveCredits.isPending}
-              onChange={(e) => setCredits(e.target.value)}
-              onBlur={() => {
-                if (credits === null) return;
-                const micros = dollarInputToMicros(credits);
-                if (micros !== (data.credits_loaded_micros ?? null)) saveCredits.mutate(micros);
-                else setCredits(null);
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  (e.target as HTMLInputElement).blur();
-                }
-              }}
-            />
-          </label>
-          {data.estimated_remaining_micros !== null ? (
-            <span className="tabular-nums text-ink">
-              ≈ {formatMicrosAsDollars(data.estimated_remaining_micros)} remaining
-            </span>
-          ) : null}
-        </div>
-      ) : null}
-      <p className="text-faint" title={data.detail ?? undefined}>
-        {balanceSourceLabel(data.source)}
-        {data.source === "tracked" && data.detail && data.detail !== "Tracked by Jhin"
-          ? ` — ${data.detail}`
-          : ""}
-      </p>
-      {showAddAdminKey ? (
-        <Button size="sm" variant="ghost" onClick={() => setAdminKeyDialog(true)}>
-          <KeyRound size={12} /> Add admin key
-        </Button>
-      ) : null}
-      {adminKeyDialog ? (
-        <AdminKeyDialog
-          workspaceId={workspaceId}
-          provider={provider}
-          onClose={() => setAdminKeyDialog(false)}
-          onSaved={() => {
-            setAdminKeyDialog(false);
-            onChanged();
-            void balance.refetch();
-          }}
-        />
-      ) : null}
-    </div>
-  );
-}
 
 function AdminKeyDialog({
   workspaceId,
@@ -1362,4 +1097,3 @@ function AdminKeyDialog({
     </Dialog>
   );
 }
-

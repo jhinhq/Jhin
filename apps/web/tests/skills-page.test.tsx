@@ -3,12 +3,34 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useEffect } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import SkillsPage from "@/app/(app)/skills/page";
 import { api } from "@/lib/api";
 import { useBrowseSkills, useSkills, useSkillSources } from "@/lib/hooks";
 import type { BrowseSkillEntry, Skill, SkillSourceInfo } from "@/lib/types";
 import { WorkspaceProvider } from "@/lib/workspace-context";
+
+// The catalog-backed gallery has its own suite (skill-catalog-gallery.test.tsx);
+// here it is stubbed so this page test stays about the page — it echoes the
+// role the page hands down and, when a test flips `mockCatalogEmpty`, reports
+// an empty catalog the way the real gallery does after its query resolves.
+let mockCatalogEmpty = false;
+vi.mock("@/components/skill-catalog-gallery", () => ({
+  SkillCatalogGallery: ({
+    isAdmin,
+    onCatalogEmpty,
+  }: {
+    workspaceId: string;
+    isAdmin: boolean;
+    onCatalogEmpty?: (empty: boolean) => void;
+  }) => {
+    useEffect(() => {
+      onCatalogEmpty?.(mockCatalogEmpty);
+    }, [onCatalogEmpty]);
+    return <div data-testid="skill-catalog-gallery">{isAdmin ? "can install" : "read only"}</div>;
+  },
+}));
 
 vi.mock("@/lib/hooks", () => ({
   useSkills: vi.fn(),
@@ -33,7 +55,17 @@ vi.mock("@/lib/api", async () => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  mockCatalogEmpty = false;
 });
+
+/** The direct GitHub browser sits behind an Advanced disclosure on the
+ * "Find new skills" tab now; the browse tests reach it by opening both. */
+function openBrowseTab() {
+  fireEvent.click(screen.getByRole("tab", { name: "Find new skills" }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Advanced — browse a GitHub library directly" }),
+  );
+}
 
 function skill(overrides: Partial<Skill> = {}): Skill {
   return {
@@ -154,7 +186,59 @@ function sourceInfo(overrides: Partial<SkillSourceInfo> = {}): SkillSourceInfo {
   };
 }
 
-describe("SkillsPage — Browse library", () => {
+describe("SkillsPage — Find new skills", () => {
+  it("leads with the reviewed gallery and keeps the GitHub browser behind Advanced", () => {
+    vi.mocked(useSkillSources).mockReturnValue({
+      data: [sourceInfo()],
+      isError: false,
+    } as ReturnType<typeof useSkillSources>);
+    vi.mocked(useBrowseSkills).mockReturnValue({
+      data: { source: "anthropics/skills", skills: [browseEntry()] },
+      isPending: false,
+      isError: false,
+      error: null,
+      refetch: () => undefined,
+    } as unknown as ReturnType<typeof useBrowseSkills>);
+    renderPage([skill()]);
+    fireEvent.click(screen.getByRole("tab", { name: "Find new skills" }));
+
+    expect(screen.getByTestId("skill-catalog-gallery").textContent).toBe("can install");
+    // The direct GitHub browse stays folded until somebody asks for it.
+    expect(screen.queryByLabelText("Search skills")).toBeNull();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Advanced — browse a GitHub library directly" }),
+    );
+    expect(screen.getByLabelText("Search skills")).toBeTruthy();
+    expect(screen.getByText("pdf")).toBeTruthy();
+  });
+
+  it("opens the Advanced GitHub browser itself when the gallery is empty", () => {
+    mockCatalogEmpty = true;
+    vi.mocked(useSkillSources).mockReturnValue({
+      data: [sourceInfo()],
+      isError: false,
+    } as ReturnType<typeof useSkillSources>);
+    vi.mocked(useBrowseSkills).mockReturnValue({
+      data: { source: "anthropics/skills", skills: [browseEntry()] },
+      isPending: false,
+      isError: false,
+      error: null,
+      refetch: () => undefined,
+    } as unknown as ReturnType<typeof useBrowseSkills>);
+    renderPage([skill()]);
+    fireEvent.click(screen.getByRole("tab", { name: "Find new skills" }));
+
+    // No extra click: the browse section is already breathing.
+    expect(screen.getByLabelText("Search skills")).toBeTruthy();
+    expect(screen.getByText("pdf")).toBeTruthy();
+  });
+
+  it("tells the gallery when the viewer cannot install", () => {
+    renderPage([skill()], "member");
+    fireEvent.click(screen.getByRole("tab", { name: "Find new skills" }));
+    expect(screen.getByTestId("skill-catalog-gallery").textContent).toBe("read only");
+  });
+
   it("shows a search box and results after switching tabs", () => {
     vi.mocked(useSkillSources).mockReturnValue({
       data: [sourceInfo()],
@@ -168,7 +252,7 @@ describe("SkillsPage — Browse library", () => {
       refetch: () => undefined,
     } as unknown as ReturnType<typeof useBrowseSkills>);
     renderPage([skill()]);
-    fireEvent.click(screen.getByRole("tab", { name: "Browse library" }));
+    openBrowseTab();
     expect(screen.getByLabelText("Search skills")).toBeTruthy();
     expect(screen.getByText("pdf")).toBeTruthy();
     expect(screen.getByText("docx")).toBeTruthy();
@@ -188,7 +272,7 @@ describe("SkillsPage — Browse library", () => {
     } as unknown as ReturnType<typeof useBrowseSkills>);
     vi.mocked(api).mockResolvedValue({ skill: skill({ name: "pdf" }), status: "installed" });
     renderPage([skill()]);
-    fireEvent.click(screen.getByRole("tab", { name: "Browse library" }));
+    openBrowseTab();
     fireEvent.click(screen.getByRole("button", { name: "Install pdf" }));
     await waitFor(() =>
       expect(api).toHaveBeenCalledWith("/api/v1/workspaces/w1/skills/browse/install", {
@@ -211,7 +295,7 @@ describe("SkillsPage — Browse library", () => {
       refetch: () => undefined,
     } as unknown as ReturnType<typeof useBrowseSkills>);
     renderPage([skill()]);
-    fireEvent.click(screen.getByRole("tab", { name: "Browse library" }));
+    openBrowseTab();
     expect(screen.queryByText(/No skills found/)).toBeNull();
     // An ErrorNote renders — the page does not crash and shows some message.
     expect(document.body.textContent).toMatch(/could not reach|GitHub/i);
@@ -230,7 +314,7 @@ describe("SkillsPage — Browse library", () => {
       refetch: () => undefined,
     } as unknown as ReturnType<typeof useBrowseSkills>);
     renderPage([skill()], "member");
-    fireEvent.click(screen.getByRole("tab", { name: "Browse library" }));
+    openBrowseTab();
     expect(screen.queryByRole("button", { name: "Install pdf" })).toBeNull();
   });
 
@@ -248,7 +332,7 @@ describe("SkillsPage — Browse library", () => {
     } as unknown as ReturnType<typeof useBrowseSkills>);
     vi.mocked(api).mockResolvedValue(sourceInfo({ source: "obra/superpowers", custom: true }));
     renderPage([skill()]);
-    fireEvent.click(screen.getByRole("tab", { name: "Browse library" }));
+    openBrowseTab();
     fireEvent.click(screen.getByRole("button", { name: "Add a source" }));
     fireEvent.change(screen.getByPlaceholderText("owner/repo or owner/repo/path"), {
       target: { value: "obra/superpowers" },
@@ -275,7 +359,7 @@ describe("SkillsPage — Browse library", () => {
       refetch: () => undefined,
     } as unknown as ReturnType<typeof useBrowseSkills>);
     renderPage([skill()], "member");
-    fireEvent.click(screen.getByRole("tab", { name: "Browse library" }));
+    openBrowseTab();
     expect(screen.queryByRole("button", { name: "Add a source" })).toBeNull();
   });
 
@@ -295,7 +379,7 @@ describe("SkillsPage — Browse library", () => {
       refetch: () => undefined,
     } as unknown as ReturnType<typeof useBrowseSkills>);
     renderPage([skill()]);
-    fireEvent.click(screen.getByRole("tab", { name: "Browse library" }));
+    openBrowseTab();
     expect(screen.getByTestId("browse-category-Skills")).toBeTruthy();
     expect(screen.getByTestId("browse-category-General")).toBeTruthy();
   });

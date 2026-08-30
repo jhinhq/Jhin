@@ -3,6 +3,7 @@
 
 import type {
   BalanceSource,
+  ModelProfile,
   ModelProviderType,
   ObservedRate,
   PriceSourceName,
@@ -322,6 +323,58 @@ const DERIVATION_LABELS: Record<ObservedRate["derivation"], string> = {
 
 export function derivationLabel(derivation: ObservedRate["derivation"]): string {
   return DERIVATION_LABELS[derivation];
+}
+
+/** How expensive a model is, as one of three buckets a non-expert can read. */
+export type CostTier = 1 | 2 | 3;
+
+/**
+ * Bucket a price pair into a simple tier for the model cards.
+ *
+ * The buckets are on combined dollars per 1M tokens (input plus output): a
+ * missing half counts as $0 so a partly priced model still lands somewhere,
+ * but a model with no price at all returns null — "we don't know" must never
+ * render as "cheap".
+ */
+export function costTier(
+  inputMicros: number | null,
+  outputMicros: number | null,
+): CostTier | null {
+  if (inputMicros === null && outputMicros === null) return null;
+  const combined = ((inputMicros ?? 0) + (outputMicros ?? 0)) / MICROS_PER_DOLLAR;
+  if (combined <= 3) return 1;
+  if (combined <= 15) return 2;
+  return 3;
+}
+
+const COST_TIER_LABELS: Record<CostTier, string> = {
+  1: "Inexpensive",
+  2: "Moderate",
+  3: "Premium",
+};
+
+export function costTierLabel(tier: CostTier): string {
+  return COST_TIER_LABELS[tier];
+}
+
+/**
+ * One plain-language line saying what a model is good at.
+ *
+ * Built from the two facts a profile reliably carries — context window and
+ * whether built-in web search is on — because a claim the data cannot back
+ * ("great at code") would be marketing, not a capability.
+ */
+export function capabilitySummary(profile: ModelProfile): string {
+  const parts: string[] = [];
+  const window = profile.context_window ?? 0;
+  if (window >= 400_000) parts.push("Reads very long documents");
+  else if (window >= 100_000) parts.push("Handles long documents");
+  // An unknown window earns no claim at all: a line every card repeats
+  // verbatim conveys nothing, so the card simply says less.
+  else if (window > 0) parts.push("Good for everyday tasks");
+  const webSearch = (profile.config_json as { web_search?: { enabled?: boolean } }).web_search;
+  if (webSearch?.enabled) parts.push("Can search the web");
+  return parts.join(" · ");
 }
 
 /**

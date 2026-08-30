@@ -14,10 +14,12 @@ import {
   RefreshCw,
   ShieldCheck,
   Trash2,
+  UserRound,
   Webhook,
   XCircle,
 } from "lucide-react";
 import { useState } from "react";
+import { ReconnectButton } from "@/components/connect/reconnect-banner";
 import { ConnectionAccessSummary } from "@/components/connection-access-summary";
 import { ConnectionTools } from "@/components/connection-tools";
 import { Disclosure } from "@/components/company/bits";
@@ -82,8 +84,17 @@ export function deletePrompt(name: string, impact: ConnectionDeleteImpact | unde
     .join(" ");
 }
 
-export function statusTone(status: string): "ok" | "danger" | "neutral" {
-  return status === "active" ? "ok" : status === "error" ? "danger" : "neutral";
+export function statusTone(status: string): "ok" | "danger" | "neutral" | "warn" {
+  if (status === "active") return "ok";
+  if (status === "error") return "danger";
+  // A lapsed sign-in is a nudge, not a failure: the setup is intact.
+  if (status === "needs_reauth") return "warn";
+  return "neutral";
+}
+
+/** The machine word a person should not have to read. */
+export function statusLabel(status: string): string {
+  return status === "needs_reauth" ? "needs reconnecting" : status;
 }
 
 export function CopyRow({ label, value }: { label: string; value: string }) {
@@ -301,16 +312,42 @@ export function ConnectionDetailDialog({
         {intro ? <p className="text-sm text-dim">{intro}</p> : null}
 
         <div className="flex flex-wrap items-center gap-2">
-          <Badge tone={statusTone(connection.status)}>{connection.status}</Badge>
+          <Badge tone={statusTone(connection.status)}>{statusLabel(connection.status)}</Badge>
           <Badge tone="neutral">{connection.connector_type}</Badge>
           <Badge tone="neutral">
             <KeyRound size={11} /> {scheme?.label ?? connection.auth_type}
           </Badge>
+          {connection.authorized_by ? (
+            <Badge tone="neutral">
+              <UserRound size={11} /> {connection.authorized_by.display_name}
+            </Badge>
+          ) : null}
           <span className="ml-auto text-xs text-faint">
             Last checked:{" "}
             {connection.last_verified_at ? formatDateTime(connection.last_verified_at) : "never"}
           </span>
         </div>
+
+        {connection.status === "needs_reauth" ? (
+          /* The one thing to do about this connection, above everything that
+           * cannot work until it is done. Re-authorizing keeps the row, its
+           * name, its config, and every grant that points at it. */
+          <div
+            data-testid="connection-needs-reauth"
+            className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-warn/40 bg-warn-soft px-3.5 py-3"
+          >
+            <p className="min-w-0 text-[13px] leading-relaxed text-ink">
+              This app&rsquo;s sign-in lapsed, so agents cannot use it. Reconnecting keeps the setup
+              and every grant exactly as they are.
+              {connection.authorized_by
+                ? ` It was connected by ${connection.authorized_by.display_name}.`
+                : ""}
+            </p>
+            {canManage ? (
+              <ReconnectButton workspaceId={workspaceId} connection={connection} />
+            ) : null}
+          </div>
+        ) : null}
 
         {Object.keys(connection.config_json).length > 0 ? (
           <dl className="space-y-1 rounded-xl border border-line bg-raised px-3.5 py-2.5 text-xs">

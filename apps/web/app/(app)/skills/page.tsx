@@ -8,6 +8,8 @@ import { useMutation } from "@tanstack/react-query";
 import { BookOpen, Download, Pencil, Plus, Search, Trash2, Upload, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { PageBody, PageHeader } from "@/components/app-shell";
+import { Disclosure } from "@/components/company/bits";
+import { SkillCatalogGallery } from "@/components/skill-catalog-gallery";
 import { SkillsBrowseGallery } from "@/components/skills-browse-gallery";
 import {
   Badge,
@@ -179,6 +181,10 @@ export default function SkillsPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
+  // When the reviewed gallery has nothing to show, the Advanced GitHub
+  // browser opens itself so the tab isn't two-thirds blank. Sticky: a later
+  // search in the gallery never yanks the browser shut again.
+  const [advancedBrowseOpen, setAdvancedBrowseOpen] = useState(false);
 
   const install = useMutation({
     mutationFn: () =>
@@ -253,8 +259,8 @@ export default function SkillsPage() {
         <Tabs
           label="Skills sections"
           tabs={[
-            { id: "library", label: "Library" },
-            { id: "browse", label: "Browse library" },
+            { id: "library", label: "Your skills" },
+            { id: "browse", label: "Find new skills" },
           ]}
           value={tab}
           onChange={(id) => setTab(id as "library" | "browse")}
@@ -333,7 +339,27 @@ export default function SkillsPage() {
             </div>
           </div>
         ) : (
-          <BrowseLibrarySection workspaceId={workspaceId} isAdmin={isAdmin} onInstalled={invalidate} />
+          <div className="space-y-6">
+            <SkillCatalogGallery
+              workspaceId={workspaceId}
+              isAdmin={isAdmin}
+              onCatalogEmpty={(empty) => {
+                if (empty) setAdvancedBrowseOpen(true);
+              }}
+            />
+            <Disclosure
+              key={advancedBrowseOpen ? "auto-open" : "folded"}
+              defaultOpen={advancedBrowseOpen}
+              label="Advanced — browse a GitHub library directly"
+              openLabel="Hide the direct GitHub browser"
+            >
+              <BrowseLibrarySection
+                workspaceId={workspaceId}
+                isAdmin={isAdmin}
+                onInstalled={invalidate}
+              />
+            </Disclosure>
+          </div>
         )}
       </PageBody>
 
