@@ -75,6 +75,7 @@ class TwoQueueWorld:
             task_id=str(uuid.uuid4()),
             agent_id=str(uuid.uuid4()),
         )
+        self.reason_inputs: list[ReasonAgentStepInput] = []
         self._scenario = "one_step"
         self._reason_calls = 0
         self._approval_parked = asyncio.Event()
@@ -82,6 +83,9 @@ class TwoQueueWorld:
         self._release_first_execute = asyncio.Event()
         self._commit_started = asyncio.Event()
         self._release_commit = asyncio.Event()
+        self._cleanup_started = asyncio.Event()
+        self._release_cleanup = asyncio.Event()
+        self._cleanup_calls = 0
 
     @property
     def effect_calls(self) -> list[tuple[str, str]]:
@@ -128,13 +132,16 @@ class TwoQueueWorld:
         ]
 
     @activity.defn(name=ACTIVITY_REASON_AGENT_STEP)
-    async def reason_agent_step(self, _params: ReasonAgentStepInput) -> ReasonAgentStepResult:
+    async def reason_agent_step(self, params: ReasonAgentStepInput) -> ReasonAgentStepResult:
         self._record(ACTIVITY_REASON_AGENT_STEP)
+        self.reason_inputs.append(params)
         self._reason_calls += 1
         if self._reason_calls > 1 or self._scenario in {
             "zero_calls",
             "cleanup_failure",
             "cleanup_no_poller",
+            "late_instruction",
+            "late_instruction_during_cleanup",
         }:
             return ReasonAgentStepResult(call_count=0)
         if self._scenario == "one_step":
@@ -185,6 +192,13 @@ class TwoQueueWorld:
             self._commit_started.set()
             await self._release_commit.wait()
             return StepResult(done=True)
+        if self._scenario == "late_instruction" and params.step_index == 0:
+            # Hold the final activity of the step open so the test can land a
+            # user_instruction signal while the step is still wrapping up —
+            # the window where the instruction used to vanish.
+            self._commit_started.set()
+            await self._release_commit.wait()
+            return StepResult(done=True)
         if self._scenario == "execution_unknown":
             raise ApplicationError(
                 "tool execution outcome is unknown",
@@ -216,12 +230,19 @@ class TwoQueueWorld:
         self, _params: CleanupRunWorkspaceInput
     ) -> CleanupRunWorkspaceResult:
         self._record(ACTIVITY_CLEANUP_RUN_WORKSPACE)
+        self._cleanup_calls += 1
         if self._scenario == "cleanup_failure":
             raise ApplicationError(
                 "injected cleanup failure",
                 type="cleanup_failed",
                 non_retryable=True,
             )
+        if self._scenario == "late_instruction_during_cleanup" and self._cleanup_calls == 1:
+            # Hold the cross-queue cleanup hop open: in production it can sit
+            # scheduled for seconds, which is exactly when the person's next
+            # turn arrives (their reply has already rendered by then).
+            self._cleanup_started.set()
+            await self._release_cleanup.wait()
         return CleanupRunWorkspaceResult(deleted=True)
 
     @activity.defn(name=ACTIVITY_FINALIZE_RUN_PROJECTION)
@@ -315,9 +336,37 @@ class TwoQueueWorld:
                     assert started_task in done
                     await handle.signal("cancel")
                     self._release_first_execute.set()
+                elif scenario == "late_instruction":
+                    started_task = asyncio.create_task(self._commit_started.wait())
+                    done, _pending = await asyncio.wait(
+                        {started_task, result_task},
+                        timeout=5,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if result_task in done:
+                        started_task.cancel()
+                        return result_task.result()
+                    assert started_task in done
+                    await handle.signal("user_instruction", "answer turn three")
+                    self._release_commit.set()
+                elif scenario == "late_instruction_during_cleanup":
+                    started_task = asyncio.create_task(self._cleanup_started.wait())
+                    done, _pending = await asyncio.wait(
+                        {started_task, result_task},
+                        timeout=5,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if result_task in done:
+                        started_task.cancel()
+                        return result_task.result()
+                    assert started_task in done
+                    await handle.signal("user_instruction", "answer turn three")
+                    self._release_cleanup.set()
                 return await result_task
         finally:
             self._release_first_execute.set()
+            self._release_commit.set()
+            self._release_cleanup.set()
             await environment.shutdown()
 
     async def run_without_cleanup_poller(self) -> Any:
@@ -455,6 +504,36 @@ async def test_stop_scenarios_never_schedule_a_later_ordinal(
         assert result.status == "failed"
     else:
         assert result.status == "completed"
+
+
+async def test_late_instruction_runs_another_step_instead_of_completing_past_it(
+    two_queue_world: TwoQueueWorld,
+) -> None:
+    """A user turn signalled while the final step is wrapping up must be
+    answered, not stranded: the loop runs one more reason step carrying the
+    instruction instead of completing with a non-empty queue (the E2E
+    turn-order regression)."""
+    result = await two_queue_world.run_scenario("late_instruction")
+
+    assert result.status == "completed"
+    assert len(two_queue_world.reason_inputs) == 2
+    assert two_queue_world.reason_inputs[0].user_instructions == []
+    assert two_queue_world.reason_inputs[1].user_instructions == ["answer turn three"]
+
+
+async def test_instruction_during_cleanup_hop_still_gets_answered(
+    two_queue_world: TwoQueueWorld,
+) -> None:
+    """The production shape of the same regression: the loop has exited and
+    the cross-queue cleanup hop is in flight when the person's next turn
+    lands. The pre-projection check must send it back through the step loop
+    (and clean up again afterwards) instead of finalizing past it."""
+    result = await two_queue_world.run_scenario("late_instruction_during_cleanup")
+
+    assert result.status == "completed"
+    assert len(two_queue_world.reason_inputs) == 2
+    assert two_queue_world.reason_inputs[1].user_instructions == ["answer turn three"]
+    assert two_queue_world._cleanup_calls == 2
 
 
 async def test_final_projection_is_bounded_when_cleanup_queue_has_no_poller(

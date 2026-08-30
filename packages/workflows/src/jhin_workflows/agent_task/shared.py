@@ -30,6 +30,12 @@ WORK_REQUEST_REQUESTER_WAIT_PATCH = "work-request-requester-wait-v1"
 # Pause is written when the run actually parks, not when the signal is
 # accepted, so it adds an activity to the history of any run that pauses.
 PAUSE_IS_OBSERVED_PATCH = "pause-is-observed-v1"
+# A user instruction that arrives while the final step is wrapping up used to
+# be appended to the pending queue and never read again — the workflow
+# completed past it and the person's turn vanished. The loop now keeps
+# stepping while instructions are pending, which can add reason steps to the
+# history, so in-flight runs recorded before the patch keep the old exit.
+CHAT_LATE_INSTRUCTION_DRAIN_PATCH = "chat-late-instruction-drain-v1"
 ACTIVITY_MARK_TASK_PAUSED = "mark_task_paused"
 ACTIVITY_RESOLVE_ADVERTISED_TOOLS = "resolve_advertised_tools"
 ACTIVITY_REASON_AGENT_STEP = "reason_agent_step"

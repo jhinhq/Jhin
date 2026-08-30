@@ -810,6 +810,7 @@ async def _run_turn(
     tasks = await _conversation_tasks(db, ctx.workspace_id, conversation.id)
     active = _active_task(tasks)
 
+    mode: TurnMode = "instruction"
     if active is not None:
         message = Message(
             workspace_id=ctx.workspace_id,
@@ -825,18 +826,39 @@ async def _run_turn(
         )
         db.add(message)
         await db.commit()
-        task = await tasks_service.signal_task(
-            db,
-            ctx,
-            temporal,
-            active.id,
-            signal="user_instruction",
-            args=[text],
-            action="task.instruction",
-            request_id=request_id,
-            ip_hash=ip_hash,
-        )
-        mode: TurnMode = "instruction"
+        try:
+            task = await tasks_service.signal_task(
+                db,
+                ctx,
+                temporal,
+                active.id,
+                signal="user_instruction",
+                args=[text],
+                action="task.instruction",
+                request_id=request_id,
+                ip_hash=ip_hash,
+            )
+        except HTTPException as exc:
+            if exc.status_code != status.HTTP_409_CONFLICT:
+                raise
+            # The run finished between our activity check and the signal, so
+            # nothing will ever read this instruction. Promote the turn to a
+            # fresh work episode instead of stranding the person's message
+            # under a task that is already over.
+            task = Task(
+                workspace_id=ctx.workspace_id,
+                title=default_title(text, agent.name)[:500],
+                description=text,
+                assigned_agent_id=agent.id,
+                conversation_id=conversation.id,
+                correlation_id=new_uuid7(),
+                metadata_json={"origin": "conversation", "conversation_id": str(conversation.id)},
+            )
+            db.add(task)
+            await db.flush()
+            message.task_id = task.id
+            message.message_type = MessageType.TEXT.value
+            mode = "new_task"
     else:
         # Each work episode is titled after the message that started it, so
         # activity and the details panel describe what was actually asked

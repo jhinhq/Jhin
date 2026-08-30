@@ -15,7 +15,6 @@
  * directly, no matter how it got there.
  */
 
-import { echoOf } from "./fixtures/api";
 import { expect, REPLY_TIMEOUT_MS, test } from "./fixtures/test";
 
 const QUESTIONS = [
@@ -44,9 +43,12 @@ test("the third reply answers the third question", async ({ page, workspace }) =
 
   // Every answer names its own question, in order. The bug showed up as reply
   // n echoing question n-1, so asserting all three pins the alignment rather
-  // than only the endpoint.
+  // than only the endpoint. Asserted as "contains the question", not the
+  // exact echo: a turn that lands while the previous run is wrapping up is
+  // (correctly) delivered as a drained instruction, and the worker prefixes
+  // those with "Additional instruction:" in the prompt.
   for (const [index, question] of QUESTIONS.entries()) {
-    await expect(replies.nth(index)).toContainText(echoOf(question));
+    await expect(replies.nth(index)).toContainText(question);
   }
 
   // Said the other way round, because this is the shape the bug took: the last

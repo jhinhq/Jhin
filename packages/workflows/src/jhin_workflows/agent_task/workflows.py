@@ -37,6 +37,7 @@ from jhin_workflows.agent_task.shared import (
     ACTIVITY_RESOLVE_SNAPSHOT,
     ACTIVITY_RUN_AGENT_STEP,
     ASK_PERSON_WAIT_PATCH,
+    CHAT_LATE_INSTRUCTION_DRAIN_PATCH,
     ORDINARY_TOOL_FAILURE_MESSAGE,
     PAUSE_IS_OBSERVED_PATCH,
     PHASE10_TOOL_WORKER_PATCH,
@@ -366,9 +367,97 @@ class AgentTaskWorkflow:
 
         totals.run_id = snapshot.run_id
         use_tool_worker = workflow.patched(PHASE10_TOOL_WORKER_PATCH)
+        # A turn signalled while the run is wrapping up must still be
+        # answered: the queue is checked again at every late boundary below,
+        # and anything found re-enters the step loop instead of being
+        # stranded — the run used to complete past it and the person's
+        # message was never answered.
+        drain_late_instructions = workflow.patched(CHAT_LATE_INSTRUCTION_DRAIN_PATCH)
         done = False
 
-        while not done and self._steps_used < snapshot.max_steps:
+        while True:
+            done, error_code, error_message = await self._run_step_loop(
+                params,
+                snapshot,
+                totals,
+                use_tool_worker=use_tool_worker,
+                drain_late_instructions=drain_late_instructions,
+                done=done,
+                error_code=error_code,
+                error_message=error_message,
+            )
+
+            if self._cancelled:
+                final_status = "cancelled"
+            elif error_code is not None:
+                final_status = "failed"
+            elif done:
+                final_status = "completed"
+            else:
+                final_status = "failed"
+                error_code = "max_steps_exceeded"
+                error_message = f"run hit the {snapshot.max_steps}-step limit before finishing"
+
+            if drain_late_instructions and final_status == "completed":
+                # The workspace-cleanup hop crosses task queues and can sit
+                # scheduled for seconds — and the person's reply has already
+                # rendered by then, so this is exactly when their next turn
+                # tends to arrive. Run the hop first, then look one last time
+                # before the terminal projection: anything pending re-enters
+                # the step loop. (A signal during the projection itself can
+                # still slip through; once the state is terminal the API
+                # starts a fresh task instead of signalling.)
+                await self._cleanup_run_workspace(
+                    params, snapshot.run_id, use_tool_worker=use_tool_worker
+                )
+                if self._pending_instructions and self._steps_used < snapshot.max_steps:
+                    done = False
+                    continue
+                self._status = "finalizing"
+                await self._finalize(
+                    params,
+                    run_id=snapshot.run_id,
+                    status=final_status,
+                    error_code=error_code,
+                    error_message=error_message,
+                    use_tool_worker=use_tool_worker,
+                    skip_cleanup=True,
+                )
+                break
+
+            self._status = "finalizing"
+            await self._finalize(
+                params,
+                run_id=snapshot.run_id,
+                status=final_status,
+                error_code=error_code,
+                error_message=error_message,
+                use_tool_worker=use_tool_worker,
+            )
+            break
+
+        self._status = final_status
+        totals.status = final_status
+        return totals
+
+    async def _run_step_loop(
+        self,
+        params: AgentTaskInput,
+        snapshot: SnapshotResult,
+        totals: AgentTaskResult,
+        *,
+        use_tool_worker: bool,
+        drain_late_instructions: bool,
+        done: bool,
+        error_code: str | None,
+        error_message: str | None,
+    ) -> tuple[bool, str | None, str | None]:
+        """One pass of the reason/act loop. The caller decides whether a
+        completed pass is really the end, or whether instructions that
+        arrived late send it around again."""
+        while (
+            not done or (drain_late_instructions and len(self._pending_instructions) > 0)
+        ) and self._steps_used < snapshot.max_steps:
             if self._cancelled:
                 break
             if self._paused:
@@ -696,29 +785,7 @@ class AgentTaskWorkflow:
                 # Approved or rejected, the loop continues: the next reason
                 # step sees the tool result or the recorded denial.
 
-        if self._cancelled:
-            final_status = "cancelled"
-        elif error_code is not None:
-            final_status = "failed"
-        elif done:
-            final_status = "completed"
-        else:
-            final_status = "failed"
-            error_code = "max_steps_exceeded"
-            error_message = f"run hit the {snapshot.max_steps}-step limit before finishing"
-
-        self._status = "finalizing"
-        await self._finalize(
-            params,
-            run_id=snapshot.run_id,
-            status=final_status,
-            error_code=error_code,
-            error_message=error_message,
-            use_tool_worker=use_tool_worker,
-        )
-        self._status = final_status
-        totals.status = final_status
-        return totals
+        return done, error_code, error_message
 
     async def _run_delegation(
         self, params: AgentTaskInput, run_id: str, request: DelegationRequest
@@ -965,6 +1032,24 @@ class AgentTaskWorkflow:
                 retry_policy=_FINALIZE_RETRY,
             )
 
+    async def _cleanup_run_workspace(
+        self, params: AgentTaskInput, run_id: str | None, *, use_tool_worker: bool
+    ) -> None:
+        if not use_tool_worker or run_id is None:
+            return
+        with contextlib.suppress(Exception):
+            await workflow.execute_activity(
+                ACTIVITY_CLEANUP_RUN_WORKSPACE,
+                CleanupRunWorkspaceInput(
+                    workspace_id=params.workspace_id,
+                    run_id=run_id,
+                ),
+                task_queue=TOOL_TASK_QUEUE,
+                start_to_close_timeout=timedelta(seconds=30),
+                schedule_to_close_timeout=_CLEANUP_SCHEDULE_TO_CLOSE_TIMEOUT,
+                retry_policy=_FINALIZE_RETRY,
+            )
+
     async def _finalize(
         self,
         params: AgentTaskInput,
@@ -974,6 +1059,7 @@ class AgentTaskWorkflow:
         error_code: str | None,
         error_message: str | None,
         use_tool_worker: bool = False,
+        skip_cleanup: bool = False,
     ) -> None:
         finalize_input = FinalizeInput(
             workspace_id=params.workspace_id,
@@ -985,19 +1071,8 @@ class AgentTaskWorkflow:
             error_message=error_message,
         )
         if use_tool_worker:
-            if run_id is not None:
-                with contextlib.suppress(Exception):
-                    await workflow.execute_activity(
-                        ACTIVITY_CLEANUP_RUN_WORKSPACE,
-                        CleanupRunWorkspaceInput(
-                            workspace_id=params.workspace_id,
-                            run_id=run_id,
-                        ),
-                        task_queue=TOOL_TASK_QUEUE,
-                        start_to_close_timeout=timedelta(seconds=30),
-                        schedule_to_close_timeout=_CLEANUP_SCHEDULE_TO_CLOSE_TIMEOUT,
-                        retry_policy=_FINALIZE_RETRY,
-                    )
+            if not skip_cleanup:
+                await self._cleanup_run_workspace(params, run_id, use_tool_worker=use_tool_worker)
             await workflow.execute_activity(
                 ACTIVITY_FINALIZE_RUN_PROJECTION,
                 finalize_input,
