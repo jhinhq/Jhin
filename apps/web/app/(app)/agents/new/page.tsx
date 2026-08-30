@@ -10,6 +10,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
 import { PageBody, PageHeader } from "@/components/app-shell";
 import { Avatar } from "@/components/avatar";
+import { Disclosure as InlineDisclosure, LoadError } from "@/components/company/bits";
 import { ScopeEditor } from "@/components/scope-editor";
 import { ShapeAvatar } from "@/components/shape-avatar";
 import {
@@ -44,6 +45,7 @@ import {
   COLLABORATION_PRESET_ID,
   capabilitySummary,
   effectiveAvatar,
+  firstInvalidStep,
   hasManualGrants,
   isPresetApplied,
   presetMissingTools,
@@ -229,6 +231,13 @@ function WizardInner() {
     },
   });
 
+  if (graph.isError) {
+    return (
+      <PageBody>
+        <LoadError what="the setup form" onRetry={() => void graph.refetch()} />
+      </PageBody>
+    );
+  }
   if (graph.isPending || !graph.data) {
     return (
       <PageBody>
@@ -258,6 +267,9 @@ function WizardInner() {
 
   const avatarPreview = effectiveAvatar(state);
 
+  const invalidStep = firstInvalidStep(state);
+  const invalidStepTitle = WIZARD_STEPS.find((entry) => entry.id === invalidStep)?.title;
+
   const goTo = (next: number) => {
     setAttempted(false);
     setStep(Math.min(Math.max(next, 1), REVIEW_STEP));
@@ -275,7 +287,7 @@ function WizardInner() {
   return (
     <PageBody className="flex flex-col gap-6 md:flex-row md:gap-8">
       <aside className="w-full shrink-0 md:w-56">
-        <StepRail current={step} onSelect={setStep} />
+        <StepRail current={step} onSelect={goTo} />
       </aside>
       <div className="max-w-2xl flex-1 space-y-5">
         {step === 1 ? (
@@ -404,6 +416,10 @@ function WizardInner() {
               </div>
             </Field>
           </div>
+        ) : step === 2 && tools.isPending ? (
+          <Spinner label="Loading the tool catalog…" />
+        ) : step === 2 && tools.isError ? (
+          <LoadError what="the tool catalog" onRetry={() => void tools.refetch()} />
         ) : step === 2 ? (
           <div className="space-y-5">
             <Field
@@ -422,7 +438,7 @@ function WizardInner() {
                       data-testid={`tool-preset-${preset.id}`}
                       aria-pressed={applied}
                       title={preset.description}
-                      disabled={tools.isPending || unavailable}
+                      disabled={unavailable}
                       onClick={() =>
                         setState(
                           toggleToolPreset(state, preset, toolList, connections.data ?? []),
@@ -549,7 +565,6 @@ function WizardInner() {
                           </label>
                         );
                       })}
-                      {tools.isPending ? <Spinner /> : null}
                     </div>
                   </Field>
                   {toolList
@@ -884,22 +899,19 @@ function WizardInner() {
                   )
                 }
               />
-              <ReviewRow
-                label="Tools"
-                value={
-                  state.grantToolNames.length > 0 ? (
-                    <span className="flex flex-wrap justify-end gap-x-1.5 gap-y-0.5 text-xs">
+              {state.grantToolNames.length > 0 ? (
+                <div className="border-b border-line py-2.5">
+                  <InlineDisclosure label="Show tool details">
+                    <ul className="flex flex-wrap gap-x-2 gap-y-1">
                       {state.grantToolNames.map((toolName) => (
-                        <code key={toolName} className="font-mono text-xs">
-                          {toolName}
-                        </code>
+                        <li key={toolName}>
+                          <code className="font-mono text-xs text-dim">{toolName}</code>
+                        </li>
                       ))}
-                    </span>
-                  ) : (
-                    <span className="text-faint">none (deny-by-default)</span>
-                  )
-                }
-              />
+                    </ul>
+                  </InlineDisclosure>
+                </div>
+              ) : null}
               <ReviewRow label="Autonomy" value={state.autonomyLevel} />
               <ReviewRow
                 label="Approval policy"
@@ -957,13 +969,33 @@ function WizardInner() {
               </Button>
             </div>
           ) : (
-            <Button
-              variant="primary"
-              disabled={!canSubmit(state) || create.isPending || incompleteScopeTools.length > 0}
-              onClick={() => create.mutate()}
-            >
-              <Check size={14} /> {create.isPending ? "Creating…" : "Create agent"}
-            </Button>
+            <div className="flex items-center justify-end gap-3">
+              {invalidStep !== null ? (
+                <p className="text-right text-[13px] text-dim">
+                  The{" "}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      // Land on the offending step with its errors showing,
+                      // rather than goTo, which clears them.
+                      setStep(invalidStep);
+                      setAttempted(true);
+                    }}
+                    className={`font-medium text-accent-strong underline ${focusRing}`}
+                  >
+                    {invalidStepTitle}
+                  </button>{" "}
+                  step needs a fix before this agent can be created.
+                </p>
+              ) : null}
+              <Button
+                variant="primary"
+                disabled={!canSubmit(state) || create.isPending || incompleteScopeTools.length > 0}
+                onClick={() => create.mutate()}
+              >
+                <Check size={14} /> {create.isPending ? "Creating…" : "Create agent"}
+              </Button>
+            </div>
           )}
         </footer>
       </div>

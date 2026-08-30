@@ -226,10 +226,14 @@ export function useSecrets(workspaceId: string, enabled = true) {
   });
 }
 
-export function useModelProviders(workspaceId: string) {
+/** Providers are an admin-only listing server-side; pass `enabled: false` for
+ * everyone else so the page doesn't manufacture a 403 it then reports as a
+ * load failure. */
+export function useModelProviders(workspaceId: string, enabled = true) {
   return useQuery({
     queryKey: ["model-providers", workspaceId],
     queryFn: () => api<ModelProvider[]>(`/api/v1/workspaces/${workspaceId}/model-providers`),
+    enabled,
   });
 }
 

@@ -2,7 +2,29 @@
  * component so the row↔DSL round-trip and the summary sentence are unit-
  * testable. */
 
+import { APP_LABELS, humanizeSegment, titleCase } from "@/lib/humanize";
 import type { Agent, ConnectionInfo, Trigger, TriggerCondition } from "@/lib/types";
+
+const TRIGGER_FRIENDLY_EVENTS: Record<string, string> = {
+  "connector.linear.issue.created": "a Linear issue is created",
+  "connector.linear.issue.updated": "a Linear issue changes",
+  "connector.github.pull_request.opened": "a GitHub pull request opens",
+  "connector.github.pull_request.merged": "a GitHub pull request merges",
+  "connector.github.push": "code is pushed to GitHub",
+  "connector.github.issue.opened": "a GitHub issue opens",
+};
+
+/** The "When …" half of an automation, in plain words. Shared by the cards,
+ * the builder's event picker, and the summary sentence. */
+export function triggerWhen(eventType: string | null, connectionName: string | undefined): string {
+  if (!eventType) return connectionName ? `anything happens in ${connectionName}` : "anything happens";
+  const known = TRIGGER_FRIENDLY_EVENTS[eventType];
+  if (known) return known;
+  const parts = eventType.replace(/^connector\./, "").split(".");
+  const app = APP_LABELS[parts[0]] ?? titleCase(parts[0] ?? "");
+  const what = parts.slice(1).map(humanizeSegment).join(" ");
+  return what ? `${what} in ${app}` : `something happens in ${app}`;
+}
 
 export const TRIGGER_OPS = [
   "eq",
@@ -95,7 +117,11 @@ export function summarySentence(
   agent: Agent | undefined,
   connection: ConnectionInfo | undefined,
 ): string {
-  const source = connection ? connection.name : "any connection";
+  // Same friendly event wording as the automation cards and the builder's
+  // event dropdown; triggerWhen already folds the connection in when there is
+  // no event type.
+  const when = triggerWhen(eventType || null, connection?.name);
+  const source = eventType && connection ? ` via ${connection.name}` : "";
   const clauses = rows
     .filter((row) => row.path)
     .map((row) => {
@@ -104,7 +130,7 @@ export function summarySentence(
     });
   const condition = clauses.length ? ` where ${clauses.join(" and ")}` : "";
   const target = agent ? `assign a task to ${agent.name}` : "assign a task";
-  return `When a ${eventType || "…"} event arrives from ${source}${condition}, ${target}.`;
+  return `When ${when}${source}${condition}, ${target}.`;
 }
 
 /** Editable sample payload for the test panel, shaped like a normalized

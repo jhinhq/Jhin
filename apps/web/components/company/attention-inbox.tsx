@@ -11,9 +11,9 @@ import { useState } from "react";
 import { ApprovalCard } from "@/components/approval-card";
 import { Avatar } from "@/components/avatar";
 import { Chip, SectionCard, StatusPill } from "@/components/company/bits";
-import { Button, Dialog, Field, Textarea } from "@/components/ui";
+import { Button, Dialog, EmptyState, Field, Textarea } from "@/components/ui";
 import { timeAgo } from "@/lib/activity";
-import { humanizeToolName, matchedConditionLabels, REVIEW_MODE_LABELS, reviewSubject } from "@/lib/coordination";
+import { humanizeToolName, matchedConditionLabels, REVIEW_MODE_LABELS, reviewSubject, workRequestStatus } from "@/lib/coordination";
 import { formatDateTime } from "@/lib/format";
 import { avatarProps } from "@/lib/media";
 import { kindLabel, scopeLabel } from "@/lib/memory";
@@ -23,16 +23,12 @@ export type WorkRequestAction = "accept" | "decline" | "clarify";
 
 function AttentionAllClear() {
   return (
-    <div
-      data-testid="attention-all-clear"
-      className="flex flex-col items-center gap-2 rounded-2xl border border-line bg-surface px-8 py-16 text-center"
-    >
-      <CheckCircle2 className="text-ok" size={28} aria-hidden />
-      <p className="font-display text-lg font-semibold tracking-tight">You’re all caught up</p>
-      <p className="max-w-sm text-sm text-dim">
-        Nothing needs your decision right now. We’ll list approvals, reviews, help requests, problems, and chats
-        waiting on you here.
-      </p>
+    <div data-testid="attention-all-clear">
+      <EmptyState
+        icon={<CheckCircle2 size={22} aria-hidden />}
+        title="You’re all caught up"
+        description="Nothing needs your decision right now. We’ll list approvals, reviews, help requests, problems, and chats waiting on you here."
+      />
     </div>
   );
 }
@@ -46,7 +42,7 @@ function ReviewDecisionDialog({
 }: {
   review: WorkReview | null;
   onClose: () => void;
-  onSubmit: (reviewId: string, verdict: ReviewVerdict, feedback: string) => void;
+  onSubmit: (reviewId: string, verdict: ReviewVerdict, feedback: string) => void | Promise<unknown>;
   busy?: boolean;
 }) {
   const [feedback, setFeedback] = useState("");
@@ -60,8 +56,12 @@ function ReviewDecisionDialog({
       return;
     }
     setProblem(null);
-    onSubmit(review.id, verdict, text);
-    setFeedback("");
+    // The dialog owns the outcome: close on success, and on failure say so
+    // right here — the page's error note sits behind this dialog's backdrop.
+    void Promise.resolve(onSubmit(review.id, verdict, text)).then(
+      () => onClose(),
+      () => setProblem("Saving your review failed — check your connection and try again."),
+    );
   };
   return (
     <Dialog title="Review this work" description={review ? reviewSubject(review) : undefined} open={open} onClose={onClose}>
@@ -109,10 +109,11 @@ function WorkRequestReplyDialog({
   request: WorkRequest | null;
   action: Exclude<WorkRequestAction, "accept"> | null;
   onClose: () => void;
-  onSubmit: (requestId: string, action: WorkRequestAction, response: string) => void;
+  onSubmit: (requestId: string, action: WorkRequestAction, response: string) => void | Promise<unknown>;
   busy?: boolean;
 }) {
   const [text, setText] = useState("");
+  const [problem, setProblem] = useState<string | null>(null);
   const open = request !== null && action !== null;
   const clarify = action === "clarify";
   return (
@@ -128,13 +129,28 @@ function WorkRequestReplyDialog({
           onSubmit={(event) => {
             event.preventDefault();
             if (clarify && !text.trim()) return;
-            onSubmit(request.id, action, text.trim());
-            setText("");
+            setProblem(null);
+            // Close on success; on failure report here, where it is visible
+            // over the backdrop, and keep the typed text.
+            void Promise.resolve(onSubmit(request.id, action, text.trim())).then(
+              () => onClose(),
+              () =>
+                setProblem(
+                  clarify
+                    ? "Sending your question failed — check your connection and try again."
+                    : "Declining the request failed — check your connection and try again.",
+                ),
+            );
           }}
         >
           <Field label={clarify ? "What do you need to know?" : "Reason (optional)"}>
             <Textarea value={text} rows={3} maxLength={4000} onChange={(event) => setText(event.target.value)} autoFocus />
           </Field>
+          {problem ? (
+            <p role="alert" className="text-sm text-danger">
+              {problem}
+            </p>
+          ) : null}
           <div className="flex justify-end gap-2">
             <Button variant="ghost" type="button" onClick={onClose} disabled={busy}>
               Cancel
@@ -170,13 +186,15 @@ export function AttentionInbox({
   isAdmin?: boolean;
   decidingId?: string | null;
   onDecide: (approvalId: string, decision: "approve" | "reject") => void;
-  onReviewDecide?: (reviewId: string, verdict: ReviewVerdict, feedback: string) => void;
+  /** May return the mutation's promise: the decision dialog stays open until
+   * it resolves, so a failure keeps the typed feedback. */
+  onReviewDecide?: (reviewId: string, verdict: ReviewVerdict, feedback: string) => void | Promise<unknown>;
   /** Dismiss one failed task / every listed failure from the inbox. */
   onDismissFailure?: (taskId: string) => void;
   onDismissAllFailures?: () => void;
   /** Pending work requests (admins see accept/decline/clarify). */
   workRequests?: WorkRequest[];
-  onWorkRequest?: (requestId: string, action: WorkRequestAction, response: string) => void;
+  onWorkRequest?: (requestId: string, action: WorkRequestAction, response: string) => void | Promise<unknown>;
   /** Proposed team/company memories waiting for an admin. */
   proposedMemories?: MemoryRecord[];
   onMemoryDecide?: (memoryId: string, decision: "approve" | "reject") => void;
@@ -368,7 +386,7 @@ export function AttentionInbox({
                     {request.description ? <p className="mt-0.5 line-clamp-3 whitespace-pre-wrap text-[13px] text-dim">{request.description}</p> : null}
                     {request.expected_output ? <p className="mt-1 text-[13px] text-dim">Expected: {request.expected_output}</p> : null}
                     <p className="mt-1 text-xs text-faint">
-                      <StatusPill status={{ label: request.status === "clarification_requested" ? "Clarification asked" : "Waiting for an answer", tone: "warn" }} />{" "}
+                      <StatusPill status={workRequestStatus(request.status)} />{" "}
                       · <time dateTime={request.created_at}>{timeAgo(request.created_at, now)}</time>
                     </p>
                     <div className="mt-2 flex flex-wrap items-center gap-1.5">
@@ -383,7 +401,20 @@ export function AttentionInbox({
                 </div>
                 {isAdmin && onWorkRequest ? (
                   <div className="mt-2 flex flex-wrap gap-1.5 pl-11">
-                    <Button size="sm" variant="primary" disabled={decidingId === request.id} onClick={() => onWorkRequest(request.id, "accept", "")}>
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      disabled={decidingId === request.id}
+                      onClick={() =>
+                        // The page's error note reports a failed accept (no
+                        // dialog covers it); swallow the mutateAsync rejection
+                        // so it doesn't surface as unhandled.
+                        void Promise.resolve(onWorkRequest(request.id, "accept", "")).then(
+                          undefined,
+                          () => {},
+                        )
+                      }
+                    >
                       Accept
                     </Button>
                     <Button size="sm" disabled={decidingId === request.id} onClick={() => setReplying({ request, action: "clarify" })}>
@@ -525,24 +556,24 @@ export function AttentionInbox({
         </SectionCard>
       ) : null}
 
+      {/* Keyed by the open item so switching items never carries typed text
+          over. Each dialog owns its outcome: it stays open while the mutation
+          runs, closes itself on success, and reports a failure inline so what
+          was typed is never lost behind a silent backdrop. */}
       <ReviewDecisionDialog
+        key={reviewing?.id ?? "review:closed"}
         review={reviewing}
         onClose={() => setReviewing(null)}
         busy={reviewing ? decidingId === reviewing.id : false}
-        onSubmit={(id, verdict, feedback) => {
-          setReviewing(null);
-          onReviewDecide?.(id, verdict, feedback);
-        }}
+        onSubmit={(id, verdict, feedback) => onReviewDecide?.(id, verdict, feedback)}
       />
       <WorkRequestReplyDialog
+        key={replying ? `${replying.request.id}:${replying.action}` : "reply:closed"}
         request={replying?.request ?? null}
         action={replying?.action ?? null}
         onClose={() => setReplying(null)}
         busy={replying ? decidingId === replying.request.id : false}
-        onSubmit={(id, action, response) => {
-          setReplying(null);
-          onWorkRequest?.(id, action, response);
-        }}
+        onSubmit={(id, action, response) => onWorkRequest?.(id, action, response)}
       />
     </div>
   );

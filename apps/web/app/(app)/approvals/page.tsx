@@ -8,6 +8,7 @@ import { Inbox } from "lucide-react";
 import { useState } from "react";
 import { PageBody, PageHeader } from "@/components/app-shell";
 import { ApprovalCard } from "@/components/approval-card";
+import { LoadError } from "@/components/company/bits";
 import { Badge, EmptyState, ErrorNote, Spinner, Tabs } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import { useApprovals, useInvalidateApprovals } from "@/lib/hooks";
@@ -65,6 +66,8 @@ export default function ApprovalsPage() {
 
         {approvals.isPending ? (
           <Spinner label="Loading approvals…" />
+        ) : approvals.isError ? (
+          <LoadError what="approvals" onRetry={() => void approvals.refetch()} />
         ) : items.length === 0 ? (
           <EmptyState
             icon={<Inbox size={20} aria-hidden />}

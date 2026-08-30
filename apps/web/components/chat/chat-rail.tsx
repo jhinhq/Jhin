@@ -18,12 +18,10 @@ import { useWorkspace } from "@/lib/workspace-context";
 export function ConversationRailItem({
   conversation,
   selected,
-  now,
   avatar,
 }: {
   conversation: Conversation;
   selected: boolean;
-  now?: Date;
   /** The primary agent's avatar visuals, when known. */
   avatar?: AgentAvatar | null;
 }) {
@@ -44,7 +42,7 @@ export function ConversationRailItem({
           <span className="flex items-baseline justify-between gap-2">
             <span className="truncate text-sm font-medium text-ink">{conversation.title}</span>
             <span className="shrink-0 text-[11px] tabular-nums text-faint">
-              {relativeTime(conversation.last_activity_at, now)}
+              {relativeTime(conversation.last_activity_at)}
             </span>
           </span>
           <span className="block truncate text-xs text-dim">

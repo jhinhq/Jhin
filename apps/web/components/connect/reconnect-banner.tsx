@@ -27,13 +27,9 @@ import type { ConnectionInfo } from "@/lib/types";
 export function ReconnectButton({
   workspaceId,
   connection,
-  size = "sm",
-  label = "Reconnect",
 }: {
   workspaceId: string;
   connection: ConnectionInfo;
-  size?: "sm" | "md";
-  label?: string;
 }) {
   const [leaving, setLeaving] = useState(false);
   const reauthorize = useReauthorizeConnection(workspaceId);
@@ -42,7 +38,7 @@ export function ReconnectButton({
     <span className="inline-flex flex-col items-end gap-1">
       <Button
         type="button"
-        size={size}
+        size="sm"
         variant="primary"
         data-testid={`reconnect-${connection.name}`}
         disabled={reauthorize.isPending || leaving}
@@ -58,7 +54,7 @@ export function ReconnectButton({
         }}
       >
         <RefreshCw size={12} aria-hidden />
-        {reauthorize.isPending || leaving ? "Starting…" : label}
+        {reauthorize.isPending || leaving ? "Starting…" : "Reconnect"}
       </Button>
       {reauthorize.error ? (
         <span role="alert" className="text-right text-xs text-danger">

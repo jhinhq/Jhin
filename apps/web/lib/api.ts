@@ -26,6 +26,12 @@ export class ApiError extends Error {
   }
 }
 
+/** The API's own words when it sent any (an ApiError detail), else the
+ * caller's fallback — the one place this ternary should live. */
+export function errorText(error: unknown, fallback: string): string {
+  return error instanceof ApiError && error.detail ? error.detail : fallback;
+}
+
 function readCookie(name: string): string | null {
   if (typeof document === "undefined") return null;
   for (const part of document.cookie.split("; ")) {

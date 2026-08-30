@@ -565,8 +565,9 @@ the SWE, comment the outcome back on the issue).
 - **Attention** — pending approvals, failed work, and chats waiting on you.
 - **Agents / Company** — a directory with profiles (purpose, colleagues,
   what each agent can use, recent activity) and an org outline/map.
-- **Automations** — a friendly view over triggers; the full builder remains
-  under Advanced.
+- **Automations** — plain-language cards over the workspace's triggers with
+  the full WHEN/IF/THEN builder, dry-run testing, and run history on the
+  same page; the old `/triggers` route permanently redirects here.
 - **Apps** (`/apps`) — the one place connections live: a searchable library of
   well-known apps plus what is already connected, with per-connection
   verification, credential rotation, webhook setup, discovered tools and risk
@@ -656,9 +657,9 @@ bounded fix/retest cycles after a failed verdict. Follow the delegation chain
 and structured results on the task page; tasks waiting for an agent or
 workspace run slot remain visibly queued until capacity is available.
 
-### Triggers — the showcase demo
+### Automations — the showcase demo
 
-The **Triggers page** automates WHEN/IF/THEN: WHEN a connector event arrives
+The **Automations page** automates WHEN/IF/THEN: WHEN a connector event arrives
 (connection + canonical event type), IF the filter conditions match (with a
 "State changes to Todo" preset and a team picker fed by connector metadata),
 THEN a task is created and assigned to an agent. Every trigger can be

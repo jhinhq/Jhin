@@ -15,10 +15,12 @@ import {
   RoleBadge,
   ScopeTree,
 } from "@/components/access";
+import { LoadError } from "@/components/company/bits";
 import {
   Badge,
   Button,
   Card,
+  ConfirmDialog,
   Dialog,
   EmptyState,
   ErrorNote,
@@ -51,6 +53,7 @@ export default function ApiKeysPage() {
   const workspaceId = workspace.workspace_id;
   const keys = useApiKeys(workspaceId);
   const [createOpen, setCreateOpen] = useState(false);
+  const [confirmRevoke, setConfirmRevoke] = useState<ApiKeyInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const revoke = useMutation({
@@ -58,9 +61,13 @@ export default function ApiKeysPage() {
       api<void>(`/api/v1/workspaces/${workspaceId}/api-keys/${id}`, { method: "DELETE" }),
     onSuccess: () => {
       setError(null);
+      setConfirmRevoke(null);
       void keys.refetch();
     },
-    onError: (cause) => setError(errorText(cause, "That key could not be revoked.")),
+    onError: (cause) => {
+      setError(errorText(cause, "That key could not be revoked."));
+      setConfirmRevoke(null);
+    },
   });
 
   const rows = keys.data ?? [];
@@ -95,6 +102,8 @@ export default function ApiKeysPage() {
           <ErrorNote message={error} />
           {keys.isPending ? (
             <Spinner />
+          ) : keys.isError ? (
+            <LoadError what="API keys" onRetry={() => void keys.refetch()} />
           ) : rows.length === 0 ? (
             <EmptyState
               icon={<KeyRound size={20} aria-hidden />}
@@ -113,15 +122,7 @@ export default function ApiKeysPage() {
                   key={key.id}
                   apiKey={key}
                   canRevoke={key.created_by_user_id === user.id || can("admin")}
-                  onRevoke={() => {
-                    if (
-                      window.confirm(
-                        `Revoke “${key.name}”? Anything still using it stops working immediately.`,
-                      )
-                    ) {
-                      revoke.mutate(key.id);
-                    }
-                  }}
+                  onRevoke={() => setConfirmRevoke(key)}
                 />
               ))}
             </ul>
@@ -139,6 +140,18 @@ export default function ApiKeysPage() {
         onClose={() => setCreateOpen(false)}
         onCreated={() => void keys.refetch()}
       />
+
+      {confirmRevoke ? (
+        <ConfirmDialog
+          open
+          title={`Revoke “${confirmRevoke.name}”?`}
+          body="Anything still using it stops working immediately."
+          confirmLabel="Revoke"
+          busy={revoke.isPending}
+          onConfirm={() => revoke.mutate(confirmRevoke.id)}
+          onClose={() => setConfirmRevoke(null)}
+        />
+      ) : null}
     </>
   );
 }
@@ -432,6 +445,8 @@ function UsageLog({
 
       {usage.isPending ? (
         <Spinner />
+      ) : usage.isError ? (
+        <LoadError what="recent calls" onRetry={() => void usage.refetch()} />
       ) : items.length === 0 ? (
         <EmptyState
           title="Nothing yet"

@@ -30,7 +30,7 @@ import {
 import { Chip, Disclosure, LoadError, SectionCard, StatusPill, Tabs } from "@/components/company/bits";
 import { useWorkingAgentIds } from "@/components/company/use-working";
 import { AgentDrawer } from "@/components/org/agent-drawer";
-import { Button, Dialog, ErrorNote, Spinner } from "@/components/ui";
+import { Button, ButtonLink, Dialog, ErrorNote, Spinner } from "@/components/ui";
 import { useSegmentAfter } from "@/lib/use-route-segment";
 import { api, ApiError } from "@/lib/api";
 import { timeAgo } from "@/lib/activity";
@@ -174,6 +174,9 @@ function AgentProfileView() {
   const reports = nodes.filter((node) => node.manager_agent_id === agentId);
   const isManager = reports.length > 0;
   const visibleTabs = isManager ? TABS : TABS.filter((entry) => entry.id !== "team");
+  // A deep link like ?tab=team can name a tab this profile doesn't show;
+  // fall back to About instead of rendering a blank panel.
+  const effectiveTab: TabId = visibleTabs.some((entry) => entry.id === tab) ? tab : "about";
 
   if (agentQuery.isPending) {
     return (
@@ -242,13 +245,9 @@ function AgentProfileView() {
               {purpose ? <p className="mt-3 max-w-2xl text-sm text-ink/90">{purpose}</p> : null}
             </div>
             <div className="flex shrink-0 flex-wrap gap-2 sm:flex-col">
-              <Link
-                href={chatHref(agent.id)}
-                className="inline-flex h-10 items-center justify-center gap-1.5 rounded-xl px-4 text-sm font-semibold text-white transition-transform hover:-translate-y-px"
-                style={{ background: "linear-gradient(120deg, var(--accent), var(--accent-2, var(--accent)))" }}
-              >
+              <ButtonLink href={chatHref(agent.id)} variant="primary">
                 <MessageSquare size={15} /> Chat
-              </Link>
+              </ButtonLink>
               {isAdmin ? (
                 <>
                   <Button onClick={() => setEditing(true)}>
@@ -286,9 +285,9 @@ function AgentProfileView() {
           <ErrorNote message={actionError} />
         </section>
 
-        <Tabs tabs={visibleTabs} value={tab} onChange={setTab} label="Profile sections" />
+        <Tabs tabs={visibleTabs} value={effectiveTab} onChange={setTab} label="Profile sections" />
 
-        {tab === "about" ? (
+        {effectiveTab === "about" ? (
           <div className="grid gap-4 lg:grid-cols-3">
             <SectionCard title="Purpose" className="lg:col-span-2">
               {purpose ? (
@@ -345,7 +344,7 @@ function AgentProfileView() {
           </div>
         ) : null}
 
-        {tab === "colleagues" ? (
+        {effectiveTab === "colleagues" ? (
           <div className="grid gap-4 lg:grid-cols-2">
             <SectionCard title="Reporting line">
               {graph.isPending ? (
@@ -402,11 +401,11 @@ function AgentProfileView() {
           </div>
         ) : null}
 
-        {tab === "team" && isManager ? (
+        {effectiveTab === "team" ? (
           <TeamStatus workspaceId={workspaceId} agentId={agent.id} avatars={avatars} showAdvanced={isAdmin} />
         ) : null}
 
-        {tab === "memory" ? (
+        {effectiveTab === "memory" ? (
           <MemoryPanel
             workspaceId={workspaceId}
             agent={agent}
@@ -416,13 +415,13 @@ function AgentProfileView() {
           />
         ) : null}
 
-        {tab === "skills" ? (
+        {effectiveTab === "skills" ? (
           <SkillsPanel workspaceId={workspaceId} agentId={agent.id} isAdmin={isAdmin} />
         ) : null}
 
-        {tab === "access" ? <AccessSection workspaceId={workspaceId} agentId={agent.id} isAdmin={isAdmin} /> : null}
+        {effectiveTab === "access" ? <AccessSection workspaceId={workspaceId} agentId={agent.id} isAdmin={isAdmin} /> : null}
 
-        {tab === "activity" ? (
+        {effectiveTab === "activity" ? (
           <SectionCard title="Recent activity" description="What this agent has been doing and who it worked with.">
             <ActivityFeed
               workspaceId={workspaceId}
@@ -433,7 +432,7 @@ function AgentProfileView() {
           </SectionCard>
         ) : null}
 
-        {tab === "chats" ? <ChatsSection workspaceId={workspaceId} agent={agent} /> : null}
+        {effectiveTab === "chats" ? <ChatsSection workspaceId={workspaceId} agent={agent} /> : null}
       </div>
 
       <AvatarDialog workspaceId={workspaceId} agent={agent} open={changingAvatar} onClose={() => setChangingAvatar(false)} />

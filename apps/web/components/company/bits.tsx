@@ -4,8 +4,9 @@
  * color dot, section cards, chips, and a simple tab strip. */
 
 import Link from "next/link";
-import { useId, useState } from "react";
+import { useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { StatusText, StatusTone } from "@/components/company/agent-helpers";
+import { focusRing, rovingIndex } from "@/components/ui";
 
 const DOT_TONES: Record<StatusTone, string> = {
   ok: "bg-ok",
@@ -117,6 +118,9 @@ export function Disclosure({
   );
 }
 
+/** Underline-style tab strip with the same roving-tabindex keyboard behavior
+ * as the pill Tabs in components/ui.tsx: arrows, Home, and End move selection,
+ * and only the active tab sits in the tab order. */
 export function Tabs<T extends string>({
   tabs,
   value,
@@ -128,6 +132,22 @@ export function Tabs<T extends string>({
   onChange: (id: T) => void;
   label: string;
 }) {
+  const refs = useRef<Map<T, HTMLButtonElement>>(new Map());
+
+  const focusTab = (id: T) => {
+    refs.current.get(id)?.focus();
+    onChange(id);
+  };
+
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>, id: T) => {
+    const index = tabs.findIndex((tab) => tab.id === id);
+    if (index === -1 || tabs.length === 0) return;
+    const next = rovingIndex(event.key, index, tabs.length);
+    if (next === null) return;
+    event.preventDefault();
+    focusTab(tabs[next].id);
+  };
+
   return (
     <div role="tablist" aria-label={label} className="flex gap-1 overflow-x-auto border-b border-line">
       {tabs.map((tab) => {
@@ -135,10 +155,17 @@ export function Tabs<T extends string>({
         return (
           <button
             key={tab.id}
+            ref={(node) => {
+              if (node) refs.current.set(tab.id, node);
+              else refs.current.delete(tab.id);
+            }}
+            type="button"
             role="tab"
             aria-selected={active}
+            tabIndex={active ? 0 : -1}
             onClick={() => onChange(tab.id)}
-            className={`flex h-10 shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-3 text-sm transition-colors ${
+            onKeyDown={(event) => onKeyDown(event, tab.id)}
+            className={`flex h-10 shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-3 text-sm transition-colors ${focusRing} ${
               active ? "border-accent font-medium text-ink" : "border-transparent text-dim hover:text-ink"
             }`}
           >

@@ -26,6 +26,7 @@ import { Disclosure } from "@/components/company/bits";
 import {
   Badge,
   Button,
+  ConfirmDialog,
   Dialog,
   ErrorNote,
   Field,
@@ -71,17 +72,6 @@ export function impactSentence(impact: ConnectionDeleteImpact | undefined): stri
   }
   const runs = plural(impact.trigger_invocation_count, "recorded run", "recorded runs");
   return `Deleting also removes ${automations} built on this app, and their ${runs}.`;
-}
-
-export function deletePrompt(name: string, impact: ConnectionDeleteImpact | undefined): string {
-  const extra = impactSentence(impact);
-  return [
-    `Delete connection “${name}”? Grants that reference it stop working.`,
-    extra,
-    "This cannot be undone.",
-  ]
-    .filter(Boolean)
-    .join(" ");
 }
 
 export function statusTone(status: string): "ok" | "danger" | "neutral" | "warn" {
@@ -244,6 +234,7 @@ export function ConnectionDetailDialog({
   const [rotateCredentials, setRotateCredentials] = useState<Record<string, string>>({});
   const [webhookSecret, setWebhookSecret] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   const scheme = findAuthScheme(connector, connection.auth_type);
   const origin = typeof window === "undefined" ? "" : window.location.origin;
@@ -289,6 +280,9 @@ export function ConnectionDetailDialog({
     mutationFn: () => api<void>(base, { method: "DELETE" }),
     onSuccess: onRemoved,
     onError: (err) => setError(errText(err, "Deleting the connection failed.")),
+    // Close the confirm either way so the error note is readable, not stuck
+    // behind the confirm's backdrop.
+    onSettled: () => setConfirmingDelete(false),
   });
 
   const storeWebhookSecret = useMutation({
@@ -560,11 +554,7 @@ export function ConnectionDetailDialog({
                     variant="danger"
                     className="ml-auto"
                     disabled={remove.isPending}
-                    onClick={() => {
-                      if (window.confirm(deletePrompt(connection.name, accessSummary.data?.delete_impact))) {
-                        remove.mutate();
-                      }
-                    }}
+                    onClick={() => setConfirmingDelete(true)}
                   >
                     <Trash2 size={13} /> Delete
                   </Button>
@@ -592,6 +582,23 @@ export function ConnectionDetailDialog({
           </Button>
         </footer>
       </div>
+      {confirmingDelete ? (
+        <ConfirmDialog
+          open
+          title={`Delete “${connection.name}”?`}
+          body={[
+            "Grants that reference it stop working.",
+            impactSentence(accessSummary.data?.delete_impact),
+            "This cannot be undone.",
+          ]
+            .filter(Boolean)
+            .join(" ")}
+          confirmLabel="Delete connection"
+          busy={remove.isPending}
+          onConfirm={() => remove.mutate()}
+          onClose={() => setConfirmingDelete(false)}
+        />
+      ) : null}
     </Dialog>
   );
 }

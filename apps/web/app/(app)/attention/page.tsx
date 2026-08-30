@@ -6,7 +6,7 @@
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { PageHeader } from "@/components/app-shell";
+import { PageBody, PageHeader } from "@/components/app-shell";
 import { AttentionInbox, type WorkRequestAction } from "@/components/company/attention-inbox";
 import { LoadError } from "@/components/company/bits";
 import { ErrorNote, Spinner } from "@/components/ui";
@@ -163,13 +163,24 @@ export default function AttentionPage() {
         title="Attention"
         description={total > 0 ? `${total} ${total === 1 ? "thing needs" : "things need"} you` : "Things that need a human"}
       />
-      <div className="mx-auto max-w-3xl space-y-4 px-4 py-5 sm:px-8 sm:py-6">
+      <PageBody narrow className="space-y-4">
         <ErrorNote message={error} />
+        {/* The main inbox never waits on, or is replaced because of, the two
+            secondary feeds: they poll, most users have zero items in them, and
+            one failed poll must not blank a loaded page of approvals. They get
+            inline notices below instead. */}
         {attention.isPending ? (
           <Spinner label="Checking what needs you…" />
         ) : attention.isError || !attention.data ? (
           <LoadError what="your inbox" onRetry={() => void attention.refetch()} />
         ) : (
+          <>
+          {workRequests.isError && !workRequests.data ? (
+            <LoadError what="help requests" onRetry={() => void workRequests.refetch()} />
+          ) : null}
+          {isAdmin && proposed.isError && !proposed.data ? (
+            <LoadError what="memories waiting for approval" onRetry={() => void proposed.refetch()} />
+          ) : null}
           <AttentionInbox
             data={attention.data}
             canDecide={can("member")}
@@ -177,16 +188,17 @@ export default function AttentionPage() {
             decidingId={busyId}
             avatars={avatars}
             onDecide={(id, decision) => decide.mutate({ id, decision })}
-            onReviewDecide={(id, verdict, feedback) => decideReview.mutate({ id, verdict, feedback })}
+            onReviewDecide={(id, verdict, feedback) => decideReview.mutateAsync({ id, verdict, feedback })}
             onDismissFailure={(id) => dismissFailure.mutate({ id })}
             onDismissAllFailures={() => dismissAllFailures.mutate()}
             workRequests={pendingRequests}
-            onWorkRequest={(id, action, response) => answerRequest.mutate({ id, action, response })}
+            onWorkRequest={(id, action, response) => answerRequest.mutateAsync({ id, action, response })}
             proposedMemories={proposedMemories}
             onMemoryDecide={(id, decision) => decideMemory.mutate({ id, decision })}
           />
+          </>
         )}
-      </div>
+      </PageBody>
     </>
   );
 }

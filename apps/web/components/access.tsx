@@ -45,22 +45,17 @@ export function RoleSelect({
   value,
   onChange,
   maxRole,
-  label = "Role",
-  disabled = false,
 }: {
   value: WorkspaceRole;
   onChange: (role: WorkspaceRole) => void;
   maxRole: WorkspaceRole;
-  label?: string;
-  disabled?: boolean;
 }) {
   const ceiling = ROLE_ORDER.indexOf(maxRole);
   const options = ROLE_ORDER.filter((role) => ROLE_ORDER.indexOf(role) <= ceiling);
   return (
-    <Field label={label} hint={ROLE_COPY[value].blurb}>
+    <Field label="Role" hint={ROLE_COPY[value].blurb}>
       <Select
         value={value}
-        disabled={disabled}
         onChange={(event) => onChange(event.target.value as WorkspaceRole)}
       >
         {options.map((role) => (

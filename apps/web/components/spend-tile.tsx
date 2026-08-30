@@ -48,11 +48,15 @@ export function SpendTile({
     <section
       data-testid="spend-tile"
       aria-label="Spend"
-      className={`flex flex-col gap-2 md:flex-row md:items-start md:gap-6 ${
-        bare ? "" : "rounded-2xl border border-line bg-surface px-5 py-4 shadow-card"
+      className={`flex flex-col gap-2 ${
+        bare
+          ? // Home renders this inside a narrow rail card: stay stacked, or the
+            // budget note ends up wrapping one word per line beside the total.
+            ""
+          : "rounded-2xl border border-line bg-surface px-5 py-4 shadow-card md:flex-row md:items-start md:gap-6"
       }`}
     >
-      <div className="md:w-64 md:shrink-0">
+      <div className={bare ? "" : "md:w-64 md:shrink-0"}>
         <p className="whitespace-nowrap text-xs font-medium uppercase tracking-wider text-faint">Spend this month</p>
         <p className="font-display text-2xl font-semibold tabular-nums text-ink">
           {formatMicrosAsDollars(spend.spent_month_micros)}

@@ -7,7 +7,7 @@ import { Sparkles } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useMemo, useRef, useState } from "react";
 import { AgentPicker } from "@/components/chat/agent-picker";
-import { Composer } from "@/components/chat/composer";
+import { Composer, type ComposerHandle } from "@/components/chat/composer";
 import { FirstRunSteps } from "@/components/first-run-steps";
 import { LogoMark } from "@/components/brand/logo-mark";
 import { EmptyState, ErrorNote, Spinner } from "@/components/ui";
@@ -50,6 +50,7 @@ function ChatsHome() {
     textRef.current = value;
     setText(value);
   }, []);
+  const composerRef = useRef<ComposerHandle>(null);
   const [chosenAgentId, setChosenAgentId] = useState<string | null>(null);
   const [rememberedId] = useState<string | null>(() =>
     typeof window === "undefined" ? null : readLastAgent(),
@@ -109,7 +110,9 @@ function ChatsHome() {
   const canStart = can("member");
 
   return (
-    <main className="min-h-0 flex-1 overflow-y-auto">
+    // AppShell already renders the page's <main id="main">; this is a plain
+    // scroll container inside it.
+    <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col justify-center px-5 py-10 sm:px-8">
         <div className="mb-8 flex flex-col items-center gap-3 text-center">
           <LogoMark className="h-12 w-auto" />
@@ -142,6 +145,7 @@ function ChatsHome() {
         ) : (
           <div className="space-y-6">
             <Composer
+              ref={composerRef}
               variant="large"
               autoFocus
               value={text}
@@ -179,28 +183,33 @@ function ChatsHome() {
               />
             </section>
 
-            <section className="space-y-2">
-              <h2 className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-faint">
-                <Sparkles size={12} aria-hidden /> Try asking
-              </h2>
-              <ul className="grid gap-2 sm:grid-cols-2">
-                {STARTER_PROMPTS.map((prompt) => (
-                  <li key={prompt}>
-                    <button
-                      type="button"
-                      onClick={() => setText(prompt)}
-                      className="min-h-[44px] w-full rounded-xl border border-line bg-surface px-3.5 py-2.5 text-left text-sm text-dim transition-colors hover:border-line-strong hover:bg-hover hover:text-ink"
-                    >
-                      {prompt}
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </section>
+            {canStart ? (
+              <section className="space-y-2">
+                <h2 className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-faint">
+                  <Sparkles size={12} aria-hidden /> Try asking
+                </h2>
+                <ul className="grid gap-2 sm:grid-cols-2">
+                  {STARTER_PROMPTS.map((prompt) => (
+                    <li key={prompt}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          changeText(prompt);
+                          composerRef.current?.focus();
+                        }}
+                        className="min-h-[44px] w-full rounded-xl border border-line bg-surface px-3.5 py-2.5 text-left text-sm text-dim transition-colors hover:border-line-strong hover:bg-hover hover:text-ink"
+                      >
+                        {prompt}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ) : null}
           </div>
         )}
       </div>
-    </main>
+    </div>
   );
 }
 

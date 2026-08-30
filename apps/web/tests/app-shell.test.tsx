@@ -62,6 +62,8 @@ describe("SidebarNav", () => {
       "Attention",
       "Automations",
       "Apps",
+      "Models",
+      "Skills",
     ]) {
       expect(within(nav).getByRole("link", { name: new RegExp(label) })).toBeTruthy();
     }
@@ -94,15 +96,16 @@ describe("SidebarNav", () => {
       "Work queue",
       "Runs",
       "Approvals",
-      "Triggers",
-      "Models",
       "Audit",
       "Settings",
     ]) {
       expect(screen.getByRole("link", { name: label })).toBeTruthy();
     }
-    // Connectors merged into Apps; the redundant index link is gone.
+    // Connectors merged into Apps; Triggers merged into Automations; Models
+    // was promoted to the primary group; the redundant index link is gone.
     expect(screen.queryByRole("link", { name: "Connectors" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Triggers" })).toBeNull();
+    expect(within(screen.getByRole("navigation", { name: "Main" }).querySelector("#advanced-nav") as HTMLElement).queryByRole("link", { name: "Models" })).toBeNull();
     expect(screen.queryByRole("link", { name: "All advanced tools" })).toBeNull();
     expect(screen.getByRole("link", { name: "Runs" }).getAttribute("aria-current")).toBe("page");
 

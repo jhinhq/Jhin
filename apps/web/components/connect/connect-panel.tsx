@@ -33,7 +33,6 @@ import {
 } from "@/components/connection-create-dialog";
 import { errText } from "@/components/connection-detail";
 import { Button, Dialog, ErrorNote, Field, Input, Spinner } from "@/components/ui";
-import type { ConfigSchema } from "@/lib/config-schema";
 import {
   useGitHubAppManifest,
   useOAuthDeviceStart,
@@ -46,13 +45,10 @@ import type {
   ConnectionCreated,
   ConnectionInfo,
   ConnectorInfo,
-  OAuthConnectMethod,
   OAuthDeviceStartOut,
   OAuthProbeOut,
 } from "@/lib/types";
 import { useWorkspace } from "@/lib/workspace-context";
-
-export type ConnectMethod = OAuthConnectMethod;
 
 export type ConnectState =
   | { kind: "probing" }
@@ -195,7 +191,6 @@ export function ConnectPanel({
   workspaceId,
   connector,
   prefill,
-  schema,
   onClose,
   onConnected,
   onCreated,
@@ -203,8 +198,6 @@ export function ConnectPanel({
   workspaceId: string;
   connector: ConnectorInfo;
   prefill?: ConnectionPrefill;
-  /** The server's render contract for a catalog entry, when there is one. */
-  schema?: ConfigSchema | null;
   onClose: () => void;
   onConnected: (connection: ConnectionInfo) => void;
   /**
@@ -337,7 +330,6 @@ export function ConnectPanel({
         workspaceId={workspaceId}
         connector={connector}
         prefill={prefill}
-        schema={schema}
         note={
           oauthAvailable
             ? `${appName} supports connecting without a key. An API key you paste here is stored encrypted, but it does not expire and cannot be narrowed to the permissions Jhin needs.`

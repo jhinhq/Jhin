@@ -80,12 +80,6 @@ const ICONS: Record<string, LucideIcon> = {
   flask: FlaskConical,
 };
 
-/** The bare glyph, for the places that want an icon without the tile. */
-export function AppIcon({ icon, size = 18 }: { icon: string; size?: number }) {
-  const Icon = ICONS[icon] ?? Plug;
-  return <Icon size={size} aria-hidden />;
-}
-
 const TILE_SIZES: Record<36 | 40 | 48, string> = {
   36: "h-9 w-9",
   40: "h-10 w-10",
@@ -103,13 +97,11 @@ export function LogoTile({
   icon,
   logoUrl,
   size = 40,
-  className = "",
 }: {
   name: string;
   icon?: string | null;
   logoUrl?: string | null;
   size?: 36 | 40 | 48;
-  className?: string;
 }) {
   // Remember which URL failed rather than a bare flag, so a re-render with a
   // different logo gets a fresh attempt instead of inheriting the old failure.
@@ -147,7 +139,7 @@ export function LogoTile({
 
   return (
     <span
-      className={`flex shrink-0 items-center justify-center overflow-hidden rounded-xl bg-accent-soft text-accent-strong ${TILE_SIZES[size]} ${className}`}
+      className={`flex shrink-0 items-center justify-center overflow-hidden rounded-xl bg-accent-soft text-accent-strong ${TILE_SIZES[size]}`}
     >
       {content}
     </span>

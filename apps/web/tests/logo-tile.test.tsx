@@ -5,7 +5,7 @@
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
-import { AppIcon, LogoTile } from "@/components/catalog/logo-tile";
+import { LogoTile } from "@/components/catalog/logo-tile";
 
 afterEach(cleanup);
 
@@ -57,15 +57,5 @@ describe("LogoTile", () => {
     expect(container.firstElementChild?.className).toContain("h-10 w-10");
     rerender(<LogoTile name="X" size={48} />);
     expect(container.firstElementChild?.className).toContain("h-12 w-12");
-  });
-});
-
-describe("AppIcon", () => {
-  it("still resolves the curated icon names, with the plug as default", () => {
-    const { container } = render(<AppIcon icon="github" />);
-    expect(container.querySelector("svg")).not.toBeNull();
-    cleanup();
-    const fallback = render(<AppIcon icon="no-such-glyph" />);
-    expect(fallback.container.querySelector("svg")).not.toBeNull();
   });
 });

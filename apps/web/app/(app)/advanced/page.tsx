@@ -46,9 +46,9 @@ export default function AdvancedIndexPage() {
           })}
         </ul>
         <p className="mt-8 max-w-2xl text-sm text-faint">
-          Tip: the friendlier versions of most of these live in the main navigation. Automations
-          wraps Triggers, Attention gathers approvals and failures in one place, and connecting or
-          reconfiguring an outside service now happens entirely under Apps.
+          Tip: everyday setup lives in the main navigation — Automations, Apps, Models, and
+          Skills are all there. Attention gathers approvals and failures in one place; the
+          screens here are the raw machinery behind those views.
         </p>
       </PageBody>
     </>

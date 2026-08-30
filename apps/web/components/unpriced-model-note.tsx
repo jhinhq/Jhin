@@ -26,7 +26,6 @@ export interface UnpricedModelNoteProps {
   /** Omitted for viewers: the fields only appear for admins who can save. */
   onSave?: (input: number | null, output: number | null) => void;
   saving?: boolean;
-  compact?: boolean;
 }
 
 export function UnpricedModelNote({
@@ -36,7 +35,6 @@ export function UnpricedModelNote({
   runs = 0,
   onSave,
   saving = false,
-  compact = false,
 }: UnpricedModelNoteProps) {
   const [input, setInput] = useState("");
   const [output, setOutput] = useState("");
@@ -72,7 +70,7 @@ export function UnpricedModelNote({
           </a>
         </p>
       ) : null}
-      {onSave && !compact ? (
+      {onSave ? (
         <div className="mt-2 flex flex-wrap items-end gap-2">
           <Field label="Input $ / 1M">
             <Input

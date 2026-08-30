@@ -5,6 +5,7 @@
  * and keyboard accessible. */
 
 import { Moon, Sun, X } from "lucide-react";
+import Link from "next/link";
 import {
   useCallback,
   useEffect,
@@ -44,6 +45,27 @@ export function Button({
   return (
     <button
       className={`inline-flex shrink-0 items-center justify-center gap-1.5 rounded-xl font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${focusRing} ${sizing} ${buttonStyles[variant]} ${className}`}
+      {...props}
+    />
+  );
+}
+
+/** A navigation link dressed exactly like Button. Use this instead of
+ * wrapping a Button in a Link: a button inside an anchor is invalid HTML and
+ * hands keyboard and screen-reader users two nested stops for one control. */
+export function ButtonLink({
+  variant = "outline",
+  size = "md",
+  className = "",
+  ...props
+}: React.ComponentProps<typeof Link> & {
+  variant?: ButtonVariant;
+  size?: "sm" | "md";
+}) {
+  const sizing = size === "sm" ? "h-8 px-3 text-[13px]" : "h-10 px-4 text-sm";
+  return (
+    <Link
+      className={`inline-flex shrink-0 items-center justify-center gap-1.5 rounded-xl font-medium transition-colors ${focusRing} ${sizing} ${buttonStyles[variant]} ${className}`}
       {...props}
     />
   );
@@ -164,15 +186,13 @@ const badgeTones: Record<BadgeTone, string> = {
 export function Badge({
   tone = "neutral",
   children,
-  className = "",
 }: {
   tone?: BadgeTone;
   children: React.ReactNode;
-  className?: string;
 }) {
   return (
     <span
-      className={`inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-2.5 py-0.5 text-xs font-medium ${badgeTones[tone]} ${className}`}
+      className={`inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-2.5 py-0.5 text-xs font-medium ${badgeTones[tone]}`}
     >
       {children}
     </span>
@@ -198,23 +218,15 @@ const dotTones: Record<BadgeTone, string> = {
 export function StatusLabel({
   tone = "neutral",
   children,
-  pulse = false,
   className = "",
 }: {
   tone?: BadgeTone;
   children: React.ReactNode;
-  pulse?: boolean;
   className?: string;
 }) {
   return (
     <span className={`inline-flex items-center gap-2 text-sm text-ink ${className}`}>
       <span className="relative inline-flex h-2 w-2 shrink-0">
-        {pulse ? (
-          <span
-            aria-hidden
-            className={`absolute inset-0 animate-ping rounded-full opacity-60 ${dotTones[tone]}`}
-          />
-        ) : null}
         <span aria-hidden className={`relative inline-block h-2 w-2 rounded-full ${dotTones[tone]}`} />
       </span>
       {children}
@@ -228,18 +240,16 @@ export function StatusLabel({
 
 export function Card({
   as: Tag = "div",
-  padded = true,
   className = "",
   children,
   ...props
 }: React.HTMLAttributes<HTMLElement> & {
   as?: "div" | "section" | "article" | "li";
-  padded?: boolean;
   children: React.ReactNode;
 }) {
   return (
     <Tag
-      className={`rounded-2xl border border-line bg-surface shadow-card ${padded ? "p-5" : ""} ${className}`}
+      className={`rounded-2xl border border-line bg-surface shadow-card p-5 ${className}`}
       {...props}
     >
       {children}
@@ -255,6 +265,17 @@ export interface TabItem {
   id: string;
   label: React.ReactNode;
   disabled?: boolean;
+}
+
+/** Shared roving-tabindex arithmetic: the index a key press moves to, or null
+ * when the key is not part of the pattern. Used by both Tabs implementations
+ * and the model-picker radio group so the keyboard contract lives once. */
+export function rovingIndex(key: string, index: number, length: number): number | null {
+  if (key === "ArrowRight" || key === "ArrowDown") return (index + 1) % length;
+  if (key === "ArrowLeft" || key === "ArrowUp") return (index - 1 + length) % length;
+  if (key === "Home") return 0;
+  if (key === "End") return length - 1;
+  return null;
 }
 
 /** Roving-tabindex tab list. Selection follows focus (arrow keys, Home, End);
@@ -285,16 +306,7 @@ export function Tabs({
   const onKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>, id: string) => {
     const index = enabled.findIndex((tab) => tab.id === id);
     if (index === -1 || enabled.length === 0) return;
-    let next: number | null = null;
-    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
-      next = (index + 1) % enabled.length;
-    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
-      next = (index - 1 + enabled.length) % enabled.length;
-    } else if (event.key === "Home") {
-      next = 0;
-    } else if (event.key === "End") {
-      next = enabled.length - 1;
-    }
+    const next = rovingIndex(event.key, index, enabled.length);
     if (next === null) return;
     event.preventDefault();
     focusTab(enabled[next].id);
@@ -565,10 +577,8 @@ function useIsDark(): boolean {
 /** Sun/moon toggle. Reads the `.dark` class and persists the choice to
  * localStorage["jhin-theme"]. */
 export function ThemeToggle({
-  className = "",
   showLabel = false,
 }: {
-  className?: string;
   showLabel?: boolean;
 }) {
   const dark = useIsDark();
@@ -592,7 +602,7 @@ export function ThemeToggle({
       aria-pressed={dark}
       title={label}
       data-theme={dark ? "dark" : "light"}
-      className={`inline-flex h-10 items-center justify-center gap-2 rounded-xl border border-line text-ink transition-colors hover:border-accent hover:bg-hover ${showLabel ? "px-3" : "w-10"} ${focusRing} ${className}`}
+      className={`inline-flex h-10 items-center justify-center gap-2 rounded-xl border border-line text-ink transition-colors hover:border-accent hover:bg-hover ${showLabel ? "px-3" : "w-10"} ${focusRing}`}
     >
       {dark ? <Moon size={16} strokeWidth={1.8} /> : <Sun size={16} strokeWidth={1.8} />}
       {showLabel ? (

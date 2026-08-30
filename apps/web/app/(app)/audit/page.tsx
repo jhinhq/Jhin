@@ -4,6 +4,7 @@
 
 import { useState } from "react";
 import { PageBody, PageHeader } from "@/components/app-shell";
+import { LoadError } from "@/components/company/bits";
 import { Badge, Button, EmptyState, Field, Input, Select, Spinner } from "@/components/ui";
 import { formatDateTime, shortId } from "@/lib/format";
 import { useAuditEvents } from "@/lib/hooks";
@@ -135,6 +136,8 @@ export default function AuditPage() {
 
         {query.isPending ? (
           <Spinner label="Loading audit log…" />
+        ) : query.isError ? (
+          <LoadError what="the audit log" onRetry={() => void query.refetch()} />
         ) : page && page.events.length > 0 ? (
           <>
             <div className="overflow-x-auto rounded-2xl border border-line bg-surface shadow-card">

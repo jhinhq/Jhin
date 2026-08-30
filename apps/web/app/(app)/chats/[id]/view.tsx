@@ -3,14 +3,13 @@
 /** One chat thread: header, transcript, composer, and the Details panel. */
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChatHeader } from "@/components/chat/chat-header";
 import { Composer, type ComposerHandle } from "@/components/chat/composer";
 import { ContextPanel } from "@/components/chat/context-panel";
 import { ChatQuickControls } from "@/components/chat/quick-controls";
 import { Transcript } from "@/components/chat/transcript";
-import { Button, Dialog, ErrorNote, Spinner } from "@/components/ui";
+import { ButtonLink, ConfirmDialog, Dialog, ErrorNote, Spinner } from "@/components/ui";
 import { useSegmentAfter } from "@/lib/use-route-segment";
 import { api, ApiError } from "@/lib/api";
 import {
@@ -246,6 +245,10 @@ export default function ChatThreadPage() {
     },
     onError: (error) =>
       setActionError(describeError(error, "Couldn't change the work status. Try again.")),
+    // The stop confirmation stays open (frozen via `busy`) until the request
+    // settles; closing on error too keeps the note above the transcript
+    // visible. A no-op for pause/resume, where it is already closed.
+    onSettled: () => setConfirmStop(false),
   });
 
   if (detail.isPending) {
@@ -265,9 +268,7 @@ export default function ChatThreadPage() {
             ? "This chat doesn't exist or was removed."
             : `Couldn't open this chat${detail.error instanceof ApiError ? `: ${detail.error.detail}` : "."}`}
         </p>
-        <Link href="/chats">
-          <Button>Back to chats</Button>
-        </Link>
+        <ButtonLink href="/chats">Back to chats</ButtonLink>
       </div>
     );
   }
@@ -387,24 +388,20 @@ export default function ChatThreadPage() {
         </Dialog>
       ) : null}
 
-      <Dialog title={`Stop ${agentName}?`} open={confirmStop} onClose={() => setConfirmStop(false)}>
-        <p className="text-sm text-dim">
-          It&apos;ll finish the current step, then stop. You can always send a new message to start
-          again.
-        </p>
-        <div className="mt-4 flex justify-end gap-2">
-          <Button onClick={() => setConfirmStop(false)}>Keep going</Button>
-          <Button
-            variant="danger"
-            onClick={() => {
-              setConfirmStop(false);
-              if (activeTaskId) taskAction.mutate({ taskId: activeTaskId, action: "cancel" });
-            }}
-          >
-            Stop {agentName}
-          </Button>
-        </div>
-      </Dialog>
+      <ConfirmDialog
+        open={confirmStop}
+        title={`Stop ${agentName}?`}
+        body="It'll finish the current step, then stop. You can always send a new message to start again."
+        confirmLabel={`Stop ${agentName}`}
+        cancelLabel="Keep going"
+        tone="danger"
+        busy={taskAction.isPending}
+        onConfirm={() => {
+          if (activeTaskId) taskAction.mutate({ taskId: activeTaskId, action: "cancel" });
+          else setConfirmStop(false);
+        }}
+        onClose={() => setConfirmStop(false)}
+      />
     </div>
   );
 }

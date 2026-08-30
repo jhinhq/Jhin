@@ -61,8 +61,10 @@ describe("summarySentence", () => {
       { name: "Senior Software Engineer" } as Agent,
       { name: "Linear (fake)" } as ConnectionInfo,
     );
+    // The same friendly wording the automation cards use — never the raw
+    // canonical event string.
     expect(sentence).toBe(
-      "When a connector.linear.issue.updated event arrives from Linear (fake) where " +
+      "When a Linear issue changes via Linear (fake) where " +
         "team.key equals “ENG” and state changes to “Todo”, assign a task to " +
         "Senior Software Engineer.",
     );
@@ -70,7 +72,7 @@ describe("summarySentence", () => {
 
   it("falls back gracefully when nothing is selected", () => {
     expect(summarySentence("", [], undefined, undefined)).toBe(
-      "When a … event arrives from any connection, assign a task.",
+      "When anything happens, assign a task.",
     );
   });
 });

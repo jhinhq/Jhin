@@ -6,8 +6,7 @@
  * add the optional "connect an app" step; the Chats empty state does not. */
 
 import { CheckCircle2, Circle } from "lucide-react";
-import Link from "next/link";
-import { Button } from "@/components/ui";
+import { ButtonLink } from "@/components/ui";
 import { useAgents, useConnections, useConversations, useModelProfiles } from "@/lib/hooks";
 
 export interface SetupStatus {
@@ -137,9 +136,9 @@ export function FirstRunSteps({
         })}
       </ol>
       <div className="flex justify-center">
-        <Link href={current.href}>
-          <Button variant="primary">{current.cta}</Button>
-        </Link>
+        <ButtonLink href={current.href} variant="primary">
+          {current.cta}
+        </ButtonLink>
       </div>
     </div>
   );

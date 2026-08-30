@@ -240,6 +240,20 @@ export function BalanceBlock({
       </div>
     );
   }
+  if (balance.isError) {
+    return (
+      <div data-testid="balance-block" className="rounded-xl bg-raised px-3 py-2 text-xs text-faint">
+        We couldn’t load the balance for this provider. Check your connection and try again.{" "}
+        <button
+          type="button"
+          onClick={() => void balance.refetch()}
+          className="font-medium text-ink underline"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
   const data = balance.data;
   if (!data) {
     return (

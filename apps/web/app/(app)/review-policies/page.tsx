@@ -9,7 +9,7 @@ import { useMemo, useState } from "react";
 import { PageBody, PageHeader } from "@/components/app-shell";
 import { Disclosure, LoadError, SectionCard } from "@/components/company/bits";
 import { ReviewPolicyDialog } from "@/components/company/review-policy-dialog";
-import { Badge, Button, EmptyState, ErrorNote, Spinner } from "@/components/ui";
+import { Badge, Button, ConfirmDialog, EmptyState, ErrorNote, Spinner } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import { describeCondition, describeReviewer, describeScope, REVIEW_MODE_LABELS } from "@/lib/coordination";
 import { useAgents, useInvalidateCoordination, useReviewPolicies, useTeams } from "@/lib/hooks";
@@ -188,44 +188,17 @@ export default function ReviewPoliciesPage() {
       ) : null}
 
       {confirmDelete ? (
-        <DeleteConfirm
-          policy={confirmDelete}
+        <ConfirmDialog
+          open
+          title={`Delete “${confirmDelete.name}”?`}
+          body="Reviews already opened by this policy stay as they are. New work simply won’t be checked by this rule anymore."
+          confirmLabel="Delete"
+          cancelLabel="Keep it"
           busy={remove.isPending}
-          onCancel={() => setConfirmDelete(null)}
           onConfirm={() => remove.mutate(confirmDelete)}
+          onClose={() => setConfirmDelete(null)}
         />
       ) : null}
     </>
-  );
-}
-
-function DeleteConfirm({
-  policy,
-  busy,
-  onCancel,
-  onConfirm,
-}: {
-  policy: ReviewPolicy;
-  busy: boolean;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#221e38]/40 p-4 backdrop-blur-sm dark:bg-black/60">
-      <div role="alertdialog" aria-modal="true" aria-label={`Delete ${policy.name}?`} className="w-full max-w-md rounded-2xl border border-line bg-surface p-6 shadow-card">
-        <h2 className="font-display text-base font-semibold">Delete “{policy.name}”?</h2>
-        <p className="mt-2 text-sm text-dim">
-          Reviews already opened by this policy stay as they are. New work simply won’t be checked by this rule anymore.
-        </p>
-        <div className="mt-4 flex justify-end gap-2">
-          <Button variant="ghost" onClick={onCancel} disabled={busy}>
-            Keep it
-          </Button>
-          <Button variant="danger" onClick={onConfirm} disabled={busy}>
-            {busy ? "Deleting…" : "Delete"}
-          </Button>
-        </div>
-      </div>
-    </div>
   );
 }

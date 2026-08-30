@@ -4,6 +4,7 @@
  * relationship wording. React-free and unit-tested.
  */
 
+import { APP_LABELS, humanizeSegment, titleCase } from "@/lib/humanize";
 import type {
   AgentIdentity,
   AgentPolicy,
@@ -12,6 +13,10 @@ import type {
   Grant,
   ToolInfo,
 } from "@/lib/types";
+
+// Automation wording moved to lib/triggers.ts (lib code must not depend on
+// the component layer); re-exported so existing imports keep working.
+export { triggerWhen } from "@/lib/triggers";
 
 export interface AgentLike extends AgentIdentity {
   id: string;
@@ -136,14 +141,6 @@ const VERB_WORDS: Record<string, string> = {
   delegate_task: "delegate work",
 };
 
-function titleCase(word: string): string {
-  return word.charAt(0).toUpperCase() + word.slice(1);
-}
-
-function humanizeSegment(segment: string): string {
-  return segment.replace(/_/g, " ");
-}
-
 function pluralize(noun: string): string {
   if (/[^aeiou]y$/.test(noun)) return `${noun.slice(0, -1)}ies`;
   if (/(s|x|z|ch|sh)$/.test(noun)) return `${noun}es`;
@@ -216,33 +213,3 @@ export function describeGrant(
   return `${appLabel}: ${body}`;
 }
 
-const APP_LABELS: Record<string, string> = {
-  github: "GitHub",
-  linear: "Linear",
-  cli: "Command line",
-  vercel: "Vercel",
-  organization: "Company",
-  system: "System",
-  http: "HTTP",
-  slack: "Slack",
-};
-
-const TRIGGER_FRIENDLY_EVENTS: Record<string, string> = {
-  "connector.linear.issue.created": "a Linear issue is created",
-  "connector.linear.issue.updated": "a Linear issue changes",
-  "connector.github.pull_request.opened": "a GitHub pull request opens",
-  "connector.github.pull_request.merged": "a GitHub pull request merges",
-  "connector.github.push": "code is pushed to GitHub",
-  "connector.github.issue.opened": "a GitHub issue opens",
-};
-
-/** "When … → then …" sentence for an automation card. */
-export function triggerWhen(eventType: string | null, connectionName: string | undefined): string {
-  if (!eventType) return connectionName ? `anything happens in ${connectionName}` : "anything happens";
-  const known = TRIGGER_FRIENDLY_EVENTS[eventType];
-  if (known) return known;
-  const parts = eventType.replace(/^connector\./, "").split(".");
-  const app = APP_LABELS[parts[0]] ?? titleCase(parts[0] ?? "");
-  const what = parts.slice(1).map(humanizeSegment).join(" ");
-  return what ? `${what} in ${app}` : `something happens in ${app}`;
-}

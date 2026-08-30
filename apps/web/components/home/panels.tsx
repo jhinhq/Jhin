@@ -9,7 +9,7 @@ import Link from "next/link";
 import { Avatar } from "@/components/avatar";
 import { ConversationRailItem } from "@/components/chat/chat-rail";
 import { LoadError, SectionCard } from "@/components/company/bits";
-import { Spinner } from "@/components/ui";
+import { focusRing, Spinner } from "@/components/ui";
 import { actorNameOf, friendlyHandoff, timeAgo } from "@/lib/activity";
 import { avatarProps } from "@/lib/media";
 import type {
@@ -26,6 +26,8 @@ interface Async {
   isError: boolean;
   onRetry?: () => void;
 }
+
+const CHIPS_SHOWN = 8;
 
 /** A "3 waiting for you" tile. Zero-count items are never rendered. */
 function NeedTile({
@@ -109,10 +111,13 @@ export function NeedsYouPanel({
       {attention?.budget ? (
         <Link
           href="/models"
-          className="mt-3 flex items-center gap-2 rounded-xl border border-warn/30 bg-warn-soft px-3.5 py-2.5 text-[13px] text-warn"
+          className={`mt-3 flex items-center gap-2 rounded-xl border border-warn/30 bg-warn-soft px-3.5 py-2.5 text-[13px] text-warn transition-opacity hover:opacity-80 ${focusRing}`}
         >
           <AlertTriangle size={15} className="shrink-0" aria-hidden />
-          This month&apos;s model spend is at {attention.budget.percent_used}% of the budget.
+          <span>
+            This month&apos;s model spend is at {attention.budget.percent_used}% of the budget.{" "}
+            <span className="font-medium underline">Review in Models</span>
+          </span>
         </Link>
       ) : null}
     </SectionCard>
@@ -171,6 +176,7 @@ export function RecentChatsPanel({
 
 export function RightNowPanel({
   running,
+  runningTotal,
   queued,
   activity,
   activityFailed = false,
@@ -182,6 +188,8 @@ export function RightNowPanel({
   onRetry,
 }: Async & {
   running: Task[];
+  /** How many tasks are running in total, so a truncated list can say so. */
+  runningTotal: number;
   queued: Task[];
   activity: ActivityCard[];
   /** The feed is a secondary signal: a failure there is a line, not a wipeout. */
@@ -239,6 +247,15 @@ export function RightNowPanel({
               </Link>
             </li>
           ))}
+          {runningTotal > running.length ? (
+            <li className="text-[13px] text-dim">
+              …and {runningTotal - running.length} more{" "}
+              {runningTotal - running.length === 1 ? "task is" : "tasks are"} running.{" "}
+              <Link href="/tasks" className="font-medium text-accent-strong hover:underline">
+                See all tasks
+              </Link>
+            </li>
+          ) : null}
           {queued.length > 0 ? (
             <li className="text-[13px] text-dim">
               {queued.length} more {queued.length === 1 ? "task is" : "tasks are"} queued and will start
@@ -314,6 +331,9 @@ export function TeamGlancePanel({
   const active = agents.filter((agent) => agent.status === "active");
   const working = active.filter((agent) => workingIds.has(agent.id));
   const availableCount = active.length - working.length;
+  const chipSource = working.length > 0 ? working : active;
+  const chipAgents = chipSource.slice(0, CHIPS_SHOWN);
+  const chipOverflow = chipSource.length - chipAgents.length;
 
   return (
     <SectionCard
@@ -345,25 +365,45 @@ export function TeamGlancePanel({
               { label: teamCount === 1 ? "team" : "teams", value: teamCount },
               { label: "working now", value: working.length },
             ].map((stat) => (
-              <div key={stat.label} className="rounded-xl border border-line bg-raised px-2 py-3">
-                <dd className="font-display text-xl font-semibold tabular-nums text-ink">{stat.value}</dd>
+              // dt precedes dd for valid <dl> markup; flex-col-reverse keeps
+              // the value on top visually.
+              <div
+                key={stat.label}
+                className="flex flex-col-reverse rounded-xl border border-line bg-raised px-2 py-3"
+              >
                 <dt className="text-xs text-dim">{stat.label}</dt>
+                <dd className="font-display text-xl font-semibold tabular-nums text-ink">{stat.value}</dd>
               </div>
             ))}
           </dl>
-          <ul className="flex flex-wrap gap-2">
-            {(working.length > 0 ? working : active).slice(0, 8).map((agent) => (
-              <li key={agent.id}>
-                <Link
-                  href={`/agents/${agent.id}`}
-                  className="flex items-center gap-2 rounded-full border border-line bg-raised py-1 pl-1 pr-3 text-xs text-dim hover:border-line-strong hover:text-ink"
-                >
-                  <Avatar name={agent.name} size="xs" {...avatarProps(avatars[agent.id])} />
-                  <span className="max-w-[9rem] truncate">{agent.name}</span>
-                </Link>
-              </li>
-            ))}
-          </ul>
+          <div>
+            <h3 className="mb-2 text-[11px] font-medium uppercase tracking-wider text-faint">
+              {working.length > 0 ? "Working now" : "Your agents"}
+            </h3>
+            <ul className="flex flex-wrap gap-2">
+              {chipAgents.map((agent) => (
+                <li key={agent.id}>
+                  <Link
+                    href={`/agents/${agent.id}`}
+                    className="flex items-center gap-2 rounded-full border border-line bg-raised py-1 pl-1 pr-3 text-xs text-dim hover:border-line-strong hover:text-ink"
+                  >
+                    <Avatar name={agent.name} size="xs" {...avatarProps(avatars[agent.id])} />
+                    <span className="max-w-[9rem] truncate">{agent.name}</span>
+                  </Link>
+                </li>
+              ))}
+              {chipOverflow > 0 ? (
+                <li>
+                  <Link
+                    href="/company"
+                    className="flex h-full items-center rounded-full border border-line bg-raised px-3 py-1 text-xs text-dim hover:border-line-strong hover:text-ink"
+                  >
+                    +{chipOverflow} more
+                  </Link>
+                </li>
+              ) : null}
+            </ul>
+          </div>
           <p className="text-xs text-faint">
             {working.length === 0
               ? `Everyone is free — ${availableCount} ${availableCount === 1 ? "agent is" : "agents are"} ready for work.`

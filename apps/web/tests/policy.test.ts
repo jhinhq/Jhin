@@ -6,7 +6,6 @@ import {
   formatScope,
   grantCovers,
   isCapabilityGranted,
-  matchingPreset,
   PRESET_RULES,
   riskTone,
   sortGrants,
@@ -82,19 +81,6 @@ describe("grant display", () => {
 });
 
 describe("approval presets", () => {
-  it("recognises each preset from its expanded rules", () => {
-    for (const preset of ["autonomous", "balanced", "restricted"] as const) {
-      expect(matchingPreset(PRESET_RULES[preset])).toBe(preset);
-    }
-  });
-
-  it("returns null for custom rules", () => {
-    expect(matchingPreset([])).toBeNull();
-    expect(
-      matchingPreset([{ capability: "system.*", risk: null, action: "forbid" }]),
-    ).toBeNull();
-  });
-
   it("restricted forbids destructive actions", () => {
     const destructive = PRESET_RULES.restricted.find((rule) => rule.risk === "destructive");
     expect(destructive?.action).toBe("forbid");

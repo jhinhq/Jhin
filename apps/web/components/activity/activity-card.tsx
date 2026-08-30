@@ -15,13 +15,11 @@ import type { ActivityCard as ActivityCardData, AgentAvatar } from "@/lib/types"
 export function ActivityCard({
   card,
   now,
-  showAdvanced = true,
   avatars,
 }: {
   card: ActivityCardData;
   /** Injectable clock for deterministic tests. */
   now?: number;
-  showAdvanced?: boolean;
   /** Agent id → avatar visuals, when the caller has the agent list. */
   avatars?: Record<string, AgentAvatar | null>;
 }) {
@@ -84,7 +82,7 @@ export function ActivityCard({
               <MessageSquare size={12} className="mr-1" aria-hidden /> Open chat
             </Chip>
           ) : null}
-          {showAdvanced && card.task_id ? (
+          {card.task_id ? (
             <Chip href={`/tasks/${card.task_id}`}>
               <ExternalLink size={12} className="mr-1" aria-hidden /> Open in Advanced
             </Chip>

@@ -119,12 +119,16 @@ const nextConfig: NextConfig = isDesktopExport
     ];
   },
   // Real HTTP redirects, resolved before routing so deep links and bookmarks
-  // never pay for a client-side bounce. `/connectors` is permanent: Apps
-  // absorbed it. `/` is temporary: it is only the landing choice.
+  // never pay for a client-side bounce. `/connectors`, `/triggers`, and
+  // `/organization` are permanent: Apps absorbed the first, Automations the
+  // second, and Company the third. `/` is temporary: it is only the landing
+  // choice.
   async redirects() {
     return [
       { source: "/", destination: "/home", permanent: false },
       { source: "/connectors", destination: "/apps", permanent: true },
+      { source: "/triggers", destination: "/automations", permanent: true },
+      { source: "/organization", destination: "/company", permanent: true },
     ];
   },
   async rewrites() {

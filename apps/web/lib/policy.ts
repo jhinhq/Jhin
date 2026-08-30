@@ -57,24 +57,6 @@ export function describeRule(rule: PolicyRule): string {
   return `${target} calls${scope}: ${ACTION_LABELS[rule.action]}`;
 }
 
-/** The preset whose expansion equals these exact rules, if any. */
-export function matchingPreset(rules: PolicyRule[]): ApprovalPreset | null {
-  for (const [preset, presetRules] of Object.entries(PRESET_RULES)) {
-    if (
-      rules.length === presetRules.length &&
-      rules.every(
-        (rule, index) =>
-          rule.capability === presetRules[index].capability &&
-          rule.risk === presetRules[index].risk &&
-          rule.action === presetRules[index].action,
-      )
-    ) {
-      return preset as ApprovalPreset;
-    }
-  }
-  return null;
-}
-
 export function formatScope(scope: Record<string, unknown>): string {
   const entries = Object.entries(scope);
   if (entries.length === 0) return "any scope";

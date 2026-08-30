@@ -8,6 +8,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
 import { PageBody, PageHeader } from "@/components/app-shell";
+import { LoadError } from "@/components/company/bits";
 import { isActiveState, StateBadge } from "@/components/task-bits";
 import {
   Button,
@@ -93,10 +94,12 @@ function TasksPageInner() {
 
         {tasks.isPending ? (
           <Spinner label="Loading tasks…" />
+        ) : tasks.isError ? (
+          <LoadError what="tasks" onRetry={() => void tasks.refetch()} />
         ) : (tasks.data?.items.length ?? 0) === 0 ? (
           <EmptyState
             title="No tasks yet"
-            description="Create a task and assign it to an agent, or message an agent from the organization view — every conversation becomes a task."
+            description="Create a task and assign it to an agent, or message an agent from the Company page — every conversation becomes a task."
             action={
               can("member") ? (
                 <Button variant="primary" onClick={() => setDialogOpen(true)}>

@@ -15,6 +15,7 @@ import { QuestionCard, type AnswerQuestion } from "@/components/chat/question-ca
 import { Timestamp } from "@/components/chat/timestamp";
 import { Markdown } from "@/components/markdown";
 import { MessageTypeBadge, StructuredMessageBody } from "@/components/task-bits";
+import { Spinner } from "@/components/ui";
 import {
   exchangeLabel,
   exchangeSuffix,
@@ -225,7 +226,7 @@ function SystemChip({ message }: { message: ConversationMessage }) {
           <p className="mt-1 break-words text-dim">{friendly}</p>
           <p className="mt-2 text-xs">
             <Link href="/models" className="font-medium text-accent-strong underline-offset-2 hover:underline">
-              Advanced → Models
+              Open Models
             </Link>
             <span className="text-faint"> to check the balance, then retry.</span>
             <Timestamp iso={message.created_at} className="ml-2" />
@@ -245,10 +246,31 @@ function SystemChip({ message }: { message: ConversationMessage }) {
           <p className="mt-1 break-words text-dim">{friendly}</p>
           <p className="mt-2 text-xs">
             <Link href="/models" className="font-medium text-accent-strong underline-offset-2 hover:underline">
-              Advanced → Models
+              Open Models
             </Link>
             <span className="text-faint"> to edit the model profile, then retry.</span>
             <Timestamp iso={message.created_at} className="ml-2" />
+          </p>
+        </div>
+      </div>
+    );
+  }
+  // Failures and long notices get the wrapping card treatment the credit and
+  // model cards use: the one-line chip would truncate exactly the part that
+  // says what went wrong or what to do next.
+  const failed =
+    typeof message.content_json.error_code === "string" || /^run failed/i.test(text);
+  if (failed || text.length > 120) {
+    return (
+      <div data-testid="system-card" className="flex justify-center">
+        <div
+          className={`max-w-[min(90%,36rem)] rounded-2xl border px-4 py-3 text-sm ${
+            failed ? "border-danger/30 bg-danger/10 text-ink" : "border-line bg-raised text-dim"
+          }`}
+        >
+          <p className="break-words">{text}</p>
+          <p className="mt-1 text-xs">
+            <Timestamp iso={message.created_at} />
           </p>
         </div>
       </div>
@@ -590,6 +612,12 @@ export function Transcript({
           ) : null}
 
           {liveStatus ? <WorkingIndicator status={liveStatus} name={agentName} avatar={agentAvatar} /> : null}
+
+          {loading && items.length === 0 ? (
+            <div className="flex justify-center py-10">
+              <Spinner label="Loading messages…" />
+            </div>
+          ) : null}
 
           {!loading && items.length === 0 && !liveStatus ? (
             <p className="py-10 text-center text-sm text-dim">

@@ -58,6 +58,7 @@ const PRIMARY_NAV: readonly NavItem[] = [
   { href: "/attention", label: "Attention", icon: BellRing },
   { href: "/automations", label: "Automations", icon: Zap },
   { href: "/apps", label: "Apps", icon: Plug },
+  { href: "/models", label: "Models", icon: Cpu },
   { href: "/skills", label: "Skills", icon: BookOpen },
 ] as const;
 
@@ -85,18 +86,6 @@ export const ADVANCED_NAV: readonly NavItem[] = [
     label: "Approvals",
     icon: CheckSquare,
     description: "Actions that paused to wait for a person to say yes or no.",
-  },
-  {
-    href: "/triggers",
-    label: "Triggers",
-    icon: Zap,
-    description: "The schedules and events that start work automatically.",
-  },
-  {
-    href: "/models",
-    label: "Models",
-    icon: Cpu,
-    description: "Which AI models are available and how they are configured.",
   },
   {
     href: "/audit",
@@ -598,20 +587,23 @@ export function PageHeader({
   );
 }
 
-/** Constrained page body used by the operational pages. */
+/** Constrained page body shared by every page: one source of truth for
+ * gutters and centering. `wide` for dense tables, `narrow` for reading
+ * columns like feeds and inboxes. */
 export function PageBody({
   children,
   className = "",
   wide = false,
+  narrow = false,
 }: {
   children: React.ReactNode;
   className?: string;
   wide?: boolean;
+  narrow?: boolean;
 }) {
+  const maxWidth = narrow ? "max-w-3xl" : wide ? "max-w-7xl" : "max-w-6xl";
   return (
-    <div
-      className={`mx-auto w-full px-5 py-6 md:px-8 md:py-8 ${wide ? "max-w-7xl" : "max-w-6xl"} ${className}`}
-    >
+    <div className={`mx-auto w-full px-5 py-6 md:px-8 md:py-8 ${maxWidth} ${className}`}>
       {children}
     </div>
   );

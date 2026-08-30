@@ -243,7 +243,7 @@ with the message *"Your <provider> account is out of credit. Add funds at
 `ApplicationError` with that type, the workflow records
 `error_code="insufficient_funds"` and the friendly `error_message` on the run,
 and the conversation's system message carries both; the chat renders an
-"Out of credit" card linking to Advanced → Models.
+"Out of credit" card linking to the Models page.
 
 ## Reasoning effort and tool calling
 

@@ -271,8 +271,10 @@ describe("HomePage", () => {
   it("summarises the team and this month's spend", () => {
     renderHome();
     const stats = screen.getByTestId("team-stats");
-    expect(within(stats).getByText("agents").previousSibling?.textContent).toBe("2");
-    expect(within(stats).getByText("working now").previousSibling?.textContent).toBe("1");
+    // dt (label) precedes dd (value) in source; flex-col-reverse keeps the
+    // value on top visually.
+    expect(within(stats).getByText("agents").nextSibling?.textContent).toBe("2");
+    expect(within(stats).getByText("working now").nextSibling?.textContent).toBe("1");
     expect(screen.getByTestId("spend-tile")).toBeTruthy();
     expect(screen.getByText("$12.50")).toBeTruthy();
   });

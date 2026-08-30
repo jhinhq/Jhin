@@ -5,12 +5,13 @@
 
 import { useMutation } from "@tanstack/react-query";
 import { MessageSquare, Pause, Play, Trash2, X } from "lucide-react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
   Badge,
   Button,
+  ButtonLink,
+  ConfirmDialog,
   Dialog,
   ErrorNote,
   Field,
@@ -73,6 +74,7 @@ export function AgentDrawer({
   // The drawer is mounted with key={agentId}, so tab state resets per agent.
   const [tab, setTab] = useState<TabId>("overview");
   const [messageOpen, setMessageOpen] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -104,6 +106,9 @@ export function AgentDrawer({
       invalidate();
       onClose();
     },
+    // On failure the confirm closes so the Settings tab's error note is
+    // readable instead of sitting behind the dialog backdrop.
+    onSettled: () => setConfirmingDelete(false),
   });
 
   return (
@@ -225,16 +230,12 @@ export function AgentDrawer({
                   />
                   <OverviewRow label="Slug" value={<code className="font-mono text-xs">{agent.slug}</code>} />
                   <div className="mt-4 flex gap-2">
-                    <Link href={`/tasks?agent=${agent.id}`}>
-                      <Button size="sm" variant="ghost">
-                        View tasks
-                      </Button>
-                    </Link>
-                    <Link href={`/runs?agent=${agent.id}`}>
-                      <Button size="sm" variant="ghost">
-                        View runs
-                      </Button>
-                    </Link>
+                    <ButtonLink href={`/tasks?agent=${agent.id}`} size="sm" variant="ghost">
+                      View tasks
+                    </ButtonLink>
+                    <ButtonLink href={`/runs?agent=${agent.id}`} size="sm" variant="ghost">
+                      View runs
+                    </ButtonLink>
                   </div>
                 </div>
               ) : null}
@@ -258,11 +259,7 @@ export function AgentDrawer({
                     teams={teams}
                     agents={agents}
                     onSaved={invalidate}
-                    onDelete={() => {
-                      if (window.confirm(`Delete agent “${agent.name}”? This cannot be undone.`)) {
-                        remove.mutate();
-                      }
-                    }}
+                    onDelete={() => setConfirmingDelete(true)}
                     deleteError={
                       remove.error instanceof ApiError ? remove.error.detail : null
                     }
@@ -279,6 +276,17 @@ export function AgentDrawer({
       </aside>
       {messageOpen && agent ? (
         <MessageDialog agent={agent} onClose={() => setMessageOpen(false)} />
+      ) : null}
+      {confirmingDelete && agent ? (
+        <ConfirmDialog
+          open
+          title={`Delete ${agent.name}?`}
+          body="This cannot be undone."
+          confirmLabel="Delete agent"
+          busy={remove.isPending}
+          onConfirm={() => remove.mutate()}
+          onClose={() => setConfirmingDelete(false)}
+        />
       ) : null}
     </div>
   );

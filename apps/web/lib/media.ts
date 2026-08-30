@@ -79,13 +79,13 @@ export function avatarErrorMessage(code: string | null, fallback: string): strin
     case "empty":
       return "We couldn't read that image. It may be corrupt or truncated.";
     case "image_generation_unsupported":
-      return "No model here can draw pictures yet. An admin can enable image generation on a model profile under Advanced → Models.";
+      return "No model here can draw pictures yet. An admin can enable image generation on a model profile on the Models page.";
     case "generation_in_progress":
       return "An illustration is already being made for this agent. Give it a moment.";
     case "provider_disabled":
-      return "The image provider is turned off. Turn it back on under Advanced → Models, or upload a picture instead.";
+      return "The image provider is turned off. Turn it back on from the Models page, or upload a picture instead.";
     case "provider_config":
-      return "The image provider isn't set up correctly. Check it under Advanced → Models.";
+      return "The image provider isn't set up correctly. Check it on the Models page.";
     case "provider_error":
       return "The image provider had a problem. The previous avatar is unchanged; try again in a minute.";
     case "image_rejected":

@@ -4,9 +4,8 @@
  * leads to a chat or the agent's profile. */
 
 import { Plus, Search } from "lucide-react";
-import Link from "next/link";
 import { useMemo, useState } from "react";
-import { PageHeader } from "@/components/app-shell";
+import { PageBody, PageHeader } from "@/components/app-shell";
 import { AgentDirectoryCard } from "@/components/company/agent-directory-card";
 import {
   matchesAvailability,
@@ -16,7 +15,7 @@ import {
 import { LoadError, Segmented } from "@/components/company/bits";
 import { useWorkingAgentIds } from "@/components/company/use-working";
 import { FirstRunSteps } from "@/components/first-run-steps";
-import { Button, EmptyState, Input, Select, Spinner } from "@/components/ui";
+import { Button, ButtonLink, EmptyState, Input, Select, Spinner } from "@/components/ui";
 import { useAgents, useTeams } from "@/lib/hooks";
 import { useWorkspace } from "@/lib/workspace-context";
 
@@ -52,17 +51,15 @@ export default function AgentsPage() {
   }, [agents.data, teamId, query, availability, working, isAdmin]);
 
   const newAgent = isAdmin ? (
-    <Link href="/agents/new">
-      <Button variant="primary">
-        <Plus size={14} /> New agent
-      </Button>
-    </Link>
+    <ButtonLink href="/agents/new" variant="primary">
+      <Plus size={14} /> New agent
+    </ButtonLink>
   ) : null;
 
   return (
     <>
       <PageHeader title="Agents" description="Everyone who works here, and what they’re good at" actions={newAgent} />
-      <div className="space-y-5 px-4 py-5 sm:px-8 sm:py-6">
+      <PageBody className="space-y-5">
         {agents.isPending ? (
           <Spinner label="Loading agents…" />
         ) : agents.isError || !agents.data ? (
@@ -132,7 +129,7 @@ export default function AgentsPage() {
             )}
           </>
         )}
-      </div>
+      </PageBody>
     </>
   );
 }

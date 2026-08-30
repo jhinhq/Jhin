@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
 import { PageBody, PageHeader } from "@/components/app-shell";
+import { LoadError } from "@/components/company/bits";
 import { StateBadge } from "@/components/task-bits";
 import { EmptyState, Select, Spinner, focusRing } from "@/components/ui";
 import { formatCostMicros, formatDateTime, formatTokens, shortId } from "@/lib/format";
@@ -67,6 +68,8 @@ function RunsPageInner() {
 
         {runs.isPending ? (
           <Spinner label="Loading runs…" />
+        ) : runs.isError ? (
+          <LoadError what="runs" onRetry={() => void runs.refetch()} />
         ) : (runs.data?.items.length ?? 0) === 0 ? (
           <EmptyState
             title="No runs yet"

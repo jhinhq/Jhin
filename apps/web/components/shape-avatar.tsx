@@ -1,6 +1,6 @@
 /** Pure SVG rendering of a free brand-cube avatar: a tetris-ish stack of the
- * logo mark's isometric cubes, tinted from one palette color. Decorative by
- * default (aria-hidden); pair it with a visible name, or pass a `title`. */
+ * logo mark's isometric cubes, tinted from one palette color. Decorative
+ * (aria-hidden); pair it with a visible name. */
 
 import {
   AVATAR_SHAPES,
@@ -16,15 +16,12 @@ export function ShapeAvatar({
   shape,
   color,
   className = "",
-  title,
 }: {
   /** One of the fixed shape ids (unknown ids fall back to a single cube). */
   shape: string;
   /** Palette hex like `#7371fc`. */
   color: string;
   className?: string;
-  /** Accessible label; omitted = decorative. */
-  title?: string;
 }) {
   const spec = shapeById(shape) ?? AVATAR_SHAPES[0];
   const palette = faceColors(color);
@@ -33,9 +30,7 @@ export function ShapeAvatar({
     <svg
       viewBox={`${box.x} ${box.y} ${box.width} ${box.height}`}
       className={className}
-      role={title ? "img" : undefined}
-      aria-label={title}
-      aria-hidden={title ? undefined : true}
+      aria-hidden
       focusable="false"
       data-shape={spec.id}
       style={{ overflow: "visible" }}

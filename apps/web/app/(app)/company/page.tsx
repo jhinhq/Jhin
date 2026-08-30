@@ -18,7 +18,7 @@ import { List, Network, Plus, Users } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
-import { PageHeader } from "@/components/app-shell";
+import { PageBody, PageHeader } from "@/components/app-shell";
 import { Avatar } from "@/components/avatar";
 import { statusTextOf } from "@/components/company/agent-helpers";
 import { identityAvatarProps } from "@/lib/media";
@@ -27,7 +27,7 @@ import { menuOnlyMoveApi, OrgDnd } from "@/components/company/org-dnd";
 import { useWorkingAgentIds } from "@/components/company/use-working";
 import { TeamDialog } from "@/components/org/team-dialog";
 import { AgentCard, TeamCard, TEAM_ICONS, type OrgMoveApi } from "@/components/org/tree";
-import { Button, EmptyState, ErrorNote, Spinner } from "@/components/ui";
+import { Button, ButtonLink, ConfirmDialog, EmptyState, ErrorNote, Spinner } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import { useAgentAvatarMap, useInvalidateOrg, useOrgGraph } from "@/lib/hooks";
 import {
@@ -206,6 +206,7 @@ export default function CompanyPage() {
   const [view, changeView] = useCompanyView();
   const [teamDialogOpen, setTeamDialogOpen] = useState(false);
   const [editingTeam, setEditingTeam] = useState<OrgTeamNode | null>(null);
+  const [deletingTeam, setDeletingTeam] = useState<OrgTeamNode | null>(null);
   const [pageError, setPageError] = useState<string | null>(null);
   /** In-flight moves, keyed by agent. Drawn on top of the fetched graph so a
    * drop lands instantly; removed when the request settles. Keying by agent
@@ -219,12 +220,16 @@ export default function CompanyPage() {
       api<void>(`/api/v1/workspaces/${workspaceId}/teams/${teamId}`, { method: "DELETE" }),
     onSuccess: () => {
       setPageError(null);
+      setDeletingTeam(null);
       invalidate();
     },
-    onError: (error) =>
+    onError: (error) => {
+      // Close the dialog: the error note renders behind its backdrop.
+      setDeletingTeam(null);
       setPageError(
         `${error instanceof ApiError ? error.detail : "Deleting the team failed"}. Try again, or check Advanced → Audit for details.`,
-      ),
+      );
+    },
   });
 
   // Org-graph nodes carry no avatar; merge the directory's avatars so the
@@ -334,11 +339,9 @@ export default function CompanyPage() {
       >
         <Plus size={14} /> New team
       </Button>
-      <Link href="/agents/new">
-        <Button variant="primary">
-          <Plus size={14} /> New agent
-        </Button>
-      </Link>
+      <ButtonLink href="/agents/new" variant="primary">
+        <Plus size={14} /> New agent
+      </ButtonLink>
     </>
   ) : null;
 
@@ -418,15 +421,7 @@ export default function CompanyPage() {
                   setEditingTeam(team);
                   setTeamDialogOpen(true);
                 }}
-                onDeleteTeam={(team) => {
-                  if (
-                    window.confirm(
-                      `Delete team “${team.name}”? Its agents and sub-teams are kept, just detached.`,
-                    )
-                  ) {
-                    deleteTeam.mutate(team.id);
-                  }
-                }}
+                onDeleteTeam={setDeletingTeam}
                 onAddAgent={(teamId) => router.push(`/agents/new?team=${teamId}`)}
                 managerNameFor={managerNameFor}
                 move={move}
@@ -446,7 +441,7 @@ export default function CompanyPage() {
   return (
     <>
       <PageHeader title="Company" description="Teams, who leads them, and who reports to whom" actions={actions} />
-      <div className="space-y-5 px-4 py-5 sm:px-8 sm:py-6">
+      <PageBody className="space-y-5">
         <ErrorNote message={pageError} />
         {graph.isPending ? (
           <Spinner label="Loading your company…" />
@@ -501,7 +496,7 @@ export default function CompanyPage() {
             )}
           </>
         )}
-      </div>
+      </PageBody>
 
       {graph.data ? (
         <TeamDialog
@@ -512,6 +507,17 @@ export default function CompanyPage() {
           agents={agents}
         />
       ) : null}
+      <ConfirmDialog
+        open={deletingTeam !== null}
+        title={`Delete team “${deletingTeam?.name ?? ""}”?`}
+        body="Its agents and sub-teams are kept, just detached."
+        confirmLabel="Delete team"
+        busy={deleteTeam.isPending}
+        onConfirm={() => {
+          if (deletingTeam) deleteTeam.mutate(deletingTeam.id);
+        }}
+        onClose={() => setDeletingTeam(null)}
+      />
     </>
   );
 }

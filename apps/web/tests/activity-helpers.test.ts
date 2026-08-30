@@ -2,15 +2,13 @@
 
 import { describe, expect, it } from "vitest";
 import {
-  ACTIVITY_GROUPS,
   actorNameOf,
   detailText,
   friendlyHandoff,
-  groupForKind,
   kindsParam,
   timeAgo,
 } from "@/lib/activity";
-import type { ActivityCard, ActivityKind } from "@/lib/types";
+import type { ActivityCard } from "@/lib/types";
 
 function card(overrides: Partial<ActivityCard> = {}): ActivityCard {
   return {
@@ -34,23 +32,7 @@ function card(overrides: Partial<ActivityCard> = {}): ActivityCard {
   };
 }
 
-describe("groupForKind", () => {
-  it("maps every kind to exactly one friendly group", () => {
-    const kinds: ActivityKind[] = [
-      "started", "asked_agent", "reported", "escalated", "status_update",
-      "needs_review", "finished", "failed", "paused", "stopped", "queued",
-    ];
-    for (const kind of kinds) {
-      const group = groupForKind(kind);
-      expect(ACTIVITY_GROUPS[group]).toContain(kind);
-    }
-    expect(groupForKind("asked_agent")).toBe("handoffs");
-    expect(groupForKind("reported")).toBe("handoffs");
-    expect(groupForKind("escalated")).toBe("handoffs");
-    expect(groupForKind("needs_review")).toBe("review");
-    expect(groupForKind("failed")).toBe("progress");
-  });
-
+describe("kindsParam", () => {
   it("builds the kinds query param", () => {
     expect(kindsParam("all")).toBeUndefined();
     expect(kindsParam("handoffs")).toBe("asked_agent,reported,escalated");

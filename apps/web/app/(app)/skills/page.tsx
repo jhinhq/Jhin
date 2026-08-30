@@ -5,15 +5,16 @@
  * own, or import from GitHub / a zip — imports stay off until reviewed. */
 
 import { useMutation } from "@tanstack/react-query";
-import { BookOpen, Download, Pencil, Plus, Search, Trash2, Upload, X } from "lucide-react";
+import { BookOpen, ChevronDown, Download, Pencil, Plus, Search, Trash2, Upload, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { PageBody, PageHeader } from "@/components/app-shell";
-import { Disclosure } from "@/components/company/bits";
+import { Disclosure, LoadError } from "@/components/company/bits";
 import { SkillCatalogGallery } from "@/components/skill-catalog-gallery";
 import { SkillsBrowseGallery } from "@/components/skills-browse-gallery";
 import {
   Badge,
   Button,
+  ConfirmDialog,
   Dialog,
   EmptyState,
   ErrorNote,
@@ -179,6 +180,7 @@ export default function SkillsPage() {
   const [importOpen, setImportOpen] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<Skill | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
   // When the reviewed gallery has nothing to show, the Advanced GitHub
@@ -280,7 +282,9 @@ export default function SkillsPage() {
             ) : null}
             <ErrorNote message={actionError} />
             {skills.isPending ? <Spinner label="Loading skills…" /> : null}
-            {skills.isError ? <ErrorNote message="Could not load the skills library." /> : null}
+            {skills.isError ? (
+              <LoadError what="the skills library" onRetry={() => void skills.refetch()} />
+            ) : null}
             {skills.data && items.length === 0 ? (
               <EmptyState
                 icon={<BookOpen size={20} aria-hidden />}
@@ -303,11 +307,20 @@ export default function SkillsPage() {
                 <details
                   key={category}
                   open
-                  className="rounded-2xl border border-line bg-surface"
+                  className="group rounded-2xl border border-line bg-surface"
                   data-testid={`skill-category-${category}`}
                 >
-                  <summary className="cursor-pointer list-none px-4 py-2.5 text-sm font-semibold text-ink">
-                    {category} <span className="font-normal text-faint">({group.length})</span>
+                  <summary
+                    className={`flex cursor-pointer list-none items-center justify-between gap-2 rounded-2xl px-4 py-2.5 text-sm font-semibold text-ink ${focusRing}`}
+                  >
+                    <span>
+                      {category} <span className="font-normal text-faint">({group.length})</span>
+                    </span>
+                    <ChevronDown
+                      size={16}
+                      className="shrink-0 text-faint transition-transform group-open:rotate-180"
+                      aria-hidden
+                    />
                   </summary>
                   <ul className="space-y-2 border-t border-line px-4 py-3">
                     {group.map((skill) => (
@@ -316,21 +329,13 @@ export default function SkillsPage() {
                         skill={skill}
                         isAdmin={isAdmin}
                         onToggle={() => toggle.mutate(skill)}
-                        toggling={toggle.isPending}
+                        toggling={toggle.isPending && toggle.variables?.id === skill.id}
                         onEdit={() => {
                           setEditingId(skill.id);
                           setEditorOpen(true);
                         }}
-                        onDelete={() => {
-                          if (
-                            window.confirm(
-                              `Delete the skill “${skill.name}”? Agents lose it immediately.`,
-                            )
-                          ) {
-                            remove.mutate(skill);
-                          }
-                        }}
-                        removing={remove.isPending}
+                        onDelete={() => setPendingDelete(skill)}
+                        removing={remove.isPending && remove.variables?.id === skill.id}
                       />
                     ))}
                   </ul>
@@ -363,6 +368,24 @@ export default function SkillsPage() {
         )}
       </PageBody>
 
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title="Delete this skill?"
+        body={
+          pendingDelete ? (
+            <>
+              “{pendingDelete.name}” will be removed from the library. Agents lose it immediately.
+            </>
+          ) : null
+        }
+        confirmLabel="Delete skill"
+        busy={remove.isPending}
+        onConfirm={() => {
+          if (pendingDelete === null) return;
+          remove.mutate(pendingDelete, { onSettled: () => setPendingDelete(null) });
+        }}
+        onClose={() => setPendingDelete(null)}
+      />
       <ImportDialog
         workspaceId={workspaceId}
         open={importOpen}
@@ -400,6 +423,7 @@ function BrowseLibrarySection({
   const [installError, setInstallError] = useState<string | null>(null);
   const [installingPath, setInstallingPath] = useState<string | null>(null);
   const [addSourceOpen, setAddSourceOpen] = useState(false);
+  const [confirmRemoveSource, setConfirmRemoveSource] = useState(false);
 
   const activeSource = source || sources.data?.[0]?.source || "";
   const browse = useBrowseSkills(workspaceId, activeSource, debouncedQuery);
@@ -447,7 +471,7 @@ function BrowseLibrarySection({
         Search public skill libraries and install what you need with one click.
       </p>
       {sources.isError ? (
-        <ErrorNote message="Could not reach the skill sources catalog." />
+        <LoadError what="the skill sources catalog" onRetry={() => void sources.refetch()} />
       ) : null}
       <div className="flex flex-wrap items-center gap-2">
         {sources.data && sources.data.length > 1 ? (
@@ -472,11 +496,7 @@ function BrowseLibrarySection({
         {isAdmin && activeEntry?.custom ? (
           <Button
             size="sm"
-            onClick={() => {
-              if (window.confirm(`Remove the source “${activeLabel}”?`)) {
-                removeSource.mutate(activeSource);
-              }
-            }}
+            onClick={() => setConfirmRemoveSource(true)}
             disabled={removeSource.isPending}
             aria-label={`Remove source ${activeLabel}`}
           >
@@ -509,9 +529,7 @@ function BrowseLibrarySection({
       <ErrorNote message={installError} />
       {browse.isPending && activeSource ? <Spinner label="Loading skills…" /> : null}
       {browse.isError ? (
-        <ErrorNote
-          message={errorText(browse.error, "Could not reach GitHub for this source right now.")}
-        />
+        <LoadError what="this source from GitHub" onRetry={() => void browse.refetch()} />
       ) : null}
       {browse.data ? (
         <SkillsBrowseGallery
@@ -522,6 +540,22 @@ function BrowseLibrarySection({
           onInstall={(entry) => install.mutate(entry)}
         />
       ) : null}
+      <ConfirmDialog
+        open={confirmRemoveSource}
+        title="Remove this source?"
+        body={
+          <>
+            “{activeLabel}” leaves the source picker. Skills you already installed from it stay in
+            your library.
+          </>
+        }
+        confirmLabel="Remove source"
+        busy={removeSource.isPending}
+        onConfirm={() =>
+          removeSource.mutate(activeSource, { onSettled: () => setConfirmRemoveSource(false) })
+        }
+        onClose={() => setConfirmRemoveSource(false)}
+      />
       <AddSourceDialog
         workspaceId={workspaceId}
         open={addSourceOpen}

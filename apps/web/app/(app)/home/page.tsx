@@ -7,9 +7,8 @@
  * and the guided introduction can always be reopened from the header. */
 
 import { Compass, Plus } from "lucide-react";
-import Link from "next/link";
 import { useMemo } from "react";
-import { PageHeader } from "@/components/app-shell";
+import { PageBody, PageHeader } from "@/components/app-shell";
 import { SectionCard } from "@/components/company/bits";
 import { FirstRunSteps, useSetupStatus } from "@/components/first-run-steps";
 import {
@@ -21,7 +20,7 @@ import {
 } from "@/components/home/panels";
 import { useOnboardingTour } from "@/components/onboarding/tour";
 import { SpendTile } from "@/components/spend-tile";
-import { Button } from "@/components/ui";
+import { Button, ButtonLink } from "@/components/ui";
 import { sortByActivity } from "@/lib/chat";
 import {
   useActivity,
@@ -102,16 +101,14 @@ export default function HomePage() {
                 offers one when that card is not on screen. */}
             {showGettingStarted ? null : tourButton}
             {can("member") ? (
-              <Link href="/chats">
-                <Button variant="primary">
-                  <Plus size={14} /> New chat
-                </Button>
-              </Link>
+              <ButtonLink href="/chats" variant="primary">
+                <Plus size={14} /> New chat
+              </ButtonLink>
             ) : null}
           </>
         }
       />
-      <div className="mx-auto w-full max-w-6xl space-y-4 px-4 py-5 sm:px-8 sm:py-6">
+      <PageBody className="space-y-4">
         {showGettingStarted ? (
           <SectionCard
             title="Getting started"
@@ -139,6 +136,7 @@ export default function HomePage() {
           <div className="space-y-4 lg:col-span-2">
             <RightNowPanel
               running={runningTasks.slice(0, RUNNING_SHOWN)}
+              runningTotal={runningTasks.length}
               queued={queuedTasks}
               activity={activity.data?.items ?? []}
               // The feed hook retries on a timer, so a persistent failure can
@@ -182,7 +180,7 @@ export default function HomePage() {
             </SpendPanelFrame>
           </div>
         </div>
-      </div>
+      </PageBody>
     </>
   );
 }

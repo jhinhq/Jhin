@@ -32,7 +32,16 @@ import {
   StateBadge,
   StructuredMessageBody,
 } from "@/components/task-bits";
-import { Badge, Button, ErrorNote, Input, Spinner, focusRing } from "@/components/ui";
+import {
+  Badge,
+  Button,
+  ButtonLink,
+  ConfirmDialog,
+  ErrorNote,
+  Input,
+  Spinner,
+  focusRing,
+} from "@/components/ui";
 import { useSegmentAfter } from "@/lib/use-route-segment";
 import { api, ApiError } from "@/lib/api";
 import { riskTone } from "@/lib/policy";
@@ -54,6 +63,7 @@ export default function TaskDetailPage() {
   const workspaceId = workspace.workspace_id;
   const invalidate = useInvalidateTasks(workspaceId);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [confirmCancel, setConfirmCancel] = useState(false);
 
   const detail = useTask(workspaceId, taskId, true);
   const live = detail.data ? isActiveState(detail.data.task.state) : true;
@@ -67,10 +77,13 @@ export default function TaskDetailPage() {
       api(`/api/v1/workspaces/${workspaceId}/tasks/${taskId}/${action}`, { method: "POST" }),
     onSuccess: () => {
       setActionError(null);
+      setConfirmCancel(false);
       invalidate();
     },
-    onError: (error) =>
-      setActionError(error instanceof ApiError ? error.detail : "Action failed."),
+    onError: (error) => {
+      setActionError(error instanceof ApiError ? error.detail : "Action failed.");
+      setConfirmCancel(false);
+    },
   });
 
   if (detail.isPending) {
@@ -130,11 +143,7 @@ export default function TaskDetailPage() {
                 size="sm"
                 variant="danger"
                 disabled={act.isPending}
-                onClick={() => {
-                  if (window.confirm("Cancel this task? The run stops after the current step.")) {
-                    act.mutate("cancel");
-                  }
-                }}
+                onClick={() => setConfirmCancel(true)}
               >
                 <Ban size={13} /> Cancel
               </Button>
@@ -153,9 +162,9 @@ export default function TaskDetailPage() {
             >
               <Zap size={16} className="shrink-0 text-accent-strong" aria-hidden />
               <p className="min-w-0 flex-1 text-sm text-dim">
-                Started by trigger{" "}
+                Started by the automation{" "}
                 <Link
-                  href="/triggers"
+                  href="/automations"
                   className={`rounded-md font-medium text-accent-strong hover:underline ${focusRing}`}
                 >
                   {String(task.metadata_json.trigger_name ?? shortId(task.trigger_id))}
@@ -230,11 +239,9 @@ export default function TaskDetailPage() {
                   someone decides.
                 </p>
               </div>
-              <Link href="/approvals">
-                <Button size="sm" variant="primary">
-                  Review approval
-                </Button>
-              </Link>
+              <ButtonLink href="/approvals" size="sm" variant="primary">
+                Review approval
+              </ButtonLink>
             </section>
           ) : null}
 
@@ -321,6 +328,17 @@ export default function TaskDetailPage() {
           ) : null}
         </aside>
       </PageBody>
+
+      <ConfirmDialog
+        open={confirmCancel}
+        title="Cancel this task?"
+        body="The run stops after the current step."
+        confirmLabel="Cancel task"
+        cancelLabel="Keep running"
+        busy={act.isPending}
+        onConfirm={() => act.mutate("cancel")}
+        onClose={() => setConfirmCancel(false)}
+      />
     </>
   );
 }

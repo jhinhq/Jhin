@@ -41,9 +41,6 @@ import type {
   ConnectionInfo,
 } from "@/lib/types";
 
-// The glyphs live with the tile now; the re-export keeps old import paths true.
-export { AppIcon } from "@/components/catalog/logo-tile";
-
 type ConnectShape = Pick<CatalogApp, "connector_type" | "stdio_only" | "mcp_url" | "url_unverified">;
 
 function howItConnects(entry: ConnectShape): string {

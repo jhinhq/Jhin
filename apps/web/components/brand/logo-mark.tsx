@@ -23,19 +23,13 @@ const CUBES = [
   { cx: 43, y: 55.4, top: "#f0e9fd", right: "#b7a8fc", left: "#7371fc" },
 ];
 
-export function LogoMark({
-  className = "",
-  title = "Jhin",
-}: {
-  className?: string;
-  title?: string;
-}) {
+export function LogoMark({ className = "" }: { className?: string }) {
   return (
     <svg
       viewBox="25.5 6 50.5 87.5"
       className={className}
       role="img"
-      aria-label={title}
+      aria-label="Jhin"
       style={{ overflow: "visible" }}
     >
       {CUBES.map((c, i) => {

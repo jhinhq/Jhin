@@ -3,10 +3,6 @@
 import { describe, expect, it } from "vitest";
 import {
   buildToolScope,
-  buildCliScope,
-  buildConnectorScope,
-  capabilityConnectorType,
-  CLI_SCOPE_FIELDS,
   coerceConnectorConfig,
   configFieldsForAuth,
   findAuthScheme,
@@ -112,45 +108,6 @@ describe("connector scope helpers", () => {
     ]);
   });
 
-  it("maps capabilities to their owning connector", () => {
-    expect(capabilityConnectorType("github.pull_request.create", ["github"])).toBe("github");
-    expect(capabilityConnectorType("system.echo", ["github"])).toBeNull();
-    expect(capabilityConnectorType("github.repository.read", [])).toBeNull();
-  });
-
-  it("builds a scope with only the provided values", () => {
-    expect(buildConnectorScope("conn-1", "octo/*", " agent/* ")).toEqual({
-      connection_id: "conn-1",
-      repository: "octo/*",
-      branch: "agent/*",
-    });
-    expect(buildConnectorScope("", "", "")).toEqual({});
-  });
-
-  it("builds cli scopes with only the fields the capability supports", () => {
-    expect(
-      buildCliScope("cli.command.execute", "conn-1", {
-        command: "git *",
-        network: "internet",
-        repository: "octo/*", // not a command.execute dimension — dropped
-      }),
-    ).toEqual({ connection_id: "conn-1", command: "git *", network: "internet" });
-    expect(
-      buildCliScope("cli.repository.checkout", "", { repository: "octo/*", command: "rm *" }),
-    ).toEqual({ repository: "octo/*" });
-    expect(buildCliScope("cli.file.read", "", { path: "src/*" })).toEqual({ path: "src/*" });
-    expect(buildCliScope("cli.file.write", "", {})).toEqual({});
-  });
-
-  it("declares scope dimensions for all five cli capabilities", () => {
-    expect(Object.keys(CLI_SCOPE_FIELDS).sort()).toEqual([
-      "cli.command.execute",
-      "cli.file.read",
-      "cli.file.write",
-      "cli.repository.checkout",
-      "cli.test.run",
-    ]);
-  });
 });
 
 describe("gallery data", () => {

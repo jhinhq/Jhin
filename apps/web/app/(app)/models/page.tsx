@@ -10,7 +10,7 @@ import { useMutation } from "@tanstack/react-query";
 import { CheckCircle2, ChevronDown, ChevronRight, Plus, RefreshCw, ShieldCheck } from "lucide-react";
 import { useId, useState } from "react";
 import { PageBody, PageHeader } from "@/components/app-shell";
-import { Disclosure } from "@/components/company/bits";
+import { Disclosure, LoadError } from "@/components/company/bits";
 import { ChangeDefaultDialog } from "@/components/models/change-default-dialog";
 import { DefaultModelCard } from "@/components/models/default-model-card";
 import { ProfileCard } from "@/components/models/profile-card";
@@ -88,7 +88,9 @@ export default function ModelsPage() {
   const workspaceId = workspace.workspace_id;
   const isAdmin = can("admin");
 
-  const providers = useModelProviders(workspaceId);
+  // The providers listing is admin-only server-side; asking anyway would turn
+  // every member's visit into a 403 reported as a load failure.
+  const providers = useModelProviders(workspaceId, isAdmin);
   const profiles = useModelProfiles(workspaceId);
   const detail = useWorkspaceDetail(workspaceId);
   const spend = useWorkspaceSpend(workspaceId);
@@ -139,12 +141,32 @@ export default function ModelsPage() {
     onError: (error) => setPricingError(errText(error, "Refreshing the price catalog failed.")),
   });
 
-  if (providers.isPending || profiles.isPending) {
+  // A disabled query stays pending forever, so the non-admin path must not
+  // wait on providers.
+  if ((isAdmin && providers.isPending) || profiles.isPending || detail.isPending) {
     return (
       <>
         <PageHeader title="Models" />
         <PageBody>
           <Spinner label="Loading model configuration…" />
+        </PageBody>
+      </>
+    );
+  }
+
+  if ((isAdmin && providers.isError) || profiles.isError || detail.isError) {
+    return (
+      <>
+        <PageHeader title="Models" />
+        <PageBody>
+          <LoadError
+            what="your model setup"
+            onRetry={() => {
+              if (isAdmin) void providers.refetch();
+              void profiles.refetch();
+              void detail.refetch();
+            }}
+          />
         </PageBody>
       </>
     );
@@ -236,7 +258,11 @@ export default function ModelsPage() {
           <h2 className="mb-3 font-display text-base font-semibold tracking-tight text-ink">
             Providers
           </h2>
-          {providerList.length === 0 ? (
+          {!isAdmin ? (
+            <p className="text-sm text-dim">
+              Provider accounts and API keys are managed by workspace admins.
+            </p>
+          ) : providerList.length === 0 ? (
             <EmptyState
               title="No model providers yet"
               description="Connect OpenAI, Anthropic, OpenRouter, Ollama, or any OpenAI-compatible endpoint. API keys are envelope-encrypted at rest and never shown again."

@@ -7,7 +7,6 @@ import {
   connectionsForApp,
   connectTarget,
   describeRisk,
-  describeTool,
   filterCatalog,
 } from "@/lib/apps";
 import type { CatalogApp, ConnectionInfo, ConnectorInfo } from "@/lib/types";
@@ -171,14 +170,8 @@ describe("connectTarget", () => {
 });
 
 describe("plain-language descriptions", () => {
-  it("describes risk and tools without jargon", () => {
+  it("describes risk without jargon", () => {
     expect(describeRisk("read")).toBe("Reads information only");
     expect(describeRisk("destructive")).toContain("needs approval");
-    expect(
-      describeTool({ name: "mcp.fake.echo", provider_name: "echo", description: "[MCP: fake] Return the text.", risk: "read" }),
-    ).toBe("echo: Return the text. (reads information only)");
-    expect(
-      describeTool({ name: "mcp.fake.x", provider_name: null, description: "", risk: "write" }),
-    ).toBe("x: no description from the server (can create or change things)");
   });
 });

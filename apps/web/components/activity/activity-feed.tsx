@@ -31,14 +31,12 @@ interface FeedFilters {
 export function ActivityFeed({
   workspaceId,
   fixedAgentId,
-  compact = false,
   emptyTitle = "Nothing here yet",
   emptyDescription = "When your agents talk to each other, it shows up here.",
 }: {
   workspaceId: string;
   /** When set, the agent picker is hidden and the feed is scoped to this agent. */
   fixedAgentId?: string;
-  compact?: boolean;
   emptyTitle?: string;
   emptyDescription?: string;
 }) {
@@ -47,7 +45,7 @@ export function ActivityFeed({
   const baseParams = {
     agent_id: agentId || undefined,
     kinds: kindsParam(filters.group),
-    limit: compact ? 10 : PAGE_SIZE,
+    limit: PAGE_SIZE,
   };
   const agents = useAgents(workspaceId);
   const avatarMap = useMemo(
@@ -68,33 +66,31 @@ export function ActivityFeed({
 
   return (
     <div className="space-y-4">
-      {!compact ? (
-        <div className="flex flex-wrap items-end gap-3">
-          <Segmented
-            label="Kind of activity"
-            options={GROUP_OPTIONS}
-            value={filters.group}
-            onChange={(group) => setFilters((current) => ({ ...current, group }))}
-          />
-          {!fixedAgentId ? (
-            <div className="w-full sm:w-64">
-              <Field label="Agent">
-                <Select
-                  value={filters.agentId}
-                  onChange={(event) => setFilters((current) => ({ ...current, agentId: event.target.value }))}
-                >
-                  <option value="">Everyone</option>
-                  {(agents.data ?? []).map((agent) => (
-                    <option key={agent.id} value={agent.id}>
-                      {agent.name}
-                    </option>
-                  ))}
-                </Select>
-              </Field>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
+      <div className="flex flex-wrap items-end gap-3">
+        <Segmented
+          label="Kind of activity"
+          options={GROUP_OPTIONS}
+          value={filters.group}
+          onChange={(group) => setFilters((current) => ({ ...current, group }))}
+        />
+        {!fixedAgentId ? (
+          <div className="w-full sm:w-64">
+            <Field label="Agent">
+              <Select
+                value={filters.agentId}
+                onChange={(event) => setFilters((current) => ({ ...current, agentId: event.target.value }))}
+              >
+                <option value="">Everyone</option>
+                {(agents.data ?? []).map((agent) => (
+                  <option key={agent.id} value={agent.id}>
+                    {agent.name}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </div>
+        ) : null}
+      </div>
 
       {first.isPending ? (
         <Spinner label="Loading activity…" />
@@ -108,7 +104,6 @@ export function ActivityFeed({
           workspaceId={workspaceId}
           firstPage={first.data}
           params={baseParams}
-          compact={compact}
           avatars={avatarMap}
         />
       )}
@@ -121,13 +116,11 @@ function PagedList({
   workspaceId,
   firstPage,
   params,
-  compact,
   avatars,
 }: {
   workspaceId: string;
   firstPage: ActivityList;
   params: Record<string, string | number | undefined>;
-  compact: boolean;
   avatars: Record<string, AgentAvatar>;
 }) {
   const [extra, setExtra] = useState<ActivityCardData[]>([]);
@@ -161,7 +154,7 @@ function PagedList({
       {loadMore.isError ? (
         <LoadError what="older activity" onRetry={() => cursor && loadMore.mutate(cursor)} />
       ) : null}
-      {!compact && cursor ? (
+      {cursor ? (
         <div className="flex justify-center pt-1">
           <Button onClick={() => loadMore.mutate(cursor)} disabled={loadMore.isPending}>
             {loadMore.isPending ? "Loading…" : "Load more"}

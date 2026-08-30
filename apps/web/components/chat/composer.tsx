@@ -4,6 +4,7 @@
 
 import { SendHorizontal, Square } from "lucide-react";
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef } from "react";
+import { focusRing } from "@/components/ui";
 
 export interface ComposerHandle {
   focus: () => void;
@@ -169,11 +170,18 @@ export const Composer = forwardRef<
           ) : null}
           <button
             type="submit"
-            aria-label="Send message"
+            aria-label={sending ? "Sending…" : "Send message"}
             disabled={!canSend}
-            className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-accent text-white shadow-[0_6px_20px_-6px_var(--glow,rgba(115,113,252,0.4))] transition-transform hover:-translate-y-px disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:translate-y-0"
+            className={`btn-gradient inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl disabled:cursor-not-allowed disabled:opacity-40 ${focusRing}`}
           >
-            <SendHorizontal size={18} />
+            {sending ? (
+              <span
+                aria-hidden
+                className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white"
+              />
+            ) : (
+              <SendHorizontal size={18} />
+            )}
           </button>
         </div>
       </div>

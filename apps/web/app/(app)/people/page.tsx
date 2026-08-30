@@ -8,10 +8,12 @@ import { Mail, Trash2, UserPlus } from "lucide-react";
 import { useState } from "react";
 import { PageBody, PageHeader } from "@/components/app-shell";
 import { OneTimeSecret, ROLE_COPY, ROLE_ORDER, RoleBadge, RoleSelect } from "@/components/access";
+import { LoadError } from "@/components/company/bits";
 import {
   Badge,
   Button,
   Card,
+  ConfirmDialog,
   Dialog,
   EmptyState,
   ErrorNote,
@@ -40,6 +42,12 @@ export default function PeoplePage() {
   const invitations = useInvitations(workspaceId, isAdmin);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // High-impact role changes (handing out ownership, changing your own role)
+  // wait behind a confirm; ordinary ones still commit straight away.
+  const [confirmRole, setConfirmRole] = useState<{ member: Member; role: WorkspaceRole } | null>(
+    null,
+  );
+  const [confirmRemove, setConfirmRemove] = useState<Member | null>(null);
 
   const changeRole = useMutation({
     mutationFn: ({ membershipId, role: next }: { membershipId: string; role: WorkspaceRole }) =>
@@ -49,9 +57,13 @@ export default function PeoplePage() {
       }),
     onSuccess: () => {
       setError(null);
+      setConfirmRole(null);
       void members.refetch();
     },
-    onError: (cause) => setError(errorText(cause, "That role change was not allowed.")),
+    onError: (cause) => {
+      setError(errorText(cause, "That role change was not allowed."));
+      setConfirmRole(null);
+    },
   });
 
   const removeMember = useMutation({
@@ -61,9 +73,13 @@ export default function PeoplePage() {
       }),
     onSuccess: () => {
       setError(null);
+      setConfirmRemove(null);
       void members.refetch();
     },
-    onError: (cause) => setError(errorText(cause, "Removing that person was not allowed.")),
+    onError: (cause) => {
+      setError(errorText(cause, "Removing that person was not allowed."));
+      setConfirmRemove(null);
+    },
   });
 
   // Only an owner may hand out ownership, and only an owner may change or
@@ -104,6 +120,8 @@ export default function PeoplePage() {
           <ErrorNote message={error} />
           {members.isPending ? (
             <Spinner />
+          ) : members.isError ? (
+            <LoadError what="members" onRetry={() => void members.refetch()} />
           ) : (
             <ul className="divide-y divide-line" data-testid="member-list">
               {(members.data ?? []).map((member) => (
@@ -124,12 +142,17 @@ export default function PeoplePage() {
                           value={member.role}
                           aria-label={`Role for ${member.display_name}`}
                           className="!h-8 w-28 !text-[13px]"
-                          onChange={(event) =>
-                            changeRole.mutate({
-                              membershipId: member.id,
-                              role: event.target.value as WorkspaceRole,
-                            })
-                          }
+                          onChange={(event) => {
+                            const next = event.target.value as WorkspaceRole;
+                            if (next === member.role) return;
+                            if (next === "owner" || member.user_id === user.id) {
+                              // The select is controlled by server state, so
+                              // cancelling simply leaves it showing the old role.
+                              setConfirmRole({ member, role: next });
+                            } else {
+                              changeRole.mutate({ membershipId: member.id, role: next });
+                            }
+                          }}
                         >
                           {ROLE_ORDER.filter(
                             (entry) =>
@@ -154,13 +177,7 @@ export default function PeoplePage() {
                               ? "Leave this workspace"
                               : `Remove ${member.display_name}`
                           }
-                          onClick={() => {
-                            const isSelf = member.user_id === user.id;
-                            const question = isSelf
-                              ? `Leave ${workspace.workspace_name}? You lose access immediately and will need a new invitation to come back.`
-                              : `Remove ${member.display_name} from ${workspace.workspace_name}? They lose access immediately.`;
-                            if (window.confirm(question)) removeMember.mutate(member.id);
-                          }}
+                          onClick={() => setConfirmRemove(member)}
                         >
                           <Trash2 size={13} />
                         </Button>
@@ -195,6 +212,50 @@ export default function PeoplePage() {
           void members.refetch();
         }}
       />
+
+      {confirmRole ? (
+        <ConfirmDialog
+          open
+          title={
+            confirmRole.member.user_id === user.id
+              ? `Change your own role to ${ROLE_COPY[confirmRole.role].label.toLowerCase()}?`
+              : `Make ${confirmRole.member.display_name} an owner?`
+          }
+          body={
+            confirmRole.member.user_id === user.id
+              ? "This takes effect immediately, and you may not be able to change it back yourself."
+              : "Owners can do everything here, including managing every member and deleting the workspace."
+          }
+          confirmLabel={
+            confirmRole.member.user_id === user.id ? "Change my role" : "Make owner"
+          }
+          busy={changeRole.isPending}
+          onConfirm={() =>
+            changeRole.mutate({ membershipId: confirmRole.member.id, role: confirmRole.role })
+          }
+          onClose={() => setConfirmRole(null)}
+        />
+      ) : null}
+
+      {confirmRemove ? (
+        <ConfirmDialog
+          open
+          title={
+            confirmRemove.user_id === user.id
+              ? `Leave ${workspace.workspace_name}?`
+              : `Remove ${confirmRemove.display_name}?`
+          }
+          body={
+            confirmRemove.user_id === user.id
+              ? "You lose access immediately and will need a new invitation to come back."
+              : `They lose access to ${workspace.workspace_name} immediately.`
+          }
+          confirmLabel={confirmRemove.user_id === user.id ? "Leave workspace" : "Remove"}
+          busy={removeMember.isPending}
+          onConfirm={() => removeMember.mutate(confirmRemove.id)}
+          onClose={() => setConfirmRemove(null)}
+        />
+      ) : null}
     </>
   );
 }

@@ -11,7 +11,7 @@ import { Plus } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { AppLibrary, type FacetDimension } from "@/components/app-library";
-import { PageHeader } from "@/components/app-shell";
+import { PageBody, PageHeader } from "@/components/app-shell";
 import { LogoTile } from "@/components/catalog/logo-tile";
 import { CatalogEntryDialog } from "@/components/catalog-entry-dialog";
 import { Disclosure, LoadError, StatusPill } from "@/components/company/bits";
@@ -335,7 +335,7 @@ export default function AppsPage() {
         description="Connect the apps your agents work with — GitHub, Notion, Slack, Stripe, and any app with an MCP server"
         actions={addApp}
       />
-      <div className="space-y-8 px-4 py-5 sm:px-8 sm:py-6">
+      <PageBody className="space-y-8">
         {!isAdmin ? (
           <EmptyState
             title="Apps are managed by admins"
@@ -501,7 +501,7 @@ export default function AppsPage() {
             </section>
           </>
         )}
-      </div>
+      </PageBody>
 
       {createFor ? (
         <ConnectPanel

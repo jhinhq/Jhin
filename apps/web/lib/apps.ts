@@ -10,7 +10,6 @@ import type {
   CatalogEntryDetail,
   CatalogTrustTier,
   ConnectionInfo,
-  ConnectionToolInfo,
   ConnectorInfo,
   RiskLevel,
 } from "@/lib/types";
@@ -202,13 +201,6 @@ const RISK_COPY: Record<RiskLevel, string> = {
 /** Plain-language risk label for people who do not know the policy model. */
 export function describeRisk(risk: RiskLevel): string {
   return RISK_COPY[risk] ?? risk;
-}
-
-/** One-line, jargon-free summary of a discovered tool for grant pickers. */
-export function describeTool(tool: Pick<ConnectionToolInfo, "name" | "description" | "risk" | "provider_name">): string {
-  const label = tool.provider_name ?? tool.name.split(".").at(-1) ?? tool.name;
-  const summary = tool.description.replace(/^\[MCP: [^\]]+\]\s*/, "").trim();
-  return `${label}: ${summary || "no description from the server"} (${describeRisk(tool.risk).toLowerCase()})`;
 }
 
 /* ------------------------------------------------------------------ */

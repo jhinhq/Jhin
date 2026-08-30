@@ -22,13 +22,6 @@ export const ACTIVITY_GROUP_LABELS: Record<ActivityGroup, string> = {
   review: "Needs review",
 };
 
-export function groupForKind(kind: ActivityKind): ActivityGroup {
-  for (const [group, kinds] of Object.entries(ACTIVITY_GROUPS) as [ActivityGroup, ActivityKind[]][]) {
-    if (kinds.includes(kind)) return group;
-  }
-  return "progress";
-}
-
 /** Comma list for the API's `kinds` query param, or undefined for "all". */
 export function kindsParam(group: ActivityGroup | "all"): string | undefined {
   return group === "all" ? undefined : ACTIVITY_GROUPS[group].join(",");

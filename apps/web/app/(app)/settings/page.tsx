@@ -81,9 +81,20 @@ export default function SettingsPage() {
               </Button>
             ) : null}
           </form>
+          {rename.error ? (
+            <div className="mt-3">
+              <ErrorNote
+                message={
+                  rename.error instanceof ApiError
+                    ? rename.error.detail
+                    : "Renaming the workspace failed — try again."
+                }
+              />
+            </div>
+          ) : null}
           <p className="mt-3 text-xs text-faint">
-            Slug: <code className="font-mono">{workspaceQuery.data?.slug ?? workspace.workspace_slug}</code> · Default
-            model, timezone, and other settings are coming later.
+            Slug: <code className="font-mono">{workspaceQuery.data?.slug ?? workspace.workspace_slug}</code> · The
+            default model lives on the <Link href="/models" className="text-accent-strong hover:underline">Models page</Link>.
           </p>
         </Card>
 
@@ -92,8 +103,8 @@ export default function SettingsPage() {
         <Card as="section">
           <h2 className="mb-1 font-display text-base font-semibold">People</h2>
           <p className="mb-4 text-sm text-dim">
-            Members, roles, and invitations moved to their own page so there is room to explain
-            what each role actually means.
+            Members, roles, and invitations live on the People page, along with what each role
+            is allowed to do.
           </p>
           <Link
             href="/people"
