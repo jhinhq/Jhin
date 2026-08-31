@@ -38,6 +38,7 @@ dependencies = [
 
 [project.scripts]
 jhin-seed-dev = "jhin_api.seed:main"
+jhin-admin = "jhin_api.cli:main"
 
 [tool.uv.sources]
 jhin-catalog-sync = { workspace = true }

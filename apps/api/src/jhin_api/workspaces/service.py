@@ -34,7 +34,7 @@ from jhin_db.models import (
     Workspace,
     WorkspaceMembership,
 )
-from jhin_domain import WorkspaceRole
+from jhin_domain import ActorType, WorkspaceRole
 
 
 async def list_for_user(db: AsyncSession, user_id: UUID) -> list[Workspace]:
@@ -61,7 +61,7 @@ async def create(
     default_timezone: str,
     creator_id: UUID,
     request_id: UUID,
-    ip_hash: str,
+    ip_hash: str | None,
 ) -> Workspace:
     slug = slugify(name)
     if await db.scalar(select(Workspace.id).where(Workspace.slug == slug)):
@@ -290,7 +290,9 @@ async def add_member(
     email: str,
     role: WorkspaceRole,
     request_id: UUID,
-    ip_hash: str,
+    ip_hash: str | None,
+    actor_type: ActorType = ActorType.USER,
+    extra_metadata: dict[str, Any] | None = None,
 ) -> tuple[WorkspaceMembership, User]:
     require_authority_over(ctx, role)
     user = await db.scalar(select(User).where(User.email == email.strip().lower()))
@@ -318,10 +320,11 @@ async def add_member(
         target_type="workspace_membership",
         target_id=membership.id,
         workspace_id=ctx.workspace_id,
+        actor_type=actor_type,
         actor_id=ctx.user.id,
         request_id=request_id,
         ip_hash=ip_hash,
-        metadata={"user_id": str(user.id), "role": role.value},
+        metadata={"user_id": str(user.id), "role": role.value, **(extra_metadata or {})},
     )
     await db.commit()
     return membership, user
@@ -334,7 +337,9 @@ async def update_member_role(
     *,
     role: WorkspaceRole,
     request_id: UUID,
-    ip_hash: str,
+    ip_hash: str | None,
+    actor_type: ActorType = ActorType.USER,
+    extra_metadata: dict[str, Any] | None = None,
 ) -> tuple[WorkspaceMembership, User]:
     membership = await _get_membership(db, ctx.workspace_id, membership_id)
     current_role = WorkspaceRole(membership.role)
@@ -356,10 +361,15 @@ async def update_member_role(
         target_type="workspace_membership",
         target_id=membership.id,
         workspace_id=ctx.workspace_id,
+        actor_type=actor_type,
         actor_id=ctx.user.id,
         request_id=request_id,
         ip_hash=ip_hash,
-        metadata={"from_role": current_role.value, "to_role": role.value},
+        metadata={
+            "from_role": current_role.value,
+            "to_role": role.value,
+            **(extra_metadata or {}),
+        },
     )
     await db.commit()
     user = await db.get(User, membership.user_id)

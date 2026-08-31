@@ -471,6 +471,70 @@ make compose-down
 Internal infrastructure ports (Postgres, NATS, Temporal) are **not** published
 publicly. The dev overlay (`compose.dev.yaml`) binds them to `127.0.0.1` only.
 
+### Administering an install from the server
+
+The API image ships `jhin-admin` for the things a browser cannot do: checking
+an install, creating the first owner on a headless box, and getting back in
+when nobody can sign in. It runs wherever the API runs, and the `jhin` command
+the installer puts on your PATH is the short way to reach it:
+
+```bash
+jhin admin --help
+jhin doctor
+```
+
+`jhin` also covers the rest of the day: `up`, `down`, `restart`, `status`,
+`logs`, `open`, `update`, `migrate`, and `compose` for anything it does not
+wrap. It remembers the install directory and the socket overlay chosen at
+install time, so none of that has to be retyped. Without it — or on an install
+made before it existed — every command below has a longer equivalent:
+
+```bash
+docker compose -f compose.yaml -f <your-overlay>.yaml \
+  run --rm --no-deps api jhin-admin doctor
+```
+
+> Upgrading an install that predates `jhin-admin`? It lives in the API image,
+> so it appears once that image is rebuilt: `jhin update`, or
+> `docker compose build api`. Until then the command is genuinely not there
+> and Docker will say so.
+
+`doctor` is read-only. It reports whether the database answers, whether the
+schema matches the code (and says so plainly when migrations are pending),
+whether the master key loads — never what it is — whether first-run setup is
+still open, and what the install holds. It exits non-zero when something is
+broken, so a monitor can run it.
+
+There are two ways to give somebody an account, and they are not
+interchangeable:
+
+- `jhin-admin invite create --email … --workspace … --role …` mints a
+  single-use invitation link and prints it once, for you to pass along. They
+  choose their own password and nobody else ever holds it. Prefer this.
+- `jhin-admin user create --email … --name … --workspace … --role …` makes the
+  account outright, for automation and for the case where there is no way to
+  get a link to the person. You set the first password, which means you have
+  seen it.
+
+`jhin-admin owner create` is the `/setup` page from the server side, for a
+first run on a machine with no browser in front of it; like the page, it
+refuses once any account exists. `jhin-admin user set-password --email …` is
+the way back in when the only owner is locked out — it also signs that account
+out everywhere, because a password change that leaves old sessions alive has
+changed nothing that matters.
+
+No command anywhere takes a password as an argument: arguments are visible in
+the process table to every other user on the host, and shells write them to
+their history. Commands prompt for one, or read it from stdin:
+
+```bash
+printf %s "$NEW_PASSWORD" |
+  jhin admin user set-password --email owner@example.com --password-stdin --yes
+```
+
+Every command takes `--json` for scripting, and `jhin-admin user list`,
+`workspace list` and `user set-role` cover the rest of the day-to-day.
+
 ## Production deployment
 
 Production installs use the pull-based release bundle

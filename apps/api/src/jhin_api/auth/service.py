@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 import anyio.to_thread
@@ -123,19 +124,25 @@ async def revoke_all_sessions(
     return int(getattr(result, "rowcount", 0) or 0)
 
 
-async def bootstrap_owner(
+async def create_owner_and_workspace(
     db: AsyncSession,
     *,
     email: str,
     password: str,
     display_name: str,
     workspace_name: str,
-    session_ttl_hours: int,
     request_id: UUID,
-    ip_hash: str,
-    user_agent: str | None,
-) -> LoginResult:
-    """First-run flow (plan 43 steps 1-2): create owner user + workspace.
+    ip_hash: str | None,
+    actor_type: ActorType = ActorType.USER,
+    metadata: dict[str, Any] | None = None,
+) -> tuple[User, Workspace]:
+    """Stage the first owner, their workspace, and its starter skills.
+
+    Shared by the ``/setup`` page and by ``jhin-admin owner create`` so the two
+    first-run paths cannot drift: whichever one an install uses, the same rows
+    exist afterwards. Stages only — the caller commits, and decides whether the
+    run also seats a session (a console one must not: nobody is holding the
+    token it would mint).
 
     Refuses to run once any user exists, so it cannot be used to take over an
     installed instance.
@@ -172,10 +179,11 @@ async def bootstrap_owner(
         target_type="user",
         target_id=user.id,
         workspace_id=workspace.id,
-        actor_type=ActorType.USER,
+        actor_type=actor_type,
         actor_id=user.id,
         request_id=request_id,
         ip_hash=ip_hash,
+        metadata=metadata,
     )
     audit.record(
         db,
@@ -183,10 +191,11 @@ async def bootstrap_owner(
         target_type="workspace",
         target_id=workspace.id,
         workspace_id=workspace.id,
+        actor_type=actor_type,
         actor_id=user.id,
         request_id=request_id,
         ip_hash=ip_hash,
-        metadata={"name": workspace.name, "slug": workspace.slug},
+        metadata={"name": workspace.name, "slug": workspace.slug, **(metadata or {})},
     )
     # Every new workspace starts with the five starter skills already
     # installed and enabled (docs/architecture/skills.md).
@@ -194,6 +203,36 @@ async def bootstrap_owner(
         db,
         workspace.id,
         actor_id=user.id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+    )
+    return user, workspace
+
+
+async def bootstrap_owner(
+    db: AsyncSession,
+    *,
+    email: str,
+    password: str,
+    display_name: str,
+    workspace_name: str,
+    session_ttl_hours: int,
+    request_id: UUID,
+    ip_hash: str,
+    user_agent: str | None,
+) -> LoginResult:
+    """First-run flow (plan 43 steps 1-2): create owner user + workspace.
+
+    The browser half of :func:`create_owner_and_workspace`: the operator who
+    filled in the form is signed in on the spot, so the response can seat them
+    without a second trip through the login form.
+    """
+    user, workspace = await create_owner_and_workspace(
+        db,
+        email=email,
+        password=password,
+        display_name=display_name,
+        workspace_name=workspace_name,
         request_id=request_id,
         ip_hash=ip_hash,
     )

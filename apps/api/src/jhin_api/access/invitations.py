@@ -89,7 +89,7 @@ async def create_invitation(
     role: WorkspaceRole,
     ttl_days: int,
     request_id: UUID,
-    ip_hash: str,
+    ip_hash: str | None,
 ) -> CreatedInvitation:
     require_authority_over(ctx, role)
     normalized = email.strip().lower()
