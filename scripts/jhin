@@ -1,0 +1,167 @@
+#!/bin/sh
+# jhin - one command for a self-hosted Jhin install.
+#
+# Everything here is a thin wrapper over Docker Compose. The value is not the
+# wrapping, it is that the two things every Compose call needs - which
+# directory the install lives in, and which of the mutually exclusive Docker
+# socket overlays this host was set up with - are remembered from install time
+# instead of retyped. Getting the overlay wrong is not a typo, it is a
+# different security posture, so it is not something to leave to memory.
+#
+# Install location is resolved in this order:
+#   1. $JHIN_DIR
+#   2. the config the installer wrote (see CONFIG below)
+#   3. the current directory, if it looks like a Jhin checkout
+#   4. ~/jhin
+set -eu
+
+CONFIG="${JHIN_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/jhin/config}"
+
+say() { printf '%s\n' "$*"; }
+fail() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<'USAGE'
+jhin - run and administer a self-hosted Jhin install
+
+  jhin up                 Start the stack (builds what changed)
+  jhin down               Stop the stack
+  jhin restart [service]  Restart everything, or one service
+  jhin status             What is running, and is it healthy
+  jhin logs [service]     Follow logs, all services or one
+  jhin open               Open the web UI in a browser
+  jhin update             Pull the latest version, rebuild, migrate
+  jhin migrate            Apply pending database migrations
+  jhin doctor             Check this install's health
+  jhin admin ...          Administer accounts and workspaces
+  jhin compose ...        Run a raw Compose command with the right files
+  jhin version            Versions of Jhin and this launcher
+
+Common admin commands:
+  jhin admin user create --email you@example.com --name "Your Name" \
+      --workspace jhin-hq --role owner
+  jhin admin user set-password --email you@example.com
+  jhin admin invite create --email them@example.com --workspace jhin-hq --role member
+  jhin admin --help
+
+A password is never passed as an argument - the command asks for it, or reads
+it from stdin with --password-stdin. Arguments are visible to every process on
+the host and land in your shell history; passwords should not.
+USAGE
+}
+
+# --- Locate the install ----------------------------------------------------
+
+looks_like_jhin() { [ -f "$1/compose.yaml" ] && [ -d "$1/apps/api" ]; }
+
+if [ -n "${JHIN_DIR:-}" ]; then
+  :
+elif [ -f "$CONFIG" ]; then
+  # Written by the installer; only these two keys are read.
+  JHIN_DIR="$(sed -n 's/^JHIN_DIR=//p' "$CONFIG" | tail -n 1)"
+  JHIN_OVERLAY="${JHIN_OVERLAY:-$(sed -n 's/^JHIN_OVERLAY=//p' "$CONFIG" | tail -n 1)}"
+elif looks_like_jhin "$PWD"; then
+  JHIN_DIR="$PWD"
+else
+  JHIN_DIR="$HOME/jhin"
+fi
+
+looks_like_jhin "${JHIN_DIR:-}" || fail "no Jhin install at ${JHIN_DIR:-<unset>}.
+Set JHIN_DIR, or re-run the installer: curl -fsSL https://get.jhin.ai | sh"
+
+# The overlay is a security decision, so an unknown one is fatal rather than
+# quietly replaced with a default.
+if [ -z "${JHIN_OVERLAY:-}" ]; then
+  fail "no Docker socket overlay recorded for $JHIN_DIR.
+Set JHIN_OVERLAY to one of compose.rootful.yaml, compose.rootless.yaml, or
+compose.desktop.yaml, or re-run the installer to record it."
+fi
+[ -f "$JHIN_DIR/$JHIN_OVERLAY" ] || fail "overlay $JHIN_OVERLAY does not exist in $JHIN_DIR."
+
+cd "$JHIN_DIR"
+COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-jhin}"
+export COMPOSE_PROJECT_NAME
+
+compose() { docker compose -f compose.yaml -f "$JHIN_OVERLAY" "$@"; }
+
+# Run a command in the api container. Prefer the running one: it starts in
+# milliseconds instead of standing up a throwaway container. Interactive
+# terminals get a TTY so a password prompt works; a pipe deliberately does not,
+# so `... | jhin admin ... --password-stdin` reaches the program unchanged.
+api_exec() {
+  if [ -t 0 ]; then tty_flag=""; else tty_flag="-T"; fi
+  if compose ps --services --status running 2>/dev/null | grep -qx api; then
+    # shellcheck disable=SC2086
+    compose exec $tty_flag api "$@"
+  else
+    say "The stack is not running; starting a temporary container." >&2
+    # shellcheck disable=SC2086
+    compose run --rm --no-deps $tty_flag api "$@"
+  fi
+}
+
+# --- Commands --------------------------------------------------------------
+
+[ $# -eq 0 ] && { usage; exit 0; }
+command="$1"
+shift
+
+case "$command" in
+  -h|--help|help) usage ;;
+
+  up|start)
+    compose up -d --build --wait --wait-timeout 300 "$@"
+    say ""
+    say "Jhin is up: http://localhost:3000"
+    ;;
+
+  down|stop) compose down "$@" ;;
+
+  restart) compose restart "$@" ;;
+
+  status|ps) compose ps "$@" ;;
+
+  logs)
+    if [ $# -eq 0 ]; then compose logs --follow --tail 100
+    else compose logs --follow --tail 100 "$@"; fi
+    ;;
+
+  open)
+    url="http://localhost:3000"
+    if command -v xdg-open >/dev/null 2>&1; then xdg-open "$url"
+    elif command -v open >/dev/null 2>&1; then open "$url"
+    else say "Open $url"; fi
+    ;;
+
+  update)
+    git pull --ff-only
+    compose --profile build build sandbox-image
+    compose up -d --build --wait --wait-timeout 300
+    api_exec jhin-db-migrate
+    say ""
+    say "Updated. http://localhost:3000"
+    ;;
+
+  migrate) api_exec jhin-db-migrate ;;
+
+  doctor) api_exec jhin-admin doctor "$@" ;;
+
+  admin) api_exec jhin-admin "$@" ;;
+
+  compose) compose "$@" ;;
+
+  version)
+    if [ -f VERSION ]; then say "Jhin $(cat VERSION)"; fi
+    say "install   $JHIN_DIR"
+    say "overlay   $JHIN_OVERLAY"
+    git -C "$JHIN_DIR" rev-parse --short HEAD 2>/dev/null | while read -r sha; do
+      say "revision  $sha"
+    done
+    ;;
+
+  *)
+    printf '\033[1;31merror:\033[0m unknown command "%s"\n\n' "$command" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

@@ -5,6 +5,8 @@
 packages/workflows/tests/fixtures/phase9_temporal/** -text
 
 # The installer is piped straight into sh (curl -fsSL https://get.jhin.ai | sh)
-# and also runs from checkouts under WSL; a CRLF checkout breaks POSIX sh.
+# and also runs from checkouts under WSL; a CRLF checkout breaks POSIX sh. The
+# launcher is copied onto PATH from a checkout and runs the same way.
 scripts/install.sh text eol=lf
+scripts/jhin text eol=lf
 

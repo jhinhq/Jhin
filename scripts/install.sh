@@ -186,7 +186,37 @@ compose up -d --build --wait --wait-timeout 300
 step "Applying database migrations"
 compose run --rm --no-deps api jhin-db-migrate
 
-# --- 6. Done ---------------------------------------------------------------
+# --- 6. The jhin launcher --------------------------------------------------
+# Every operation needs the install directory and the one socket overlay this
+# host was set up with. Recording them here is what lets `jhin ...` stand in
+# for a full `docker compose -f ... -f ...` line afterwards.
+
+step "Installing the jhin command"
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/jhin"
+mkdir -p "$CONFIG_DIR"
+cat > "$CONFIG_DIR/config" <<CONFIG
+# Written by the Jhin installer. Read by the jhin launcher.
+JHIN_DIR=$JHIN_DIR
+JHIN_OVERLAY=$OVERLAY
+CONFIG
+
+BIN_DIR="$HOME/.local/bin"
+mkdir -p "$BIN_DIR"
+if cp "$JHIN_DIR/scripts/jhin" "$BIN_DIR/jhin" 2>/dev/null && chmod +x "$BIN_DIR/jhin"; then
+  LAUNCHER="$BIN_DIR/jhin"
+  say "installed $LAUNCHER"
+  case ":$PATH:" in
+    *":$BIN_DIR:"*) LAUNCHER_ON_PATH=1 ;;
+    *) LAUNCHER_ON_PATH=0 ;;
+  esac
+else
+  LAUNCHER=""
+  LAUNCHER_ON_PATH=0
+  say "could not install the launcher into $BIN_DIR; use $JHIN_DIR/scripts/jhin directly."
+fi
+
+# --- 7. Done ---------------------------------------------------------------
 
 printf '\n\033[1;32mJhin is running.\033[0m\n\n'
 say "  Open        http://localhost:3000"
@@ -194,7 +224,13 @@ say "              (first visit walks you through creating the owner account)"
 say "  Installed   $JHIN_DIR"
 say "  Master key  $JHIN_DIR/$KEY_FILE"
 say "              Back this file up. Losing it makes every stored credential unreadable."
-say "  Stop        cd $JHIN_DIR && docker compose -f compose.yaml -f $OVERLAY down"
+say "  Commands    jhin status | jhin logs | jhin down | jhin admin --help"
+if [ "$LAUNCHER_ON_PATH" -eq 0 ] && [ -n "$LAUNCHER" ]; then
+  say ""
+  say "  $BIN_DIR is not on your PATH yet. Add it to use \"jhin\" by name:"
+  say "      export PATH=\"\$HOME/.local/bin:\$PATH\""
+  say "  Until then the full path works: $LAUNCHER status"
+fi
 if [ "$MODE" = desktop ]; then
   say ""
   say "  Reminder: desktop mode is for a developer's own machine only. For a"

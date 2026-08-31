@@ -126,7 +126,37 @@ Step "Applying database migrations"
 docker compose -f compose.yaml -f compose.desktop.yaml run --rm --no-deps api jhin-db-migrate
 Assert-LastExit "database migration"
 
-# --- 5. Done ---------------------------------------------------------------
+# --- 5. The jhin launcher --------------------------------------------------
+# Every operation needs the install directory and the socket overlay this host
+# was set up with. Recording them here is what lets `jhin ...` stand in for a
+# full `docker compose -f ... -f ...` line afterwards.
+
+Step "Installing the jhin command"
+
+$configDir = Join-Path $env:APPDATA "Jhin"
+New-Item -ItemType Directory -Force $configDir | Out-Null
+$configText = "# Written by the Jhin installer. Read by the jhin launcher.`nJHIN_DIR=$jhinDir`nJHIN_OVERLAY=compose.desktop.yaml`n"
+[IO.File]::WriteAllText((Join-Path $configDir "config"), $configText, $utf8NoBom)
+
+$binDir = Join-Path $env:LOCALAPPDATA "Jhin\bin"
+New-Item -ItemType Directory -Force $binDir | Out-Null
+Copy-Item (Join-Path $jhinDir "scripts\jhin.ps1") (Join-Path $binDir "jhin.ps1") -Force
+Copy-Item (Join-Path $jhinDir "scripts\jhin.cmd") (Join-Path $binDir "jhin.cmd") -Force
+Say "installed $binDir\jhin.cmd"
+
+# PATH is per-user here: a machine-wide change would need elevation, and this
+# installer never asks for it.
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if (-not $userPath) { $userPath = "" }
+if (($userPath -split ";") -notcontains $binDir) {
+    [Environment]::SetEnvironmentVariable("Path", ($userPath.TrimEnd(";") + ";" + $binDir), "User")
+    $pathWasAdded = $true
+} else {
+    $pathWasAdded = $false
+}
+$env:Path = $env:Path + ";" + $binDir
+
+# --- 6. Done ---------------------------------------------------------------
 
 Write-Host "`nJhin is running." -ForegroundColor Green
 Say ""
@@ -135,6 +165,10 @@ Say "              (first visit walks you through creating the owner account)"
 Say "  Installed   $jhinDir"
 Say "  Master key  $keyFile"
 Say "              Back this file up. Losing it makes every stored credential unreadable."
-Say "  Stop        cd $jhinDir; docker compose -f compose.yaml -f compose.desktop.yaml down"
+Say "  Commands    jhin status | jhin logs | jhin down | jhin admin --help"
+if ($pathWasAdded) {
+    Say ""
+    Say "  Added $binDir to your PATH. Open a new terminal for \"jhin\" to resolve."
+}
 Say ""
 Start-Process "http://localhost:3000"
