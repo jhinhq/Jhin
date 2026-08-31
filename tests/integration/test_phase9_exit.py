@@ -2968,7 +2968,9 @@ async def test_control_plane_rbac_access_summary_and_outputs_hide_secrets(
 
     ui_response = await client.get(f"{WEB_URL}/connectors", follow_redirects=True)
     assert ui_response.status_code == 200, ui_response.text
-    assert ui_response.url.path == "/connectors", str(ui_response.url)
+    # Connections live on /apps now; /connectors is kept as a permanent
+    # redirect for anyone holding the old link (apps/web/next.config.ts).
+    assert ui_response.url.path == "/apps", str(ui_response.url)
     # The page is a client component; the initial response proves the protected
     # route renders, while the hydrated connector/access-summary view is
     # exercised by the web component gate and the Task 8 browser verification.
