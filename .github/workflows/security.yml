@@ -34,14 +34,14 @@ jobs:
       matrix:
         language: [python, javascript-typescript]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: github/codeql-action/init@v3
+      - uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
           queries: security-and-quality
 
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/analyze@v4
         with:
           category: /language:${{ matrix.language }}
 
@@ -54,9 +54,9 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/dependency-review-action@v4
+      - uses: actions/dependency-review-action@v5
         with:
           fail-on-severity: high
           # Runtime dependencies with copyleft-for-SaaS or source-available
@@ -69,9 +69,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.13"
           enable-cache: true
@@ -95,11 +95,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "22"
           cache: pnpm
@@ -116,16 +116,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: gitleaks over tracked content and history
+        # The config is read from the same read-only mount as the source; it
+        # allowlists the synthetic credentials that published test commits
+        # carry and that history cannot be edited to remove.
         run: |
           docker run --rm \
             --volume "$GITHUB_WORKSPACE:/repo:ro" \
             ghcr.io/gitleaks/gitleaks:v8.21.2 \
-            detect --source /repo --redact --verbose --exit-code 1
+            detect --source /repo --config /repo/.gitleaks.toml \
+            --redact --verbose --exit-code 1
 
       - name: Repository pattern scan (release preflight subset)
         run: python3 scripts/release_preflight.py --only secrets
@@ -138,10 +142,12 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Trivy (vulnerabilities, misconfigurations, secrets) - report
-        uses: aquasecurity/trivy-action@0.28.0
+        # The action's tags carry a v prefix; a bare "0.28.0" no longer
+        # resolves to anything.
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -150,16 +156,20 @@ jobs:
           format: sarif
           output: trivy-fs.sarif
           exit-code: "0"
+          # The vulnerability database comes from ghcr.io, which rate-limits
+          # anonymous pulls. Caching keeps both scans in this job to a single
+          # download and survives across runs on the daily cache key.
+          cache: "true"
 
       - name: Upload Trivy SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
 
       - name: Trivy - fail on critical findings
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -167,3 +177,4 @@ jobs:
           severity: CRITICAL
           ignore-unfixed: false
           exit-code: "1"
+          cache: "true"

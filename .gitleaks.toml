@@ -1,0 +1,44 @@
+# Gitleaks configuration for the Jhin workspace.
+#
+# The default ruleset is extended, never replaced, and no rule is disabled.
+# Application source stays scanned in full; the only value exempted anywhere
+# outside a test tree is the one documentation placeholder described below.
+#
+# The allowlist exists because gitleaks walks the whole commit history. The
+# findings it reports live in commits that are already published, so they
+# cannot be corrected at the source - only allowlisted. Every allowlisted
+# area holds deliberately synthetic material:
+#
+#   tests/ directories across the workspace
+#       Redaction, secret-rejection and connector-auth tests need
+#       credential-shaped literals to assert against. Every one of them is
+#       sequential filler - a token prefix followed by the alphabet or by
+#       counting digits - or a PEM block whose body is the word "fake".
+#       Nothing here has ever authenticated against anything.
+#
+#   packages/connectors/src/jhin_connectors/testing/
+#       The fake GitHub OAuth server the connector suites run against. It
+#       ships a PEM-shaped placeholder whose base64 body decodes to
+#       "not-a-key-this-is-a-fake-for-jhin-tests", chosen so that anything
+#       leaking it is obvious on sight.
+#
+#   The API-key placeholder rendered by the web UI
+#       apps/web shows a copy-paste curl example on the API keys page. This
+#       one is matched by an exact-value regex instead of a path, so the rest
+#       of that page - and the rest of the application - stays scanned.
+#       gitleaks 8.21 honours only a single global allowlist block and offers
+#       no per-rule scoping there, so an exact literal is the narrowest form
+#       available.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic fixtures in test trees, the connector test double, and the documented UI placeholder"
+paths = [
+  '''(^|/)tests/''',
+  '''^packages/connectors/src/jhin_connectors/testing/''',
+]
+regexes = [
+  '''^jhin_xxxxxxxx_your-key-here$''',
+]
