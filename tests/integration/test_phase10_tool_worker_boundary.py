@@ -4274,7 +4274,7 @@ def test_make_and_ci_delegate_all_live_modes_to_the_shared_harness() -> None:
 
     rootless_steps = workflow_payload["jobs"]["phase10-rootless-live"]["steps"]
     rootless_checkout = rootless_steps[0]
-    assert rootless_checkout["uses"] == "actions/checkout@v4"
+    assert rootless_checkout["uses"] == "actions/checkout@v5"
     assert rootless_checkout["with"]["persist-credentials"] is False
     provision_step = next(
         step

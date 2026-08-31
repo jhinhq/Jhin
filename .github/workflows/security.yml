@@ -156,10 +156,6 @@ jobs:
           format: sarif
           output: trivy-fs.sarif
           exit-code: "0"
-          # The vulnerability database comes from ghcr.io, which rate-limits
-          # anonymous pulls. Caching keeps both scans in this job to a single
-          # download and survives across runs on the daily cache key.
-          cache: "true"
 
       - name: Upload Trivy SARIF
         if: always()
@@ -177,4 +173,3 @@ jobs:
           severity: CRITICAL
           ignore-unfixed: false
           exit-code: "1"
-          cache: "true"
