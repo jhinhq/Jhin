@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="25.5 6 50.5 87.5" role="img" aria-label="Jhin">
+  <!-- The isometric "Pastel Skies" J: four stacked cubes. Geometry and palette
+       mirror apps/web/components/brand/logo-mark.tsx exactly. -->
+  <g>
+    <polygon points="58.6,46.3 73.7,55.1 58.6,63.9 43.5,55.1" fill="#ece2fa"/>
+    <polygon points="43.5,55.1 58.6,63.9 58.6,82.6 43.5,73.8" fill="#7371fc"/>
+    <polygon points="73.7,55.1 58.6,63.9 58.6,82.6 73.7,73.8" fill="#a594f9"/>
+    <polygon points="58.6,46.3 73.7,55.1 58.6,63.9 43.5,55.1" fill="none" stroke="rgba(90,88,232,0.28)" stroke-width="0.6" stroke-linejoin="round"/>
+  </g>
+  <g>
+    <polygon points="58.6,27.6 73.7,36.4 58.6,45.2 43.5,36.4" fill="#f0e8fb"/>
+    <polygon points="43.5,36.4 58.6,45.2 58.6,63.9 43.5,55.1" fill="#7d71f8"/>
+    <polygon points="73.7,36.4 58.6,45.2 58.6,63.9 73.7,55.1" fill="#cdc1ff"/>
+    <polygon points="58.6,27.6 73.7,36.4 58.6,45.2 43.5,36.4" fill="none" stroke="rgba(90,88,232,0.28)" stroke-width="0.6" stroke-linejoin="round"/>
+  </g>
+  <g>
+    <polygon points="58.6,8.9 73.7,17.7 58.6,26.5 43.5,17.7" fill="#f5efff"/>
+    <polygon points="43.5,17.7 58.6,26.5 58.6,45.2 43.5,36.4" fill="#8a7bf5"/>
+    <polygon points="73.7,17.7 58.6,26.5 58.6,45.2 73.7,36.4" fill="#e5d9f2"/>
+    <polygon points="58.6,8.9 73.7,17.7 58.6,26.5 43.5,17.7" fill="none" stroke="rgba(90,88,232,0.28)" stroke-width="0.6" stroke-linejoin="round"/>
+  </g>
+  <g>
+    <polygon points="43,55.4 58.1,64.2 43,73 27.9,64.2" fill="#f0e9fd"/>
+    <polygon points="27.9,64.2 43,73 43,91.7 27.9,82.9" fill="#7371fc"/>
+    <polygon points="58.1,64.2 43,73 43,91.7 58.1,82.9" fill="#b7a8fc"/>
+    <polygon points="43,55.4 58.1,64.2 43,73 27.9,64.2" fill="none" stroke="rgba(90,88,232,0.28)" stroke-width="0.6" stroke-linejoin="round"/>
+  </g>
+</svg>

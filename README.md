@@ -1,38 +1,81 @@
+<div align="center">
+
+<img src="docs/media/logo.svg" width="110" alt="The Jhin logo: an isometric J built from stacked pastel-purple cubes">
+
 # Jhin
 
-[![CI](https://github.com/Teachmetech/Jhin/actions/workflows/ci.yml/badge.svg)](https://github.com/Teachmetech/Jhin/actions/workflows/ci.yml)
-[![Security](https://github.com/Teachmetech/Jhin/actions/workflows/security.yml/badge.svg)](https://github.com/Teachmetech/Jhin/actions/workflows/security.yml)
+**Run a company of AI agents on your own hardware.**
+
+Teams, managers, and reporting lines. Chats, delegation, approvals, and
+automations. Every credential encrypted, every tool call audited, everything
+self-hosted.
+
+[![CI](https://github.com/jhinhq/Jhin/actions/workflows/ci.yml/badge.svg)](https://github.com/jhinhq/Jhin/actions/workflows/ci.yml)
+[![Security](https://github.com/jhinhq/Jhin/actions/workflows/security.yml/badge.svg)](https://github.com/jhinhq/Jhin/actions/workflows/security.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.1.0--rc-orange.svg)](CHANGELOG.md)
 
-Jhin is a self-hosted, open-source platform for creating hierarchical teams of
-autonomous AI agents that can securely use external systems, react to triggers,
-delegate work, execute long-running workflows, and expose all activity through
-a polished web application.
+[Install](#install) · [What you get](#what-you-get) · [Demo](#screenshots-and-demo) · [Docs](docs/README.md) · [Contributing](CONTRIBUTING.md)
 
-**Architecture:** [Temporal](https://temporal.io) is the durable workflow
+</div>
+
+---
+
+Jhin is a self-hosted, open-source platform for hierarchical teams of
+autonomous AI agents that securely use external systems, react to triggers,
+delegate work, execute long-running workflows, and expose all activity
+through a polished web application.
+
+Under the hood: [Temporal](https://temporal.io) is the durable workflow
 authority, [NATS JetStream](https://nats.io) is the asynchronous event
 backbone, and PostgreSQL is the system of record. A FastAPI control-plane API
 owns configuration and authorization, and a Next.js frontend provides the
-operations UI.
+operations UI. Bring your own model provider — OpenRouter, OpenAI, Anthropic,
+or anything OpenAI-compatible.
 
-> **Status: 0.1.0 release candidate.** Phases 1–9 of the implementation
-> plan are complete and verified with compose-stack integration tests.
-> Phase 10 (production operations) is in progress: deterministic connector,
-> tool, trigger-sync, and sandbox effects now run on an isolated tool worker;
-> model reasoning and its private durable record remain on the agent worker.
-> See [Deterministic tool-worker boundary](docs/architecture/tool-worker-boundary.md)
-> and [Sandboxing architecture](docs/architecture/sandboxing.md) for the
-> ownership, compatibility, and Docker-authority contracts. Phase 11
-> (open-source release) artifacts are in place: community files, CI/E2E/
-> Security/Release workflows, the release Compose bundle under `deploy/`,
-> the documentation set under `docs/`, and `scripts/release_preflight.py`.
-> The first tagged release (`v0.1.0`) and public image publication remain
-> owner-gated; do not treat an installation as production-ready until the
-> section 49 criteria in `docs/implementation-plan.md` have evidence for
-> your environment.
+## Install
 
-## Features
+All you need is [Docker](https://docs.docker.com/get-started/get-docker/) and
+git. One command builds and starts the whole stack, then walks you through
+creating your owner account at `http://localhost:3000`:
+
+**Linux / macOS**
+
+```bash
+curl -fsSL https://get.jhin.ai | sh
+```
+
+**Windows** (Docker Desktop)
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://get.jhin.ai/install.ps1 | iex"
+```
+
+The installer ([install.sh](scripts/install.sh) /
+[install.ps1](scripts/install.ps1) — short, readable, no sudo) checks your
+Docker setup, picks the right sandbox socket mode for your machine, clones
+the repository into `~/jhin`, generates the secret-store master key and a
+random internal token, builds the images, starts the stack, and applies
+database migrations. Re-running it updates an existing install.
+
+Two things worth knowing on day one:
+
+- **Back up your master key** (`secrets/dev/jhin_master_key`). It encrypts
+  every credential you store; losing it makes them permanently unreadable.
+- On macOS and Windows the sandbox uses the development-only Docker Desktop
+  socket mode. That is fine on your own machine and never acceptable on a
+  server — servers run Linux with one of the two
+  [verified socket modes](#choose-a-docker-socket-mode) below.
+
+> **Status: 0.1.0 release candidate.** The implementation phases through the
+> deterministic tool-worker boundary are complete and verified with
+> compose-stack integration tests; the first tagged release and public image
+> publication remain owner-gated. Do not treat an installation as
+> production-ready until the release criteria in
+> [docs/implementation-plan.md](docs/implementation-plan.md) have evidence
+> for your environment.
+
+## What you get
 
 - **Chat-first operation.** Named, persistent conversations with every agent
   (`/chats`); each turn that needs work becomes a durable task behind the
@@ -63,10 +106,9 @@ operations UI.
   Agents see only names and descriptions in their prompt and read a
   skill's full playbook on demand through the audited `skills.read` tool
   ([Agent Skills](docs/architecture/skills.md)).
-- **Connectors.** GitHub, Linear, Vercel, Supabase, and a CLI sandbox that runs
-  jobs in ephemeral non-root containers, with fake services for
-  credential-free development (`/apps`,
-  [connector SDK](docs/architecture/connectors.md)).
+- **Connectors.** GitHub, Linear, Vercel, Supabase, and a CLI sandbox that
+  runs jobs in ephemeral non-root containers
+  (`/apps`, [connector SDK](docs/architecture/connectors.md)).
 - **Apps library and any MCP server.** The Apps page is a searchable library
   of ~45 well-known apps (Notion, Slack, Stripe, Sentry, Figma, …) that
   connect either through a native connector or through the app's Model
@@ -88,7 +130,43 @@ operations UI.
 - **Observable.** Structured JSON logs with redaction, OpenTelemetry traces
   and metrics, protected health endpoints.
 
-## Quick start
+## Screenshots and demo
+
+The seeded, credential-free demo (fake model provider, fake Linear, fake
+GitHub — development overlay only, never part of a production install) walks
+through chats, the company map, an automation firing on a Linear ticket,
+delegation to QA, and the approval surface. The step-by-step flow, expected
+output, and the reviewed screenshot set are in [docs/demo.md](docs/demo.md).
+
+## Manual install
+
+Prefer to run every command yourself, or setting up a server? This is
+exactly what the installer automates, in operator form.
+
+Requirements: Docker with Compose v2 (Linux for servers; Docker Desktop on
+macOS/Windows for local development only), Python 3.13, `uv`, and `make`.
+
+```bash
+git clone https://github.com/jhinhq/Jhin.git
+cd Jhin
+cp .env.example .env
+uv run python scripts/generate_master_key.py   # one-time secret-store master key
+```
+
+The master key file (`secrets/dev/jhin_master_key` by default) encrypts every
+stored credential. Back it up; losing it makes stored secrets unreadable.
+
+### Choose a Docker socket mode
+
+Jhin's CLI sandbox runs agent jobs in ephemeral non-root containers, so the
+`sandbox-runner` service needs a verified path to a Docker daemon. Choose
+exactly one mode below (`rootless` or `rootful` on Linux; `desktop` on Docker
+Desktop). The commands disable implicit `.env` loading, scrub inherited
+Compose and Docker targeting controls, and pin the Compose project to
+`jhin`: export any reviewed infrastructure values in the operator
+environment, but do not put credentials or tokens on the command line. A
+base-only start and a start containing more than one overlay are invalid. All
+modes build the sandbox job image before starting the stack.
 
 > **macOS / Docker Desktop note.** The server-grade sandbox contract needs a
 > Linux Docker socket in `rootful` (root-owned, positive docker GID) or
@@ -101,25 +179,6 @@ operations UI.
 > `make test-integration PHASE10_MODE=desktop`. A base-only
 > `docker compose -f compose.yaml -f compose.dev.yaml up` still starts every
 > service except `sandbox-runner`. Never use `desktop` mode on a server.
-
-
-Requirements: Docker with Compose v2 (Linux for servers; Docker Desktop on
-macOS/Windows for local development only), Python 3.13, `uv`, and `make`.
-
-```bash
-git clone https://github.com/Teachmetech/Jhin.git
-cd Jhin
-cp .env.example .env
-make master-key          # one-time: generate the secret-store master key
-```
-
-Choose exactly one Docker socket mode below (`rootless` or `rootful` on Linux;
-`desktop` on Docker Desktop). The commands disable implicit `.env` loading,
-scrub inherited Compose and Docker targeting controls, and pin the Compose
-project to `jhin`: export any reviewed infrastructure values in the operator
-environment, but do not put credentials or tokens on the command line. A
-base-only start and a start containing more than one overlay are invalid. All
-modes build the sandbox job image before starting the stack.
 
 ### Rootless Docker socket (Linux)
 
@@ -401,10 +460,7 @@ make compose-up PHASE10_MODE=desktop            # persistent isolated stack
 make compose-down
 ```
 
-The master key file (`secrets/dev/jhin_master_key` by default) encrypts every
-stored credential. Back it up; losing it makes stored secrets unreadable.
-
-Then open:
+### Then open
 
 - Web UI: http://localhost:3000 — on a fresh install you are redirected to
   `/setup` to create the initial owner account and workspace (this first-run
@@ -415,23 +471,15 @@ Then open:
 Internal infrastructure ports (Postgres, NATS, Temporal) are **not** published
 publicly. The dev overlay (`compose.dev.yaml`) binds them to `127.0.0.1` only.
 
-## Screenshots and demo
-
-The seeded, credential-free demo (fake model provider, fake Linear, fake
-GitHub) walks through chats, the company map, an automation firing on a
-Linear ticket, delegation to QA, and the approval surface. The step-by-step
-flow, expected output, and the reviewed screenshot set are in
-[docs/demo.md](docs/demo.md).
-
 ## Production deployment
 
 Production installs use the pull-based release bundle
 (`deploy/compose.release.yaml`, rendered per release with digest-pinned
-images from `ghcr.io/teachmetech/jhin-<component>`), a TLS reverse proxy in
-front of the web entry point, and exactly one Docker-socket overlay for the
-sandbox runner. The full contract (configuration classes, secrets and the
-master key, backups and restore, upgrades, sizing, health, telemetry,
-troubleshooting) is in [docs/deployment.md](docs/deployment.md).
+images), a TLS reverse proxy in front of the web entry point, and exactly one
+Docker-socket overlay for the sandbox runner. The full contract
+(configuration classes, secrets and the master key, backups and restore,
+upgrades, sizing, health, telemetry, troubleshooting) is in
+[docs/deployment.md](docs/deployment.md).
 
 Connector credentials are stored encrypted under a master key that Jhin never
 backs up for you: **back up the master key separately from the database**.
@@ -441,9 +489,9 @@ Verify a released image before running it:
 
 ```bash
 cosign verify \
-  --certificate-identity-regexp '^https://github.com/Teachmetech/Jhin/.github/workflows/release.yml@refs/tags/v' \
+  --certificate-identity-regexp '^https://github.com/jhinhq/Jhin/.github/workflows/release.yml@refs/tags/v' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/teachmetech/jhin-api@<digest-from-image-lock.json>
+  ghcr.io/jhinhq/jhin-api@<digest-from-image-lock.json>
 ```
 
 The self-hosted core (PostgreSQL, NATS, Temporal, all Jhin services) runs
@@ -508,8 +556,8 @@ frontend tooling uses pnpm.
 uv sync --all-packages   # install Python workspace
 pnpm install             # install frontend workspace
 
-# Start with one validated socket-mode command from Quick start. A dev stack
-# also adds compose.dev.yaml before that one selected mode overlay.
+# Start with one validated socket-mode command from Manual install. A dev
+# stack also adds compose.dev.yaml before that one selected mode overlay.
 make lint                # ruff + eslint
 make typecheck           # mypy + tsc
 make test-unit           # pytest (unit) + vitest
@@ -531,8 +579,9 @@ email:    owner@jhin.dev
 password: jhin-dev-password
 ```
 
-Seeding is idempotent and refuses to run if users already exist. These
-credentials are for local development only.
+Seeding is idempotent, refuses to run if users already exist, and refuses to
+run against a production-shaped stack. These credentials are for local
+development only.
 
 The seed also creates a "Fake Provider (dev)" model provider pointing at the
 in-stack fake OpenAI-compatible server (`fake-provider`, dev overlay only)

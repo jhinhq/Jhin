@@ -3,3 +3,8 @@
 # (core.autocrlf=true on Windows) would rewrite them and fail the digest, so
 # they must never go through text conversion.
 packages/workflows/tests/fixtures/phase9_temporal/** -text
+
+# The installer is piped straight into sh (curl -fsSL https://get.jhin.ai | sh)
+# and also runs from checkouts under WSL; a CRLF checkout breaks POSIX sh.
+scripts/install.sh text eol=lf
+
