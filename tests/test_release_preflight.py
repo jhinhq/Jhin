@@ -129,7 +129,7 @@ def test_cli_changelog_excerpt_matches_version_file() -> None:
 def _lock(tmp_path: Path) -> Path:
     images = {
         f"jhin-{component}": {
-            "repository": f"ghcr.io/teachmetech/jhin-{component}",
+            "repository": f"ghcr.io/jhinhq/jhin-{component}",
             "digest": "sha256:" + f"{index:064x}",
         }
         for index, component in enumerate(renderer.COMPONENTS, start=1)
@@ -144,7 +144,7 @@ def _lock(tmp_path: Path) -> Path:
 def test_render_bundle_pins_every_first_party_image_and_writes_manifest(tmp_path: Path) -> None:
     output = tmp_path / "bundle"
     renderer.render_bundle(
-        ROOT, output, "0.1.0", _lock(tmp_path), "Teachmetech/Jhin", allow_unpinned=False
+        ROOT, output, "0.1.0", _lock(tmp_path), "jhinhq/Jhin", allow_unpinned=False
     )
     compose = (output / "compose.yaml").read_text(encoding="utf-8")
     assert ":${JHIN_VERSION" not in compose
@@ -152,13 +152,13 @@ def test_render_bundle_pins_every_first_party_image_and_writes_manifest(tmp_path
     for component in renderer.COMPONENTS:
         if component == "sandbox":
             continue
-        assert f"ghcr.io/teachmetech/jhin-{component}@sha256:" in compose
+        assert f"ghcr.io/jhinhq/jhin-{component}@sha256:" in compose
     env = (output / ".env.release.example").read_text(encoding="utf-8")
     assert "JHIN_VERSION=0.1.0" in env
-    assert "SANDBOX_DEFAULT_IMAGE=ghcr.io/teachmetech/jhin-sandbox@sha256:" in env
-    assert "SANDBOX_RUNNER_IMAGE=ghcr.io/teachmetech/jhin-sandbox-runner@sha256:" in env
+    assert "SANDBOX_DEFAULT_IMAGE=ghcr.io/jhinhq/jhin-sandbox@sha256:" in env
+    assert "SANDBOX_RUNNER_IMAGE=ghcr.io/jhinhq/jhin-sandbox-runner@sha256:" in env
     rootless = (output / "compose.rootless.yaml").read_text(encoding="utf-8")
-    assert "ghcr.io/teachmetech/jhin-sandbox-runner@sha256:" in rootless
+    assert "ghcr.io/jhinhq/jhin-sandbox-runner@sha256:" in rootless
     manifest = (output / "MANIFEST.SHA256").read_text(encoding="utf-8").splitlines()
     listed = {line.split("  ", 1)[1] for line in manifest}
     assert "MANIFEST.SHA256" not in listed
@@ -175,16 +175,16 @@ def test_render_bundle_pins_every_first_party_image_and_writes_manifest(tmp_path
 def test_render_bundle_refuses_tag_only_images_without_override(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="missing digests"):
         renderer.render_bundle(
-            ROOT, tmp_path / "out", "0.1.0", None, "Teachmetech/Jhin", allow_unpinned=False
+            ROOT, tmp_path / "out", "0.1.0", None, "jhinhq/Jhin", allow_unpinned=False
         )
 
 
 def test_render_bundle_dry_run_uses_version_tags(tmp_path: Path) -> None:
     output = renderer.render_bundle(
-        ROOT, tmp_path / "out", "0.1.0", None, "Teachmetech/Jhin", allow_unpinned=True
+        ROOT, tmp_path / "out", "0.1.0", None, "jhinhq/Jhin", allow_unpinned=True
     )
     compose = (output / "compose.yaml").read_text(encoding="utf-8")
-    assert "ghcr.io/teachmetech/jhin-api:0.1.0" in compose
+    assert "ghcr.io/jhinhq/jhin-api:0.1.0" in compose
 
 
 def test_validate_compose_rejects_build_keys_and_dev_markers() -> None:

@@ -11,7 +11,7 @@ security problem.**
 
 Report privately through GitHub's private vulnerability reporting:
 
-<https://github.com/Teachmetech/Jhin/security/advisories/new>
+<https://github.com/jhinhq/Jhin/security/advisories/new>
 
 Treat the following classes as confidential until a coordinated fix ships:
 

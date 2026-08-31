@@ -2,30 +2,30 @@
 # sensitive paths (Phase 11 spec section 3.1). Replace the team handles
 # below with the real maintainer teams before enabling required reviews.
 
-*                                   @Teachmetech/jhin-maintainers
+*                                   @jhinhq/jhin-maintainers
 
 # Release and supply chain
-/.github/                           @Teachmetech/jhin-maintainers
-/VERSION                            @Teachmetech/jhin-maintainers
-/CHANGELOG.md                       @Teachmetech/jhin-maintainers
-/deploy/                            @Teachmetech/jhin-maintainers
-/docker/                            @Teachmetech/jhin-maintainers
-/scripts/release_preflight.py       @Teachmetech/jhin-maintainers
-/scripts/render_release_bundle.py   @Teachmetech/jhin-maintainers
+/.github/                           @jhinhq/jhin-maintainers
+/VERSION                            @jhinhq/jhin-maintainers
+/CHANGELOG.md                       @jhinhq/jhin-maintainers
+/deploy/                            @jhinhq/jhin-maintainers
+/docker/                            @jhinhq/jhin-maintainers
+/scripts/release_preflight.py       @jhinhq/jhin-maintainers
+/scripts/render_release_bundle.py   @jhinhq/jhin-maintainers
 
 # Security boundaries
-/SECURITY.md                        @Teachmetech/jhin-maintainers
-/packages/secrets/                  @Teachmetech/jhin-maintainers
-/packages/policy/                   @Teachmetech/jhin-maintainers
-/packages/tools/                    @Teachmetech/jhin-maintainers
-/services/tool_worker/              @Teachmetech/jhin-maintainers
-/services/sandbox_runner/           @Teachmetech/jhin-maintainers
-/apps/api/src/jhin_api/auth/        @Teachmetech/jhin-maintainers
+/SECURITY.md                        @jhinhq/jhin-maintainers
+/packages/secrets/                  @jhinhq/jhin-maintainers
+/packages/policy/                   @jhinhq/jhin-maintainers
+/packages/tools/                    @jhinhq/jhin-maintainers
+/services/tool_worker/              @jhinhq/jhin-maintainers
+/services/sandbox_runner/           @jhinhq/jhin-maintainers
+/apps/api/src/jhin_api/auth/        @jhinhq/jhin-maintainers
 
 # Deployment contract
-/compose*.yaml                      @Teachmetech/jhin-maintainers
-/.env.example                       @Teachmetech/jhin-maintainers
-/docs/deployment.md                 @Teachmetech/jhin-maintainers
+/compose*.yaml                      @jhinhq/jhin-maintainers
+/.env.example                       @jhinhq/jhin-maintainers
+/docs/deployment.md                 @jhinhq/jhin-maintainers
 
 # Connectors (credential handling and outbound target policy)
-/packages/connectors/               @Teachmetech/jhin-maintainers
+/packages/connectors/               @jhinhq/jhin-maintainers

@@ -22,7 +22,7 @@ production deployment.
 | Kubernetes, Podman, Nomad | not supported in `0.1.x` |
 
 Images are multi-arch (`linux/amd64`, `linux/arm64`), run as non-root, and
-are published to `ghcr.io/teachmetech/jhin-<component>` for the eight
+are published to `ghcr.io/jhinhq/jhin-<component>` for the eight
 components: `web`, `api`, `workflow-worker`, `agent-worker`, `tool-worker`,
 `event-worker`, `sandbox-runner`, `sandbox`.
 
@@ -38,14 +38,14 @@ rootless overlays, `config/nats.conf`, `.env.release.example`, `MANIFEST.SHA256`
 
 ```bash
 VERSION=0.1.0
-curl -fsSLO "https://github.com/Teachmetech/Jhin/releases/download/v$VERSION/jhin-$VERSION-compose.tar.gz"
-curl -fsSLO "https://github.com/Teachmetech/Jhin/releases/download/v$VERSION/SHA256SUMS"
-curl -fsSLO "https://github.com/Teachmetech/Jhin/releases/download/v$VERSION/SHA256SUMS.sigstore.json"
+curl -fsSLO "https://github.com/jhinhq/Jhin/releases/download/v$VERSION/jhin-$VERSION-compose.tar.gz"
+curl -fsSLO "https://github.com/jhinhq/Jhin/releases/download/v$VERSION/SHA256SUMS"
+curl -fsSLO "https://github.com/jhinhq/Jhin/releases/download/v$VERSION/SHA256SUMS.sigstore.json"
 
 # Verify the checksum file was produced by the release workflow, then the tarball.
 cosign verify-blob \
   --bundle SHA256SUMS.sigstore.json \
-  --certificate-identity-regexp '^https://github.com/Teachmetech/Jhin/.github/workflows/release.yml@refs/tags/v' \
+  --certificate-identity-regexp '^https://github.com/jhinhq/Jhin/.github/workflows/release.yml@refs/tags/v' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   SHA256SUMS
 sha256sum --check --ignore-missing SHA256SUMS
@@ -61,9 +61,9 @@ Verify any image before you trust it (every digest is listed in
 
 ```bash
 cosign verify \
-  --certificate-identity-regexp '^https://github.com/Teachmetech/Jhin/.github/workflows/release.yml@refs/tags/v' \
+  --certificate-identity-regexp '^https://github.com/jhinhq/Jhin/.github/workflows/release.yml@refs/tags/v' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/teachmetech/jhin-api@sha256:<digest>
+  ghcr.io/jhinhq/jhin-api@sha256:<digest>
 ```
 
 The repository copy of the manifest is `deploy/compose.release.yaml`; it
@@ -86,7 +86,7 @@ be committed or logged, **dev-only** must be absent in production.
 | Variable | Class | Consumed by | Notes |
 |---|---|---|---|
 | `JHIN_VERSION` | required (bundle) | release Compose | image tag, e.g. `0.1.0`; the bundle pins digests so this only labels the stack |
-| `JHIN_IMAGE_NAMESPACE` | optional | release Compose | default `ghcr.io/teachmetech`; set for a mirror |
+| `JHIN_IMAGE_NAMESPACE` | optional | release Compose | default `ghcr.io/jhinhq`; set for a mirror |
 | `APP_NAME` | optional | web, api | display name, default `Jhin` |
 | `APP_ENV` | required | all services | `production` for production; `dev`/`test`/`staging` accepted; the dev overlay forces `dev` |
 | `APP_URL` | required | api | public origin of the web UI (`https://jhin.example.com`); used for CORS |

@@ -25,8 +25,8 @@ docker compose -f compose.release.yaml -f compose.release.rootful.yaml up -d --w
 docker compose -f compose.release.yaml run --rm --no-deps api jhin-db-migrate
 ```
 
-Set `SANDBOX_RUNNER_IMAGE=ghcr.io/teachmetech/jhin-sandbox-runner:<version>`
-and `SANDBOX_DEFAULT_IMAGE=ghcr.io/teachmetech/jhin-sandbox:<version>` in
+Set `SANDBOX_RUNNER_IMAGE=ghcr.io/jhinhq/jhin-sandbox-runner:<version>`
+and `SANDBOX_DEFAULT_IMAGE=ghcr.io/jhinhq/jhin-sandbox:<version>` in
 `.env`, and pull the sandbox job image on the daemon the runner uses
 (`docker pull "$SANDBOX_DEFAULT_IMAGE"`).
 

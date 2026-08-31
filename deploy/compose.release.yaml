@@ -1,7 +1,7 @@
 # Jhin release manifest: pull-based, production-only (Phase 11 spec 6.3).
 #
 #   * No `build` keys; every first-party image comes from ${JHIN_IMAGE_NAMESPACE}
-#     (default ghcr.io/teachmetech) at ${JHIN_VERSION}. The bundle rendered by
+#     (default ghcr.io/jhinhq) at ${JHIN_VERSION}. The bundle rendered by
 #     .github/workflows/release.yml replaces each tag with an exact digest.
 #   * No fake or development services; no development credentials.
 #   * Only `web` is published by default. Uncomment the `api` port mapping for
@@ -18,7 +18,7 @@ name: jhin
 
 services:
   web:
-    image: ${JHIN_IMAGE_NAMESPACE:-ghcr.io/teachmetech}/jhin-web:${JHIN_VERSION:?set JHIN_VERSION}
+    image: ${JHIN_IMAGE_NAMESPACE:-ghcr.io/jhinhq}/jhin-web:${JHIN_VERSION:?set JHIN_VERSION}
     environment:
       APP_NAME: ${APP_NAME:-Jhin}
       API_INTERNAL_URL: http://api:8000
@@ -37,7 +37,7 @@ services:
     restart: unless-stopped
 
   api:
-    image: ${JHIN_IMAGE_NAMESPACE:-ghcr.io/teachmetech}/jhin-api:${JHIN_VERSION:?set JHIN_VERSION}
+    image: ${JHIN_IMAGE_NAMESPACE:-ghcr.io/jhinhq}/jhin-api:${JHIN_VERSION:?set JHIN_VERSION}
     command: ["uvicorn", "jhin_api.main:app", "--host", "0.0.0.0", "--port", "8000"]
     environment:
       APP_NAME: ${APP_NAME:-Jhin}
@@ -86,7 +86,7 @@ services:
     restart: unless-stopped
 
   workflow-worker:
-    image: ${JHIN_IMAGE_NAMESPACE:-ghcr.io/teachmetech}/jhin-workflow-worker:${JHIN_VERSION:?set JHIN_VERSION}
+    image: ${JHIN_IMAGE_NAMESPACE:-ghcr.io/jhinhq}/jhin-workflow-worker:${JHIN_VERSION:?set JHIN_VERSION}
     command: ["jhin-workflow-worker"]
     environment:
       APP_ENV: ${APP_ENV:-production}
@@ -108,7 +108,7 @@ services:
     restart: unless-stopped
 
   agent-worker:
-    image: ${JHIN_IMAGE_NAMESPACE:-ghcr.io/teachmetech}/jhin-agent-worker:${JHIN_VERSION:?set JHIN_VERSION}
+    image: ${JHIN_IMAGE_NAMESPACE:-ghcr.io/jhinhq}/jhin-agent-worker:${JHIN_VERSION:?set JHIN_VERSION}
     command: ["jhin-agent-worker"]
     environment:
       APP_ENV: ${APP_ENV:-production}
@@ -139,7 +139,7 @@ services:
     restart: unless-stopped
 
   tool-worker:
-    image: ${JHIN_IMAGE_NAMESPACE:-ghcr.io/teachmetech}/jhin-tool-worker:${JHIN_VERSION:?set JHIN_VERSION}
+    image: ${JHIN_IMAGE_NAMESPACE:-ghcr.io/jhinhq}/jhin-tool-worker:${JHIN_VERSION:?set JHIN_VERSION}
     command: ["jhin-tool-worker"]
     environment:
       APP_ENV: ${APP_ENV:-production}
@@ -178,7 +178,7 @@ services:
   # exclusively from one rootful/rootless overlay; the runner is always
   # UID/GID 10001 and never privileged.
   sandbox-runner:
-    image: ${JHIN_IMAGE_NAMESPACE:-ghcr.io/teachmetech}/jhin-sandbox-runner:${JHIN_VERSION:?set JHIN_VERSION}
+    image: ${JHIN_IMAGE_NAMESPACE:-ghcr.io/jhinhq}/jhin-sandbox-runner:${JHIN_VERSION:?set JHIN_VERSION}
     command: ["jhin-sandbox-runner"]
     user: "10001:10001"
     privileged: false
@@ -208,7 +208,7 @@ services:
     restart: unless-stopped
 
   event-worker:
-    image: ${JHIN_IMAGE_NAMESPACE:-ghcr.io/teachmetech}/jhin-event-worker:${JHIN_VERSION:?set JHIN_VERSION}
+    image: ${JHIN_IMAGE_NAMESPACE:-ghcr.io/jhinhq}/jhin-event-worker:${JHIN_VERSION:?set JHIN_VERSION}
     command: ["jhin-event-worker"]
     environment:
       APP_ENV: ${APP_ENV:-production}

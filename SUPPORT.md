@@ -3,12 +3,12 @@
 ## Where to ask
 
 - **Usage questions and troubleshooting:** open a
-  [GitHub Discussion](https://github.com/Teachmetech/Jhin/discussions) (or an
+  [GitHub Discussion](https://github.com/jhinhq/Jhin/discussions) (or an
   issue if Discussions are not enabled yet). Include your Jhin version
   (`cat VERSION` or the image digest), deployment mode, host platform, and
   redacted `docker compose ps --all` / health output.
 - **Bugs and feature requests:** use the issue forms at
-  <https://github.com/Teachmetech/Jhin/issues/new/choose>.
+  <https://github.com/jhinhq/Jhin/issues/new/choose>.
 - **Security vulnerabilities:** never post publicly. Use the private advisory
   route described in [SECURITY.md](SECURITY.md).
 

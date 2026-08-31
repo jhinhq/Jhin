@@ -36,7 +36,7 @@ COMPONENTS = (
     "sandbox-runner",
     "sandbox",
 )
-DEFAULT_NAMESPACE = "ghcr.io/teachmetech"
+DEFAULT_NAMESPACE = "ghcr.io/jhinhq"
 IMAGE_REFERENCE = re.compile(
     r"\$\{JHIN_IMAGE_NAMESPACE:-(?P<namespace>[^}]+)\}/(?P<name>jhin-[a-z-]+):\$\{JHIN_VERSION[^}]*\}"
 )
@@ -286,7 +286,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--image-lock", type=Path, default=None)
-    parser.add_argument("--repository", default="Teachmetech/Jhin")
+    parser.add_argument("--repository", default="jhinhq/Jhin")
     parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument(
         "--allow-unpinned", action="store_true", help="render tag references (dry run)"

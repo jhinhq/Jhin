@@ -110,5 +110,5 @@ adds the open-source release artifacts.
 - Production Compose publishes only the web and API ports; PostgreSQL,
   NATS, Temporal, and `sandbox-runner` stay on internal networks.
 
-[Unreleased]: https://github.com/Teachmetech/Jhin/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/Teachmetech/Jhin/releases/tag/v0.1.0
+[Unreleased]: https://github.com/jhinhq/Jhin/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/jhinhq/Jhin/releases/tag/v0.1.0

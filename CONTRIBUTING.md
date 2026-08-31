@@ -17,7 +17,7 @@ Origin (DCO); there is no separate contributor license agreement.
 ## Set up a development checkout
 
 ```bash
-git clone https://github.com/Teachmetech/Jhin.git
+git clone https://github.com/jhinhq/Jhin.git
 cd Jhin
 uv sync --all-packages      # Python workspace (all apps/services/packages)
 pnpm install                # web workspace (apps/web)

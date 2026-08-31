@@ -45,7 +45,7 @@ LICENSE_INFO = {
 
 CONTACT_INFO = {
     "name": "Jhin on GitHub",
-    "url": "https://github.com/Teachmetech/Jhin",
+    "url": "https://github.com/jhinhq/Jhin",
 }
 
 SUMMARY = "Run and observe an AI company: agents, teams, tasks, and the tools they use."
