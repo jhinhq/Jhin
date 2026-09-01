@@ -3052,10 +3052,17 @@ class ComposeAuthority:
         *,
         runner: CommandRunner = run_command,
         expected_services: Iterable[str] | None = None,
-        timeout_seconds: float = 90.0,
+        timeout_seconds: float = 180.0,
         interval_seconds: float = 3.0,
     ) -> dict[str, dict[str, Any]]:
-        """Wait boundedly while an exact running service is still starting."""
+        """Wait boundedly while an exact running service is still starting.
+
+        The bound covers the slowest configuration rather than the typical one:
+        under rootless Docker on a shared runner, a worker's 30s health
+        start_period plus its retry ladder can outlast a tighter deadline while
+        the service is merely slow. A service that never becomes healthy still
+        fails here - only later.
+        """
         if timeout_seconds <= 0 or interval_seconds <= 0:
             raise ValueError("readiness timeout and interval must be positive")
         deadline = time.monotonic() + timeout_seconds
@@ -5183,10 +5190,14 @@ class UpgradeHarness:
         stage: UpgradeStage,
         *,
         runner: CommandRunner = run_command,
-        timeout_seconds: float = 90.0,
+        timeout_seconds: float = 180.0,
         interval_seconds: float = 3.0,
     ) -> dict[str, dict[str, Any]]:
-        """Wait boundedly only while an exact upgrade inventory is starting."""
+        """Wait boundedly only while an exact upgrade inventory is starting.
+
+        Same bound, same reason, as :meth:`wait_ready`: the upgrade stages
+        recreate workers, so each stage pays a fresh health start_period.
+        """
         if timeout_seconds <= 0 or interval_seconds <= 0:
             raise ValueError("upgrade topology timeout and interval must be positive")
         deadline = time.monotonic() + timeout_seconds

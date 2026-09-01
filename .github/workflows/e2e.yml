@@ -102,6 +102,10 @@ jobs:
         with:
           python-version: "3.13"
           enable-cache: true
+          # This job never syncs as the runner: every uv invocation below runs
+          # as UID 10001 against its own cache, so the runner's cache directory
+          # is legitimately empty and saving it is not an error.
+          ignore-nothing-to-cache: true
 
       - name: Provision UID-10001 rootless Docker prerequisites
         run: |
