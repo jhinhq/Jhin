@@ -114,6 +114,10 @@ async def test_api_readiness_reports_all_dependencies_ok() -> None:
 
 async def test_web_shell_serves() -> None:
     async with httpx.AsyncClient(timeout=15) as client:
-        response = await client.get(WEB_URL)
+        # "/" is only the landing choice and redirects to the shell
+        # (apps/web/next.config.ts); the page itself is a client component,
+        # so the server renders it for anyone and the session guard hydrates.
+        response = await client.get(WEB_URL, follow_redirects=True)
     assert response.status_code == 200
+    assert response.url.path == "/home", str(response.url)
     assert "Jhin" in response.text

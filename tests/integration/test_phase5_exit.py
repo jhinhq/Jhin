@@ -430,4 +430,11 @@ async def test_connector_tools_visible_in_catalog(
     connectors = await _get(client, "/api/v1/connectors")
     github = next(c for c in connectors if c["connector_type"] == "github")
     assert github["supports_webhooks"] is True
-    assert {scheme["type"] for scheme in github["auth_schemes"]} == {"pat", "github_app"}
+    # Signing in came first once OAuth landed; the pasted key is the last
+    # resort (jhin_connectors.github.manifest.GITHUB_MANIFEST).
+    assert {scheme["type"] for scheme in github["auth_schemes"]} == {
+        "oauth",
+        "device",
+        "github_app",
+        "pat",
+    }
