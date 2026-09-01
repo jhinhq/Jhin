@@ -46,7 +46,7 @@ jobs:
       PHASE10_MODE: rootful
       PHASE10_ROOTFUL_DOCKER_SOCKET: /var/run/docker.sock
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -92,7 +92,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
