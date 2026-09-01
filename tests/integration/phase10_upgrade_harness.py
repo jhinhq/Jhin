@@ -229,6 +229,17 @@ _CHILD_BARRIER_JOURNAL_NAME = "phase10-child-barriers.jsonl"
 _CHILD_BARRIER_JOURNAL_ENV = "JHIN_PHASE10_CHILD_BARRIER_JOURNAL"
 
 
+# What the daemon says when it loses the race for a published host port. The
+# rootless wording names RootlessKit's port manager; the rootful one does not,
+# so both endings are matched rather than the prefix.
+_HOST_PORT_COLLISION = "bind: address already in use"
+
+
+def _is_host_port_collision(error: subprocess.CalledProcessError) -> bool:
+    """True only for a transient host-port clash while publishing."""
+    return _HOST_PORT_COLLISION in f"{_text(error.stdout)}\n{_text(error.stderr)}"
+
+
 class ComposePsError(ValueError):
     """The selected project is not the exact healthy service topology."""
 
@@ -4130,6 +4141,39 @@ class ComposeAuthority:
         if observed != {"memory": "67108864", "cpu": "25000 100000", "pids": "32"}:
             raise RuntimeError("rootless daemon did not enforce exact cpu/memory/pids limits")
 
+    def _start_containers(self, *, runner: CommandRunner = run_command) -> None:
+        """Bring the stack up, retrying only a host-port collision.
+
+        Docker assigns the published host ports itself, out of the same
+        ephemeral range the kernel hands to outbound connections, so a busy
+        runner can lose the race between the daemon choosing a port and
+        binding it. Rootless makes it likelier still: RootlessKit binds in its
+        own namespace, where the daemon's view of what is free is staler.
+
+        The retry is deliberately narrow. Only this signature is transient -
+        a different port is drawn next time - and anything else, including an
+        unhealthy service, fails on the first attempt exactly as before.
+        """
+        attempts = 3
+        for attempt in range(1, attempts + 1):
+            try:
+                self._run(
+                    self.compose_command("up", "-d", "--build", "--wait", "--wait-timeout", "300"),
+                    runner=runner,
+                    timeout=1200.0,
+                )
+                return
+            except subprocess.CalledProcessError as error:
+                if attempt == attempts or not _is_host_port_collision(error):
+                    raise
+                # The half-created containers hold the ports they did win.
+                self._run(
+                    self.compose_command("down", "--remove-orphans"),
+                    runner=runner,
+                    timeout=300.0,
+                    check=False,
+                )
+
     def start_stack(
         self,
         *,
@@ -4141,11 +4185,7 @@ class ComposeAuthority:
         if self.mode == "rootless":
             self.probe_rootless_capabilities(runner=runner)
         self.install_master_key(runner=runner)
-        self._run(
-            self.compose_command("up", "-d", "--build", "--wait", "--wait-timeout", "300"),
-            runner=runner,
-            timeout=1200.0,
-        )
+        self._start_containers(runner=runner)
         if self.mode == "rootless":
             self.wait_ready(
                 runner=runner,
