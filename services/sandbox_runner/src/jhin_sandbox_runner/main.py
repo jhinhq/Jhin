@@ -25,6 +25,7 @@ from jhin_observability import (
     initialize_observability,
     service_version,
 )
+from jhin_sandbox_runner.docker_socket import DockerSocketConfigurationError
 from jhin_sandbox_runner.jobs import JobManager, JobValidationError
 from jhin_sandbox_runner.schemas import (
     SandboxJobRequest,
@@ -186,7 +187,20 @@ def create_app(
             active_error: BaseException | None = None
             active_traceback: TracebackType | None = None
             try:
-                await manager.start()
+                try:
+                    await manager.start()
+                except DockerSocketConfigurationError as refusal:
+                    # Still fatal; only visible. uvicorn reports a failed
+                    # startup through its stdlib logger, whose text the log
+                    # contract replaces with a constant, so an operator who
+                    # mis-set the Docker authority would otherwise get a
+                    # non-zero exit and no reason. The event registry decides
+                    # which of the runner's own sentences may be carried.
+                    logger.error(
+                        "sandbox_runner.docker_authority_refused",
+                        reason=str(refusal),
+                    )
+                    raise
                 logger.info(
                     "sandbox_runner.started",
                     token_configured=bool(active_settings.sandbox_runner_token),

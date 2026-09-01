@@ -176,6 +176,13 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
         "network_policy": FieldKind.ENUM,
         "token_configured": FieldKind.BOOL,
     },
+    # The runner refused to start because its Docker authority did not match
+    # the configured mode. uvicorn announces the dying process through the
+    # stdlib logger, whose text this contract replaces with a constant, so the
+    # runner has to name the refusal itself or the operator gets an exit code
+    # and nothing else. The reason is a closed vocabulary of the runner's own
+    # sentences (below) -- never a path, a GID, or anything it was handed.
+    "sandbox_runner.docker_authority_refused": {"reason": FieldKind.ENUM},
     "trigger.task_deduped": {},
     "trigger.invoked": {"connector_type": FieldKind.ENUM, "outcome": FieldKind.ENUM},
     "trigger.duplicate_suppressed": {"connector_type": FieldKind.ENUM},
@@ -392,6 +399,40 @@ EVENT_FIELD_ENUM_VALUES: dict[tuple[str, str], frozenset[str]] = {
     # raises instead of logging.
     ("oauth.metadata_field_refused", "field"): frozenset(
         {"registration_endpoint", "revocation_endpoint", "device_authorization_endpoint"}
+    ),
+    # Every sentence jhin_sandbox_runner's authority check can raise, kept
+    # literal here so this registry stays a leaf package that imports no other
+    # Jhin package. The runner's own test holds this set equal to what those
+    # modules spell, and an unlisted sentence is dropped rather than logged.
+    ("sandbox_runner.docker_authority_refused", "reason"): frozenset(
+        {
+            "Docker socket group does not match SANDBOX_DOCKER_GID",
+            "Docker socket is not readable and writable by the runner",
+            "Docker socket must be owned by UID 0",
+            "cannot inspect Docker socket",
+            "configured Docker endpoint is not a Unix socket",
+            "configured Docker endpoint must not be a symlink",
+            "desktop Docker socket must be owned by GID 0 (Docker Desktop VM socket)",
+            "desktop Docker socket path must be absolute",
+            "desktop runner requires UID 10001",
+            "desktop runner requires UID/GID 10001:10001",
+            "desktop runner requires no SANDBOX_DOCKER_GID",
+            "desktop runner requires one Unix socket only",
+            "desktop runner requires the root group as its only supplemental group",
+            "rootful Docker socket path must be absolute",
+            "rootful runner requires UID/GID 10001:10001",
+            "rootful runner requires a positive SANDBOX_DOCKER_GID",
+            "rootful runner requires one Unix socket only",
+            "rootless runner requires UID 10001",
+            "rootless runner requires UID/GID 10001:10001",
+            "rootless runner requires no socket GID",
+            "rootless runner requires no socket mount",
+            "rootless runner requires no supplemental groups",
+            "rootless transport URL is not the private endpoint",
+            "runner requires the exact Docker socket group only",
+            "sandbox runner must not run as root",
+            "unsupported Docker socket mode",
+        }
     ),
 }
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
