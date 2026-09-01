@@ -3532,6 +3532,15 @@ class _TracerSite:
 
 
 _ENGINE_TRACER_SITES = {
+    # jhin-admin bootstraps no observability runtime, so it passes the same
+    # no-op the dev seed does rather than a tracer nothing would collect from.
+    "apps/api/src/jhin_api/cli/main.py": _TracerSite(
+        ("Call",),
+        None,
+        None,
+        (),
+        ("_run",),
+    ),
     "apps/api/src/jhin_api/main.py": _TracerSite(
         ("attr", ("name", "runtime"), "tracer"),
         "runtime",
@@ -3792,6 +3801,7 @@ def test_temporal_wiring_and_long_lived_tracer_authority_are_exact() -> None:
         ]
     )
     assert _inventory(engines) == {
+        "apps/api/src/jhin_api/cli/main.py": 1,
         "apps/api/src/jhin_api/main.py": 1,
         "apps/api/src/jhin_api/seed.py": 1,
         "services/agent_worker/src/jhin_agent_worker/resources.py": 1,

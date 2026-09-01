@@ -30,7 +30,9 @@ class AuditFailure:
     ]
 
 
-AUDIT_EXCLUDED_PARTS = frozenset({"tests", "testing", "alembic", "__pycache__"})
+# ``cli`` is jhin-admin, whose modules are operator entry points for the same
+# reason the files below are: what they print is the command's answer.
+AUDIT_EXCLUDED_PARTS = frozenset({"tests", "testing", "alembic", "__pycache__", "cli"})
 # Operator entry points, not services. Their stdout *is* the interface a
 # scheduler or a person reads, so a structured log line would be the wrong
 # output rather than the safer one. ``cli.py`` is jhin-catalog-sync, whose
