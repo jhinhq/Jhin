@@ -28,7 +28,7 @@ from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import httpx
 
-from jhin_connectors.endpoints import EndpointPolicyError
+from jhin_domain.endpoints import EndpointPolicyError
 from jhin_oauth._http import (
     MAX_TOKEN_BYTES,
     BoundedHttpError,
@@ -366,7 +366,7 @@ async def exchange_code(
     :class:`~jhin_oauth.errors.InvalidGrantError`,
     :class:`~jhin_oauth.errors.ClientForgottenError`,
     :class:`~jhin_oauth.errors.TransientOAuthError`, and
-    :class:`jhin_connectors.endpoints.EndpointPolicyError`.
+    :class:`jhin_domain.endpoints.EndpointPolicyError`.
     """
     get_redactor().register(code)
     fields, headers = _client_auth(credentials)
@@ -471,7 +471,7 @@ async def start_device_authorization(
 
     Raises :class:`~jhin_oauth.errors.TokenError`,
     :class:`~jhin_oauth.errors.TransientOAuthError`, and
-    :class:`jhin_connectors.endpoints.EndpointPolicyError`.
+    :class:`jhin_domain.endpoints.EndpointPolicyError`.
     """
     endpoint = validate_oauth_url(
         device_authorization_endpoint, kind="device authorization endpoint"

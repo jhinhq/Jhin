@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import tomllib
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,42 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 def _project(path: str) -> dict[str, Any]:
     return tomllib.loads((REPO_ROOT / path).read_text(encoding="utf-8"))
+
+
+def _workspace_dependencies() -> dict[str, tuple[str, ...]]:
+    """Each workspace member's declared dependencies, keyed by distribution name.
+
+    Members are read from the root workspace list rather than globbed, so a
+    package added to the workspace and forgotten here cannot leave a hole in
+    the graph. Every intra-repo edge is a local workspace source, which is why
+    the declared names alone are a faithful graph and no resolver is needed.
+    """
+    graph: dict[str, tuple[str, ...]] = {}
+    for member in _project("pyproject.toml")["tool"]["uv"]["workspace"]["members"]:
+        project = _project(f"{member}/pyproject.toml")["project"]
+        graph[project["name"]] = tuple(project.get("dependencies", ()))
+    return graph
+
+
+def _dependency_path(root: str, target: str) -> tuple[str, ...] | None:
+    """The shortest declared chain from ``root`` to ``target``, or ``None``.
+
+    The whole chain is returned rather than a yes/no, because when a boundary
+    is breached the expensive question is never *whether* — it is which
+    intermediary started carrying the package.
+    """
+    graph = _workspace_dependencies()
+    queue: deque[tuple[str, ...]] = deque([(root,)])
+    seen = {root}
+    while queue:
+        path = queue.popleft()
+        for dependency in graph.get(path[-1], ()):
+            if dependency == target:
+                return (*path, dependency)
+            if dependency in graph and dependency not in seen:
+                seen.add(dependency)
+                queue.append((*path, dependency))
+    return None
 
 
 def _imports_under(root: str, prefix: str) -> bool:
@@ -49,6 +86,25 @@ def test_distribution_dependencies_and_imports_are_one_way() -> None:
     assert _imports_under("services/tool_worker/src", "jhin_observability")
     assert workflows["project"]["dependencies"].count("jhin-observability") == 1
     assert workflows["tool"]["uv"]["sources"]["jhin-observability"] == {"workspace": True}
+
+
+def test_no_intermediary_carries_connectors_back_into_the_agent_worker() -> None:
+    """The boundary is the transitive closure, not the direct dependency list.
+
+    Direct edges are the easy half. ``jhin-oauth`` is a legitimate agent worker
+    dependency — background token refresh — and it once depended on
+    ``jhin-connectors``, so the image shipped the executable connector catalog
+    and the credentials it resolves into the one process whose whole guarantee
+    is that model reasoning structurally cannot execute a connector. Every
+    direct-dependency assertion above passed the entire time.
+    """
+    reintroduced = _dependency_path("jhin-agent-worker", "jhin-connectors")
+    assert reintroduced is None, (
+        "jhin-connectors is reachable from the agent worker again via "
+        + " -> ".join(reintroduced or ())
+    )
+    assert not _imports_under("packages/oauth/src", "jhin_connectors")
+    assert _dependency_path("jhin-tool-worker", "jhin-connectors") is not None
 
 
 def test_worker_settings_store_closed_environment_defaults(

@@ -4,7 +4,7 @@ candidates, and ``WWW-Authenticate`` parsing.
 Every URL an authorization server or a protected resource hands Jhin is
 attacker-influenced, including the ones Jhin then *fetches*. They all go
 through :func:`validate_oauth_url`, which is a thin wrapper over the shared
-policy in :mod:`jhin_connectors.endpoints` — the same validator the MCP and
+policy in :mod:`jhin_domain.endpoints` — the same validator the MCP and
 generic HTTP connectors use. This module only ever tightens that policy; it
 never relaxes one of its rules.
 """
@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 from urllib.parse import urlsplit, urlunsplit
 
-from jhin_connectors.endpoints import (
+from jhin_domain.endpoints import (
     EndpointPolicyError,
     validate_http_origin,
     validate_public_http_url,
@@ -42,7 +42,7 @@ _QUOTED_PAIR_RE = re.compile(r"\\(.)")
 def validate_oauth_url(raw: str, *, kind: str) -> str:
     """The normalized URL when Jhin's outbound policy allows it.
 
-    Delegates to :func:`jhin_connectors.endpoints.validate_public_http_url`
+    Delegates to :func:`jhin_domain.endpoints.validate_public_http_url`
     (public ``https`` origins, or an exact operator allow-list entry in
     ``JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS`` for anything else) and then
     re-asserts the two rules OAuth depends on: no userinfo and no fragment,
@@ -58,7 +58,7 @@ def validate_oauth_url(raw: str, *, kind: str) -> str:
     trailing slash would turn every origin-root authorization server into an
     issuer mismatch.
 
-    Raises :class:`jhin_connectors.endpoints.EndpointPolicyError`.
+    Raises :class:`jhin_domain.endpoints.EndpointPolicyError`.
     """
     if not isinstance(raw, str) or not raw or len(raw) > MAX_URL_LENGTH:
         raise EndpointPolicyError(f"{kind} is invalid")

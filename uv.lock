@@ -1161,7 +1161,6 @@ version = "0.1.0"
 source = { editable = "packages/oauth" }
 dependencies = [
     { name = "httpx" },
-    { name = "jhin-connectors" },
     { name = "jhin-db" },
     { name = "jhin-domain" },
     { name = "jhin-observability" },
@@ -1172,7 +1171,6 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.28" },
-    { name = "jhin-connectors", editable = "packages/connectors" },
     { name = "jhin-db", editable = "packages/db" },
     { name = "jhin-domain", editable = "packages/domain" },
     { name = "jhin-observability", editable = "packages/observability" },

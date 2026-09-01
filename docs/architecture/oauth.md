@@ -291,7 +291,7 @@ can fail, so a later shape error still cannot leave it unredactable.
 
 Every URL in this subsystem — discovered, configured, or constructed — goes
 through `jhin_oauth.urls.validate_oauth_url`, which delegates to the shared
-`jhin_connectors.endpoints` policy (public `https` origins, or an exact
+`jhin_domain.endpoints` policy (public `https` origins, or an exact
 operator allow-list entry in `JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS`) and then
 re-asserts the two rules OAuth depends on: no userinfo, no fragment, and
 `https` unless that exact origin was allow-listed. The re-assertion is

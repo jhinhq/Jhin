@@ -1,11 +1,20 @@
-"""Shared domain vocabulary for Jhin.
+"""Shared domain vocabulary for Jhin, and the outbound target policy.
 
 Deliberately dependency-light (stdlib + uuid-utils only) so every package —
 db, events, API, workers — can depend on it without dragging in SQLAlchemy,
-Pydantic, or NATS.
+Pydantic, or NATS. That is also what :mod:`jhin_domain.endpoints` is doing
+this far down: the OAuth core and the connectors need the same fail-closed
+validator, and reaching it through ``jhin_connectors`` would put an executable
+connector inside the agent worker.
 """
 
 from jhin_domain.activity import activity_phrase, waiting_for_colleague_phrase
+from jhin_domain.endpoints import (
+    EndpointPolicyError,
+    validate_http_origin,
+    validate_postgres_target,
+    validate_public_http_url,
+)
 from jhin_domain.enums import (
     ACTIVITY_LABELS,
     AGENT_MESSAGE_TYPES,
@@ -109,6 +118,7 @@ __all__ = [
     "AvatarKind",
     "ConnectionStatus",
     "ConversationStatus",
+    "EndpointPolicyError",
     "MediaAssetStatus",
     "MemoryKind",
     "MemoryScope",
@@ -150,5 +160,8 @@ __all__ = [
     "scopes_above_role",
     "scopes_for_role",
     "structured_content",
+    "validate_http_origin",
+    "validate_postgres_target",
+    "validate_public_http_url",
     "waiting_for_colleague_phrase",
 ]

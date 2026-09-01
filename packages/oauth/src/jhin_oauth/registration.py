@@ -19,7 +19,7 @@ from typing import Any, Final, Literal
 
 import httpx
 
-from jhin_connectors.endpoints import EndpointPolicyError
+from jhin_domain.endpoints import EndpointPolicyError
 from jhin_oauth._http import (
     MAX_METADATA_BYTES,
     BoundedHttpError,
@@ -159,7 +159,7 @@ async def register_client(
 
     Raises :class:`~jhin_oauth.errors.RegistrationError`,
     :class:`~jhin_oauth.errors.TransientOAuthError`, and
-    :class:`jhin_connectors.endpoints.EndpointPolicyError`.
+    :class:`jhin_domain.endpoints.EndpointPolicyError`.
     """
     if not metadata.registration_endpoint:
         raise RegistrationError(

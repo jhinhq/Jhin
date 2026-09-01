@@ -25,7 +25,7 @@ from typing import Any, Final
 
 import httpx
 
-from jhin_connectors.endpoints import EndpointPolicyError
+from jhin_domain.endpoints import EndpointPolicyError
 from jhin_oauth._http import (
     MAX_METADATA_BYTES as _MAX_METADATA_BYTES,
 )
@@ -469,7 +469,7 @@ async def probe_mcp_endpoint(client: httpx.AsyncClient, server_url: str) -> McpA
     :data:`PROBE_FAILURE_REASONS`, so the answer to "can we OAuth this?" is
     always a value the UI can render and never provider prose.
 
-    Raises :class:`jhin_connectors.endpoints.EndpointPolicyError` only, and
+    Raises :class:`jhin_domain.endpoints.EndpointPolicyError` only, and
     only when ``server_url`` itself is not an allowed target.
     """
     endpoint = validate_oauth_url(server_url, kind="MCP server URL")

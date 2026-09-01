@@ -37,9 +37,9 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from jhin_connectors.endpoints import EndpointPolicyError
 from jhin_db.models import Connection
 from jhin_domain import ConnectionStatus, SecretType
+from jhin_domain.endpoints import EndpointPolicyError
 from jhin_oauth.errors import (
     ClientForgottenError,
     InvalidGrantError,
