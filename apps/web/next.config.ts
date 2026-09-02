@@ -18,7 +18,8 @@ const isProduction = process.env.NODE_ENV === "production";
  * Everything else is locked down — in particular `default-src 'self'`,
  * `object-src 'none'`, `frame-ancestors 'none'` and `base-uri 'self'`, which
  * are what stop framing, plugin abuse, and `<base>` hijacking. Fonts are
- * self-hosted (@fontsource), so no external origin is needed anywhere.
+ * self-hosted (@fontsource), so the only external origin anywhere is the
+ * `form-action` entry for github.com, explained inline below.
  *
  * Tightening `script-src` with per-request nonces is tracked in
  * docs/security-assessment.md as accepted residual risk.
@@ -28,7 +29,13 @@ const contentSecurityPolicy = [
   "base-uri 'self'",
   "object-src 'none'",
   "frame-ancestors 'none'",
-  "form-action 'self'",
+  // github.com is the one place a form leaves this origin: creating a GitHub
+  // App from a manifest is a browser POST of that manifest to
+  // github.com/settings/apps/new (or an org's equivalent). Without it the
+  // browser drops the submission silently and the button appears to do
+  // nothing. Every other provider is reached by redirect, which form-action
+  // does not govern.
+  "form-action 'self' https://github.com",
   "img-src 'self' data: blob:",
   "font-src 'self' data:",
   "media-src 'self' data: blob:",
