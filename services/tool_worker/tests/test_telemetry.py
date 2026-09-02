@@ -384,10 +384,17 @@ class _ProbeSession(AsyncSession):
     created_session_ids: ClassVar[list[int]] = []
     capture_authority_sql: ClassVar[bool] = False
     authority_sql: ClassVar[list[tuple[int, str]]] = []
+    # Sessions are told apart by a serial, not by id(): CPython hands a freed
+    # session's address to the next allocation, so two sessions that never
+    # coexisted can share an id, and the disjointness assertions below would
+    # then fail on nothing more than an unlucky collection order.
+    _next_serial: ClassVar[int] = 0
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        type(self).created_session_ids.append(id(self))
+        type(self)._next_serial += 1
+        self.probe_serial = type(self)._next_serial
+        type(self).created_session_ids.append(self.probe_serial)
 
     async def commit(self) -> None:
         caller = inspect.currentframe()
@@ -410,12 +417,12 @@ class _ProbeSession(AsyncSession):
             "resolve_bound_tool_approval_activity",
         }:
             type(self).activity_commit_callers.append(caller_name)
-            type(self).activity_session_ids.append(id(self))
+            type(self).activity_session_ids.append(self.probe_serial)
         await super().commit()
 
     async def execute(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
         if type(self).capture_authority_sql:
-            type(self).authority_sql.append((id(self), str(statement)))
+            type(self).authority_sql.append((self.probe_serial, str(statement)))
         return await super().execute(statement, *args, **kwargs)
 
 
