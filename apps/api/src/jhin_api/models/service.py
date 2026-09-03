@@ -957,7 +957,9 @@ async def refresh_profile_pricing(
     from real spend, the provider's own live model list, the refreshed
     community catalog, then the built-in list prices. A price an admin typed
     is left alone and reported as such unless ``force`` is set, which is how
-    the UI offers "update it anyway" with the difference shown first.
+    the UI offers "update it anyway" with the difference shown first. On a
+    self-hosted provider an unpriced model that no source knows is reported
+    as assumed free, and nothing is written.
 
     Returns ``(profile, updated, source, detail)``.
     """
@@ -998,7 +1000,7 @@ async def refresh_profile_pricing(
         else None,
         pricing_service.catalog_candidate(provider.type, profile.model_name, refreshed),
     ]
-    winner = resolve_price([c for c in candidates if c is not None])
+    winner = resolve_price([c for c in candidates if c is not None], provider_type=provider.type)
     if winner is None:
         detail = "No price is known for this model on any source"
         if lookup_detail:
@@ -1009,6 +1011,23 @@ async def refresh_profile_pricing(
     label = describe_price_source(
         winner.source, refreshed_at=snapshot.fetched_at.date() if snapshot else None
     )
+    if winner.source == "self_hosted":
+        # Nothing knows a number, so the profile falls back to the self-hosted
+        # assumption. That is a reading of "no price", not a price: storing it
+        # would turn the assumption into a $0 that a real source could no
+        # longer fill and an admin would have to clear by hand.
+        if pricing_service.has_stored_price(profile):
+            theirs = _price_pair(
+                profile.input_cost_micros_per_million, profile.output_cost_micros_per_million
+            )
+            detail = (
+                f"No source knows a different price for this model; kept the stored one ({theirs})"
+            )
+            return profile, False, None, detail
+        detail = label
+        if lookup_detail:
+            detail = f"{detail} ({lookup_detail})"
+        return profile, False, winner.source, detail
     if not force and not pricing_service.may_write_price(profile, winner.source):
         theirs = _price_pair(
             profile.input_cost_micros_per_million, profile.output_cost_micros_per_million

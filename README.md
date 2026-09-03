@@ -694,13 +694,14 @@ the SWE, comment the outcome back on the issue).
   store and are never displayed again), verify them with a live call, create
   priced model profiles, and pick the workspace default profile. Picking a
   model auto-fills its prices (live from OpenRouter, or from a public price
-  catalog for OpenAI and Anthropic — editable), and each provider card shows
-  a Balance block: live remaining credit (OpenRouter), month-to-date spend
-  (OpenAI, with an optional admin key), or spend tracked by Jhin with an
-  optional "loaded credits" figure. An Ollama provider shows a Local models
-  panel instead: the models pulled on your Ollama host, which one is in
-  memory, and admin Load/Unload controls (keep it for 5 minutes, 1 hour, or
-  until unloaded) so an 18 GB model is warmed up before a run rather than
+  catalog for OpenAI and Anthropic — editable; self-hosted endpoints such as
+  Ollama are assumed free unless you enter a price), and each provider card
+  shows a Balance block: live remaining credit (OpenRouter), month-to-date
+  spend (OpenAI, with an optional admin key), or spend tracked by Jhin with
+  an optional "loaded credits" figure. An Ollama provider shows a Local
+  models panel instead: the models pulled on your Ollama host, which one is
+  in memory, and admin Load/Unload controls (keep it for 5 minutes, 1 hour,
+  or until unloaded) so an 18 GB model is warmed up before a run rather than
   during it, plus "Use as model" to create a $0 profile from it. A Spend
   tile and the Settings page show the month's total against an optional
   monthly budget. Out-of-credit failures surface as a friendly "add funds"

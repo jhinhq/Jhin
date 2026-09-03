@@ -5,7 +5,8 @@ static catalog, the parsing of a refreshed community catalog, and — the part
 everything else defers to — the single precedence rule:
 
     user-entered > measured from spend > live from the provider
-                 > refreshed catalog > built-in catalog > unknown
+                 > refreshed catalog > built-in catalog
+                 > assumed free (self-hosted providers only) > unknown
 
 Rationale for the order. A price an admin typed is a contract fact and is
 never overwritten by anything automatic. A rate measured from the
@@ -17,6 +18,15 @@ LiteLLM is fresher than whatever shipped in this file. The built-in catalog
 below is the offline floor. Anything else is honestly *unknown* — and an
 unknown price is reported as unknown, never silently as zero, because a run
 priced at $0.00 is a lie that quietly breaks budgets.
+
+The one deliberate exception is a self-hosted provider — Ollama, or an
+OpenAI-compatible endpoint the workspace runs itself — where nothing on the
+far side meters tokens. A model there with no price is *assumed* free, and
+said so in as many words rather than reported as unknown. The assumption is
+a reading, not a price: it is never written to the row, so a price entered
+later has nothing to displace, and clearing that price falls straight back
+to the assumption. Any source that actually knows a number outranks it,
+which is why ``self_hosted`` sits last in the precedence.
 
 The built-in catalog holds *public list prices* for OpenAI and Anthropic,
 which expose no pricing endpoint at all. Entries are micro-dollars per
@@ -40,6 +50,8 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Literal
+
+from jhin_domain import ModelProviderType
 
 CATALOG_UPDATED = "2026-01"
 
@@ -383,16 +395,35 @@ def lookup_refreshed_price(
 
 # --- Precedence: the one place that decides which source wins ---
 
-PriceSource = Literal["user", "observed", "provider", "refreshed_catalog", "catalog"]
+#: Provider types that point at an endpoint the workspace runs for itself.
+#: Nothing on the far side meters tokens, so a model there with no price is
+#: assumed free rather than reported as unknown. Defined once, here, because
+#: the API, the web prefill, and the spend report all have to agree on
+#: exactly which providers the assumption covers.
+SELF_HOSTED_PROVIDER_TYPES: frozenset[str] = frozenset(
+    {ModelProviderType.OLLAMA.value, ModelProviderType.OPENAI_COMPATIBLE.value}
+)
+
+
+def is_self_hosted(provider_type: str) -> bool:
+    """Whether an unpriced model on ``provider_type`` is assumed to be free."""
+    return provider_type in SELF_HOSTED_PROVIDER_TYPES
+
+
+PriceSource = Literal["user", "observed", "provider", "refreshed_catalog", "catalog", "self_hosted"]
 
 #: Highest authority first. Every surface that has to choose between two
-#: known prices consults this order and nothing else.
+#: known prices consults this order and nothing else. ``self_hosted`` is the
+#: $0 an unpriced model on a self-hosted provider resolves to; it is last so
+#: that any source which actually knows a number beats it, and it is never
+#: stored on a row — clearing a stored price falls back to it.
 PRICE_SOURCE_PRECEDENCE: tuple[PriceSource, ...] = (
     "user",
     "observed",
     "provider",
     "refreshed_catalog",
     "catalog",
+    "self_hosted",
 )
 
 
@@ -416,19 +447,58 @@ class PriceCandidate:
         )
 
 
-def resolve_price(candidates: list[PriceCandidate]) -> PriceCandidate | None:
+def _self_hosted_candidate(provider_type: str | None) -> PriceCandidate | None:
+    if provider_type is None or not is_self_hosted(provider_type):
+        return None
+    return PriceCandidate(
+        source="self_hosted", input_cost_micros_per_million=0, output_cost_micros_per_million=0
+    )
+
+
+def resolve_price(
+    candidates: list[PriceCandidate], *, provider_type: str | None = None
+) -> PriceCandidate | None:
     """The winning candidate under :data:`PRICE_SOURCE_PRECEDENCE`.
 
     Order of the input list is irrelevant; only the declared source matters.
+    Passing ``provider_type`` adds the $0 ``self_hosted`` candidate for a
+    self-hosted provider, so it wins only when nothing else knows a price.
     ``None`` means no source knew the price — which is reported as *unknown*,
     never as free.
     """
     usable = [candidate for candidate in candidates if candidate.is_usable]
+    assumed = _self_hosted_candidate(provider_type)
+    if assumed is not None:
+        usable.append(assumed)
     for source in PRICE_SOURCE_PRECEDENCE:
         for candidate in usable:
             if candidate.source == source:
                 return candidate
     return None
+
+
+def effective_price(
+    provider_type: str,
+    input_micros: int | None,
+    output_micros: int | None,
+    stored_source: PriceSource | None,
+) -> PriceCandidate | None:
+    """The price a stored profile *reports*, with the self-hosted assumption applied.
+
+    A stored pair wins, carrying whatever provenance it has — a row that
+    predates provenance tracking counts as user-entered, the same reading the
+    write guard and :func:`describe_price_source` give it. With no stored
+    pair, a self-hosted provider resolves to the $0 assumption and anything
+    else resolves to nothing. The assumption lives only in this return value:
+    the row's nulls stay null, so a price entered later has nothing to
+    displace and clearing it falls straight back here.
+    """
+    stored = PriceCandidate(
+        source=stored_source if stored_source is not None else "user",
+        input_cost_micros_per_million=input_micros,
+        output_cost_micros_per_million=output_micros,
+    )
+    return resolve_price([stored], provider_type=provider_type)
 
 
 def describe_price_source(
@@ -461,6 +531,11 @@ def describe_price_source(
         )
     if source == "catalog":
         return f"Public list price, catalog {catalog_updated}"
+    if source == "self_hosted":
+        return (
+            "Assumed free: a self-hosted endpoint has no per-token price. "
+            "Enter prices if this endpoint bills you."
+        )
     if priced:
         return (
             "Set before Jhin recorded where prices come from — treated as yours, "
@@ -481,6 +556,7 @@ __all__ = [
     "MICROS_PER_DOLLAR",
     "PRICE_SOURCE_PRECEDENCE",
     "PRICING_PAGES",
+    "SELF_HOSTED_PROVIDER_TYPES",
     "ModelPrice",
     "PriceCandidate",
     "PriceSource",
@@ -488,6 +564,8 @@ __all__ = [
     "catalog_is_stale",
     "catalog_updated_date",
     "describe_price_source",
+    "effective_price",
+    "is_self_hosted",
     "lookup_in_catalog",
     "lookup_price",
     "lookup_refreshed_price",

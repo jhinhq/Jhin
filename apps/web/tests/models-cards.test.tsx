@@ -169,6 +169,7 @@ describe("ProfileCard", () => {
           input_cost_micros_per_million: null,
           output_cost_micros_per_million: null,
           price_source: null,
+          assumed_free: false,
         })}
         isDefault={false}
         isAdmin
@@ -177,6 +178,65 @@ describe("ProfileCard", () => {
     expect(screen.getByText("No price yet")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Add price" })).toBeTruthy();
     expect(screen.queryByTestId("profile-cost-line")).toBeNull();
+    expect(screen.queryByText("Free (self-hosted)")).toBeNull();
+  });
+
+  const ollamaProvider = provider({
+    id: "prov-ollama",
+    type: "ollama",
+    display_name: "Ollama Main",
+    secret_id: null,
+    base_url: "http://192.168.1.79:11434/v1",
+  });
+
+  it("shows a self-hosted profile with no stored price as free, not unpriced", () => {
+    renderWithQuery(
+      <ProfileCard
+        {...cardProps}
+        provider={ollamaProvider}
+        profile={profile({
+          provider_id: "prov-ollama",
+          model_name: "qwen3.8:latest",
+          display_name: "qwen3.8",
+          input_cost_micros_per_million: null,
+          output_cost_micros_per_million: null,
+          price_source: null,
+          assumed_free: true,
+        })}
+        isDefault={false}
+        isAdmin
+      />,
+    );
+    expect(screen.getByText("Free (self-hosted)")).toBeTruthy();
+    expect(screen.queryByText("No price yet")).toBeNull();
+    // Nothing is missing, so there is nothing to add from the card; the edit
+    // dialog keeps the fields for an endpoint that does bill.
+    expect(screen.queryByRole("button", { name: "Add price" })).toBeNull();
+    expect(screen.queryByTestId("profile-cost-line")).toBeNull();
+    expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy();
+  });
+
+  it("shows the stored price on a self-hosted profile an admin has priced", () => {
+    renderWithQuery(
+      <ProfileCard
+        {...cardProps}
+        provider={ollamaProvider}
+        profile={profile({
+          provider_id: "prov-ollama",
+          model_name: "qwen3.8:latest",
+          display_name: "qwen3.8",
+          input_cost_micros_per_million: 0,
+          output_cost_micros_per_million: 0,
+          price_source: "user",
+          assumed_free: false,
+        })}
+        isDefault={false}
+        isAdmin
+      />,
+    );
+    expect(screen.getByTestId("profile-cost-line").textContent).toContain("$0.00 in · $0.00 out");
+    expect(screen.queryByText("Free (self-hosted)")).toBeNull();
+    expect(screen.queryByText("No price yet")).toBeNull();
   });
 
   it("shows viewers the facts but none of the admin buttons", () => {

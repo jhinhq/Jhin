@@ -1603,7 +1603,8 @@
                   "observed",
                   "provider",
                   "refreshed_catalog",
-                  "catalog"
+                  "catalog",
+                  "self_hosted"
                 ],
                 "type": "string"
               },
@@ -1636,7 +1637,8 @@
               "observed",
               "provider",
               "refreshed_catalog",
-              "catalog"
+              "catalog",
+              "self_hosted"
             ],
             "title": "To Source",
             "type": "string"
@@ -6684,6 +6686,10 @@
       },
       "ModelProfileOut": {
         "properties": {
+          "assumed_free": {
+            "title": "Assumed Free",
+            "type": "boolean"
+          },
           "config_json": {
             "additionalProperties": true,
             "title": "Config Json",
@@ -6748,7 +6754,8 @@
                   "observed",
                   "provider",
                   "refreshed_catalog",
-                  "catalog"
+                  "catalog",
+                  "self_hosted"
                 ],
                 "type": "string"
               },
@@ -6791,6 +6798,7 @@
           "context_window",
           "input_cost_micros_per_million",
           "output_cost_micros_per_million",
+          "assumed_free",
           "supports_tools",
           "supports_reasoning",
           "config_json",
@@ -8569,7 +8577,8 @@
               "observed",
               "provider",
               "refreshed_catalog",
-              "catalog"
+              "catalog",
+              "self_hosted"
             ],
             "title": "Source",
             "type": "string"
@@ -8689,6 +8698,10 @@
       "ProfilePricingOut": {
         "description": "One profile's price, where it came from, and what could improve it.",
         "properties": {
+          "assumed_free": {
+            "title": "Assumed Free",
+            "type": "boolean"
+          },
           "display_name": {
             "title": "Display Name",
             "type": "string"
@@ -8737,7 +8750,8 @@
                   "observed",
                   "provider",
                   "refreshed_catalog",
-                  "catalog"
+                  "catalog",
+                  "self_hosted"
                 ],
                 "type": "string"
               },
@@ -8816,6 +8830,7 @@
           "price_source",
           "price_source_label",
           "priced",
+          "assumed_free",
           "pricing_page_url",
           "runs_this_month",
           "suggestion",
@@ -8843,7 +8858,8 @@
                   "observed",
                   "provider",
                   "refreshed_catalog",
-                  "catalog"
+                  "catalog",
+                  "self_hosted"
                 ],
                 "type": "string"
               },

@@ -13,7 +13,7 @@ API and workers see `ModelClient`, `ModelRequest`, and `ModelResponse`.
 | Adapters | `packages/models/src/jhin_models/providers/` | OpenAI, Anthropic, OpenRouter, Ollama, and generic OpenAI-compatible endpoints. The Ollama adapter also speaks Ollama's native `/api` endpoints for local model management. |
 | Factory | `packages/models/src/jhin_models/factory.py` | `build_model_client(type, base_url, api_key, admin_api_key, ...)`; every adapter is wrapped once by the telemetry client. |
 | Telemetry | `packages/models/src/jhin_models/telemetry.py` | Payload-free `model.request` spans with `jhin.operation` in `generate`, `stream`, `verify`, `embed`, `list_models`, `account_status`. Ollama's list/show reads report as `list_models`; load and unload report as `model_load`, which the registry folds to `other` (as it does `model_costs`). |
-| Price catalog | `packages/models/src/jhin_models/pricing.py` | Static public list prices for OpenAI and Anthropic, `lookup_price`, OpenRouter per-token conversion. |
+| Price catalog | `packages/models/src/jhin_models/pricing.py` | Static public list prices for OpenAI and Anthropic, `lookup_price`, OpenRouter per-token conversion, the price-source precedence, and the self-hosted rule (`SELF_HOSTED_PROVIDER_TYPES`, `is_self_hosted`, `effective_price`) that every other surface imports rather than restates. |
 | Fake provider | `packages/models/src/jhin_models/testing/fake_openai.py` | Dev/test endpoint with deterministic prices, credits, and costs. |
 | API | `apps/api/src/jhin_api/models/` | Providers, profiles, verification, model listing, balance, spend, pricing refresh, Ollama load/unload. |
 | UI | `apps/web/app/(app)/models/page.tsx`, `apps/web/lib/models.ts`, `apps/web/components/models/ollama-panel.tsx` | Provider cards with a Balance block, profile dialog with auto-filled pricing, Spend tile, Local models panel on the Ollama provider. |
@@ -53,13 +53,15 @@ exposes `has_admin_key: bool` only.
 
 ## Where prices come from
 
-Jhin can learn a model's price from five places. They are ranked, and the
-ranking is enforced in exactly one place —
+Jhin can learn a model's price from five places, and assumes one more: an
+endpoint you host yourself has no per-token price, so a profile on it that
+nobody has priced is taken to be free. All six are ranked, and the ranking is
+enforced in exactly one place —
 `jhin_models.pricing.PRICE_SOURCE_PRECEDENCE`, applied against the database by
 `jhin_api.models.pricing_service.apply_best_prices`:
 
 **user-entered > measured from spend > live from the provider > refreshed
-catalog > built-in catalog > unknown**
+catalog > built-in catalog > assumed free (self-hosted) > unknown**
 
 | Rank | `price_source` | Where the number comes from | Trust |
 | --- | --- | --- | --- |
@@ -68,12 +70,44 @@ catalog > built-in catalog > unknown**
 | 3 | `provider` | The provider's live `/models` response — OpenRouter's `pricing.prompt`/`pricing.completion`, USD per token. | Authoritative list data, straight from the source. |
 | 4 | `refreshed_catalog` | The LiteLLM community price map, fetched by `POST /model-profiles/refresh-catalog` and cached. | Community-maintained; fresher than the release but can be stale or wrong. |
 | 5 | `catalog` | `jhin_models.pricing`, public list prices as of `CATALOG_UPDATED` (`2026-01`). | Offline floor. Goes out of date between releases. |
-| — | `NULL` | Nothing knows it. | Reported as **unknown**, never as `$0.00`. |
+| 6 | `self_hosted` | Not a number anyone supplied: `$0 / $0`, because the provider is one you run (`ollama` or `openai_compatible` — `jhin_models.pricing.SELF_HOSTED_PROVIDER_TYPES`) and nothing has been entered. Never written to a row; it is what an unpriced profile on such a provider *resolves to* at read time. | An assumption, and labelled as one: *"Assumed free: a self-hosted endpoint has no per-token price. Enter prices if this endpoint bills you."* Every real source above beats it, and clearing a user price falls back to it rather than to unknown. |
+| — | `NULL` | Nothing knows it, and the provider is a hosted vendor. | Reported as **unknown**, never as `$0.00`. |
 
 `price_source` is `NULL` on rows that predate migration `0027` or that were
 posted straight to the API. Unknown provenance is treated as *user-entered*:
 leaving a stale price alone is a far smaller failure than silently replacing a
 real contract price.
+
+### Self-hosted endpoints are assumed free
+
+Ollama and a generic OpenAI-compatible endpoint are, by default, machines you
+run: no vendor bills per token, and there is no pricing page to send anyone
+to. Treating such a profile as *unknown* would keep every run on it in the
+*"n runs aren't included — no price set"* list for as long as the workspace
+exists — noise, not honesty. So the zero is assumed, and the assumption is
+kept out of the database:
+
+- `is_self_hosted(provider_type)` is the only definition of which types
+  qualify. `resolve_price` appends a `self_hosted` `$0` candidate for those
+  providers and lets the precedence table do the rest: anything real wins,
+  and nothing real leaves `$0`.
+- `effective_price(provider_type, input, output, stored_source)` is what a
+  reader calls: the stored price with its stored source when both halves are
+  set; else a `self_hosted` `$0` candidate when the provider qualifies; else
+  `None`. Stored nulls stay null — nothing writes `0` into a row on the
+  assumption's behalf — so entering a real price later is an ordinary edit,
+  and clearing it returns to *assumed free*, not to *unknown*.
+- On the API a self-hosted profile with no stored price counts as priced:
+  `GET /model-profiles/pricing-status` reports it at `0` / `0` with
+  `price_source: "self_hosted"`, `priced: true`, and the sentence above as its
+  label, and it never appears in `untracked` (`untracked_models` loads the
+  providers precisely so it can tell). `ModelProfileOut` and the
+  pricing-status row carry `assumed_free: true` for exactly this case —
+  self-hosted *and* no stored price — so the UI can say so while the edit
+  fields stay empty.
+- If the endpoint does bill you — a metered proxy, or a hosted service that
+  happens to speak the OpenAI wire format — enter its prices. They are stored
+  as `user` and outrank the assumption like any other source.
 
 ### Honest limitations
 
@@ -89,6 +123,11 @@ real contract price.
 - **Tracked spend is still an estimate.** It covers only runs Jhin executed,
   and it undercounts anything on an unpriced model — which is why the spend
   tile names those runs instead of implying the total is complete.
+- **Self-hosted means assumed free.** An `ollama` or `openai_compatible`
+  provider with no entered price is tracked at `$0.00`. That is right for a
+  box in the next room and wrong for a metered proxy or a hosted service
+  behind the same wire format; the assumption is a floor, and any price you
+  enter replaces it.
 
 ### Measuring the real rate (`POST /model-profiles/reconcile-pricing`, admin)
 
@@ -166,6 +205,13 @@ direction. So:
 - Unpriced models get a warning wherever they appear (create dialog, profile
   row, Models page, spend tile) that says spend will not be tracked, links the
   provider's real pricing page, and offers input/output fields inline.
+- A self-hosted profile with no stored price is the one case where `$0.00` is
+  the truth rather than the failure, so it gets none of that: the profile card
+  shows a calm *Free (self-hosted)* badge where a hosted vendor's row would
+  say *No price yet*, the dialog's price fields stay empty and editable under
+  the note *"Self-hosted endpoints have no per-token price. Enter prices only
+  if this endpoint bills you."*, and its runs are counted at `$0` rather than
+  listed as untracked. `assumed_free` on the profile is what the UI keys on.
 - `catalog_stale` flips once `CATALOG_UPDATED` is more than
   `CATALOG_STALE_AFTER_DAYS` (183) old, and the UI says *"These are list prices
   from {date} — check they're current."*
@@ -178,7 +224,11 @@ When a model is picked, prices and context window come from
 `GET /model-providers/{id}/models`, whose entries carry
 `input_cost_micros_per_million`, `output_cost_micros_per_million`,
 `context_window`, and `source` (`provider` live, `catalog` static, or `null`).
-Catalog lookup normalises identifiers: vendor prefixes (`openai/gpt-4o`), dated
+On a self-hosted provider (`ollama`, `openai_compatible`) the dialog pre-fills
+`0` / `0` instead and says why — the Ollama wording names the host, a generic
+OpenAI-compatible endpoint gets the self-hosted note — with the fields left
+editable for the endpoint that does bill. Catalog lookup normalises
+identifiers: vendor prefixes (`openai/gpt-4o`), dated
 snapshots (`gpt-4o-2024-08-06`, `claude-sonnet-4-20250514`,
 `claude-opus-4-1@20250805`), and `-latest`/`-preview` suffixes resolve to their
 family; longer variants fall back to a dash-delimited prefix
@@ -397,13 +447,18 @@ quick and is awaited in full.
 
 Ollama has no per-token price and the `/models` listing reports
 `source: null` for every local model, so an Ollama provider is treated as
-$0 by construction rather than as unknown: picking a local model in the
-profile dialog auto-fills `0` / `0` with the note *"Runs on your Ollama host
-— no per-token price."*, and **Use as model** pre-fills the same. The zeros
-are saved as a user-entered price (`price_source: user`), which is the
-point — a local model's runs are tracked at $0.00 instead of being reported
-as unpriced, so they neither inflate the spend total nor appear in *"n runs
-aren't included — no price set"*.
+$0 by construction rather than as unknown — the self-hosted rule under
+"Where prices come from", which Ollama shares with `openai_compatible`.
+Picking a local model in the profile dialog auto-fills `0` / `0` with the
+note *"Runs on your Ollama host — no per-token price."*, and **Use as
+model** pre-fills the same. Saving those zeros stores a user-entered price
+(`price_source: user`); clearing them stores nothing, and the profile then
+resolves to `self_hosted` at read time and is badged *Free (self-hosted)*.
+Either way a local model's runs are tracked at $0.00 instead of being
+reported as unpriced, so they neither inflate the spend total nor appear in
+*"n runs aren't included — no price set"* — which is the point. An Ollama
+host behind a metered proxy is the exception: enter the proxy's prices and
+they win.
 
 ## Out-of-credit failures
 

@@ -4,7 +4,13 @@
 place that enforces it against the database:
 
     user-entered > measured from spend > live from the provider
-                 > refreshed catalog > built-in catalog > unknown
+                 > refreshed catalog > built-in catalog
+                 > assumed free (self-hosted providers only) > unknown
+
+The last real layer is a reading, not a write: a profile on a self-hosted
+provider with no stored price *reports* $0 with source ``self_hosted``, but
+the row keeps its nulls. That is what lets any source that knows a number
+fill it, and what makes clearing a typed price fall back to the assumption.
 
 Two admin actions feed the lower layers.
 
@@ -75,6 +81,7 @@ from jhin_models.pricing import (
     RefreshedCatalog,
     catalog_is_stale,
     describe_price_source,
+    effective_price,
     lookup_price,
     lookup_refreshed_price,
     normalize_model_id,
@@ -267,11 +274,50 @@ class AppliedPrice:
     detail: str
 
 
-def _is_priced(profile: ModelProfile) -> bool:
+def has_stored_price(profile: ModelProfile) -> bool:
+    """Both halves actually on the row.
+
+    This is the only kind of price the write guard protects. A self-hosted
+    profile reading as free is deliberately *not* one: the assumption is what
+    the nulls resolve to, not a number anybody stored.
+    """
     return (
         profile.input_cost_micros_per_million is not None
         and profile.output_cost_micros_per_million is not None
     )
+
+
+def _stored_source(profile: ModelProfile) -> PriceSource | None:
+    # The column is free text; anything it holds that is not a source Jhin
+    # knows reads as "provenance unrecorded", which precedence treats as the
+    # admin's own — the safe direction to be wrong in.
+    source = profile.price_source
+    if source is None or source not in PRICE_SOURCE_PRECEDENCE:
+        return None
+    return source
+
+
+def price_of(profile: ModelProfile, provider_type: str) -> PriceCandidate | None:
+    """What this profile's price *is* for reporting: the stored pair, or the
+    $0 assumption when a self-hosted provider has none. ``None`` is unknown."""
+    return effective_price(
+        provider_type,
+        profile.input_cost_micros_per_million,
+        profile.output_cost_micros_per_million,
+        _stored_source(profile),
+    )
+
+
+def _is_priced(profile: ModelProfile, provider_type: str) -> bool:
+    return price_of(profile, provider_type) is not None
+
+
+def assumed_free(profile: ModelProfile, provider_type: str) -> bool:
+    """True only when the reported $0 is the self-hosted assumption, not a
+    number somebody stored — what lets the UI say "Free (self-hosted)" while
+    leaving the price fields empty and editable."""
+    price = price_of(profile, provider_type)
+    return price is not None and price.source == "self_hosted"
 
 
 def may_write_price(profile: ModelProfile, new_source: PriceSource) -> bool:
@@ -279,7 +325,9 @@ def may_write_price(profile: ModelProfile, new_source: PriceSource) -> bool:
 
     Three rules, in order:
 
-    1. A profile with no price has nothing to protect — anything may fill it.
+    1. A profile with no stored price has nothing to protect — anything may
+       fill it. That includes a self-hosted profile reading as free: a source
+       that actually knows a number outranks the assumption.
     2. A price an admin typed, or one whose provenance is unknown, is never
        overwritten automatically. Unknown counts as typed: this is the safe
        direction to be wrong in.
@@ -287,7 +335,7 @@ def may_write_price(profile: ModelProfile, new_source: PriceSource) -> bool:
        wrote the current value, so a stale catalog can never displace a
        measured rate.
     """
-    if not _is_priced(profile):
+    if not has_stored_price(profile):
         return True
     current = profile.price_source
     if current is None or current == "user":
@@ -825,6 +873,9 @@ class ProfilePricingView:
     price_source: str | None
     price_source_label: str
     priced: bool
+    # The reported $0 is the self-hosted assumption rather than a stored
+    # number; the row's price columns are still null.
+    assumed_free: bool
     pricing_page_url: str | None
     runs_this_month: int
     suggestion: PriceCandidate | None
@@ -887,7 +938,9 @@ async def untracked_models(
     """Models that ran this period but carry no price, so cost 0 was recorded.
 
     This is the honest counterpart to the spend total: without it, a run on an
-    unpriced model is indistinguishable from a free one.
+    unpriced model is indistinguishable from a free one. A self-hosted
+    provider's unpriced models are the one case where "free" is the honest
+    reading, so they are not listed — which is why the providers are loaded.
     """
     profiles = {
         row.id: row
@@ -895,11 +948,22 @@ async def untracked_models(
             select(ModelProfile).where(ModelProfile.workspace_id == workspace_id)
         )
     }
+    providers = {
+        row.id: row
+        for row in await db.scalars(
+            select(ModelProvider).where(ModelProvider.workspace_id == workspace_id)
+        )
+    }
     usage = await _runs_by_profile(db, workspace_id, since)
     merged: dict[str, UntrackedModel] = {}
     for profile_id, (runs, input_tokens, output_tokens) in usage.items():
         profile = profiles.get(profile_id)
-        if profile is None or _is_priced(profile):
+        if profile is None:
+            continue
+        provider = providers.get(profile.provider_id)
+        # A profile always has a provider; the empty type only keeps a torn
+        # row honest, since an unknown provider is not one assumed free.
+        if _is_priced(profile, provider.type if provider is not None else ""):
             continue
         current = merged.get(profile.model_name)
         merged[profile.model_name] = UntrackedModel(
@@ -959,6 +1023,20 @@ async def pricing_status(
             and candidate.output_cost_micros_per_million == profile.output_cost_micros_per_million
         ):
             suggestion = None
+        price = price_of(profile, provider_type)
+        # An assumed-free profile reports the $0 it resolves to and names the
+        # assumption as its source. The row itself keeps its nulls, so the
+        # edit fields stay empty and a price entered later displaces nothing.
+        if price is not None and price.source == "self_hosted":
+            assumed = True
+            reported_input = price.input_cost_micros_per_million
+            reported_output = price.output_cost_micros_per_million
+            reported_source: str | None = price.source
+        else:
+            assumed = False
+            reported_input = profile.input_cost_micros_per_million
+            reported_output = profile.output_cost_micros_per_million
+            reported_source = profile.price_source
         views.append(
             ProfilePricingView(
                 profile_id=profile.id,
@@ -966,15 +1044,16 @@ async def pricing_status(
                 model_name=profile.model_name,
                 provider_id=profile.provider_id,
                 provider_type=provider_type,
-                input_cost_micros_per_million=profile.input_cost_micros_per_million,
-                output_cost_micros_per_million=profile.output_cost_micros_per_million,
-                price_source=profile.price_source,
+                input_cost_micros_per_million=reported_input,
+                output_cost_micros_per_million=reported_output,
+                price_source=reported_source,
                 price_source_label=describe_price_source(
-                    profile.price_source,  # type: ignore[arg-type]
-                    priced=_is_priced(profile),
+                    reported_source,  # type: ignore[arg-type]
+                    priced=price is not None,
                     refreshed_at=snapshot.fetched_at.date() if snapshot else None,
                 ),
-                priced=_is_priced(profile),
+                priced=price is not None,
+                assumed_free=assumed,
                 pricing_page_url=PRICING_PAGES.get(provider_type),
                 runs_this_month=usage.get(profile.id, (0, 0, 0))[0],
                 suggestion=suggestion,

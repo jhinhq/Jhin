@@ -268,6 +268,11 @@ export interface ModelProfile {
   /** Which source last wrote the price; null means unknown provenance, which
    *  is treated as user-entered so nothing automatic overwrites it. */
   price_source: PriceSourceName | null;
+  /** True only on a self-hosted provider (Ollama, an OpenAI-compatible
+   *  endpoint) with no stored price: the profile then resolves to $0 with
+   *  source `self_hosted` instead of counting as unpriced. Nothing is written
+   *  to the row. Optional only for fixtures: the API always sends it. */
+  assumed_free?: boolean;
   supports_tools: boolean;
   supports_reasoning: boolean;
   config_json: Record<string, unknown>;
@@ -278,16 +283,21 @@ export interface ModelProfile {
 export type PriceSource = "provider" | "catalog" | null;
 
 /**
- * Where a stored price came from, highest authority first:
+ * Where a price came from, highest authority first:
  * user-entered > measured from spend > live from the provider >
- * refreshed catalog > built-in catalog.
+ * refreshed catalog > built-in catalog > assumed free on a self-hosted host.
+ *
+ * `self_hosted` is never stored on a row: it is what an unpriced profile on
+ * Ollama or an OpenAI-compatible endpoint resolves to when its price is read,
+ * so any real source beats it and clearing a price falls back to it.
  */
 export type PriceSourceName =
   | "user"
   | "observed"
   | "provider"
   | "refreshed_catalog"
-  | "catalog";
+  | "catalog"
+  | "self_hosted";
 
 export interface ProviderModelEntry {
   id: string;
@@ -482,6 +492,9 @@ export interface ProfilePricing {
   price_source: PriceSourceName | null;
   price_source_label: string;
   priced: boolean;
+  /** Mirrors `ModelProfile.assumed_free`: priced at $0 by virtue of the
+   *  provider, not by anything stored. Optional only for fixtures. */
+  assumed_free?: boolean;
   pricing_page_url: string | null;
   runs_this_month: number;
   suggestion: PriceCandidate | null;

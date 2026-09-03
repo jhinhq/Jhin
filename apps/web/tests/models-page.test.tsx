@@ -97,8 +97,26 @@ const PROFILES: ModelProfile[] = [
     input_cost_micros_per_million: null,
     output_cost_micros_per_million: null,
     price_source: null,
+    assumed_free: false,
   }),
 ];
+
+/** A local model turned into a profile and left unpriced: the API reports
+ * it as assumed free rather than as a gap, and stores nothing. */
+const ASSUMED_FREE_PROFILE: ModelProfile = profile({
+  id: "profile-ollama",
+  provider_id: "prov-ollama",
+  model_name: "qwen3.8:latest",
+  display_name: "qwen3.8",
+  context_window: 40_960,
+  input_cost_micros_per_million: null,
+  output_cost_micros_per_million: null,
+  price_source: null,
+  assumed_free: true,
+});
+
+const ASSUMED_FREE_LABEL =
+  "Assumed free: a self-hosted endpoint has no per-token price. Enter prices if this endpoint bills you.";
 
 const WORKSPACE_DETAIL = {
   id: "workspace-1",
@@ -147,10 +165,15 @@ function json(data: unknown, status = 200): Response {
 }
 
 /** Every request the page makes, with the writes kept for assertions. With
- * `ollama`, a local provider sits beside OpenAI and its host answers. */
-function installServer(options: { ollama?: boolean } = {}) {
+ * `ollama`, a local provider sits beside OpenAI and its host answers;
+ * `profiles` and `pricing` replace the default rows. */
+function installServer(
+  options: { ollama?: boolean; profiles?: ModelProfile[]; pricing?: PricingStatus } = {},
+) {
   const deletes: string[] = [];
   const providers = options.ollama ? [PROVIDER, OLLAMA_PROVIDER] : [PROVIDER];
+  const profiles = options.profiles ?? PROFILES;
+  const pricing = options.pricing ?? PRICING;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -181,11 +204,11 @@ function installServer(options: { ollama?: boolean } = {}) {
           catalog_updated: "2026-01",
         });
       }
-      if (path === "/api/v1/workspaces/workspace-1/model-profiles") return json(PROFILES);
+      if (path === "/api/v1/workspaces/workspace-1/model-profiles") return json(profiles);
       if (path === "/api/v1/workspaces/workspace-1") return json(WORKSPACE_DETAIL);
       if (path === "/api/v1/workspaces/workspace-1/spend") return json(SPEND);
       if (path === "/api/v1/workspaces/workspace-1/model-profiles/pricing-status") {
-        return json(PRICING);
+        return json(pricing);
       }
       if (path === "/api/v1/workspaces/workspace-1/model-providers/prov-1/models") {
         return json({ models: [], detail: null, catalog_updated: "2026-01" });
@@ -299,6 +322,69 @@ describe("ModelsPage", () => {
     // The provider's model list arriving later leaves the prefill alone.
     await waitFor(() => expect(within(dialog).getByText(/1 models available/)).toBeDefined());
     expect((within(dialog).getByLabelText("Input $ / 1M tokens") as HTMLInputElement).value).toBe("0");
+  });
+
+  it("treats an unpriced self-hosted profile as free and keeps its price fields empty", async () => {
+    installServer({
+      ollama: true,
+      profiles: [profile(), ASSUMED_FREE_PROFILE],
+      pricing: {
+        ...PRICING,
+        profiles: [
+          {
+            profile_id: "profile-ollama",
+            display_name: "qwen3.8",
+            model_name: "qwen3.8:latest",
+            provider_id: "prov-ollama",
+            provider_type: "ollama",
+            input_cost_micros_per_million: 0,
+            output_cost_micros_per_million: 0,
+            price_source: "self_hosted",
+            price_source_label: ASSUMED_FREE_LABEL,
+            priced: true,
+            assumed_free: true,
+            pricing_page_url: null,
+            runs_this_month: 4,
+            suggestion: null,
+            suggestion_label: null,
+            observed: null,
+          },
+        ],
+      },
+    });
+    renderPage();
+    await screen.findByRole("heading", { name: "Default model" });
+
+    // The card is calm about it: free, not "no price yet".
+    const card = await screen.findByTestId("profile-card-profile-ollama");
+    expect(within(card).getByText("Free (self-hosted)")).toBeDefined();
+    expect(screen.queryByText("No price yet")).toBeNull();
+    expect(within(card).queryByRole("button", { name: "Add price" })).toBeNull();
+
+    // Editing says why it is free, with the fields empty and still editable
+    // for an endpoint that does bill — and no "we don't know its price" box.
+    fireEvent.click(within(card).getByRole("button", { name: "Edit" }));
+    const dialog = await screen.findByRole("dialog", { name: "Edit model profile" });
+    expect(within(dialog).getByText("Free (self-hosted) — no per-token price.")).toBeDefined();
+    fireEvent.click(within(dialog).getByRole("button", { name: /Pricing \(auto-filled\)/ }));
+    expect(within(dialog).getByText("Runs on your Ollama host — no per-token price.")).toBeDefined();
+    expect(within(dialog).queryByTestId("unpriced-model-note")).toBeNull();
+    const input = within(dialog).getByLabelText("Input $ / 1M tokens") as HTMLInputElement;
+    const output = within(dialog).getByLabelText("Output $ / 1M tokens") as HTMLInputElement;
+    expect(input.value).toBe("");
+    expect(output.value).toBe("");
+    expect(input.disabled).toBe(false);
+    const provenance = within(dialog).getByTestId("price-provenance");
+    expect(within(provenance).getByText("Free (self-hosted)")).toBeDefined();
+    expect(provenance.textContent).toContain(ASSUMED_FREE_LABEL);
+
+    // The host's model list arriving does not write $0 into the fields: the
+    // stored row already answered, and nothing gets saved that the admin did
+    // not type.
+    await waitFor(() => expect(within(dialog).getByText(/1 models available/)).toBeDefined());
+    expect(input.value).toBe("");
+    fireEvent.change(input, { target: { value: "0.5" } });
+    expect(input.value).toBe("0.5");
   });
 
   it("shows viewers the decisions but none of the admin controls", async () => {

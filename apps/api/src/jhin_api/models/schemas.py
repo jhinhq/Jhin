@@ -94,11 +94,15 @@ class ModelProviderOut(BaseModel):
     updated_at: datetime
 
 
-#: Where a stored price came from. Mirrors ``jhin_models.pricing.PriceSource``
-#: and is ordered by authority: user-entered beats a measured rate, which
-#: beats a live provider price, which beats a refreshed catalog, which beats
-#: the list prices built into the release.
-PriceSourceName = Literal["user", "observed", "provider", "refreshed_catalog", "catalog"]
+#: Where a price came from. Mirrors ``jhin_models.pricing.PriceSource`` and
+#: is ordered by authority: user-entered beats a measured rate, which beats
+#: a live provider price, which beats a refreshed catalog, which beats the
+#: list prices built into the release. ``self_hosted`` is never stored: it
+#: is what an unpriced model on a self-hosted provider resolves to, reported
+#: so the UI can say "assumed free" rather than "unknown".
+PriceSourceName = Literal[
+    "user", "observed", "provider", "refreshed_catalog", "catalog", "self_hosted"
+]
 
 
 BalanceSource = Literal["openrouter", "openai_admin", "tracked"]
@@ -229,10 +233,14 @@ class ModelProfileOut(BaseModel):
     context_window: int | None
     input_cost_micros_per_million: int | None
     output_cost_micros_per_million: int | None
-    # Which of the five sources last wrote the price. The UI renders it as a
-    # badge, and it is what makes "never overwrite a price you typed"
-    # inspectable rather than a promise.
+    # Which source last wrote the price. The UI renders it as a badge, and it
+    # is what makes "never overwrite a price you typed" inspectable rather
+    # than a promise.
     price_source: PriceSourceName | None = None
+    # The profile sits on a self-hosted provider and stores no price, so it
+    # is reported as free. The price fields above are still null on purpose:
+    # the UI shows "Free (self-hosted)" and leaves them empty and editable.
+    assumed_free: bool
     supports_tools: bool
     supports_reasoning: bool
     config_json: dict[str, Any]
@@ -294,6 +302,9 @@ class ProfilePricingOut(BaseModel):
     price_source: PriceSourceName | None
     price_source_label: str
     priced: bool
+    # ``priced`` with the $0 coming from the self-hosted assumption rather
+    # than a stored number (``price_source`` is then ``self_hosted``).
+    assumed_free: bool
     pricing_page_url: str | None
     runs_this_month: int
     suggestion: PriceCandidateOut | None

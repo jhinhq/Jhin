@@ -48,11 +48,14 @@ import {
   catalogStalenessNote,
   derivationLabel,
   dollarInputToMicros,
+  effectivePriceSource,
   formatPricePair,
+  isSelfHostedProvider,
   microsToDollarInput,
   observedRateSummary,
   priceSourceBadge,
   priceSourceLabel,
+  selfHostedPriceNote,
   webSearchSupport,
   type ProfilePrefill,
 } from "@/lib/models";
@@ -758,10 +761,17 @@ function ProfileDialog({
     prefillNote?.known ? prefillNote.note : null,
   );
   // The model the prices were last auto-filled for, so edits survive
-  // re-renders. A prefill counts as already filled: the provider's model
-  // list arriving later must not overwrite what the panel handed over.
+  // re-renders. A prefill or a stored row counts as already filled: the
+  // provider's model list arriving later must not overwrite what the panel
+  // handed over or what the row holds (an assumed-free profile keeps its
+  // empty fields; "Refresh prices" is the deliberate way to look them up
+  // again). Picking a different model still fills.
   const [autofilledFor, setAutofilledFor] = useState<string | null>(
-    prefill ? `${prefill.providerId}:${prefill.modelName.trim().toLowerCase()}` : null,
+    existing
+      ? `${existing.provider_id}:${existing.model_name.trim().toLowerCase()}`
+      : prefill
+        ? `${prefill.providerId}:${prefill.modelName.trim().toLowerCase()}`
+        : null,
   );
   const webSupport = webSearchSupport(providerType, modelName);
   const entries = providerModels.data?.models;
@@ -852,20 +862,28 @@ function ProfileDialog({
   });
 
   const pricesKnown = Boolean(inputCost || outputCost);
+  const selfHosted = isSelfHostedProvider(providerType);
+  // Empty price fields on a self-hosted provider are not a gap: the profile
+  // resolves to $0. The note under the fields says so, and they stay
+  // editable for the endpoint that does bill.
+  const priceNote = pricingNote ?? selfHostedPriceNote(providerType);
   // List prices age. Saying how old they are is the difference between a
-  // number the admin can trust and one they should go check. A local Ollama
+  // number the admin can trust and one they should go check. A self-hosted
   // model has no list price to have aged, so the nudge would only confuse.
-  const catalogStaleness = providerType === "ollama" ? null : catalogStalenessNote(catalogUpdated);
+  const catalogStaleness = selfHosted ? null : catalogStalenessNote(catalogUpdated);
   const summary = pricesKnown
     ? `$${inputCost || "0"} in · $${outputCost || "0"} out per 1M tokens`
-    : "No prices yet — runs will show $0.00 until you add them.";
+    : selfHosted
+      ? "Free (self-hosted) — no per-token price."
+      : "No prices yet — runs will show $0.00 until you add them.";
   // Provenance describes the stored price, not the unsaved form inputs.
   const storedPriced = Boolean(
     existing &&
       existing.input_cost_micros_per_million !== null &&
       existing.output_cost_micros_per_million !== null,
   );
-  const storedBadge = existing ? priceSourceBadge(existing.price_source, storedPriced) : null;
+  const storedSource = existing ? effectivePriceSource(existing) : null;
+  const storedBadge = existing ? priceSourceBadge(storedSource, storedPriced) : null;
 
   return (
     <Dialog title={existing ? "Edit model profile" : "New model profile"} open onClose={onClose}>
@@ -882,6 +900,8 @@ function ProfileDialog({
             onChange={(e) => {
               setProviderId(e.target.value);
               setAutofilledFor(null);
+              // The note described the previous provider's prices.
+              setPricingNote(null);
             }}
             required
           >
@@ -965,8 +985,12 @@ function ProfileDialog({
           </button>
           {pricingOpen ? (
             <div id={pricingPanelId} className="space-y-3 border-t border-line px-3 py-3">
-              {pricingNote ? <p className="text-xs text-dim">{pricingNote}</p> : null}
-              {!pricesKnown && modelName.trim() ? (
+              {priceNote ? (
+                <p className="text-xs text-dim" data-testid="dialog-price-note">
+                  {priceNote}
+                </p>
+              ) : null}
+              {!pricesKnown && modelName.trim() && !selfHosted ? (
                 <UnpricedModelNote modelName={modelName.trim()} providerType={providerType} />
               ) : null}
               {catalogStaleness ? (
@@ -1010,8 +1034,7 @@ function ProfileDialog({
                 <div className="space-y-1 text-[11px] text-faint" data-testid="price-provenance">
                   <p>
                     <Badge tone={storedBadge.tone}>{storedBadge.text}</Badge>{" "}
-                    {pricing?.price_source_label ??
-                      priceSourceLabel(existing.price_source, storedPriced)}
+                    {pricing?.price_source_label ?? priceSourceLabel(storedSource, storedPriced)}
                   </p>
                   {pricing?.observed ? (
                     <p>
@@ -1032,8 +1055,8 @@ function ProfileDialog({
                 </div>
               ) : null}
             </div>
-          ) : pricingNote ? (
-            <p className="border-t border-line px-3 py-2 text-xs text-dim">{pricingNote}</p>
+          ) : priceNote ? (
+            <p className="border-t border-line px-3 py-2 text-xs text-dim">{priceNote}</p>
           ) : null}
         </div>
 

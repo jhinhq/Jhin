@@ -15,15 +15,19 @@ from datetime import date, timedelta
 
 import pytest
 
+from jhin_domain import ModelProviderType
 from jhin_models.pricing import (
     CATALOG_STALE_AFTER_DAYS,
     LITELLM_PRICE_MAP_URL,
     PRICE_SOURCE_PRECEDENCE,
     PRICING_PAGES,
+    SELF_HOSTED_PROVIDER_TYPES,
     ModelPrice,
     PriceCandidate,
     catalog_is_stale,
     describe_price_source,
+    effective_price,
+    is_self_hosted,
     lookup_refreshed_price,
     parse_litellm_price_map,
     refreshed_catalog_from_json,
@@ -170,6 +174,7 @@ def test_the_precedence_order_is_the_documented_one() -> None:
         "provider",
         "refreshed_catalog",
         "catalog",
+        "self_hosted",
     )
 
 
@@ -208,6 +213,76 @@ def test_zero_is_a_real_price_and_is_kept() -> None:
     assert free.is_usable
     winner = resolve_price([free])
     assert winner is not None and winner.input_cost_micros_per_million == 0
+
+
+# --- The self-hosted assumption ---
+
+
+@pytest.mark.parametrize("provider_type", list(ModelProviderType))
+def test_only_ollama_and_openai_compatible_are_self_hosted(
+    provider_type: ModelProviderType,
+) -> None:
+    """Which providers the assumption covers is decided here and nowhere else."""
+    expected = provider_type in {ModelProviderType.OLLAMA, ModelProviderType.OPENAI_COMPATIBLE}
+    assert is_self_hosted(provider_type.value) is expected
+    assert (provider_type.value in SELF_HOSTED_PROVIDER_TYPES) is expected
+
+
+@pytest.mark.parametrize("provider_type", ["ollama", "openai_compatible"])
+def test_a_self_hosted_provider_with_no_price_resolves_to_assumed_free(provider_type: str) -> None:
+    winner = resolve_price([], provider_type=provider_type)
+    assert winner is not None
+    assert winner.source == "self_hosted"
+    assert winner.input_cost_micros_per_million == 0
+    assert winner.output_cost_micros_per_million == 0
+
+
+@pytest.mark.parametrize("provider_type", ["openai", "anthropic", "openrouter", None])
+def test_a_hosted_provider_with_no_price_is_still_unknown_not_free(
+    provider_type: str | None,
+) -> None:
+    """The assumption is the one exception; everyone else stays unknown."""
+    assert resolve_price([], provider_type=provider_type) is None
+
+
+def test_every_real_source_beats_the_self_hosted_assumption() -> None:
+    """A typed $0.15/$0.60 on an Ollama profile is the price, not the assumption."""
+    for source in PRICE_SOURCE_PRECEDENCE[:-1]:
+        winner = resolve_price([_candidate(source, 150_000, 600_000)], provider_type="ollama")
+        assert winner is not None
+        assert winner.source == source, f"{source} must beat the assumption"
+        assert winner.input_cost_micros_per_million == 150_000
+        assert winner.output_cost_micros_per_million == 600_000
+
+
+def test_effective_price_reports_the_stored_pair_and_falls_back_when_cleared() -> None:
+    """Clearing a typed price on Ollama goes back to "assumed free", not "unknown"."""
+    typed = effective_price("ollama", 150_000, 600_000, "user")
+    assert typed is not None
+    assert typed.source == "user"
+    assert typed.output_cost_micros_per_million == 600_000
+
+    cleared = effective_price("ollama", None, None, None)
+    assert cleared is not None
+    assert cleared.source == "self_hosted"
+    assert (cleared.input_cost_micros_per_million, cleared.output_cost_micros_per_million) == (0, 0)
+
+    assert effective_price("openai", None, None, None) is None, "hosted stays unknown"
+
+
+def test_a_stored_price_with_no_recorded_source_still_outranks_the_assumption() -> None:
+    """Rows predating provenance tracking hold real numbers and read as the admin's."""
+    legacy = effective_price("openai_compatible", 1, 2, None)
+    assert legacy is not None
+    assert legacy.source == "user"
+    assert legacy.input_cost_micros_per_million == 1
+
+
+def test_the_assumption_is_described_as_an_assumption() -> None:
+    assert describe_price_source("self_hosted") == (
+        "Assumed free: a self-hosted endpoint has no per-token price. "
+        "Enter prices if this endpoint bills you."
+    )
 
 
 # --- Source labels and staleness ---

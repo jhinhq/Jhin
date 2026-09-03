@@ -50,6 +50,31 @@ export const PROVIDER_LABELS: Record<ModelProviderType, string> = {
   openai_compatible: "the provider",
 };
 
+/** Providers that run on hardware the workspace pays for by other means, so
+ * a model there has no per-token price unless the admin says otherwise.
+ * Mirrors `jhin_models.pricing.SELF_HOSTED_PROVIDER_TYPES`. */
+export const SELF_HOSTED_PROVIDER_TYPES: readonly ModelProviderType[] = [
+  "ollama",
+  "openai_compatible",
+];
+
+export function isSelfHostedProvider(providerType: ModelProviderType): boolean {
+  return SELF_HOSTED_PROVIDER_TYPES.includes(providerType);
+}
+
+export const OLLAMA_PRICE_NOTE = "Runs on your Ollama host — no per-token price.";
+export const SELF_HOSTED_PRICE_NOTE =
+  "Self-hosted endpoints have no per-token price. Enter prices only if this endpoint bills you.";
+
+/** The line under the price fields of a self-hosted provider, or null for a
+ * cloud one (its note names the price source instead). Ollama keeps its own
+ * wording: the host is something the admin runs, not an endpoint that might
+ * send a bill. */
+export function selfHostedPriceNote(providerType: ModelProviderType): string | null {
+  if (providerType === "ollama") return OLLAMA_PRICE_NOTE;
+  return isSelfHostedProvider(providerType) ? SELF_HOSTED_PRICE_NOTE : null;
+}
+
 /** What to auto-fill when `modelId` is picked from `entries`. Matching is
  * case-insensitive on the exact identifier; unknown models return empty
  * fields with a hint to enter prices manually. */
@@ -62,17 +87,18 @@ export function autofillForModel(
   const wanted = modelId.trim().toLowerCase();
   const entry = entries?.find((candidate) => candidate.id.toLowerCase() === wanted);
   const label = PROVIDER_LABELS[providerType] ?? providerType;
-  // A local model has no per-token price, and Ollama has no pricing page to
-  // send anyone to. $0 is the true price, not an unknown one: without this
+  // A self-hosted model has no per-token price, and there is no pricing page
+  // to send anyone to. $0 is the true price, not an unknown one: without this
   // branch every run on the host is reported as untracked spend.
-  if (providerType === "ollama") {
+  const selfHostedNote = selfHostedPriceNote(providerType);
+  if (selfHostedNote !== null) {
     return {
       known: true,
       inputCost: "0",
       outputCost: "0",
       contextWindow: entry?.context_window ? String(entry.context_window) : "",
       source: null,
-      note: OLLAMA_PRICE_NOTE,
+      note: selfHostedNote,
     };
   }
   if (!entry || entry.source === null) {
@@ -100,8 +126,6 @@ export function autofillForModel(
     note,
   };
 }
-
-export const OLLAMA_PRICE_NOTE = "Runs on your Ollama host — no per-token price.";
 
 /** "17.7 GB" in decimal gigabytes (what Ollama and disk vendors quote), or
  * whole megabytes below one gigabyte so a small embedding model never reads
@@ -319,6 +343,8 @@ const PRICE_SOURCE_LABELS: Record<PriceSourceName, string> = {
   provider: "Live from the provider's own model list",
   refreshed_catalog: "From the LiteLLM community price catalog",
   catalog: "Public list price",
+  self_hosted:
+    "Assumed free: a self-hosted endpoint has no per-token price. Enter prices if this endpoint bills you.",
 };
 
 /**
@@ -353,9 +379,23 @@ export function priceSourceBadge(
       return { text: "Catalog", tone: "neutral" };
     case "catalog":
       return { text: "List price", tone: "neutral" };
+    case "self_hosted":
+      return { text: "Free (self-hosted)", tone: "ok" };
     default:
       return { text: "No price", tone: "warn" };
   }
+}
+
+/**
+ * The source a profile's price resolves to: the stored one, or `self_hosted`
+ * when the API reports the profile as assumed free. The row itself never
+ * carries `self_hosted`, so reading `price_source` alone shows an assumed-free
+ * profile as unpriced. Mirrors `jhin_models.pricing.effective_price`.
+ */
+export function effectivePriceSource(
+  profile: Pick<ModelProfile, "price_source" | "assumed_free">,
+): PriceSourceName | null {
+  return profile.assumed_free ? "self_hosted" : profile.price_source;
 }
 
 /** "$2.50 in · $10.00 out" — or an em dash when either half is unknown. */

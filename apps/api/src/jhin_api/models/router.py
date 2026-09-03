@@ -9,6 +9,7 @@ Reading requires membership; managing requires admin.
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from jhin_api.deps import AdminCtx, DbSession, ObservabilityRuntimeDep, SecretCryptoDep, ViewerCtx
 from jhin_api.deps import client_ip_hash as ip_hash
@@ -71,8 +72,23 @@ def _provider_out(provider: ModelProvider) -> ModelProviderOut:
     return ModelProviderOut.model_validate(provider, from_attributes=True)
 
 
-def _profile_out(profile: ModelProfile) -> ModelProfileOut:
-    return ModelProfileOut.model_validate(profile, from_attributes=True)
+def _profile_out_on(profile: ModelProfile, provider_type: str) -> ModelProfileOut:
+    # The row alone cannot say whether its null prices mean "unknown" or
+    # "assumed free" — that depends on the provider — so the caller names it.
+    fields = {
+        name: getattr(profile, name)
+        for name in ModelProfileOut.model_fields
+        if name != "assumed_free"
+    }
+    fields["assumed_free"] = pricing_service.assumed_free(profile, provider_type)
+    return ModelProfileOut.model_validate(fields)
+
+
+async def _profile_out(
+    db: AsyncSession, workspace_id: UUID, profile: ModelProfile
+) -> ModelProfileOut:
+    provider = await service.get_provider(db, workspace_id, profile.provider_id)
+    return _profile_out_on(profile, provider.type)
 
 
 @providers_router.get("")
@@ -356,7 +372,11 @@ async def verify_provider(
 
 @profiles_router.get("")
 async def list_profiles(ctx: ViewerCtx, db: DbSession) -> list[ModelProfileOut]:
-    return [_profile_out(p) for p in await service.list_profiles(db, ctx.workspace_id)]
+    providers = {p.id: p for p in await service.list_providers(db, ctx.workspace_id)}
+    return [
+        _profile_out_on(p, providers[p.provider_id].type)
+        for p in await service.list_profiles(db, ctx.workspace_id)
+    ]
 
 
 @profiles_router.post("", status_code=201)
@@ -370,7 +390,7 @@ async def create_profile(
         request_id=req_id(request),
         ip_hash=ip_hash(request),
     )
-    return _profile_out(profile)
+    return await _profile_out(db, ctx.workspace_id, profile)
 
 
 @profiles_router.get("/pricing-status")
@@ -384,7 +404,8 @@ async def pricing_status(ctx: ViewerCtx, db: DbSession) -> PricingStatusOut:
 
 @profiles_router.get("/{profile_id}")
 async def get_profile(profile_id: UUID, ctx: ViewerCtx, db: DbSession) -> ModelProfileOut:
-    return _profile_out(await service.get_profile(db, ctx.workspace_id, profile_id))
+    profile = await service.get_profile(db, ctx.workspace_id, profile_id)
+    return await _profile_out(db, ctx.workspace_id, profile)
 
 
 @profiles_router.patch("/{profile_id}")
@@ -399,7 +420,7 @@ async def update_profile(
         request_id=req_id(request),
         ip_hash=ip_hash(request),
     )
-    return _profile_out(profile)
+    return await _profile_out(db, ctx.workspace_id, profile)
 
 
 @profiles_router.post("/{profile_id}/refresh-pricing")
@@ -426,7 +447,10 @@ async def refresh_profile_pricing(
         force=force,
     )
     return ProfilePricingRefreshResult(
-        updated=updated, source=source, detail=detail, profile=_profile_out(profile)
+        updated=updated,
+        source=source,
+        detail=detail,
+        profile=await _profile_out(db, ctx.workspace_id, profile),
     )
 
 

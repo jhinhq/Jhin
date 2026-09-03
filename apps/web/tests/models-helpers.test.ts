@@ -9,15 +9,22 @@ import {
   costTier,
   costTierLabel,
   dollarInputToMicros,
+  effectivePriceSource,
   formatMicrosAsDollars,
   formatModelSize,
   isInsufficientFunds,
   isModelIncompatibleRequest,
+  isSelfHostedProvider,
   microsToDollarInput,
   OLLAMA_KEEP_ALIVE_OPTIONS,
+  OLLAMA_PRICE_NOTE,
   ollamaDisplayName,
   ollamaNamePath,
+  priceSourceBadge,
+  priceSourceLabel,
   profilePrefillForOllamaModel,
+  SELF_HOSTED_PRICE_NOTE,
+  selfHostedPriceNote,
   summarizeBudget,
   webSearchSupport,
 } from "@/lib/models";
@@ -106,6 +113,53 @@ describe("autofillForModel", () => {
       outputCost: "0",
       contextWindow: "",
     });
+  });
+
+  it("prices a model on an OpenAI-compatible endpoint at $0 with the self-hosted note", () => {
+    const fill = autofillForModel("qwen3.8", undefined, "openai_compatible", null);
+    expect(fill).toMatchObject({
+      known: true,
+      inputCost: "0",
+      outputCost: "0",
+      contextWindow: "",
+      source: null,
+      note: SELF_HOSTED_PRICE_NOTE,
+    });
+    expect(fill.note).toBe(
+      "Self-hosted endpoints have no per-token price. Enter prices only if this endpoint bills you.",
+    );
+    // The endpoint's own listing still lends its context window.
+    const listed: ProviderModelEntry[] = [
+      {
+        id: "llama-3.3-70b",
+        input_cost_micros_per_million: null,
+        output_cost_micros_per_million: null,
+        context_window: 8_192,
+        source: null,
+      },
+    ];
+    expect(autofillForModel("LLAMA-3.3-70B", listed, "openai_compatible", null).contextWindow).toBe(
+      "8192",
+    );
+    // The Ollama wording stays with Ollama: it names a host the admin runs.
+    expect(autofillForModel("qwen3.8:latest", undefined, "ollama", null).note).toBe(OLLAMA_PRICE_NOTE);
+    expect(OLLAMA_PRICE_NOTE).not.toBe(SELF_HOSTED_PRICE_NOTE);
+  });
+});
+
+describe("isSelfHostedProvider", () => {
+  it("names Ollama and OpenAI-compatible endpoints, never the cloud providers", () => {
+    expect(isSelfHostedProvider("ollama")).toBe(true);
+    expect(isSelfHostedProvider("openai_compatible")).toBe(true);
+    expect(isSelfHostedProvider("openai")).toBe(false);
+    expect(isSelfHostedProvider("anthropic")).toBe(false);
+    expect(isSelfHostedProvider("openrouter")).toBe(false);
+  });
+
+  it("gives Ollama its host wording and any other endpoint the generic note", () => {
+    expect(selfHostedPriceNote("ollama")).toBe(OLLAMA_PRICE_NOTE);
+    expect(selfHostedPriceNote("openai_compatible")).toBe(SELF_HOSTED_PRICE_NOTE);
+    expect(selfHostedPriceNote("openai")).toBeNull();
   });
 });
 
@@ -279,6 +333,29 @@ function modelProfile(overrides: Partial<ModelProfile> = {}): ModelProfile {
     ...overrides,
   };
 }
+
+describe("effectivePriceSource", () => {
+  it("resolves an assumed-free profile to self_hosted and otherwise reads the row", () => {
+    expect(effectivePriceSource(modelProfile({ assumed_free: true }))).toBe("self_hosted");
+    expect(
+      effectivePriceSource(
+        modelProfile({
+          input_cost_micros_per_million: 0,
+          output_cost_micros_per_million: 0,
+          price_source: "user",
+          assumed_free: false,
+        }),
+      ),
+    ).toBe("user");
+    expect(effectivePriceSource(modelProfile())).toBeNull();
+  });
+
+  it("labels the assumed-free source calmly instead of as a missing price", () => {
+    expect(priceSourceBadge("self_hosted")).toEqual({ text: "Free (self-hosted)", tone: "ok" });
+    expect(priceSourceLabel("self_hosted")).toMatch(/^Assumed free/);
+    expect(priceSourceBadge(null)).toEqual({ text: "No price", tone: "warn" });
+  });
+});
 
 describe("costTier", () => {
   it("buckets combined dollars per 1M tokens into three tiers", () => {

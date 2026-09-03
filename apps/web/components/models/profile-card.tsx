@@ -88,6 +88,10 @@ export function ProfileCard({
     profile.output_cost_micros_per_million,
   );
   const providerType: ModelProviderType = provider?.type ?? "openai_compatible";
+  // The API reports an unpriced profile on a self-hosted provider as assumed
+  // free: the card says so calmly instead of warning, and leaves the price
+  // fields to the edit dialog for the endpoint that does bill.
+  const assumedFree = Boolean(profile.assumed_free);
 
   return (
     <article
@@ -121,6 +125,10 @@ export function ProfileCard({
             profile.output_cost_micros_per_million,
           )}
         </p>
+      ) : assumedFree ? (
+        <div className="flex flex-wrap items-center gap-2" data-testid="profile-assumed-free">
+          <Badge tone="ok">Free (self-hosted)</Badge>
+        </div>
       ) : (
         <div className="flex flex-wrap items-center gap-2">
           <Badge tone="warn">No price yet</Badge>
