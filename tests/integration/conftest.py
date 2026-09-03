@@ -179,7 +179,11 @@ def _require_stack(request: pytest.FixtureRequest) -> None:
     try:
         authority = compose_authority()
         if stack_readiness_required(os.environ.get("JHIN_PHASE10_SCENARIO")):
-            authority.assert_ready()
+            # The harness saw every service healthy before it started this
+            # process, but a worker can drop back to "starting" in the gap - a
+            # NATS reconnect under rootless Docker is enough - so this is a
+            # bounded wait, not a single look.
+            authority.wait_ready()
         else:
             authority.assert_socket_unchanged()
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
