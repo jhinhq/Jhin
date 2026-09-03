@@ -9946,9 +9946,11 @@ async def test_advertised_tools_filter_before_reasoning() -> None:
             # The model sees exactly the agent's grants, encoded for the wire
             # (jhin_models.base.wire_tool_name): the one connector capability
             # this helper grants, plus the baseline every new agent is created
-            # with (jhin_policy.agent_defaults.default_agent_grant_specs).
+            # with (jhin_policy.agent_defaults.default_agent_grant_specs):
+            # collaboration, memory, and choosing its own persona.
             # organization.ask_person is granted too but withheld here because
-            # an assigned task has nobody watching it.
+            # an assigned task has nobody watching it; organization.persona.assign
+            # needs manage_agents, which the baseline never carries.
             assert set(provider.advertised_tools()) == {
                 "github__issue__comment",
                 "organization__directory__search",
@@ -9957,6 +9959,9 @@ async def test_advertised_tools_filter_before_reasoning() -> None:
                 "organization__respond_work_request",
                 "memory__search",
                 "memory__propose",
+                "organization__persona__list",
+                "organization__persona__assign_self",
+                "organization__persona__create",
             }
             assert await _calls(client, workspace_id, str(detail["runs"][0]["id"])) == []
     finally:
