@@ -10,7 +10,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from jhin_api.audit import service as audit
@@ -24,9 +24,9 @@ from jhin_db.models import (
     Connection,
     Conversation,
     MemoryRecord,
-    Persona,
     Message,
     ModelProfile,
+    Persona,
     Secret,
     Skill,
     Task,
@@ -161,20 +161,23 @@ async def update(
 #: every row counted here really does disappear with the workspace. The list is
 #: deliberately not exhaustive — runs, tool calls, approvals and the rest go
 #: too — but naming *those* would turn a warning into a schema dump.
-_DELETION_COUNTS: tuple[tuple[str, type[Any]], ...] = (
-    ("agents", Agent),
-    ("teams", Team),
-    ("tasks", Task),
-    ("conversations", Conversation),
-    ("messages", Message),
-    ("memories", MemoryRecord),
-    ("skills", Skill),
-    ("personas", Persona),
-    ("connections", Connection),
-    ("triggers", Trigger),
-    ("api_keys", ApiKey),
-    ("secrets", Secret),
-    ("members", WorkspaceMembership),
+_DELETION_COUNTS: tuple[tuple[str, type[Any], ColumnElement[bool]], ...] = (
+    ("agents", Agent, true()),
+    ("teams", Team, true()),
+    ("tasks", Task, true()),
+    ("conversations", Conversation, true()),
+    ("messages", Message, true()),
+    ("memories", MemoryRecord, true()),
+    ("skills", Skill, true()),
+    # The shipped cast is installed in every workspace, so counting it would
+    # say "12 personas" about a workspace nobody wrote a card in. Only the
+    # cards people or agents wrote here are really lost.
+    ("personas", Persona, Persona.source != "built_in"),
+    ("connections", Connection, true()),
+    ("triggers", Trigger, true()),
+    ("api_keys", ApiKey, true()),
+    ("secrets", Secret, true()),
+    ("members", WorkspaceMembership, true()),
 )
 
 
@@ -188,13 +191,15 @@ async def deletion_summary(db: AsyncSession, workspace_id: UUID) -> dict[str, in
     columns = [
         select(func.count())
         .select_from(model)
-        .where(model.workspace_id == workspace_id)
+        .where(model.workspace_id == workspace_id, only)
         .scalar_subquery()
         .label(name)
-        for name, model in _DELETION_COUNTS
+        for name, model, only in _DELETION_COUNTS
     ]
     row = (await db.execute(select(*columns))).one()
-    return {name: int(value or 0) for (name, _), value in zip(_DELETION_COUNTS, row, strict=True)}
+    return {
+        name: int(value or 0) for (name, _, _), value in zip(_DELETION_COUNTS, row, strict=True)
+    }
 
 
 async def delete(

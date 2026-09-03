@@ -18,6 +18,7 @@ from jhin_db.models import (
     Agent,
     Conversation,
     Message,
+    Persona,
     Task,
     User,
     Workspace,
@@ -115,6 +116,7 @@ async def test_deletion_summary_of_an_empty_workspace_is_all_zeros(
         "messages",
         "memories",
         "skills",
+        "personas",
         "connections",
         "triggers",
         "api_keys",
@@ -122,3 +124,24 @@ async def test_deletion_summary_of_an_empty_workspace_is_all_zeros(
         "members",
     }
     assert all(value == 0 for key, value in summary.items() if key != "members")
+
+
+async def test_deletion_summary_counts_only_the_personas_written_here(
+    session: AsyncSession,
+) -> None:
+    # The shipped cast is installed in every workspace, so it is never "lost"
+    # with one; only the cards people or agents wrote here are.
+    ctx = await make_workspace(session, "cast")
+    for name, source in (("the-host", "built_in"), ("house-style", "custom"), ("my-own", "agent")):
+        session.add(
+            Persona(
+                workspace_id=ctx.workspace_id,
+                name=name,
+                display_name=name,
+                description="A card.",
+                facets_json={"voice": "Plain."},
+                source=source,
+            )
+        )
+    await session.flush()
+    assert (await service.deletion_summary(session, ctx.workspace_id))["personas"] == 2

@@ -14143,6 +14143,10 @@
             "title": "Name",
             "type": "string"
           },
+          "personas": {
+            "title": "Personas",
+            "type": "integer"
+          },
           "secrets": {
             "title": "Secrets",
             "type": "integer"
@@ -14179,6 +14183,7 @@
           "messages",
           "memories",
           "skills",
+          "personas",
           "connections",
           "triggers",
           "api_keys",

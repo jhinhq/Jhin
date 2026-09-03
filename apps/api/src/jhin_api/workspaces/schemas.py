@@ -86,6 +86,7 @@ class WorkspaceDeletionSummary(BaseModel):
     messages: int
     memories: int
     skills: int
+    personas: int
     connections: int
     triggers: int
     api_keys: int
