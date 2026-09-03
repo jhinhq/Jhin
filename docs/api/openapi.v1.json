@@ -7687,6 +7687,448 @@
         "title": "ObservedRateOut",
         "type": "object"
       },
+      "OllamaLoadIn": {
+        "description": "Bring a model into memory on the host and keep it there for\n``keep_alive`` after its last request: a duration like ``5m`` or ``1h``,\nor ``-1`` to keep it until an explicit unload.",
+        "properties": {
+          "keep_alive": {
+            "default": "5m",
+            "maxLength": 16,
+            "title": "Keep Alive",
+            "type": "string"
+          },
+          "model": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "title": "OllamaLoadIn",
+        "type": "object"
+      },
+      "OllamaLoadResultOut": {
+        "description": "Outcome of a load or unload.\n\n``loading`` is a success: the host is still reading the model in after\nthe response budget ran out, and ``/ollama/loaded`` shows it once done.",
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "keep_alive": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Keep Alive"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "status": {
+            "enum": [
+              "loaded",
+              "loading",
+              "unloaded",
+              "failed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "status",
+          "model",
+          "keep_alive",
+          "detail"
+        ],
+        "title": "OllamaLoadResultOut",
+        "type": "object"
+      },
+      "OllamaLoadedModelOut": {
+        "description": "One model resident in memory on the host (``/api/ps``).\n``size_vram_bytes`` is 0 on a CPU-only host.",
+        "properties": {
+          "context_length": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Length"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "keeps_loaded": {
+            "title": "Keeps Loaded",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          },
+          "size_vram_bytes": {
+            "title": "Size Vram Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "size_bytes",
+          "size_vram_bytes",
+          "expires_at",
+          "keeps_loaded",
+          "context_length"
+        ],
+        "title": "OllamaLoadedModelOut",
+        "type": "object"
+      },
+      "OllamaLoadedResult": {
+        "properties": {
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "fetched_at": {
+            "format": "date-time",
+            "title": "Fetched At",
+            "type": "string"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/OllamaLoadedModelOut"
+            },
+            "title": "Models",
+            "type": "array"
+          }
+        },
+        "required": [
+          "models",
+          "detail",
+          "fetched_at"
+        ],
+        "title": "OllamaLoadedResult",
+        "type": "object"
+      },
+      "OllamaModelDetailsOut": {
+        "properties": {
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Capabilities",
+            "type": "array"
+          },
+          "context_length": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Length"
+          },
+          "family": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Family"
+          },
+          "license": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "License"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "parameter_size": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parameter Size"
+          },
+          "quantization": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quantization"
+          }
+        },
+        "required": [
+          "name",
+          "family",
+          "parameter_size",
+          "quantization",
+          "context_length",
+          "capabilities",
+          "license"
+        ],
+        "title": "OllamaModelDetailsOut",
+        "type": "object"
+      },
+      "OllamaModelDetailsResult": {
+        "properties": {
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OllamaModelDetailsOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "model",
+          "detail"
+        ],
+        "title": "OllamaModelDetailsResult",
+        "type": "object"
+      },
+      "OllamaModelOut": {
+        "description": "One model on an Ollama host: ``/api/tags`` merged with ``/api/ps`` and\n``/api/show``.\n\n``context_length`` is the architecture's maximum from ``/api/show``, not\nthe context a running instance was started with. ``keeps_loaded`` is\ncomputed server-side because a ``keep_alive`` of ``-1`` shows up as an\n``expires_at`` centuries out, which is not a date worth rendering.",
+        "properties": {
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Capabilities",
+            "type": "array"
+          },
+          "context_length": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Length"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "family": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Family"
+          },
+          "keeps_loaded": {
+            "title": "Keeps Loaded",
+            "type": "boolean"
+          },
+          "loaded": {
+            "title": "Loaded",
+            "type": "boolean"
+          },
+          "modified_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Modified At"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "parameter_size": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parameter Size"
+          },
+          "quantization": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quantization"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          },
+          "size_vram_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Vram Bytes"
+          }
+        },
+        "required": [
+          "name",
+          "size_bytes",
+          "family",
+          "parameter_size",
+          "quantization",
+          "modified_at",
+          "context_length",
+          "capabilities",
+          "loaded",
+          "size_vram_bytes",
+          "expires_at",
+          "keeps_loaded"
+        ],
+        "title": "OllamaModelOut",
+        "type": "object"
+      },
+      "OllamaModelsResult": {
+        "description": "Installed models with their loaded state, or an explanation of why\nthe list is empty.",
+        "properties": {
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "fetched_at": {
+            "format": "date-time",
+            "title": "Fetched At",
+            "type": "string"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/OllamaModelOut"
+            },
+            "title": "Models",
+            "type": "array"
+          }
+        },
+        "required": [
+          "models",
+          "detail",
+          "fetched_at"
+        ],
+        "title": "OllamaModelsResult",
+        "type": "object"
+      },
+      "OllamaUnloadIn": {
+        "properties": {
+          "model": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "title": "OllamaUnloadIn",
+        "type": "object"
+      },
       "OnboardingStateIn": {
         "properties": {
           "last_step": {
@@ -22189,6 +22631,360 @@
           "model-providers"
         ],
         "x-jhin-scope": "models:read"
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/model-providers/{provider_id}/ollama/load": {
+      "post": {
+        "description": "Load a model into memory on an Ollama host; slow loads answer `loading` and carry on.\n\n**Scope.** An API key needs `models:write`.",
+        "operationId": "load_ollama_model_api_v1_workspaces__workspace_id__model_providers__provider_id__ollama_load_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Provider Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OllamaLoadIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OllamaLoadResultOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": [
+              "models:write"
+            ]
+          }
+        ],
+        "summary": "Load Ollama Model",
+        "tags": [
+          "model-providers"
+        ],
+        "x-jhin-scope": "models:write"
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/model-providers/{provider_id}/ollama/loaded": {
+      "get": {
+        "description": "Models an Ollama host holds in memory right now; cheap enough to poll.\n\n**Scope.** An API key needs `models:read`.",
+        "operationId": "list_ollama_loaded_api_v1_workspaces__workspace_id__model_providers__provider_id__ollama_loaded_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Provider Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OllamaLoadedResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": [
+              "models:read"
+            ]
+          }
+        ],
+        "summary": "List Ollama Loaded",
+        "tags": [
+          "model-providers"
+        ],
+        "x-jhin-scope": "models:read"
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/model-providers/{provider_id}/ollama/models": {
+      "get": {
+        "description": "Models installed on an Ollama host, and which of them are loaded in memory.\n\n**Scope.** An API key needs `models:read`.",
+        "operationId": "list_ollama_models_api_v1_workspaces__workspace_id__model_providers__provider_id__ollama_models_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Provider Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OllamaModelsResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": [
+              "models:read"
+            ]
+          }
+        ],
+        "summary": "List Ollama Models",
+        "tags": [
+          "model-providers"
+        ],
+        "x-jhin-scope": "models:read"
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/model-providers/{provider_id}/ollama/models/{name}": {
+      "get": {
+        "description": "Architecture, capabilities and licence of one model on an Ollama host.\n\n**Scope.** An API key needs `models:read`.",
+        "operationId": "show_ollama_model_api_v1_workspaces__workspace_id__model_providers__provider_id__ollama_models__name__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Provider Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OllamaModelDetailsResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": [
+              "models:read"
+            ]
+          }
+        ],
+        "summary": "Show Ollama Model",
+        "tags": [
+          "model-providers"
+        ],
+        "x-jhin-scope": "models:read"
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/model-providers/{provider_id}/ollama/unload": {
+      "post": {
+        "description": "Unload a model from memory on an Ollama host.\n\n**Scope.** An API key needs `models:write`.",
+        "operationId": "unload_ollama_model_api_v1_workspaces__workspace_id__model_providers__provider_id__ollama_unload_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Provider Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OllamaUnloadIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OllamaLoadResultOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": [
+              "models:write"
+            ]
+          }
+        ],
+        "summary": "Unload Ollama Model",
+        "tags": [
+          "model-providers"
+        ],
+        "x-jhin-scope": "models:write"
       }
     },
     "/api/v1/workspaces/{workspace_id}/model-providers/{provider_id}/verify": {

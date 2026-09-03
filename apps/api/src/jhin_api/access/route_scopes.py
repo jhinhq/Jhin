@@ -199,6 +199,12 @@ ROUTE_SCOPES: dict[tuple[str, ...], RouteRule] = {
     ("model-providers",): _rule("models:read", "models:write"),
     ("model-providers", "models"): _rule("models:read", None),
     ("model-providers", "balance"): _rule("models:read", None),
+    # Local models on an Ollama host: listing is a models read, loading and
+    # unloading change what the host holds in memory, so they take the write.
+    ("model-providers", "ollama", "models"): _rule("models:read", None),
+    ("model-providers", "ollama", "loaded"): _rule("models:read", None),
+    ("model-providers", "ollama", "load"): _rule(None, "models:write"),
+    ("model-providers", "ollama", "unload"): _rule(None, "models:write"),
     ("model-providers", "verify"): _rule(None, "models:write"),
     # Verifies a provider key posted in the request body: credential material.
     ("model-providers", "verify-draft"): _SEALED,

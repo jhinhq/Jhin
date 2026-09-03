@@ -697,9 +697,14 @@ the SWE, comment the outcome back on the issue).
   catalog for OpenAI and Anthropic — editable), and each provider card shows
   a Balance block: live remaining credit (OpenRouter), month-to-date spend
   (OpenAI, with an optional admin key), or spend tracked by Jhin with an
-  optional "loaded credits" figure. A Spend tile and the Settings page show
-  the month's total against an optional monthly budget. Out-of-credit
-  failures surface as a friendly "add funds" message in the chat. Details:
+  optional "loaded credits" figure. An Ollama provider shows a Local models
+  panel instead: the models pulled on your Ollama host, which one is in
+  memory, and admin Load/Unload controls (keep it for 5 minutes, 1 hour, or
+  until unloaded) so an 18 GB model is warmed up before a run rather than
+  during it, plus "Use as model" to create a $0 profile from it. A Spend
+  tile and the Settings page show the month's total against an optional
+  monthly budget. Out-of-credit failures surface as a friendly "add funds"
+  message in the chat. Details:
   [docs/architecture/models.md](docs/architecture/models.md). Agents use
   the workspace default unless a custom profile is set (wizard step 4 or the
   agent drawer's Model tab).

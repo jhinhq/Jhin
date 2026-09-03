@@ -318,6 +318,85 @@ export interface ProviderBalance {
   fetched_at: string;
 }
 
+/** One model installed on an Ollama host, merged with whether it is resident
+ *  right now. `loaded` and the VRAM/expiry facts are a snapshot from the same
+ *  listing call; the `/ollama/loaded` poll is the fresher source. */
+export interface OllamaModel {
+  name: string;
+  size_bytes: number;
+  family: string | null;
+  parameter_size: string | null;
+  quantization: string | null;
+  modified_at: string | null;
+  /** The model's maximum context from its metadata, not the runtime num_ctx. */
+  context_length: number | null;
+  capabilities: string[];
+  loaded: boolean;
+  size_vram_bytes: number | null;
+  expires_at: string | null;
+  /** Derived server-side from a keep_alive of -1, so the UI never has to
+   *  render Ollama's "expires in centuries" sentinel. */
+  keeps_loaded: boolean;
+}
+
+export interface OllamaModels {
+  models: OllamaModel[];
+  /** Why the list is incomplete or empty when the host could not be read. */
+  detail: string | null;
+  fetched_at: string;
+  /** Ollama's own version when the API reports it; absent on builds that
+   *  do not ask the host for it. */
+  version?: string | null;
+}
+
+export interface OllamaLoadedModel {
+  name: string;
+  size_bytes: number;
+  /** 0 on a CPU-only host: the model is resident in RAM, not VRAM. */
+  size_vram_bytes: number;
+  expires_at: string | null;
+  keeps_loaded: boolean;
+  context_length: number | null;
+}
+
+export interface OllamaLoaded {
+  models: OllamaLoadedModel[];
+  detail: string | null;
+  fetched_at: string;
+}
+
+export interface OllamaModelDetails {
+  name: string;
+  family: string | null;
+  parameter_size: string | null;
+  quantization: string | null;
+  context_length: number | null;
+  capabilities: string[];
+  license: string | null;
+}
+
+export interface OllamaModelDetailsResult {
+  model: OllamaModelDetails | null;
+  detail: string | null;
+}
+
+/** The keep_alive values the UI offers: a short lease, a long one, or
+ *  "-1" for Ollama's keep-forever sentinel. Unloading sends "0" on its own
+ *  route and is never a menu choice. */
+export type OllamaKeepAlive = "5m" | "1h" | "-1";
+
+/** "loading" means the host is still reading the weights after the API's
+ *  response budget ran out; the loaded poll flips the row when it lands. */
+export type OllamaLoadStatus = "loaded" | "loading" | "unloaded" | "failed";
+
+export interface OllamaLoadResult {
+  ok: boolean;
+  status: OllamaLoadStatus;
+  model: string;
+  keep_alive: string | null;
+  detail: string;
+}
+
 export interface ProviderSpend {
   provider_id: string;
   display_name: string;

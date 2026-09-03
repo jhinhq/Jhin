@@ -25,6 +25,15 @@ from jhin_models.base import (
 from jhin_models.embeddings import EmbeddingClient, EmbeddingResult
 from jhin_models.images import ImageGenerationClient
 from jhin_models.observed_pricing import ModelCostReport
+from jhin_models.providers.ollama import (
+    DEFAULT_KEEP_ALIVE,
+    OllamaInstalledModel,
+    OllamaLoadedModel,
+    OllamaLoadResult,
+    OllamaModelDetails,
+    OllamaNativeClient,
+    as_ollama_client,
+)
 from jhin_observability import (
     SPAN_NAMES,
     AttributeValue,
@@ -265,6 +274,45 @@ class _InstrumentedEmbeddingClient:
         )
 
 
+class _InstrumentedOllamaClient:
+    """Native Ollama view of an instrumented client (see ``ollama_client``)."""
+
+    def __init__(self, wrapped: OllamaNativeClient, *, owner: InstrumentedModelClient) -> None:
+        self._wrapped = wrapped
+        self._owner = owner
+
+    @property
+    def provider_name(self) -> str:
+        return self._owner.provider_name
+
+    async def installed_models(self) -> list[OllamaInstalledModel]:
+        return await self._owner._simple_attempt("list_models", self._wrapped.installed_models)
+
+    async def loaded_models(self) -> list[OllamaLoadedModel]:
+        return await self._owner._simple_attempt("list_models", self._wrapped.loaded_models)
+
+    async def show_model(self, name: str) -> OllamaModelDetails:
+        return await self._owner._simple_attempt(
+            "list_models", lambda: self._wrapped.show_model(name)
+        )
+
+    async def load_model(
+        self, name: str, *, keep_alive: str = DEFAULT_KEEP_ALIVE
+    ) -> OllamaLoadResult:
+        # ``model_load`` is not a registered ``jhin.operation`` value, so the
+        # observability registry normalises it to ``other`` — exactly what
+        # happens to ``model_costs`` today. The metric point still counts the
+        # attempt under this provider type, which is what the dashboards need.
+        return await self._owner._simple_attempt(
+            "model_load", lambda: self._wrapped.load_model(name, keep_alive=keep_alive)
+        )
+
+    async def unload_model(self, name: str) -> OllamaLoadResult:
+        return await self._owner._simple_attempt(
+            "model_load", lambda: self._wrapped.unload_model(name)
+        )
+
+
 class InstrumentedModelClient(ModelClient):
     """One telemetry wrapper around one provider adapter."""
 
@@ -446,6 +494,12 @@ class InstrumentedModelClient(ModelClient):
         from jhin_models.images import as_image_generation_client
 
         return as_image_generation_client(self._wrapped)
+
+    def ollama_client(self) -> OllamaNativeClient:
+        """Unwrap for ``as_ollama_client``; the returned client keeps the
+        attempt telemetry of this wrapper. Any adapter other than Ollama's
+        raises ``OllamaUnsupported`` here, naming itself."""
+        return _InstrumentedOllamaClient(as_ollama_client(self._wrapped), owner=self)
 
     async def verify(self) -> str:
         with _attempt_span(

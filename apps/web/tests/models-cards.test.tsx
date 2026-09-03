@@ -242,18 +242,44 @@ describe("ProviderCard", () => {
 });
 
 describe("ProviderManageDialog", () => {
-  function renderDialog(overrides: { isAdmin?: boolean } = {}) {
+  function renderDialog(overrides: { isAdmin?: boolean; provider?: ModelProvider } = {}) {
     vi.mocked(api).mockImplementation(async (path: string, options?: { method?: string }) => {
       if (path.endsWith("/balance")) return balance();
+      if (path.endsWith("/ollama/models")) {
+        return {
+          models: [
+            {
+              name: "qwen3.8:latest",
+              size_bytes: 17_700_000_000,
+              family: "qwen3",
+              parameter_size: "27.3B",
+              quantization: "Q4_K_M",
+              modified_at: "2026-08-30T12:00:00Z",
+              context_length: 40_960,
+              capabilities: ["completion", "tools", "thinking"],
+              loaded: false,
+              size_vram_bytes: null,
+              expires_at: null,
+              keeps_loaded: false,
+            },
+          ],
+          detail: null,
+          fetched_at: "2026-09-02T10:00:00Z",
+        };
+      }
+      if (path.endsWith("/ollama/loaded")) {
+        return { models: [], detail: null, fetched_at: "2026-09-02T10:00:00Z" };
+      }
       if (options?.method === "DELETE") return undefined;
       throw new Error(`Unexpected request: ${options?.method ?? "GET"} ${path}`);
     });
     const onChanged = vi.fn();
     const onClose = vi.fn();
+    const onUseAsModel = vi.fn();
     renderWithQuery(
       <ProviderManageDialog
         workspaceId="w1"
-        provider={provider()}
+        provider={overrides.provider ?? provider()}
         typeLabel="OpenAI"
         profileCount={2}
         isDefaultProvider
@@ -262,10 +288,39 @@ describe("ProviderManageDialog", () => {
         onChanged={onChanged}
         onEdit={() => undefined}
         onAddAdminKey={() => undefined}
+        onUseAsModel={onUseAsModel}
       />,
     );
-    return { onChanged, onClose };
+    return { onChanged, onClose, onUseAsModel };
   }
+
+  it("shows the local-models panel instead of the balance block for an Ollama provider", async () => {
+    const { onUseAsModel } = renderDialog({
+      provider: provider({
+        type: "ollama",
+        display_name: "Ollama Main",
+        secret_id: null,
+        base_url: "http://192.168.1.79:11434/v1",
+      }),
+    });
+    const panel = await screen.findByTestId("ollama-panel");
+    expect(screen.queryByTestId("balance-block")).toBeNull();
+    expect(within(panel).getByText("Local models")).toBeTruthy();
+    expect(await within(panel).findByTestId("ollama-model-qwen3.8:latest")).toBeTruthy();
+    for (const call of vi.mocked(api).mock.calls) {
+      expect(String(call[0])).not.toContain("/balance");
+    }
+
+    fireEvent.click(within(panel).getByRole("button", { name: "Use as model" }));
+    expect(onUseAsModel).toHaveBeenCalledWith({
+      providerId: "prov-1",
+      modelName: "qwen3.8:latest",
+      displayName: "qwen3.8",
+      contextWindow: 40_960,
+      inputCostMicros: 0,
+      outputCostMicros: 0,
+    });
+  });
 
   it("deletes through the shared ConfirmDialog, never window.confirm", async () => {
     const confirmSpy = vi.spyOn(window, "confirm");

@@ -2,14 +2,16 @@
 
 /** Everything operational about one provider, behind its Manage button:
  * endpoint and credential facts, the live verify check, balance and loaded
- * credits, and the edit/delete actions. This is the old provider card's
- * entire content, relocated — nothing was cut, it just stopped being the
- * first thing everyone had to read. */
+ * credits (or, for an Ollama host, the local models it holds), and the
+ * edit/delete actions. This is the old provider card's entire content,
+ * relocated — nothing was cut, it just stopped being the first thing
+ * everyone had to read. */
 
 import { useMutation } from "@tanstack/react-query";
 import { CheckCircle2, KeyRound, ShieldCheck, Wallet, XCircle } from "lucide-react";
 import { useState } from "react";
 import { Button, ConfirmDialog, Dialog, ErrorNote } from "@/components/ui";
+import { OllamaPanel } from "@/components/models/ollama-panel";
 import { ProviderStatus } from "@/components/models/provider-card";
 import { api, ApiError } from "@/lib/api";
 import { formatDateTime } from "@/lib/format";
@@ -19,6 +21,7 @@ import {
   dollarInputToMicros,
   formatMicrosAsDollars,
   microsToDollarInput,
+  type ProfilePrefill,
 } from "@/lib/models";
 import type { ModelProvider } from "@/lib/types";
 
@@ -38,6 +41,7 @@ export function ProviderManageDialog({
   onChanged,
   onEdit,
   onAddAdminKey,
+  onUseAsModel,
 }: {
   workspaceId: string;
   provider: ModelProvider;
@@ -53,6 +57,8 @@ export function ProviderManageDialog({
   onEdit: () => void;
   /** Opens the OpenAI admin-key dialog (kept on the page). */
   onAddAdminKey: () => void;
+  /** Opens the new-profile dialog prefilled for a local Ollama model. */
+  onUseAsModel: (prefill: ProfilePrefill) => void;
 }) {
   const [verifyResult, setVerifyResult] = useState<{ ok: boolean; detail: string } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -152,14 +158,25 @@ export function ProviderManageDialog({
 
         <ErrorNote message={actionError} />
 
-        <BalanceBlock
-          provider={provider}
-          isAdmin={isAdmin}
-          workspaceId={workspaceId}
-          onChanged={onChanged}
-          onError={setActionError}
-          onAddAdminKey={onAddAdminKey}
-        />
+        {/* A local host has no balance to show; what it has is models. */}
+        {provider.type === "ollama" ? (
+          <OllamaPanel
+            workspaceId={workspaceId}
+            provider={provider}
+            isAdmin={isAdmin}
+            onError={setActionError}
+            onUseAsModel={onUseAsModel}
+          />
+        ) : (
+          <BalanceBlock
+            provider={provider}
+            isAdmin={isAdmin}
+            workspaceId={workspaceId}
+            onChanged={onChanged}
+            onError={setActionError}
+            onAddAdminKey={onAddAdminKey}
+          />
+        )}
 
         <div className="flex flex-wrap items-center gap-2 border-t border-line pt-4">
           <Button size="sm" onClick={() => verify.mutate()} disabled={verify.isPending}>

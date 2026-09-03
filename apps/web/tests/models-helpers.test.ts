@@ -10,13 +10,18 @@ import {
   costTierLabel,
   dollarInputToMicros,
   formatMicrosAsDollars,
+  formatModelSize,
   isInsufficientFunds,
   isModelIncompatibleRequest,
   microsToDollarInput,
+  OLLAMA_KEEP_ALIVE_OPTIONS,
+  ollamaDisplayName,
+  ollamaNamePath,
+  profilePrefillForOllamaModel,
   summarizeBudget,
   webSearchSupport,
 } from "@/lib/models";
-import type { ModelProfile, ProviderModelEntry } from "@/lib/types";
+import type { ModelProfile, OllamaModel, ProviderModelEntry } from "@/lib/types";
 
 const ENTRIES: ProviderModelEntry[] = [
   {
@@ -75,6 +80,100 @@ describe("autofillForModel", () => {
     expect(unknown.contextWindow).toBe("");
     expect(autofillForModel("", ENTRIES, "openai", null).note).toBe("Pick a model to auto-fill its prices.");
     expect(autofillForModel("gpt-4o", undefined, "openai", null).known).toBe(false);
+  });
+
+  it("prices a local Ollama model at $0 instead of asking for a pricing page", () => {
+    const local: ProviderModelEntry[] = [
+      {
+        id: "qwen3.8:latest",
+        input_cost_micros_per_million: null,
+        output_cost_micros_per_million: null,
+        context_window: 40_960,
+        source: null,
+      },
+    ];
+    const fill = autofillForModel("qwen3.8:latest", local, "ollama", null);
+    expect(fill.known).toBe(true);
+    expect(fill.inputCost).toBe("0");
+    expect(fill.outputCost).toBe("0");
+    expect(fill.contextWindow).toBe("40960");
+    expect(fill.source).toBeNull();
+    expect(fill.note).toBe("Runs on your Ollama host — no per-token price.");
+    // Even a model the host did not list is free to run there.
+    expect(autofillForModel("gemma4:31b", undefined, "ollama", null)).toMatchObject({
+      known: true,
+      inputCost: "0",
+      outputCost: "0",
+      contextWindow: "",
+    });
+  });
+});
+
+describe("formatModelSize", () => {
+  it("quotes decimal gigabytes to one place and whole megabytes below one", () => {
+    expect(formatModelSize(17_700_000_000)).toBe("17.7 GB");
+    expect(formatModelSize(16_757_083_340)).toBe("16.8 GB");
+    expect(formatModelSize(1_000_000_000)).toBe("1.0 GB");
+    expect(formatModelSize(536_870_912)).toBe("537 MB");
+    expect(formatModelSize(0)).toBe("0 MB");
+  });
+});
+
+describe("ollamaDisplayName", () => {
+  it("drops only the :latest tag", () => {
+    expect(ollamaDisplayName("qwen3.8:latest")).toBe("qwen3.8");
+    expect(ollamaDisplayName("gemma4:31b")).toBe("gemma4:31b");
+    expect(ollamaDisplayName("tripolskypetr/qwen3.6-uncensored-aggressive:latest")).toBe(
+      "tripolskypetr/qwen3.6-uncensored-aggressive",
+    );
+  });
+});
+
+describe("ollamaNamePath", () => {
+  it("keeps slashes as path separators and encodes colons", () => {
+    expect(ollamaNamePath("qwen3.8:latest")).toBe("qwen3.8%3Alatest");
+    expect(ollamaNamePath("tripolskypetr/qwen3.6-uncensored-aggressive:latest")).toBe(
+      "tripolskypetr/qwen3.6-uncensored-aggressive%3Alatest",
+    );
+  });
+});
+
+describe("OLLAMA_KEEP_ALIVE_OPTIONS", () => {
+  it("offers a short lease, a long one, and forever — never the unload sentinel", () => {
+    expect(OLLAMA_KEEP_ALIVE_OPTIONS.map((option) => option.value)).toEqual(["5m", "1h", "-1"]);
+    expect(OLLAMA_KEEP_ALIVE_OPTIONS.map((option) => option.label)).toEqual([
+      "5 minutes",
+      "1 hour",
+      "Until unloaded",
+    ]);
+  });
+});
+
+describe("profilePrefillForOllamaModel", () => {
+  it("prices the profile at $0 and carries the host's context length", () => {
+    const model: OllamaModel = {
+      name: "qwen3.8:latest",
+      size_bytes: 17_700_000_000,
+      family: "qwen3",
+      parameter_size: "27.3B",
+      quantization: "Q4_K_M",
+      modified_at: "2026-08-30T12:00:00Z",
+      context_length: 40_960,
+      capabilities: ["completion", "tools", "thinking"],
+      loaded: false,
+      size_vram_bytes: null,
+      expires_at: null,
+      keeps_loaded: false,
+    };
+    expect(profilePrefillForOllamaModel("prov-1", model)).toEqual({
+      providerId: "prov-1",
+      modelName: "qwen3.8:latest",
+      displayName: "qwen3.8",
+      contextWindow: 40_960,
+      inputCostMicros: 0,
+      outputCostMicros: 0,
+    });
+    expect(profilePrefillForOllamaModel("prov-1", { ...model, context_length: null }).contextWindow).toBeNull();
   });
 });
 

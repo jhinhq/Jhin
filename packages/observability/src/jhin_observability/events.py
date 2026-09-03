@@ -280,6 +280,11 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
         "refreshed": FieldKind.COUNT,
     },
     "oauth.refresh_on_use_failed": {},
+    # A preload the API answered "loading" for, then lost in the background.
+    "ollama.background_load_failed": {
+        "error_type": FieldKind.ERROR_TYPE,
+        "error": FieldKind.ERROR,
+    },
     "stdlib.message": {},
     "log.event_rejected": {},
 }

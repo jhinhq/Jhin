@@ -54,6 +54,7 @@ import {
   priceSourceBadge,
   priceSourceLabel,
   webSearchSupport,
+  type ProfilePrefill,
 } from "@/lib/models";
 import type {
   CatalogRefreshResult,
@@ -101,6 +102,9 @@ export default function ModelsPage() {
   const [managingProviderId, setManagingProviderId] = useState<string | null>(null);
   const [adminKeyProviderId, setAdminKeyProviderId] = useState<string | null>(null);
   const [profileDialog, setProfileDialog] = useState(false);
+  // A local model handed over from the Ollama panel: the profile dialog
+  // opens already filled in, so nothing is retyped from the host's listing.
+  const [profilePrefill, setProfilePrefill] = useState<ProfilePrefill | null>(null);
   const [editingProfile, setEditingProfile] = useState<ModelProfile | null>(null);
   const [changeDefaultOpen, setChangeDefaultOpen] = useState(false);
   const [pageError, setPageError] = useState<string | null>(null);
@@ -337,6 +341,10 @@ export default function ModelsPage() {
           onChanged={invalidate}
           onEdit={() => setEditingProviderId(managingProvider.id)}
           onAddAdminKey={() => setAdminKeyProviderId(managingProvider.id)}
+          onUseAsModel={(prefill) => {
+            setManagingProviderId(null);
+            setProfilePrefill(prefill);
+          }}
         />
       ) : null}
       {adminKeyProvider ? (
@@ -355,6 +363,15 @@ export default function ModelsPage() {
           workspaceId={workspaceId}
           providers={providerList}
           onClose={() => setProfileDialog(false)}
+          onCreated={invalidate}
+        />
+      ) : null}
+      {profilePrefill ? (
+        <ProfileDialog
+          workspaceId={workspaceId}
+          providers={providerList}
+          prefill={profilePrefill}
+          onClose={() => setProfilePrefill(null)}
           onCreated={invalidate}
         />
       ) : null}
@@ -683,6 +700,7 @@ function ProfileDialog({
   workspaceId,
   providers,
   existing,
+  prefill,
   isDefault = false,
   pricing,
   onClose,
@@ -692,6 +710,9 @@ function ProfileDialog({
   providers: ModelProvider[];
   /** When set, the dialog edits this profile (PATCH) instead of creating one. */
   existing?: ModelProfile;
+  /** Starting values for a new profile (a local model picked on the Ollama
+   * panel); ignored when editing. */
+  prefill?: ProfilePrefill;
   /** Whether the profile being edited is the workspace default. */
   isDefault?: boolean;
   /** The price provenance for the profile being edited, when known. */
@@ -699,18 +720,23 @@ function ProfileDialog({
   onClose: () => void;
   onCreated: () => void;
 }) {
-  const [providerId, setProviderId] = useState(existing?.provider_id ?? providers[0]?.id ?? "");
-  const [displayName, setDisplayName] = useState(existing?.display_name ?? "");
-  const [modelName, setModelName] = useState(existing?.model_name ?? "");
+  const [providerId, setProviderId] = useState(
+    existing?.provider_id ?? prefill?.providerId ?? providers[0]?.id ?? "",
+  );
+  const [displayName, setDisplayName] = useState(
+    existing?.display_name ?? prefill?.displayName ?? "",
+  );
+  const [modelName, setModelName] = useState(existing?.model_name ?? prefill?.modelName ?? "");
   const [inputCost, setInputCost] = useState(
-    microsToDollarInput(existing?.input_cost_micros_per_million ?? null),
+    microsToDollarInput(existing?.input_cost_micros_per_million ?? prefill?.inputCostMicros ?? null),
   );
   const [outputCost, setOutputCost] = useState(
-    microsToDollarInput(existing?.output_cost_micros_per_million ?? null),
+    microsToDollarInput(existing?.output_cost_micros_per_million ?? prefill?.outputCostMicros ?? null),
   );
-  const [contextWindow, setContextWindow] = useState(
-    existing?.context_window ? String(existing.context_window) : "",
-  );
+  const [contextWindow, setContextWindow] = useState(() => {
+    const tokens = existing?.context_window ?? prefill?.contextWindow;
+    return tokens ? String(tokens) : "";
+  });
   const [webSearchEnabled, setWebSearchEnabled] = useState(
     Boolean(
       (existing?.config_json as { web_search?: { enabled?: boolean } } | undefined)?.web_search
@@ -718,14 +744,25 @@ function ProfileDialog({
     ),
   );
   const [pricingOpen, setPricingOpen] = useState(false);
-  const [pricingNote, setPricingNote] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [refreshNote, setRefreshNote] = useState<string | null>(null);
-  // The model the prices were last auto-filled for, so edits survive re-renders.
-  const [autofilledFor, setAutofilledFor] = useState<string | null>(null);
   const providerModels = useProviderModels(workspaceId, providerId || null);
   const provider = providers.find((p) => p.id === providerId);
   const providerType: ModelProviderType = provider?.type ?? "openai_compatible";
+  // A prefill carries a real price ($0 for a local model), and the note under
+  // the pricing fields must say so rather than stay silent about it.
+  const prefillNote = prefill
+    ? autofillForModel(prefill.modelName, undefined, providerType, null)
+    : null;
+  const [pricingNote, setPricingNote] = useState<string | null>(
+    prefillNote?.known ? prefillNote.note : null,
+  );
+  // The model the prices were last auto-filled for, so edits survive
+  // re-renders. A prefill counts as already filled: the provider's model
+  // list arriving later must not overwrite what the panel handed over.
+  const [autofilledFor, setAutofilledFor] = useState<string | null>(
+    prefill ? `${prefill.providerId}:${prefill.modelName.trim().toLowerCase()}` : null,
+  );
   const webSupport = webSearchSupport(providerType, modelName);
   const entries = providerModels.data?.models;
   const catalogUpdated = providerModels.data?.catalog_updated ?? null;
@@ -816,8 +853,9 @@ function ProfileDialog({
 
   const pricesKnown = Boolean(inputCost || outputCost);
   // List prices age. Saying how old they are is the difference between a
-  // number the admin can trust and one they should go check.
-  const catalogStaleness = catalogStalenessNote(catalogUpdated);
+  // number the admin can trust and one they should go check. A local Ollama
+  // model has no list price to have aged, so the nudge would only confuse.
+  const catalogStaleness = providerType === "ollama" ? null : catalogStalenessNote(catalogUpdated);
   const summary = pricesKnown
     ? `$${inputCost || "0"} in · $${outputCost || "0"} out per 1M tokens`
     : "No prices yet — runs will show $0.00 until you add them.";

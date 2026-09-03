@@ -6,6 +6,8 @@ import type {
   ModelProfile,
   ModelProviderType,
   ObservedRate,
+  OllamaKeepAlive,
+  OllamaModel,
   PriceSourceName,
   PriceSource,
   ProviderModelEntry,
@@ -60,6 +62,19 @@ export function autofillForModel(
   const wanted = modelId.trim().toLowerCase();
   const entry = entries?.find((candidate) => candidate.id.toLowerCase() === wanted);
   const label = PROVIDER_LABELS[providerType] ?? providerType;
+  // A local model has no per-token price, and Ollama has no pricing page to
+  // send anyone to. $0 is the true price, not an unknown one: without this
+  // branch every run on the host is reported as untracked spend.
+  if (providerType === "ollama") {
+    return {
+      known: true,
+      inputCost: "0",
+      outputCost: "0",
+      contextWindow: entry?.context_window ? String(entry.context_window) : "",
+      source: null,
+      note: OLLAMA_PRICE_NOTE,
+    };
+  }
   if (!entry || entry.source === null) {
     return {
       known: false,
@@ -83,6 +98,61 @@ export function autofillForModel(
     contextWindow: entry.context_window ? String(entry.context_window) : "",
     source: entry.source,
     note,
+  };
+}
+
+export const OLLAMA_PRICE_NOTE = "Runs on your Ollama host — no per-token price.";
+
+/** "17.7 GB" in decimal gigabytes (what Ollama and disk vendors quote), or
+ * whole megabytes below one gigabyte so a small embedding model never reads
+ * as "0.1 GB". */
+export function formatModelSize(bytes: number): string {
+  const safe = Number.isFinite(bytes) && bytes > 0 ? bytes : 0;
+  if (safe < 1_000_000_000) return `${Math.round(safe / 1_000_000)} MB`;
+  return `${(safe / 1_000_000_000).toFixed(1)} GB`;
+}
+
+/** The name people say: "qwen3.8:latest" is "qwen3.8". Any other tag is
+ * kept because "gemma4:31b" without its tag names a different model. */
+export function ollamaDisplayName(name: string): string {
+  return name.endsWith(":latest") ? name.slice(0, -":latest".length) : name;
+}
+
+/** A model name as a URL path for the API's `{name:path}` route: colons and
+ * anything else unsafe are encoded, slashes stay real separators so
+ * "tripolskypetr/qwen3.6-uncensored-aggressive:latest" reaches the route
+ * intact. */
+export function ollamaNamePath(name: string): string {
+  return name.split("/").map(encodeURIComponent).join("/");
+}
+
+export const OLLAMA_KEEP_ALIVE_OPTIONS: { value: OllamaKeepAlive; label: string }[] = [
+  { value: "5m", label: "5 minutes" },
+  { value: "1h", label: "1 hour" },
+  { value: "-1", label: "Until unloaded" },
+];
+
+/** What the profile dialog opens with when a local model is turned into a
+ * profile from the Ollama panel. */
+export interface ProfilePrefill {
+  providerId: string;
+  modelName: string;
+  displayName: string;
+  contextWindow: number | null;
+  inputCostMicros: number;
+  outputCostMicros: number;
+}
+
+/** $0 both ways — a local model's real price — and the context length the
+ * host reported, so the profile is priced and sized without retyping. */
+export function profilePrefillForOllamaModel(providerId: string, model: OllamaModel): ProfilePrefill {
+  return {
+    providerId,
+    modelName: model.name,
+    displayName: ollamaDisplayName(model.name),
+    contextWindow: model.context_length,
+    inputCostMicros: 0,
+    outputCostMicros: 0,
   };
 }
 

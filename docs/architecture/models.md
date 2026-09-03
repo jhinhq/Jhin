@@ -10,13 +10,13 @@ API and workers see `ModelClient`, `ModelRequest`, and `ModelResponse`.
 
 | Piece | Location | Responsibility |
 | --- | --- | --- |
-| Adapters | `packages/models/src/jhin_models/providers/` | OpenAI, Anthropic, OpenRouter, Ollama, and generic OpenAI-compatible endpoints. |
+| Adapters | `packages/models/src/jhin_models/providers/` | OpenAI, Anthropic, OpenRouter, Ollama, and generic OpenAI-compatible endpoints. The Ollama adapter also speaks Ollama's native `/api` endpoints for local model management. |
 | Factory | `packages/models/src/jhin_models/factory.py` | `build_model_client(type, base_url, api_key, admin_api_key, ...)`; every adapter is wrapped once by the telemetry client. |
-| Telemetry | `packages/models/src/jhin_models/telemetry.py` | Payload-free `model.request` spans with `jhin.operation` in `generate`, `stream`, `verify`, `embed`, `list_models`, `account_status`. |
+| Telemetry | `packages/models/src/jhin_models/telemetry.py` | Payload-free `model.request` spans with `jhin.operation` in `generate`, `stream`, `verify`, `embed`, `list_models`, `account_status`. Ollama's list/show reads report as `list_models`; load and unload report as `model_load`, which the registry folds to `other` (as it does `model_costs`). |
 | Price catalog | `packages/models/src/jhin_models/pricing.py` | Static public list prices for OpenAI and Anthropic, `lookup_price`, OpenRouter per-token conversion. |
 | Fake provider | `packages/models/src/jhin_models/testing/fake_openai.py` | Dev/test endpoint with deterministic prices, credits, and costs. |
-| API | `apps/api/src/jhin_api/models/` | Providers, profiles, verification, model listing, balance, spend, pricing refresh. |
-| UI | `apps/web/app/(app)/models/page.tsx`, `apps/web/lib/models.ts` | Provider cards with a Balance block, profile dialog with auto-filled pricing, Spend tile. |
+| API | `apps/api/src/jhin_api/models/` | Providers, profiles, verification, model listing, balance, spend, pricing refresh, Ollama load/unload. |
+| UI | `apps/web/app/(app)/models/page.tsx`, `apps/web/lib/models.ts`, `apps/web/components/models/ollama-panel.tsx` | Provider cards with a Balance block, profile dialog with auto-filled pricing, Spend tile, Local models panel on the Ollama provider. |
 
 ## Data model (migrations `0020`, `0027`, and `0028` for measured pricing)
 
@@ -199,7 +199,7 @@ best-effort call to the provider's billing API:
 | --- | --- | --- | --- |
 | OpenRouter | `openrouter` | `GET /api/v1/credits`: `total_credits - total_usage` → `provider_remaining_micros`. | Needs the normal API key only. |
 | OpenAI | `openai_admin` | Admin API `GET /v1/organization/costs?start_time=<month start>&bucket_width=1d&limit=31` (paginated), summed → `provider_spent_month_micros`. | OpenAI has **no balance API**; this needs a separate *admin key* (OpenAI dashboard → Settings → Organization → Admin keys). Without one the block falls back to tracked spend and offers "Add admin key". |
-| Anthropic, Ollama, OpenAI-compatible | `tracked` | Nothing (no billing API through the model endpoint). | Jhin's own numbers only. |
+| Anthropic, Ollama, OpenAI-compatible | `tracked` | Nothing (no billing API through the model endpoint). | Jhin's own numbers only (Ollama shows the local-models panel instead of a balance — see below). |
 
 Fields:
 
@@ -233,6 +233,177 @@ Tracked spend is an *estimate*: it only covers runs Jhin executed and uses
 the profile's configured prices, so it undercounts anything billed outside
 Jhin (other apps on the same key, image generation, embeddings without a
 priced profile) and drifts when prices are stale.
+
+## Ollama: local models
+
+Ollama serves models from a machine you run, so its provider card has
+different questions to answer than a hosted vendor's: not how much credit is
+left, but which models are pulled, which one is in memory right now, and
+whether it can be warmed up before the next run instead of during it. An
+Ollama provider therefore shows a **Local models** panel where every other
+type shows the Balance block. It lists everything the host has pulled with
+size, family, parameter count, quantisation, and context length, marks what
+is resident (with VRAM use and when it expires), and gives admins **Load**,
+**Unload**, and **Use as model** — the last opens the profile dialog
+pre-filled with the model at $0 / $0.
+
+### Routes
+
+All five live under `/model-providers/{id}/ollama/` and are **admin-only**,
+like the sibling `/models` route: they decrypt the provider credential and
+make a live call to the host. Any other provider type gets a 409, *"This
+provider is not an Ollama endpoint; local model management only applies to
+providers of type ollama."*, checked before a client is built.
+
+| Route | Scope | Ollama call behind it | Audit action |
+| --- | --- | --- | --- |
+| `GET …/ollama/models` | `models:read` | `GET /api/tags` for the catalog, `GET /api/ps` for what is resident, then `POST /api/show` per model — the first 24, 5 s each, in parallel — for context length and capabilities. Merged by exact name. | — |
+| `GET …/ollama/loaded` | `models:read` | `GET /api/ps`. The panel polls this every 10 s. | — |
+| `GET …/ollama/models/{name}` | `models:read` | `POST /api/show {"model": name}`. Names carry `:` and `/` (`tripolskypetr/qwen3.6-uncensored-aggressive:latest`), so the segment is a `{name:path}`. | — |
+| `POST …/ollama/load` `{model, keep_alive}` | `models:write` | `POST /api/generate {"model", "keep_alive", "stream": false}` with **no prompt** — Ollama's documented preload. | `provider.ollama_model_loaded` / `provider.ollama_model_load_failed` |
+| `POST …/ollama/unload` `{model}` | `models:write` | The same request with `keep_alive: 0`. | `provider.ollama_model_unloaded` / `provider.ollama_model_unload_failed` |
+
+The failure shape follows the rest of this module. Reads never 5xx: an
+unreachable or slow host (10 s for `/api/tags` and `/api/ps`) comes back as
+an empty list with the redacted reason in `detail`; a failing `/api/ps`
+degrades to "nothing loaded" and says so; a failing `/api/show` leaves that
+one row with `context_length: null` and no capabilities and never fails the
+list. Mutations answer HTTP 200 with `{ok, status, model, keep_alive,
+detail}` — the `ProviderVerifyResult` shape — and `detail` is what the panel
+renders, including Ollama's own sentence when it refuses (*"ollama: HTTP 404:
+model 'nope:latest' not found, try pulling it first"*).
+
+Audit rows carry the provider's display name, the model, the `keep_alive`,
+and the outcome (`status: loaded | loading` on success, the redacted
+`detail` on failure). Reads write no audit row, and nothing here touches
+`model_provider.last_error` — that column belongs to verification.
+
+### `/v1` and the native origin
+
+The provider's `base_url` is the OpenAI-compatible root
+(`http://192.168.1.79:11434/v1`), and chat stays on
+`{base_url}/chat/completions`. Ollama's management API lives beside that
+root, not under it: `/api/tags`, `/api/ps`, `/api/show`, and `/api/generate`
+are served from the server origin. The adapter derives the origin once
+(`native_origin`: strip trailing slashes, then one trailing `/v1`) and keeps
+a second `httpx` client on it — `http://192.168.1.79:11434/v1` becomes
+`http://192.168.1.79:11434`, and a base URL without `/v1` is left alone.
+`verify` and `list_models` are untouched and still read `/v1/models`.
+
+### `keep_alive`
+
+`keep_alive` is how long Ollama keeps a model resident after its last
+request. One validator (`validate_keep_alive`) accepts a duration
+(`^[1-9][0-9]*[smh]$`: `5m`, `30m`, `1h`), `-1` for "until unloaded", and
+`0` for "unload now". The load route refuses `0` with a 422 (*"keep_alive 0
+unloads a model; call unload instead"*): unload is its own route so it gets
+its own audit action. The panel offers exactly **5 minutes** (the default,
+and Ollama's own `OLLAMA_KEEP_ALIVE` default), **1 hour**, and **Until
+unloaded**.
+
+On the wire, durations and `0` go as JSON strings and **`-1` goes as a JSON
+number**. Ollama parses string durations with Go's `time.ParseDuration`,
+which special-cases `"0"` and accepts `"-1m"` but rejects a unit-less
+`"-1"` — `400 {"error": "time: missing unit in duration \"-1\""}` — while
+any negative *number* means forever. (Measured against Ollama 0.33.2; the
+Ollama FAQ documents the same three forms.)
+
+What Ollama does with it, as observed on 0.33.2:
+
+- The timer restarts on every request that touches the model, and
+  `expires_at` in `/api/ps` is re-stamped at each completion. A busy agent
+  keeps its model warm without anyone pressing Load.
+- A request that carries no `keep_alive` — every chat completion Jhin sends
+  — restarts the timer but keeps the duration in force. A model loaded with
+  `-1` kept its far-future expiry across chat traffic; it does not fall back
+  to five minutes.
+- A load request against an already-resident model returns in milliseconds
+  with `done_reason: "load"` and replaces the duration without reloading
+  anything, so changing your mind from `5m` to `-1` is free.
+- `-1` shows in `/api/ps` as an `expires_at` centuries out (Go's
+  `math.MaxInt64` nanoseconds — the year 2318 on this host). The API turns
+  that into `keeps_loaded: true` (`expires_at` is null or more than a year
+  away) so the panel says *stays loaded* instead of a relative time nobody
+  wants to read.
+
+### No key needed
+
+Ollama has no credentials: an Ollama provider is saved with `secret_id`
+null and every route above works without one. If a key *is* stored it is
+sent as `Authorization: Bearer …` on both the `/v1` and the `/api` clients —
+useful only when a reverse proxy in front of Ollama asks for one.
+
+### Reaching the host
+
+Ollama listens on `127.0.0.1:11434` by default, which is right for a laptop
+and wrong for a server. From the compose stack `localhost` is the API
+container itself, so the base URL has to name the machine:
+`http://<lan-ip>:11434/v1`, or `http://host.docker.internal:11434/v1` under
+Docker Desktop when Ollama runs on the same machine as the stack. The Ollama
+host must be started with `OLLAMA_HOST=0.0.0.0` (or an explicit interface)
+before anything but itself can connect. The panel's unreachable state names
+the base URL it tried for exactly this reason, and Verify on the provider
+card is the quickest check that `/v1/models` answers.
+
+### Long loads
+
+Loading a model is the slow operation. On the host this feature was built
+against — one GPU, ~18 GB Q4_K_M models (`qwen3.8:latest` 27.3B and
+`muse-glimmer:latest` 27.9B) — the first request after a cold start took
+55–60 s to answer (`time_total` 54.8 s and 60.8 s), a reload from the host's
+page cache 8–13 s, and a resident model answered a one-word prompt in 0.7 s
+and a tool-calling reasoning step in one to four seconds. Only one model of
+that size fit at a time: loading the second evicted the first, and the poll
+shows the swap. An agent that starts on a cold model pays that load inside
+its first reasoning step — the chat client's read timeout is 300 s, so the
+run succeeds but looks stuck for a minute. Load exists so an admin can pay
+it ahead of time.
+
+A cold load can outlast what a proxy allows on one request (Cloudflare
+answers 524 at 100 s), so the load route does not wait for it. The adapter
+gives `/api/generate` a ten-minute read timeout; the API awaits that call
+for at most 20 s (`OLLAMA_LOAD_RESPONSE_BUDGET_SECONDS`) and on timeout
+answers `status: "loading"` (*"Ollama is still loading … It will show as
+loaded when it finishes."*) while the shielded task finishes in the
+background and closes its client. The panel treats `loaded` and `loading`
+alike: the row reads *Loading qwen3.8:latest — 17.7 GB, this can take a
+minute or more* until the 10 s `/loaded` poll lists the name. Unload is
+quick and is awaited in full.
+
+### What the numbers mean
+
+- **Resident size.** `size_bytes` is what `/api/ps` reports as resident and
+  `size_vram_bytes` the part of it on the GPU. Equal means the whole model is
+  on the GPU; `0` means it runs from system RAM, and the panel says *in RAM*.
+- **Two context lengths.** The catalog row's `context_length` comes from
+  `/api/show` (`model_info["<architecture>.context_length"]`) and is the
+  model's *maximum* — 262 144 for `qwen3.8:latest`. The loaded row's comes
+  from `/api/ps` and is the *runtime* context the resident instance was
+  started with — 32 768 for the same model. A profile created with **Use as
+  model** takes the maximum as its `context_window`; the effective window is
+  whatever `num_ctx` Ollama applied.
+- **Capabilities** (`completion`, `tools`, `thinking`, `vision`, …) are
+  Ollama's word for them; older servers send none, and the row shows none.
+- **The listing degrades rather than fails.** A stuck `/api/ps` shows
+  everything as not loaded with the reason in `detail`; past 24 models the
+  rest are listed without context length or capabilities.
+- **No streaming.** The agent runtime calls `generate()`, not `stream()`,
+  and the chat view polls for messages, so a slow local model shows nothing
+  until the whole reply is in. Ollama's OpenAI endpoint also returns the
+  model's chain of thought in a separate `reasoning` field; the adapter
+  ignores it, and only the answer reaches the conversation.
+
+### Prices
+
+Ollama has no per-token price and the `/models` listing reports
+`source: null` for every local model, so an Ollama provider is treated as
+$0 by construction rather than as unknown: picking a local model in the
+profile dialog auto-fills `0` / `0` with the note *"Runs on your Ollama host
+— no per-token price."*, and **Use as model** pre-fills the same. The zeros
+are saved as a user-entered price (`price_source: user`), which is the
+point — a local model's runs are tracked at $0.00 instead of being reported
+as unpriced, so they neither inflate the spend total nor appear in *"n runs
+aren't included — no price set"*.
 
 ## Out-of-credit failures
 

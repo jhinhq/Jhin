@@ -7,7 +7,14 @@ from uuid import UUID
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from jhin_domain import ModelProviderType
-from jhin_models import EmbeddingConfig, ReasoningConfig, WebSearchConfig
+from jhin_models import (
+    DEFAULT_KEEP_ALIVE,
+    KEEP_ALIVE_UNLOAD,
+    EmbeddingConfig,
+    ReasoningConfig,
+    WebSearchConfig,
+    validate_keep_alive,
+)
 from jhin_models.embeddings import EMBEDDINGS_CONFIG_KEY
 from jhin_models.reasoning import REASONING_CONFIG_KEY
 from jhin_models.web_search import WEB_SEARCH_CONFIG_KEY
@@ -402,6 +409,110 @@ class CatalogRefreshResultOut(BaseModel):
     attribution: str
     detail: str
     repriced: list[AppliedPriceOut]
+
+
+class OllamaModelOut(BaseModel):
+    """One model on an Ollama host: ``/api/tags`` merged with ``/api/ps`` and
+    ``/api/show``.
+
+    ``context_length`` is the architecture's maximum from ``/api/show``, not
+    the context a running instance was started with. ``keeps_loaded`` is
+    computed server-side because a ``keep_alive`` of ``-1`` shows up as an
+    ``expires_at`` centuries out, which is not a date worth rendering.
+    """
+
+    name: str
+    size_bytes: int
+    family: str | None
+    parameter_size: str | None
+    quantization: str | None
+    modified_at: datetime | None
+    context_length: int | None
+    capabilities: list[str]
+    loaded: bool
+    size_vram_bytes: int | None
+    expires_at: datetime | None
+    keeps_loaded: bool
+
+
+class OllamaModelsResult(BaseModel):
+    """Installed models with their loaded state, or an explanation of why
+    the list is empty."""
+
+    models: list[OllamaModelOut]
+    detail: str | None
+    fetched_at: datetime
+
+
+class OllamaLoadedModelOut(BaseModel):
+    """One model resident in memory on the host (``/api/ps``).
+    ``size_vram_bytes`` is 0 on a CPU-only host."""
+
+    name: str
+    size_bytes: int
+    size_vram_bytes: int
+    expires_at: datetime | None
+    keeps_loaded: bool
+    context_length: int | None
+
+
+class OllamaLoadedResult(BaseModel):
+    models: list[OllamaLoadedModelOut]
+    detail: str | None
+    fetched_at: datetime
+
+
+class OllamaModelDetailsOut(BaseModel):
+    name: str
+    family: str | None
+    parameter_size: str | None
+    quantization: str | None
+    context_length: int | None
+    capabilities: list[str]
+    license: str | None
+
+
+class OllamaModelDetailsResult(BaseModel):
+    model: OllamaModelDetailsOut | None
+    detail: str | None
+
+
+class OllamaLoadIn(BaseModel):
+    """Bring a model into memory on the host and keep it there for
+    ``keep_alive`` after its last request: a duration like ``5m`` or ``1h``,
+    or ``-1`` to keep it until an explicit unload."""
+
+    model: str = Field(min_length=1, max_length=200)
+    keep_alive: str = Field(default=DEFAULT_KEEP_ALIVE, max_length=16)
+
+    @field_validator("keep_alive")
+    @classmethod
+    def _keep_alive(cls, value: str) -> str:
+        cleaned = validate_keep_alive(value)
+        if cleaned == KEEP_ALIVE_UNLOAD:
+            raise ValueError("keep_alive 0 unloads a model; call unload instead")
+        return cleaned
+
+
+class OllamaUnloadIn(BaseModel):
+    model: str = Field(min_length=1, max_length=200)
+
+
+OllamaLoadStatus = Literal["loaded", "loading", "unloaded", "failed"]
+
+
+class OllamaLoadResultOut(BaseModel):
+    """Outcome of a load or unload.
+
+    ``loading`` is a success: the host is still reading the model in after
+    the response budget ran out, and ``/ollama/loaded`` shows it once done.
+    """
+
+    ok: bool
+    status: OllamaLoadStatus
+    model: str
+    keep_alive: str | None
+    detail: str
 
 
 # ``WorkspaceSpendOut`` references a class defined further down; resolve it

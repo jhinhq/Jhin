@@ -5,6 +5,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef } from "react";
 import { api, ApiError } from "@/lib/api";
+import { ollamaNamePath } from "@/lib/models";
 import { devicePollDelayMs, SLOW_DOWN_STEP_MS } from "@/lib/oauth";
 import type {
   ActivityList,
@@ -52,6 +53,9 @@ import type {
   OAuthProbeOut,
   OAuthRedirectOut,
   OAuthStartOut,
+  OllamaLoaded,
+  OllamaModelDetailsResult,
+  OllamaModels,
   OnboardingState,
   OnboardingStatus,
   ProviderBalance,
@@ -267,6 +271,70 @@ export function useProviderBalance(workspaceId: string, providerId: string, enab
   });
 }
 
+/** Models installed on an Ollama provider's host, each merged with whether
+ * it is resident. Reads never fail the query for a host that is up: an
+ * unreadable host answers an empty list with a `detail`. `retry: false`
+ * because the API already waited on the host once; asking again only
+ * delays the "can't reach it" message. */
+export function useOllamaModels(workspaceId: string, providerId: string, enabled = true) {
+  return useQuery({
+    queryKey: ["ollama-models", workspaceId, providerId],
+    queryFn: () =>
+      api<OllamaModels>(
+        `/api/v1/workspaces/${workspaceId}/model-providers/${providerId}/ollama/models`,
+      ),
+    enabled,
+    staleTime: 30_000,
+    retry: false,
+  });
+}
+
+/** What the Ollama host holds in memory right now. Polled every ten seconds
+ * (the trigger/attention cadence) because a load the API handed off after its
+ * response budget only ever shows up here, and Ollama's own keep-alive timer
+ * unloads models without telling anyone. */
+export function useOllamaLoaded(workspaceId: string, providerId: string, enabled = true) {
+  return useQuery({
+    queryKey: ["ollama-loaded", workspaceId, providerId],
+    queryFn: () =>
+      api<OllamaLoaded>(
+        `/api/v1/workspaces/${workspaceId}/model-providers/${providerId}/ollama/loaded`,
+      ),
+    enabled,
+    refetchInterval: 10_000,
+    retry: false,
+  });
+}
+
+/** Metadata for one installed model (capabilities, license, context). The
+ * name goes through `ollamaNamePath`: colons are encoded, slashes stay real
+ * separators for the API's `{name:path}` route. */
+export function useOllamaModelDetails(
+  workspaceId: string,
+  providerId: string,
+  name: string | null,
+) {
+  return useQuery({
+    queryKey: ["ollama-model-details", workspaceId, providerId, name],
+    queryFn: () =>
+      api<OllamaModelDetailsResult>(
+        `/api/v1/workspaces/${workspaceId}/model-providers/${providerId}/ollama/models/${ollamaNamePath(name ?? "")}`,
+      ),
+    enabled: name !== null,
+    staleTime: 60_000,
+    retry: false,
+  });
+}
+
+/** Refresh the local-models panel after a load or unload. */
+export function useInvalidateOllama(workspaceId: string) {
+  const queryClient = useQueryClient();
+  return () => {
+    void queryClient.invalidateQueries({ queryKey: ["ollama-models", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["ollama-loaded", workspaceId] });
+  };
+}
+
 export function useWorkspaceSpend(workspaceId: string) {
   return useQuery({
     queryKey: ["workspace-spend", workspaceId],
@@ -427,6 +495,10 @@ export function useInvalidateModels(workspaceId: string) {
     void queryClient.invalidateQueries({ queryKey: ["secrets", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["workspace", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["provider-balance", workspaceId] });
+    // A provider edit can change the base URL, which is the whole identity of
+    // an Ollama host: the local-models panel must not keep showing the old one.
+    void queryClient.invalidateQueries({ queryKey: ["ollama-models", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["ollama-loaded", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["workspace-spend", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["pricing-status", workspaceId] });
   };

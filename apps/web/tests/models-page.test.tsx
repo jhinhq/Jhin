@@ -37,6 +37,36 @@ const PROVIDER: ModelProvider = {
   updated_at: "2026-08-01T00:00:00Z",
 };
 
+const OLLAMA_PROVIDER: ModelProvider = {
+  ...PROVIDER,
+  id: "prov-ollama",
+  type: "ollama",
+  display_name: "Ollama Main",
+  base_url: "http://192.168.1.79:11434/v1",
+  secret_id: null,
+};
+
+const OLLAMA_MODELS = {
+  models: [
+    {
+      name: "qwen3.8:latest",
+      size_bytes: 17_700_000_000,
+      family: "qwen3",
+      parameter_size: "27.3B",
+      quantization: "Q4_K_M",
+      modified_at: "2026-08-30T12:00:00Z",
+      context_length: 40_960,
+      capabilities: ["completion", "tools", "thinking"],
+      loaded: false,
+      size_vram_bytes: null,
+      expires_at: null,
+      keeps_loaded: false,
+    },
+  ],
+  detail: null,
+  fetched_at: "2026-09-02T10:00:00Z",
+};
+
 function profile(overrides: Partial<ModelProfile> = {}): ModelProfile {
   return {
     id: "profile-1",
@@ -116,9 +146,11 @@ function json(data: unknown, status = 200): Response {
   });
 }
 
-/** Every request the page makes, with the writes kept for assertions. */
-function installServer() {
+/** Every request the page makes, with the writes kept for assertions. With
+ * `ollama`, a local provider sits beside OpenAI and its host answers. */
+function installServer(options: { ollama?: boolean } = {}) {
   const deletes: string[] = [];
+  const providers = options.ollama ? [PROVIDER, OLLAMA_PROVIDER] : [PROVIDER];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -129,7 +161,26 @@ function installServer() {
         return new Response(null, { status: 204 });
       }
       if (method !== "GET") throw new Error(`Unexpected write: ${method} ${path}`);
-      if (path === "/api/v1/workspaces/workspace-1/model-providers") return json([PROVIDER]);
+      if (path === "/api/v1/workspaces/workspace-1/model-providers") return json(providers);
+      if (path === "/api/v1/workspaces/workspace-1/model-providers/prov-ollama/ollama/models") {
+        return json(OLLAMA_MODELS);
+      }
+      if (path === "/api/v1/workspaces/workspace-1/model-providers/prov-ollama/ollama/loaded") {
+        return json({ models: [], detail: null, fetched_at: "2026-09-02T10:00:00Z" });
+      }
+      if (path === "/api/v1/workspaces/workspace-1/model-providers/prov-ollama/models") {
+        return json({
+          models: OLLAMA_MODELS.models.map((model) => ({
+            id: model.name,
+            input_cost_micros_per_million: null,
+            output_cost_micros_per_million: null,
+            context_window: null,
+            source: null,
+          })),
+          detail: null,
+          catalog_updated: "2026-01",
+        });
+      }
       if (path === "/api/v1/workspaces/workspace-1/model-profiles") return json(PROFILES);
       if (path === "/api/v1/workspaces/workspace-1") return json(WORKSPACE_DETAIL);
       if (path === "/api/v1/workspaces/workspace-1/spend") return json(SPEND);
@@ -214,6 +265,40 @@ describe("ModelsPage", () => {
     await waitFor(() => expect(deletes).toHaveLength(1));
     expect(deletes[0]).toBe("/api/v1/workspaces/workspace-1/model-profiles/profile-2");
     expect(confirmSpy).not.toHaveBeenCalled();
+  });
+
+  it("Use as model opens the profile dialog prefilled", async () => {
+    installServer({ ollama: true });
+    renderPage();
+    await screen.findByRole("heading", { name: "Default model" });
+
+    const card = await screen.findByTestId("provider-card-prov-ollama");
+    fireEvent.click(within(card).getByRole("button", { name: "Manage" }));
+    const manage = await screen.findByRole("dialog", { name: "Ollama Main" });
+    const row = await within(manage).findByTestId("ollama-model-qwen3.8:latest");
+    fireEvent.click(within(row).getByRole("button", { name: "Use as model" }));
+
+    // The manage dialog gives way to a new-profile dialog that already knows
+    // the model: name, identifier, the $0 price, and the host's context.
+    const dialog = await screen.findByRole("dialog", { name: "New model profile" });
+    expect(screen.queryByRole("dialog", { name: "Ollama Main" })).toBeNull();
+    expect(within(dialog).getByDisplayValue("qwen3.8")).toBeDefined();
+    expect(within(dialog).getByDisplayValue("qwen3.8:latest")).toBeDefined();
+    expect((within(dialog).getByLabelText("Provider") as HTMLSelectElement).value).toBe(
+      "prov-ollama",
+    );
+    expect(within(dialog).getByText("$0 in · $0 out per 1M tokens")).toBeDefined();
+    expect(within(dialog).getByText("Runs on your Ollama host — no per-token price.")).toBeDefined();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: /Pricing \(auto-filled\)/ }));
+    expect((within(dialog).getByLabelText("Input $ / 1M tokens") as HTMLInputElement).value).toBe("0");
+    expect((within(dialog).getByLabelText("Output $ / 1M tokens") as HTMLInputElement).value).toBe("0");
+    expect(
+      (within(dialog).getByLabelText(/Context window \(tokens\)/) as HTMLInputElement).value,
+    ).toBe("40960");
+    // The provider's model list arriving later leaves the prefill alone.
+    await waitFor(() => expect(within(dialog).getByText(/1 models available/)).toBeDefined());
+    expect((within(dialog).getByLabelText("Input $ / 1M tokens") as HTMLInputElement).value).toBe("0");
   });
 
   it("shows viewers the decisions but none of the admin controls", async () => {

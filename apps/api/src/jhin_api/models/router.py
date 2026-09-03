@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, Request
 from jhin_api.deps import AdminCtx, DbSession, ObservabilityRuntimeDep, SecretCryptoDep, ViewerCtx
 from jhin_api.deps import client_ip_hash as ip_hash
 from jhin_api.deps import get_request_id as req_id
-from jhin_api.models import pricing_service, service
+from jhin_api.models import ollama_service, pricing_service, service
 from jhin_api.models.schemas import (
     CatalogRefreshResultOut,
     ModelProfileCreate,
@@ -22,6 +22,15 @@ from jhin_api.models.schemas import (
     ModelProviderCreate,
     ModelProviderOut,
     ModelProviderUpdate,
+    OllamaLoadedModelOut,
+    OllamaLoadedResult,
+    OllamaLoadIn,
+    OllamaLoadResultOut,
+    OllamaModelDetailsOut,
+    OllamaModelDetailsResult,
+    OllamaModelOut,
+    OllamaModelsResult,
+    OllamaUnloadIn,
     PricingStatusOut,
     ProfilePricingRefreshResult,
     ProviderBalanceOut,
@@ -168,6 +177,126 @@ async def provider_balance(
         db, crypto, ctx, provider_id, runtime.metrics, runtime.tracer
     )
     return ProviderBalanceOut.model_validate(balance, from_attributes=True)
+
+
+@providers_router.get("/{provider_id}/ollama/models")
+async def list_ollama_models(
+    provider_id: UUID,
+    ctx: AdminCtx,
+    db: DbSession,
+    crypto: SecretCryptoDep,
+    runtime: ObservabilityRuntimeDep,
+) -> OllamaModelsResult:
+    """Models installed on an Ollama host, and which of them are loaded in memory."""
+    snapshot = await ollama_service.list_ollama_models(
+        db, crypto, ctx, provider_id, runtime.metrics, runtime.tracer
+    )
+    return OllamaModelsResult(
+        models=[
+            OllamaModelOut.model_validate(row, from_attributes=True) for row in snapshot.models
+        ],
+        detail=snapshot.detail,
+        fetched_at=snapshot.fetched_at,
+    )
+
+
+@providers_router.get("/{provider_id}/ollama/loaded")
+async def list_ollama_loaded(
+    provider_id: UUID,
+    ctx: AdminCtx,
+    db: DbSession,
+    crypto: SecretCryptoDep,
+    runtime: ObservabilityRuntimeDep,
+) -> OllamaLoadedResult:
+    """Models an Ollama host holds in memory right now; cheap enough to poll."""
+    snapshot = await ollama_service.list_loaded_models(
+        db, crypto, ctx, provider_id, runtime.metrics, runtime.tracer
+    )
+    return OllamaLoadedResult(
+        models=[
+            OllamaLoadedModelOut.model_validate(row, from_attributes=True)
+            for row in snapshot.models
+        ],
+        detail=snapshot.detail,
+        fetched_at=snapshot.fetched_at,
+    )
+
+
+# Declared after the bare ``/ollama/models`` route: model names carry ``:``
+# and ``/`` (``tripolskypetr/qwen3.6-uncensored-aggressive:latest``), so the
+# name is the rest of the path rather than one segment.
+@providers_router.get("/{provider_id}/ollama/models/{name:path}")
+async def show_ollama_model(
+    provider_id: UUID,
+    name: str,
+    ctx: AdminCtx,
+    db: DbSession,
+    crypto: SecretCryptoDep,
+    runtime: ObservabilityRuntimeDep,
+) -> OllamaModelDetailsResult:
+    """Architecture, capabilities and licence of one model on an Ollama host."""
+    details, detail = await ollama_service.show_ollama_model(
+        db, crypto, ctx, provider_id, runtime.metrics, runtime.tracer, name=name
+    )
+    return OllamaModelDetailsResult(
+        model=(
+            OllamaModelDetailsOut.model_validate(details, from_attributes=True)
+            if details is not None
+            else None
+        ),
+        detail=detail,
+    )
+
+
+@providers_router.post("/{provider_id}/ollama/load")
+async def load_ollama_model(
+    provider_id: UUID,
+    payload: OllamaLoadIn,
+    request: Request,
+    ctx: AdminCtx,
+    db: DbSession,
+    crypto: SecretCryptoDep,
+    runtime: ObservabilityRuntimeDep,
+) -> OllamaLoadResultOut:
+    """Load a model into memory on an Ollama host; slow loads answer `loading` and carry on."""
+    outcome = await ollama_service.load_ollama_model(
+        db,
+        crypto,
+        ctx,
+        provider_id,
+        runtime.metrics,
+        runtime.tracer,
+        model=payload.model,
+        keep_alive=payload.keep_alive,
+        request_id=req_id(request),
+        ip_hash=ip_hash(request),
+    )
+    return OllamaLoadResultOut.model_validate(outcome, from_attributes=True)
+
+
+@providers_router.post("/{provider_id}/ollama/unload")
+async def unload_ollama_model(
+    provider_id: UUID,
+    payload: OllamaUnloadIn,
+    request: Request,
+    ctx: AdminCtx,
+    db: DbSession,
+    crypto: SecretCryptoDep,
+    runtime: ObservabilityRuntimeDep,
+) -> OllamaLoadResultOut:
+    """Unload a model from memory on an Ollama host."""
+    outcome = await ollama_service.unload_ollama_model(
+        db,
+        crypto,
+        ctx,
+        provider_id,
+        runtime.metrics,
+        runtime.tracer,
+        model=payload.model,
+        request_id=req_id(request),
+        ip_hash=ip_hash(request),
+    )
+    return OllamaLoadResultOut.model_validate(outcome, from_attributes=True)
 
 
 @spend_router.get("")

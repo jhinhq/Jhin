@@ -35,6 +35,20 @@ from jhin_models.images import (
     ImageGenerationUnsupported,
     as_image_generation_client,
 )
+from jhin_models.providers.ollama import (
+    DEFAULT_KEEP_ALIVE,
+    KEEP_ALIVE_FOREVER,
+    KEEP_ALIVE_UNLOAD,
+    OllamaInstalledModel,
+    OllamaLoadedModel,
+    OllamaLoadResult,
+    OllamaModelDetails,
+    OllamaNativeClient,
+    OllamaUnsupported,
+    as_ollama_client,
+    native_origin,
+    validate_keep_alive,
+)
 from jhin_models.reasoning import (
     REASONING_CONFIG_KEY,
     ReasoningConfig,
@@ -49,7 +63,10 @@ from jhin_models.web_search import (
 )
 
 __all__ = [
+    "DEFAULT_KEEP_ALIVE",
     "INSUFFICIENT_FUNDS",
+    "KEEP_ALIVE_FOREVER",
+    "KEEP_ALIVE_UNLOAD",
     "MODEL_INCOMPATIBLE_REQUEST",
     "REASONING_CONFIG_KEY",
     "WEB_SEARCH_CONFIG_KEY",
@@ -71,14 +88,23 @@ __all__ = [
     "ModelResponse",
     "ModelToolCall",
     "ModelUsage",
+    "OllamaInstalledModel",
+    "OllamaLoadResult",
+    "OllamaLoadedModel",
+    "OllamaModelDetails",
+    "OllamaNativeClient",
+    "OllamaUnsupported",
     "ReasoningConfig",
     "ToolSchema",
     "WebSearchConfig",
     "as_embedding_client",
     "as_image_generation_client",
+    "as_ollama_client",
     "build_model_client",
     "is_reasoning_model",
+    "native_origin",
     "normalize_tool_arguments",
     "reasoning_unsupported_reason",
+    "validate_keep_alive",
     "web_search_unsupported_reason",
 ]
