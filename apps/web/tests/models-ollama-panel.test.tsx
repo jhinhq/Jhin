@@ -1,17 +1,24 @@
-/** Render tests for the local-models panel an Ollama provider card carries
- * instead of a balance: the installed list, the loaded facts, the load flow
- * that stays "loading" until the poll confirms it, unload, the host's own
- * refusal sentence, the unreachable and empty states, the viewer view, and
- * the hand-over into a prefilled profile. The panel reads through the page's
- * host subscription, which the harness stands in for. */
+/** Render tests for the Local models block an Ollama host gets on the Models
+ * page: the installed list, the loaded facts, the header line that says what
+ * is loaded, the load flow that stays "loading" until the poll confirms it,
+ * unload, the host's own refusal sentence, the unreachable and empty states,
+ * the viewer view, which profiles use a model, and the hand-over into a
+ * prefilled profile. The block reads through the page's host subscription,
+ * which the harness stands in for. */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { OllamaPanel } from "@/components/models/ollama-panel";
+import { OllamaHostSection, OllamaPanel } from "@/components/models/ollama-panel";
 import { api, ApiError } from "@/lib/api";
 import { profilePrefillForOllamaModel } from "@/lib/models";
-import type { ModelProvider, OllamaLoaded, OllamaLoadResult, OllamaModels } from "@/lib/types";
+import type {
+  ModelProfile,
+  ModelProvider,
+  OllamaLoaded,
+  OllamaLoadResult,
+  OllamaModels,
+} from "@/lib/types";
 import { WithOllamaHost } from "@/tests/helpers/ollama-host";
 
 vi.mock("@/lib/api", async () => {
@@ -36,6 +43,24 @@ const PROVIDER: ModelProvider = {
   enabled: true,
   last_verified_at: "2026-09-01T00:00:00Z",
   last_error: null,
+  created_at: "2026-08-01T00:00:00Z",
+  updated_at: "2026-08-01T00:00:00Z",
+};
+
+const QWEN_PROFILE: ModelProfile = {
+  id: "p-qwen",
+  workspace_id: "w1",
+  provider_id: "prov-1",
+  model_name: "qwen3.8",
+  display_name: "qwen3.8",
+  context_window: 40_960,
+  input_cost_micros_per_million: null,
+  output_cost_micros_per_million: null,
+  price_source: null,
+  assumed_free: true,
+  supports_tools: true,
+  supports_reasoning: false,
+  config_json: {},
   created_at: "2026-08-01T00:00:00Z",
   updated_at: "2026-08-01T00:00:00Z",
 };
@@ -102,11 +127,16 @@ const UNLOAD_URL = "/api/v1/workspaces/w1/model-providers/prov-1/ollama/unload";
 /** A stand-in API whose loaded set the test can change between polls. */
 function installApi(options: {
   listing?: OllamaModels | Error;
-  loaded?: OllamaLoaded["models"];
+  loaded?: OllamaLoaded["models"] | Error;
+  /** The host's own reason on the loaded poll (an empty answer with why). */
+  detail?: string | null;
   load?: (body: { model: string; keep_alive: string }) => OllamaLoadResult;
   unload?: (body: { model: string }) => OllamaLoadResult;
 } = {}) {
-  const state = { loaded: options.loaded ?? [MUSE_LOADED], loadedCalls: 0 };
+  const state = {
+    loaded: options.loaded instanceof Error ? [] : (options.loaded ?? [MUSE_LOADED]),
+    loadedCalls: 0,
+  };
   vi.mocked(api).mockImplementation(
     async (path: string, requestOptions?: { method?: string; body?: unknown }) => {
       if (path.endsWith("/ollama/models")) {
@@ -114,8 +144,9 @@ function installApi(options: {
         return options.listing ?? listing();
       }
       if (path.endsWith("/ollama/loaded")) {
+        if (options.loaded instanceof Error) throw options.loaded;
         state.loadedCalls += 1;
-        return loaded(state.loaded);
+        return loaded(state.loaded, options.detail ?? null);
       }
       if (path === LOAD_URL && options.load) {
         return options.load(requestOptions?.body as { model: string; keep_alive: string });
@@ -129,10 +160,14 @@ function installApi(options: {
   return state;
 }
 
-function renderPanel(overrides: { isAdmin?: boolean } = {}) {
-  const queryClient = new QueryClient({
+function newQueryClient() {
+  return new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
+}
+
+function renderPanel(overrides: { isAdmin?: boolean; profiles?: ModelProfile[] } = {}) {
+  const queryClient = newQueryClient();
   const onError = vi.fn();
   const onUseAsModel = vi.fn();
   render(
@@ -143,6 +178,7 @@ function renderPanel(overrides: { isAdmin?: boolean } = {}) {
             provider={PROVIDER}
             host={host}
             isAdmin={overrides.isAdmin ?? true}
+            profiles={overrides.profiles}
             onError={onError}
             onUseAsModel={onUseAsModel}
           />
@@ -156,6 +192,28 @@ function renderPanel(overrides: { isAdmin?: boolean } = {}) {
   return { onError, onUseAsModel, poll };
 }
 
+/** The block as the page mounts it: the panel plus the section's error note. */
+function renderHost(overrides: { isAdmin?: boolean; profiles?: ModelProfile[] } = {}) {
+  const queryClient = newQueryClient();
+  const onUseAsModel = vi.fn();
+  render(
+    <QueryClientProvider client={queryClient}>
+      <WithOllamaHost workspaceId="w1" providerId={PROVIDER.id}>
+        {(host) => (
+          <OllamaHostSection
+            provider={PROVIDER}
+            host={host}
+            isAdmin={overrides.isAdmin ?? true}
+            profiles={overrides.profiles ?? []}
+            onUseAsModel={onUseAsModel}
+          />
+        )}
+      </WithOllamaHost>
+    </QueryClientProvider>,
+  );
+  return { onUseAsModel };
+}
+
 describe("OllamaPanel", () => {
   it("lists local models with size, family, params, quant and context", async () => {
     installApi();
@@ -163,18 +221,25 @@ describe("OllamaPanel", () => {
     const qwen = await screen.findByTestId("ollama-model-qwen3.8:latest");
     expect(within(qwen).getByText("qwen3.8:latest")).toBeTruthy();
     expect(within(qwen).getByText("17.7 GB · qwen3 · 27.3B · Q4_K_M · ctx 41.0k")).toBeTruthy();
-    // Capabilities other than plain completion are worth a chip.
+    // Capabilities other than plain completion are worth naming.
     expect(within(qwen).getByText("Tools")).toBeTruthy();
     expect(within(qwen).getByText("Thinking")).toBeTruthy();
-    expect(screen.getByText("Ollama — 2 models, 1 loaded")).toBeTruthy();
+    // The header carries the host and the count; the loaded state lives
+    // once, in the status line beside it.
+    expect(screen.getByText("Ollama · 2 models")).toBeTruthy();
+    await waitFor(() =>
+      expect(screen.getByTestId("ollama-header-status").textContent).toBe(
+        "1 of 2 loaded — muse-glimmer — 18.2 GB",
+      ),
+    );
   });
 
-  it("marks the loaded model with VRAM and expiry, loaded rows first", async () => {
+  it("marks the loaded model with VRAM and its lease, loaded rows first", async () => {
     installApi();
     renderPanel();
     const muse = await screen.findByTestId("ollama-model-muse-glimmer:latest");
     expect(within(muse).getByText("Loaded")).toBeTruthy();
-    expect(within(muse).getByText(/18\.2 GB VRAM · expires in 4 minutes/)).toBeTruthy();
+    expect(within(muse).getByText(/18\.2 GB VRAM · for 4 more minutes/)).toBeTruthy();
     const rows = screen.getAllByTestId(/^ollama-model-/);
     expect(rows[0].getAttribute("data-testid")).toBe("ollama-model-muse-glimmer:latest");
     expect(within(rows[0]).getByRole("button", { name: "Unload" })).toBeTruthy();
@@ -222,13 +287,15 @@ describe("OllamaPanel", () => {
     await waitFor(() => expect(state.loadedCalls).toBeGreaterThanOrEqual(2));
     expect(within(qwen).queryByText("Loaded")).toBeNull();
 
-    // The host finishes; the next poll flips the row.
+    // The host finishes; the next poll flips the row and the header.
     state.loaded = [MUSE_LOADED, QWEN_LOADED];
     await poll();
     await within(qwen).findByText("Loaded");
     expect(within(qwen).queryByText(/this can take a minute/)).toBeNull();
     expect(within(qwen).getByRole("button", { name: "Unload" })).toBeTruthy();
-    expect(screen.getByText("Ollama — 2 models, 2 loaded")).toBeTruthy();
+    await waitFor(() =>
+      expect(screen.getByTestId("ollama-header-status").textContent).toMatch(/^2 of 2 loaded — /),
+    );
   });
 
   it("unloads through /ollama/unload", async () => {
@@ -274,14 +341,14 @@ describe("OllamaPanel", () => {
     expect(note.textContent).toBe(
       "ollama: HTTP 404: model 'qwen3.8:latest' not found, try pulling it first",
     );
-    // The refusal stays on the row; the progress line and the card-level
+    // The refusal stays on the row; the progress line and the block-level
     // error are both cleared.
     expect(within(qwen).queryByText(/this can take a minute/)).toBeNull();
     expect(within(qwen).getByRole("button", { name: "Load" })).toBeTruthy();
     expect(onError).toHaveBeenLastCalledWith(null);
   });
 
-  it("hands a request failure to the card's error note", async () => {
+  it("hands a request failure to the block's error callback", async () => {
     installApi();
     vi.mocked(api).mockImplementationOnce(async () => listing());
     const { onError } = renderPanel();
@@ -292,6 +359,20 @@ describe("OllamaPanel", () => {
       expect(onError).toHaveBeenLastCalledWith("This provider is not an Ollama endpoint"),
     );
     expect(within(qwen).queryByText(/this can take a minute/)).toBeNull();
+  });
+
+  it("hands a request failure to the section's error note", async () => {
+    installApi();
+    vi.mocked(api).mockImplementationOnce(async () => listing());
+    renderHost();
+    const host = screen.getByTestId("ollama-host-prov-1");
+    const qwen = await within(host).findByTestId("ollama-model-qwen3.8:latest");
+    vi.mocked(api).mockRejectedValueOnce(new ApiError(409, "This provider is not an Ollama endpoint"));
+    fireEvent.click(within(qwen).getByRole("button", { name: "Load" }));
+    const note = await within(host).findByRole("alert");
+    expect(note.textContent).toBe("This provider is not an Ollama endpoint");
+    // A request failure is the section's to show, not the row's.
+    expect(within(qwen).queryByRole("alert")).toBeNull();
   });
 
   it("explains an unreachable host with a Retry", async () => {
@@ -312,7 +393,8 @@ describe("OllamaPanel", () => {
     renderPanel();
     expect(await screen.findByText(/No models on this Ollama host yet/)).toBeTruthy();
     expect(screen.getByText("ollama pull qwen3")).toBeTruthy();
-    expect(screen.queryByText(/models, /)).toBeNull();
+    expect(screen.queryByText(/Ollama · /)).toBeNull();
+    expect(screen.queryByLabelText("Keep loaded for")).toBeNull();
   });
 
   it("repeats the host's reason when the list came back empty because of it", async () => {
@@ -351,5 +433,118 @@ describe("OllamaPanel", () => {
       inputCostMicros: 0,
       outputCostMicros: 0,
     });
+  });
+
+  it("says which profile uses a model and still offers Use as model", async () => {
+    installApi();
+    renderPanel({ profiles: [QWEN_PROFILE] });
+    const qwen = await screen.findByTestId("ollama-model-qwen3.8:latest");
+    // The profile was typed without ":latest"; it still names the row.
+    expect(within(qwen).getByText("used as “qwen3.8”")).toBeTruthy();
+    // A second profile for one model is legitimate, so the button stays.
+    expect(within(qwen).getByRole("button", { name: "Use as model" })).toBeTruthy();
+    const muse = screen.getByTestId("ollama-model-muse-glimmer:latest");
+    expect(within(muse).queryByText(/used as/)).toBeNull();
+  });
+
+  it("hides the keep-alive control once everything installed is loaded", async () => {
+    installApi({ loaded: [MUSE_LOADED, QWEN_LOADED] });
+    renderPanel();
+    await screen.findByTestId("ollama-model-qwen3.8:latest");
+    await waitFor(() => expect(screen.getAllByText("Loaded")).toHaveLength(2));
+    expect(screen.queryByLabelText("Keep loaded for")).toBeNull();
+
+    // With something still loadable the control is back.
+    cleanup();
+    installApi();
+    renderPanel();
+    await screen.findByTestId("ollama-model-qwen3.8:latest");
+    expect(screen.getByLabelText("Keep loaded for")).toBeTruthy();
+  });
+
+  it("carries the header status and rows on the page face", async () => {
+    installApi();
+    const { onUseAsModel } = renderHost();
+    const host = screen.getByTestId("ollama-host-prov-1");
+    // Content, not a disclosure: nothing to open, the rows are simply there.
+    const panel = within(host).getByTestId("ollama-panel");
+    expect(within(panel).getByTestId("ollama-header-status")).toBeTruthy();
+    const muse = await within(panel).findByTestId("ollama-model-muse-glimmer:latest");
+    expect(within(muse).getByText("Loaded")).toBeTruthy();
+    expect(within(muse).getByRole("button", { name: "Unload" })).toBeTruthy();
+
+    const qwen = within(panel).getByTestId("ollama-model-qwen3.8:latest");
+    fireEvent.click(within(qwen).getByRole("button", { name: "Use as model" }));
+    expect(onUseAsModel).toHaveBeenCalledWith({
+      providerId: "prov-1",
+      modelName: "qwen3.8:latest",
+      displayName: "qwen3.8",
+      contextWindow: 40_960,
+      inputCostMicros: 0,
+      outputCostMicros: 0,
+    });
+  });
+
+  it("says in the header what is loaded, counted against what is installed", async () => {
+    installApi();
+    renderPanel();
+    const status = screen.getByTestId("ollama-header-status");
+    expect(status.textContent).toBe("Checking what's loaded…");
+    await waitFor(() =>
+      expect(status.textContent).toBe("1 of 2 loaded — muse-glimmer — 18.2 GB"),
+    );
+    expect(status.className).toContain("text-ok");
+  });
+
+  it("says Nothing loaded when the host holds nothing", async () => {
+    installApi({ loaded: [] });
+    renderPanel();
+    const status = screen.getByTestId("ollama-header-status");
+    await waitFor(() => expect(status.textContent).toBe("Nothing loaded"));
+  });
+
+  it("says Ollama unreachable in the header when the host cannot be asked, even as the rows fail", async () => {
+    installApi({
+      listing: new ApiError(502, "upstream unreachable"),
+      loaded: new ApiError(502, "upstream unreachable"),
+    });
+    renderPanel();
+    const status = screen.getByTestId("ollama-header-status");
+    await waitFor(() => expect(status.textContent).toBe("Ollama unreachable"));
+    expect(status.className).toContain("text-danger");
+    // The body says its own piece beneath; the header did not wait on it.
+    expect(await screen.findByText(/We couldn't reach Ollama at/)).toBeTruthy();
+    // Nothing to load, so no keep-alive to choose.
+    expect(screen.queryByLabelText("Keep loaded for")).toBeNull();
+
+    // A host that answers with a reason and no models is the same story to
+    // the reader, with the reason a hover away.
+    cleanup();
+    installApi({ loaded: [], detail: "ollama: network error: ConnectError" });
+    renderPanel();
+    const again = screen.getByTestId("ollama-header-status");
+    await waitFor(() => expect(again.textContent).toBe("Ollama unreachable"));
+    expect(again.getAttribute("title")).toBe("ollama: network error: ConnectError");
+  });
+
+  it("shares one load in progress between the rows and the header", async () => {
+    const state = installApi({
+      loaded: [],
+      load: (body) => ({
+        ok: true,
+        status: "loading",
+        model: body.model,
+        keep_alive: body.keep_alive,
+        detail: "Ollama is still loading qwen3.8:latest.",
+      }),
+    });
+    renderPanel();
+    const row = await screen.findByTestId("ollama-model-qwen3.8:latest");
+    fireEvent.click(within(row).getByRole("button", { name: "Load" }));
+    await waitFor(() => expect(api).toHaveBeenCalledWith(LOAD_URL, expect.anything()));
+    expect(within(row).getByRole("button", { name: "Loading…" })).toBeTruthy();
+    await waitFor(() => expect(state.loadedCalls).toBeGreaterThanOrEqual(2));
+    // Still nothing resident as far as the host says, so the header says so.
+    expect(screen.getByTestId("ollama-header-status").textContent).toBe("Nothing loaded");
   });
 });

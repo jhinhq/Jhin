@@ -1,8 +1,8 @@
 /** Render tests for the recomposed Models page pieces: the default-model
- * hero card, the profile cards, the provider cards — a cloud card as a status
- * tile, an Ollama card with its live header line and local-models panel —
- * and the manage dialog, including that destructive actions go through the
- * shared ConfirmDialog rather than window.confirm. */
+ * hero card, the model rows (ProfileCard), the provider status rows
+ * (ProviderCard), and the manage dialog, including that destructive actions
+ * go through the shared ConfirmDialog rather than window.confirm. The Ollama
+ * host's own block is covered in models-ollama-panel.test.tsx. */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -243,6 +243,20 @@ describe("DefaultModelCard", () => {
     expect(screen.queryByRole("button", { name: "Change" })).toBeNull();
   });
 
+  it("offers Choose a default on the empty state for admins, not viewers", () => {
+    const onChange = vi.fn();
+    renderWithQuery(<DefaultModelCard profile={null} provider={null} isAdmin onChange={onChange} />);
+    fireEvent.click(screen.getByRole("button", { name: "Choose a default" }));
+    expect(onChange).toHaveBeenCalled();
+
+    cleanup();
+    renderWithQuery(
+      <DefaultModelCard profile={null} provider={null} isAdmin={false} onChange={onChange} />,
+    );
+    expect(screen.getByText("No default model yet")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Choose a default" })).toBeNull();
+  });
+
   it("hides the Change button from viewers", () => {
     renderWithQuery(
       <DefaultModelCard
@@ -317,7 +331,6 @@ describe("ProfileCard", () => {
     pricing: undefined,
     pricingPages: undefined,
     onChanged: () => undefined,
-    onError: () => undefined,
     onEdit: () => undefined,
   };
 
@@ -420,6 +433,66 @@ describe("ProfileCard", () => {
   it("keeps the raw model identifier off the card face but on the name's title", () => {
     renderWithQuery(<ProfileCard {...cardProps} profile={profile()} isDefault={false} isAdmin />);
     expect(screen.getByTitle("gpt-5-mini")).toBeTruthy();
+  });
+
+  it("shows the raw model id on the facts line when it differs from the name", () => {
+    renderWithQuery(<ProfileCard {...cardProps} profile={profile()} isDefault={false} isAdmin />);
+    // Touch users and viewers get the id without a hover, in mono.
+    const id = screen.getByText("gpt-5-mini");
+    expect(id.className).toContain("font-mono");
+    expect(screen.getByText("OpenAI")).toBeTruthy();
+
+    // A row named after its id does not say it twice.
+    cleanup();
+    renderWithQuery(
+      <ProfileCard
+        {...cardProps}
+        profile={profile({ display_name: "gpt-5-mini" })}
+        isDefault={false}
+        isAdmin
+      />,
+    );
+    expect(screen.getAllByText("gpt-5-mini")).toHaveLength(1);
+  });
+
+  it("falls back to the provider type label for a member who cannot list providers", () => {
+    renderWithQuery(
+      <ProfileCard
+        {...cardProps}
+        provider={undefined}
+        pricing={{
+          profile_id: "p1",
+          display_name: "GPT-5 mini",
+          model_name: "gpt-5-mini",
+          provider_id: "prov-1",
+          provider_type: "openai",
+          input_cost_micros_per_million: 2_500_000,
+          output_cost_micros_per_million: 10_000_000,
+          price_source: "catalog",
+          price_source_label: "Public list price",
+          priced: true,
+          pricing_page_url: null,
+          runs_this_month: 0,
+          suggestion: null,
+          suggestion_label: null,
+          observed: null,
+        }}
+        profile={profile()}
+        isDefault={false}
+        isAdmin={false}
+      />,
+    );
+    expect(screen.getByText("OpenAI")).toBeTruthy();
+    expect(screen.queryByText("—")).toBeNull();
+  });
+
+  it("keeps a failed Make default beside the row", async () => {
+    vi.mocked(api).mockRejectedValue(new ApiError(500, "boom"));
+    renderWithQuery(<ProfileCard {...cardProps} profile={profile()} isDefault={false} isAdmin />);
+    fireEvent.click(screen.getByRole("button", { name: "Make default" }));
+    const row = screen.getByTestId("profile-card-p1");
+    const note = await within(row).findByRole("alert");
+    expect(note.textContent).toBe("boom");
   });
 
   /** The card with the page's subscription to its Ollama host. */
@@ -588,120 +661,40 @@ describe("ProviderCard", () => {
     expect(screen.getByText("Turned off")).toBeTruthy();
   });
 
-  function renderOllamaCard(overrides: { isAdmin?: boolean } = {}) {
-    const onUseAsModel = vi.fn();
-    renderWithQuery(
-      <WithOllamaHost workspaceId="w1" providerId="prov-ollama">
-        {(host) => (
-          <ProviderCard
-            provider={ollamaProvider}
-            typeLabel="Ollama (local)"
-            profileCount={1}
-            onManage={() => undefined}
-            ollama={{ host, isAdmin: overrides.isAdmin ?? true, onUseAsModel }}
-          />
-        )}
-      </WithOllamaHost>,
-    );
-    return { onUseAsModel };
-  }
-
-  it("carries the local-models panel on an Ollama card, open by default, and not on a cloud card", async () => {
-    installOllamaApi({ loaded: [QWEN_LOADED] });
-    const { onUseAsModel } = renderOllamaCard();
-    const card = screen.getByTestId("provider-card-prov-ollama");
-    // Content, not a disclosure: nothing to open, the rows are simply there.
-    const panel = within(card).getByTestId("ollama-panel");
-    const row = await within(panel).findByTestId("ollama-model-qwen3.8:latest");
-    expect(within(row).getByText("Loaded")).toBeTruthy();
-    expect(within(row).getByRole("button", { name: "Unload" })).toBeTruthy();
-    // Manage stays for the endpoint facts; the card is the wide one.
-    expect(within(card).getByRole("button", { name: "Manage" })).toBeTruthy();
-    expect(card.className).toContain("md:col-span-2");
-
-    fireEvent.click(within(row).getByRole("button", { name: "Use as model" }));
-    expect(onUseAsModel).toHaveBeenCalledWith({
-      providerId: "prov-ollama",
-      modelName: "qwen3.8:latest",
-      displayName: "qwen3.8",
-      contextWindow: 40_960,
-      inputCostMicros: 0,
-      outputCostMicros: 0,
-    });
-
-    cleanup();
+  it("shows the provider's spend this month when given", () => {
     renderWithQuery(
       <ProviderCard
         provider={provider()}
         typeLabel="OpenAI"
         profileCount={2}
+        spentMonthMicros={10_000_000}
         onManage={() => undefined}
       />,
     );
-    const cloud = screen.getByTestId("provider-card-prov-1");
-    expect(within(cloud).queryByTestId("ollama-panel")).toBeNull();
-    expect(within(cloud).queryByTestId("ollama-header-status")).toBeNull();
-    expect(cloud.className).not.toContain("col-span");
-  });
+    expect(screen.getByText("$10.00 this month")).toBeTruthy();
 
-  it("says in the header what is loaded, counted against what is installed", async () => {
-    installOllamaApi({ loaded: [QWEN_LOADED] });
-    renderOllamaCard();
-    const status = screen.getByTestId("ollama-header-status");
-    expect(status.textContent).toBe("Checking what's loaded…");
-    await waitFor(() =>
-      expect(status.textContent).toBe("1 of 2 loaded — qwen3.8 — 17.5 GB"),
-    );
-    expect(status.className).toContain("text-ok");
-  });
-
-  it("says Nothing loaded when the host holds nothing", async () => {
-    installOllamaApi();
-    renderOllamaCard();
-    const status = screen.getByTestId("ollama-header-status");
-    await waitFor(() => expect(status.textContent).toBe("Nothing loaded"));
-  });
-
-  it("says Ollama unreachable in the header when the host cannot be asked, even as the panel fails", async () => {
-    installOllamaApi({
-      listing: new ApiError(502, "upstream unreachable"),
-      loaded: new ApiError(502, "upstream unreachable"),
-    });
-    renderOllamaCard();
-    const status = screen.getByTestId("ollama-header-status");
-    await waitFor(() => expect(status.textContent).toBe("Ollama unreachable"));
-    expect(status.className).toContain("text-danger");
-    // The panel says its own piece beneath; the header did not wait on it.
-    expect(await screen.findByText(/We couldn't reach Ollama at/)).toBeTruthy();
-
-    // A host that answers with a reason and no models is the same story to
-    // the reader, with the reason a hover away.
     cleanup();
-    installOllamaApi({ detail: "ollama: network error: ConnectError" });
-    renderOllamaCard();
-    const again = screen.getByTestId("ollama-header-status");
-    await waitFor(() => expect(again.textContent).toBe("Ollama unreachable"));
-    expect(again.getAttribute("title")).toBe("ollama: network error: ConnectError");
+    renderWithQuery(
+      <ProviderCard provider={provider()} typeLabel="OpenAI" profileCount={2} onManage={() => undefined} />,
+    );
+    expect(screen.queryByText(/this month/)).toBeNull();
   });
 
-  it("shares one load in progress between the panel and the header", async () => {
-    const state = installOllamaApi({
-      load: (body) => ({
-        ok: true,
-        status: "loading",
-        model: body.model,
-        keep_alive: body.keep_alive,
-        detail: "Ollama is still loading qwen3.8:latest.",
-      }),
-    });
-    renderOllamaCard();
-    const row = await screen.findByTestId("ollama-model-qwen3.8:latest");
-    fireEvent.click(within(row).getByRole("button", { name: "Load" }));
-    await waitFor(() => expect(api).toHaveBeenCalledWith(LOAD_URL, expect.anything()));
-    expect(within(row).getByRole("button", { name: "Loading…" })).toBeTruthy();
-    await waitFor(() => expect(state.loadedCalls).toBeGreaterThanOrEqual(2));
-    // Still nothing resident as far as the host says, so the header says so.
-    expect(screen.getByTestId("ollama-header-status").textContent).toBe("Nothing loaded");
+  it("is a status row for an Ollama host too: the live state lives under Local models", () => {
+    renderWithQuery(
+      <ProviderCard
+        provider={ollamaProvider}
+        typeLabel="Ollama (local)"
+        profileCount={1}
+        onManage={() => undefined}
+      />,
+    );
+    const row = screen.getByTestId("provider-card-prov-ollama");
+    expect(within(row).getByText("Ollama (local)")).toBeTruthy();
+    expect(within(row).getByText("1 model")).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Manage" })).toBeTruthy();
+    expect(within(row).queryByTestId("ollama-panel")).toBeNull();
+    expect(within(row).queryByTestId("ollama-header-status")).toBeNull();
   });
 });
 
@@ -731,7 +724,7 @@ describe("ProviderManageDialog", () => {
     return { onChanged, onClose };
   }
 
-  it("points an Ollama provider at its card instead of a balance block or a second panel", async () => {
+  it("points an Ollama provider at Local models instead of a balance block or a second panel", async () => {
     renderDialog({ provider: ollamaProvider });
     expect(await screen.findByTestId("ollama-manage-note")).toBeTruthy();
     expect(screen.queryByTestId("balance-block")).toBeNull();

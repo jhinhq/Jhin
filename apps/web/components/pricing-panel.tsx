@@ -7,7 +7,8 @@
  * matters: a list price from a stale catalog and a rate measured off the
  * workspace's own invoice deserve very different amounts of trust. This panel
  * states the current situation, offers the two actions that improve it, and
- * names anything Jhin still cannot price.
+ * names anything Jhin still cannot price. It carries no chrome of its own:
+ * it lives behind the page's Advanced disclosure, which is frame enough.
  */
 
 import { RefreshCw, Sigma, TriangleAlert } from "lucide-react";
@@ -65,11 +66,7 @@ export function PricingPanel({
   const measured = status.profiles.filter((profile) => profile.observed !== null);
 
   return (
-    <section
-      data-testid="pricing-panel"
-      aria-label="Where prices come from"
-      className="rounded-2xl border border-line bg-surface px-5 py-4 shadow-card"
-    >
+    <section data-testid="pricing-panel" aria-label="Where prices come from" className="space-y-3 pt-1">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h3 className="font-display text-sm font-semibold text-ink">Where prices come from</h3>
@@ -88,7 +85,6 @@ export function PricingPanel({
             </Button>
             <Button
               size="sm"
-              variant="primary"
               onClick={onReconcile}
               disabled={reconciling || !status.reconcile_available}
               title={status.reconcile_detail}
@@ -102,7 +98,7 @@ export function PricingPanel({
 
       <ErrorNote message={error} />
 
-      <dl className="mt-3 grid gap-3 text-xs sm:grid-cols-3">
+      <dl className="grid gap-3 text-xs sm:grid-cols-3">
         <div>
           <dt className="text-faint">Built-in list prices</dt>
           <dd className="text-dim">Catalog {status.catalog_updated}</dd>
@@ -163,7 +159,7 @@ export function PricingPanel({
       {staleness ? (
         <p
           data-testid="catalog-staleness"
-          className="mt-3 flex items-start gap-2 rounded-md border border-warn/40 bg-warn-soft px-3 py-2 text-xs text-warn"
+          className="flex items-start gap-2 rounded-md border border-warn/40 bg-warn-soft px-3 py-2 text-xs text-warn"
         >
           <TriangleAlert aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span>
@@ -174,11 +170,11 @@ export function PricingPanel({
       ) : null}
 
       {!status.reconcile_available ? (
-        <p className="mt-3 text-xs text-faint">{status.reconcile_detail}</p>
+        <p className="text-xs text-faint">{status.reconcile_detail}</p>
       ) : null}
 
       {unpriced.length > 0 ? (
-        <p data-testid="pricing-unpriced-summary" className="mt-3 text-xs text-warn">
+        <p data-testid="pricing-unpriced-summary" className="text-xs text-warn">
           {unpriced.length} model{unpriced.length === 1 ? " has" : "s have"} no price, so spend for{" "}
           {unpriced.length === 1 ? "it isn't" : "them isn't"} tracked:{" "}
           {unpriced.map((profile) => profile.model_name).join(", ")}.
@@ -186,13 +182,13 @@ export function PricingPanel({
       ) : null}
 
       {catalogResult ? (
-        <p data-testid="catalog-refresh-result" className="mt-3 text-xs text-dim">
+        <p data-testid="catalog-refresh-result" className="text-xs text-dim">
           {catalogResult.detail}
         </p>
       ) : null}
 
       {reconcileResult ? (
-        <div data-testid="reconcile-result" className="mt-3 space-y-2 text-xs">
+        <div data-testid="reconcile-result" className="space-y-2 text-xs">
           <p className="text-dim">{reconcileResult.detail}</p>
           {reconcileResult.providers.map((provider) => (
             <div key={provider.provider_id} className="rounded-md border border-line px-3 py-2">

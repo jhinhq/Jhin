@@ -7,9 +7,10 @@
 
 import { useMutation } from "@tanstack/react-query";
 import { type KeyboardEvent as ReactKeyboardEvent, useRef, useState } from "react";
+import { PriceLine } from "@/components/models/price-line";
 import { Badge, Button, Dialog, ErrorNote, focusRing, rovingIndex } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
-import { capabilitySummary, costTier, costTierLabel, formatPricePair } from "@/lib/models";
+import { capabilitySummary } from "@/lib/models";
 import type { ModelProfile, ModelProvider } from "@/lib/types";
 
 export function ChangeDefaultDialog({
@@ -81,10 +82,6 @@ export function ChangeDefaultDialog({
         >
           {profiles.map((profile) => {
             const provider = providers.find((p) => p.id === profile.provider_id);
-            const tier = costTier(
-              profile.input_cost_micros_per_million,
-              profile.output_cost_micros_per_million,
-            );
             const selected = selectedId === profile.id;
             return (
               <button
@@ -116,34 +113,10 @@ export function ChangeDefaultDialog({
                 {capabilitySummary(profile) ? (
                   <span className="text-[13px] text-dim">{capabilitySummary(profile)}</span>
                 ) : null}
-                {tier !== null ? (
-                  <span
-                    className="text-[13px] text-dim"
-                    title={`${formatPricePair(
-                      profile.input_cost_micros_per_million,
-                      profile.output_cost_micros_per_million,
-                    )} per 1M tokens`}
-                  >
-                    <span className="font-mono text-accent-strong" aria-hidden>
-                      {"$".repeat(tier)}
-                    </span>{" "}
-                    {costTierLabel(tier)}{" "}
-                    <span className="text-faint">
-                      {formatPricePair(
-                        profile.input_cost_micros_per_million,
-                        profile.output_cost_micros_per_million,
-                      )}{" "}
-                      per 1M tokens
-                    </span>
-                  </span>
-                ) : profile.assumed_free ? (
-                  // Same words as the model card and the hero: the API says
-                  // this profile resolves to $0, so "no price set" here would
-                  // contradict them.
-                  <span className="text-[13px] text-dim">Free (self-hosted)</span>
-                ) : (
-                  <span className="text-[13px] text-warn">No price set yet</span>
-                )}
+                {/* Same words as the model row and the hero: the API says an
+                    assumed-free profile resolves to $0, so "no price set"
+                    here would contradict them. */}
+                <PriceLine profile={profile} variant="option" />
               </button>
             );
           })}

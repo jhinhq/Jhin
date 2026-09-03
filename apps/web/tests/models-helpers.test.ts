@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   autofillForModel,
   balanceSourceLabel,
+  budgetBannerText,
   buildProfileConfig,
   capabilitySummary,
   costTier,
@@ -24,9 +25,11 @@ import {
   ollamaLeaseText,
   ollamaLoadedSummary,
   ollamaNamePath,
+  ollamaUsedAsText,
   priceSourceBadge,
   priceSourceLabel,
   profilePrefillForOllamaModel,
+  providerTypeLabel,
   residentByName,
   SELF_HOSTED_PRICE_NOTE,
   selfHostedPriceNote,
@@ -35,6 +38,7 @@ import {
 } from "@/lib/models";
 import type {
   ModelProfile,
+  ModelProviderType,
   OllamaLoadedModel,
   OllamaModel,
   ProviderModelEntry,
@@ -587,5 +591,72 @@ describe("buildProfileConfig", () => {
     });
     expect(buildProfileConfig(existing, false)).toEqual({ embeddings: { enabled: true } });
     expect(buildProfileConfig(undefined, true)).toEqual({ web_search: { enabled: true } });
+  });
+});
+
+describe("providerTypeLabel", () => {
+  it("names each provider type and passes an unknown one through", () => {
+    expect(providerTypeLabel("openai")).toBe("OpenAI");
+    expect(providerTypeLabel("anthropic")).toBe("Anthropic");
+    expect(providerTypeLabel("openrouter")).toBe("OpenRouter");
+    expect(providerTypeLabel("ollama")).toBe("Ollama (local)");
+    expect(providerTypeLabel("openai_compatible")).toBe("OpenAI-compatible endpoint");
+    expect(providerTypeLabel("mystery" as ModelProviderType)).toBe("mystery");
+  });
+});
+
+describe("budgetBannerText", () => {
+  it("says nothing while the budget is fine or absent", () => {
+    expect(budgetBannerText(null)).toBeNull();
+    expect(budgetBannerText(summarizeBudget(10_000_000, 100_000_000))).toBeNull();
+  });
+
+  it("warns near the budget and refuses past it, one sentence each", () => {
+    expect(budgetBannerText(summarizeBudget(42_000_000, 50_000_000))).toBe(
+      "$42.00 of $50.00 (84%) of the monthly budget — runs stop once it's reached.",
+    );
+    expect(budgetBannerText(summarizeBudget(60_000_000, 50_000_000))).toBe(
+      "Over budget: $60.00 of $50.00 — new runs are refused until the budget is raised under Settings.",
+    );
+  });
+});
+
+describe("ollamaUsedAsText", () => {
+  const qwen = modelProfile({
+    id: "p-qwen",
+    provider_id: "prov-ollama",
+    model_name: "qwen3.8",
+    display_name: "qwen3.8",
+  });
+  const fast = modelProfile({
+    id: "p-fast",
+    provider_id: "prov-ollama",
+    model_name: "qwen3.8:latest",
+    display_name: "qwen fast",
+  });
+  const elsewhere = modelProfile({
+    id: "p-other",
+    provider_id: "prov-2",
+    model_name: "qwen3.8:latest",
+    display_name: "elsewhere",
+  });
+
+  it("is null when no profile runs the model", () => {
+    expect(ollamaUsedAsText([], "prov-ollama", "qwen3.8:latest")).toBeNull();
+    expect(ollamaUsedAsText([qwen], "prov-ollama", "muse-glimmer:latest")).toBeNull();
+  });
+
+  it("matches a profile typed without :latest and quotes every name in API order", () => {
+    expect(ollamaUsedAsText([qwen], "prov-ollama", "qwen3.8:latest")).toBe("used as “qwen3.8”");
+    expect(ollamaUsedAsText([qwen, fast], "prov-ollama", "qwen3.8:latest")).toBe(
+      "used as “qwen3.8”, “qwen fast”",
+    );
+  });
+
+  it("ignores a profile on another provider", () => {
+    expect(ollamaUsedAsText([elsewhere], "prov-ollama", "qwen3.8:latest")).toBeNull();
+    expect(ollamaUsedAsText([elsewhere, qwen], "prov-ollama", "qwen3.8:latest")).toBe(
+      "used as “qwen3.8”",
+    );
   });
 });

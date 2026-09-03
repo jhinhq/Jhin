@@ -5,15 +5,16 @@
  * credits, and the edit/delete actions. This is the old provider card's
  * content, relocated — it stopped being the first thing everyone had to
  * read. The one thing that went the other way is an Ollama host's local
- * models: they are live state people come to check and act on, so they sit
- * on the card itself, and this dialog only points there. */
+ * models: they are live state people come to check and act on, so they have
+ * their own Local models block on the page, and this dialog only points
+ * there. */
 
 import { useMutation } from "@tanstack/react-query";
 import { CheckCircle2, HardDrive, KeyRound, ShieldCheck, Wallet, XCircle } from "lucide-react";
 import { useState } from "react";
 import { Button, ConfirmDialog, Dialog, ErrorNote } from "@/components/ui";
 import { ProviderStatus } from "@/components/models/provider-card";
-import { api, ApiError } from "@/lib/api";
+import { api, errorText } from "@/lib/api";
 import { formatDateTime } from "@/lib/format";
 import { useProviderBalance } from "@/lib/hooks";
 import {
@@ -23,11 +24,6 @@ import {
   microsToDollarInput,
 } from "@/lib/models";
 import type { ModelProvider } from "@/lib/types";
-
-function errText(error: unknown, fallback: string): string | null {
-  if (!error) return null;
-  return error instanceof ApiError ? error.detail : fallback;
-}
 
 export function ProviderManageDialog({
   workspaceId,
@@ -71,7 +67,7 @@ export function ProviderManageDialog({
       setVerifyResult(result);
       onChanged();
     },
-    onError: (error) => setActionError(errText(error, "Verification failed.")),
+    onError: (error) => setActionError(errorText(error, "Verification failed.")),
   });
 
   const remove = useMutation({
@@ -86,7 +82,7 @@ export function ProviderManageDialog({
     },
     onError: (error) => {
       setConfirmDelete(false);
-      setActionError(errText(error, "Deleting the provider failed."));
+      setActionError(errorText(error, "Deleting the provider failed."));
     },
   });
 
@@ -155,7 +151,7 @@ export function ProviderManageDialog({
         <ErrorNote message={actionError} />
 
         {/* A local host has no balance to show; what it has is models, and
-            those live on the card this dialog opened from — one place, not
+            those live in the Local models block on the page — one place, not
             two, so a load started there is never missing here. */}
         {provider.type === "ollama" ? (
           <p
@@ -164,8 +160,8 @@ export function ProviderManageDialog({
           >
             <HardDrive size={12} aria-hidden className="mt-0.5 shrink-0" />
             <span>
-              Installed and loaded models, with Load and Unload, are on this provider&apos;s
-              card on the Models page.
+              Installed and loaded models, with Load and Unload, are under Local models on the
+              Models page.
             </span>
           </p>
         ) : (
@@ -248,7 +244,7 @@ export function BalanceBlock({
       onChanged();
       void balance.refetch();
     },
-    onError: (error) => onError(errText(error, "Saving the loaded credits failed.")),
+    onError: (error) => onError(errorText(error, "Saving the loaded credits failed.")),
   });
 
   if (balance.isPending) {

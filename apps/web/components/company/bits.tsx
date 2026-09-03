@@ -97,14 +97,19 @@ export function Disclosure({
   openLabel,
   children,
   defaultOpen = false,
+  tone = "accent",
 }: {
   label: string;
   openLabel?: string;
   children: React.ReactNode;
   defaultOpen?: boolean;
+  /** "danger" for a disclosure whose label is itself a warning (a budget
+   * in trouble); the default accent for everything else. */
+  tone?: "accent" | "danger";
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const id = useId();
+  const color = tone === "danger" ? "text-danger" : "text-accent-strong";
   return (
     <div>
       <button
@@ -112,7 +117,7 @@ export function Disclosure({
         aria-expanded={open}
         aria-controls={id}
         onClick={() => setOpen((value) => !value)}
-        className="inline-flex min-h-10 items-center text-xs font-medium text-accent-strong hover:underline md:min-h-0"
+        className={`inline-flex min-h-10 items-center text-xs font-medium hover:underline md:min-h-0 ${color}`}
       >
         {open ? (openLabel ?? `Hide ${label.replace(/^Show /, "")}`) : label}
       </button>

@@ -248,16 +248,6 @@ export function ollamaMemoryText(resident: OllamaResident): string {
   return `${formatModelSize(resident.sizeVramBytes)} VRAM`;
 }
 
-/** Ollama restarts its keep-alive timer on every request, so the poll keeps
- * this honest; callers re-render between polls so the minutes tick. An
- * expiry already in the past means the host has not evicted the model yet —
- * "expires 2 minutes ago" would be nonsense. */
-export function ollamaExpiryText(resident: OllamaResident): string {
-  if (resident.keepsLoaded || !resident.expiresAt) return "stays loaded";
-  if (new Date(resident.expiresAt).getTime() <= Date.now()) return "unloading now";
-  return `expires ${formatRelative(resident.expiresAt)}`;
-}
-
 /** The same lease phrased to follow a "Loaded" badge — "for 4 more minutes"
  * rather than "expires in 4 minutes", which after a badge reads as a
  * forecast. Whole minutes, then whole hours: a lease is a rough promise
@@ -641,4 +631,53 @@ export function untrackedSpendNote(
   return `${untrackedRuns} ${single ? "run" : "runs"} on ${named}${more} ${
     single ? "isn't" : "aren't"
   } included — no price set.`;
+}
+
+/** The provider types an admin can connect, with the label each wears on
+ * the Models page and whether the provider dialog must ask for a key. */
+export const PROVIDER_TYPES: { value: ModelProviderType; label: string; needsKey: boolean }[] = [
+  { value: "openai", label: "OpenAI", needsKey: true },
+  { value: "anthropic", label: "Anthropic", needsKey: true },
+  { value: "openrouter", label: "OpenRouter", needsKey: true },
+  { value: "ollama", label: "Ollama (local)", needsKey: false },
+  { value: "openai_compatible", label: "OpenAI-compatible endpoint", needsKey: false },
+];
+
+/** "OpenAI", "Ollama (local)", … — the type as a person reads it. An
+ * unknown type passes through so a newer API never renders as blank. */
+export function providerTypeLabel(type: ModelProviderType): string {
+  return PROVIDER_TYPES.find((t) => t.value === type)?.label ?? type;
+}
+
+/** The one-line interrupt at the top of the Models page once the month is
+ * at or over the warning threshold; null while the budget is fine or there
+ * is none, so the page says nothing about money until it has to. */
+export function budgetBannerText(budget: BudgetSummary | null): string | null {
+  if (!budget) return null;
+  if (budget.tone === "warn") {
+    return `${budget.label} of the monthly budget — runs stop once it's reached.`;
+  }
+  if (budget.tone === "over") {
+    return `${budget.label} — new runs are refused until the budget is raised under Settings.`;
+  }
+  return null;
+}
+
+/** `used as “qwen3.8”` — which profiles on this provider run the host's
+ * model `name`, so a Local models row never looks as if "Use as model"
+ * offers something that already exists. Names in API order, quoted; null
+ * when no profile matches. A profile typed without ":latest" still counts. */
+export function ollamaUsedAsText(
+  profiles: ModelProfile[],
+  providerId: string,
+  name: string,
+): string | null {
+  const names = profiles
+    .filter(
+      (profile) =>
+        profile.provider_id === providerId && ollamaCanonicalName(profile.model_name) === name,
+    )
+    .map((profile) => `“${profile.display_name}”`);
+  if (names.length === 0) return null;
+  return `used as ${names.join(", ")}`;
 }

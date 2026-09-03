@@ -16,7 +16,31 @@ API and workers see `ModelClient`, `ModelRequest`, and `ModelResponse`.
 | Price catalog | `packages/models/src/jhin_models/pricing.py` | Static public list prices for OpenAI and Anthropic, `lookup_price`, OpenRouter per-token conversion, the price-source precedence, and the self-hosted rule (`SELF_HOSTED_PROVIDER_TYPES`, `is_self_hosted`, `effective_price`) that every other surface imports rather than restates. |
 | Fake provider | `packages/models/src/jhin_models/testing/fake_openai.py` | Dev/test endpoint with deterministic prices, credits, and costs. |
 | API | `apps/api/src/jhin_api/models/` | Providers, profiles, verification, model listing, balance, spend, pricing refresh, Ollama load/unload. |
-| UI | `apps/web/app/(app)/models/page.tsx`, `apps/web/lib/models.ts`, `apps/web/components/models/ollama-panel.tsx` | Provider cards with a Balance block, profile dialog with auto-filled pricing, Spend tile, Local models panel on the Ollama provider. |
+| UI | `apps/web/app/(app)/models/page.tsx`, `apps/web/components/models/*`, `apps/web/lib/models.ts` | The Models page (see "The Models page" below): default-model hero, model rows with inline price and Ollama load state, a Local models section per Ollama host, provider rows, spend and price-provenance disclosures; every dialog (provider, profile, admin key, manage, change default) lives in `components/models/`. |
+
+### The Models page
+
+Top to bottom, for an admin: a **Default model** hero (the one decision most
+workspaces make here — name, capability line, cost tier with the exact price
+pair, and whether an Ollama-hosted default is loaded, with *Change*); a
+**Models** list, one row per profile — display name, the raw model id when
+it differs, provider, capability line, the price cell (*$$ $a in · $b out*,
+*Free (self-hosted)*, or *No price yet* with *Add price*), the live loaded
+state for a profile on an Ollama host, and *Make default* / *Edit*; a
+**Local models** section, one block per Ollama host, with the host's
+version and installed count, the live *N of M loaded* line from the
+ten-second poll, the keep-alive select, and one row per installed model
+with *Load*, *Unload* and *Use as model*; a **Providers** list of status
+rows (type, Connected / Needs attention / Turned off, model count, spend
+this month, *Manage*); then two closed disclosures — *Spend this month — $X*
+(the shared spend tile with the budget bar; it opens itself and a banner
+appears at the top of the page once the month crosses the warning
+threshold) and *Advanced — where prices come from*. Members see the hero
+without *Change*, the rows without buttons, no Local models section, and the
+sentence that providers are managed by admins. Nothing operational — verify,
+balance, credentials, delete, price provenance — is on the page face; it is
+one dialog or one disclosure away. A fresh workspace shows only the
+*No model providers yet* state, never three stacked empty boxes.
 
 ## Data model (migrations `0020`, `0027`, and `0028` for measured pricing)
 
@@ -202,13 +226,15 @@ direction. So:
   its `price_source` and human label, the measured rate behind it when there is
   one, a `suggestion` when a better source exists, and the models that ran
   unpriced this month.
-- Unpriced models get a warning wherever they appear (create dialog, profile
-  row, Models page, spend tile) that says spend will not be tracked, links the
-  provider's real pricing page, and offers input/output fields inline.
+- Unpriced models get a warning wherever they appear (create dialog, the
+  profile's row, the spend disclosure, the pricing panel) that says spend
+  will not be tracked, links the provider's real pricing page, and offers
+  input/output fields inline.
 - A self-hosted profile with no stored price is the one case where `$0.00` is
-  the truth rather than the failure, so it gets none of that: the profile card
-  shows a calm *Free (self-hosted)* badge where a hosted vendor's row would
-  say *No price yet*, the dialog's price fields stay empty and editable under
+  the truth rather than the failure, so it gets none of that: the profile's
+  row on the Models page shows a calm *Free (self-hosted)* badge where a
+  hosted vendor's row would say *No price yet* with an inline *Add price*,
+  the dialog's price fields stay empty and editable under
   the note *"Self-hosted endpoints have no per-token price. Enter prices only
   if this endpoint bills you."*, and its runs are counted at `$0` rather than
   listed as untracked. `assumed_free` on the profile is what the UI keys on.
@@ -270,7 +296,9 @@ cache entry.
 
 `GET /workspaces/{id}/spend` returns the workspace's tracked spend this month
 and all time, a per-provider breakdown, and the optional budget; the Models
-page header tile and Settings → "Model spend and budget" render it.
+page's *Spend this month* disclosure (and its budget banner once the warning
+threshold is crossed), Home, and Settings → "Model spend and budget" render
+it.
 
 Budgets are enforced (plan 15.5): the agent worker refuses to admit a new run
 — and stops an in-flight run before its next reasoning step — once the
@@ -286,16 +314,26 @@ priced profile) and drifts when prices are stale.
 
 ## Ollama: local models
 
-Ollama serves models from a machine you run, so its provider card has
-different questions to answer than a hosted vendor's: not how much credit is
-left, but which models are pulled, which one is in memory right now, and
-whether it can be warmed up before the next run instead of during it. An
-Ollama provider therefore shows a **Local models** panel where every other
-type shows the Balance block. It lists everything the host has pulled with
-size, family, parameter count, quantisation, and context length, marks what
-is resident (with VRAM use and when it expires), and gives admins **Load**,
+Ollama serves models from a machine you run, so its provider has different
+questions to answer than a hosted vendor's: not how much credit is left, but
+which models are pulled, which one is in memory right now, and whether it
+can be warmed up before the next run instead of during it. The Models page
+therefore gives each Ollama host its own block under **Local models**,
+directly beneath the model list, where a hosted vendor has only a status row
+(its Balance lives behind *Manage*). The block's header carries the host's
+version, how many models are installed, the live *N of M loaded — names —
+size* line from the ten-second poll, and the keep-alive select (shown while
+something is still loadable). Each installed model is a row with size,
+family, parameter count, quantisation, context length and capabilities;
+a resident row says where the weights sit (*18.2 GB VRAM*, *in RAM*) and
+how long the lease has left (*for 4 more minutes*, *stays loaded*), names
+the profiles that use it (*used as “qwen3.8”*), and gives admins **Load**,
 **Unload**, and **Use as model** — the last opens the profile dialog
-pre-filled with the model at $0 / $0.
+pre-filled with the model at $0 / $0. The same loaded state, in the same
+words, sits on every profile row that runs on the host and on the default
+hero, with its own *Load*; all of them read one subscription per host
+(`apps/web/lib/ollama-host.ts`), so a load pressed anywhere reads as loading
+everywhere.
 
 ### Routes
 
@@ -391,9 +429,11 @@ container itself, so the base URL has to name the machine:
 `http://<lan-ip>:11434/v1`, or `http://host.docker.internal:11434/v1` under
 Docker Desktop when Ollama runs on the same machine as the stack. The Ollama
 host must be started with `OLLAMA_HOST=0.0.0.0` (or an explicit interface)
-before anything but itself can connect. The panel's unreachable state names
-the base URL it tried for exactly this reason, and Verify on the provider
-card is the quickest check that `/v1/models` answers.
+before anything but itself can connect. The Local models block's unreachable
+state names the base URL it tried for exactly this reason (the header line
+says *Ollama unreachable* with the host's reason as a tooltip), and *Verify*
+in the provider's Manage dialog is the quickest check that `/v1/models`
+answers.
 
 ### Long loads
 
@@ -415,10 +455,11 @@ gives `/api/generate` a ten-minute read timeout; the API awaits that call
 for at most 20 s (`OLLAMA_LOAD_RESPONSE_BUDGET_SECONDS`) and on timeout
 answers `status: "loading"` (*"Ollama is still loading … It will show as
 loaded when it finishes."*) while the shielded task finishes in the
-background and closes its client. The panel treats `loaded` and `loading`
-alike: the row reads *Loading qwen3.8:latest — 17.7 GB, this can take a
-minute or more* until the 10 s `/loaded` poll lists the name. Unload is
-quick and is awaited in full.
+background and closes its client. The Local models block treats `loaded` and
+`loading` alike: the row reads *Loading qwen3.8 — 17.7 GB, this can take a
+minute or more* until the 10 s `/loaded` poll lists the name, and the
+profile rows and hero show *Loading — 17.7 GB* from the same pending set.
+Unload is quick and is awaited in full.
 
 ### What the numbers mean
 
@@ -451,9 +492,10 @@ $0 by construction rather than as unknown — the self-hosted rule under
 "Where prices come from", which Ollama shares with `openai_compatible`.
 Picking a local model in the profile dialog auto-fills `0` / `0` with the
 note *"Runs on your Ollama host — no per-token price."*, and **Use as
-model** pre-fills the same. Saving those zeros stores a user-entered price
-(`price_source: user`); clearing them stores nothing, and the profile then
-resolves to `self_hosted` at read time and is badged *Free (self-hosted)*.
+model** on a Local models row pre-fills the same. Saving those zeros stores
+a user-entered price (`price_source: user`); clearing them stores nothing,
+and the profile then resolves to `self_hosted` at read time and is badged
+*Free (self-hosted)* on its row, the hero, and the change-default picker.
 Either way a local model's runs are tracked at $0.00 instead of being
 reported as unpriced, so they neither inflate the spend total nor appear in
 *"n runs aren't included — no price set"* — which is the point. An Ollama

@@ -1,6 +1,7 @@
-/** The recomposed Models page: decisions first (default model, model cards,
- * provider cards), machinery folded away — the pricing panel behind one
- * Advanced disclosure, and destructive actions behind the shared
+/** The recomposed Models page: decisions first (the default-model hero, the
+ * model rows, each Ollama host's Local models block, the provider rows),
+ * machinery folded away — spend and the pricing panel behind two closed
+ * disclosures at the bottom, and destructive actions behind the shared
  * ConfirmDialog instead of `window.confirm`. */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -166,22 +167,30 @@ function json(data: unknown, status = 200): Response {
 
 /** Every request the page makes, with the writes kept for assertions. With
  * `ollama`, a local provider sits beside OpenAI and its host answers;
- * `profiles`, `pricing` and `defaultProfileId` replace the default rows. */
+ * `providers`, `profiles`, `pricing`, `spend` and `defaultProfileId` replace
+ * the default rows (`defaultProfileId: null` means no default is set). */
 function installServer(
   options: {
     ollama?: boolean;
+    providers?: ModelProvider[];
     profiles?: ModelProfile[];
     pricing?: PricingStatus;
-    defaultProfileId?: string;
+    spend?: WorkspaceSpend;
+    defaultProfileId?: string | null;
   } = {},
 ) {
   const deletes: string[] = [];
-  const providers = options.ollama ? [PROVIDER, OLLAMA_PROVIDER] : [PROVIDER];
+  const providers =
+    options.providers ?? (options.ollama ? [PROVIDER, OLLAMA_PROVIDER] : [PROVIDER]);
   const profiles = options.profiles ?? PROFILES;
   const pricing = options.pricing ?? PRICING;
+  const spend = options.spend ?? SPEND;
   const workspaceDetail = {
     ...WORKSPACE_DETAIL,
-    default_model_profile_id: options.defaultProfileId ?? WORKSPACE_DETAIL.default_model_profile_id,
+    default_model_profile_id:
+      options.defaultProfileId === undefined
+        ? WORKSPACE_DETAIL.default_model_profile_id
+        : options.defaultProfileId,
   };
   vi.stubGlobal(
     "fetch",
@@ -215,7 +224,7 @@ function installServer(
       }
       if (path === "/api/v1/workspaces/workspace-1/model-profiles") return json(profiles);
       if (path === "/api/v1/workspaces/workspace-1") return json(workspaceDetail);
-      if (path === "/api/v1/workspaces/workspace-1/spend") return json(SPEND);
+      if (path === "/api/v1/workspaces/workspace-1/spend") return json(spend);
       if (path === "/api/v1/workspaces/workspace-1/model-profiles/pricing-status") {
         return json(pricing);
       }
@@ -299,38 +308,40 @@ describe("ModelsPage", () => {
     expect(confirmSpy).not.toHaveBeenCalled();
   });
 
-  it("puts the Ollama card first with its panel open and a header line saying what is loaded", async () => {
+  it("puts the Ollama host in its own Local models section with the panel open and a header line saying what is loaded", async () => {
     installServer({ ollama: true });
     renderPage();
     await screen.findByRole("heading", { name: "Providers" });
 
-    // The card with live state leads the grid, and is the wide one.
+    // The local host leads the provider rows.
     const cards = screen.getAllByTestId(/^provider-card-/);
     expect(cards.map((card) => card.getAttribute("data-testid"))).toEqual([
       "provider-card-prov-ollama",
       "provider-card-prov-1",
     ]);
-    const [ollama, cloud] = cards;
-    expect(ollama.className).toContain("md:col-span-2");
+    const [ollamaRow, cloudRow] = cards;
 
-    // The panel is simply on the card — nothing to open — and the header
-    // line answers before anyone scrolls to it.
-    expect(within(ollama).getByTestId("ollama-panel")).toBeDefined();
-    expect(await within(ollama).findByTestId("ollama-model-qwen3.8:latest")).toBeDefined();
+    // The host has its own section on the page face — nothing to open —
+    // and the header line answers before anyone scrolls to it.
+    expect(screen.getByRole("heading", { name: "Local models" })).toBeDefined();
+    const host = screen.getByTestId("ollama-host-prov-ollama");
+    expect(within(host).getByTestId("ollama-panel")).toBeDefined();
+    expect(await within(host).findByTestId("ollama-model-qwen3.8:latest")).toBeDefined();
     await waitFor(() =>
-      expect(within(ollama).getByTestId("ollama-header-status").textContent).toBe(
+      expect(within(host).getByTestId("ollama-header-status").textContent).toBe(
         "Nothing loaded",
       ),
     );
 
-    // The cloud card is the status tile it always was.
-    expect(within(cloud).queryByTestId("ollama-panel")).toBeNull();
-    expect(within(cloud).queryByTestId("ollama-header-status")).toBeNull();
-    expect(cloud.className).not.toContain("col-span");
+    // Both provider rows are status rows: the live state lives in one
+    // place, not two.
+    expect(within(ollamaRow).queryByTestId("ollama-panel")).toBeNull();
+    expect(within(ollamaRow).queryByTestId("ollama-header-status")).toBeNull();
+    expect(within(cloudRow).queryByTestId("ollama-panel")).toBeNull();
+    expect(within(cloudRow).queryByTestId("ollama-header-status")).toBeNull();
 
-    // Manage keeps the endpoint facts and points back at the card: the
-    // panel lives in one place, not two.
-    fireEvent.click(within(ollama).getByRole("button", { name: "Manage" }));
+    // Manage keeps the endpoint facts and points at the section.
+    fireEvent.click(within(ollamaRow).getByRole("button", { name: "Manage" }));
     const manage = await screen.findByRole("dialog", { name: "Ollama Main" });
     expect(within(manage).queryByTestId("ollama-panel")).toBeNull();
     expect(within(manage).getByTestId("ollama-manage-note")).toBeDefined();
@@ -342,9 +353,9 @@ describe("ModelsPage", () => {
     renderPage();
     await screen.findByRole("heading", { name: "Default model" });
 
-    // Straight from the card's panel; no Manage dialog in between.
-    const card = await screen.findByTestId("provider-card-prov-ollama");
-    const row = await within(card).findByTestId("ollama-model-qwen3.8:latest");
+    // Straight from the host's row; no Manage dialog in between.
+    const host = await screen.findByTestId("ollama-host-prov-ollama");
+    const row = await within(host).findByTestId("ollama-model-qwen3.8:latest");
     fireEvent.click(within(row).getByRole("button", { name: "Use as model" }));
 
     // A new-profile dialog that already knows the model: name, identifier,
@@ -517,5 +528,95 @@ describe("ModelsPage", () => {
     expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
     expect(screen.queryByRole("button", { name: /Add provider/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /New profile/ })).toBeNull();
+    // No providers to list means no host to show, and nothing to load.
+    expect(screen.queryByRole("heading", { name: "Local models" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Load" })).toBeNull();
+    expect(
+      screen.getByText("Provider accounts and API keys are managed by workspace admins."),
+    ).toBeDefined();
+    // The disclosures are there for everyone; their buttons are not.
+    expect(screen.getByRole("button", { name: "Spend this month — $12.50" })).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Advanced — where prices come from" }));
+    await screen.findByTestId("pricing-panel");
+    expect(screen.queryByRole("button", { name: /Refresh price catalog/ })).toBeNull();
+  });
+
+  it("keeps spend folded behind a label carrying the month total", async () => {
+    installServer();
+    renderPage();
+    await screen.findByRole("heading", { name: "Default model" });
+
+    expect(screen.queryByTestId("spend-tile")).toBeNull();
+    expect(screen.queryByTestId("budget-banner")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Spend this month — $12.50" }));
+    expect(screen.getByTestId("spend-tile")).toBeDefined();
+  });
+
+  it("interrupts with a budget banner and opens the spend disclosure when the month is over budget", async () => {
+    installServer({
+      spend: { ...SPEND, spent_month_micros: 60_000_000, monthly_budget_micros: 50_000_000 },
+    });
+    renderPage();
+    await screen.findByRole("heading", { name: "Default model" });
+
+    expect((await screen.findByTestId("budget-banner")).textContent).toBe(
+      "Over budget: $60.00 of $50.00 — new runs are refused until the budget is raised under Settings.",
+    );
+    // Already open: the number is the interrupt, not a click away.
+    expect(screen.getByTestId("spend-tile")).toBeDefined();
+    expect(screen.getByRole("button", { name: /^Hide spend/ })).toBeDefined();
+  });
+
+  it("offers Choose a default when no default is set", async () => {
+    installServer({ defaultProfileId: null });
+    renderPage();
+    await screen.findByRole("heading", { name: "Default model" });
+
+    expect(screen.getByText("No default model yet")).toBeDefined();
+    expect(screen.queryByText("Default")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Choose a default" }));
+    expect(await screen.findByRole("dialog", { name: "Change the default model" })).toBeDefined();
+  });
+
+  it("shows a fresh workspace one empty state, not three", async () => {
+    installServer({ providers: [], profiles: [] });
+    renderPage();
+    await screen.findByRole("heading", { name: "Providers" });
+
+    expect(screen.getByText("No model providers yet")).toBeDefined();
+    expect(screen.getByRole("button", { name: /Add first provider/ })).toBeDefined();
+    expect(screen.queryByRole("heading", { name: "Default model" })).toBeNull();
+    // The page title is also "Models"; the section heading is the h2.
+    expect(screen.queryByRole("heading", { name: "Models", level: 2 })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Local models" })).toBeNull();
+    expect(screen.queryByText("No model profiles yet")).toBeNull();
+    expect(screen.getByRole("button", { name: /New profile/ }).hasAttribute("disabled")).toBe(
+      true,
+    );
+  });
+
+  it("hides Local models when no provider is an Ollama host", async () => {
+    installServer();
+    renderPage();
+    await screen.findByRole("heading", { name: "Providers" });
+
+    expect(screen.queryByRole("heading", { name: "Local models" })).toBeNull();
+    expect(screen.queryByTestId("ollama-panel")).toBeNull();
+  });
+
+  it("says which profile uses a host model", async () => {
+    installServer({ ollama: true, profiles: [profile(), ASSUMED_FREE_PROFILE] });
+    renderPage();
+    await screen.findByRole("heading", { name: "Default model" });
+
+    const host = await screen.findByTestId("ollama-host-prov-ollama");
+    const row = await within(host).findByTestId("ollama-model-qwen3.8:latest");
+    expect(within(row).getByText("used as “qwen3.8”")).toBeDefined();
+    expect(within(row).getByRole("button", { name: "Use as model" })).toBeDefined();
+
+    // The model row spells the raw id out where it differs from the name.
+    const card = screen.getByTestId("profile-card-profile-ollama");
+    const id = within(card).getByText("qwen3.8:latest");
+    expect(id.className).toContain("font-mono");
   });
 });
