@@ -1,7 +1,7 @@
 # Multi-stage build for the Jhin web UI (Next.js standalone output).
 # Build context is the repository root (pnpm workspace).
 
-FROM node:22-alpine AS deps
+FROM node:26-alpine AS deps
 RUN corepack enable pnpm
 WORKDIR /repo
 # Hoisted layout: Next.js standalone output-file tracing misses files behind
@@ -18,7 +18,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ENV API_INTERNAL_URL=http://api:8000
 RUN pnpm --filter jhin-web build
 
-FROM node:22-alpine AS runtime
+FROM node:26-alpine AS runtime
 RUN addgroup -S jhin && adduser -S jhin -G jhin
 WORKDIR /app
 ENV NODE_ENV=production \
