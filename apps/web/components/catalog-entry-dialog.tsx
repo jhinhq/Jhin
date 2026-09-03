@@ -18,6 +18,7 @@
 
 import { useState } from "react";
 import { LogoTile } from "@/components/catalog/logo-tile";
+import { ConnectPanel } from "@/components/connect/connect-panel";
 import { CreateConnectionDialog, type ConnectionPrefill } from "@/components/connection-create-dialog";
 import { Badge, Button, Dialog, ErrorNote, Spinner } from "@/components/ui";
 import {
@@ -33,6 +34,7 @@ import {
 } from "@/lib/apps";
 import { normalizeConfigSchema } from "@/lib/config-schema";
 import { useCatalogEntry } from "@/lib/hooks";
+import { connectorSignsIn } from "@/lib/oauth";
 import type { CatalogEntryDetail, ConnectionCreated, ConnectorInfo } from "@/lib/types";
 
 /** Third-party, untrusted, and not an endorsement — said in the markup. */
@@ -285,14 +287,30 @@ export function CatalogEntryDialog({
       </Dialog>
 
       {connecting !== null && detail && activeTarget && activeTarget.kind !== "unsupported" ? (
-        <CreateConnectionDialog
-          workspaceId={workspaceId}
-          connector={activeTarget.connector}
-          prefill={prefill}
-          schema={connecting === "entry" ? schema : null}
-          onClose={() => setConnecting(null)}
-          onCreated={onCreated}
-        />
+        connecting === "entry" &&
+        activeTarget.kind === "native" &&
+        connectorSignsIn(activeTarget.connector) ? (
+          // A native app that signs in (GitHub) connects the way the library
+          // card does: the panel asks the server how, and an API key is the
+          // demoted fallback. MCP entries keep the schema-driven form.
+          <ConnectPanel
+            workspaceId={workspaceId}
+            connector={activeTarget.connector}
+            prefill={prefill}
+            onClose={() => setConnecting(null)}
+            onConnected={(connection) => onCreated({ connection, webhook: null })}
+            onCreated={onCreated}
+          />
+        ) : (
+          <CreateConnectionDialog
+            workspaceId={workspaceId}
+            connector={activeTarget.connector}
+            prefill={prefill}
+            schema={connecting === "entry" ? schema : null}
+            onClose={() => setConnecting(null)}
+            onCreated={onCreated}
+          />
+        )
       ) : null}
     </>
   );

@@ -91,14 +91,34 @@ class GitHubConnector(Connector):
         Deliberately the same check as a PAT — the token is a bearer token
         whichever way it was obtained — so a connection made in the browser
         and one made with a device code prove themselves identically.
+
+        A user-to-server token reaches only repositories the app is installed
+        on, and GitHub offers no API for the install itself, so the one thing
+        this can add is whether it has happened yet. ``ok`` stays true either
+        way: the token is real, and "installed nowhere" is a reachability fact
+        for the person to act on, not a broken connection.
         """
-        user = await github_request("GET", base_url, "/user", oauth_access_token(credentials))
+        token = oauth_access_token(credentials)
+        user = await github_request("GET", base_url, "/user", token)
         login = str(user.get("login", "unknown"))
-        return ConnectionHealth(
-            ok=True,
-            message=f"Authenticated as {login}",
-            details={"login": login, "auth": auth_type},
-        )
+        message = f"Authenticated as {login}"
+        details = {"login": login, "auth": auth_type}
+        try:
+            installations = await github_request("GET", base_url, "/user/installations", token)
+        except (GitHubApiError, GitHubAuthError):
+            # A classic OAuth App token gets a 403 here; that is not a broken
+            # connection, only a question this token cannot answer.
+            return ConnectionHealth(ok=True, message=message, details=details)
+        raw_count = installations.get("total_count", 0) if isinstance(installations, dict) else 0
+        count = int(raw_count or 0) if isinstance(raw_count, int | str) else 0
+        details["installations"] = str(count)
+        if count == 0:
+            message = (
+                f"Authenticated as {login}. The app is not installed on any of your GitHub "
+                "accounts yet, so it cannot reach repositories — install it from your "
+                "GitHub Apps on github.com."
+            )
+        return ConnectionHealth(ok=True, message=message, details=details)
 
     async def _verify_app(self, base_url: str, credentials: dict[str, str]) -> ConnectionHealth:
         # Two live checks: the app JWT is accepted (GET /app) and an

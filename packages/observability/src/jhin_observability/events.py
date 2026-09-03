@@ -273,7 +273,10 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
         "connector_type": FieldKind.ENUM,
         "error_code": FieldKind.ENUM,
     },
-    "oauth.code_exchange_failed": {"connector_type": FieldKind.ENUM},
+    "oauth.code_exchange_failed": {
+        "connector_type": FieldKind.ENUM,
+        "error_code": FieldKind.ENUM,
+    },
     "oauth.connection_not_created": {"connector_type": FieldKind.ENUM},
     "oauth.github_app_conversion_failed": {},
     "oauth.refresher_not_started": {},
@@ -380,6 +383,7 @@ _OAUTH_ERROR_CODES: frozenset[str] = frozenset(
     {
         "access_denied",
         "authorization_pending",
+        "bad_verification_code",
         "device_flow_disabled",
         "expired_token",
         "incorrect_client_credentials",
@@ -389,6 +393,7 @@ _OAUTH_ERROR_CODES: frozenset[str] = frozenset(
         "invalid_request",
         "invalid_scope",
         "invalid_target",
+        "redirect_uri_mismatch",
         "server_error",
         "slow_down",
         "temporarily_unavailable",
@@ -406,6 +411,7 @@ EVENT_FIELD_ENUM_VALUES: dict[tuple[str, str], frozenset[str]] = {
     ),
     ("oauth.token_request_refused", "error_code"): _OAUTH_ERROR_CODES,
     ("oauth.device_start_refused", "error_code"): _OAUTH_ERROR_CODES,
+    ("oauth.code_exchange_failed", "error_code"): _OAUTH_ERROR_CODES,
     # Only the optional endpoints reach this event; a refused *required* URL
     # raises instead of logging.
     ("oauth.metadata_field_refused", "field"): frozenset(

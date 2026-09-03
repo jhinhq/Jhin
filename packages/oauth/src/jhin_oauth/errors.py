@@ -10,12 +10,16 @@ degrades to ``"unknown"`` instead of flowing through as free text.
 
 from __future__ import annotations
 
-# RFC 6749 §5.2, RFC 8628 §3.5, RFC 7591 §3.2.2, plus the two GitHub device
-# codes. Anything outside this set is reported as "unknown".
+# RFC 6749 §5.2, RFC 8628 §3.5, RFC 7591 §3.2.2, plus the five GitHub codes:
+# ``device_flow_disabled`` and ``incorrect_device_code`` from its device flow,
+# ``incorrect_client_credentials``, ``bad_verification_code`` and
+# ``redirect_uri_mismatch`` from its token endpoint (which reports them with
+# HTTP 200). Anything outside this set is reported as "unknown".
 KNOWN_ERROR_CODES: frozenset[str] = frozenset(
     {
         "access_denied",
         "authorization_pending",
+        "bad_verification_code",
         "device_flow_disabled",
         "expired_token",
         "incorrect_client_credentials",
@@ -25,6 +29,7 @@ KNOWN_ERROR_CODES: frozenset[str] = frozenset(
         "invalid_request",
         "invalid_scope",
         "invalid_target",
+        "redirect_uri_mismatch",
         "server_error",
         "slow_down",
         "temporarily_unavailable",

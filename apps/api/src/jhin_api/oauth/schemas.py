@@ -38,14 +38,39 @@ ConnectMethod = Literal[
 RegistrationSource = Literal["dcr", "manual", "static"]
 TokenEndpointAuthMethod = Literal["none", "client_secret_post", "client_secret_basic"]
 
+#: Why one sign-in flow cannot start, from Jhin's own vocabulary. Empty when
+#: it can. ``needs_client_secret`` means a registration exists but cannot do
+#: the browser redirect: a confidential provider with no stored secret.
+ProbeFlowReason = Literal[
+    "",
+    "needs_client_credentials",
+    "needs_client_secret",
+    "no_device_endpoint",
+]
+
+
+class ProbeFlow(BaseModel):
+    """Whether one sign-in flow can start for this workspace, and if not, why.
+
+    ``reason`` is a constant from Jhin's own vocabulary, never provider text.
+    """
+
+    available: bool
+    reason: ProbeFlowReason = ""
+
+
+def _unavailable_flow() -> ProbeFlow:
+    return ProbeFlow(available=False)
+
 
 class OAuthRedirectOut(BaseModel):
     """The redirect URI an operator pastes into a provider's app settings.
 
     Shown verbatim, with a copy button, on every bring-your-own-app screen.
     ``is_loopback`` exists so the UI can say the honest thing on a laptop
-    install: a provider on the internet cannot reach ``localhost``, and the
-    device-code flow is the answer there rather than a redirect.
+    install: a provider that redirects the browser can still send it back to
+    this machine, but one-click GitHub App creation needs the origin
+    allow-listed, which ``github_app_available`` reports.
     """
 
     redirect_uri: str
@@ -53,6 +78,15 @@ class OAuthRedirectOut(BaseModel):
     is_https: bool
     is_loopback: bool
     configured_via: Literal["OAUTH_REDIRECT_BASE_URL", "APP_URL"]
+    #: False when the outbound URL policy refuses this instance's own origin
+    #: (loopback / plain http not allow-listed): the manifest cannot be built,
+    #: and the web app offers the by-hand registration instead.
+    github_app_available: bool
+    #: ``app_permissions()`` — the permissions a manifest asks for — so a
+    #: by-hand setup never drifts from what the manifest would have requested.
+    github_app_permissions: dict[str, str]
+    #: Which flow Connect offers first for a native provider that can do both.
+    preferred_sign_in: Literal["redirect", "device_code"]
 
 
 class OAuthProbeIn(BaseModel):
@@ -81,6 +115,16 @@ class OAuthProbeOut(BaseModel):
     requires_client_secret: bool = False
     #: A constant from the service's own vocabulary. Never provider text.
     reason: str = ""
+    #: The browser redirect (authorization-code) flow. ``method`` names the
+    #: preferred flow; this and ``device_flow`` say which ones can start.
+    redirect_flow: ProbeFlow = Field(default_factory=_unavailable_flow)
+    #: RFC 8628. Available when the provider has a device endpoint and a
+    #: client is registered for this workspace.
+    device_flow: ProbeFlow = Field(default_factory=_unavailable_flow)
+    #: Where a person manages the apps they own at this provider — from the
+    #: provider table, validated on the way out, https. Rendered as a link the
+    #: person may open; the web app never navigates to it. Empty when unknown.
+    app_settings_url: str = ""
 
 
 class OAuthStartIn(BaseModel):

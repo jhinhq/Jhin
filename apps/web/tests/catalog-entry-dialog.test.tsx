@@ -14,6 +14,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CatalogEntryDialog } from "@/components/catalog-entry-dialog";
 import type { CatalogEntryDetail, ConnectorInfo } from "@/lib/types";
+import { WorkspaceProvider } from "@/lib/workspace-context";
 
 afterEach(() => {
   cleanup();
@@ -339,6 +340,117 @@ describe("CatalogEntryDialog", () => {
     const connect = await within(dialog).findByRole("button", { name: "Connect" });
     expect((connect as HTMLButtonElement).disabled).toBe(false);
     expect(connect.getAttribute("aria-describedby")).toBeNull();
+
+    // An MCP entry keeps the schema-driven form: its server is what gets
+    // probed, from the form's own URL, and the entry's contract fills it.
+    fireEvent.click(connect);
+    expect(await screen.findByTestId("create-connection-form")).toBeDefined();
+    expect(screen.queryByTestId("connect-panel")).toBeNull();
+  });
+
+  it("connects a native app that signs in through the Connect panel", async () => {
+    // GitHub from the catalog is the same GitHub as the library card: the
+    // panel asks the server how it signs in, and the API key is the demoted
+    // fallback rather than the only door.
+    const github: ConnectorInfo = {
+      ...MCP_CONNECTOR,
+      connector_type: "github",
+      display_name: "GitHub",
+      icon: "github",
+      auth_schemes: [
+        { type: "oauth", label: "Sign in with GitHub", description: "", secret_fields: [] },
+        {
+          type: "pat",
+          label: "Personal access token",
+          description: "",
+          secret_fields: [
+            { name: "token", label: "Token", placeholder: "ghp_…", multiline: false, required: true },
+          ],
+        },
+      ],
+      config_fields: [],
+    };
+    const entry = detail({
+      slug: "github",
+      name: "GitHub",
+      connector_type: "github",
+      mcp_url: null,
+      auth_hint: "oauth",
+      config_schema: null,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const path = String(input);
+        const method = init?.method ?? "GET";
+        if (path === `/api/v1/catalog/entries/${entry.slug}` && method === "GET") return json(entry);
+        if (path === "/api/v1/oauth/redirect-uri") {
+          return json({
+            redirect_uri: "https://jhin.example.com/api/v1/oauth/callback",
+            github_app_redirect_uri: "https://jhin.example.com/api/v1/oauth/github-app/callback",
+            is_https: true,
+            is_loopback: false,
+            configured_via: "APP_URL",
+            github_app_available: true,
+            github_app_permissions: {},
+            preferred_sign_in: "redirect",
+          });
+        }
+        if (path === "/api/v1/workspaces/workspace-1/oauth/probe" && method === "POST") {
+          return json({
+            method: "oauth_static",
+            supports_oauth: true,
+            supports_dcr: false,
+            issuer: "https://github.com",
+            authorization_server_display: "github.com",
+            scopes: [],
+            resource: "",
+            client_configured: true,
+            requires_client_secret: true,
+            reason: "",
+            redirect_flow: { available: true, reason: "" },
+            device_flow: { available: true, reason: "" },
+            app_settings_url: "https://github.com/settings/apps",
+          });
+        }
+        throw new Error(`Unexpected request: ${method} ${path}`);
+      }),
+    );
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <WorkspaceProvider
+          user={{
+            id: "user-1",
+            email: "ada@example.com",
+            display_name: "Ada Lovelace",
+            created_at: "2026-08-18T00:00:00Z",
+          }}
+          workspace={{
+            workspace_id: "workspace-1",
+            workspace_name: "Acme",
+            workspace_slug: "acme",
+            role: "owner",
+          }}
+        >
+          <CatalogEntryDialog
+            slug={entry.slug}
+            workspaceId="workspace-1"
+            connectors={[MCP_CONNECTOR, github]}
+            onClose={vi.fn()}
+            onCreated={vi.fn()}
+          />
+        </WorkspaceProvider>
+      </QueryClientProvider>,
+    );
+
+    const dialog = await screen.findByTestId("catalog-entry-dialog");
+    fireEvent.click(await within(dialog).findByRole("button", { name: "Connect" }));
+    expect(await screen.findByTestId("connect-panel")).toBeDefined();
+    expect(await screen.findByTestId("oauth-consent-step")).toBeDefined();
+    expect(screen.queryByTestId("create-connection-form")).toBeNull();
   });
 
   it("titles a package-named entry by its friendly name, package underneath", async () => {

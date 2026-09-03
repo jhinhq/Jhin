@@ -92,6 +92,11 @@ class Settings(ObservabilitySettings):
     oauth_client_name: str = "Jhin"
     # Proactive refresh sweep cadence, in seconds.
     oauth_refresh_interval_seconds: int = 300
+    # Offer the sign-in code before the browser sign-in for a native provider
+    # that can do both. Never removes either flow and never affects MCP
+    # servers: it is for an operator whose browsers cannot load this
+    # instance's redirect URI.
+    oauth_prefer_device_code: bool = False
 
     # --- Request limits ---
     # Global ceiling on any request body, enforced by middleware. Set above the

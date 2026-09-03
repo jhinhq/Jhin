@@ -5,6 +5,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   consumeReturnRoute,
+  credentialSchemes,
+  describePermissions,
   describeScopes,
   devicePollDelayMs,
   formatCountdown,
@@ -12,6 +14,8 @@ import {
   needsReauth,
   oauthErrorMessage,
   postFormTo,
+  readGitHubAppLanding,
+  safeHttpsUrl,
   saveReturnRoute,
   secondsUntil,
   SLOW_DOWN_STEP_MS,
@@ -150,6 +154,89 @@ describe("oauthErrorMessage", () => {
     // Anything unrecognised — including text a provider influenced — collapses
     // to the same Jhin-authored sentence.
     expect(oauthErrorMessage("<script>alert(1)</script>")).toBe(oauthErrorMessage("failed"));
+  });
+
+  it("names the two first-setup mistakes a person can fix", () => {
+    const rejected = oauthErrorMessage("client_rejected");
+    expect(rejected).toContain("did not accept this app's client id and secret");
+    expect(rejected).toContain("Settings → OAuth");
+    expect(rejected).toContain("Apps → Connect GitHub");
+    const mismatch = oauthErrorMessage("callback_mismatch");
+    expect(mismatch).toContain("callback URL listed on the app is not this instance's redirect URL");
+    expect(mismatch).toContain("Settings → OAuth");
+  });
+});
+
+describe("credentialSchemes", () => {
+  it("drops the sign-in schemes and keeps every one a person can fill in", () => {
+    const connector = {
+      auth_schemes: [
+        { type: "oauth" },
+        { type: "device" },
+        { type: "device_code" },
+        { type: "none" },
+        { type: "bearer" },
+        { type: "pat" },
+      ],
+    };
+    expect(credentialSchemes(connector).map((scheme) => scheme.type)).toEqual([
+      "none",
+      "bearer",
+      "pat",
+    ]);
+    expect(credentialSchemes({ auth_schemes: [{ type: "oauth" }] })).toEqual([]);
+  });
+});
+
+describe("readGitHubAppLanding", () => {
+  it("maps the manifest callback's flag and GitHub's install return", () => {
+    expect(readGitHubAppLanding(new URLSearchParams("github_app=created"))).toBe("created");
+    expect(readGitHubAppLanding(new URLSearchParams("github_app=failed"))).toBe("failed");
+    expect(
+      readGitHubAppLanding(new URLSearchParams("installation_id=123&setup_action=install")),
+    ).toBe("installed");
+    expect(readGitHubAppLanding(new URLSearchParams("setup_action=update"))).toBe("installed");
+  });
+
+  it("ignores anything outside the closed sets, and never reads the installation id", () => {
+    expect(readGitHubAppLanding(new URLSearchParams(""))).toBeNull();
+    expect(readGitHubAppLanding(new URLSearchParams("github_app=<script>"))).toBeNull();
+    expect(readGitHubAppLanding(new URLSearchParams("setup_action=uninstall"))).toBeNull();
+    expect(readGitHubAppLanding(new URLSearchParams("installation_id=123"))).toBeNull();
+    // The manifest flag wins when both are present; the shape is the same.
+    expect(
+      readGitHubAppLanding(new URLSearchParams("github_app=created&setup_action=install")),
+    ).toBe("created");
+  });
+});
+
+describe("safeHttpsUrl", () => {
+  it("passes https and refuses everything else", () => {
+    expect(safeHttpsUrl("https://github.com/settings/apps")).toBe(
+      "https://github.com/settings/apps",
+    );
+    for (const hostile of ["http://evil.example", "javascript:alert(1)", "not a url", "", null]) {
+      expect(safeHttpsUrl(hostile)).toBeNull();
+    }
+    expect(safeHttpsUrl(undefined)).toBeNull();
+  });
+});
+
+describe("describePermissions", () => {
+  it("lists permissions the way GitHub's settings page spells them, in name order", () => {
+    expect(
+      describePermissions({
+        pull_requests: "write",
+        contents: "write",
+        metadata: "read",
+        checks: "read",
+        actions: "write",
+        issues: "write",
+      }),
+    ).toBe(
+      "Actions (read & write), Checks (read), Contents (read & write), Issues (read & write), Metadata (read), Pull requests (read & write)",
+    );
+    expect(describePermissions({})).toBe("");
   });
 });
 

@@ -26,6 +26,7 @@ reintroduce it.
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final
@@ -53,6 +54,7 @@ from jhin_api.oauth.schemas import (
     OAuthProbeOut,
     OAuthStartIn,
     OAuthStartOut,
+    ProbeFlow,
     RegistrationSource,
 )
 from jhin_api.settings import Settings
@@ -148,9 +150,112 @@ class DiscoveredTarget:
     #: discovery. Such a provider never does DCR, so a missing client is an
     #: admin task, not something to attempt automatically.
     is_static: bool = False
+    #: Whether the redirect flow needs a confidential client here. A static
+    #: registration without a secret is refused at *start* rather than at
+    #: the exchange, so nobody is sent to a consent screen that cannot end.
+    requires_client_secret: bool = False
+
+
+#: The connectors this module can name in a sentence. Anything else is "this
+#: app" or "The provider", never a value a request supplied.
+_PROVIDER_NAMES: Final[dict[str, str]] = {"github": "GitHub"}
+
+_ENTERPRISE_HOST_DETAIL: Final[str] = (
+    "Jhin's GitHub app is registered with github.com and cannot sign in to a GitHub "
+    "Enterprise server. Connect that server with a personal access token or app "
+    "credentials instead."
+)
+_PROVIDER_URL_POLICY_DETAIL: Final[str] = (
+    "This app's authorization service is not one this Jhin install is allowed to reach."
+)
+
+
+def _provider_name(connector_type: str) -> str:
+    return _PROVIDER_NAMES.get(connector_type, "this app")
+
+
+def _not_registered_detail(connector_type: str) -> str:
+    """The 409 for a static provider with no client in this workspace.
+
+    Points at Apps, not Settings → OAuth: the Connect panel is where a
+    GitHub App is created or pasted, and the settings page has no form.
+    """
+    name = _provider_name(connector_type)
+    return (
+        f"This workspace has not registered Jhin with {name} yet. Register it from Apps by "
+        f"pressing Connect on {name}."
+    )
+
+
+def _no_secret_detail(connector_type: str, issuer: str) -> str:
+    name = _provider_name(connector_type)
+    host = _display_host(issuer) or name
+    return (
+        f"Jhin's registration at {host} has a client id but no client secret, which the "
+        f"browser sign-in needs. Add the secret from Apps → Connect {name}, or sign in with "
+        "a code."
+    )
+
+
+def _refuse_enterprise_host(connector_type: str, config: Mapping[str, Any]) -> None:
+    """A GitHub Enterprise ``base_url`` cannot be signed in to with github.com's app.
+
+    The provider table fixes GitHub's endpoints at github.com, and a client
+    registered there means nothing to an enterprise server. Said before any
+    row is written, in Jhin's words, rather than as a refusal from the other
+    side that the person would have to decode.
+    """
+    if connector_type != "github":
+        return
+    base_url = config.get("base_url")
+    if not isinstance(base_url, str) or not base_url.strip():
+        return
+    if _display_host(base_url) != "api.github.com":
+        raise _bad_request(_ENTERPRISE_HOST_DETAIL)
 
 
 # --- Probing -----------------------------------------------------------
+
+
+def _no_device_flow() -> ProbeFlow:
+    return ProbeFlow(available=False, reason="no_device_endpoint")
+
+
+def _redirect_flow_for(provider: Any, credentials: ClientCredentials | None) -> ProbeFlow:
+    """Whether the browser redirect can start for this registration.
+
+    The one predicate both the probe and the device-start refusal consult, so
+    the panel and the API never disagree about whether a browser alternative
+    exists.
+    """
+    if credentials is None:
+        return ProbeFlow(available=False, reason="needs_client_credentials")
+    if provider.requires_client_secret and not credentials.client_secret:
+        return ProbeFlow(available=False, reason="needs_client_secret")
+    return ProbeFlow(available=True)
+
+
+def _device_flow_for(provider: Any, credentials: ClientCredentials | None) -> ProbeFlow:
+    if not provider.device_authorization_endpoint:
+        return _no_device_flow()
+    if credentials is None:
+        return ProbeFlow(available=False, reason="needs_client_credentials")
+    return ProbeFlow(available=True)
+
+
+def _app_settings_url(provider: Any) -> str:
+    """The provider's app-management page, validated on the way out.
+
+    A link is optional, so a policy refusal costs the link and never the
+    probe.
+    """
+    url = getattr(provider, "app_settings_url", "")
+    if not isinstance(url, str) or not url:
+        return ""
+    try:
+        return validate_oauth_url(url, kind=f"{provider.key} app settings URL")
+    except EndpointPolicyError:
+        return ""
 
 
 async def probe(
@@ -179,6 +284,7 @@ async def probe(
             supports_oauth=False,
             supports_dcr=False,
             reason="server_url_required",
+            device_flow=_no_device_flow(),
         )
     try:
         result = await probe_mcp_endpoint(http_client, payload.server_url)
@@ -188,6 +294,7 @@ async def probe(
             supports_oauth=False,
             supports_dcr=False,
             reason="server_url_not_allowed",
+            device_flow=_no_device_flow(),
         )
     except (OAuthError, httpx.HTTPError):
         return OAuthProbeOut(
@@ -195,6 +302,7 @@ async def probe(
             supports_oauth=False,
             supports_dcr=False,
             reason="discovery_failed",
+            device_flow=_no_device_flow(),
         )
 
     metadata = result.authorization_server
@@ -204,6 +312,7 @@ async def probe(
             supports_oauth=False,
             supports_dcr=False,
             reason="no_oauth_offered" if result.requires_auth else "connector_has_no_oauth",
+            device_flow=_no_device_flow(),
         )
 
     # The canonical URI of the MCP server itself, never the PRM document's own
@@ -234,9 +343,11 @@ async def probe(
     if client_configured or metadata.supports_dcr():
         method = "oauth_discovery"
         reason = ""
+        redirect_flow = ProbeFlow(available=True)
     else:
         method = "oauth_needs_client"
         reason = "needs_client_credentials"
+        redirect_flow = ProbeFlow(available=False, reason="needs_client_credentials")
     return OAuthProbeOut(
         method=method,
         supports_oauth=True,
@@ -248,6 +359,10 @@ async def probe(
         client_configured=client_configured,
         requires_client_secret=False,
         reason=reason,
+        redirect_flow=redirect_flow,
+        # Discovery never routes to the device flow: an MCP server is
+        # reached by a browser that just loaded Jhin, and the redirect works.
+        device_flow=_no_device_flow(),
     )
 
 
@@ -269,6 +384,17 @@ async def _static_provider_probe(
     only thing that tells the panel whether the workspace has already
     registered a client at this issuer; answering a blanket ``False`` sent an
     admin who had just registered one back to the registration form for good.
+
+    The rule for which flow comes first: **the browser sign-in whenever the
+    registration can do it; the sign-in code one link away.** A browser that
+    just loaded Jhin at ``APP_URL`` can be redirected back to it — loopback
+    included — and the redirect needs no toggle on the provider's side,
+    whereas a GitHub App starts with its device flow switched off. So a
+    device endpoint only makes the code *available*; it never demotes the
+    redirect. The code comes first only when the registration has no secret
+    (the redirect cannot start) or the operator asked with
+    ``OAUTH_PREFER_DEVICE_CODE``, and even then the other flow is reported as
+    available rather than removed.
     """
     provider = _static_provider_for(connector_type)
     if provider is None:
@@ -277,6 +403,7 @@ async def _static_provider_probe(
             supports_oauth=False,
             supports_dcr=False,
             reason="connector_has_no_oauth",
+            device_flow=_no_device_flow(),
         )
     clients = OAuthClientStore(db, crypto)
     existing = await clients.get(
@@ -284,11 +411,22 @@ async def _static_provider_probe(
         issuer=provider.issuer,
         redirect_uri=redirect_module.redirect_uri(settings),
     )
-    client_configured = existing is not None
-    if provider.device_authorization_endpoint:
-        method: ConnectMethod = "device_code"
+    credentials = existing[1] if existing is not None else None
+    redirect_flow = _redirect_flow_for(provider, credentials)
+    device_flow = _device_flow_for(provider, credentials)
+
+    method: ConnectMethod
+    if existing is None:
+        method, reason = "oauth_needs_client", "needs_client_credentials"
+    elif redirect_flow.available and not (
+        device_flow.available and settings.oauth_prefer_device_code
+    ):
+        method, reason = "oauth_static", ""
+    elif device_flow.available:
+        method, reason = "device_code", "" if redirect_flow.available else "needs_client_secret"
     else:
-        method = "oauth_static"
+        method, reason = "oauth_needs_client", "needs_client_secret"
+
     return OAuthProbeOut(
         method=method,
         supports_oauth=True,
@@ -297,9 +435,12 @@ async def _static_provider_probe(
         authorization_server_display=_display_host(provider.issuer),
         scopes=list(provider.default_scopes),
         resource="",
-        client_configured=client_configured,
+        client_configured=existing is not None,
         requires_client_secret=provider.requires_client_secret,
-        reason="" if client_configured else "needs_client_credentials",
+        reason=reason,
+        redirect_flow=redirect_flow,
+        device_flow=device_flow,
+        app_settings_url=_app_settings_url(provider),
     )
 
 
@@ -357,8 +498,10 @@ async def start_authorization(
 
     connection = await _target_connection(db, ctx, payload.connection_id)
     target = await _resolve_target(http_client, settings, payload, connection)
+    if target.is_static:
+        _refuse_enterprise_host(connector_type, payload.config)
     registration_id, credentials, source = await _client_for(
-        db, crypto, ctx, http_client, settings, target=target
+        db, crypto, ctx, http_client, settings, target=target, connector_type=connector_type
     )
 
     pkce = generate_pkce()
@@ -466,7 +609,13 @@ async def _resolve_target(
     if provider is not None:
         from jhin_connectors.oauth_providers import provider_metadata
 
-        static_metadata = provider_metadata(provider)
+        try:
+            static_metadata = provider_metadata(provider)
+        except EndpointPolicyError as exc:
+            # The outbound policy refused one of the provider's own URLs — an
+            # operator's allow-list decision, not a server fault, so a 400
+            # with a sentence rather than an unexplained 500.
+            raise _bad_request(_PROVIDER_URL_POLICY_DETAIL) from exc
         scope = " ".join(provider.default_scopes)
         return DiscoveredTarget(
             metadata=static_metadata,
@@ -474,6 +623,7 @@ async def _resolve_target(
             scope=scope,
             challenge_scope=None,
             is_static=True,
+            requires_client_secret=bool(provider.requires_client_secret),
         )
 
     server_url = _server_url_for(payload, connection)
@@ -538,27 +688,36 @@ async def _client_for(
     settings: Settings,
     *,
     target: DiscoveredTarget,
+    connector_type: str,
 ) -> tuple[UUID, ClientCredentials, RegistrationSource]:
     """This workspace's client at this issuer, registering one if we may.
 
     Credentials are keyed by ``(workspace, issuer, redirect URI)`` and reused
     for every later connection to the same server — which is what turns the
     second and every subsequent connection into two clicks and no fields.
+
+    A static registration that cannot do the redirect — a confidential
+    provider with no stored secret — is refused here, with the fix named,
+    rather than at the token exchange after the person has already said yes
+    on the provider's consent screen. The method is never guessed and no
+    registration is minted on anybody's behalf: the 409 says what to add.
     """
     uri = redirect_module.redirect_uri(settings)
     store = OAuthClientStore(db, crypto)
     existing = await store.get(ctx.workspace_id, issuer=target.metadata.issuer, redirect_uri=uri)
     if existing is not None:
         row, credentials = existing
+        if target.is_static and target.requires_client_secret and not credentials.client_secret:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=_no_secret_detail(connector_type, target.metadata.issuer),
+            )
         return row.id, credentials, _source_of(row.source)
 
     if target.is_static:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                "This workspace has not registered Jhin with this provider yet. Add the "
-                "client id in Settings → OAuth, then connect."
-            ),
+            detail=_not_registered_detail(connector_type),
         )
     if not target.metadata.supports_dcr():
         raise HTTPException(
@@ -689,12 +848,20 @@ async def complete_authorization(
             code_verifier=verifier,
             resource=row.resource,
         )
+    except ClientForgottenError:
+        return await _exchange_refused(
+            db, pending, row, error_code="invalid_client", error="client_rejected"
+        )
+    except TokenError as exc:
+        return await _exchange_refused(
+            db,
+            pending,
+            row,
+            error_code=exc.error_code,
+            error=_EXCHANGE_REFUSAL_LANDINGS.get(exc.error_code, "failed"),
+        )
     except (OAuthError, EndpointPolicyError, httpx.HTTPError):
-        # Deliberately no provider text: the exchange failed, the pending row
-        # is spent, and the user is told to try again from a page we control.
-        logger.warning("oauth.code_exchange_failed", connector_type=row.connector_type)
-        await _abandon(db, pending, row)
-        return CallbackResult(connection=None, error="failed")
+        return await _exchange_refused(db, pending, row, error_code="unknown", error="failed")
 
     await clients.touch(registration)
     try:
@@ -724,6 +891,41 @@ async def complete_authorization(
     await pending.finish(row)
     await db.commit()
     return CallbackResult(connection=connection, error=None)
+
+
+#: Which landing flag a refused exchange picks, by the provider's
+#: machine-readable code (already narrowed to ``KNOWN_ERROR_CODES`` upstream).
+#: The two named here are the first-setup mistakes a person can actually fix
+#: — a wrong secret, a callback URL the app does not list — and the flag is
+#: what lets the Apps page say so. Everything else is ``failed``: a spent or
+#: refused code has no fix beyond starting again.
+_EXCHANGE_REFUSAL_LANDINGS: Final[dict[str, redirect_module.OAuthReturnError]] = {
+    "incorrect_client_credentials": "client_rejected",
+    "invalid_client": "client_rejected",
+    "redirect_uri_mismatch": "callback_mismatch",
+}
+
+
+async def _exchange_refused(
+    db: AsyncSession,
+    pending: PendingAuthorizationStore,
+    row: OAuthAuthorization,
+    *,
+    error_code: str,
+    error: redirect_module.OAuthReturnError,
+) -> CallbackResult:
+    """A failed exchange: the row is spent and the browser goes back to Apps.
+
+    Deliberately no provider text anywhere — the log line carries the code
+    from the closed vocabulary and the ``Location`` carries a flag from
+    Jhin's own closed set. The person is told to try again from a page Jhin
+    controls, in a sentence Jhin wrote.
+    """
+    logger.warning(
+        "oauth.code_exchange_failed", connector_type=row.connector_type, error_code=error_code
+    )
+    await _abandon(db, pending, row)
+    return CallbackResult(connection=None, error=error)
 
 
 def _verify_callback_context(
@@ -855,10 +1057,22 @@ async def _persist_connection(
 
 _DEVICE_START_GENERIC = "The provider refused to start a device sign-in for this app."
 # What the person can do about a refusal, keyed by the provider's own error
-# code. A device sign-in fails at start for one of a few nameable reasons, and
-# the fix for each is on the provider's side; saying which one saves a round
-# of guessing. GitHub Apps ship with the device flow switched off, so the
-# first of these is the one people actually hit.
+# code. A device sign-in fails at start for one of a few nameable reasons;
+# GitHub Apps ship with the device flow switched off, so the first of these
+# is the one people actually hit. When the registration can do the browser
+# sign-in — the common case, a secret stored — the fix is one click away in
+# Jhin and the sentence says so; the provider-side checkbox is named only
+# when no browser sign-in is possible.
+_DEVICE_START_REFUSALS_WITH_REDIRECT: dict[str, str] = {
+    "device_flow_disabled": (
+        "{provider} has device sign-in turned off for this app. Use the browser sign-in "
+        "instead — it needs no change on {provider}."
+    ),
+    "unauthorized_client": (
+        "{provider} does not allow this app to use the device sign-in. Use the browser "
+        "sign-in instead."
+    ),
+}
 _DEVICE_START_REFUSALS: dict[str, str] = {
     "device_flow_disabled": (
         "{provider} has device sign-in turned off for this app. In the app's settings on "
@@ -866,23 +1080,28 @@ _DEVICE_START_REFUSALS: dict[str, str] = {
     ),
     "unauthorized_client": (
         "{provider} does not allow this app to use the device sign-in. Check the app's "
-        "settings on {provider}, or connect with a redirect instead."
+        "settings on {provider}."
     ),
     "invalid_client": (
-        "{provider} no longer recognises this app's client id. Check the client id under "
-        "Settings → OAuth."
+        "{provider} no longer recognises this app's client id. Forget the registration "
+        "under Settings → OAuth, then connect {provider} again from Apps."
     ),
     "invalid_scope": (
         "{provider} refused one of the permissions Jhin asked for. Check the app's "
         "permissions on {provider}."
     ),
 }
-_DEVICE_PROVIDER_NAMES: dict[str, str] = {"github": "GitHub"}
 
 
-def _device_start_refusal(connector_type: str, error_code: str) -> str:
-    provider = _DEVICE_PROVIDER_NAMES.get(connector_type, "The provider")
-    template = _DEVICE_START_REFUSALS.get(error_code)
+def _device_start_refusal(
+    connector_type: str, error_code: str, *, redirect_alternative: bool
+) -> str:
+    provider = _PROVIDER_NAMES.get(connector_type, "The provider")
+    template = None
+    if redirect_alternative:
+        template = _DEVICE_START_REFUSALS_WITH_REDIRECT.get(error_code)
+    if template is None:
+        template = _DEVICE_START_REFUSALS.get(error_code)
     if template is None:
         return _DEVICE_START_GENERIC
     return template.format(provider=provider)
@@ -898,13 +1117,16 @@ async def start_device_flow(
 ) -> OAuthDeviceStartOut:
     """Begin a device-code authorization: no redirect URI, no client secret.
 
-    This is the answer for an instance the internet cannot reach — a laptop,
-    a private network, anything without TLS — which is precisely why it never
-    sends a client secret, at start, at poll, or at refresh.
+    The alternative to the browser sign-in for a provider that offers RFC
+    8628, and the first offer only when the registration has no secret or the
+    operator asked. It never sends a client secret — at start, at poll, or at
+    refresh — and the stored secret is read here for exactly one purpose: to
+    decide whether a refusal can name the browser sign-in as the way out.
     """
     provider = _static_provider_for(payload.connector_type)
     if provider is None or not provider.device_authorization_endpoint:
         raise _bad_request("This app does not offer the device-code sign-in.")
+    _refuse_enterprise_host(payload.connector_type, payload.config)
 
     store = OAuthClientStore(db, crypto)
     existing = await store.get(
@@ -915,12 +1137,10 @@ async def start_device_flow(
     if existing is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                "This workspace has not registered Jhin with this provider yet. Add the "
-                "client id in Settings → OAuth, then connect."
-            ),
+            detail=_not_registered_detail(payload.connector_type),
         )
     registration, credentials = existing
+    redirect_alternative = _redirect_flow_for(provider, credentials).available
     scope = " ".join(provider.default_scopes)
     try:
         grant = await start_device_authorization(
@@ -939,14 +1159,22 @@ async def start_device_flow(
             connector_type=payload.connector_type,
             error_code="invalid_client",
         )
-        raise _bad_request(_device_start_refusal(payload.connector_type, "invalid_client")) from exc
+        raise _bad_request(
+            _device_start_refusal(
+                payload.connector_type, "invalid_client", redirect_alternative=redirect_alternative
+            )
+        ) from exc
     except TokenError as exc:
         logger.warning(
             "oauth.device_start_refused",
             connector_type=payload.connector_type,
             error_code=exc.error_code,
         )
-        raise _bad_request(_device_start_refusal(payload.connector_type, exc.error_code)) from exc
+        raise _bad_request(
+            _device_start_refusal(
+                payload.connector_type, exc.error_code, redirect_alternative=redirect_alternative
+            )
+        ) from exc
     except (OAuthError, EndpointPolicyError) as exc:
         raise _bad_request(_DEVICE_START_GENERIC) from exc
 
@@ -1239,6 +1467,33 @@ def _github_oauth_module() -> Any:
     return github_oauth
 
 
+def github_app_permissions() -> dict[str, str]:
+    """The permissions a manifest asks for, so a by-hand setup matches it.
+
+    Empty when the GitHub helpers are not installed: the web app then has no
+    list to show, which is the honest answer.
+    """
+    github_oauth = _github_oauth_module()
+    if github_oauth is None:
+        return {}
+    return dict(github_oauth.app_permissions())
+
+
+_MANIFEST_NAME_DETAIL: Final[str] = (
+    "GitHub App names use letters, numbers, spaces, dots, underscores and hyphens, start "
+    "with a letter or number, and are at most 34 characters."
+)
+_MANIFEST_ORG_DETAIL: Final[str] = (
+    "That is not a GitHub organization name. Use the login exactly as it appears in the "
+    "organization's URL on GitHub."
+)
+_MANIFEST_ORIGIN_DETAIL: Final[str] = (
+    "This instance's address is not one Jhin will put into a GitHub App: it is a loopback "
+    "or plain-HTTP origin that JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS does not list. Register "
+    "the app by hand with the callback URL shown, or allow-list the origin and restart."
+)
+
+
 async def start_github_app_manifest(
     db: AsyncSession,
     crypto: SecretCrypto,
@@ -1253,6 +1508,14 @@ async def start_github_app_manifest(
     whole feature exists to remove. The state is a pending row like any other
     — single-use, bound to this admin's session — with the one-hour TTL
     GitHub's conversion code lives for.
+
+    Every refusal — an app name GitHub would reject, an organization login
+    that is not one, an instance origin the outbound policy will not put
+    into a manifest — is decided *before* the pending row is minted, so a
+    refused request writes nothing and answers with a sentence rather than
+    a 500. ``setup_url`` is Apps: an install lands there and the page opens
+    Connect GitHub, because installing the app and signing in with it are
+    two steps and the second starts from Jhin's own page.
     """
     github_oauth = _github_oauth_module()
     if github_oauth is None:
@@ -1262,14 +1525,25 @@ async def start_github_app_manifest(
         )
     app_url = settings.app_url.strip().rstrip("/")
     callback_url = redirect_module.redirect_uri(settings)
-    manifest = github_oauth.build_app_manifest(
-        app_name=payload.app_name,
-        homepage_url=app_url,
-        redirect_url=redirect_module.github_app_redirect_uri(settings),
-        callback_url=callback_url,
-        setup_url=f"{app_url}/settings/oauth",
-        webhook_url=None,
-    )
+    try:
+        manifest = github_oauth.build_app_manifest(
+            app_name=payload.app_name,
+            homepage_url=app_url,
+            redirect_url=redirect_module.github_app_redirect_uri(settings),
+            callback_url=callback_url,
+            setup_url=f"{app_url}/apps",
+            webhook_url=None,
+        )
+    except EndpointPolicyError as exc:
+        # Before ``ValueError``: the policy error is one, and the two are
+        # different sentences with different fixes.
+        raise _bad_request(_MANIFEST_ORIGIN_DETAIL) from exc
+    except ValueError as exc:
+        raise _bad_request(_MANIFEST_NAME_DETAIL) from exc
+    try:
+        post_url = github_oauth.manifest_post_target(organization=payload.organization)
+    except ValueError as exc:
+        raise _bad_request(_MANIFEST_ORG_DETAIL) from exc
     pending = PendingAuthorizationStore(db, crypto)
     row, handle = await pending.create(
         workspace_id=ctx.workspace_id,
@@ -1283,7 +1557,7 @@ async def start_github_app_manifest(
     )
     await db.commit()
     return GitHubAppManifestOut(
-        post_url=github_oauth.manifest_post_target(organization=payload.organization),
+        post_url=post_url,
         manifest=manifest,
         state=handle,
         expires_at=row.expires_at,

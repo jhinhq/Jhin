@@ -1,17 +1,24 @@
-/** The device-code screen: the code, the wait, and the three ways it ends. */
+/** The device-code screen: the code, the wait, and the ways it ends. */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DeviceCodePanel } from "@/components/connect/device-code-panel";
+import { ApiError } from "@/lib/api";
 import { devicePollDelayMs, SLOW_DOWN_STEP_MS } from "@/lib/oauth";
 import type { ConnectionInfo, OAuthDeviceStartOut, OAuthDevicePollOut } from "@/lib/types";
 
 /** What the mocked poll hook returns, and the interval floors it was asked for. */
-let pollState: { data: OAuthDevicePollOut | undefined; dataUpdatedAt: number; isError: boolean } = {
+let pollState: {
+  data: OAuthDevicePollOut | undefined;
+  dataUpdatedAt: number;
+  isError: boolean;
+  error: unknown;
+} = {
   data: undefined,
   dataUpdatedAt: 0,
   isError: false,
+  error: null,
 };
 const intervalsAsked: number[] = [];
 
@@ -59,6 +66,7 @@ function renderPanel(
     onConnected?: (connection: ConnectionInfo) => void;
     onCancel?: () => void;
     onRestart?: () => void;
+    appSettingsUrl?: string | null;
   } = {},
 ) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -70,6 +78,7 @@ function renderPanel(
       <DeviceCodePanel
         workspaceId="workspace-1"
         device={device(overrides)}
+        appSettingsUrl={handlers.appSettingsUrl ?? null}
         onConnected={onConnected}
         onCancel={onCancel}
         onRestart={onRestart}
@@ -80,7 +89,7 @@ function renderPanel(
 }
 
 beforeEach(() => {
-  pollState = { data: undefined, dataUpdatedAt: 0, isError: false };
+  pollState = { data: undefined, dataUpdatedAt: 0, isError: false, error: null };
   intervalsAsked.length = 0;
 });
 
@@ -128,6 +137,7 @@ describe("DeviceCodePanel", () => {
       data: { status: "connected", interval_seconds: null, connection: CONNECTION },
       dataUpdatedAt: 1,
       isError: false,
+      error: null,
     };
     const { onConnected } = renderPanel();
     await waitFor(() => expect(onConnected).toHaveBeenCalledWith(CONNECTION));
@@ -136,11 +146,34 @@ describe("DeviceCodePanel", () => {
     expect(window.location.href).toBe(before);
   });
 
+  it("says where a GitHub app has to be installed, and waits for Done", async () => {
+    pollState = {
+      data: { status: "connected", interval_seconds: null, connection: CONNECTION },
+      dataUpdatedAt: 1,
+      isError: false,
+      error: null,
+    };
+    const { onConnected } = renderPanel(
+      {},
+      { appSettingsUrl: "https://github.com/settings/apps" },
+    );
+    const hint = await screen.findByTestId("device-install-hint");
+    expect(hint.textContent).toContain("only in repositories where the app is installed");
+    expect(screen.getByRole("link", { name: /Open your GitHub Apps/ }).getAttribute("href")).toBe(
+      "https://github.com/settings/apps",
+    );
+    // The sentence is the point; the panel does not close over the top of it.
+    expect(onConnected).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    expect(onConnected).toHaveBeenCalledWith(CONNECTION);
+  });
+
   it("offers a restart when the code expires", async () => {
     pollState = {
       data: { status: "expired", interval_seconds: null, connection: null },
       dataUpdatedAt: 1,
       isError: false,
+      error: null,
     };
     const { onRestart } = renderPanel();
     const again = await screen.findByRole("button", { name: "Try again" });
@@ -148,11 +181,40 @@ describe("DeviceCodePanel", () => {
     expect(onRestart).toHaveBeenCalledTimes(1);
   });
 
+  it("treats a spent handle as no longer valid, not as a passing failure", async () => {
+    pollState = {
+      data: undefined,
+      dataUpdatedAt: 0,
+      isError: true,
+      error: new ApiError(410, "This connection attempt is no longer valid. Start again from Apps."),
+    };
+    const { onRestart } = renderPanel();
+    const panel = await screen.findByTestId("device-code-panel");
+    expect(panel.textContent).toContain("This sign-in attempt is no longer valid. Start again.");
+    expect(panel.textContent).not.toContain("It is still valid");
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(onRestart).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a passing poll failure passing", async () => {
+    pollState = {
+      data: undefined,
+      dataUpdatedAt: 0,
+      isError: true,
+      error: new Error("network"),
+    };
+    renderPanel();
+    const panel = await screen.findByTestId("device-code-panel");
+    expect(panel.textContent).toContain("It is still valid — try again.");
+    expect(screen.getByTestId("device-user-code")).toBeTruthy();
+  });
+
   it("says plainly when the request was declined, and offers another go", async () => {
     pollState = {
       data: { status: "denied", interval_seconds: null, connection: null },
       dataUpdatedAt: 1,
       isError: false,
+      error: null,
     };
     const { onRestart } = renderPanel();
     expect((await screen.findByTestId("device-code-panel")).textContent).toContain("You declined");

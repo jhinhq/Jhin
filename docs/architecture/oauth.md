@@ -29,7 +29,7 @@ sequenceDiagram
     B->>A: POST /oauth/probe {connector_type, server_url}
     A->>S: unauthenticated request + well-known lookups
     S-->>A: 401 WWW-Authenticate, RFC 9728 + RFC 8414 metadata
-    A-->>B: method: oauth_discovery | oauth_needs_client | device_code | api_key
+    A-->>B: method: oauth_discovery | oauth_static | oauth_needs_client | device_code | api_key (+ redirect_flow / device_flow availability)
     B->>A: POST /oauth/start
     A->>S: RFC 7591 register (when offered)
     A-->>B: authorization_url (state = opaque handle)
@@ -47,8 +47,8 @@ admin-only.
 | --- | --- | --- |
 | `GET /api/v1/oauth/redirect-uri` | any authenticated user | the one URI to paste into a provider's app settings |
 | `GET /api/v1/oauth/callback` | public | the provider redirects a browser here |
-| `GET /api/v1/oauth/github-app/callback` | public | GitHub's app-manifest and installation return |
-| `POST …/oauth/probe` | `apps:write` | answers "does this server speak OAuth?"; returns no credential material |
+| `GET /api/v1/oauth/github-app/callback` | public | GitHub's app-manifest return (an *install* lands on `/apps`, not here) |
+| `POST …/oauth/probe` | `apps:write` | answers "does this server speak OAuth?" and which flows can start; returns no credential material |
 | `POST …/oauth/start` | admin, session-only | returns a URL that a browser turns into a token |
 | `POST …/oauth/device/start`, `…/device/poll` | admin, session-only | holds a device code |
 | `GET/POST/DELETE …/oauth/clients` | admin, session-only | stores a client secret |
@@ -67,23 +67,40 @@ label for the Apps library, written by whoever indexed the server, and it is
 wrong more often than right as a routing signal. A protocol fact comes from
 the protocol.
 
-The probe returns one of four methods, and the Connect dialog renders itself
+The probe returns one of five methods, and the Connect dialog renders itself
 from that answer rather than from anything it assumed beforehand:
 
 - `oauth_discovery` — the server offers DCR, or this workspace already has a
   client registered at that issuer. Press Connect and go.
+- `oauth_static` — a native connector whose provider is in the shipped table
+  and whose registration can start the browser redirect. Press Connect and
+  go; the sign-in code is one link away.
 - `oauth_needs_client` — the server speaks OAuth but will not register Jhin
-  automatically. An admin adds a client id in Settings → OAuth first.
-- `device_code` — a native connector whose provider offers RFC 8628.
+  automatically, or a registration exists that cannot do the redirect. The
+  Connect panel asks for the app once (for GitHub, it can create one).
+- `device_code` — a native connector whose provider offers RFC 8628, offered
+  first only when the registration has no client secret or the operator set
+  `OAUTH_PREFER_DEVICE_CODE`.
 - `api_key` — no OAuth on offer. The `reason` field distinguishes
   `no_oauth_offered` from `discovery_failed` and `server_url_not_allowed`,
   because "this server does not do OAuth" and "Jhin could not reach it" are
   different problems with different fixes.
 
+`method` is the *preferred* flow. For a static provider the probe also
+reports both flows — `redirect_flow` and `device_flow`, each `{available,
+reason}` — so the panel can offer the other as a quiet link rather than
+guess at it. `reason` is a closed vocabulary (`needs_client_credentials`,
+`needs_client_secret`, `no_device_endpoint`); `needs_client_secret` means a
+registration exists but cannot do the redirect, because the provider
+authenticates a confidential client and no secret is stored. The top-level
+`reason` carries the same code when it is why `method` is not `oauth_static`.
+
 Native connectors cannot be probed — GitHub publishes no discovery document
 at all — so their protocol facts come from a reviewed table,
 `jhin_connectors.oauth_providers.STATIC_PROVIDERS`. An entry there is a fact
-about a provider's endpoints, never a credential. A connector with no entry
+about a provider's endpoints (and, for GitHub, the page where a person
+manages the apps they own, `app_settings_url`, validated on the way out and
+only ever rendered as a link), never a credential. A connector with no entry
 answers `api_key`, which is the honest answer for a connector with no OAuth.
 
 ## One redirect URI, and it never varies
@@ -144,7 +161,17 @@ exchanged on that path.
 
 Then the code is exchanged with the PKCE verifier and the `resource`
 indicator. A failed exchange abandons the pending row: the code is spent, and
-the user is told to start again from a page Jhin controls.
+the user is told to start again from a page Jhin controls. GitHub reports a
+refused exchange with **HTTP 200** and the error in the body, exactly as its
+device flow does; `exchange_code` classifies that body like any refusal, and
+the callback logs `oauth.code_exchange_failed error_code=…` with the code
+from the closed vocabulary. The flag the browser is sent back with comes
+from a closed set of its own — `denied | failed | client_rejected |
+callback_mismatch` — chosen by the service from the machine-readable code,
+never carrying provider text. The two named ones are the first-setup
+mistakes a person can fix: a wrong client secret, and a callback URL the app
+on GitHub does not list. (Refresh keeps its existing classification, which
+reads the status code; classifying HTTP-200 bodies there is a follow-up.)
 
 Provider error text is never rendered, returned, or embedded in an exception
 anywhere in this subsystem. An authorization server's `error_description` is
@@ -258,23 +285,51 @@ anything: the row's id is what every grant, trigger, and recorded tool call
 points at. Only the manifest-declared settings travel into the new
 authorization; the server-side bookkeeping on `config_json` is re-derived
 from the connection, and the discovered tool list and risk overrides are
-carried across untouched.
+carried across untouched. The path is one: `POST
+/connections/{id}/reauthorize` → `start_authorization` → the browser
+redirect for a native connector, discovery for an MCP server. A connection
+first made with a device code reconnects through the redirect too, which is
+why a GitHub registration needs a client secret for reconnect as well as for
+the first browser sign-in.
 
-## When there is no browser to redirect
+## Which sign-in a native provider gets
 
-Two paths for the instance the internet cannot reach — a laptop, a private
-network, anything without TLS.
+The rule is short: **browser sign-in first whenever the registration can do
+it; the sign-in code one link away; nothing is ever the only button on a
+dead screen.**
 
-**Device flow** (RFC 8628). A client id and nothing else: no redirect URI and
-no client secret, at start, at poll, or at refresh. That is precisely why it
-is the answer here. GitHub answers a not-ready poll with **HTTP 200** and the
-error in the body, so the status code alone never decides anything;
-`slow_down` raises the polling cadence permanently. GitHub only serves the
-device flow to apps that have **Enable Device Flow** ticked in their settings,
-and a GitHub App starts with it off, so the operator ticks it once; until
-then GitHub refuses the start with `device_flow_disabled`, which Jhin
-reports as exactly that instruction rather than a generic refusal
-(`oauth.device_start_refused` in the log carries the provider's code).
+| Registration at the provider | Offered first | Also offered |
+| --- | --- | --- |
+| client id + secret | browser redirect (`oauth_static`) | the code, when the provider has a device endpoint |
+| client id, no secret | the code (`device_code`, `reason: needs_client_secret`) | the browser sign-in, one paste of the secret away |
+| nothing registered | register the app (`oauth_needs_client`) | — |
+| any, with `OAUTH_PREFER_DEVICE_CODE=true` | the code | the browser sign-in |
+
+The setting only reorders; it never removes a flow and never affects MCP
+servers. A provider's device endpoint makes the code *available*; it never
+demotes the redirect (`_static_provider_probe` decides, not the field's
+truthiness).
+
+The browser sign-in is primary on every instance, loopback included, for
+three reasons. GitHub redirects the *browser* that just loaded Jhin at
+`APP_URL`, so any origin that browser can reach — `http://localhost:3000` on
+the same machine — is one it can be sent back to. The redirect needs no
+toggle on GitHub's side: a GitHub App with a client secret can do it the
+moment it exists. And a plaintext public origin is already refused at
+startup, so there is no instance where the redirect is primary *and* unsafe.
+
+**Device flow** (RFC 8628) is the alternative. A client id and nothing else:
+no redirect URI and no client secret, at start, at poll, or at refresh. GitHub
+answers a not-ready poll with **HTTP 200** and the error in the body, so the
+status code alone never decides anything; `slow_down` raises the polling
+cadence permanently. GitHub only serves the device flow to apps that have
+**Enable Device Flow** ticked in their settings, and a GitHub App created
+from Jhin starts with it **off**. So when GitHub refuses the start with
+`device_flow_disabled` and the registration can do the browser sign-in, the
+refusal says to use the browser sign-in instead, and the panel offers it in
+the same place; the checkbox on GitHub is named only when no browser sign-in
+is possible — a registration with no secret (`oauth.device_start_refused` in
+the log carries the provider's code either way).
 
 **GitHub app-manifest provisioning.** The operator clicks once, GitHub
 creates this instance's own GitHub App, and a single exchange returns its
@@ -286,6 +341,33 @@ capability without mapping a permission is a build-time error, not a silently
 under-permissioned app. `callback_urls` holds exactly one entry: this
 instance's single constant redirect URI. No wildcard, no second entry,
 nothing derived from a request.
+
+The landing is `/apps?github_app=created`, which opens Connect GitHub: the
+app was created so that GitHub could be connected, and the next screen is
+the consent step. `request_oauth_on_install` is **false** — with it on,
+GitHub would follow an install with a state-less authorization code at the
+OAuth callback, which has no pending row to bind it to and refuses it by
+construction. `setup_url` is `/apps`, and the page reads only `setup_action`
+(`install` | `update`) from what GitHub appends, never `installation_id`.
+The manifest callback treats a dead session exactly as the OAuth callback
+does: nothing claimed, a redirect to `/apps?oauth_error=failed`.
+
+One-click creation needs the instance's own origin to pass the outbound
+policy, because the manifest embeds it. `GET /oauth/redirect-uri` reports
+that as `github_app_available`; a loopback install that is not allow-listed
+registers by hand instead, with the permissions the same route lists
+(`github_app_permissions`, derived from the same capability map) so a by-hand
+app never drifts from what the manifest would have asked for.
+
+Only the `client_id` and `client_secret` are kept from the conversion, as an
+ordinary `client_secret_post` registration keyed by `https://github.com`.
+The app id, private key, and webhook secret are discarded: the `github_app`
+(installation-token) credential scheme is a separate, hand-provisioned
+credential and this path does not provision it. Installing the app on an
+account or organization is a consent GitHub offers no API for, so the
+consent step says where to do it (the person's GitHub Apps page) and
+`verify` says when it has not been done — a user-to-server token reaches
+only repositories the app is installed on.
 
 The one-time conversion code *is* the credential, is single-use, and expires
 an hour after the form is posted. Every returned secret is registered with
@@ -325,7 +407,8 @@ about a moment, and nothing downstream may edit one in place.
 
 | Setting | Default | Notes |
 | --- | --- | --- |
-| `OAUTH_REDIRECT_BASE_URL` | `""` | empty means "use `APP_URL`", right for every deployment where the browser reaches the API through the web app's rewrite proxy |
+| `OAUTH_REDIRECT_BASE_URL` | `""` | empty means "use `APP_URL`", right for every deployment where the browser reaches the API through the web app's rewrite proxy. On a loopback origin, `JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS` must list it for one-click GitHub App creation; the browser sign-in itself needs no allow-list |
 | `OAUTH_STATE_TTL_SECONDS` | `600` | the MCP security-considerations recommendation for state lifetime |
 | `OAUTH_CLIENT_NAME` | `Jhin` | `client_name` sent during DCR; what the user sees on the consent screen |
 | `OAUTH_REFRESH_INTERVAL_SECONDS` | `300` | proactive sweep cadence |
+| `OAUTH_PREFER_DEVICE_CODE` | `false` | offer the sign-in code before the browser sign-in for a native provider that can do both; never removes a flow; does not affect MCP |

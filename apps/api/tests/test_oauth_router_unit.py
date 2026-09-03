@@ -48,6 +48,7 @@ ALLOWED_CREDENTIAL_SHAPED_FIELDS = {
 RESPONSE_MODELS: list[type[BaseModel]] = [
     schemas.OAuthRedirectOut,
     schemas.OAuthProbeOut,
+    schemas.ProbeFlow,
     schemas.OAuthStartOut,
     schemas.OAuthDeviceStartOut,
     schemas.OAuthDevicePollOut,

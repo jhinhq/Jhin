@@ -897,6 +897,20 @@ export type OAuthConnectMethod =
   | "oauth_needs_client"
   | "api_key";
 
+/** Why one sign-in flow cannot start, from Jhin's own vocabulary. Empty when
+ * it can. `needs_client_secret` means a registration exists but cannot do
+ * the browser redirect: a confidential provider with no stored secret. */
+export type OAuthProbeFlowReason =
+  | ""
+  | "needs_client_credentials"
+  | "needs_client_secret"
+  | "no_device_endpoint";
+
+export interface OAuthProbeFlow {
+  available: boolean;
+  reason: OAuthProbeFlowReason;
+}
+
 /** `POST /oauth/probe`. Carries no credential material of any kind: `reason`
  * is a Jhin-authored constant, never text the provider wrote. */
 export interface OAuthProbeOut {
@@ -912,6 +926,14 @@ export interface OAuthProbeOut {
   client_configured: boolean;
   requires_client_secret: boolean;
   reason: string;
+  /** The browser redirect flow. `method` is the preferred one; these two say
+   * which flows can start, so the other can be offered as a link. */
+  redirect_flow: OAuthProbeFlow;
+  /** RFC 8628, when the provider has a device endpoint and a client exists. */
+  device_flow: OAuthProbeFlow;
+  /** Where a person manages the apps they own at this provider. Rendered as
+   * a link they may open — never navigated to. Empty when unknown. */
+  app_settings_url: string;
 }
 
 /** `POST /oauth/start` and `POST /connections/{id}/reauthorize`. The URL is
@@ -975,6 +997,13 @@ export interface OAuthRedirectOut {
   is_https: boolean;
   is_loopback: boolean;
   configured_via: "OAUTH_REDIRECT_BASE_URL" | "APP_URL";
+  /** False when the outbound URL policy refuses this instance's own origin,
+   * so one-click GitHub App creation cannot build its manifest. */
+  github_app_available: boolean;
+  /** The permissions a manifest asks for, so a by-hand setup matches it. */
+  github_app_permissions: Record<string, string>;
+  /** Which flow Connect offers first for a native provider that can do both. */
+  preferred_sign_in: "redirect" | "device_code";
 }
 
 /** `POST /oauth/github-app/manifest`. The browser POSTs `manifest` and

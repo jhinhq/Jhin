@@ -59,9 +59,18 @@ class FakeGitHubState:
         token: str = DEFAULT_TOKEN,
         repos: str = DEFAULT_REPOS,
         git_root: str | None = None,
+        installation_count: int = 1,
+        installations_forbidden: bool = False,
     ) -> None:
         self.token = token
         self.git_root = git_root
+        # What ``GET /user/installations`` answers for a user-to-server token:
+        # how many accounts the app is installed on. One by default, so a
+        # connection verifies as plainly "Authenticated"; zero is the state a
+        # freshly created app is in. ``installations_forbidden`` is a classic
+        # OAuth App token, which GitHub answers with 403 here.
+        self.installation_count = installation_count
+        self.installations_forbidden = installations_forbidden
         self.lock = threading.Lock()
         self.minted_tokens: set[str] = set()
         self.mint_count = 0
@@ -192,6 +201,17 @@ def handle_request(
 
     if method == "GET" and path == "/user":
         return 200, {"login": "fake-user", "id": 1}
+
+    if method == "GET" and path == "/user/installations":
+        if state.installations_forbidden:
+            return 403, {"message": "Resource not accessible by integration"}
+        return 200, {
+            "total_count": state.installation_count,
+            "installations": [
+                {"id": 1000 + index, "account": {"login": f"fake-account-{index}"}}
+                for index in range(state.installation_count)
+            ],
+        }
 
     match = re.fullmatch(r"/repos/([^/]+/[^/]+)(/.*)?", path)
     if not match:
@@ -475,8 +495,16 @@ class FakeGitHubServer:
         token: str = DEFAULT_TOKEN,
         repos: str = DEFAULT_REPOS,
         git_root: str | None = None,
+        installation_count: int = 1,
+        installations_forbidden: bool = False,
     ) -> None:
-        self.state = FakeGitHubState(token=token, repos=repos, git_root=git_root)
+        self.state = FakeGitHubState(
+            token=token,
+            repos=repos,
+            git_root=git_root,
+            installation_count=installation_count,
+            installations_forbidden=installations_forbidden,
+        )
         self._host = host
         self._server = ThreadingHTTPServer((host, port), _make_handler(self.state))
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)

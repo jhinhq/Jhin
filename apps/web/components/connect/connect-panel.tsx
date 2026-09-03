@@ -10,20 +10,24 @@
  *
  *   discovery + dynamic registration  two clicks, zero fields
  *   a static provider app             two clicks once the app is registered
- *   device code                       a code to type, no redirect URL at all
+ *   device code                       a code to type, one link away
  *   register an app first             one paste, once per workspace per server
  *   an API key                        the honest last resort
  *
- * The API-key form is never removed and never broken — for the long tail of
- * servers with no OAuth it is the right answer — but it is reached through a
- * quiet link at the bottom rather than being the first thing anybody sees.
+ * The server's answer is the only routing input. It reports which flows can
+ * start beside the one it prefers, and the panel renders the preferred flow
+ * with the other as a quiet link — so a refusal on one path is never the end
+ * of the screen. The API-key form is never removed and never broken; it is
+ * reached through a link at the bottom rather than being the first thing
+ * anybody sees, and a connector with no credential scheme simply has no
+ * such link.
  *
  * Nothing here holds a token. The authorization URL is built by our API and
  * carries only public parameters; the device panel gets a display code and an
  * opaque handle. The browser is never trusted with credential material. */
 
 import { KeyRound, ShieldCheck } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { DeviceCodePanel } from "@/components/connect/device-code-panel";
 import { OAuthClientForm } from "@/components/connect/oauth-client-form";
 import { OAuthConsentStep } from "@/components/connect/oauth-consent-step";
@@ -40,12 +44,21 @@ import {
   useOAuthStart,
   useRedirectUri,
 } from "@/lib/hooks";
-import { connectorSignsIn, navigateToProvider, postFormTo, saveReturnRoute } from "@/lib/oauth";
+import {
+  connectorSignsIn,
+  credentialSchemes,
+  describePermissions,
+  navigateToProvider,
+  postFormTo,
+  safeHttpsUrl,
+  saveReturnRoute,
+} from "@/lib/oauth";
 import type {
   ConnectionCreated,
   ConnectionInfo,
   ConnectorInfo,
   OAuthDeviceStartOut,
+  OAuthProbeFlow,
   OAuthProbeOut,
 } from "@/lib/types";
 import { useWorkspace } from "@/lib/workspace-context";
@@ -77,6 +90,11 @@ function isGitHubIssuer(issuer: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Tolerant of an API that predates the flow fields: absent means "no". */
+function flowAvailable(flow?: OAuthProbeFlow): boolean {
+  return flow?.available === true;
 }
 
 /** Where a probe result sends the panel. Anything not clearly OAuth lands on
@@ -111,10 +129,15 @@ const TIMED_OUT_PROBE: OAuthProbeOut = {
   client_configured: false,
   requires_client_secret: false,
   reason: "timeout",
+  redirect_flow: { available: false, reason: "" },
+  device_flow: { available: false, reason: "" },
+  app_settings_url: "",
 };
 
 /** GitHub's own limit on an app name, so the field cannot submit an invalid one. */
 const GITHUB_APP_NAME_MAX = 34;
+
+const QUIET_LINK = "text-sm text-faint underline underline-offset-2 hover:text-dim";
 
 /**
  * "Create a GitHub App for this instance" — the path with no copy-paste at
@@ -222,6 +245,12 @@ export function ConnectPanel({
    */
   const canProbe =
     connectorSignsIn(connector) && (connector.connector_type !== "mcp" || serverUrl !== "");
+  /**
+   * Whether an API key is even a thing here. A connector whose only schemes
+   * are sign-ins has no form to fall back to, and offering one would store
+   * an empty credential; the panel says so instead.
+   */
+  const hasCredentialForm = credentialSchemes(connector).length > 0;
 
   const [state, setState] = useState<ConnectState>(() =>
     canProbe ? { kind: "probing" } : { kind: "api_key" },
@@ -237,17 +266,38 @@ export function ConnectPanel({
   const probeStarted = useRef(false);
   const probeMutate = probe.mutate;
 
-  useEffect(() => {
-    if (!canProbe || probeStarted.current) return;
-    probeStarted.current = true;
-    let live = true;
-    const timer = setTimeout(() => {
-      if (!live) return;
+  /**
+   * Probe runs are re-runnable: the first one at mount, another after a
+   * client registration is saved, so the server — never this component —
+   * decides what a fresh registration can do. A run stays live until the
+   * panel unmounts or a newer run starts; a late answer from an older run
+   * lands nowhere.
+   */
+  const mounted = useRef(true);
+  const probeRun = useRef(0);
+  const probeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      mounted.current = false;
+      if (probeTimer.current !== null) clearTimeout(probeTimer.current);
+    },
+    [],
+  );
+  const runProbe = useCallback(() => {
+    const run = ++probeRun.current;
+    const live = () => mounted.current && probeRun.current === run;
+    if (probeTimer.current !== null) clearTimeout(probeTimer.current);
+    probeTimer.current = setTimeout(() => {
+      if (!live()) return;
       setProbeResult(TIMED_OUT_PROBE);
       setState((current) =>
         current.kind === "probing" ? { kind: "choose", probe: TIMED_OUT_PROBE } : current,
       );
     }, PROBE_TIMEOUT_MS);
+    const settle = () => {
+      if (probeTimer.current !== null) clearTimeout(probeTimer.current);
+      probeTimer.current = null;
+    };
     probeMutate(
       {
         connector_type: connector.connector_type,
@@ -255,8 +305,8 @@ export function ConnectPanel({
       },
       {
         onSuccess: (result) => {
-          if (!live) return;
-          clearTimeout(timer);
+          if (!live()) return;
+          settle();
           setProbeResult(result);
           setState(nextStateFor(result));
         },
@@ -264,10 +314,10 @@ export function ConnectPanel({
           // A probe that fails must never cost somebody the connection: the
           // API-key form is the fallback, exactly as it was before OAuth.
           // Only a connector with no credential form at all has nothing left.
-          if (!live) return;
-          clearTimeout(timer);
+          if (!live()) return;
+          settle();
           setState(
-            connector.auth_schemes.length > 0
+            hasCredentialForm
               ? { kind: "api_key" }
               : {
                   kind: "failed",
@@ -278,11 +328,13 @@ export function ConnectPanel({
         },
       },
     );
-    return () => {
-      live = false;
-      clearTimeout(timer);
-    };
-  }, [canProbe, connector.auth_schemes.length, connector.connector_type, probeMutate, serverUrl]);
+  }, [connector.connector_type, hasCredentialForm, probeMutate, serverUrl]);
+
+  useEffect(() => {
+    if (!canProbe || probeStarted.current) return;
+    probeStarted.current = true;
+    runProbe();
+  }, [canProbe, runProbe]);
 
   const oauthAvailable = probeResult?.supports_oauth === true;
   const showApiKeyLink = () => setState({ kind: "api_key" });
@@ -345,18 +397,38 @@ export function ConnectPanel({
     );
   }
 
-  const apiKeyLink =
-    connector.auth_schemes.length > 0 ? (
-      <div className="border-t border-line pt-3 text-center">
-        <button
-          type="button"
-          onClick={showApiKeyLink}
-          className="text-sm text-faint underline underline-offset-2 hover:text-dim"
-        >
-          Use an API key instead
-        </button>
+  const apiKeyLink = hasCredentialForm ? (
+    <button type="button" onClick={showApiKeyLink} className={QUIET_LINK}>
+      Use an API key instead
+    </button>
+  ) : null;
+
+  /** The quiet links under a card, in one row; nothing when there are none. */
+  const quietLinks = (...links: (React.ReactNode | null)[]) => {
+    const present = links.filter((link) => link !== null);
+    if (present.length === 0) return null;
+    return (
+      <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1 border-t border-line pt-3 text-center">
+        {present.map((link, index) => (
+          <span key={index}>{link}</span>
+        ))}
       </div>
-    ) : null;
+    );
+  };
+
+  /** The device card's own facts, when that is the state on screen.
+   *
+   * The card shows when the code is the preferred flow *or* when the person
+   * took the "sign in with a code" link from consent — the server said the
+   * code can start either way. Anything else in `choose` is the timed-out
+   * probe, which has nothing to offer but the key. */
+  const chooseProbe = state.kind === "choose" ? state.probe : null;
+  const deviceCard =
+    chooseProbe !== null &&
+    (chooseProbe.method === "device_code" || flowAvailable(chooseProbe.device_flow));
+  const redirectAvailable = chooseProbe !== null && flowAvailable(chooseProbe.redirect_flow);
+  const secretMissing = chooseProbe?.redirect_flow?.reason === "needs_client_secret";
+  const deviceRefused = deviceStart.error !== null && deviceStart.error !== undefined;
 
   return (
     <Dialog title={`Connect ${appName}`} open onClose={onClose} wide>
@@ -380,13 +452,28 @@ export function ConnectPanel({
             userName={user.display_name}
             busy={start.isPending}
             error={errText(start.error, "That connection attempt could not be started.")}
+            accessSummary={
+              isGitHubIssuer(state.probe.issuer)
+                ? "the permissions the app was registered with"
+                : undefined
+            }
+            installHint={
+              isGitHubIssuer(state.probe.issuer)
+                ? { url: safeHttpsUrl(state.probe.app_settings_url) }
+                : undefined
+            }
             onContinue={continueToProvider}
-            onUseApiKey={connector.auth_schemes.length > 0 ? showApiKeyLink : undefined}
+            onUseDeviceCode={
+              flowAvailable(state.probe.device_flow)
+                ? () => setState({ kind: "choose", probe: state.probe })
+                : undefined
+            }
+            onUseApiKey={hasCredentialForm ? showApiKeyLink : undefined}
             onCancel={onClose}
           />
         ) : null}
 
-        {state.kind === "choose" && state.probe.method === "device_code" ? (
+        {state.kind === "choose" && deviceCard ? (
           <>
             <div className="space-y-3 rounded-2xl border border-accent/30 bg-accent-soft px-4 py-3.5">
               <p className="flex items-center gap-2 font-display text-sm font-semibold text-ink">
@@ -399,35 +486,96 @@ export function ConnectPanel({
               </p>
               {connector.connector_type === "github" ? (
                 // A GitHub App starts with the device flow switched off, and GitHub
-                // refuses the start until it is on; say so before the click, not after.
+                // refuses the start until it is on; say so before the click, not
+                // after — and say where the working sign-in is when there is one.
                 <p className="text-[13px] leading-relaxed text-dim" data-testid="device-github-hint">
-                  GitHub only offers this to apps with{" "}
-                  <span className="font-medium text-ink">Enable Device Flow</span> turned on in
-                  their settings on GitHub. A GitHub App starts with it off.
+                  {redirectAvailable ? (
+                    <>
+                      GitHub only offers this to apps with{" "}
+                      <span className="font-medium text-ink">Enable Device Flow</span> turned on in
+                      their settings. Yours may not have it — the browser sign-in needs no change
+                      on GitHub.
+                    </>
+                  ) : (
+                    <>
+                      GitHub only offers this to apps with{" "}
+                      <span className="font-medium text-ink">Enable Device Flow</span> turned on in
+                      their settings on GitHub. A GitHub App starts with it off.
+                    </>
+                  )}
                 </p>
               ) : null}
             </div>
             <ErrorNote
               message={errText(deviceStart.error, "That sign-in could not be started.")}
             />
-            <div className="flex justify-end gap-2">
+            <div className="flex flex-wrap justify-end gap-2">
               <Button type="button" variant="ghost" onClick={onClose}>
                 Cancel
               </Button>
-              <Button
-                type="button"
-                variant="primary"
-                onClick={beginDeviceFlow}
-                disabled={deviceStart.isPending}
-              >
-                {deviceStart.isPending ? "Starting…" : `Connect ${appName}`}
-              </Button>
+              {deviceRefused && redirectAvailable ? (
+                // The provider said no to the code and the browser sign-in
+                // works: that becomes the primary action, the code a retry.
+                <>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    onClick={beginDeviceFlow}
+                    disabled={deviceStart.isPending}
+                  >
+                    {deviceStart.isPending ? "Starting…" : "Try the code again"}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="primary"
+                    data-testid="device-refused-use-redirect"
+                    onClick={() => setState({ kind: "consent", probe: state.probe })}
+                  >
+                    Use the browser sign-in instead
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  type="button"
+                  variant="primary"
+                  onClick={beginDeviceFlow}
+                  disabled={deviceStart.isPending}
+                >
+                  {deviceStart.isPending
+                    ? "Starting…"
+                    : deviceRefused
+                      ? "Try the code again"
+                      : `Connect ${appName}`}
+                </Button>
+              )}
             </div>
-            {apiKeyLink}
+            {quietLinks(
+              redirectAvailable && !deviceRefused ? (
+                <button
+                  type="button"
+                  data-testid="use-redirect-link"
+                  onClick={() => setState({ kind: "consent", probe: state.probe })}
+                  className={QUIET_LINK}
+                >
+                  Use the browser sign-in instead
+                </button>
+              ) : null,
+              secretMissing ? (
+                <button
+                  type="button"
+                  data-testid="add-secret-link"
+                  onClick={() => setState({ kind: "needs_client", probe: state.probe })}
+                  className={QUIET_LINK}
+                >
+                  Add a client secret to use the browser sign-in instead
+                </button>
+              ) : null,
+              apiKeyLink,
+            )}
           </>
         ) : null}
 
-        {state.kind === "choose" && state.probe.method !== "device_code" ? (
+        {state.kind === "choose" && !deviceCard ? (
           <>
             <div className="flex items-start gap-3 rounded-2xl border border-line bg-raised px-4 py-3.5">
               <KeyRound size={16} aria-hidden className="mt-0.5 shrink-0 text-dim" />
@@ -443,7 +591,7 @@ export function ConnectPanel({
                 type="button"
                 variant="primary"
                 onClick={showApiKeyLink}
-                disabled={connector.auth_schemes.length === 0}
+                disabled={!hasCredentialForm}
               >
                 Continue with an API key
               </Button>
@@ -453,8 +601,23 @@ export function ConnectPanel({
 
         {state.kind === "needs_client" ? (
           <>
-            {isGitHubIssuer(state.probe.issuer) ? (
+            {isGitHubIssuer(state.probe.issuer) && redirectUri.data?.github_app_available ? (
               <GitHubAppCard workspaceId={workspaceId} defaultName="Jhin" />
+            ) : null}
+            {isGitHubIssuer(state.probe.issuer) &&
+            redirectUri.data &&
+            !redirectUri.data.github_app_available ? (
+              <p
+                className="rounded-2xl border border-line bg-raised px-4 py-3 text-[13px] leading-relaxed text-dim"
+                data-testid="github-app-by-hand"
+              >
+                One-click app creation is off on this instance: its address is a loopback or
+                plain-HTTP origin that JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS does not list. Create a
+                GitHub App on github.com by hand — give it the callback URL below and these
+                permissions: {describePermissions(redirectUri.data.github_app_permissions)} — then
+                generate a client secret and paste both here. (Or allow-list the origin, restart
+                the API, and reopen this dialog.)
+              </p>
             ) : null}
             {redirectUri.isPending ? (
               <Spinner label="Loading this instance's redirect URL…" />
@@ -464,18 +627,35 @@ export function ConnectPanel({
                 issuer={state.probe.issuer}
                 redirectUri={redirectUri.data.redirect_uri}
                 requiresSecret={state.probe.requires_client_secret}
-                docsUrl={connector.docs_url || undefined}
-                onSaved={() =>
-                  setState({
-                    kind: "consent",
-                    probe: { ...state.probe, client_configured: true },
-                  })
+                docsUrl={
+                  (isGitHubIssuer(state.probe.issuer)
+                    ? safeHttpsUrl(state.probe.app_settings_url)
+                    : null) ??
+                  connector.docs_url ??
+                  undefined
                 }
+                intro={
+                  state.probe.reason === "needs_client_secret"
+                    ? `${state.probe.authorization_server_display || state.probe.issuer} needs a client secret for the browser sign-in and none is stored. Paste the client id and secret again — Save replaces the stored pair.`
+                    : undefined
+                }
+                permissions={
+                  isGitHubIssuer(state.probe.issuer)
+                    ? redirectUri.data.github_app_permissions
+                    : undefined
+                }
+                onSaved={() => {
+                  // One registration, one answer: the server says what the
+                  // fresh registration can do, rather than this component
+                  // deciding it can go straight to consent.
+                  setState({ kind: "probing" });
+                  runProbe();
+                }}
               />
             ) : (
               <ErrorNote message="This instance's redirect URL could not be read, so an app cannot be registered here yet." />
             )}
-            {apiKeyLink}
+            {quietLinks(apiKeyLink)}
           </>
         ) : null}
 
@@ -483,6 +663,11 @@ export function ConnectPanel({
           <DeviceCodePanel
             workspaceId={workspaceId}
             device={state.device}
+            appSettingsUrl={
+              probeResult && isGitHubIssuer(probeResult.issuer)
+                ? safeHttpsUrl(probeResult.app_settings_url)
+                : null
+            }
             onConnected={onConnected}
             onCancel={onClose}
             onRestart={() =>
@@ -498,9 +683,11 @@ export function ConnectPanel({
               <Button type="button" variant="ghost" onClick={onClose}>
                 Cancel
               </Button>
-              <Button type="button" variant="primary" onClick={showApiKeyLink}>
-                Use an API key instead
-              </Button>
+              {hasCredentialForm ? (
+                <Button type="button" variant="primary" onClick={showApiKeyLink}>
+                  Use an API key instead
+                </Button>
+              ) : null}
             </div>
           </>
         ) : null}

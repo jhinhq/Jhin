@@ -96,6 +96,8 @@ _REFUSAL_MESSAGES: Final[Mapping[str, str]] = {
     "unsupported_grant_type": "this authorization server does not support this sign-in method",
     "device_flow_disabled": "device sign-in is turned off for this app",
     "incorrect_client_credentials": "this app's credentials were refused",
+    "bad_verification_code": "the authorization code was refused",
+    "redirect_uri_mismatch": "the redirect URI is not one registered for this app",
 }
 _GENERIC_REFUSAL: Final[str] = "the authorization server refused the token request"
 
@@ -381,6 +383,13 @@ async def exchange_code(
     response = await _post_token_request(client, metadata.token_endpoint, form, headers)
     if not response.is_success:
         _raise_for_refusal(response)
+    if isinstance(response.payload, dict) and isinstance(response.payload.get("error"), str):
+        # GitHub reports a refused exchange — ``incorrect_client_credentials``,
+        # ``redirect_uri_mismatch``, ``bad_verification_code`` — with HTTP 200
+        # and the error in the body, exactly as its device flow does. Restated
+        # as a refusal so the one classifier names it, instead of the shape
+        # check below reporting "no access token" and losing the reason.
+        _raise_for_refusal(_as_refusal(response))
     return _token_response(response.payload, issuer=metadata.issuer)
 
 

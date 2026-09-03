@@ -12,21 +12,28 @@ Two properties, both structural rather than defensive:
 
 from __future__ import annotations
 
+from typing import get_args
+
 import pytest
 
 from jhin_api.oauth.redirect import (
     CALLBACK_PATH,
     GITHUB_APP_CALLBACK_PATH,
     OAuthRedirectMisconfigured,
+    OAuthReturnError,
     app_return_url,
     configured_via,
+    github_app_available,
     github_app_redirect_uri,
+    github_app_return_url,
     is_https_redirect,
     is_loopback_redirect,
     redirect_base,
     redirect_uri,
 )
 from jhin_api.settings import InsecureDeploymentError, Settings
+
+ALLOWLIST_ENV = "JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS"
 
 
 def _settings(**overrides: object) -> Settings:
@@ -140,3 +147,53 @@ def test_app_return_url_refuses_anything_that_is_not_a_public_id(public_id: str)
     """The one interpolation into a Location header, and it is proven first."""
     with pytest.raises(ValueError):
         app_return_url(_settings(), public_id=public_id)
+
+
+def test_the_return_error_vocabulary_is_closed_and_every_member_lands_on_apps() -> None:
+    """Four constants, chosen by the service, never provider text."""
+    assert set(get_args(OAuthReturnError)) == {
+        "denied",
+        "failed",
+        "client_rejected",
+        "callback_mismatch",
+    }
+    settings = _settings(app_url="https://jhin.example.com")
+    for code in get_args(OAuthReturnError):
+        assert app_return_url(settings, public_id=None, error=code) == (
+            f"https://jhin.example.com/apps?oauth_error={code}"
+        )
+
+
+def test_the_manifest_handshake_lands_on_apps_with_a_boolean_flag() -> None:
+    settings = _settings(app_url="https://jhin.example.com/")
+    assert github_app_return_url(settings, created=True) == (
+        "https://jhin.example.com/apps?github_app=created"
+    )
+    assert github_app_return_url(settings, created=False) == (
+        "https://jhin.example.com/apps?github_app=failed"
+    )
+
+
+def test_one_click_app_creation_needs_an_origin_the_outbound_policy_accepts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The manifest embeds the instance's own origin, so a loopback install
+    is told up front instead of the manifest route answering 400 later."""
+    monkeypatch.delenv(ALLOWLIST_ENV, raising=False)
+    assert github_app_available(_settings(app_url="http://localhost:3000")) is False
+    assert github_app_available(_settings(app_url="https://jhin.example.com")) is True
+
+    monkeypatch.setenv(ALLOWLIST_ENV, "http://localhost:3000")
+    assert github_app_available(_settings(app_url="http://localhost:3000")) is True
+
+    # The redirect base is embedded too, so it has to pass on its own.
+    monkeypatch.setenv(ALLOWLIST_ENV, "http://localhost:3000")
+    assert (
+        github_app_available(
+            _settings(
+                app_url="http://localhost:3000",
+                oauth_redirect_base_url="http://127.0.0.1:8000",
+            )
+        )
+        is False
+    )

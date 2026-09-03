@@ -140,6 +140,9 @@ async def get_redirect_uri(_auth: CurrentAuth, settings: SettingsDep) -> OAuthRe
         is_https=redirect_module.is_https_redirect(settings),
         is_loopback=redirect_module.is_loopback_redirect(settings),
         configured_via=redirect_module.configured_via(settings),
+        github_app_available=redirect_module.github_app_available(settings),
+        github_app_permissions=service.github_app_permissions(),
+        preferred_sign_in="device_code" if settings.oauth_prefer_device_code else "redirect",
     )
 
 
@@ -209,7 +212,7 @@ async def oauth_callback(
 @oauth_public_router.get("/github-app/callback", status_code=status.HTTP_303_SEE_OTHER)
 async def github_app_callback(
     request: Request,
-    auth: CurrentAuth,
+    auth: OptionalAuth,
     db: DbSession,
     crypto: SecretCryptoDep,
     settings: SettingsDep,
@@ -223,7 +226,14 @@ async def github_app_callback(
     conversion code is worth a full set of app credentials for exactly one
     hour, which is why the pending row for this flow is the only one with a
     TTL longer than ten minutes and why it is still single-use.
+
+    A session that died while the person was on GitHub's form is handled
+    exactly as the OAuth callback handles it: nothing is claimed, nothing is
+    converted, and the browser is sent back to Apps with a flag rather than
+    a raw 401 body. The pending row survives for a retry within the hour.
     """
+    if auth is None:
+        return _no_store(redirect_module.app_return_url(settings, public_id=None, error="failed"))
     created = await service.complete_github_app_manifest(
         db,
         crypto,
@@ -312,10 +322,11 @@ async def start_device_flow(
 ) -> OAuthDeviceStartOut:
     """Begin a device-code sign-in: a short code, no redirect, no secret.
 
-    The answer for an install the internet cannot reach — a laptop, a private
-    network, anything without a public HTTPS origin — where a redirect-based
-    flow cannot work at all and pasting a personal access token used to be the
-    only remaining option.
+    The alternative to the browser sign-in for a native provider that offers
+    RFC 8628 — chosen from a link on the consent step, or offered first when
+    the registration has no client secret or ``OAUTH_PREFER_DEVICE_CODE`` is
+    set. A provider that refuses to start it is answered with a sentence that
+    names the fix, and names the browser sign-in when that is one.
     """
     return await service.start_device_flow(db, crypto, ctx, http_client, settings, payload)
 

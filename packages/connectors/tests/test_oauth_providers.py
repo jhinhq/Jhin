@@ -17,6 +17,7 @@ from jhin_connectors.oauth_providers import (
     StaticOAuthProvider,
     provider_metadata,
 )
+from jhin_oauth.urls import validate_oauth_url
 
 #: Every attribute the API's OAuth service reads off a provider. Kept as a
 #: literal list so that adding a read site without a field is caught here
@@ -33,6 +34,7 @@ READ_BY_THE_API = (
     "requires_client_secret",
     "supports_refresh",
     "extra_authorize_params",
+    "app_settings_url",
 )
 
 
@@ -64,6 +66,33 @@ def test_metadata_never_claims_dynamic_registration() -> None:
         # The issuer must survive round-tripping byte-identically: client
         # registrations are keyed by it.
         assert metadata.issuer == provider.issuer
+
+
+def test_the_app_settings_url_is_https_and_validates_on_the_way_out() -> None:
+    """A link the probe hands a person to open: a provider fact, never a
+    credential, and put through the same outbound policy as every URL here."""
+    github = STATIC_PROVIDERS["github"]
+    assert github.app_settings_url == "https://github.com/settings/apps"
+    for provider in STATIC_PROVIDERS.values():
+        if not provider.app_settings_url:
+            continue
+        assert provider.app_settings_url.startswith("https://")
+        assert (
+            validate_oauth_url(provider.app_settings_url, kind=f"{provider.key} app settings URL")
+            == provider.app_settings_url
+        )
+
+    hostile = StaticOAuthProvider(
+        key="hostile",
+        connector_type="hostile",
+        issuer="https://as.example.com",
+        authorization_endpoint="https://as.example.com/authorize",
+        token_endpoint="https://as.example.com/token",
+        app_settings_url="http://169.254.169.254/apps",
+    )
+    with pytest.raises(Exception) as excinfo:
+        validate_oauth_url(hostile.app_settings_url, kind="hostile app settings URL")
+    assert "169.254" not in str(excinfo.value)
 
 
 def test_a_revocation_endpoint_is_validated_on_the_way_out() -> None:

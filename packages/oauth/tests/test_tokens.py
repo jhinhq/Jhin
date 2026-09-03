@@ -578,6 +578,83 @@ def test_an_unknown_error_code_degrades_to_unknown() -> None:
     assert TokenError("refused", error_code="invalid_scope").error_code == "invalid_scope"
 
 
+def test_githubs_token_endpoint_codes_are_known_and_normalise_to_themselves() -> None:
+    """The three codes GitHub's token endpoint reports with HTTP 200."""
+    for code in ("bad_verification_code", "incorrect_client_credentials", "redirect_uri_mismatch"):
+        assert TokenError("refused", error_code=code).error_code == code
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["bad_verification_code", "incorrect_client_credentials", "redirect_uri_mismatch"],
+)
+async def test_an_http_200_error_body_at_the_token_endpoint_is_a_refusal(
+    http_client: httpx.AsyncClient, start_server: StartServer, code: str
+) -> None:
+    """GitHub answers a refused exchange with 200 and the error in the body.
+
+    Read only by status, that looks like a success with no access token and
+    the reason is lost; classified, it is the same refusal a 400 would be,
+    carrying the code the caller branches on.
+    """
+    server = start_server(FakeAsConfig(fail_token_with=code, token_error_status=200))
+    metadata = await discover_authorization_server(http_client, server.issuer)
+    server.register_static_client()
+
+    with pytest.raises(TokenError) as caught:
+        await exchange_code(
+            http_client,
+            metadata,
+            credentials=ClientCredentials(client_id="fake-static-client"),
+            code="fake-code",
+            redirect_uri=REDIRECT_URI,
+            code_verifier=generate_pkce().verifier,
+            resource=RESOURCE,
+        )
+    assert caught.value.error_code == code
+    assert "fake failure" not in str(caught.value)
+
+
+async def test_a_normal_token_body_still_returns_tokens(
+    http_client: httpx.AsyncClient, fake_as: FakeAuthorizationServer
+) -> None:
+    """The HTTP-200 classification only fires on a string ``error`` field."""
+    _metadata, _credentials, tokens = await _tokens(http_client, fake_as)
+    assert isinstance(tokens, TokenResponse)
+    assert tokens.access_token
+
+
+async def test_a_non_string_error_field_is_not_a_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a string ``error`` is provider vocabulary; anything else is noise
+    beside a real token. Stubbed at the module's own request function, not
+    at httpx, because no server in the test kit sends such a body."""
+    from jhin_oauth import tokens as tokens_module
+    from jhin_oauth._http import BoundedResponse
+
+    async def _post(*_args: object, **_kwargs: object) -> BoundedResponse:
+        return BoundedResponse(
+            status_code=200,
+            payload={"error": 1, "access_token": "fake-access-token", "token_type": "bearer"},
+            content_type="application/json",
+            headers={},
+        )
+
+    monkeypatch.setattr(tokens_module, "_post_token_request", _post)
+    async with httpx.AsyncClient() as client:
+        tokens = await exchange_code(
+            client,
+            STATIC_METADATA,
+            credentials=ClientCredentials(client_id="public"),
+            code="fake-code",
+            redirect_uri=REDIRECT_URI,
+            code_verifier=generate_pkce().verifier,
+            resource="",
+        )
+    assert tokens.access_token == "fake-access-token"
+
+
 # --- client authentication -------------------------------------------------
 
 

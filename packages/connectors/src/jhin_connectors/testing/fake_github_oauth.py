@@ -81,6 +81,15 @@ class FakeGitHubOAuthConfig:
     manifest_conversion_status: int = 201
     app_slug: str = "jhin-fake-instance"
     app_id: str = "424242"
+    # When set, an ``authorization_code`` exchange whose ``client_secret``
+    # differs answers ``incorrect_client_credentials`` — the way GitHub
+    # reports a wrong secret, with HTTP 200. Unset keeps the permissive
+    # behaviour every existing test relies on.
+    expected_client_secret: str | None = None
+    # A scripted refusal for the *next* ``authorization_code`` exchange
+    # (``redirect_uri_mismatch``, ``bad_verification_code``…), consumed once;
+    # ``reset()`` re-arms it. See :meth:`FakeGitHubOAuthServer.refuse_next_exchange`.
+    authorization_code_error: str | None = None
 
 
 class FakeGitHubOAuthServer:
@@ -101,6 +110,7 @@ class FakeGitHubOAuthServer:
         self.device_grants: dict[str, dict[str, Any]] = {}
         self.issued: list[dict[str, Any]] = []
         self._poll_queue: list[str] = list(self.config.device_poll_script)
+        self._next_exchange_error: str | None = self.config.authorization_code_error
         import uvicorn
 
         self._host = host
@@ -162,6 +172,12 @@ class FakeGitHubOAuthServer:
             self.device_grants.clear()
             self.issued.clear()
             self._poll_queue = list(self.config.device_poll_script)
+            self._next_exchange_error = self.config.authorization_code_error
+
+    def refuse_next_exchange(self, error_code: str) -> None:
+        """Script one refusal for the next ``authorization_code`` exchange."""
+        with self.lock:
+            self._next_exchange_error = error_code
 
     def approve_device(self, user_code: str) -> None:
         with self.lock:
@@ -256,6 +272,13 @@ class FakeGitHubOAuthServer:
             if grant_type in {"", "authorization_code"}:
                 if not form.get("code"):
                     return self._error(request, "invalid_grant")
+                with self.lock:
+                    scripted_error, self._next_exchange_error = self._next_exchange_error, None
+                if scripted_error is not None:
+                    return self._error(request, scripted_error)
+                expected = self.config.expected_client_secret
+                if expected is not None and form.get("client_secret") != expected:
+                    return self._error(request, "incorrect_client_credentials")
                 return self._issue(request, scope=form.get("scope", ""))
             return self._error(request, "unsupported_grant_type")
 

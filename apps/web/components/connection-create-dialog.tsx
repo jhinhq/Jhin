@@ -46,6 +46,7 @@ import {
   findAuthScheme,
   validateConnectionForm,
 } from "@/lib/connectors";
+import { credentialSchemes } from "@/lib/oauth";
 import type { ConnectionCreated, ConnectorInfo } from "@/lib/types";
 
 function errText(error: unknown, fallback: string): string | null {
@@ -84,10 +85,19 @@ export function CreateConnectionDialog({
   onCreated: (created: ConnectionCreated) => void;
 }) {
   const [name, setName] = useState(prefill?.name ?? "");
+  /**
+   * Only schemes a person can fill in. A sign-in scheme ("Sign in with
+   * GitHub", "Sign in with a device code", MCP's `oauth`) has no fields and
+   * belongs to `ConnectPanel`; offering it here would store an empty
+   * credential and call it a connection. The full list is the fallback only
+   * for a connector that declares nothing else.
+   */
+  const fillable = credentialSchemes(connector);
+  const schemes = fillable.length > 0 ? fillable : connector.auth_schemes;
   const [authType, setAuthType] = useState(
-    prefill?.authType && findAuthScheme(connector, prefill.authType)
+    prefill?.authType && schemes.some((scheme) => scheme.type === prefill.authType)
       ? prefill.authType
-      : connector.auth_schemes[0]?.type ?? "",
+      : schemes[0]?.type ?? "",
   );
   const [credentials, setCredentials] = useState<Record<string, string>>({});
   const initialConfig = (selectedAuth: string) => ({
@@ -186,7 +196,7 @@ export function CreateConnectionDialog({
               setConfig(initialConfig(e.target.value));
             }}
           >
-            {connector.auth_schemes.map((s) => (
+            {schemes.map((s) => (
               <option key={s.type} value={s.type}>
                 {s.label}
               </option>

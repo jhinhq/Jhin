@@ -3,10 +3,9 @@
 /** The device-code screen: a code to type somewhere else, and a panel that
  * notices when you have.
  *
- * This is the flow for an instance the provider cannot redirect back to —
- * localhost, a private network, anything without a public HTTPS address. It
- * needs no redirect URI and no client secret, which is exactly why it is the
- * answer there rather than a hosted broker.
+ * The alternative to the browser sign-in for a provider that offers it. It
+ * needs no redirect URI and no client secret, which is why it is also the
+ * first offer when a registration has no secret.
  *
  * The browser never sees the device code. It gets a display code, which is
  * useless on its own, and an opaque handle the server exchanges for it. */
@@ -14,8 +13,9 @@
 import { CheckCircle2, Copy, ExternalLink, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Button, ErrorNote, Spinner } from "@/components/ui";
+import { ApiError } from "@/lib/api";
 import { useOAuthDevicePoll } from "@/lib/hooks";
-import { formatCountdown, formatUserCode, secondsUntil } from "@/lib/oauth";
+import { formatCountdown, formatUserCode, safeHttpsUrl, secondsUntil } from "@/lib/oauth";
 import type { ConnectionInfo, OAuthDeviceStartOut } from "@/lib/types";
 
 /** `https://github.com/login/device` reads better as `github.com/login/device`
@@ -31,24 +31,20 @@ function verificationLabel(uri: string): string | null {
   }
 }
 
-function safeHttpsUrl(uri: string | null): string | null {
-  if (!uri) return null;
-  try {
-    return new URL(uri).protocol === "https:" ? uri : null;
-  } catch {
-    return null;
-  }
-}
-
 export function DeviceCodePanel({
   workspaceId,
   device,
+  appSettingsUrl = null,
   onConnected,
   onCancel,
   onRestart,
 }: {
   workspaceId: string;
   device: OAuthDeviceStartOut;
+  /** GitHub only: where the app has to be installed before the connection
+   * reaches a repository. When given, the connected state waits for Done
+   * instead of closing at once, so the person sees that sentence. */
+  appSettingsUrl?: string | null;
   onConnected: (connection: ConnectionInfo) => void;
   onCancel: () => void;
   /** Where "Try again" goes when the code expires or is declined. Falls back
@@ -73,25 +69,60 @@ export function DeviceCodePanel({
     return () => clearInterval(timer);
   }, [device.expires_at]);
 
-  /** The one thing worth telling the caller about: it worked. */
+  /** The one thing worth telling the caller about: it worked. With an
+   * install hint to show, the caller hears it from the Done button instead. */
   useEffect(() => {
     const data = poll.data;
-    if (data?.status === "connected" && data.connection) onConnected(data.connection);
-  }, [poll.data, onConnected]);
+    if (data?.status === "connected" && data.connection && !appSettingsUrl) {
+      onConnected(data.connection);
+    }
+  }, [poll.data, onConnected, appSettingsUrl]);
 
   const status = poll.data?.status ?? "pending";
-  const expired = status === "expired" || (remaining === 0 && status !== "connected");
+  /** A 410 from the poll: the handle is spent or expired server-side. Not a
+   * transient failure, so it is not "try again in a moment". */
+  const gone = poll.error instanceof ApiError && poll.error.status === 410;
+  const expired = status === "expired" || gone || (remaining === 0 && status !== "connected");
   const restart = onRestart ?? onCancel;
   const label = verificationLabel(device.verification_uri);
   const openUrl =
     safeHttpsUrl(device.verification_uri_complete) ?? safeHttpsUrl(device.verification_uri);
 
   if (status === "connected") {
+    const connection = poll.data?.connection ?? null;
     return (
-      <div className="space-y-3" data-testid="device-code-panel">
+      <div className="space-y-4" data-testid="device-code-panel">
         <p className="flex items-center gap-2 rounded-2xl border border-ok/30 bg-ok-soft px-4 py-3 text-sm text-ok">
           <CheckCircle2 size={16} aria-hidden /> Approved — this app is connected.
         </p>
+        {appSettingsUrl ? (
+          <>
+            <p className="text-[13px] leading-relaxed text-dim" data-testid="device-install-hint">
+              Jhin can act as you only in repositories where the app is installed.{" "}
+              <a
+                href={appSettingsUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-accent-strong hover:underline"
+              >
+                Open your GitHub Apps <ExternalLink size={11} aria-hidden />
+              </a>
+              , choose the app, then <span className="font-medium text-ink">Install App</span>.
+            </p>
+            <div className="flex justify-end">
+              <Button
+                type="button"
+                variant="primary"
+                disabled={connection === null}
+                onClick={() => {
+                  if (connection) onConnected(connection);
+                }}
+              >
+                Done
+              </Button>
+            </div>
+          </>
+        ) : null}
       </div>
     );
   }
@@ -119,7 +150,9 @@ export function DeviceCodePanel({
     return (
       <div className="space-y-4" data-testid="device-code-panel">
         <p className="rounded-2xl border border-warn/30 bg-warn-soft px-4 py-3 text-sm text-warn">
-          That code expired before it was approved. Codes are short-lived on purpose.
+          {gone
+            ? "This sign-in attempt is no longer valid. Start again."
+            : "That code expired before it was approved. Codes are short-lived on purpose."}
         </p>
         <div className="flex justify-end gap-2">
           <Button type="button" variant="ghost" onClick={onCancel}>

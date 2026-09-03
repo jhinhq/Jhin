@@ -19,6 +19,7 @@ import { CopyRow } from "@/components/connection-detail";
 import { Button, ErrorNote, Field, Input, Select } from "@/components/ui";
 import { ApiError } from "@/lib/api";
 import { useCreateOAuthClient } from "@/lib/hooks";
+import { describePermissions } from "@/lib/oauth";
 
 type AuthMethod = "none" | "client_secret_post" | "client_secret_basic";
 
@@ -38,6 +39,8 @@ export function OAuthClientForm({
   redirectUri,
   requiresSecret,
   docsUrl,
+  intro,
+  permissions,
   onSaved,
 }: {
   workspaceId: string;
@@ -45,6 +48,12 @@ export function OAuthClientForm({
   redirectUri: string;
   requiresSecret: boolean;
   docsUrl?: string;
+  /** Replaces the "needs Jhin registered first" opener — for the case where
+   * a registration exists but is missing the secret the redirect needs. */
+  intro?: string;
+  /** The permissions the app should be created with, when the provider has
+   * a permission model rather than scopes (a GitHub App). */
+  permissions?: Record<string, string>;
   onSaved: () => void;
 }) {
   const [clientId, setClientId] = useState("");
@@ -73,9 +82,17 @@ export function OAuthClientForm({
         );
       }}
     >
-      <p className="rounded-2xl border border-accent/30 bg-accent-soft px-4 py-3 text-sm leading-relaxed text-ink">
-        <span className="font-medium">{host}</span> needs Jhin registered as an app first. This is a
-        one-time setup for your whole workspace — every later connection to this server skips it.
+      <p
+        className="rounded-2xl border border-accent/30 bg-accent-soft px-4 py-3 text-sm leading-relaxed text-ink"
+        data-testid="oauth-client-form-intro"
+      >
+        {intro ?? (
+          <>
+            <span className="font-medium">{host}</span> needs Jhin registered as an app first. This
+            is a one-time setup for your whole workspace — every later connection to this server
+            skips it.
+          </>
+        )}
       </p>
 
       <CopyRow label="Redirect URL to paste there" value={redirectUri} />
@@ -98,6 +115,11 @@ export function OAuthClientForm({
           .
         </li>
         <li>2. Create an app and give it the redirect URL above, exactly as shown.</li>
+        {permissions && Object.keys(permissions).length > 0 ? (
+          <li data-testid="oauth-client-form-permissions">
+            2b. Give it these permissions: {describePermissions(permissions)}.
+          </li>
+        ) : null}
         <li>3. Paste the client ID it gives you back here.</li>
       </ol>
 

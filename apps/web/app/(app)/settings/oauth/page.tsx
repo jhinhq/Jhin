@@ -12,8 +12,8 @@
  * No secret is displayed here, ever. A registration either has one stored or
  * it does not, and that is all this page can say about it. */
 
-import { KeyRound, Link2, ShieldCheck } from "lucide-react";
-import { useEffect, useState } from "react";
+import { KeyRound, Link2, LogIn, ShieldCheck } from "lucide-react";
+import { useState } from "react";
 import { PageBody, PageHeader } from "@/components/app-shell";
 import { LoadError } from "@/components/company/bits";
 import { CopyRow } from "@/components/connection-detail";
@@ -40,6 +40,22 @@ function issuerHost(issuer: string): string {
   }
 }
 
+/** What the secret badge says. A GitHub registration without a secret can
+ * only sign in with a code — the browser sign-in needs the secret — so the
+ * badge says that rather than the generic "no secret needed". */
+function secretLabel(client: OAuthClientOut): string {
+  if (client.client_secret_configured) return "Secret stored";
+  if (issuerHost(client.issuer) === "github.com") return "No secret — sign-in code only";
+  return "No secret needed";
+}
+
+const SIGN_IN_ORDER: Record<"redirect" | "device_code", string> = {
+  redirect:
+    "In the browser first. Connect GitHub sends the person to github.com and back to the redirect URL above; no setting on GitHub is needed. A sign-in code is offered as an alternative, and when GitHub refuses the code for an app, the browser sign-in is offered in return.",
+  device_code:
+    "With a sign-in code first, set by OAUTH_PREFER_DEVICE_CODE. The browser sign-in stays available as an alternative. A GitHub App created from Jhin starts with device sign-in turned off; to use codes with it, turn on Enable Device Flow in the app's settings on GitHub.",
+};
+
 function ClientRow({
   client,
   canManage,
@@ -63,7 +79,7 @@ function ClientRow({
           </Badge>
           <Badge tone="neutral">
             <KeyRound size={11} aria-hidden />
-            {client.client_secret_configured ? "Secret stored" : "No secret needed"}
+            {secretLabel(client)}
           </Badge>
           <span className="text-xs text-faint">
             {client.connection_count === 1
@@ -90,19 +106,6 @@ export default function OAuthSettingsPage() {
   const clients = useOAuthClients(workspaceId, isAdmin);
   const forget = useDeleteOAuthClient(workspaceId);
   const [pendingForget, setPendingForget] = useState<OAuthClientOut | null>(null);
-  /** The GitHub app-manifest callback lands here with a flag. Read once at
-   * mount; the effect only scrubs it, so a refresh cannot re-announce a
-   * one-off event. */
-  const [appCreated] = useState(
-    () =>
-      typeof window !== "undefined" &&
-      new URLSearchParams(window.location.search).get("github_app") === "created",
-  );
-
-  useEffect(() => {
-    if (!appCreated) return;
-    window.history.replaceState(null, "", window.location.pathname);
-  }, [appCreated]);
 
   if (!isAdmin) {
     return (
@@ -127,16 +130,6 @@ export default function OAuthSettingsPage() {
         description="The callback URL this instance uses, and the apps it has registered."
       />
       <PageBody className="max-w-3xl space-y-8">
-        {appCreated ? (
-          <p
-            role="status"
-            className="rounded-2xl border border-ok/30 bg-ok-soft px-4 py-3 text-sm text-ok"
-          >
-            Your GitHub App was created and its credentials were stored. GitHub connections can be
-            made from Apps now.
-          </p>
-        ) : null}
-
         <Card as="section">
           <h2 className="mb-1 flex items-center gap-2 font-display text-base font-semibold">
             <Link2 size={16} aria-hidden /> Redirect URL
@@ -160,12 +153,21 @@ export default function OAuthSettingsPage() {
                 {redirect.data.is_https
                   ? "."
                   : redirect.data.is_loopback
-                    ? ". Plain HTTP is fine here because it is a loopback address, but most providers will not accept it — this instance is best connected with a sign-in code instead."
+                    ? ". Plain HTTP is fine here because it is a loopback address. Providers that redirect the browser (GitHub does) can still send it back to this machine; one-click GitHub App creation needs this origin listed in JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS."
                     : ". This is not HTTPS, and most providers will refuse it. Set OAUTH_REDIRECT_BASE_URL to an HTTPS origin this browser can reach."}
               </p>
             </div>
           )}
         </Card>
+
+        {redirect.data ? (
+          <Card as="section" data-testid="github-sign-in-order">
+            <h2 className="mb-1 flex items-center gap-2 font-display text-base font-semibold">
+              <LogIn size={16} aria-hidden /> How GitHub signs in
+            </h2>
+            <p className="text-sm text-dim">{SIGN_IN_ORDER[redirect.data.preferred_sign_in]}</p>
+          </Card>
+        ) : null}
 
         <Card as="section">
           <h2 className="mb-1 flex items-center gap-2 font-display text-base font-semibold">
@@ -181,8 +183,8 @@ export default function OAuthSettingsPage() {
             <LoadError what="the registered apps" onRetry={() => void clients.refetch()} />
           ) : clientList.length === 0 ? (
             <p className="rounded-2xl border border-dashed border-line-strong px-4 py-5 text-sm text-dim">
-              Nothing registered yet. The first time you connect an app that signs in, one appears
-              here on its own.
+              Nothing registered yet. Connect GitHub from Apps, or any app that signs in, and one
+              appears here on its own.
             </p>
           ) : (
             <ul className="space-y-2">

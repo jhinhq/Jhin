@@ -2,9 +2,10 @@
  * rule that an API key is never the first thing anybody is shown. */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConnectPanel } from "@/components/connect/connect-panel";
+import { ApiError } from "@/lib/api";
 import type {
   ConnectorInfo,
   OAuthDeviceStartOut,
@@ -22,7 +23,13 @@ const calls = {
 };
 
 let probeResult: OAuthProbeOut | null = null;
+/** What the *second* probe answers — the one a saved registration triggers. */
+let probeResultAfterSave: OAuthProbeOut | null = null;
 let probeFails = false;
+/** When set, the device start is refused with this, the way the API refuses. */
+let deviceStartError: Error | null = null;
+/** What `/oauth/redirect-uri` says about one-click GitHub App creation. */
+let githubAppAvailable = true;
 
 const startResult: OAuthStartOut = {
   authorization_url: "https://auth.example.com/authorize?client_id=abc&state=xyz",
@@ -45,6 +52,7 @@ const deviceResult: OAuthDeviceStartOut = {
 
 vi.mock("@/lib/hooks", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/hooks")>();
+  const { useState } = await import("react");
   return {
     ...actual,
     useOAuthProbe: () => ({
@@ -53,8 +61,12 @@ vi.mock("@/lib/hooks", async (importOriginal) => {
         handlers?: { onSuccess?: (r: OAuthProbeOut) => void; onError?: (e: unknown) => void },
       ) => {
         calls.probe.push(body);
-        if (probeFails || probeResult === null) handlers?.onError?.(new Error("probe failed"));
-        else handlers?.onSuccess?.(probeResult);
+        const answer =
+          calls.probe.length > 1 && probeResultAfterSave !== null
+            ? probeResultAfterSave
+            : probeResult;
+        if (probeFails || answer === null) handlers?.onError?.(new Error("probe failed"));
+        else handlers?.onSuccess?.(answer);
       },
       isPending: false,
       error: null,
@@ -67,15 +79,33 @@ vi.mock("@/lib/hooks", async (importOriginal) => {
       isPending: false,
       error: null,
     }),
-    useOAuthDeviceStart: () => ({
-      mutate: (body: unknown, handlers?: { onSuccess?: (r: OAuthDeviceStartOut) => void }) => {
-        calls.deviceStart.push(body);
-        handlers?.onSuccess?.(deviceResult);
-      },
-      isPending: false,
-      error: null,
-    }),
-    useOAuthDevicePoll: () => ({ data: undefined, dataUpdatedAt: 0, isError: false }),
+    useOAuthDeviceStart: () => {
+      // A real mutation re-renders its caller with `error` set after a
+      // refusal; this one does the same, so the panel's refused layout is
+      // exercised the way it happens.
+      const [error, setError] = useState<Error | null>(null);
+      return {
+        mutate: (
+          body: unknown,
+          handlers?: {
+            onSuccess?: (r: OAuthDeviceStartOut) => void;
+            onError?: (e: unknown) => void;
+          },
+        ) => {
+          calls.deviceStart.push(body);
+          if (deviceStartError) {
+            setError(deviceStartError);
+            handlers?.onError?.(deviceStartError);
+          } else {
+            handlers?.onSuccess?.(deviceResult);
+          }
+        },
+        isPending: false,
+        error,
+        isError: error !== null,
+      };
+    },
+    useOAuthDevicePoll: () => ({ data: undefined, dataUpdatedAt: 0, isError: false, error: null }),
     useRedirectUri: () => ({
       data: {
         redirect_uri: "https://jhin.example.com/api/v1/oauth/callback",
@@ -83,13 +113,22 @@ vi.mock("@/lib/hooks", async (importOriginal) => {
         is_https: true,
         is_loopback: false,
         configured_via: "APP_URL",
+        github_app_available: githubAppAvailable,
+        github_app_permissions: { contents: "write", metadata: "read" },
+        preferred_sign_in: "redirect",
       },
       isPending: false,
       isError: false,
       refetch: () => undefined,
     }),
     useGitHubAppManifest: () => ({ mutate: () => undefined, isPending: false, error: null }),
-    useCreateOAuthClient: () => ({ mutate: () => undefined, isPending: false, error: null }),
+    useCreateOAuthClient: () => ({
+      mutate: (_body: unknown, handlers?: { onSuccess?: (r: unknown) => void }) => {
+        handlers?.onSuccess?.({});
+      },
+      isPending: false,
+      error: null,
+    }),
   };
 });
 
@@ -162,9 +201,40 @@ function probe(overrides: Partial<OAuthProbeOut> = {}): OAuthProbeOut {
     client_configured: false,
     requires_client_secret: false,
     reason: "",
+    redirect_flow: { available: true, reason: "" },
+    device_flow: { available: false, reason: "no_device_endpoint" },
+    app_settings_url: "",
     ...overrides,
   };
 }
+
+/** GitHub as the probe describes it: a static provider with both flows. */
+function githubProbe(overrides: Partial<OAuthProbeOut> = {}): OAuthProbeOut {
+  return probe({
+    method: "oauth_static",
+    supports_dcr: false,
+    issuer: "https://github.com",
+    authorization_server_display: "github.com",
+    scopes: [],
+    resource: "",
+    client_configured: true,
+    requires_client_secret: true,
+    redirect_flow: { available: true, reason: "" },
+    device_flow: { available: true, reason: "" },
+    app_settings_url: "https://github.com/settings/apps",
+    ...overrides,
+  });
+}
+
+const GITHUB_CONNECTOR: ConnectorInfo = {
+  ...MCP_CONNECTOR,
+  connector_type: "github",
+  display_name: "GitHub",
+  docs_url: "https://docs.github.com/apps",
+};
+
+const DEVICE_REFUSED =
+  "GitHub has device sign-in turned off for this app. Use the browser sign-in instead — it needs no change on GitHub.";
 
 function renderPanel(onConnected = vi.fn(), onClose = vi.fn(), connector = MCP_CONNECTOR) {
   const queryClient = new QueryClient({
@@ -209,7 +279,10 @@ beforeEach(() => {
   calls.deviceStart = [];
   calls.navigate = [];
   probeResult = probe();
+  probeResultAfterSave = null;
   probeFails = false;
+  deviceStartError = null;
+  githubAppAvailable = true;
 });
 
 afterEach(() => {
@@ -292,20 +365,200 @@ describe("ConnectPanel", () => {
     expect(screen.queryByTestId("device-code-panel")).toBeNull();
   });
 
-  it("warns a GitHub app that the device flow starts switched off, and only GitHub", async () => {
-    probeResult = probe({
+  it("tells a GitHub app the code may be off, and where the working sign-in is", async () => {
+    probeResult = githubProbe({ method: "device_code", scopes: ["repo"] });
+    renderPanel(vi.fn(), vi.fn(), GITHUB_CONNECTOR);
+    await screen.findByRole("button", { name: "Connect Linear" });
+    const hint = screen.getByTestId("device-github-hint").textContent ?? "";
+    expect(hint).toContain("Enable Device Flow");
+    expect(hint).toContain("the browser sign-in needs no change on GitHub");
+    expect(hint).not.toContain("A GitHub App starts with it off");
+  });
+
+  it("names GitHub's checkbox only when no browser sign-in is possible", async () => {
+    probeResult = githubProbe({
       method: "device_code",
-      supports_dcr: false,
-      client_configured: true,
+      reason: "needs_client_secret",
+      redirect_flow: { available: false, reason: "needs_client_secret" },
       scopes: ["repo"],
     });
-    renderPanel(vi.fn(), vi.fn(), {
-      ...MCP_CONNECTOR,
-      connector_type: "github",
-      display_name: "GitHub",
-    });
+    renderPanel(vi.fn(), vi.fn(), GITHUB_CONNECTOR);
     await screen.findByRole("button", { name: "Connect Linear" });
-    expect(screen.getByTestId("device-github-hint").textContent).toContain("Enable Device Flow");
+    const hint = screen.getByTestId("device-github-hint").textContent ?? "";
+    expect(hint).toContain("A GitHub App starts with it off");
+    expect(hint).not.toContain("needs no change on GitHub");
+  });
+
+  it("goes to consent for a registered GitHub app, with the code one link away", async () => {
+    probeResult = githubProbe();
+    renderPanel(vi.fn(), vi.fn(), GITHUB_CONNECTOR);
+    const consent = await screen.findByTestId("oauth-consent-step");
+    // A GitHub App has permissions, not scopes; the sentence says so.
+    expect(consent.textContent).toContain("the permissions the app was registered with");
+    expect(screen.getByRole("button", { name: /Continue to github.com/ })).toBeTruthy();
+    // Where the app has to be installed, as a link the person may open.
+    const hint = screen.getByTestId("github-install-hint");
+    expect(hint.textContent).toContain("Jhin cannot see where the app is installed");
+    const link = within(hint).getByRole("link", { name: /Open your GitHub Apps/ });
+    expect(link.getAttribute("href")).toBe("https://github.com/settings/apps");
+    expect(link.getAttribute("target")).toBe("_blank");
+    // Nothing on GitHub needs changing, so nothing says it does.
+    expect(consent.textContent).not.toContain("Enable Device Flow");
+
+    fireEvent.click(screen.getByTestId("use-device-link"));
+    expect(await screen.findByText("Sign in with a code")).toBeTruthy();
+    expect(calls.navigate).toEqual([]);
+  });
+
+  it("offers no code link when the provider has no device endpoint", async () => {
+    probeResult = githubProbe({ device_flow: { available: false, reason: "no_device_endpoint" } });
+    renderPanel(vi.fn(), vi.fn(), GITHUB_CONNECTOR);
+    await screen.findByTestId("oauth-consent-step");
+    expect(screen.queryByTestId("use-device-link")).toBeNull();
+  });
+
+  it("renders the install hint without a link when the address is not https", async () => {
+    probeResult = githubProbe({ app_settings_url: "http://evil.example" });
+    renderPanel(vi.fn(), vi.fn(), GITHUB_CONNECTOR);
+    await screen.findByTestId("oauth-consent-step");
+    const hint = screen.getByTestId("github-install-hint");
+    expect(hint.textContent).toContain("Open your GitHub Apps");
+    expect(within(hint).queryByRole("link")).toBeNull();
+  });
+
+  it("offers the browser sign-in as a link beside the code when both work", async () => {
+    probeResult = githubProbe({ method: "device_code" });
+    renderPanel(vi.fn(), vi.fn(), GITHUB_CONNECTOR);
+    await screen.findByRole("button", { name: "Connect Linear" });
+    fireEvent.click(screen.getByTestId("use-redirect-link"));
+    expect(await screen.findByTestId("oauth-consent-step")).toBeTruthy();
+    expect(screen.queryByTestId("add-secret-link")).toBeNull();
+  });
+
+  it("offers to add the secret when that is what the browser sign-in is missing", async () => {
+    probeResult = githubProbe({
+      method: "device_code",
+      reason: "needs_client_secret",
+      redirect_flow: { available: false, reason: "needs_client_secret" },
+    });
+    renderPanel(vi.fn(), vi.fn(), GITHUB_CONNECTOR);
+    await screen.findByRole("button", { name: "Connect Linear" });
+    expect(screen.queryByTestId("use-redirect-link")).toBeNull();
+    fireEvent.click(screen.getByTestId("add-secret-link"));
+    const form = await screen.findByTestId("oauth-client-form");
+    expect(screen.getByTestId("oauth-client-form-intro").textContent).toContain(
+      "github.com needs a client secret for the browser sign-in and none is stored",
+    );
+    expect(form.textContent).toContain("Save replaces the stored pair");
+  });
+
+  it("offers neither browser link when no client is registered at all", async () => {
+    probeResult = githubProbe({
+      method: "device_code",
+      redirect_flow: { available: false, reason: "needs_client_credentials" },
+    });
+    renderPanel(vi.fn(), vi.fn(), GITHUB_CONNECTOR);
+    await screen.findByRole("button", { name: "Connect Linear" });
+    expect(screen.queryByTestId("use-redirect-link")).toBeNull();
+    expect(screen.queryByTestId("add-secret-link")).toBeNull();
+  });
+
+  it("turns a refused code into the browser sign-in, one click, when that works", async () => {
+    probeResult = githubProbe({ method: "device_code" });
+    deviceStartError = new ApiError(400, DEVICE_REFUSED);
+    renderPanel(vi.fn(), vi.fn(), GITHUB_CONNECTOR);
+    fireEvent.click(await screen.findByRole("button", { name: "Connect Linear" }));
+    await waitFor(() => expect(calls.deviceStart).toHaveLength(1));
+
+    // The API's sentence, verbatim — and the way out beside it.
+    expect(await screen.findByText(DEVICE_REFUSED)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Try the code again" })).toBeTruthy();
+    fireEvent.click(screen.getByTestId("device-refused-use-redirect"));
+    expect(await screen.findByTestId("oauth-consent-step")).toBeTruthy();
+    // Nobody was sent to a checkbox.
+    expect(document.body.textContent).not.toContain("Enable Device Flow");
+  });
+
+  it("keeps the retry, not the browser button, when no browser sign-in is possible", async () => {
+    probeResult = githubProbe({
+      method: "device_code",
+      reason: "needs_client_secret",
+      redirect_flow: { available: false, reason: "needs_client_secret" },
+    });
+    deviceStartError = new ApiError(
+      400,
+      'GitHub has device sign-in turned off for this app. In the app\'s settings on GitHub, turn on "Enable Device Flow", save, and try again.',
+    );
+    renderPanel(vi.fn(), vi.fn(), GITHUB_CONNECTOR);
+    fireEvent.click(await screen.findByRole("button", { name: "Connect Linear" }));
+    await screen.findByRole("button", { name: "Try the code again" });
+    expect(screen.queryByTestId("device-refused-use-redirect")).toBeNull();
+    expect(screen.getByTestId("add-secret-link")).toBeTruthy();
+  });
+
+  it("asks the server again after a registration is saved, rather than deciding itself", async () => {
+    probeResult = githubProbe({
+      method: "oauth_needs_client",
+      client_configured: false,
+      reason: "needs_client_credentials",
+      redirect_flow: { available: false, reason: "needs_client_credentials" },
+      device_flow: { available: false, reason: "needs_client_credentials" },
+    });
+    probeResultAfterSave = githubProbe();
+    renderPanel(vi.fn(), vi.fn(), GITHUB_CONNECTOR);
+    const form = await screen.findByTestId("oauth-client-form");
+    // One-click creation is on, so the card comes first; the paste form is below it.
+    expect(screen.getByTestId("github-app-manifest-card")).toBeTruthy();
+    // Step 1 opens the person's own GitHub Apps page.
+    expect(within(form).getByRole("link", { name: /app settings/ }).getAttribute("href")).toBe(
+      "https://github.com/settings/apps",
+    );
+    expect(screen.getByTestId("oauth-client-form-permissions").textContent).toContain(
+      "Contents (read & write), Metadata (read)",
+    );
+
+    fireEvent.change(within(form).getByPlaceholderText("Client ID from the provider"), {
+      target: { value: "Iv23lixxxxxxxxxxxxxx" },
+    });
+    fireEvent.submit(form);
+
+    await waitFor(() => expect(calls.probe).toHaveLength(2));
+    expect(await screen.findByTestId("oauth-consent-step")).toBeTruthy();
+  });
+
+  it("explains the by-hand setup when one-click creation is off for this origin", async () => {
+    githubAppAvailable = false;
+    probeResult = githubProbe({
+      method: "oauth_needs_client",
+      client_configured: false,
+      reason: "needs_client_credentials",
+      redirect_flow: { available: false, reason: "needs_client_credentials" },
+      device_flow: { available: false, reason: "needs_client_credentials" },
+    });
+    renderPanel(vi.fn(), vi.fn(), GITHUB_CONNECTOR);
+    const note = await screen.findByTestId("github-app-by-hand");
+    expect(note.textContent).toContain("JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS");
+    expect(note.textContent).toContain("Contents (read & write)");
+    expect(screen.queryByTestId("github-app-manifest-card")).toBeNull();
+    expect(screen.getByTestId("oauth-client-form")).toBeTruthy();
+  });
+
+  it("has no API-key link, and no API-key fallback, for an app that only signs in", async () => {
+    const signInOnly: ConnectorInfo = {
+      ...GITHUB_CONNECTOR,
+      auth_schemes: GITHUB_CONNECTOR.auth_schemes.filter((scheme) => scheme.type === "oauth"),
+    };
+    probeResult = githubProbe();
+    renderPanel(vi.fn(), vi.fn(), signInOnly);
+    await screen.findByTestId("oauth-consent-step");
+    expect(screen.queryByRole("button", { name: "Use an API key instead" })).toBeNull();
+    cleanup();
+
+    probeFails = true;
+    renderPanel(vi.fn(), vi.fn(), signInOnly);
+    expect(await screen.findByText(/offers no other way to connect/)).toBeTruthy();
+    expect(screen.queryByTestId("create-connection-form")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Use an API key instead" })).toBeNull();
   });
 
   it("says nothing about GitHub's checkbox for any other app", async () => {

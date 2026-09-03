@@ -112,7 +112,10 @@ def test_manifest_carries_what_github_requires() -> None:
     assert manifest["name"] == "Jhin"
     assert manifest["redirect_url"] == REDIRECT_URL
     assert manifest["setup_url"] == SETUP_URL
-    assert manifest["request_oauth_on_install"] is True
+    # Off on purpose: with it on, GitHub follows an install with a state-less
+    # authorization code at the OAuth callback, which has no pending row to
+    # bind it to and refuses it. The sign-in is a separate, Jhin-started step.
+    assert manifest["request_oauth_on_install"] is False
     assert manifest["public"] is False
     assert manifest["setup_on_update"] is True
 

@@ -16,167 +16,27 @@ the one worth being paranoid about. Every test here asserts one of:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
-from uuid import UUID
 
 import httpx
 import pytest
-from fastapi import FastAPI, Request
+from apps.api.tests.oauth_callback_harness import (
+    CALLBACK_APP_URL as APP_URL,
+)
+from apps.api.tests.oauth_callback_harness import (
+    CALLBACK_ISSUER as ISSUER,
+)
+from apps.api.tests.oauth_callback_harness import (
+    CallbackHarness,
+)
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from jhin_api.deps import (
-    AuthContext,
-    Principal,
-    get_current_auth,
-    get_current_auth_optional,
-    get_current_principal,
-    get_db,
-)
-from jhin_api.oauth.redirect import CALLBACK_PATH
-from jhin_api.oauth.router import oauth_public_router
-from jhin_api.settings import Settings
-from jhin_db.models import (
-    Connection,
-    OAuthAuthorization,
-    User,
-    UserSession,
-    WorkspaceMembership,
-)
-from jhin_domain import WorkspaceRole, new_uuid7
+from jhin_api.oauth.redirect import CALLBACK_PATH, GITHUB_APP_CALLBACK_PATH
+from jhin_db.models import Connection, OAuthAuthorization
 from jhin_oauth.persistence import PendingAuthorizationInvalid, PendingAuthorizationStore
-from jhin_secrets import SecretCrypto
 
 INVALID_BODY = {"detail": PendingAuthorizationInvalid.MESSAGE}
-APP_URL = "http://localhost:3000"
-ISSUER = "https://auth.example.com"
-TOKEN_ENDPOINT = "https://auth.example.com/token"
 EVIL = "https://evil.example"
-
-
-@dataclass
-class CallbackHarness:
-    client: httpx.AsyncClient
-    session: AsyncSession
-    crypto: SecretCrypto
-    workspace_id: UUID
-    actor: dict[str, User]
-    admin: User
-    other: User
-
-    async def pending(self, **overrides: Any) -> tuple[OAuthAuthorization, str]:
-        store = PendingAuthorizationStore(self.session, self.crypto)
-        payload: dict[str, Any] = {
-            "workspace_id": self.workspace_id,
-            "user_id": self.admin.id,
-            "flow": "authorization_code",
-            "connector_type": "mcp",
-            "ttl_seconds": 600,
-            "issuer": ISSUER,
-            "authorization_endpoint": f"{ISSUER}/authorize",
-            "token_endpoint": TOKEN_ENDPOINT,
-            "resource": "https://mcp.example.com",
-            "scope": "read",
-            "redirect_uri": f"{APP_URL}{CALLBACK_PATH}",
-            "verifier": "v" * 43,
-            "draft": {"name": "Example", "config": {}},
-        }
-        payload.update(overrides)
-        row, handle = await store.create(**payload)
-        await self.session.commit()
-        return row, handle
-
-
-@pytest.fixture
-async def callback(
-    session: AsyncSession,
-    crypto: SecretCrypto,
-) -> AsyncIterator[CallbackHarness]:
-    admin = User(
-        email=f"oauth-admin-{new_uuid7().hex[:8]}@example.com",
-        display_name="OAuth Admin",
-        password_hash="x",
-    )
-    other = User(
-        email=f"oauth-other-{new_uuid7().hex[:8]}@example.com",
-        display_name="Someone Else",
-        password_hash="x",
-    )
-    from jhin_db.models import Workspace
-
-    workspace = Workspace(name="OAuth", slug=f"oauth-{new_uuid7().hex[:8]}")
-    session.add_all([admin, other, workspace])
-    await session.flush()
-    session.add_all(
-        [
-            WorkspaceMembership(
-                workspace_id=workspace.id, user_id=admin.id, role=WorkspaceRole.ADMIN.value
-            ),
-            WorkspaceMembership(
-                workspace_id=workspace.id, user_id=other.id, role=WorkspaceRole.ADMIN.value
-            ),
-        ]
-    )
-    await session.commit()
-
-    actor = {"user": admin}
-    app = FastAPI()
-    app.state.settings = Settings(_env_file=None, app_url=APP_URL)
-    app.state.secret_crypto = crypto
-
-    class _NoTemporal:
-        async def get(self) -> Any:
-            raise RuntimeError("temporal is unavailable in this test")
-
-    app.state.temporal_provider = _NoTemporal()
-
-    @app.middleware("http")
-    async def request_id(request: Request, call_next: Any) -> Any:
-        request.state.request_id = new_uuid7()
-        return await call_next(request)
-
-    app.include_router(oauth_public_router)
-
-    async def override_db() -> AsyncIterator[AsyncSession]:
-        yield session
-
-    async def override_auth() -> AuthContext:
-        user = actor["user"]
-        return AuthContext(
-            user=user,
-            session_record=UserSession(
-                user_id=user.id,
-                token_hash=f"oauth-callback-{user.id}",
-                expires_at=datetime.now(UTC) + timedelta(hours=1),
-            ),
-        )
-
-    async def override_principal() -> Principal:
-        return Principal(user=actor["user"])
-
-    app.dependency_overrides[get_db] = override_db
-    app.dependency_overrides[get_current_auth] = override_auth
-    # The callback resolves its session through the optional variant so an
-    # expired one becomes a redirect rather than a raw 401 body. It is a
-    # separate callable, so it needs its own override here; `signed_out`
-    # below is the case where it deliberately returns None.
-    app.dependency_overrides[get_current_auth_optional] = override_auth
-    app.dependency_overrides[get_current_principal] = override_principal
-
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        yield CallbackHarness(
-            client=client,
-            session=session,
-            crypto=crypto,
-            workspace_id=workspace.id,
-            actor=actor,
-            admin=admin,
-            other=other,
-        )
 
 
 async def _get(harness: CallbackHarness, **params: str) -> httpx.Response:
@@ -379,6 +239,33 @@ async def test_no_query_parameter_can_steer_the_location_header(
     assert EVIL not in location
 
 
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        {"redirect_uri": EVIL},
+        {"next": EVIL},
+        {"return_to": EVIL},
+        {"callback": EVIL},
+    ],
+)
+async def test_no_query_parameter_can_steer_the_manifest_callbacks_location(
+    callback: CallbackHarness, hostile: dict[str, str]
+) -> None:
+    """The GitHub App callback builds its ``Location`` from a boolean only."""
+    _row, handle = await callback.pending(flow="github_app_manifest")
+
+    # No ``code``: the row is abandoned and nothing dials GitHub.
+    response = await callback.client.get(
+        GITHUB_APP_CALLBACK_PATH, params={"state": handle, **hostile}
+    )
+
+    assert response.status_code == 303
+    location = response.headers["location"]
+    assert location == f"{APP_URL}/apps?github_app=failed"
+    assert EVIL not in location
+    assert response.headers["cache-control"] == "no-store"
+
+
 async def test_a_state_shaped_like_a_url_is_rejected_before_it_is_used(
     callback: CallbackHarness,
 ) -> None:
@@ -482,9 +369,7 @@ async def test_a_dead_session_returns_to_the_app_instead_of_a_raw_401(
     shown.
     """
     _row, handle = await callback.pending()
-    callback.client._transport.app.dependency_overrides[  # type: ignore[attr-defined]
-        get_current_auth_optional
-    ] = lambda: None
+    callback.sign_out()
 
     response = await _get(callback, state=handle, code="anything")
 
@@ -495,6 +380,34 @@ async def test_a_dead_session_returns_to_the_app_instead_of_a_raw_401(
     assert handle not in location
     # The row is untouched, because nothing claimed it.
     assert await callback.session.get(OAuthAuthorization, _row.id) is not None
+
+
+async def test_a_dead_session_at_the_github_app_callback_redirects_rather_than_401(
+    callback: CallbackHarness,
+) -> None:
+    """GitHub's app form can outlive a session just as a consent screen can.
+
+    The manifest callback used to be the one public route that still answered
+    a raw 401 JSON body there. Now it does what the OAuth callback does:
+    claims nothing, converts nothing, and sends the browser back to Apps. The
+    row survives, so the conversion code can still be presented within its
+    hour once the person signs in again.
+    """
+    _row, handle = await callback.pending(flow="github_app_manifest")
+    callback.sign_out()
+
+    response = await callback.client.get(
+        GITHUB_APP_CALLBACK_PATH, params={"state": handle, "code": "fake-manifest-code"}
+    )
+
+    assert response.status_code == 303
+    location = response.headers["location"]
+    assert location == f"{APP_URL}/apps?oauth_error=failed"
+    assert handle not in location
+    assert response.headers["cache-control"] == "no-store"
+    row = await callback.session.get(OAuthAuthorization, _row.id)
+    assert row is not None
+    assert row.consumed_at is None
 
 
 def test_the_async_cases_above_actually_run() -> None:

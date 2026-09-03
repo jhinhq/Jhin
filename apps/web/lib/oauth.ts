@@ -151,7 +151,68 @@ export function oauthErrorMessage(code: string | null): string | null {
   if (code === "failed") {
     return "That connection attempt could not be completed. Start again from the app you were connecting.";
   }
+  if (code === "client_rejected") {
+    return "GitHub did not accept this app's client id and secret, so nothing was connected. Forget the registration under Settings → OAuth and set the app up again from Apps → Connect GitHub.";
+  }
+  if (code === "callback_mismatch") {
+    return "GitHub says the callback URL listed on the app is not this instance's redirect URL. Add the redirect URL shown under Settings → OAuth to the app on GitHub, then try again.";
+  }
   return code ? "That connection attempt could not be completed. Start again from the app you were connecting." : null;
+}
+
+/**
+ * What the GitHub App handshake left in the address bar, if anything.
+ *
+ * `github_app` is written by our own manifest callback and is one of two
+ * constants. `setup_action` is what GitHub appends when it sends the browser
+ * to the app's setup URL after an install; only its shape is read, and the
+ * `installation_id` beside it is never read at all — a user-to-server
+ * sign-in does not need it, and nothing on this page should ever look up a
+ * value GitHub put in a URL.
+ */
+export function readGitHubAppLanding(
+  params: URLSearchParams,
+): "created" | "failed" | "installed" | null {
+  const created = params.get("github_app");
+  if (created === "created" || created === "failed") return created;
+  const setup = params.get("setup_action");
+  if (setup === "install" || setup === "update") return "installed";
+  return null;
+}
+
+/** Only `https:` becomes a link; anything else stays text. The one scheme a
+ * provider-supplied or table-supplied URL may be rendered as clickable. */
+export function safeHttpsUrl(uri: string | null | undefined): string | null {
+  if (!uri) return null;
+  try {
+    return new URL(uri).protocol === "https:" ? uri : null;
+  } catch {
+    return null;
+  }
+}
+
+const ACCESS_LABELS: Record<string, string> = {
+  read: "read",
+  write: "read & write",
+  admin: "admin",
+};
+
+/**
+ * A GitHub App permission map as a sentence fragment, for the by-hand setup.
+ *
+ * `{contents: "write", checks: "read"}` reads as "Checks (read), Contents
+ * (read & write)": sorted by name so the list is stable, with GitHub's own
+ * names spelled the way its settings page does.
+ */
+export function describePermissions(permissions: Record<string, string>): string {
+  return Object.entries(permissions)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, access]) => {
+      const label = name.replace(/_/g, " ");
+      const spelled = label.charAt(0).toUpperCase() + label.slice(1);
+      return `${spelled} (${ACCESS_LABELS[access] ?? access})`;
+    })
+    .join(", ");
 }
 
 /**
@@ -206,10 +267,24 @@ export function navigateToProvider(url: string): void {
  * in at all, so there is nothing to ask the server about and the API-key form
  * is reached with no round trip at all.
  */
-const SIGN_IN_SCHEMES = new Set(["oauth", "device_code", "device_flow", "device"]);
+export const SIGN_IN_SCHEMES = new Set(["oauth", "device_code", "device_flow", "device"]);
 
 export function connectorSignsIn(connector: { auth_schemes: { type: string }[] }): boolean {
   return connector.auth_schemes.some((scheme) => SIGN_IN_SCHEMES.has(scheme.type));
+}
+
+/**
+ * The auth schemes a person can fill in: everything that is not a sign-in.
+ *
+ * A sign-in scheme has no fields — its credential arrives from the provider
+ * — so a form offering it would store an empty credential and call it a
+ * connection. The API-key dialog lists these, and a connector with none has
+ * no form to fall back to at all.
+ */
+export function credentialSchemes<T extends { type: string }>(connector: {
+  auth_schemes: T[];
+}): T[] {
+  return connector.auth_schemes.filter((scheme) => !SIGN_IN_SCHEMES.has(scheme.type));
 }
 
 /** The connections this workspace can no longer act with until somebody

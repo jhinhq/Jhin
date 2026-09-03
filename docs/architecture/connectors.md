@@ -23,6 +23,11 @@ packages/connectors/src/jhin_connectors/
   testing/       fake_github — in-stack GitHub REST double for tests/dev
 ```
 
+GitHub signs in, in this order: the browser sign-in (no toggle on GitHub's
+side), a sign-in code, app credentials, a personal access token — see
+[oauth.md](oauth.md); a user-to-server token reaches only repositories the
+app is installed on, and `verify` says when that is nowhere yet.
+
 A **connector** is a class implementing the `Connector` ABC:
 
 | Member | Purpose |

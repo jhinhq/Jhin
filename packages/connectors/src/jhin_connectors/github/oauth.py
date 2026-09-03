@@ -165,6 +165,14 @@ def build_app_manifest(
       app; it carries the ``installation_id`` that installation tokens are
       minted for.
 
+    ``request_oauth_on_install`` is **off**. With it on, GitHub follows an
+    installation with an authorization code sent to ``callback_urls`` — with
+    no ``state``, because nothing on Jhin's side started that authorization.
+    The OAuth callback has no pending row to bind such an arrival to and
+    refuses it by construction, so the option could only ever produce a dead
+    end. An install therefore lands on ``setup_url``, and the sign-in is a
+    separate consent started from Jhin's own page, with its own state.
+
     Raises :class:`ValueError` for an unusable app name and
     :class:`~jhin_connectors.endpoints.EndpointPolicyError` for a URL Jhin's
     outbound policy refuses.
@@ -180,9 +188,9 @@ def build_app_manifest(
         "setup_on_update": True,
         # Nobody else's account should be able to install this instance's app.
         "public": False,
-        # The install itself authorizes the user, so one visit to GitHub does
-        # both halves and the operator never comes back for a second consent.
-        "request_oauth_on_install": True,
+        # See the docstring: a state-less code at the callback is refused, so
+        # the install and the sign-in stay two separate, Jhin-started steps.
+        "request_oauth_on_install": False,
         "default_permissions": app_permissions(),
     }
     if webhook_url is not None:

@@ -7565,6 +7565,11 @@
       "OAuthProbeOut": {
         "description": "What asking the server (never guessing from a catalog hint) established.",
         "properties": {
+          "app_settings_url": {
+            "default": "",
+            "title": "App Settings Url",
+            "type": "string"
+          },
           "authorization_server_display": {
             "default": "",
             "title": "Authorization Server Display",
@@ -7574,6 +7579,9 @@
             "default": false,
             "title": "Client Configured",
             "type": "boolean"
+          },
+          "device_flow": {
+            "$ref": "#/components/schemas/ProbeFlow"
           },
           "issuer": {
             "default": "",
@@ -7595,6 +7603,9 @@
             "default": "",
             "title": "Reason",
             "type": "string"
+          },
+          "redirect_flow": {
+            "$ref": "#/components/schemas/ProbeFlow"
           },
           "requires_client_secret": {
             "default": false,
@@ -7632,7 +7643,7 @@
         "type": "object"
       },
       "OAuthRedirectOut": {
-        "description": "The redirect URI an operator pastes into a provider's app settings.\n\nShown verbatim, with a copy button, on every bring-your-own-app screen.\n``is_loopback`` exists so the UI can say the honest thing on a laptop\ninstall: a provider on the internet cannot reach ``localhost``, and the\ndevice-code flow is the answer there rather than a redirect.",
+        "description": "The redirect URI an operator pastes into a provider's app settings.\n\nShown verbatim, with a copy button, on every bring-your-own-app screen.\n``is_loopback`` exists so the UI can say the honest thing on a laptop\ninstall: a provider that redirects the browser can still send it back to\nthis machine, but one-click GitHub App creation needs the origin\nallow-listed, which ``github_app_available`` reports.",
         "properties": {
           "configured_via": {
             "enum": [
@@ -7641,6 +7652,17 @@
             ],
             "title": "Configured Via",
             "type": "string"
+          },
+          "github_app_available": {
+            "title": "Github App Available",
+            "type": "boolean"
+          },
+          "github_app_permissions": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Github App Permissions",
+            "type": "object"
           },
           "github_app_redirect_uri": {
             "title": "Github App Redirect Uri",
@@ -7654,6 +7676,14 @@
             "title": "Is Loopback",
             "type": "boolean"
           },
+          "preferred_sign_in": {
+            "enum": [
+              "redirect",
+              "device_code"
+            ],
+            "title": "Preferred Sign In",
+            "type": "string"
+          },
           "redirect_uri": {
             "title": "Redirect Uri",
             "type": "string"
@@ -7664,7 +7694,10 @@
           "github_app_redirect_uri",
           "is_https",
           "is_loopback",
-          "configured_via"
+          "configured_via",
+          "github_app_available",
+          "github_app_permissions",
+          "preferred_sign_in"
         ],
         "title": "OAuthRedirectOut",
         "type": "object"
@@ -9207,6 +9240,31 @@
           "pricing_pages"
         ],
         "title": "PricingStatusOut",
+        "type": "object"
+      },
+      "ProbeFlow": {
+        "description": "Whether one sign-in flow can start for this workspace, and if not, why.\n\n``reason`` is a constant from Jhin's own vocabulary, never provider text.",
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "reason": {
+            "default": "",
+            "enum": [
+              "",
+              "needs_client_credentials",
+              "needs_client_secret",
+              "no_device_endpoint"
+            ],
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "available"
+        ],
+        "title": "ProbeFlow",
         "type": "object"
       },
       "ProfilePricingOut": {
@@ -15571,7 +15629,7 @@
     },
     "/api/v1/oauth/github-app/callback": {
       "get": {
-        "description": "Where GitHub sends the browser after creating this instance's own app.\n\nSame five checks as the OAuth callback, same single refusal. The\nconversion code is worth a full set of app credentials for exactly one\nhour, which is why the pending row for this flow is the only one with a\nTTL longer than ten minutes and why it is still single-use.\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
+        "description": "Where GitHub sends the browser after creating this instance's own app.\n\nSame five checks as the OAuth callback, same single refusal. The\nconversion code is worth a full set of app credentials for exactly one\nhour, which is why the pending row for this flow is the only one with a\nTTL longer than ten minutes and why it is still single-use.\n\nA session that died while the person was on GitHub's form is handled\nexactly as the OAuth callback handles it: nothing is claimed, nothing is\nconverted, and the browser is sent back to Apps with a flag rather than\na raw 401 body. The pending row survives for a retry within the hour.\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
         "operationId": "github_app_callback_api_v1_oauth_github_app_callback_get",
         "parameters": [
           {
@@ -23859,7 +23917,7 @@
     },
     "/api/v1/workspaces/{workspace_id}/oauth/device/start": {
       "post": {
-        "description": "Begin a device-code sign-in: a short code, no redirect, no secret.\n\nThe answer for an install the internet cannot reach — a laptop, a private\nnetwork, anything without a public HTTPS origin — where a redirect-based\nflow cannot work at all and pasting a personal access token used to be the\nonly remaining option.\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
+        "description": "Begin a device-code sign-in: a short code, no redirect, no secret.\n\nThe alternative to the browser sign-in for a native provider that offers\nRFC 8628 — chosen from a link on the consent step, or offered first when\nthe registration has no client secret or ``OAUTH_PREFER_DEVICE_CODE`` is\nset. A provider that refuses to start it is answered with a sentence that\nnames the fix, and names the browser sign-in when that is one.\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
         "operationId": "start_device_flow_api_v1_workspaces__workspace_id__oauth_device_start_post",
         "parameters": [
           {

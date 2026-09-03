@@ -22,7 +22,7 @@ import { ConnectorsGallery } from "@/components/connectors-gallery";
 import { Button, EmptyState, ErrorNote, Spinner } from "@/components/ui";
 import { connectTarget, type ConnectTarget } from "@/lib/apps";
 import { formatDateTime } from "@/lib/format";
-import { consumeReturnRoute, oauthErrorMessage } from "@/lib/oauth";
+import { consumeReturnRoute, oauthErrorMessage, readGitHubAppLanding } from "@/lib/oauth";
 import {
   useAppCatalog,
   useCatalogFacets,
@@ -63,25 +63,36 @@ const PUBLIC_ID_PATTERN = /^[0-9a-f]{32}$/;
 interface OAuthLanding {
   error: string | null;
   publicId: string | null;
+  /** The GitHub App handshake's flag, or GitHub's own install return. */
+  githubApp: ReturnType<typeof readGitHubAppLanding>;
 }
 
 /**
  * Read the callback's own parameters, once.
  *
- * Both are written server-side: `?connection=` is a public id built from the
- * row that was just created, `?oauth_error=` is one of two constants. Nothing
- * a provider wrote reaches this page, and the id is checked against its shape
- * before it is ever used to look anything up.
+ * All are written server-side or matched against a closed set: `?connection=`
+ * is a public id built from the row that was just created, `?oauth_error=`
+ * and `?github_app=` are constants, and `?setup_action=` is read only for its
+ * shape. Nothing a provider wrote reaches this page, and the id is checked
+ * against its shape before it is ever used to look anything up.
  */
 function readOAuthLanding(): OAuthLanding {
-  if (typeof window === "undefined") return { error: null, publicId: null };
+  if (typeof window === "undefined") return { error: null, publicId: null, githubApp: null };
   const params = new URLSearchParams(window.location.search);
   const connected = params.get("connection");
   return {
     error: oauthErrorMessage(params.get("oauth_error")),
     publicId: connected !== null && PUBLIC_ID_PATTERN.test(connected) ? connected : null,
+    githubApp: readGitHubAppLanding(params),
   };
 }
+
+const GITHUB_APP_STATUS: Record<"created" | "installed", string> = {
+  created: "Your GitHub App was created. Sign in with it to connect GitHub.",
+  installed: "Now connect GitHub to sign in with the app you installed.",
+};
+const GITHUB_APP_FAILED =
+  "GitHub did not finish creating the app. If it did create one, open it on github.com, generate a client secret, and paste both under Apps → Connect GitHub; otherwise start again from Connect GitHub.";
 
 interface CreateTarget {
   connector: ConnectorInfo;
@@ -150,11 +161,39 @@ export default function AppsPage() {
    * once at mount and derived from thereafter.
    */
   useEffect(() => {
-    if (landing.error === null && landing.publicId === null) return;
+    if (landing.error === null && landing.publicId === null && landing.githubApp === null) return;
     window.history.replaceState(null, "", window.location.pathname);
     const back = consumeReturnRoute();
     if (back !== null && back !== window.location.pathname) window.location.assign(back);
   }, [landing]);
+
+  /**
+   * A GitHub App was just created, or just installed: the next step is to
+   * sign in with it, so Connect GitHub is open from the moment the connector
+   * list can name the connector. Derived, not set: the person closing it is
+   * the one event that ends it, and a refetch of the list cannot reopen it.
+   */
+  const [githubConnectDismissed, setGitHubConnectDismissed] = useState(false);
+  const githubConnector = connectors.data?.find(
+    (connector) => connector.connector_type === "github",
+  );
+  const autoOpenedGitHub: CreateTarget | null =
+    !githubConnectDismissed &&
+    (landing.githubApp === "created" || landing.githubApp === "installed") &&
+    githubConnector
+      ? { connector: githubConnector, prefill: { name: "GitHub", config: {} } }
+      : null;
+  const connectTargetOpen = createFor ?? autoOpenedGitHub;
+  const closeConnect = () => {
+    setCreateFor(null);
+    setGitHubConnectDismissed(true);
+  };
+
+  const githubAppStatus =
+    landing.githubApp === "created" || landing.githubApp === "installed"
+      ? GITHUB_APP_STATUS[landing.githubApp]
+      : null;
+  const githubAppFailure = landing.githubApp === "failed" ? GITHUB_APP_FAILED : null;
 
   // --- The synced catalog behind the curated library ---
   const [catalogQuery, setCatalogQuery] = useState("");
@@ -278,7 +317,7 @@ export default function AppsPage() {
   /** Both create paths — the library card and the catalog sheet — land here. */
   const handleCreated = (result: ConnectionCreated) => {
     invalidate();
-    setCreateFor(null);
+    closeConnect();
     setDetailSlug(null);
     if (result.webhook) {
       // The one-time secret is the moment for webhook connectors; the drawer
@@ -345,7 +384,16 @@ export default function AppsPage() {
           <>
             <section className="space-y-3">
               <h2 className="font-display text-base font-semibold tracking-tight text-ink">Connected</h2>
-              <ErrorNote message={landing.error} />
+              <ErrorNote message={landing.error ?? githubAppFailure} />
+              {githubAppStatus ? (
+                <p
+                  role="status"
+                  data-testid="github-app-banner"
+                  className="rounded-2xl border border-ok/30 bg-ok-soft px-4 py-3 text-sm text-ok"
+                >
+                  {githubAppStatus}
+                </p>
+              ) : null}
               <ReconnectBanner workspaceId={workspaceId} connections={connectionList} />
               {connections.isPending ? (
                 <Spinner label="Loading apps…" />
@@ -503,16 +551,16 @@ export default function AppsPage() {
         )}
       </PageBody>
 
-      {createFor ? (
+      {connectTargetOpen ? (
         <ConnectPanel
           workspaceId={workspaceId}
-          connector={createFor.connector}
-          prefill={createFor.prefill}
-          onClose={() => setCreateFor(null)}
+          connector={connectTargetOpen.connector}
+          prefill={connectTargetOpen.prefill}
+          onClose={closeConnect}
           onCreated={handleCreated}
           onConnected={(connection) => {
             invalidate();
-            setCreateFor(null);
+            closeConnect();
             setCreated(connection);
             setDetailId(connection.id);
           }}

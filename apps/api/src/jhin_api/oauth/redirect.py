@@ -26,6 +26,8 @@ from typing import Final, Literal
 from urllib.parse import quote, urlsplit
 
 from jhin_api.settings import InsecureDeploymentError, Settings
+from jhin_connectors.endpoints import EndpointPolicyError
+from jhin_oauth.urls import validate_oauth_url
 
 CALLBACK_PATH: Final[str] = "/api/v1/oauth/callback"
 GITHUB_APP_CALLBACK_PATH: Final[str] = "/api/v1/oauth/github-app/callback"
@@ -34,7 +36,10 @@ GITHUB_APP_CALLBACK_PATH: Final[str] = "/api/v1/oauth/github-app/callback"
 #: one of ours and does not go into a ``Location`` header.
 _PUBLIC_ID_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{32}$")
 
-OAuthReturnError = Literal["denied", "failed"]
+#: The closed set of flags a browser leaving the callback can carry. Chosen
+#: by the service from the provider's *machine-readable* code, never from its
+#: prose; the web app turns each into a sentence Jhin wrote.
+OAuthReturnError = Literal["denied", "failed", "client_rejected", "callback_mismatch"]
 
 
 class OAuthRedirectMisconfigured(InsecureDeploymentError):
@@ -140,6 +145,30 @@ def app_return_url(
 
 
 def github_app_return_url(settings: Settings, *, created: bool) -> str:
-    """Where the browser goes after the GitHub App manifest handshake."""
+    """Where the browser goes after the GitHub App manifest handshake.
+
+    Apps, not Settings: the app was created so that GitHub could be
+    connected, and the Apps page reads the flag and opens Connect GitHub. A
+    boolean is the only input, so nothing a request carried can reach the
+    ``Location`` header this becomes.
+    """
     base = settings.app_url.strip().rstrip("/")
-    return f"{base}/settings/oauth?github_app={'created' if created else 'failed'}"
+    return f"{base}/apps?github_app={'created' if created else 'failed'}"
+
+
+def github_app_available(settings: Settings) -> bool:
+    """Whether a GitHub App manifest can be built for this instance at all.
+
+    The manifest embeds two of this instance's own origins — ``APP_URL`` as
+    the homepage and setup page, the redirect base as the callback — and
+    every URL in a manifest goes through the outbound policy on the way out.
+    A loopback or plain-HTTP origin that ``JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS``
+    does not list is refused there, so the web app is told up front and
+    offers the by-hand registration instead of a card that answers 400.
+    """
+    try:
+        validate_oauth_url(settings.app_url.strip().rstrip("/"), kind="GitHub App homepage URL")
+        validate_oauth_url(redirect_base(settings), kind="GitHub App callback URL")
+    except (EndpointPolicyError, OAuthRedirectMisconfigured, ValueError):
+        return False
+    return True

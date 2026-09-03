@@ -52,3 +52,45 @@ async def test_a_device_flow_token_is_a_working_github_connection() -> None:
     assert health.ok
     assert health.details["auth"] == AUTH_DEVICE
     assert token not in health.message
+    # Installed somewhere, so the message stays the plain one.
+    assert health.message == "Authenticated as fake-user"
+    assert health.details["installations"] == "1"
+
+
+async def test_an_app_installed_nowhere_is_named_as_the_reason_it_reaches_nothing() -> None:
+    """GitHub gives no API for the install itself; ``verify`` says when it is
+    still missing. The token is real, so the connection stays ``ok``."""
+    token = "ghu_fake_uninstalled_token"
+    with FakeGitHubServer(token=token, installation_count=0) as api:
+        _allow(api.base_url)
+        health = await GitHubConnector().verify_connection(
+            VerifyContext(
+                auth_type=AUTH_DEVICE,
+                credentials={"access_token": token},
+                config={"base_url": api.base_url},
+            )
+        )
+    assert health.ok
+    assert health.message.startswith("Authenticated as fake-user.")
+    assert "not installed on any of your GitHub accounts" in health.message
+    assert "GitHub Apps on github.com" in health.message
+    assert health.details["installations"] == "0"
+    assert token not in health.message
+
+
+async def test_a_token_that_cannot_list_installations_still_verifies_plainly() -> None:
+    """A classic OAuth App token gets 403 from ``/user/installations``. That
+    is a question the token cannot answer, not a broken connection."""
+    token = "ghu_fake_classic_token"
+    with FakeGitHubServer(token=token, installations_forbidden=True) as api:
+        _allow(api.base_url)
+        health = await GitHubConnector().verify_connection(
+            VerifyContext(
+                auth_type=AUTH_DEVICE,
+                credentials={"access_token": token},
+                config={"base_url": api.base_url},
+            )
+        )
+    assert health.ok
+    assert health.message == "Authenticated as fake-user"
+    assert "installations" not in health.details
