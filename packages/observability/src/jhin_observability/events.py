@@ -371,39 +371,41 @@ FIELD_ENUM_VALUES: dict[str, frozenset[str]] = {
         {"jhin-workflow-queue", "jhin-agent-queue", "jhin-tool-queue", "other"}
     ),
 }
+# The OAuth 2.0 error codes, not Jhin's SafeErrorCode taxonomy that the
+# global "error_code" vocabulary carries. Mirrors
+# jhin_oauth.errors.KNOWN_ERROR_CODES plus its UNKNOWN_ERROR_CODE
+# fallback, kept literal here so this registry stays a leaf package that
+# imports no other Jhin package.
+_OAUTH_ERROR_CODES: frozenset[str] = frozenset(
+    {
+        "access_denied",
+        "authorization_pending",
+        "device_flow_disabled",
+        "expired_token",
+        "incorrect_client_credentials",
+        "incorrect_device_code",
+        "invalid_client",
+        "invalid_grant",
+        "invalid_request",
+        "invalid_scope",
+        "invalid_target",
+        "server_error",
+        "slow_down",
+        "temporarily_unavailable",
+        "unauthorized_client",
+        "unsupported_grant_type",
+        "unsupported_response_type",
+        "unknown",
+    }
+)
 EVENT_FIELD_ENUM_VALUES: dict[tuple[str, str], frozenset[str]] = {
     ("budget.warning", "scope"): frozenset({"agent", "workspace"}),
     ("telemetry.export_failed", "error_code"): frozenset({"export_timeout", "export_failed"}),
     ("rootless_transport.failed", "error_code"): frozenset(
         {"configuration_error", "upstream_unavailable"}
     ),
-    # The OAuth 2.0 error codes, not Jhin's SafeErrorCode taxonomy that the
-    # global "error_code" vocabulary carries. Mirrors
-    # jhin_oauth.errors.KNOWN_ERROR_CODES plus its UNKNOWN_ERROR_CODE
-    # fallback, kept literal here so this registry stays a leaf package that
-    # imports no other Jhin package.
-    ("oauth.token_request_refused", "error_code"): frozenset(
-        {
-            "access_denied",
-            "authorization_pending",
-            "device_flow_disabled",
-            "expired_token",
-            "incorrect_client_credentials",
-            "incorrect_device_code",
-            "invalid_client",
-            "invalid_grant",
-            "invalid_request",
-            "invalid_scope",
-            "invalid_target",
-            "server_error",
-            "slow_down",
-            "temporarily_unavailable",
-            "unauthorized_client",
-            "unsupported_grant_type",
-            "unsupported_response_type",
-            "unknown",
-        }
-    ),
+    ("oauth.token_request_refused", "error_code"): _OAUTH_ERROR_CODES,
+    ("oauth.device_start_refused", "error_code"): _OAUTH_ERROR_CODES,
     # Only the optional endpoints reach this event; a refused *required* URL
     # raises instead of logging.
     ("oauth.metadata_field_refused", "field"): frozenset(
