@@ -397,6 +397,15 @@ export function ConnectPanel({
                 client secret — this works even when this instance is not reachable from the
                 internet.
               </p>
+              {connector.connector_type === "github" ? (
+                // A GitHub App starts with the device flow switched off, and GitHub
+                // refuses the start until it is on; say so before the click, not after.
+                <p className="text-[13px] leading-relaxed text-dim" data-testid="device-github-hint">
+                  GitHub only offers this to apps with{" "}
+                  <span className="font-medium text-ink">Enable Device Flow</span> turned on in
+                  their settings on GitHub. A GitHub App starts with it off.
+                </p>
+              ) : null}
             </div>
             <ErrorNote
               message={errText(deviceStart.error, "That sign-in could not be started.")}

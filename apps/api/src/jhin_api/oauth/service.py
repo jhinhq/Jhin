@@ -63,9 +63,11 @@ from jhin_oauth.discovery import (
     select_scopes,
 )
 from jhin_oauth.errors import (
+    ClientForgottenError,
     DeviceAuthorizationDenied,
     DeviceCodeExpired,
     OAuthError,
+    TokenError,
     TransientOAuthError,
 )
 from jhin_oauth.lifecycle import (
@@ -851,6 +853,40 @@ async def _persist_connection(
 
 # --- Device flow -------------------------------------------------------
 
+_DEVICE_START_GENERIC = "The provider refused to start a device sign-in for this app."
+# What the person can do about a refusal, keyed by the provider's own error
+# code. A device sign-in fails at start for one of a few nameable reasons, and
+# the fix for each is on the provider's side; saying which one saves a round
+# of guessing. GitHub Apps ship with the device flow switched off, so the
+# first of these is the one people actually hit.
+_DEVICE_START_REFUSALS: dict[str, str] = {
+    "device_flow_disabled": (
+        "{provider} has device sign-in turned off for this app. In the app's settings on "
+        '{provider}, turn on "Enable Device Flow", save, and try again.'
+    ),
+    "unauthorized_client": (
+        "{provider} does not allow this app to use the device sign-in. Check the app's "
+        "settings on {provider}, or connect with a redirect instead."
+    ),
+    "invalid_client": (
+        "{provider} no longer recognises this app's client id. Check the client id under "
+        "Settings → OAuth."
+    ),
+    "invalid_scope": (
+        "{provider} refused one of the permissions Jhin asked for. Check the app's "
+        "permissions on {provider}."
+    ),
+}
+_DEVICE_PROVIDER_NAMES: dict[str, str] = {"github": "GitHub"}
+
+
+def _device_start_refusal(connector_type: str, error_code: str) -> str:
+    provider = _DEVICE_PROVIDER_NAMES.get(connector_type, "The provider")
+    template = _DEVICE_START_REFUSALS.get(error_code)
+    if template is None:
+        return _DEVICE_START_GENERIC
+    return template.format(provider=provider)
+
 
 async def start_device_flow(
     db: AsyncSession,
@@ -897,8 +933,22 @@ async def start_device_flow(
         raise _upstream_unavailable(
             "The provider could not be reached. Try again shortly."
         ) from exc
+    except ClientForgottenError as exc:
+        logger.warning(
+            "oauth.device_start_refused",
+            connector_type=payload.connector_type,
+            error_code="invalid_client",
+        )
+        raise _bad_request(_device_start_refusal(payload.connector_type, "invalid_client")) from exc
+    except TokenError as exc:
+        logger.warning(
+            "oauth.device_start_refused",
+            connector_type=payload.connector_type,
+            error_code=exc.error_code,
+        )
+        raise _bad_request(_device_start_refusal(payload.connector_type, exc.error_code)) from exc
     except (OAuthError, EndpointPolicyError) as exc:
-        raise _bad_request("The provider refused to start a device sign-in for this app.") from exc
+        raise _bad_request(_DEVICE_START_GENERIC) from exc
 
     ttl = int((grant.expires_at - datetime.now(UTC)).total_seconds())
     pending = PendingAuthorizationStore(db, crypto)

@@ -269,7 +269,12 @@ network, anything without TLS.
 no client secret, at start, at poll, or at refresh. That is precisely why it
 is the answer here. GitHub answers a not-ready poll with **HTTP 200** and the
 error in the body, so the status code alone never decides anything;
-`slow_down` raises the polling cadence permanently.
+`slow_down` raises the polling cadence permanently. GitHub only serves the
+device flow to apps that have **Enable Device Flow** ticked in their settings,
+and a GitHub App starts with it off, so the operator ticks it once; until
+then GitHub refuses the start with `device_flow_disabled`, which Jhin
+reports as exactly that instruction rather than a generic refusal
+(`oauth.device_start_refused` in the log carries the provider's code).
 
 **GitHub app-manifest provisioning.** The operator clicks once, GitHub
 creates this instance's own GitHub App, and a single exchange returns its

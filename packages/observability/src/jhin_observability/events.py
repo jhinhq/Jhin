@@ -269,6 +269,10 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
     },
     "oauth.revocation_failed": {},
     "oauth.device_verification_complete_refused": {},
+    "oauth.device_start_refused": {
+        "connector_type": FieldKind.ENUM,
+        "error_code": FieldKind.ENUM,
+    },
     "oauth.code_exchange_failed": {"connector_type": FieldKind.ENUM},
     "oauth.connection_not_created": {"connector_type": FieldKind.ENUM},
     "oauth.github_app_conversion_failed": {},

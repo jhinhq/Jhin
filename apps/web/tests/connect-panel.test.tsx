@@ -166,7 +166,7 @@ function probe(overrides: Partial<OAuthProbeOut> = {}): OAuthProbeOut {
   };
 }
 
-function renderPanel(onConnected = vi.fn(), onClose = vi.fn()) {
+function renderPanel(onConnected = vi.fn(), onClose = vi.fn(), connector = MCP_CONNECTOR) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -188,7 +188,7 @@ function renderPanel(onConnected = vi.fn(), onClose = vi.fn()) {
       >
         <ConnectPanel
           workspaceId="workspace-1"
-          connector={MCP_CONNECTOR}
+          connector={connector}
           prefill={{
             name: "Linear",
             authType: "bearer",
@@ -290,6 +290,34 @@ describe("ConnectPanel", () => {
     renderPanel();
     expect(await screen.findByTestId("oauth-client-form")).toBeTruthy();
     expect(screen.queryByTestId("device-code-panel")).toBeNull();
+  });
+
+  it("warns a GitHub app that the device flow starts switched off, and only GitHub", async () => {
+    probeResult = probe({
+      method: "device_code",
+      supports_dcr: false,
+      client_configured: true,
+      scopes: ["repo"],
+    });
+    renderPanel(vi.fn(), vi.fn(), {
+      ...MCP_CONNECTOR,
+      connector_type: "github",
+      display_name: "GitHub",
+    });
+    await screen.findByRole("button", { name: "Connect Linear" });
+    expect(screen.getByTestId("device-github-hint").textContent).toContain("Enable Device Flow");
+  });
+
+  it("says nothing about GitHub's checkbox for any other app", async () => {
+    probeResult = probe({
+      method: "device_code",
+      supports_dcr: false,
+      client_configured: true,
+      scopes: ["repo"],
+    });
+    renderPanel();
+    await screen.findByRole("button", { name: "Connect Linear" });
+    expect(screen.queryByTestId("device-github-hint")).toBeNull();
   });
 
   it("explains the device flow before starting it, then shows the code", async () => {
