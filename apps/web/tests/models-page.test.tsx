@@ -166,14 +166,23 @@ function json(data: unknown, status = 200): Response {
 
 /** Every request the page makes, with the writes kept for assertions. With
  * `ollama`, a local provider sits beside OpenAI and its host answers;
- * `profiles` and `pricing` replace the default rows. */
+ * `profiles`, `pricing` and `defaultProfileId` replace the default rows. */
 function installServer(
-  options: { ollama?: boolean; profiles?: ModelProfile[]; pricing?: PricingStatus } = {},
+  options: {
+    ollama?: boolean;
+    profiles?: ModelProfile[];
+    pricing?: PricingStatus;
+    defaultProfileId?: string;
+  } = {},
 ) {
   const deletes: string[] = [];
   const providers = options.ollama ? [PROVIDER, OLLAMA_PROVIDER] : [PROVIDER];
   const profiles = options.profiles ?? PROFILES;
   const pricing = options.pricing ?? PRICING;
+  const workspaceDetail = {
+    ...WORKSPACE_DETAIL,
+    default_model_profile_id: options.defaultProfileId ?? WORKSPACE_DETAIL.default_model_profile_id,
+  };
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -205,7 +214,7 @@ function installServer(
         });
       }
       if (path === "/api/v1/workspaces/workspace-1/model-profiles") return json(profiles);
-      if (path === "/api/v1/workspaces/workspace-1") return json(WORKSPACE_DETAIL);
+      if (path === "/api/v1/workspaces/workspace-1") return json(workspaceDetail);
       if (path === "/api/v1/workspaces/workspace-1/spend") return json(SPEND);
       if (path === "/api/v1/workspaces/workspace-1/model-profiles/pricing-status") {
         return json(pricing);
@@ -290,21 +299,57 @@ describe("ModelsPage", () => {
     expect(confirmSpy).not.toHaveBeenCalled();
   });
 
+  it("puts the Ollama card first with its panel open and a header line saying what is loaded", async () => {
+    installServer({ ollama: true });
+    renderPage();
+    await screen.findByRole("heading", { name: "Providers" });
+
+    // The card with live state leads the grid, and is the wide one.
+    const cards = screen.getAllByTestId(/^provider-card-/);
+    expect(cards.map((card) => card.getAttribute("data-testid"))).toEqual([
+      "provider-card-prov-ollama",
+      "provider-card-prov-1",
+    ]);
+    const [ollama, cloud] = cards;
+    expect(ollama.className).toContain("md:col-span-2");
+
+    // The panel is simply on the card — nothing to open — and the header
+    // line answers before anyone scrolls to it.
+    expect(within(ollama).getByTestId("ollama-panel")).toBeDefined();
+    expect(await within(ollama).findByTestId("ollama-model-qwen3.8:latest")).toBeDefined();
+    await waitFor(() =>
+      expect(within(ollama).getByTestId("ollama-header-status").textContent).toBe(
+        "Nothing loaded",
+      ),
+    );
+
+    // The cloud card is the status tile it always was.
+    expect(within(cloud).queryByTestId("ollama-panel")).toBeNull();
+    expect(within(cloud).queryByTestId("ollama-header-status")).toBeNull();
+    expect(cloud.className).not.toContain("col-span");
+
+    // Manage keeps the endpoint facts and points back at the card: the
+    // panel lives in one place, not two.
+    fireEvent.click(within(ollama).getByRole("button", { name: "Manage" }));
+    const manage = await screen.findByRole("dialog", { name: "Ollama Main" });
+    expect(within(manage).queryByTestId("ollama-panel")).toBeNull();
+    expect(within(manage).getByTestId("ollama-manage-note")).toBeDefined();
+    expect(within(manage).getByText("http://192.168.1.79:11434/v1")).toBeDefined();
+  });
+
   it("Use as model opens the profile dialog prefilled", async () => {
     installServer({ ollama: true });
     renderPage();
     await screen.findByRole("heading", { name: "Default model" });
 
+    // Straight from the card's panel; no Manage dialog in between.
     const card = await screen.findByTestId("provider-card-prov-ollama");
-    fireEvent.click(within(card).getByRole("button", { name: "Manage" }));
-    const manage = await screen.findByRole("dialog", { name: "Ollama Main" });
-    const row = await within(manage).findByTestId("ollama-model-qwen3.8:latest");
+    const row = await within(card).findByTestId("ollama-model-qwen3.8:latest");
     fireEvent.click(within(row).getByRole("button", { name: "Use as model" }));
 
-    // The manage dialog gives way to a new-profile dialog that already knows
-    // the model: name, identifier, the $0 price, and the host's context.
+    // A new-profile dialog that already knows the model: name, identifier,
+    // the $0 price, and the host's context.
     const dialog = await screen.findByRole("dialog", { name: "New model profile" });
-    expect(screen.queryByRole("dialog", { name: "Ollama Main" })).toBeNull();
     expect(within(dialog).getByDisplayValue("qwen3.8")).toBeDefined();
     expect(within(dialog).getByDisplayValue("qwen3.8:latest")).toBeDefined();
     expect((within(dialog).getByLabelText("Provider") as HTMLSelectElement).value).toBe(
@@ -385,6 +430,80 @@ describe("ModelsPage", () => {
     expect(input.value).toBe("");
     fireEvent.change(input, { target: { value: "0.5" } });
     expect(input.value).toBe("0.5");
+  });
+
+  it("calls an assumed-free default Free (self-hosted) on the hero and in the change dialog, and says whether it is loaded", async () => {
+    installServer({
+      ollama: true,
+      profiles: [profile(), ASSUMED_FREE_PROFILE],
+      defaultProfileId: "profile-ollama",
+    });
+    renderPage();
+    const hero = await screen.findByTestId("default-model-card");
+    expect(within(hero).getByText("Free (self-hosted)")).toBeDefined();
+    expect(within(hero).queryByText("No price set yet")).toBeNull();
+
+    // The hero shares the provider card's picture of the host: nothing is
+    // resident, so an admin can load the default from right here.
+    const state = within(hero).getByTestId("ollama-load-state");
+    expect(await within(state).findByText("Not loaded")).toBeDefined();
+    expect(within(state).getByRole("button", { name: "Load" })).toBeDefined();
+    // …and so does the profile card for the same model.
+    const card = screen.getByTestId("profile-card-profile-ollama");
+    expect(within(card).getByRole("button", { name: "Load" })).toBeDefined();
+    // A cloud profile says nothing about memory.
+    expect(within(screen.getByTestId("profile-card-profile-1")).queryByTestId("ollama-load-state")).toBeNull();
+
+    fireEvent.click(within(hero).getByRole("button", { name: "Change" }));
+    const dialog = await screen.findByRole("dialog", { name: "Change the default model" });
+    expect(
+      within(within(dialog).getByTestId("default-option-profile-ollama")).getByText(
+        "Free (self-hosted)",
+      ),
+    ).toBeDefined();
+    expect(within(dialog).queryByText("No price set yet")).toBeNull();
+  });
+
+  it("prices a new profile at $0 the moment a self-hosted provider is chosen", async () => {
+    installServer({ ollama: true });
+    renderPage();
+    await screen.findByRole("heading", { name: "Default model" });
+
+    fireEvent.click(screen.getByRole("button", { name: /New profile/ }));
+    const dialog = await screen.findByRole("dialog", { name: "New model profile" });
+    fireEvent.click(within(dialog).getByRole("button", { name: /Pricing \(auto-filled\)/ }));
+    const input = within(dialog).getByLabelText("Input $ / 1M tokens") as HTMLInputElement;
+    const output = within(dialog).getByLabelText("Output $ / 1M tokens") as HTMLInputElement;
+    // OpenAI comes first, so the dialog opens on a cloud provider: empty
+    // fields behind cloud example prices.
+    expect(input.value).toBe("");
+    expect(input.placeholder).toBe("0.15");
+    expect(output.placeholder).toBe("0.60");
+    expect(
+      within(dialog).getByText("No prices yet — runs will show $0.00 until you add them."),
+    ).toBeDefined();
+
+    // Choosing the Ollama host is enough — no model picked yet — for the
+    // fields to hold the true price and the summary to agree with them.
+    fireEvent.change(within(dialog).getByLabelText("Provider"), {
+      target: { value: "prov-ollama" },
+    });
+    expect(input.value).toBe("0");
+    expect(output.value).toBe("0");
+    expect(input.placeholder).toBe("0");
+    expect(output.placeholder).toBe("0");
+    expect(within(dialog).getByText("$0 in · $0 out per 1M tokens")).toBeDefined();
+    expect(within(dialog).getByText("Runs on your Ollama host — no per-token price.")).toBeDefined();
+    // The host's model list arriving later leaves the $0 alone.
+    await waitFor(() => expect(within(dialog).getByText(/1 models available/)).toBeDefined());
+    expect(input.value).toBe("0");
+
+    // Back on a cloud provider the $0 goes too, so a cloud model is never
+    // saved as free by accident.
+    fireEvent.change(within(dialog).getByLabelText("Provider"), { target: { value: "prov-1" } });
+    expect(input.value).toBe("");
+    expect(output.value).toBe("");
+    expect(input.placeholder).toBe("0.15");
   });
 
   it("shows viewers the decisions but none of the admin controls", async () => {

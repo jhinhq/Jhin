@@ -1,8 +1,9 @@
-/** Render tests for the local-models panel an Ollama provider shows instead
- * of a balance: the installed list, the loaded facts, the load flow that
- * stays "loading" until the poll confirms it, unload, the host's own refusal
- * sentence, the unreachable and empty states, the viewer view, and the
- * hand-over into a prefilled profile. */
+/** Render tests for the local-models panel an Ollama provider card carries
+ * instead of a balance: the installed list, the loaded facts, the load flow
+ * that stays "loading" until the poll confirms it, unload, the host's own
+ * refusal sentence, the unreachable and empty states, the viewer view, and
+ * the hand-over into a prefilled profile. The panel reads through the page's
+ * host subscription, which the harness stands in for. */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -11,6 +12,7 @@ import { OllamaPanel } from "@/components/models/ollama-panel";
 import { api, ApiError } from "@/lib/api";
 import { profilePrefillForOllamaModel } from "@/lib/models";
 import type { ModelProvider, OllamaLoaded, OllamaLoadResult, OllamaModels } from "@/lib/types";
+import { WithOllamaHost } from "@/tests/helpers/ollama-host";
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
@@ -135,13 +137,17 @@ function renderPanel(overrides: { isAdmin?: boolean } = {}) {
   const onUseAsModel = vi.fn();
   render(
     <QueryClientProvider client={queryClient}>
-      <OllamaPanel
-        workspaceId="w1"
-        provider={PROVIDER}
-        isAdmin={overrides.isAdmin ?? true}
-        onError={onError}
-        onUseAsModel={onUseAsModel}
-      />
+      <WithOllamaHost workspaceId="w1" providerId={PROVIDER.id}>
+        {(host) => (
+          <OllamaPanel
+            provider={PROVIDER}
+            host={host}
+            isAdmin={overrides.isAdmin ?? true}
+            onError={onError}
+            onUseAsModel={onUseAsModel}
+          />
+        )}
+      </WithOllamaHost>
     </QueryClientProvider>,
   );
   /** What the ten-second poll does, without waiting ten seconds. */
@@ -268,14 +274,14 @@ describe("OllamaPanel", () => {
     expect(note.textContent).toBe(
       "ollama: HTTP 404: model 'qwen3.8:latest' not found, try pulling it first",
     );
-    // The refusal stays on the row; the progress line and the dialog-level
+    // The refusal stays on the row; the progress line and the card-level
     // error are both cleared.
     expect(within(qwen).queryByText(/this can take a minute/)).toBeNull();
     expect(within(qwen).getByRole("button", { name: "Load" })).toBeTruthy();
     expect(onError).toHaveBeenLastCalledWith(null);
   });
 
-  it("hands a request failure to the dialog's error note", async () => {
+  it("hands a request failure to the card's error note", async () => {
     installApi();
     vi.mocked(api).mockImplementationOnce(async () => listing());
     const { onError } = renderPanel();

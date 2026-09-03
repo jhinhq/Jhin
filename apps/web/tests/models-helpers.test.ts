@@ -16,19 +16,29 @@ import {
   isModelIncompatibleRequest,
   isSelfHostedProvider,
   microsToDollarInput,
+  OLLAMA_DEFAULT_KEEP_ALIVE,
   OLLAMA_KEEP_ALIVE_OPTIONS,
   OLLAMA_PRICE_NOTE,
+  ollamaCanonicalName,
   ollamaDisplayName,
+  ollamaLeaseText,
+  ollamaLoadedSummary,
   ollamaNamePath,
   priceSourceBadge,
   priceSourceLabel,
   profilePrefillForOllamaModel,
+  residentByName,
   SELF_HOSTED_PRICE_NOTE,
   selfHostedPriceNote,
   summarizeBudget,
   webSearchSupport,
 } from "@/lib/models";
-import type { ModelProfile, OllamaModel, ProviderModelEntry } from "@/lib/types";
+import type {
+  ModelProfile,
+  OllamaLoadedModel,
+  OllamaModel,
+  ProviderModelEntry,
+} from "@/lib/types";
 
 const ENTRIES: ProviderModelEntry[] = [
   {
@@ -200,6 +210,163 @@ describe("OLLAMA_KEEP_ALIVE_OPTIONS", () => {
       "1 hour",
       "Until unloaded",
     ]);
+  });
+
+  it("defaults every Load to the short lease, which is one of the choices", () => {
+    expect(OLLAMA_DEFAULT_KEEP_ALIVE).toBe("5m");
+    expect(OLLAMA_KEEP_ALIVE_OPTIONS.some((option) => option.value === OLLAMA_DEFAULT_KEEP_ALIVE)).toBe(
+      true,
+    );
+  });
+});
+
+describe("ollamaCanonicalName", () => {
+  it("adds :latest only when the last path segment carries no tag", () => {
+    expect(ollamaCanonicalName("qwen3.8")).toBe("qwen3.8:latest");
+    expect(ollamaCanonicalName("qwen3.8:latest")).toBe("qwen3.8:latest");
+    expect(ollamaCanonicalName("gemma4:31b")).toBe("gemma4:31b");
+    expect(ollamaCanonicalName("tripolskypetr/qwen3.6-uncensored-aggressive")).toBe(
+      "tripolskypetr/qwen3.6-uncensored-aggressive:latest",
+    );
+    expect(ollamaCanonicalName("tripolskypetr/qwen3.6-uncensored-aggressive:latest")).toBe(
+      "tripolskypetr/qwen3.6-uncensored-aggressive:latest",
+    );
+    expect(ollamaCanonicalName(" qwen3.8 ")).toBe("qwen3.8:latest");
+  });
+});
+
+const QWEN_ROW: OllamaModel = {
+  name: "qwen3.8:latest",
+  size_bytes: 17_700_000_000,
+  family: "qwen3",
+  parameter_size: "27.3B",
+  quantization: "Q4_K_M",
+  modified_at: "2026-08-30T12:00:00Z",
+  context_length: 40_960,
+  capabilities: ["completion", "tools", "thinking"],
+  loaded: false,
+  size_vram_bytes: null,
+  expires_at: null,
+  keeps_loaded: false,
+};
+
+const QWEN_LOADED_ROW: OllamaLoadedModel = {
+  name: "qwen3.8:latest",
+  size_bytes: 17_700_000_000,
+  size_vram_bytes: 17_500_000_000,
+  expires_at: "2026-09-02T10:04:00Z",
+  keeps_loaded: false,
+  context_length: 32_768,
+};
+
+describe("residentByName", () => {
+  it("trusts the poll once it has answered and the listing's snapshot before", () => {
+    const snapshot = [
+      { ...QWEN_ROW, loaded: true, size_vram_bytes: 17_500_000_000, keeps_loaded: true },
+    ];
+    expect(residentByName(snapshot, undefined).get("qwen3.8:latest")).toEqual({
+      sizeBytes: 17_700_000_000,
+      sizeVramBytes: 17_500_000_000,
+      expiresAt: null,
+      keepsLoaded: true,
+    });
+    // The poll's answer wins even when it disagrees with the snapshot: an
+    // empty poll means the host has since evicted the model.
+    expect(residentByName(snapshot, []).size).toBe(0);
+    expect(residentByName(undefined, [QWEN_LOADED_ROW]).get("qwen3.8:latest")).toEqual({
+      sizeBytes: 17_700_000_000,
+      sizeVramBytes: 17_500_000_000,
+      expiresAt: "2026-09-02T10:04:00Z",
+      keepsLoaded: false,
+    });
+    expect(residentByName([QWEN_ROW], undefined).size).toBe(0);
+  });
+});
+
+describe("ollamaLeaseText", () => {
+  const now = Date.parse("2026-09-02T10:00:00Z");
+  const at = (minutes: number) => new Date(now + minutes * 60_000).toISOString();
+  const resident = (expiresAt: string | null, keepsLoaded = false) => ({
+    sizeBytes: 1,
+    sizeVramBytes: 1,
+    expiresAt,
+    keepsLoaded,
+  });
+
+  it("phrases the lease to follow a Loaded badge, in minutes then hours", () => {
+    expect(ollamaLeaseText(resident(at(4)), now)).toBe("for 4 more minutes");
+    expect(ollamaLeaseText(resident(at(1)), now)).toBe("for 1 more minute");
+    expect(ollamaLeaseText(resident(at(0.3)), now)).toBe("for under a minute");
+    expect(ollamaLeaseText(resident(at(60)), now)).toBe("for 1 more hour");
+    expect(ollamaLeaseText(resident(at(90)), now)).toBe("for 2 more hours");
+  });
+
+  it("never announces an expiry in the past or in centuries", () => {
+    expect(ollamaLeaseText(resident(at(-1)), now)).toBe("unloading now");
+    expect(ollamaLeaseText(resident(null), now)).toBe("stays loaded");
+    expect(ollamaLeaseText(resident("2292-09-02T10:00:00Z", true), now)).toBe("stays loaded");
+  });
+});
+
+describe("ollamaLoadedSummary", () => {
+  const fetched = "2026-09-02T10:00:00Z";
+
+  it("counts what is loaded against what is installed and totals the memory", () => {
+    const loaded = { models: [QWEN_LOADED_ROW], detail: null, fetched_at: fetched };
+    expect(ollamaLoadedSummary(loaded, false, 4)).toEqual({
+      text: "1 of 4 loaded — qwen3.8 — 17.5 GB",
+      tone: "ok",
+      detail: null,
+    });
+    // Without a listing there is no "of" to say.
+    expect(ollamaLoadedSummary(loaded, false, null)?.text).toBe("1 loaded — qwen3.8 — 17.5 GB");
+    // A CPU-only host reports no VRAM, so its weight on disk counts instead.
+    expect(
+      ollamaLoadedSummary(
+        {
+          models: [
+            { ...QWEN_LOADED_ROW, size_vram_bytes: 0 },
+            {
+              ...QWEN_LOADED_ROW,
+              name: "gemma4:31b",
+              size_bytes: 2_000_000_000,
+              size_vram_bytes: 2_000_000_000,
+            },
+          ],
+          detail: null,
+          fetched_at: fetched,
+        },
+        false,
+        4,
+      )?.text,
+    ).toBe("2 of 4 loaded — qwen3.8, gemma4:31b — 19.7 GB");
+  });
+
+  it("says Nothing loaded, Ollama unreachable, or nothing until the poll has answered", () => {
+    expect(ollamaLoadedSummary(undefined, false, 4)).toBeNull();
+    expect(ollamaLoadedSummary({ models: [], detail: null, fetched_at: fetched }, false, 4)).toEqual({
+      text: "Nothing loaded",
+      tone: "neutral",
+      detail: null,
+    });
+    expect(ollamaLoadedSummary(undefined, true, null)).toEqual({
+      text: "Ollama unreachable",
+      tone: "danger",
+      detail: null,
+    });
+    // A host that answered with a reason and no models is the same story,
+    // with the reason kept for a tooltip.
+    expect(
+      ollamaLoadedSummary(
+        { models: [], detail: "ollama: network error: ConnectError", fetched_at: fetched },
+        false,
+        null,
+      ),
+    ).toEqual({
+      text: "Ollama unreachable",
+      tone: "danger",
+      detail: "ollama: network error: ConnectError",
+    });
   });
 });
 

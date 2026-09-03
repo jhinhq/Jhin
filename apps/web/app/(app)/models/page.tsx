@@ -59,6 +59,7 @@ import {
   webSearchSupport,
   type ProfilePrefill,
 } from "@/lib/models";
+import { useOllamaHosts } from "@/lib/ollama-host";
 import type {
   CatalogRefreshResult,
   ModelProfile,
@@ -99,6 +100,13 @@ export default function ModelsPage() {
   const detail = useWorkspaceDetail(workspaceId);
   const spend = useWorkspaceSpend(workspaceId);
   const invalidate = useInvalidateModels(workspaceId);
+  // One live subscription per Ollama host, made here so every card that
+  // describes the host — its provider card, its profile cards, the default
+  // hero — reads the same answer instead of each polling for its own.
+  const hosts = useOllamaHosts(
+    workspaceId,
+    (providers.data ?? []).filter((p) => p.type === "ollama").map((p) => p.id),
+  );
 
   const [providerDialog, setProviderDialog] = useState(false);
   const [editingProviderId, setEditingProviderId] = useState<string | null>(null);
@@ -191,6 +199,14 @@ export default function ModelsPage() {
   const managingProvider = providerList.find((p) => p.id === managingProviderId) ?? null;
   const editingProvider = providerList.find((p) => p.id === editingProviderId) ?? null;
   const adminKeyProvider = providerList.find((p) => p.id === adminKeyProviderId) ?? null;
+  // Ollama cards lead the grid. They carry the live state this section is
+  // for, and they are two columns wide: a wide card after a lone narrow one
+  // leaves a hole in the row before it, while one that comes first is simply
+  // followed by the rest. The sort is stable, so the API's order holds
+  // within each group.
+  const orderedProviders = [...providerList].sort(
+    (a, b) => Number(b.type === "ollama") - Number(a.type === "ollama"),
+  );
 
   return (
     <>
@@ -227,6 +243,7 @@ export default function ModelsPage() {
             profile={defaultProfile}
             provider={defaultProvider}
             isAdmin={isAdmin}
+            host={defaultProfile ? hosts.get(defaultProfile.provider_id) : undefined}
             onChange={() => setChangeDefaultOpen(true)}
           />
         </section>
@@ -252,6 +269,7 @@ export default function ModelsPage() {
                   workspaceId={workspaceId}
                   pricing={pricingByProfile.get(profile.id)}
                   pricingPages={pricing.data?.pricing_pages}
+                  host={hosts.get(profile.provider_id)}
                   onChanged={invalidate}
                   onError={setPageError}
                   onEdit={setEditingProfile}
@@ -283,15 +301,19 @@ export default function ModelsPage() {
             />
           ) : (
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-              {providerList.map((provider) => (
-                <ProviderCard
-                  key={provider.id}
-                  provider={provider}
-                  typeLabel={providerTypeLabel(provider.type)}
-                  profileCount={profileList.filter((p) => p.provider_id === provider.id).length}
-                  onManage={() => setManagingProviderId(provider.id)}
-                />
-              ))}
+              {orderedProviders.map((provider) => {
+                const host = hosts.get(provider.id);
+                return (
+                  <ProviderCard
+                    key={provider.id}
+                    provider={provider}
+                    typeLabel={providerTypeLabel(provider.type)}
+                    profileCount={profileList.filter((p) => p.provider_id === provider.id).length}
+                    onManage={() => setManagingProviderId(provider.id)}
+                    ollama={host ? { host, isAdmin, onUseAsModel: setProfilePrefill } : undefined}
+                  />
+                );
+              })}
             </div>
           )}
         </section>
@@ -344,10 +366,6 @@ export default function ModelsPage() {
           onChanged={invalidate}
           onEdit={() => setEditingProviderId(managingProvider.id)}
           onAddAdminKey={() => setAdminKeyProviderId(managingProvider.id)}
-          onUseAsModel={(prefill) => {
-            setManagingProviderId(null);
-            setProfilePrefill(prefill);
-          }}
         />
       ) : null}
       {adminKeyProvider ? (
@@ -723,18 +741,34 @@ function ProfileDialog({
   onClose: () => void;
   onCreated: () => void;
 }) {
-  const [providerId, setProviderId] = useState(
-    existing?.provider_id ?? prefill?.providerId ?? providers[0]?.id ?? "",
-  );
+  const initialProviderId = existing?.provider_id ?? prefill?.providerId ?? providers[0]?.id ?? "";
+  const [providerId, setProviderId] = useState(initialProviderId);
   const [displayName, setDisplayName] = useState(
     existing?.display_name ?? prefill?.displayName ?? "",
   );
   const [modelName, setModelName] = useState(existing?.model_name ?? prefill?.modelName ?? "");
+  // A new profile on a self-hosted provider starts at $0 — its true price —
+  // the moment the provider is chosen, not once a model is picked. Otherwise
+  // the fields sit empty behind cloud placeholders ("0.15", "0.60") under a
+  // summary that calls the model free. A stored row keeps whatever it holds
+  // (an assumed-free profile keeps its empty fields), and a prefill already
+  // carries $0.
+  const initialType = providers.find((p) => p.id === initialProviderId)?.type;
+  const startsFree =
+    !existing && !prefill && initialType !== undefined && isSelfHostedProvider(initialType);
   const [inputCost, setInputCost] = useState(
-    microsToDollarInput(existing?.input_cost_micros_per_million ?? prefill?.inputCostMicros ?? null),
+    startsFree
+      ? "0"
+      : microsToDollarInput(
+          existing?.input_cost_micros_per_million ?? prefill?.inputCostMicros ?? null,
+        ),
   );
   const [outputCost, setOutputCost] = useState(
-    microsToDollarInput(existing?.output_cost_micros_per_million ?? prefill?.outputCostMicros ?? null),
+    startsFree
+      ? "0"
+      : microsToDollarInput(
+          existing?.output_cost_micros_per_million ?? prefill?.outputCostMicros ?? null,
+        ),
   );
   const [contextWindow, setContextWindow] = useState(() => {
     const tokens = existing?.context_window ?? prefill?.contextWindow;
@@ -898,10 +932,23 @@ function ProfileDialog({
           <Select
             value={providerId}
             onChange={(e) => {
+              const nextType = providers.find((p) => p.id === e.target.value)?.type;
               setProviderId(e.target.value);
               setAutofilledFor(null);
               // The note described the previous provider's prices.
               setPricingNote(null);
+              // Self-hosted means $0 as soon as it is chosen (see startsFree);
+              // leaving it clears that $0 so a cloud model is never saved as
+              // free by accident. Only a new profile: an edit keeps its row.
+              if (!existing && nextType !== undefined) {
+                if (isSelfHostedProvider(nextType)) {
+                  setInputCost("0");
+                  setOutputCost("0");
+                } else if (selfHosted) {
+                  setInputCost("");
+                  setOutputCost("");
+                }
+              }
             }}
             required
           >
@@ -1006,7 +1053,9 @@ function ProfileDialog({
                     step="0.000001"
                     value={inputCost}
                     onChange={(e) => setInputCost(e.target.value)}
-                    placeholder="0.15"
+                    // A cloud example price is a wrong hint on a host that
+                    // has none, even once the field has been cleared.
+                    placeholder={selfHosted ? "0" : "0.15"}
                   />
                 </Field>
                 <Field label="Output $ / 1M tokens">
@@ -1016,7 +1065,7 @@ function ProfileDialog({
                     step="0.000001"
                     value={outputCost}
                     onChange={(e) => setOutputCost(e.target.value)}
-                    placeholder="0.60"
+                    placeholder={selfHosted ? "0" : "0.60"}
                   />
                 </Field>
               </div>

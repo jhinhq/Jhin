@@ -136,6 +136,11 @@ export function ChangeDefaultDialog({
                       per 1M tokens
                     </span>
                   </span>
+                ) : profile.assumed_free ? (
+                  // Same words as the model card and the hero: the API says
+                  // this profile resolves to $0, so "no price set" here would
+                  // contradict them.
+                  <span className="text-[13px] text-dim">Free (self-hosted)</span>
                 ) : (
                   <span className="text-[13px] text-warn">No price set yet</span>
                 )}

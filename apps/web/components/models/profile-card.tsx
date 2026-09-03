@@ -7,10 +7,12 @@
 
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
+import { OllamaLoadState } from "@/components/models/ollama-load-state";
 import { UnpricedModelNote } from "@/components/unpriced-model-note";
 import { Badge, Button, Dialog } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import { capabilitySummary, costTier, formatPricePair } from "@/lib/models";
+import type { OllamaHost } from "@/lib/ollama-host";
 import type {
   ModelProfile,
   ModelProvider,
@@ -31,6 +33,7 @@ export function ProfileCard({
   workspaceId,
   pricing,
   pricingPages,
+  host,
   onChanged,
   onError,
   onEdit,
@@ -42,6 +45,9 @@ export function ProfileCard({
   workspaceId: string;
   pricing: ProfilePricing | undefined;
   pricingPages: Record<string, string> | undefined;
+  /** The page's subscription to the profile's Ollama host, when its provider
+   * is one; the card then says whether the model is loaded. */
+  host?: OllamaHost;
   onChanged: () => void;
   onError: (message: string | null) => void;
   onEdit: (profile: ModelProfile) => void;
@@ -139,6 +145,10 @@ export function ProfileCard({
           ) : null}
         </div>
       )}
+
+      {host ? (
+        <OllamaLoadState host={host} modelName={profile.model_name} isAdmin={isAdmin} />
+      ) : null}
 
       {isAdmin ? (
         <footer className="mt-auto flex items-center gap-2 border-t border-line pt-3">

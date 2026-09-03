@@ -1,12 +1,15 @@
 /** Pure helpers for the Models page: price auto-fill when a model is picked
  * and balance/spend formatting. Kept free of React so they are unit-testable. */
 
+import { formatRelative } from "@/lib/format";
 import type {
   BalanceSource,
   ModelProfile,
   ModelProviderType,
   ObservedRate,
   OllamaKeepAlive,
+  OllamaLoaded,
+  OllamaLoadedModel,
   OllamaModel,
   PriceSourceName,
   PriceSource,
@@ -177,6 +180,137 @@ export function profilePrefillForOllamaModel(providerId: string, model: OllamaMo
     contextWindow: model.context_length,
     inputCostMicros: 0,
     outputCostMicros: 0,
+  };
+}
+
+/** The name Ollama itself files a model under: "qwen3.8" is "qwen3.8:latest"
+ * on the host, so a profile typed without the tag must still match the row
+ * the host reports. Only the last path segment can carry a tag —
+ * "tripolskypetr/qwen3.6:latest" already has one. */
+export function ollamaCanonicalName(name: string): string {
+  const trimmed = name.trim();
+  const slash = trimmed.lastIndexOf("/");
+  return trimmed.includes(":", slash + 1) ? trimmed : `${trimmed}:latest`;
+}
+
+/** The lease a Load asks for unless the admin picks another: long enough to
+ * cover a conversation's first replies, short enough that a model nobody
+ * used again does not hold 18 GB all afternoon. One constant for the panel
+ * and the profile cards, so "Load" means the same thing wherever it sits. */
+export const OLLAMA_DEFAULT_KEEP_ALIVE: OllamaKeepAlive = "5m";
+
+/** A resident model's in-memory facts, as every card reads them. */
+export interface OllamaResident {
+  sizeBytes: number;
+  sizeVramBytes: number | null;
+  expiresAt: string | null;
+  keepsLoaded: boolean;
+}
+
+/** What is resident, keyed by model name. The ten-second poll is the
+ * authority once it has answered — it is what notices a hand-off load
+ * landing or Ollama's own timer evicting a model — and the listing's
+ * snapshot only seeds the first paint before it does. */
+export function residentByName(
+  models: OllamaModel[] | undefined,
+  loaded: OllamaLoadedModel[] | undefined,
+): Map<string, OllamaResident> {
+  const resident = new Map<string, OllamaResident>();
+  if (loaded) {
+    for (const row of loaded) {
+      resident.set(row.name, {
+        sizeBytes: row.size_bytes,
+        sizeVramBytes: row.size_vram_bytes,
+        expiresAt: row.expires_at,
+        keepsLoaded: row.keeps_loaded,
+      });
+    }
+    return resident;
+  }
+  for (const row of models ?? []) {
+    if (row.loaded) {
+      resident.set(row.name, {
+        sizeBytes: row.size_bytes,
+        sizeVramBytes: row.size_vram_bytes,
+        expiresAt: row.expires_at,
+        keepsLoaded: row.keeps_loaded,
+      });
+    }
+  }
+  return resident;
+}
+
+/** Where the weights sit: a CPU-only host reports zero VRAM, and saying
+ * "0 MB VRAM" there would read as a fault rather than a fact. */
+export function ollamaMemoryText(resident: OllamaResident): string {
+  if (resident.sizeVramBytes === null) return "in memory";
+  if (resident.sizeVramBytes === 0) return "in RAM";
+  return `${formatModelSize(resident.sizeVramBytes)} VRAM`;
+}
+
+/** Ollama restarts its keep-alive timer on every request, so the poll keeps
+ * this honest; callers re-render between polls so the minutes tick. An
+ * expiry already in the past means the host has not evicted the model yet —
+ * "expires 2 minutes ago" would be nonsense. */
+export function ollamaExpiryText(resident: OllamaResident): string {
+  if (resident.keepsLoaded || !resident.expiresAt) return "stays loaded";
+  if (new Date(resident.expiresAt).getTime() <= Date.now()) return "unloading now";
+  return `expires ${formatRelative(resident.expiresAt)}`;
+}
+
+/** The same lease phrased to follow a "Loaded" badge — "for 4 more minutes"
+ * rather than "expires in 4 minutes", which after a badge reads as a
+ * forecast. Whole minutes, then whole hours: a lease is a rough promise
+ * that every request extends, and seconds would only pretend otherwise. */
+export function ollamaLeaseText(resident: OllamaResident, now = Date.now()): string {
+  if (resident.keepsLoaded || !resident.expiresAt) return "stays loaded";
+  const left = new Date(resident.expiresAt).getTime() - now;
+  if (!Number.isFinite(left) || left <= 0) return "unloading now";
+  const minutes = Math.round(left / 60_000);
+  if (minutes < 1) return "for under a minute";
+  if (minutes < 60) return `for ${minutes} more ${minutes === 1 ? "minute" : "minutes"}`;
+  const hours = Math.round(minutes / 60);
+  return `for ${hours} more ${hours === 1 ? "hour" : "hours"}`;
+}
+
+export interface OllamaLoadedSummary {
+  text: string;
+  tone: "ok" | "neutral" | "danger";
+  /** The host's own reason when it could not be asked, for a tooltip. */
+  detail: string | null;
+}
+
+/** The provider card's one-line answer to "what is in memory right now",
+ * read from the loaded poll so it stays true even when the listing beneath
+ * it has failed. Null until the poll has answered once. `installed` is the
+ * listing's count when known, so "1 of 4 loaded" can say how many are not;
+ * without it the line simply drops the "of". A poll that failed outright and
+ * a host that answered with a reason and no models are the same story to
+ * the reader: the host cannot be asked. */
+export function ollamaLoadedSummary(
+  loaded: OllamaLoaded | undefined,
+  unreachable: boolean,
+  installed: number | null,
+): OllamaLoadedSummary | null {
+  if (unreachable) return { text: "Ollama unreachable", tone: "danger", detail: null };
+  if (!loaded) return null;
+  if (loaded.models.length === 0) {
+    if (loaded.detail) return { text: "Ollama unreachable", tone: "danger", detail: loaded.detail };
+    return { text: "Nothing loaded", tone: "neutral", detail: null };
+  }
+  const names = loaded.models.map((row) => ollamaDisplayName(row.name)).join(", ");
+  // VRAM is what a model actually occupies; a CPU-only host reports none, so
+  // its weight on disk is the next best figure.
+  const bytes = loaded.models.reduce(
+    (sum, row) => sum + (row.size_vram_bytes > 0 ? row.size_vram_bytes : row.size_bytes),
+    0,
+  );
+  const ofInstalled =
+    installed !== null && installed >= loaded.models.length ? ` of ${installed}` : "";
+  return {
+    text: `${loaded.models.length}${ofInstalled} loaded — ${names} — ${formatModelSize(bytes)}`,
+    tone: "ok",
+    detail: null,
   };
 }
 

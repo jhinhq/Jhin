@@ -2,7 +2,7 @@
 
 /** Shared data hooks (TanStack Query) for the authenticated app. */
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef } from "react";
 import { api, ApiError } from "@/lib/api";
 import { ollamaNamePath } from "@/lib/models";
@@ -275,35 +275,47 @@ export function useProviderBalance(workspaceId: string, providerId: string, enab
  * it is resident. Reads never fail the query for a host that is up: an
  * unreadable host answers an empty list with a `detail`. `retry: false`
  * because the API already waited on the host once; asking again only
- * delays the "can't reach it" message. */
-export function useOllamaModels(workspaceId: string, providerId: string, enabled = true) {
-  return useQuery({
+ * delays the "can't reach it" message.
+ *
+ * The options stand on their own (not only inside the hook) because the
+ * Models page subscribes to every Ollama host at once through `useQueries`
+ * — see lib/ollama-host.ts — and both forms must describe the same query. */
+export function ollamaModelsQuery(workspaceId: string, providerId: string) {
+  return queryOptions({
     queryKey: ["ollama-models", workspaceId, providerId],
     queryFn: () =>
       api<OllamaModels>(
         `/api/v1/workspaces/${workspaceId}/model-providers/${providerId}/ollama/models`,
       ),
-    enabled,
     staleTime: 30_000,
     retry: false,
   });
 }
 
+export function useOllamaModels(workspaceId: string, providerId: string, enabled = true) {
+  return useQuery({ ...ollamaModelsQuery(workspaceId, providerId), enabled });
+}
+
 /** What the Ollama host holds in memory right now. Polled every ten seconds
  * (the trigger/attention cadence) because a load the API handed off after its
  * response budget only ever shows up here, and Ollama's own keep-alive timer
- * unloads models without telling anyone. */
-export function useOllamaLoaded(workspaceId: string, providerId: string, enabled = true) {
-  return useQuery({
+ * unloads models without telling anyone. Every reader of one host must share
+ * one subscription (lib/ollama-host.ts): each extra observer is an extra
+ * timer against the same endpoint. */
+export function ollamaLoadedQuery(workspaceId: string, providerId: string) {
+  return queryOptions({
     queryKey: ["ollama-loaded", workspaceId, providerId],
     queryFn: () =>
       api<OllamaLoaded>(
         `/api/v1/workspaces/${workspaceId}/model-providers/${providerId}/ollama/loaded`,
       ),
-    enabled,
     refetchInterval: 10_000,
     retry: false,
   });
+}
+
+export function useOllamaLoaded(workspaceId: string, providerId: string, enabled = true) {
+  return useQuery({ ...ollamaLoadedQuery(workspaceId, providerId), enabled });
 }
 
 /** Metadata for one installed model (capabilities, license, context). The

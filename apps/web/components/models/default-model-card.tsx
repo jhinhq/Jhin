@@ -7,7 +7,9 @@
 import { EmptyState } from "@/components/ui";
 import { Button } from "@/components/ui";
 import { LogoTile } from "@/components/catalog/logo-tile";
+import { OllamaLoadState } from "@/components/models/ollama-load-state";
 import { capabilitySummary, costTier, costTierLabel, formatPricePair } from "@/lib/models";
+import type { OllamaHost } from "@/lib/ollama-host";
 import type { ModelProfile, ModelProvider } from "@/lib/types";
 
 /** "$$ Moderate" with the exact price pair spelled out beside it (a hover
@@ -19,6 +21,17 @@ export function CostTierLine({ profile }: { profile: ModelProfile }) {
     profile.output_cost_micros_per_million,
   );
   if (tier === null) {
+    // The API reports an unpriced profile on a self-hosted provider as
+    // assumed free, and the model card already says so in these words; a
+    // hero warning "no price set" beside that would read as two opinions
+    // about one model.
+    if (profile.assumed_free) {
+      return (
+        <p className="text-sm text-dim" data-testid="cost-tier-free">
+          Free (self-hosted) <span className="text-faint">— no per-token price</span>
+        </p>
+      );
+    }
     return <p className="text-sm text-warn">No price set yet</p>;
   }
   const pair = formatPricePair(
@@ -39,6 +52,7 @@ export function DefaultModelCard({
   profile,
   provider,
   isAdmin,
+  host,
   onChange,
 }: {
   /** The workspace default, or null when none is set. */
@@ -46,6 +60,9 @@ export function DefaultModelCard({
   /** The provider that default runs on (null when the profile is null). */
   provider: ModelProvider | null;
   isAdmin: boolean;
+  /** The page's subscription to the default's Ollama host, when its provider
+   * is one; the hero then says whether the model is loaded. */
+  host?: OllamaHost;
   /** Opens the change-default dialog. */
   onChange: () => void;
 }) {
@@ -72,6 +89,9 @@ export function DefaultModelCard({
           <p className="text-sm text-dim">{capabilitySummary(profile)}</p>
         ) : null}
         <CostTierLine profile={profile} />
+        {host ? (
+          <OllamaLoadState host={host} modelName={profile.model_name} isAdmin={isAdmin} />
+        ) : null}
       </div>
       {isAdmin ? (
         <Button className="shrink-0" onClick={onChange}>

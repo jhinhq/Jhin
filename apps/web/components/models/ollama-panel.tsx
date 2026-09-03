@@ -1,71 +1,33 @@
 "use client";
 
-/** The Ollama provider's stand-in for a balance block. There is no bill to
- * show for a local host, so the block answers the questions an admin has
- * instead: what is installed, what is resident in memory right now, and the
- * two things worth doing about it — load a model ahead of a conversation so
- * the first reply does not wait on 18 GB of weights, and unload one to make
- * room for another. */
+/** The Ollama provider's stand-in for a balance block, on the provider card
+ * itself. There is no bill to show for a local host, so the block answers
+ * the questions an admin has instead: what is installed, what is resident
+ * in memory right now, and the two things worth doing about it — load a
+ * model ahead of a conversation so the first reply does not wait on 18 GB
+ * of weights, and unload one to make room for another.
+ *
+ * It reads and acts through the page's one subscription to the host
+ * (lib/ollama-host.ts) rather than querying on its own, so the profile
+ * cards above it and the status line beside it always agree with its rows. */
 
-import { useMutation } from "@tanstack/react-query";
 import { HardDrive } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Badge, Button } from "@/components/ui";
-import { api, errorText } from "@/lib/api";
-import { formatRelative, formatTokens } from "@/lib/format";
-import { useInvalidateOllama, useOllamaLoaded, useOllamaModels } from "@/lib/hooks";
+import { errorText } from "@/lib/api";
+import { formatTokens } from "@/lib/format";
+import { useCountdownTick, type OllamaHost } from "@/lib/ollama-host";
 import {
   formatModelSize,
+  OLLAMA_DEFAULT_KEEP_ALIVE,
   OLLAMA_KEEP_ALIVE_OPTIONS,
   ollamaDisplayName,
+  ollamaExpiryText,
+  ollamaMemoryText,
   profilePrefillForOllamaModel,
   type ProfilePrefill,
 } from "@/lib/models";
-import type {
-  ModelProvider,
-  OllamaKeepAlive,
-  OllamaLoadedModel,
-  OllamaLoadResult,
-  OllamaModel,
-} from "@/lib/types";
-
-/** A row's in-memory facts. */
-interface Resident {
-  sizeVramBytes: number | null;
-  expiresAt: string | null;
-  keepsLoaded: boolean;
-}
-
-/** What is resident, keyed by model name. The ten-second poll is the
- * authority once it has answered — it is what notices a hand-off load
- * landing or Ollama's own timer evicting a model — and the listing's
- * snapshot only seeds the first paint before it does. */
-function residentByName(
-  models: OllamaModel[],
-  loaded: OllamaLoadedModel[] | undefined,
-): Map<string, Resident> {
-  const resident = new Map<string, Resident>();
-  if (loaded) {
-    for (const row of loaded) {
-      resident.set(row.name, {
-        sizeVramBytes: row.size_vram_bytes,
-        expiresAt: row.expires_at,
-        keepsLoaded: row.keeps_loaded,
-      });
-    }
-    return resident;
-  }
-  for (const row of models) {
-    if (row.loaded) {
-      resident.set(row.name, {
-        sizeVramBytes: row.size_vram_bytes,
-        expiresAt: row.expires_at,
-        keepsLoaded: row.keeps_loaded,
-      });
-    }
-  }
-  return resident;
-}
+import type { ModelProvider, OllamaKeepAlive, OllamaModel } from "@/lib/types";
 
 /** Size, family, parameter count, quantisation and context — whichever of
  * them the host reported — as one quiet line. */
@@ -79,24 +41,6 @@ function metaLine(model: OllamaModel): string {
   ]
     .filter((part): part is string => Boolean(part))
     .join(" · ");
-}
-
-/** Where the weights sit: a CPU-only host reports zero VRAM, and saying
- * "0 MB VRAM" there would read as a fault rather than a fact. */
-function memoryText(resident: Resident): string {
-  if (resident.sizeVramBytes === null) return "in memory";
-  if (resident.sizeVramBytes === 0) return "in RAM";
-  return `${formatModelSize(resident.sizeVramBytes)} VRAM`;
-}
-
-/** Ollama restarts its keep-alive timer on every request, so the poll keeps
- * this honest; the panel re-renders between polls so the minutes tick. An
- * expiry already in the past means the host has not evicted the model yet —
- * "expires 2 minutes ago" would be nonsense. */
-function expiryText(resident: Resident): string {
-  if (resident.keepsLoaded || !resident.expiresAt) return "stays loaded";
-  if (new Date(resident.expiresAt).getTime() <= Date.now()) return "unloading now";
-  return `expires ${formatRelative(resident.expiresAt)}`;
 }
 
 /** Every chat model reports "completion", so it says nothing; the rest are
@@ -123,95 +67,59 @@ function without(record: Record<string, string>, key: string): Record<string, st
 }
 
 export function OllamaPanel({
-  workspaceId,
   provider,
+  host,
   isAdmin,
   onError,
   onUseAsModel,
 }: {
-  workspaceId: string;
   provider: ModelProvider;
+  /** The page's subscription to this host — see lib/ollama-host.ts. */
+  host: OllamaHost;
   isAdmin: boolean;
-  /** Request failures go to the dialog's ErrorNote, beside the other actions. */
+  /** Request failures go to the card's ErrorNote, beside the other actions. */
   onError: (message: string | null) => void;
   /** Opens the profile dialog prefilled for the picked model. */
   onUseAsModel: (prefill: ProfilePrefill) => void;
 }) {
-  const base = `/api/v1/workspaces/${workspaceId}/model-providers/${provider.id}/ollama`;
-  const models = useOllamaModels(workspaceId, provider.id);
-  const loaded = useOllamaLoaded(workspaceId, provider.id);
-  const invalidateOllama = useInvalidateOllama(workspaceId);
-  const [keepAlive, setKeepAlive] = useState<OllamaKeepAlive>("5m");
-  /** Rows whose load was requested and not yet confirmed by the poll, with
-   * the lease they asked for. The API can answer "loading" before the host
-   * has finished, so its reply alone never ends the wait. */
-  const [pendingLoads, setPendingLoads] = useState<Record<string, string>>({});
+  const { models, loaded, resident, pending, unloading } = host;
+  const [keepAlive, setKeepAlive] = useState<OllamaKeepAlive>(OLLAMA_DEFAULT_KEEP_ALIVE);
   /** The host's own refusal for a row ("model 'x' not found…"), kept beside
    * the row rather than in a note that disappears. */
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
-  const [, setTick] = useState(0);
 
   const rows = models.data?.models ?? [];
-  const resident = residentByName(rows, loaded.data?.models);
-
-  const landed = Object.keys(pendingLoads).filter((name) => resident.has(name));
-  if (landed.length > 0) {
-    setPendingLoads((current) => landed.reduce(without, current));
-  }
 
   // "expires in 4 minutes" must count down between polls, but only a row
   // with an expiry needs the clock running.
-  const ticking = rows.some((row) => {
-    const facts = resident.get(row.name);
-    return facts !== undefined && !facts.keepsLoaded && facts.expiresAt !== null;
-  });
-  useEffect(() => {
-    if (!ticking) return;
-    const timer = setInterval(() => setTick((count) => count + 1), 5_000);
-    return () => clearInterval(timer);
-  }, [ticking]);
+  useCountdownTick(
+    rows.some((row) => {
+      const facts = resident.get(row.name);
+      return facts !== undefined && !facts.keepsLoaded && facts.expiresAt !== null;
+    }),
+  );
 
-  const load = useMutation({
-    mutationFn: (name: string) =>
-      api<OllamaLoadResult>(`${base}/load`, {
-        method: "POST",
-        body: { model: name, keep_alive: keepAlive },
-      }),
-    onMutate: (name) => {
-      onError(null);
-      setRowErrors((current) => without(current, name));
-      setPendingLoads((current) => ({ ...current, [name]: keepAlive }));
-    },
-    onSuccess: (result, name) => {
-      if (!result.ok) {
-        setPendingLoads((current) => without(current, name));
-        setRowErrors((current) => ({ ...current, [name]: result.detail }));
-        return;
-      }
-      invalidateOllama();
-    },
-    onError: (error, name) => {
-      setPendingLoads((current) => without(current, name));
-      onError(errorText(error, "Loading the model failed."));
-    },
-  });
+  const requestLoad = (name: string) => {
+    onError(null);
+    setRowErrors((current) => without(current, name));
+    host.load(name, keepAlive).then(
+      (result) => {
+        if (!result.ok) setRowErrors((current) => ({ ...current, [name]: result.detail }));
+      },
+      (error: unknown) => onError(errorText(error, "Loading the model failed.")),
+    );
+  };
 
-  const unload = useMutation({
-    mutationFn: (name: string) =>
-      api<OllamaLoadResult>(`${base}/unload`, { method: "POST", body: { model: name } }),
-    onMutate: (name) => {
-      onError(null);
-      setRowErrors((current) => without(current, name));
-    },
-    onSuccess: (result, name) => {
-      if (!result.ok) {
-        setRowErrors((current) => ({ ...current, [name]: result.detail }));
-        return;
-      }
-      invalidateOllama();
-    },
-    onError: (error) => onError(errorText(error, "Unloading the model failed.")),
-  });
+  const requestUnload = (name: string) => {
+    onError(null);
+    setRowErrors((current) => without(current, name));
+    host.unload(name).then(
+      (result) => {
+        if (!result.ok) setRowErrors((current) => ({ ...current, [name]: result.detail }));
+      },
+      (error: unknown) => onError(errorText(error, "Unloading the model failed.")),
+    );
+  };
 
   const sorted = [...rows].sort((a, b) => {
     const aLoaded = resident.has(a.name) ? 0 : 1;
@@ -283,9 +191,8 @@ export function OllamaPanel({
         <ul className="divide-y divide-line">
           {sorted.map((model) => {
             const facts = resident.get(model.name);
-            const pending = model.name in pendingLoads;
-            const loading = pending || (load.isPending && load.variables === model.name);
-            const unloading = unload.isPending && unload.variables === model.name;
+            const loading = pending.has(model.name);
+            const isUnloading = unloading.has(model.name);
             const capabilities = capabilityLabels(model.capabilities);
             return (
               <li
@@ -313,7 +220,7 @@ export function OllamaPanel({
                     <p className="text-faint">{metaLine(model)}</p>
                     {facts ? (
                       <p className="text-dim">
-                        {memoryText(facts)} · {expiryText(facts)}
+                        {ollamaMemoryText(facts)} · {ollamaExpiryText(facts)}
                       </p>
                     ) : null}
                   </div>
@@ -323,16 +230,16 @@ export function OllamaPanel({
                         <Button
                           size="sm"
                           variant="ghost"
-                          disabled={unloading}
-                          onClick={() => unload.mutate(model.name)}
+                          disabled={isUnloading}
+                          onClick={() => requestUnload(model.name)}
                         >
-                          {unloading ? "Unloading…" : "Unload"}
+                          {isUnloading ? "Unloading…" : "Unload"}
                         </Button>
                       ) : (
                         <Button
                           size="sm"
                           disabled={loading}
-                          onClick={() => load.mutate(model.name)}
+                          onClick={() => requestLoad(model.name)}
                         >
                           {loading ? "Loading…" : "Load"}
                         </Button>
@@ -349,7 +256,7 @@ export function OllamaPanel({
                     </div>
                   ) : null}
                 </div>
-                {pending ? (
+                {loading ? (
                   <p role="status" className="flex items-center gap-2 text-dim">
                     <span
                       aria-hidden
