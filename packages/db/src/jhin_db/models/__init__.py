@@ -24,6 +24,7 @@ from jhin_db.models.org import (
     Workspace,
     WorkspaceMembership,
 )
+from jhin_db.models.persona import Persona
 from jhin_db.models.policy import AgentCapabilityGrant, Approval, ToolCall
 from jhin_db.models.sandbox import SandboxJob
 from jhin_db.models.secret import Secret
@@ -56,6 +57,7 @@ __all__ = [
     "ModelProvider",
     "OAuthAuthorization",
     "OAuthClientRegistration",
+    "Persona",
     "PriceCatalogSnapshot",
     "ReviewPolicy",
     "RunEvent",

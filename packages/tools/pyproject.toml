@@ -12,6 +12,7 @@ dependencies = [
     "jhin-observability",
     "jhin-policy",
     "jhin-secrets",
+    "jhin-personas",
     "jhin-skills",
 ]
 
@@ -22,6 +23,7 @@ jhin-memory = { workspace = true }
 jhin-observability = { workspace = true }
 jhin-policy = { workspace = true }
 jhin-secrets = { workspace = true }
+jhin-personas = { workspace = true }
 jhin-skills = { workspace = true }
 
 [build-system]

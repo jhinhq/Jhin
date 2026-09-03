@@ -204,9 +204,9 @@ async def test_create_agent_is_approval_gated_and_seeds_collaboration_grants(
     assert connie.avatar_color == color and color in AVATAR_COLORS
 
     # A created agent holds exactly the platform default grant set — find
-    # colleagues, ask them for help, answer them, remember, and ask the
-    # person it is talking to — and never delegation or any other
-    # higher-authority capability.
+    # colleagues, ask them for help, answer them, remember, ask the person
+    # it is talking to, and choose its own persona — and never delegation
+    # or any other higher-authority capability.
     grants = list(
         await session.scalars(
             select(AgentCapabilityGrant).where(AgentCapabilityGrant.agent_id == connie.id)
@@ -221,6 +221,7 @@ async def test_create_agent_is_approval_gated_and_seeds_collaboration_grants(
         "memory.read": {},
         "memory.propose": {},
         "organization.ask_person": {},
+        "organization.persona.self": {},
     }
     assert "organization.delegate" not in by_capability
 

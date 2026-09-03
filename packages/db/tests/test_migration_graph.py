@@ -208,9 +208,17 @@ def test_catalog_logos_directly_follows_0033() -> None:
     assert logos.down_revision == "0033"
 
 
-def test_oauth_directly_follows_0034_and_is_the_head() -> None:
+def test_oauth_directly_follows_0034() -> None:
+    """0035 sits on 0034. It is no longer the head: personas (0036) chains on it."""
     scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
     oauth = scripts.get_revision("0035")
     assert oauth is not None
     assert oauth.down_revision == "0034"
-    assert list(scripts.get_heads()) == ["0035"], "the migration graph must stay linear"
+
+
+def test_personas_directly_follows_0035_and_is_the_head() -> None:
+    scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
+    personas = scripts.get_revision("0036")
+    assert personas is not None
+    assert personas.down_revision == "0035"
+    assert list(scripts.get_heads()) == ["0036"], "the migration graph must stay linear"

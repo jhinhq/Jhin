@@ -1,8 +1,8 @@
 """Immutable agent execution snapshots (plan 7.1).
 
 A snapshot freezes everything a run needs to know about its agent at start
-time: identity, prompt, placement, model profile, and limits. Its hash is
-stored on the run so audits can prove which configuration executed.
+time: identity, prompt, persona, placement, model profile, and limits. Its
+hash is stored on the run so audits can prove which configuration executed.
 
 Credentials are deliberately absent: the snapshot carries the provider and
 secret *ids* only. Plaintext is resolved inside the model-call activity at
@@ -14,12 +14,13 @@ from __future__ import annotations
 import hashlib
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from jhin_db.models import Agent, ModelProfile, ModelProvider, Team, Workspace
+from jhin_db.models import Agent, ModelProfile, ModelProvider, Persona, Team, Workspace
 from jhin_models import ReasoningConfig, WebSearchConfig
+from jhin_personas import PersonaCard, PersonaFacets
 
 
 class SnapshotError(Exception):
@@ -78,6 +79,12 @@ class AgentExecutionSnapshot(BaseModel):
     temperature: float | None
     max_output_tokens: int | None
     run_limits: RunLimits
+    # Additive (personas): the card this agent wears, frozen with the rest
+    # of the snapshot so snapshot_hash proves which card a run saw and a
+    # reassignment mid-run cannot change a running prompt. Snapshots
+    # serialized before this field deserialize with None and render no
+    # block, the same replay rule as workspace_name.
+    persona: PersonaCard | None = None
 
     def snapshot_hash(self) -> str:
         """Stable content hash of the full snapshot (stored on the run)."""
@@ -104,6 +111,26 @@ def _reasoning_override(
     if supports_reasoning and not config.supports_reasoning:
         config = config.model_copy(update={"supports_reasoning": True})
     return config if config.is_set else None
+
+
+def _persona_card(row: Persona) -> PersonaCard | None:
+    """The persona row as a validated card, or None when the stored document
+    no longer validates (a card written under an older rule set, say).
+
+    A persona that cannot render degrades to no block, never to a failed
+    run: the card shapes how the agent sounds and is not worth stopping
+    work over.
+    """
+    try:
+        return PersonaCard(
+            name=row.name,
+            display_name=row.display_name,
+            description=row.description,
+            tags=list(row.tags_json),
+            facets=PersonaFacets.model_validate(row.facets_json),
+        )
+    except ValidationError:
+        return None
 
 
 async def resolve_snapshot(
@@ -158,6 +185,21 @@ async def resolve_snapshot(
             select(Agent.name).where(Agent.id == agent.manager_agent_id)
         )
 
+    persona: PersonaCard | None = None
+    if agent.persona_id is not None:
+        # A disabled or deleted persona is "no persona" for this run: the
+        # assignment stays on the agent row, so re-enabling it takes effect
+        # on the next run, but nothing of it reaches this run's prompt.
+        persona_row = await session.scalar(
+            select(Persona).where(
+                Persona.id == agent.persona_id,
+                Persona.workspace_id == workspace_id,
+                Persona.enabled.is_(True),
+            )
+        )
+        if persona_row is not None:
+            persona = _persona_card(persona_row)
+
     return AgentExecutionSnapshot(
         agent_id=agent.id,
         workspace_id=agent.workspace_id,
@@ -186,4 +228,5 @@ async def resolve_snapshot(
         temperature=agent.temperature,
         max_output_tokens=agent.max_output_tokens,
         run_limits=RunLimits(max_steps=agent.max_steps, max_run_minutes=agent.max_run_minutes),
+        persona=persona,
     )

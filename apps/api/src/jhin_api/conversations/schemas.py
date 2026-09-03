@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from jhin_api.approvals.schemas import ApprovalOut
 from jhin_api.coordination.schemas import WorkReviewOut
+from jhin_api.personas.schemas import AgentPersonaSummary
 from jhin_api.tasks.schemas import MessageOut, TaskOut
 from jhin_domain import ActivityKind, ConversationStatus
 
@@ -95,6 +96,9 @@ class ConversationAgentOut(BaseModel):
     status: str
     availability: str
     public_purpose: str
+    # The persona the agent wears, for the chat header. Shown even when the
+    # persona is switched off (``enabled: false``) so the header can say so.
+    persona: AgentPersonaSummary | None = None
 
 
 class ConversationDetailOut(BaseModel):

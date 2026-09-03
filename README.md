@@ -106,6 +106,12 @@ Two things worth knowing on day one:
   Agents see only names and descriptions in their prompt and read a
   skill's full playbook on demand through the audited `skills.read` tool
   ([Agent Skills](docs/architecture/skills.md)).
+- **Personas.** How each agent acts and sounds: a structured card of
+  facets (voice, stance, pace, when unsure, with people, with teammates,
+  signature, never) rather than a free-text prompt. Pick one of the twelve
+  Jhin ships, write your own, or let an agent propose one for itself. A
+  persona shapes how an agent says things, never what it may do
+  ([Personas](docs/architecture/personas.md)).
 - **Connectors.** GitHub, Linear, Vercel, Supabase, and a CLI sandbox that
   runs jobs in ephemeral non-root containers
   (`/apps`, [connector SDK](docs/architecture/connectors.md)).

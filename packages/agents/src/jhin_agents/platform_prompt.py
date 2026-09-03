@@ -18,6 +18,12 @@ Rendering is plain ``str.format`` over three placeholders — agent name, role
 title, workspace name — all sourced from the immutable execution snapshot.
 Old run histories whose snapshots predate ``workspace_name`` render without
 the workspace clause instead of failing (replay safety).
+
+The persona block (``jhin_agents.context.persona_block``, "How you work") is
+a separate layer composed directly after this preamble. It is not part of
+this template, so it never bumps ``PLATFORM_PREAMBLE_VERSION``: which card a
+run saw is proven by the run's snapshot hash instead, because the card is
+frozen into the execution snapshot.
 """
 
 from __future__ import annotations

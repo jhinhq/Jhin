@@ -351,6 +351,7 @@ def builtin_tool_definitions() -> tuple[ToolDefinition, ...]:
     from jhin_tools.memory import MEMORY_TOOLS
     from jhin_tools.organization import ORGANIZATION_TOOLS
     from jhin_tools.organization_admin import ORGANIZATION_ADMIN_TOOLS
+    from jhin_tools.personas import PERSONA_TOOLS
     from jhin_tools.reviews import REVIEW_TOOLS
     from jhin_tools.skills_tools import SKILL_TOOLS
     from jhin_tools.work_requests import WORK_REQUEST_TOOLS
@@ -366,6 +367,7 @@ def builtin_tool_definitions() -> tuple[ToolDefinition, ...]:
             *MEMORY_TOOLS,
             *ASK_PERSON_TOOLS,
             *SKILL_TOOLS,
+            *PERSONA_TOOLS,
         )
     )
 
@@ -382,6 +384,7 @@ def build_builtin_catalog() -> ToolCatalog:
     from jhin_tools.memory import MEMORY_TOOLS
     from jhin_tools.organization import ORGANIZATION_TOOLS
     from jhin_tools.organization_admin import ORGANIZATION_ADMIN_TOOLS
+    from jhin_tools.personas import PERSONA_TOOLS
     from jhin_tools.reviews import REVIEW_TOOLS
     from jhin_tools.skills_tools import SKILL_TOOLS
     from jhin_tools.work_requests import WORK_REQUEST_TOOLS
@@ -400,6 +403,7 @@ def build_builtin_catalog() -> ToolCatalog:
         *MEMORY_TOOLS,
         *ASK_PERSON_TOOLS,
         *SKILL_TOOLS,
+        *PERSONA_TOOLS,
     ):
         catalog.register(definition, org_executor, validator)
     return catalog

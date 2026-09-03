@@ -24,10 +24,10 @@ from temporalio.exceptions import ApplicationError
 
 from jhin_agent_worker.coordination_activities import manager_context, organization_context
 from jhin_agent_worker.resources import Resources
-from jhin_agent_worker.situation import situation_context
+from jhin_agent_worker.situation import SituationContext, situation_context
 from jhin_agent_worker.skills_activities import skills_prompt_context
 from jhin_agents import AgentExecutionSnapshot
-from jhin_agents.context import ConversationTurn, TaskContext
+from jhin_agents.context import ConversationTurn, TaskContext, persona_block
 from jhin_agents.graph import NodeTransition
 from jhin_agents.runtime import StepOutcome, estimate_cost_micros, execute_step
 from jhin_db.budget import budget_denial_message
@@ -1095,8 +1095,9 @@ class AgentReasoningActivities:
         *,
         workspace_id: UUID,
         task: Task,
-    ) -> tuple[str, str]:
-        """The "current time" and "who you are talking with" blocks.
+    ) -> SituationContext:
+        """The "current time" and "who you are talking with" blocks, plus the
+        counterpart's kind for the persona block.
 
         Shared knowledge, re-derived live on every run (jhin_agent_worker.
         situation). Best-effort like the roster and skills blocks: a failure
@@ -1113,7 +1114,9 @@ class AgentReasoningActivities:
                 )
         except Exception as error:
             logger.warning("situation.context_failed", error_type=type(error).__name__)
-            return "", ""
+            return SituationContext(
+                time_context="", interlocutor_context="", interlocutor_kind=None
+            )
 
     async def _skills_context(self, *, workspace_id: UUID, agent_id: UUID) -> str:
         """The "Skills available to you" block; best-effort, own session
@@ -1451,9 +1454,18 @@ class AgentReasoningActivities:
                 workspace_id=workspace_id,
                 agent_id=agent_id,
             )
-            time_context, interlocutor_context = await self._situation_context(
+            situation = await self._situation_context(
                 workspace_id=workspace_id,
                 task=task,
+            )
+            # Pure composition over the frozen snapshot and the live
+            # counterpart: no database read and no failure path of its own.
+            # The card was validated when it was written and is hashed into
+            # the snapshot, so a mid-run reassignment cannot reach this step.
+            persona_context = (
+                persona_block(snapshot.persona, interlocutor_kind=situation.interlocutor_kind)
+                if snapshot.persona is not None
+                else ""
             )
 
             api_key: str | None = None
@@ -1491,8 +1503,9 @@ class AgentReasoningActivities:
                 manager_context=manager,
                 memory_context=memory.text,
                 skills_context=skills,
-                time_context=time_context,
-                interlocutor_context=interlocutor_context,
+                time_context=situation.time_context,
+                interlocutor_context=situation.interlocutor_context,
+                persona_context=persona_context,
                 conversation_turn=conversation_turn,
             )
             try:

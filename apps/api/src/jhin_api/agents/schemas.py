@@ -7,6 +7,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from jhin_api.media.urls import avatar_url_for
+from jhin_api.personas.schemas import AgentPersonaSummary
 from jhin_domain import AVATAR_COLORS, AVATAR_SHAPES, AgentStatus, AutonomyLevel, AvatarKind
 
 Discoverability = Literal["discoverable", "hidden"]
@@ -68,6 +69,9 @@ class AgentCreate(BaseModel):
     autonomy_level: AutonomyLevel = AutonomyLevel.SUPERVISED
     # Null = inherit the workspace default profile (plan 15.2).
     model_profile_id: UUID | None = None
+    # Null = no persona: the agent gets no "How you work" block. Must
+    # name an enabled persona in this workspace.
+    persona_id: UUID | None = None
     temperature: float | None = Field(default=None, ge=0, le=2)
     max_output_tokens: int | None = Field(default=None, ge=1)
     max_steps: int = Field(default=20, ge=1, le=500)
@@ -129,6 +133,9 @@ class AgentUpdate(BaseModel):
     status: AgentStatus | None = None
     autonomy_level: AutonomyLevel | None = None
     model_profile_id: UUID | None = None
+    # Omitted = untouched; explicit null takes the persona off. Takes
+    # effect on the agent's next run, never mid-run.
+    persona_id: UUID | None = None
     temperature: float | None = Field(default=None, ge=0, le=2)
     max_output_tokens: int | None = Field(default=None, ge=1)
     max_steps: int | None = Field(default=None, ge=1, le=500)
@@ -162,6 +169,9 @@ class AgentOut(BaseModel):
     status: AgentStatus
     autonomy_level: AutonomyLevel
     model_profile_id: UUID | None
+    persona_id: UUID | None = None
+    # The card the agent wears, enabled or not, for chips and pickers.
+    persona: AgentPersonaSummary | None = None
     temperature: float | None
     max_output_tokens: int | None
     max_steps: int

@@ -54,6 +54,7 @@ _CATEGORY_ROWS: tuple[tuple[str, str, str], ...] = (
     ("apps", "Apps", "Connections to outside services such as GitHub or Slack."),
     ("automations", "Automations", "Triggers that start work on a schedule or an event."),
     ("skills", "Skills", "The reusable instruction packs agents can load."),
+    ("personas", "Personas", "How agents act and sound: the persona library and who wears which."),
     ("memories", "Memories", "Curated long-term knowledge the company remembers."),
     ("approvals", "Approvals", "Actions paused until a person says yes or no."),
     ("reviews", "Reviews", "Second looks at agent work, and the policies that ask for them."),
@@ -205,6 +206,20 @@ _SCOPE_ROWS: tuple[tuple[str, str, str, str, WorkspaceRole], ...] = (
         "write",
         "Manage skills",
         "Install, import, edit, and remove skills, and assign them to agents.",
+        WorkspaceRole.ADMIN,
+    ),
+    (
+        "personas",
+        "read",
+        "See personas",
+        "Browse the persona library and read each card.",
+        WorkspaceRole.VIEWER,
+    ),
+    (
+        "personas",
+        "write",
+        "Manage personas",
+        "Create, edit, duplicate, enable, disable, and delete personas.",
         WorkspaceRole.ADMIN,
     ),
     (

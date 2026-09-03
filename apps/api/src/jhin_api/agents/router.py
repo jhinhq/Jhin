@@ -21,6 +21,8 @@ from jhin_api.agents.schemas import (
 from jhin_api.deps import AdminCtx, DbSession, ViewerCtx
 from jhin_api.deps import client_ip_hash as ip_hash
 from jhin_api.deps import get_request_id as req_id
+from jhin_api.personas import service as personas_service
+from jhin_api.personas.schemas import AgentPersonaSummary
 from jhin_api.security.csrf import csrf_protect
 from jhin_db.models import Agent, AgentRelationship, AgentTeamMembership
 from jhin_domain import AgentStatus
@@ -54,10 +56,12 @@ async def _out(db: DbSession, agent: Agent) -> AgentOut:
     result = AgentOut.model_validate(agent, from_attributes=True)
     memberships = await service.list_memberships(db, agent.workspace_id, agent.id)
     relationships = await service.list_relationships(db, agent.workspace_id, agent.id)
+    persona = await personas_service.persona_for_agent(db, agent)
     return result.model_copy(
         update={
             "memberships": [_membership_out(row) for row in memberships],
             "relationships": [_relationship_out(row) for row in relationships],
+            "persona": (AgentPersonaSummary.from_record(persona) if persona is not None else None),
         }
     )
 

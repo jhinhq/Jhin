@@ -29,6 +29,7 @@ and trust boundary to its authoritative document:
 - [Deterministic tool-worker boundary](architecture/tool-worker-boundary.md)
 - [Curated long-term memory](architecture/memory.md)
 - [Agent Skills](architecture/skills.md)
+- [Personas](architecture/personas.md)
 - [Models, pricing, and balance](architecture/models.md)
 - [Agent avatars and media](architecture/media.md)
 - [ADR-004: agent graph](adr/ADR-004-agent-graph-langgraph.md)

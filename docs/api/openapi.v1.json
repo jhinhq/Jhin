@@ -388,6 +388,18 @@
             "title": "Name",
             "type": "string"
           },
+          "persona_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Persona Id"
+          },
           "public_purpose": {
             "default": "",
             "maxLength": 1000,
@@ -701,6 +713,28 @@
             "title": "Name",
             "type": "string"
           },
+          "persona": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentPersonaSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "persona_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Persona Id"
+          },
           "public_purpose": {
             "title": "Public Purpose",
             "type": "string"
@@ -789,6 +823,44 @@
           "updated_at"
         ],
         "title": "AgentOut",
+        "type": "object"
+      },
+      "AgentPersonaSummary": {
+        "description": "The persona an agent wears, as the agent's own representation shows it.",
+        "properties": {
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "display_name",
+          "tags",
+          "enabled"
+        ],
+        "title": "AgentPersonaSummary",
         "type": "object"
       },
       "AgentRelationshipOut": {
@@ -1096,6 +1168,18 @@
               }
             ],
             "title": "Name"
+          },
+          "persona_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Persona Id"
           },
           "public_purpose": {
             "default": "",
@@ -4459,6 +4543,16 @@
             "title": "Name",
             "type": "string"
           },
+          "persona": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentPersonaSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "public_purpose": {
             "title": "Public Purpose",
             "type": "string"
@@ -5475,6 +5569,37 @@
           "status"
         ],
         "title": "ImportedSkillOut",
+        "type": "object"
+      },
+      "InstallBuiltinPersonasOut": {
+        "properties": {
+          "installed": {
+            "title": "Installed",
+            "type": "integer"
+          },
+          "names": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Names",
+            "type": "array"
+          },
+          "refreshed": {
+            "title": "Refreshed",
+            "type": "integer"
+          },
+          "skipped": {
+            "title": "Skipped",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "installed",
+          "refreshed",
+          "skipped",
+          "names"
+        ],
+        "title": "InstallBuiltinPersonasOut",
         "type": "object"
       },
       "InstallBuiltinsOut": {
@@ -8406,6 +8531,395 @@
           "icon"
         ],
         "title": "OrgTeamNode",
+        "type": "object"
+      },
+      "PersonaCreate": {
+        "additionalProperties": false,
+        "description": "The card itself: name, display name, description, tags, facets.\n\nInheriting the card rather than restating it keeps one validation path:\na create body that would not be a valid card is a 422 here, naming the\nfield, and never reaches the service.",
+        "properties": {
+          "description": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Description",
+            "type": "string"
+          },
+          "display_name": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Display Name",
+            "type": "string"
+          },
+          "facets": {
+            "$ref": "#/components/schemas/PersonaFacets"
+          },
+          "name": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 8,
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "display_name",
+          "description",
+          "facets"
+        ],
+        "title": "PersonaCreate",
+        "type": "object"
+      },
+      "PersonaDuplicateIn": {
+        "description": "Copy a persona (usually a read-only built-in) into an editable custom one.",
+        "properties": {
+          "display_name": {
+            "anyOf": [
+              {
+                "maxLength": 80,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          }
+        },
+        "title": "PersonaDuplicateIn",
+        "type": "object"
+      },
+      "PersonaFacets": {
+        "additionalProperties": false,
+        "description": "The card's facets. Every string is whitespace-collapsed, capped at\n:data:`MAX_FACET_CHARS`, and content-checked; only ``voice`` is required.\n\nFrozen and closed: an unknown facet is a typo that would otherwise\nsilently drop, and this one object is what gets stored, frozen into a\nrun's snapshot, and rendered — so it is validated once, here.",
+        "properties": {
+          "never": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 6,
+            "title": "Never",
+            "type": "array"
+          },
+          "pace": {
+            "default": "",
+            "maxLength": 240,
+            "title": "Pace",
+            "type": "string"
+          },
+          "signature": {
+            "default": "",
+            "maxLength": 240,
+            "title": "Signature",
+            "type": "string"
+          },
+          "stance": {
+            "default": "",
+            "maxLength": 240,
+            "title": "Stance",
+            "type": "string"
+          },
+          "voice": {
+            "maxLength": 240,
+            "minLength": 1,
+            "title": "Voice",
+            "type": "string"
+          },
+          "when_unsure": {
+            "default": "",
+            "maxLength": 240,
+            "title": "When Unsure",
+            "type": "string"
+          },
+          "with_people": {
+            "default": "",
+            "maxLength": 240,
+            "title": "With People",
+            "type": "string"
+          },
+          "with_teammates": {
+            "default": "",
+            "maxLength": 240,
+            "title": "With Teammates",
+            "type": "string"
+          }
+        },
+        "required": [
+          "voice"
+        ],
+        "title": "PersonaFacets",
+        "type": "object"
+      },
+      "PersonaFacetsOut": {
+        "properties": {
+          "never": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Never",
+            "type": "array"
+          },
+          "pace": {
+            "title": "Pace",
+            "type": "string"
+          },
+          "signature": {
+            "title": "Signature",
+            "type": "string"
+          },
+          "stance": {
+            "title": "Stance",
+            "type": "string"
+          },
+          "voice": {
+            "title": "Voice",
+            "type": "string"
+          },
+          "when_unsure": {
+            "title": "When Unsure",
+            "type": "string"
+          },
+          "with_people": {
+            "title": "With People",
+            "type": "string"
+          },
+          "with_teammates": {
+            "title": "With Teammates",
+            "type": "string"
+          }
+        },
+        "required": [
+          "voice",
+          "stance",
+          "pace",
+          "when_unsure",
+          "with_people",
+          "with_teammates",
+          "signature",
+          "never"
+        ],
+        "title": "PersonaFacetsOut",
+        "type": "object"
+      },
+      "PersonaListOut": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PersonaOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "PersonaListOut",
+        "type": "object"
+      },
+      "PersonaOut": {
+        "description": "One persona. No list/detail split: a card is at most 1.5 KB, unlike a\nskill body.",
+        "properties": {
+          "agent_count": {
+            "default": 0,
+            "title": "Agent Count",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "created_by_agent_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By Agent Id"
+          },
+          "created_by_user_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By User Id"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "facets": {
+            "$ref": "#/components/schemas/PersonaFacetsOut"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "read_only": {
+            "title": "Read Only",
+            "type": "boolean"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          },
+          "workspace_id": {
+            "format": "uuid",
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "workspace_id",
+          "name",
+          "display_name",
+          "description",
+          "tags",
+          "source",
+          "facets",
+          "enabled",
+          "version",
+          "read_only",
+          "created_by_user_id",
+          "created_by_agent_id",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "PersonaOut",
+        "type": "object"
+      },
+      "PersonaUpdate": {
+        "description": "Partial update; the name is immutable (it is the agent-facing id).\n\nOnly sizes are checked here. The service merges the change into the\nstored card and validates the result as one ``PersonaCard``, which is\nwhere the content rules and the card total live.",
+        "properties": {
+          "description": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "maxLength": 80,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "facets": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PersonaFacets"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 8,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tags"
+          }
+        },
+        "title": "PersonaUpdate",
         "type": "object"
       },
       "PinIn": {
@@ -23802,6 +24316,662 @@
         "x-jhin-scope": "workspace:read"
       }
     },
+    "/api/v1/workspaces/{workspace_id}/personas": {
+      "get": {
+        "description": "**Scope.** An API key needs `personas:read`.",
+        "operationId": "list_personas_api_v1_workspaces__workspace_id__personas_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Q"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tag",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tag"
+            }
+          },
+          {
+            "in": "query",
+            "name": "enabled",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Enabled"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonaListOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": [
+              "personas:read"
+            ]
+          }
+        ],
+        "summary": "List Personas",
+        "tags": [
+          "personas"
+        ],
+        "x-jhin-scope": "personas:read"
+      },
+      "post": {
+        "description": "Create a custom persona. A persona takes effect on an agent's next\nrun, never mid-run.\n\n**Scope.** An API key needs `personas:write`.",
+        "operationId": "create_persona_api_v1_workspaces__workspace_id__personas_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonaCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonaOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": [
+              "personas:write"
+            ]
+          }
+        ],
+        "summary": "Create Persona",
+        "tags": [
+          "personas"
+        ],
+        "x-jhin-scope": "personas:write"
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/personas/install-builtins": {
+      "post": {
+        "description": "Install the shipped cast (idempotent): missing cards are added, a\nbuilt-in card older than the shipped pack is refreshed in place, and\ncustom cards are never touched.\n\n**Scope.** An API key needs `personas:write`.",
+        "operationId": "install_builtins_api_v1_workspaces__workspace_id__personas_install_builtins_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallBuiltinPersonasOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": [
+              "personas:write"
+            ]
+          }
+        ],
+        "summary": "Install Builtins",
+        "tags": [
+          "personas"
+        ],
+        "x-jhin-scope": "personas:write"
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/personas/{persona_id}": {
+      "delete": {
+        "description": "Delete a custom persona; agents wearing it are left with none.\n\n**Scope.** An API key needs `personas:write`.",
+        "operationId": "delete_persona_api_v1_workspaces__workspace_id__personas__persona_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "persona_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Persona Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": [
+              "personas:write"
+            ]
+          }
+        ],
+        "summary": "Delete Persona",
+        "tags": [
+          "personas"
+        ],
+        "x-jhin-scope": "personas:write"
+      },
+      "get": {
+        "description": "**Scope.** An API key needs `personas:read`.",
+        "operationId": "get_persona_api_v1_workspaces__workspace_id__personas__persona_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "persona_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Persona Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonaOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": [
+              "personas:read"
+            ]
+          }
+        ],
+        "summary": "Get Persona",
+        "tags": [
+          "personas"
+        ],
+        "x-jhin-scope": "personas:read"
+      },
+      "patch": {
+        "description": "Edit a custom persona. A built-in persona is read-only apart from\n``enabled``; duplicate it to edit a copy.\n\n**Scope.** An API key needs `personas:write`.",
+        "operationId": "update_persona_api_v1_workspaces__workspace_id__personas__persona_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "persona_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Persona Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonaUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonaOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": [
+              "personas:write"
+            ]
+          }
+        ],
+        "summary": "Update Persona",
+        "tags": [
+          "personas"
+        ],
+        "x-jhin-scope": "personas:write"
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/personas/{persona_id}/disable": {
+      "post": {
+        "description": "Switch a persona off. Agents keep their assignment, but their next\nrun renders no persona until it is enabled again.\n\n**Scope.** An API key needs `personas:write`.",
+        "operationId": "disable_persona_api_v1_workspaces__workspace_id__personas__persona_id__disable_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "persona_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Persona Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonaOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": [
+              "personas:write"
+            ]
+          }
+        ],
+        "summary": "Disable Persona",
+        "tags": [
+          "personas"
+        ],
+        "x-jhin-scope": "personas:write"
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/personas/{persona_id}/duplicate": {
+      "post": {
+        "description": "Copy a persona into a new custom one — how a built-in gets edited.\n\n**Scope.** An API key needs `personas:write`.",
+        "operationId": "duplicate_persona_api_v1_workspaces__workspace_id__personas__persona_id__duplicate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "persona_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Persona Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonaDuplicateIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonaOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": [
+              "personas:write"
+            ]
+          }
+        ],
+        "summary": "Duplicate Persona",
+        "tags": [
+          "personas"
+        ],
+        "x-jhin-scope": "personas:write"
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/personas/{persona_id}/enable": {
+      "post": {
+        "description": "**Scope.** An API key needs `personas:write`.",
+        "operationId": "enable_persona_api_v1_workspaces__workspace_id__personas__persona_id__enable_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "persona_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Persona Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonaOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": [
+              "personas:write"
+            ]
+          }
+        ],
+        "summary": "Enable Persona",
+        "tags": [
+          "personas"
+        ],
+        "x-jhin-scope": "personas:write"
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/questions": {
       "get": {
         "description": "**Scope.** An API key needs `chats:read`.",
@@ -28458,6 +29628,10 @@
     {
       "description": "The skill library — install, import, browse, and attach reusable instructions to agents.",
       "name": "skills"
+    },
+    {
+      "description": "How agents act and sound: the persona library, the cast Jhin ships, and the custom cards a workspace writes. Which agent wears which is set on the agent.",
+      "name": "personas"
     },
     {
       "description": "The catalogue of connectable app types and the tools each one exposes.",

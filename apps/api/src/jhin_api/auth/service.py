@@ -17,6 +17,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from jhin_api.audit import service as audit
+from jhin_api.personas import service as personas_service
 from jhin_api.security.passwords import (
     PasswordPolicyError,
     hash_password,
@@ -200,6 +201,16 @@ async def create_owner_and_workspace(
     # Every new workspace starts with the five starter skills already
     # installed and enabled (docs/architecture/skills.md).
     await skills_service.install_builtins_for_new_workspace(
+        db,
+        workspace.id,
+        actor_id=user.id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+    )
+    # And with the shipped cast of personas, staged in the same
+    # transaction. Read-only rows, so unlike the starter skills nothing
+    # here becomes content an admin later edits.
+    await personas_service.install_builtin_personas_for_new_workspace(
         db,
         workspace.id,
         actor_id=user.id,

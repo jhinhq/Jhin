@@ -30,6 +30,7 @@ named.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -37,7 +38,14 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from jhin_agents.context import Interlocutor, format_local_time, interlocutor_block, time_block
+from jhin_agents.context import (
+    Interlocutor,
+    InterlocutorKind,
+    format_local_time,
+    interlocutor_block,
+    interlocutor_kind,
+    time_block,
+)
 from jhin_db.models import (
     Agent,
     Conversation,
@@ -62,6 +70,7 @@ _ROLE_WORDS = {
 
 __all__ = [
     "DEFAULT_TIMEZONE",
+    "SituationContext",
     "format_local_time",
     "resolve_interlocutors",
     "resolve_timezone",
@@ -233,14 +242,31 @@ async def resolve_interlocutors(
     return (human,) if human is not None else ()
 
 
+@dataclass(frozen=True)
+class SituationContext:
+    """The situational blocks for one reasoning step, plus the one fact the
+    persona layer needs from them: who is on the other side.
+
+    ``interlocutor_kind`` comes from the same rows as ``interlocutor_context``,
+    so the persona's "With people" / "With teammates" facet and the "Who you
+    are talking with" block can never disagree. None means nobody — a
+    trigger- or schedule-started task — and the persona renders neither.
+    """
+
+    time_context: str
+    interlocutor_context: str
+    interlocutor_kind: InterlocutorKind | None
+
+
 async def situation_context(
     session: AsyncSession,
     *,
     workspace_id: UUID,
     task: Task,
     now: datetime | None = None,
-) -> tuple[str, str]:
-    """``(time_context, interlocutor_context)`` for one reasoning step.
+) -> SituationContext:
+    """The clock, the counterpart, and the counterpart's kind for one
+    reasoning step.
 
     ``now`` is injectable so tests (and any future replay-pinned caller) can
     fix the clock; production passes None and reads it here, inside the
@@ -251,4 +277,8 @@ async def situation_context(
     zone = resolve_timezone(timezone_name)
     local = moment.astimezone(zone)
     interlocutors = await resolve_interlocutors(session, workspace_id=workspace_id, task=task)
-    return time_block(local, str(zone.key)), interlocutor_block(interlocutors)
+    return SituationContext(
+        time_context=time_block(local, str(zone.key)),
+        interlocutor_context=interlocutor_block(interlocutors),
+        interlocutor_kind=interlocutor_kind(interlocutors),
+    )

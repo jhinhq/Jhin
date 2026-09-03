@@ -23,6 +23,7 @@ from jhin_db.models import (
     AgentRelationship,
     AgentTeamMembership,
     ModelProfile,
+    Persona,
     Team,
     Trigger,
 )
@@ -133,6 +134,32 @@ async def _validate_model_profile(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="model_profile_id does not reference a model profile in this workspace",
         )
+
+
+async def _validate_persona(
+    db: AsyncSession, workspace_id: UUID, persona_id: UUID | None
+) -> Persona | None:
+    """The persona an agent is being given, or None for "none".
+
+    A disabled persona is refused here rather than accepted and silently
+    not rendered: the person assigning it would otherwise see it on the
+    agent and wonder why the voice never changed.
+    """
+    if persona_id is None:
+        return None
+    persona = await db.scalar(
+        select(Persona).where(
+            Persona.id == persona_id,
+            Persona.workspace_id == workspace_id,
+            Persona.enabled.is_(True),
+        )
+    )
+    if persona is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="persona_id does not reference an enabled persona in this workspace",
+        )
+    return persona
 
 
 def _validate_membership_duplicates(
@@ -427,6 +454,7 @@ async def create_agent(
     await _validate_membership_teams(db, ctx.workspace_id, primary_team_id, secondary_team_ids)
     await _validate_new_agent_manager(db, ctx.workspace_id, values.get("manager_agent_id"))
     await _validate_model_profile(db, ctx.workspace_id, values.get("model_profile_id"))
+    await _validate_persona(db, ctx.workspace_id, values.get("persona_id"))
     agent = Agent(
         workspace_id=ctx.workspace_id,
         slug=await _unique_slug(db, ctx.workspace_id, values["name"]),
@@ -504,6 +532,12 @@ async def update_agent(
         _validate_manager_change(agent.id, changes["manager_agent_id"], workspace_agents)
     if "model_profile_id" in changes:
         await _validate_model_profile(db, ctx.workspace_id, changes["model_profile_id"])
+    persona_change: tuple[UUID | None, Persona | None] | None = None
+    if "persona_id" in changes and changes["persona_id"] != agent.persona_id:
+        persona_change = (
+            agent.persona_id,
+            await _validate_persona(db, ctx.workspace_id, changes["persona_id"]),
+        )
     primary_team_id = changes.pop("team_id", agent.team_id)
     for field, value in changes.items():
         setattr(agent, field, value)
@@ -545,6 +579,28 @@ async def update_agent(
         ip_hash=ip_hash,
         metadata={"changed_fields": sorted(changed_fields)},
     )
+    if persona_change is not None:
+        # Its own row beside agent.updated: which card an agent wears is
+        # the kind of change somebody later wants to find on its own.
+        previous_persona_id, persona = persona_change
+        audit.record(
+            db,
+            action="persona.assigned",
+            target_type="agent",
+            target_id=agent.id,
+            workspace_id=ctx.workspace_id,
+            actor_id=ctx.user.id,
+            request_id=request_id,
+            ip_hash=ip_hash,
+            metadata={
+                "persona_id": str(persona.id) if persona is not None else None,
+                "persona_name": persona.name if persona is not None else None,
+                "previous_persona_id": (
+                    str(previous_persona_id) if previous_persona_id is not None else None
+                ),
+                "via": "api",
+            },
+        )
     await db.commit()
     return agent
 

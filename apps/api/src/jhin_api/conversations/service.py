@@ -35,6 +35,8 @@ from jhin_api.conversations.schemas import (
 )
 from jhin_api.coordination import service as coordination
 from jhin_api.deps import WorkspaceContext
+from jhin_api.personas import service as personas_service
+from jhin_api.personas.schemas import AgentPersonaSummary
 from jhin_api.public_payloads import public_tool_payload
 from jhin_api.tasks import service as tasks_service
 from jhin_api.tasks.schemas import TaskOut
@@ -536,9 +538,19 @@ async def get_detail(
                 .order_by(Approval.requested_at.desc())
             )
         )
+    agent_out: ConversationAgentOut | None = None
+    if agent is not None:
+        persona = await personas_service.persona_for_agent(db, agent)
+        agent_out = ConversationAgentOut.model_validate(agent).model_copy(
+            update={
+                "persona": (
+                    AgentPersonaSummary.from_record(persona) if persona is not None else None
+                )
+            }
+        )
     return ConversationDetailOut(
         conversation=await project_conversation(db, workspace_id, conversation),
-        agent=ConversationAgentOut.model_validate(agent) if agent is not None else None,
+        agent=agent_out,
         tasks=[TaskOut.model_validate(t) for t in tasks],
         total_input_tokens=sum(r.input_tokens for r in runs),
         total_output_tokens=sum(r.output_tokens for r in runs),

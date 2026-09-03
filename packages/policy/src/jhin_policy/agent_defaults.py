@@ -15,6 +15,7 @@ from typing import Any
 
 from jhin_policy.ask_person import ASK_PERSON_CAPABILITY
 from jhin_policy.memory import MEMORY_PROPOSE_CAPABILITY, MEMORY_READ_CAPABILITY
+from jhin_policy.personas import persona_grant_specs
 from jhin_policy.work_requests import collaboration_grant_specs
 
 
@@ -40,7 +41,17 @@ def default_agent_grant_specs() -> tuple[tuple[str, dict[str, Any]], ...]:
     """Every grant a new agent starts with. Deny-by-default is unchanged:
     this is the platform's default *grant set*, and the gateway still
     re-decides every call against live grants."""
-    return collaboration_grant_specs() + memory_grant_specs() + ask_person_grant_specs()
+    return (
+        collaboration_grant_specs()
+        + memory_grant_specs()
+        + ask_person_grant_specs()
+        + persona_grant_specs()
+    )
 
 
-__all__ = ["ask_person_grant_specs", "default_agent_grant_specs", "memory_grant_specs"]
+__all__ = [
+    "ask_person_grant_specs",
+    "default_agent_grant_specs",
+    "memory_grant_specs",
+    "persona_grant_specs",
+]

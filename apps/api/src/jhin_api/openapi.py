@@ -186,6 +186,10 @@ TAG_DESCRIPTIONS: dict[str, str] = {
     "skills": (
         "The skill library — install, import, browse, and attach reusable instructions to agents."
     ),
+    "personas": (
+        "How agents act and sound: the persona library, the cast Jhin ships, and the custom "
+        "cards a workspace writes. Which agent wears which is set on the agent."
+    ),
     "connectors": "The catalogue of connectable app types and the tools each one exposes.",
     "catalog": (
         "The searchable index of MCP servers and agent skills, synced from the "

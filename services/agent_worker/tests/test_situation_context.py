@@ -130,6 +130,12 @@ async def make_chat_task(
     return task
 
 
+async def blocks(session: AsyncSession, workspace: Workspace, task: Task) -> tuple[str, str]:
+    """The two rendered blocks, the way most of these tests read them."""
+    situation = await situation_context(session, workspace_id=workspace.id, task=task, now=NOW)
+    return situation.time_context, situation.interlocutor_context
+
+
 # --- who am I talking to ------------------------------------------------
 
 
@@ -143,7 +149,7 @@ async def test_human_chat_names_the_person_and_their_workspace_role(
     agent = await make_agent(session, workspace, "Bisby", "Chief of Staff")
     task = await make_chat_task(session, workspace, agent, created_by=user.id, speakers=(user.id,))
 
-    _time, who = await situation_context(session, workspace_id=workspace.id, task=task, now=NOW)
+    _time, who = await blocks(session, workspace, task)
     assert who.startswith(
         "Who you are talking with: Varand (workspace owner), a person in this workspace."
     )
@@ -170,7 +176,7 @@ async def test_role_wording_is_plain_english_for_every_role(session: AsyncSessio
         task = await make_chat_task(
             session, workspace, agent, created_by=user.id, speakers=(user.id,)
         )
-        _time, who = await situation_context(session, workspace_id=workspace.id, task=task, now=NOW)
+        _time, who = await blocks(session, workspace, task)
         assert f"({words})" in who
 
 
@@ -191,7 +197,7 @@ async def test_the_person_who_spoke_last_is_the_one_being_answered(
         session, workspace, agent, created_by=opener.id, speakers=(opener.id, replier.id)
     )
 
-    _time, who = await situation_context(session, workspace_id=workspace.id, task=task, now=NOW)
+    _time, who = await blocks(session, workspace, task)
     assert "Dana (workspace member)" in who
     # Only the current counterpart — other members are not enumerated here.
     assert "Varand" not in who
@@ -207,7 +213,7 @@ async def test_first_turn_falls_back_to_the_conversation_creator(
     # composing step.
     task = await make_chat_task(session, workspace, agent, created_by=user.id)
 
-    _time, who = await situation_context(session, workspace_id=workspace.id, task=task, now=NOW)
+    _time, who = await blocks(session, workspace, task)
     assert "Varand (workspace owner)" in who
 
 
@@ -241,7 +247,7 @@ async def test_delegated_child_task_talks_to_the_requesting_agent(
     session.add(child)
     await session.flush()
 
-    _time, who = await situation_context(session, workspace_id=workspace.id, task=child, now=NOW)
+    _time, who = await blocks(session, workspace, child)
     assert "Bisby (Chief of Staff), an AI teammate in this workspace" in who
     assert "who delegated this task to you" in who
     # The human who started the parent thread is not this agent's counterpart.
@@ -271,7 +277,7 @@ async def test_work_request_child_task_talks_to_the_requesting_agent(
     session.add(task)
     await session.flush()
 
-    _time, who = await situation_context(session, workspace_id=workspace.id, task=task, now=NOW)
+    _time, who = await blocks(session, workspace, task)
     assert "Bisby (Chief of Staff), an AI teammate in this workspace" in who
     assert "who asked you for this work" in who
 
@@ -292,9 +298,7 @@ async def test_trigger_started_task_has_no_interlocutor_block(
     session.add(task)
     await session.flush()
 
-    time_context, who = await situation_context(
-        session, workspace_id=workspace.id, task=task, now=NOW
-    )
+    time_context, who = await blocks(session, workspace, task)
     assert who == ""
     # The clock is unconditional even when nobody is on the other side.
     assert time_context.startswith("Current time: ")
@@ -310,8 +314,67 @@ async def test_a_speaker_who_is_not_a_member_is_not_named(session: AsyncSession)
         session, workspace, agent, created_by=outsider.id, speakers=(outsider.id,)
     )
 
-    _time, who = await situation_context(session, workspace_id=workspace.id, task=task, now=NOW)
+    _time, who = await blocks(session, workspace, task)
     assert who == ""
+
+
+# --- who am I talking to, as a kind ---------------------------------------
+
+
+async def test_interlocutor_kind_is_human_on_a_chat_turn(session: AsyncSession) -> None:
+    """The persona block reads "With people" off this; it must agree with the
+    "Who you are talking with" block, which is derived from the same rows."""
+    workspace = await make_workspace(session)
+    user = await make_member(session, workspace, display_name="Varand", email="a@example.test")
+    agent = await make_agent(session, workspace, "Bisby", "Chief of Staff")
+    task = await make_chat_task(session, workspace, agent, created_by=user.id, speakers=(user.id,))
+    situation = await situation_context(session, workspace_id=workspace.id, task=task, now=NOW)
+    assert situation.interlocutor_kind == "human"
+    assert "Varand" in situation.interlocutor_context
+
+
+async def test_interlocutor_kind_is_agent_on_a_delegated_child(session: AsyncSession) -> None:
+    workspace = await make_workspace(session)
+    manager = await make_agent(session, workspace, "Bisby", "Chief of Staff")
+    worker = await make_agent(session, workspace, "Connie", "QA Engineer")
+    child = Task(
+        workspace_id=workspace.id,
+        title="Check the release",
+        description="please verify",
+        assigned_agent_id=worker.id,
+        correlation_id=new_uuid7(),
+        metadata_json={
+            "origin": "delegation",
+            "delegation": {
+                "kind": "delegation",
+                "delegated_by_agent_id": str(manager.id),
+                "delegated_by_agent_name": manager.name,
+            },
+        },
+    )
+    session.add(child)
+    await session.flush()
+    situation = await situation_context(session, workspace_id=workspace.id, task=child, now=NOW)
+    assert situation.interlocutor_kind == "agent"
+    assert "Bisby" in situation.interlocutor_context
+
+
+async def test_interlocutor_kind_is_none_when_nobody_is_there(session: AsyncSession) -> None:
+    workspace = await make_workspace(session)
+    agent = await make_agent(session, workspace, "Bisby", "Chief of Staff")
+    task = Task(
+        workspace_id=workspace.id,
+        title="Nightly digest",
+        description="run the digest",
+        assigned_agent_id=agent.id,
+        correlation_id=new_uuid7(),
+        metadata_json={"origin": "trigger"},
+    )
+    session.add(task)
+    await session.flush()
+    situation = await situation_context(session, workspace_id=workspace.id, task=task, now=NOW)
+    assert situation.interlocutor_kind is None
+    assert situation.interlocutor_context == ""
 
 
 # --- what time is it ----------------------------------------------------
@@ -332,9 +395,7 @@ async def test_non_utc_workspace_timezone_is_applied_and_named(
     session.add(task)
     await session.flush()
 
-    time_context, _who = await situation_context(
-        session, workspace_id=workspace.id, task=task, now=NOW
-    )
+    time_context, _who = await blocks(session, workspace, task)
     assert time_context.startswith(
         "Current time: Sunday, 23 August 2026, 21:14 (America/Los_Angeles)."
     )
@@ -356,9 +417,7 @@ async def test_missing_or_invalid_timezone_falls_back_to_utc(
     session.add(task)
     await session.flush()
 
-    time_context, _who = await situation_context(
-        session, workspace_id=workspace.id, task=task, now=NOW
-    )
+    time_context, _who = await blocks(session, workspace, task)
     assert time_context.startswith("Current time: Monday, 24 August 2026, 04:14 (UTC).")
 
 
@@ -375,6 +434,6 @@ async def test_resolution_is_stable_for_a_fixed_clock(session: AsyncSession) -> 
     user = await make_member(session, workspace, display_name="Varand", email="a@example.test")
     agent = await make_agent(session, workspace, "Bisby", "Chief of Staff")
     task = await make_chat_task(session, workspace, agent, created_by=user.id, speakers=(user.id,))
-    first = await situation_context(session, workspace_id=workspace.id, task=task, now=NOW)
-    second = await situation_context(session, workspace_id=workspace.id, task=task, now=NOW)
+    first = await blocks(session, workspace, task)
+    second = await blocks(session, workspace, task)
     assert first == second

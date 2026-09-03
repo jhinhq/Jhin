@@ -23,6 +23,7 @@ members = [
     "jhin-models",
     "jhin-oauth",
     "jhin-observability",
+    "jhin-personas",
     "jhin-policy",
     "jhin-sandbox-runner",
     "jhin-secrets",
@@ -857,6 +858,7 @@ source = { editable = "packages/agents" }
 dependencies = [
     { name = "jhin-db" },
     { name = "jhin-models" },
+    { name = "jhin-personas" },
     { name = "pydantic" },
     { name = "sqlalchemy", extra = ["asyncio"] },
 ]
@@ -865,6 +867,7 @@ dependencies = [
 requires-dist = [
     { name = "jhin-db", editable = "packages/db" },
     { name = "jhin-models", editable = "packages/models" },
+    { name = "jhin-personas", editable = "packages/personas" },
     { name = "pydantic", specifier = ">=2.10" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.36" },
 ]
@@ -886,6 +889,7 @@ dependencies = [
     { name = "jhin-models" },
     { name = "jhin-oauth" },
     { name = "jhin-observability" },
+    { name = "jhin-personas" },
     { name = "jhin-policy" },
     { name = "jhin-secrets" },
     { name = "jhin-skills" },
@@ -917,6 +921,7 @@ requires-dist = [
     { name = "jhin-models", editable = "packages/models" },
     { name = "jhin-oauth", editable = "packages/oauth" },
     { name = "jhin-observability", editable = "packages/observability" },
+    { name = "jhin-personas", editable = "packages/personas" },
     { name = "jhin-policy", editable = "packages/policy" },
     { name = "jhin-secrets", editable = "packages/secrets" },
     { name = "jhin-skills", editable = "packages/skills" },
@@ -1206,6 +1211,17 @@ requires-dist = [
 ]
 
 [[package]]
+name = "jhin-personas"
+version = "0.1.0"
+source = { editable = "packages/personas" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pydantic", specifier = ">=2.10" }]
+
+[[package]]
 name = "jhin-policy"
 version = "0.1.0"
 source = { editable = "packages/policy" }
@@ -1319,6 +1335,7 @@ dependencies = [
     { name = "jhin-domain" },
     { name = "jhin-memory" },
     { name = "jhin-observability" },
+    { name = "jhin-personas" },
     { name = "jhin-policy" },
     { name = "jhin-secrets" },
     { name = "jhin-skills" },
@@ -1332,6 +1349,7 @@ requires-dist = [
     { name = "jhin-domain", editable = "packages/domain" },
     { name = "jhin-memory", editable = "packages/memory" },
     { name = "jhin-observability", editable = "packages/observability" },
+    { name = "jhin-personas", editable = "packages/personas" },
     { name = "jhin-policy", editable = "packages/policy" },
     { name = "jhin-secrets", editable = "packages/secrets" },
     { name = "jhin-skills", editable = "packages/skills" },

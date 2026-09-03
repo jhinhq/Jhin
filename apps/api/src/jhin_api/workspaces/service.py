@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from jhin_api.audit import service as audit
 from jhin_api.deps import WorkspaceContext
+from jhin_api.personas import service as personas_service
 from jhin_api.skills import service as skills_service
 from jhin_api.slugs import slugify, with_suffix
 from jhin_db.models import (
@@ -89,6 +90,16 @@ async def create(
     # installed and enabled (docs/architecture/skills.md) — staged in this
     # same transaction, not a separate follow-up call.
     await skills_service.install_builtins_for_new_workspace(
+        db,
+        workspace.id,
+        actor_id=creator_id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+    )
+    # The shipped persona cast rides along in the same transaction. Read-only
+    # rows, so unlike the starter skills nothing here becomes content an
+    # admin later edits.
+    await personas_service.install_builtin_personas_for_new_workspace(
         db,
         workspace.id,
         actor_id=creator_id,

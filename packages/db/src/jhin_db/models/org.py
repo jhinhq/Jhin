@@ -145,6 +145,15 @@ class Agent(Base, UuidPkMixin, TimestampMixin):
         ),
         default=None,
     )
+    # Null means "no persona": the agent gets no "How you work" block. The
+    # persona <-> agent reference is circular (persona.created_by_agent_id),
+    # so this side carries use_alter, like fk_agent_model_profile above.
+    persona_id: Mapped[UUID | None] = mapped_column(
+        StdUuid,
+        ForeignKey("persona.id", ondelete="SET NULL", use_alter=True, name="fk_agent_persona"),
+        default=None,
+        index=True,
+    )
     temperature: Mapped[float | None] = mapped_column(Float, default=None)
     max_output_tokens: Mapped[int | None] = mapped_column(Integer, default=None)
     max_steps: Mapped[int] = mapped_column(Integer, default=20)

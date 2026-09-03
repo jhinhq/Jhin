@@ -9,6 +9,7 @@ from jhin_policy.agent_defaults import (
     ask_person_grant_specs,
     default_agent_grant_specs,
     memory_grant_specs,
+    persona_grant_specs,
 )
 from jhin_policy.approvals import (
     PRESET_RULES,
@@ -46,6 +47,7 @@ from jhin_policy.memory import (
     MEMORY_PROPOSE_CAPABILITY,
     MEMORY_READ_CAPABILITY,
 )
+from jhin_policy.personas import PERSONA_SELF_CAPABILITY
 from jhin_policy.reviews import (
     REVIEW_REQUEST_CAPABILITY,
     ReviewCondition,
@@ -86,6 +88,7 @@ __all__ = [
     "MEMORY_CAPABILITIES",
     "MEMORY_PROPOSE_CAPABILITY",
     "MEMORY_READ_CAPABILITY",
+    "PERSONA_SELF_CAPABILITY",
     "PRESET_RULES",
     "REVIEW_REQUEST_CAPABILITY",
     "SKILLS_CAPABILITIES",
@@ -132,6 +135,7 @@ __all__ = [
     "is_valid_capability",
     "matching_preset",
     "memory_grant_specs",
+    "persona_grant_specs",
     "policy_spec_from_row",
     "resolve_reviewer",
     "rules_for_preset",

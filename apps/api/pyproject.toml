@@ -28,6 +28,7 @@ dependencies = [
     "jhin-models",
     "jhin-oauth",
     "jhin-observability",
+    "jhin-personas",
     "jhin-policy",
     "jhin-secrets",
     "jhin-skills",
@@ -51,6 +52,7 @@ jhin-memory = { workspace = true }
 jhin-models = { workspace = true }
 jhin-oauth = { workspace = true }
 jhin-observability = { workspace = true }
+jhin-personas = { workspace = true }
 jhin-policy = { workspace = true }
 jhin-secrets = { workspace = true }
 jhin-skills = { workspace = true }

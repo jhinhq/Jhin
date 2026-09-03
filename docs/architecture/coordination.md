@@ -54,6 +54,14 @@ seed):
 ownership/authority (an unbounded parent wait, a child in the lineage), so
 it stays deny-by-default with the restrictive delegation permission model.
 
+The same platform default also carries `organization.persona.self`
+(`jhin_policy.persona_grant_specs`): an agent may browse the persona library,
+choose a persona for itself, or propose a new card. Choosing changes how the
+agent *sounds*, never what it may do, and proposing a card is elevated (a
+person approves it first), so the grant adds no authority. Putting a persona
+on a *colleague* stays behind `organization.manage_agents` and the manager
+chain. See [Personas](personas.md).
+
 This is a *platform* default, not a capability an agent chooses: the calling
 agent cannot pick these grants, `organization.create_agent` is still
 elevated → human approval, and no higher-authority capability (delegation,
