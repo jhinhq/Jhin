@@ -1,7 +1,6 @@
 /** Pure helpers for the Models page: price auto-fill when a model is picked
  * and balance/spend formatting. Kept free of React so they are unit-testable. */
 
-import { formatRelative } from "@/lib/format";
 import type {
   BalanceSource,
   ModelProfile,
