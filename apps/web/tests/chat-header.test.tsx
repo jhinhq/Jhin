@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChatHeader } from "@/components/chat/chat-header";
 import type { Conversation, ConversationAgentSummary } from "@/lib/types";
+import { personaSummary } from "./helpers/personas";
 
 afterEach(cleanup);
 
@@ -92,6 +93,29 @@ describe("ChatHeader identity", () => {
   it("carries the live status pill", () => {
     renderHeader({ conversation: conversation({ active_task_state: "running" }) });
     expect(screen.getByTestId("live-status").textContent).toContain("Working…");
+  });
+});
+
+describe("ChatHeader persona", () => {
+  it("shows a chip for the persona the agent wears, linking to its card", () => {
+    renderHeader({ agent: agent({ persona: personaSummary() }) });
+    const chip = screen.getByTestId("persona-chip");
+    expect(chip.textContent).toContain("Mission Control");
+    expect(chip.getAttribute("href")).toBe("/personas?persona=p1");
+    expect(chip.getAttribute("data-state")).toBe("on");
+  });
+
+  it("says when the worn persona is switched off in the library", () => {
+    renderHeader({ agent: agent({ persona: personaSummary({ enabled: false }) }) });
+    expect(screen.getByText("· off")).toBeTruthy();
+    expect(screen.getByTestId("persona-chip").getAttribute("data-state")).toBe("off");
+  });
+
+  it("shows no chip for an agent without a persona", () => {
+    renderHeader({ agent: agent({ persona: null }) });
+    expect(screen.queryByTestId("persona-chip")).toBeNull();
+    renderHeader({ agent: null });
+    expect(screen.queryByTestId("persona-chip")).toBeNull();
   });
 });
 

@@ -44,6 +44,8 @@ export interface WizardState {
   maxConcurrentRuns: string;
   /** Monthly model-spend budget in dollars; blank = no budget. */
   monthlyBudgetDollars: string;
+  /** Persona id; "" = none. */
+  personaId: string;
 }
 
 export const EMPTY_WIZARD: WizardState = {
@@ -67,6 +69,7 @@ export const EMPTY_WIZARD: WizardState = {
   maxRunMinutes: "30",
   maxConcurrentRuns: "1",
   monthlyBudgetDollars: "",
+  personaId: "",
 };
 
 /** The shape avatar the new agent will get: an explicit pick, else a
@@ -92,27 +95,33 @@ export interface WizardStep {
 }
 
 /**
- * Three required steps (identity → capabilities → review) plus one clearly
- * optional "Advanced setup" step that collects everything with a sensible
- * default: instructions, placement, model, approvals, limits and budget.
+ * Three required steps (identity → capabilities → review) plus two clearly
+ * optional ones: a "Persona" step (how the agent sounds; none is a fine
+ * answer) and an "Advanced setup" step that collects everything with a
+ * sensible default: instructions, placement, model, approvals, limits and
+ * budget.
  */
 export const WIZARD_STEPS: WizardStep[] = [
   { id: 1, title: "Identity", hint: "Name, role, avatar" },
   { id: 2, title: "What it can do", hint: "Capabilities & tools" },
+  { id: 3, title: "Persona", hint: "How it sounds", optional: true },
   {
-    id: 3,
+    id: 4,
     title: "Advanced setup",
     hint: "Instructions, team, model, limits",
     optional: true,
   },
-  { id: 4, title: "Review & create", hint: "Check and confirm" },
+  { id: 5, title: "Review & create", hint: "Check and confirm" },
 ];
 
 /** The last step; reaching it is what "finish the wizard" means. */
-export const REVIEW_STEP = 4;
+export const REVIEW_STEP = 5;
+
+/** The optional step that picks how the agent sounds. */
+export const PERSONA_STEP = 3;
 
 /** The step holding everything that already has a working default. */
-export const ADVANCED_STEP = 3;
+export const ADVANCED_STEP = 4;
 
 export interface AgentTemplate {
   id: string;
@@ -321,6 +330,7 @@ export function toCreatePayload(state: WizardState): Record<string, unknown> {
     max_run_minutes: Number(state.maxRunMinutes),
     max_concurrent_runs: Number(state.maxConcurrentRuns),
     monthly_budget_cents: monthlyBudgetCents(state.monthlyBudgetDollars) ?? null,
+    persona_id: state.personaId || null,
   };
 }
 

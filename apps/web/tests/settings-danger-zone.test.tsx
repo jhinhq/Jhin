@@ -43,6 +43,7 @@ function summary(overrides: Partial<WorkspaceDeletionSummary> = {}): WorkspaceDe
     messages: 501,
     memories: 18,
     skills: 5,
+    personas: 14,
     connections: 3,
     triggers: 0,
     api_keys: 1,
@@ -102,6 +103,7 @@ describe("describeDeletion", () => {
       "7 tasks",
       "18 memories",
       "5 skills",
+      "14 personas",
       "3 connected apps",
       "1 API key",
     ]);
@@ -116,6 +118,7 @@ describe("describeDeletion", () => {
       messages: 0,
       memories: 0,
       skills: 0,
+      personas: 0,
       connections: 0,
       triggers: 0,
       api_keys: 0,

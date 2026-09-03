@@ -13,6 +13,7 @@ import { ActivityFeed } from "@/components/activity/activity-feed";
 import { AvatarDialog } from "@/components/agents/avatar-dialog";
 import { HelpDirectory } from "@/components/agents/help-directory";
 import { MemoryPanel } from "@/components/agents/memory-panel";
+import { PersonaPanel } from "@/components/agents/persona-panel";
 import { SkillsPanel } from "@/components/agents/skills-panel";
 import { TeamStatus } from "@/components/agents/team-status";
 import { PageHeader } from "@/components/app-shell";
@@ -30,6 +31,7 @@ import {
 import { Chip, Disclosure, LoadError, SectionCard, StatusPill, Tabs } from "@/components/company/bits";
 import { useWorkingAgentIds } from "@/components/company/use-working";
 import { AgentDrawer } from "@/components/org/agent-drawer";
+import { PersonaChip } from "@/components/personas/persona-chip";
 import { Button, ButtonLink, Dialog, ErrorNote, Spinner } from "@/components/ui";
 import { useSegmentAfter } from "@/lib/use-route-segment";
 import { api, ApiError } from "@/lib/api";
@@ -57,6 +59,7 @@ type TabId =
   | "team"
   | "memory"
   | "skills"
+  | "persona"
   | "access"
   | "activity"
   | "chats";
@@ -67,6 +70,7 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "team", label: "Team status" },
   { id: "memory", label: "Memory" },
   { id: "skills", label: "Skills" },
+  { id: "persona", label: "Persona" },
   { id: "access", label: "What it can use" },
   { id: "activity", label: "Recent activity" },
   { id: "chats", label: "Chats" },
@@ -241,6 +245,7 @@ function AgentProfileView() {
                     </Link>
                   </span>
                 ) : null}
+                {agent.persona ? <PersonaChip persona={agent.persona} /> : null}
               </div>
               {purpose ? <p className="mt-3 max-w-2xl text-sm text-ink/90">{purpose}</p> : null}
             </div>
@@ -417,6 +422,10 @@ function AgentProfileView() {
 
         {effectiveTab === "skills" ? (
           <SkillsPanel workspaceId={workspaceId} agentId={agent.id} isAdmin={isAdmin} />
+        ) : null}
+
+        {effectiveTab === "persona" ? (
+          <PersonaPanel workspaceId={workspaceId} agent={agent} isAdmin={isAdmin} />
         ) : null}
 
         {effectiveTab === "access" ? <AccessSection workspaceId={workspaceId} agentId={agent.id} isAdmin={isAdmin} /> : null}

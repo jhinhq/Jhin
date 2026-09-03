@@ -10,19 +10,36 @@ import { IS_DESKTOP } from "@/lib/desktop";
 const CSRF_COOKIE = "jhin_csrf";
 const CSRF_HEADER = "x-csrf-token";
 
+/** One FastAPI validation item. */
+export interface ApiFieldError {
+  loc: (string | number)[];
+  msg: string;
+  type: string;
+}
+
 export class ApiError extends Error {
   readonly status: number;
   readonly detail: string;
   /** Machine-readable code when the API sent `{code, message}` (media,
    * coordination). Null for plain `{detail}` errors. */
   readonly code: string | null;
+  /** Every item of a FastAPI-shaped 422 `detail` array; null otherwise.
+   * `detail` keeps only the first as a string, which is enough for a banner
+   * but not for a form that wants each message under its own field. */
+  readonly errors: ApiFieldError[] | null;
 
-  constructor(status: number, detail: string, code: string | null = null) {
+  constructor(
+    status: number,
+    detail: string,
+    code: string | null = null,
+    errors: ApiFieldError[] | null = null,
+  ) {
     super(detail);
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
     this.code = code;
+    this.errors = errors;
   }
 }
 
@@ -82,6 +99,26 @@ function extractDetail(payload: unknown): string | null {
     }
   }
   return null;
+}
+
+/** The whole FastAPI validation list, when `detail` is one: a non-empty array
+ * whose items carry a string `msg`. Anything else is null. */
+function extractFieldErrors(payload: unknown): ApiFieldError[] | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const detail = (payload as Record<string, unknown>).detail;
+  if (!Array.isArray(detail) || detail.length === 0) return null;
+  const items: ApiFieldError[] = [];
+  for (const entry of detail) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const { loc, msg, type } = entry as Record<string, unknown>;
+    if (typeof msg !== "string") continue;
+    items.push({
+      loc: Array.isArray(loc) ? (loc as (string | number)[]) : [],
+      msg,
+      type: typeof type === "string" ? type : "",
+    });
+  }
+  return items.length > 0 ? items : null;
 }
 
 /**
@@ -150,6 +187,7 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
       response.status,
       extractDetail(payload) ?? `Request failed (${response.status})`,
       extractCode(payload),
+      extractFieldErrors(payload),
     );
   }
   return payload as T;
@@ -176,6 +214,7 @@ export async function apiUpload<T>(path: string, formData: FormData): Promise<T>
       response.status,
       extractDetail(payload) ?? `Upload failed (${response.status})`,
       extractCode(payload),
+      extractFieldErrors(payload),
     );
   }
   return payload as T;

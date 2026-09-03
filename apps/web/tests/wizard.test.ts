@@ -18,6 +18,7 @@ import {
   isPresetGranted,
   manualGrantNames,
   MANUAL_GRANT_SOURCE,
+  PERSONA_STEP,
   presetCapabilities,
   presetConnectionFor,
   presetGrantsToAdd,
@@ -45,6 +46,7 @@ import {
 } from "@/lib/wizard";
 import { AVATAR_PALETTE, AVATAR_SHAPES } from "@/lib/shapes";
 import { delegationScope } from "@/components/org/tools-access-tab";
+import { persona } from "./helpers/personas";
 
 const navigation = vi.hoisted(() => ({ push: vi.fn() }));
 vi.mock("next/navigation", () => ({
@@ -52,10 +54,14 @@ vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(),
 }));
 
+/** Every `POST …/agents` body the rendered wizard sent, newest last. */
+const agentBodies: Record<string, unknown>[] = [];
+
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   navigation.push.mockReset();
+  agentBodies.length = 0;
 });
 
 describe("wizard validation", () => {
@@ -112,18 +118,23 @@ describe("wizard validation", () => {
     expect(validateStep(ADVANCED_STEP, { ...EMPTY_WIZARD, monthlyBudgetDollars: "5.50" })).toEqual([]);
   });
 
-  it("is three required steps plus one optional advanced step", () => {
-    expect(WIZARD_STEPS.map((s) => s.id)).toEqual([1, 2, 3, 4]);
+  it("is three required steps plus two optional ones: persona and advanced", () => {
+    expect(WIZARD_STEPS.map((s) => s.id)).toEqual([1, 2, 3, 4, 5]);
     expect(WIZARD_STEPS.map((s) => s.title)).toEqual([
       "Identity",
       "What it can do",
+      "Persona",
       "Advanced setup",
       "Review & create",
     ]);
-    expect(WIZARD_STEPS.filter((s) => s.optional).map((s) => s.id)).toEqual([ADVANCED_STEP]);
+    expect(WIZARD_STEPS.filter((s) => s.optional).map((s) => s.id)).toEqual([
+      PERSONA_STEP,
+      ADVANCED_STEP,
+    ]);
     expect(WIZARD_STEPS.at(-1)?.id).toBe(REVIEW_STEP);
     // Every step but review is reachable with defaults only.
     expect(firstInvalidStep({ ...EMPTY_WIZARD, name: "SWE" })).toBeNull();
+    expect(validateStep(PERSONA_STEP, EMPTY_WIZARD)).toEqual([]);
   });
 });
 
@@ -211,6 +222,12 @@ describe("wizard payload", () => {
     expect(
       toCreatePayload({ ...EMPTY_WIZARD, name: "SWE", autonomyLevel: "manual" }).autonomy_level,
     ).toBe("manual");
+  });
+
+  it("sends the persona as null by default and as its id when picked", () => {
+    expect(EMPTY_WIZARD.personaId).toBe("");
+    expect(toCreatePayload({ ...EMPTY_WIZARD, name: "SWE" }).persona_id).toBeNull();
+    expect(toCreatePayload({ ...EMPTY_WIZARD, name: "SWE", personaId: "p1" }).persona_id).toBe("p1");
   });
 });
 
@@ -473,10 +490,15 @@ function renderWizard(
     if (path.endsWith("/model-profiles")) return response([]);
     if (path.endsWith("/tools")) return response(toolCatalog);
     if (path.endsWith("/connections")) return response(connectionList);
+    // The persona step's library (the path carries `?limit=100`).
+    if (path.includes("/personas")) return response({ items: [persona()], total: 1 });
     if (path === "/api/v1/workspaces/workspace-1" && method === "GET") {
       return response({ id: "workspace-1", default_model_profile_id: null });
     }
-    if (path.endsWith("/agents") && method === "POST") return response(createdAgent);
+    if (path.endsWith("/agents") && method === "POST") {
+      agentBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return response(createdAgent);
+    }
     if (path.endsWith("/agents/agent-new/grants") && method === "POST") {
       grantBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
       return response({});
@@ -1136,6 +1158,31 @@ describe("streamlined wizard flow", () => {
       { capability: "web.search", scope: { connection_id: "web-1" }, effect: "allow" },
       { capability: "web.fetch", scope: { connection_id: "web-1", domain: "*" }, effect: "allow" },
     ]);
+    await waitFor(() => expect(navigation.push).toHaveBeenCalledWith("/agents/agent-new"));
+    // Skipping the optional steps leaves the agent without a persona.
+    expect(agentBodies[0]?.persona_id).toBeNull();
+  });
+
+  it("picks a persona on its optional step and sends it with the create", async () => {
+    renderWizard(webTools, webConnections);
+    fireEvent.change(await screen.findByLabelText("Agent name"), { target: { value: "Flight" } });
+    fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+    // From "What it can do" the skip covers both optional steps.
+    expect(screen.getByTestId("wizard-skip").textContent).toContain("Skip optional steps");
+    fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+
+    const option = await screen.findByTestId("persona-option-mission-control");
+    expect(screen.getByTestId("persona-option-none").getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(option);
+    expect(option.getAttribute("aria-checked")).toBe("true");
+    // From the persona step only advanced setup is left to skip.
+    expect(screen.getByTestId("wizard-skip").textContent).toContain("Skip advanced setup");
+    fireEvent.click(screen.getByTestId("wizard-skip"));
+
+    expect(screen.getByText("Mission Control")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Create agent" }));
+    await waitFor(() => expect(agentBodies).toHaveLength(1));
+    expect(agentBodies[0].persona_id).toBe("p1");
     await waitFor(() => expect(navigation.push).toHaveBeenCalledWith("/agents/agent-new"));
   });
 });

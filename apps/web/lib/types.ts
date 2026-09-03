@@ -74,6 +74,7 @@ export interface WorkspaceDeletionSummary {
   messages: number;
   memories: number;
   skills: number;
+  personas: number;
   connections: number;
   triggers: number;
   api_keys: number;
@@ -168,6 +169,10 @@ export interface Agent extends AgentIdentity {
   metadata_json: Record<string, unknown>;
   avatar_kind?: AvatarKind;
   active_avatar_asset_id?: string | null;
+  /** The persona it wears (docs/architecture/personas.md). Optional for the
+   * same reason as the `AgentIdentity` fields: fixtures keep type-checking. */
+  persona_id?: string | null;
+  persona?: AgentPersonaSummary | null;
   created_at: string;
   updated_at: string;
 }
@@ -1245,6 +1250,8 @@ export interface ConversationAgentSummary {
   status: AgentStatus;
   availability: Availability;
   public_purpose: string;
+  /** The persona it wears, for the chat header; present even when switched off. */
+  persona?: AgentPersonaSummary | null;
 }
 
 export interface ConversationDetail {
@@ -1920,6 +1927,89 @@ export interface BrowseInstallResult {
 
 /** Installing from the reviewed catalog reuses the browse-install response. */
 export type CatalogInstallResult = BrowseInstallResult;
+
+// --- Personas (docs/architecture/personas.md) ---
+
+export type PersonaSource = "built_in" | "custom" | "agent";
+
+/** The eight facets as the API stores them. Only `voice` is required by the
+ * API; the rest come back as "" when unset. */
+export interface PersonaFacets {
+  voice: string;
+  stance: string;
+  pace: string;
+  when_unsure: string;
+  with_people: string;
+  with_teammates: string;
+  signature: string;
+  never: string[];
+}
+
+export interface Persona {
+  id: string;
+  workspace_id: string;
+  name: string;
+  display_name: string;
+  description: string;
+  tags: string[];
+  source: PersonaSource;
+  facets: PersonaFacets;
+  enabled: boolean;
+  version: number;
+  /** True for the shipped cast: Duplicate instead of Edit, never Delete. */
+  read_only: boolean;
+  /** Agents wearing it (counted by the API on every list/detail call). */
+  agent_count: number;
+  created_by_user_id: string | null;
+  created_by_agent_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PersonaList {
+  items: Persona[];
+  total: number;
+}
+
+export interface PersonaCreateInput {
+  name: string;
+  display_name: string;
+  description: string;
+  tags: string[];
+  facets: PersonaFacets;
+}
+
+/** PATCH body: omitted = unchanged; `facets` replaces the whole object. */
+export interface PersonaUpdateInput {
+  display_name?: string;
+  description?: string;
+  tags?: string[];
+  facets?: PersonaFacets;
+  enabled?: boolean;
+}
+
+export interface PersonaDuplicateInput {
+  name?: string;
+  display_name?: string;
+}
+
+export interface InstallBuiltinPersonasResult {
+  installed: number;
+  refreshed: number;
+  skipped: number;
+  names: string[];
+}
+
+/** The persona an agent wears, as `Agent.persona` and the chat header's agent
+ * summary carry it. Present even when `enabled` is false so the UI can say
+ * "worn but switched off". */
+export interface AgentPersonaSummary {
+  id: string;
+  name: string;
+  display_name: string;
+  tags: string[];
+  enabled: boolean;
+}
 
 /* --- People, invitations, and API keys (docs/architecture/rbac.md) --- */
 

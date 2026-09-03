@@ -163,7 +163,13 @@ one is approved by a person first. See
 ## Web
 
 The `/personas` library shows the cast and the workspace's own cards as a
-gallery with tag filters and a fun toggle, lets admins create, duplicate,
-edit, enable, disable, and delete, and previews the rendered block. The
-agent drawer has a Persona tab (and the wizard a persona step) for picking
-one, and the agent profile and chat header show a persona chip.
+gallery with search, a Fun toggle, a source filter (By Jhin, Yours,
+Agent-made), and a switch to show disabled cards. Admins create, duplicate,
+edit, enable, disable, and delete from there; the editor shows live
+character counts against the caps, surfaces the API's field errors under
+the field they name, and previews the rendered block exactly as the agent
+will read it. The agent profile has a Persona tab (and the create-agent
+wizard a persona step) for choosing one, with a note that it takes effect on
+the next run; the agent profile header and the chat header show a persona
+chip, marked "off" when the card is disabled. Deleting a workspace counts
+the custom and agent-written cards among what is lost.

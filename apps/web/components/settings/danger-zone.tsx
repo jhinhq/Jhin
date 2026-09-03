@@ -35,6 +35,7 @@ const CATEGORIES: { key: CountKey; one: string; many: string }[] = [
   { key: "tasks", one: "task", many: "tasks" },
   { key: "memories", one: "memory", many: "memories" },
   { key: "skills", one: "skill", many: "skills" },
+  { key: "personas", one: "persona", many: "personas" },
   { key: "connections", one: "connected app", many: "connected apps" },
   { key: "triggers", one: "automation", many: "automations" },
   { key: "api_keys", one: "API key", many: "API keys" },
@@ -73,8 +74,8 @@ export function DangerZone() {
       </h2>
       <p className="mb-4 text-sm text-dim">
         Deleting {workspace.workspace_name} erases it for everyone in it — agents, chats, tasks,
-        memories, skills, connected apps and keys — permanently. Only you, as the owner, can do
-        this.
+        memories, skills, personas, connected apps and keys — permanently. Only you, as the owner,
+        can do this.
       </p>
       <Button variant="danger" onClick={() => setOpen(true)}>
         Delete this workspace

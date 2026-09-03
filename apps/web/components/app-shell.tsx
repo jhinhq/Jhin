@@ -14,6 +14,7 @@ import {
   CheckSquare,
   ChevronDown,
   Cpu,
+  Drama,
   House,
   KeyRound,
   ListTodo,
@@ -60,6 +61,7 @@ const PRIMARY_NAV: readonly NavItem[] = [
   { href: "/apps", label: "Apps", icon: Plug },
   { href: "/models", label: "Models", icon: Cpu },
   { href: "/skills", label: "Skills", icon: BookOpen },
+  { href: "/personas", label: "Personas", icon: Drama },
 ] as const;
 
 export const ADVANCED_NAV: readonly NavItem[] = [

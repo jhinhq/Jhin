@@ -58,6 +58,7 @@ import type {
   OllamaModels,
   OnboardingState,
   OnboardingStatus,
+  PersonaList,
   ProviderBalance,
   PricingStatus,
   ProviderModels,
@@ -1276,6 +1277,29 @@ export function useInvalidateSkillSources(workspaceId: string) {
   const queryClient = useQueryClient();
   return () => {
     void queryClient.invalidateQueries({ queryKey: ["skill-sources", workspaceId] });
+  };
+}
+
+// --- Personas (docs/architecture/personas.md) ---
+
+/** The whole library in one call: a workspace holds a few dozen cards and a
+ * card is at most 1.5 KB, so filtering happens client-side (lib/personas.ts). */
+export function usePersonas(workspaceId: string) {
+  return useQuery({
+    queryKey: ["personas", workspaceId],
+    queryFn: () =>
+      api<PersonaList>(`/api/v1/workspaces/${workspaceId}/personas`, { params: { limit: 100 } }),
+  });
+}
+
+export function useInvalidatePersonas(workspaceId: string) {
+  const queryClient = useQueryClient();
+  return () => {
+    void queryClient.invalidateQueries({ queryKey: ["personas", workspaceId] });
+    // The persona summary rides on the agent and on the chat header.
+    void queryClient.invalidateQueries({ queryKey: ["agent", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["agents", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["conversation", workspaceId] });
   };
 }
 

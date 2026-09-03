@@ -11,6 +11,7 @@ import { Suspense, useState } from "react";
 import { PageBody, PageHeader } from "@/components/app-shell";
 import { Avatar } from "@/components/avatar";
 import { Disclosure as InlineDisclosure, LoadError } from "@/components/company/bits";
+import { PersonaPicker } from "@/components/personas/persona-picker";
 import { ScopeEditor } from "@/components/scope-editor";
 import { ShapeAvatar } from "@/components/shape-avatar";
 import {
@@ -31,6 +32,7 @@ import {
   useInvalidateOrg,
   useModelProfiles,
   useOrgGraph,
+  usePersonas,
   useTools,
   useWorkspaceDetail,
 } from "@/lib/hooks";
@@ -48,6 +50,7 @@ import {
   firstInvalidStep,
   hasManualGrants,
   isPresetApplied,
+  PERSONA_STEP,
   presetMissingTools,
   REVIEW_STEP,
   setToolScope,
@@ -176,6 +179,7 @@ function WizardInner() {
   const tools = useTools(workspaceId);
   const connections = useConnections(workspaceId);
   const workspaceDetail = useWorkspaceDetail(workspaceId);
+  const personas = usePersonas(workspaceId);
   const invalidate = useInvalidateOrg(workspaceId);
 
   const [step, setStep] = useState(1);
@@ -256,6 +260,7 @@ function WizardInner() {
     (p) => p.id === workspaceDetail.data?.default_model_profile_id,
   );
   const chosenProfile = profileList.find((p) => p.id === state.modelProfileId);
+  const chosenPersona = personas.data?.items.find((p) => p.id === state.personaId);
   const toolList = tools.data ?? [];
   const summary = capabilitySummary(state, toolList);
   const advancedToolsOpen = advancedToolsOverride ?? hasManualGrants(state);
@@ -599,6 +604,25 @@ function WizardInner() {
               ) : null}
             </div>
           </div>
+        ) : step === PERSONA_STEP ? (
+          <div className="space-y-4">
+            <p className="text-sm text-dim">
+              Optional. A persona shapes how this agent says things — its voice, pace, and manner.
+              It never changes what the agent may do.
+            </p>
+            {personas.isPending ? (
+              <Spinner label="Loading personas…" />
+            ) : personas.isError || !personas.data ? (
+              <LoadError what="the personas library" onRetry={() => void personas.refetch()} />
+            ) : (
+              <PersonaPicker
+                allowNone
+                personas={personas.data.items}
+                value={state.personaId || null}
+                onChange={(id) => patch({ personaId: id ?? "" })}
+              />
+            )}
+          </div>
         ) : step === ADVANCED_STEP ? (
           <div className="space-y-3">
             <p className="text-sm text-dim">
@@ -855,6 +879,7 @@ function WizardInner() {
                   )
                 }
               />
+              <ReviewRow label="Persona" value={chosenPersona?.display_name ?? "None"} />
               <ReviewRow label="Team" value={team?.name ?? "No team"} />
               <ReviewRow label="Manager" value={manager?.name ?? "No manager"} />
               <ReviewRow
@@ -964,7 +989,7 @@ function WizardInner() {
             <div className="flex flex-wrap items-center justify-end gap-2">
               {WIZARD_STEPS.some((entry) => entry.id === step + 1 && entry.optional) ? (
                 <Button variant="ghost" data-testid="wizard-skip" onClick={() => goTo(REVIEW_STEP)}>
-                  Skip advanced setup
+                  {step + 1 === PERSONA_STEP ? "Skip optional steps" : "Skip advanced setup"}
                 </Button>
               ) : null}
               <Button variant="primary" onClick={goNext}>

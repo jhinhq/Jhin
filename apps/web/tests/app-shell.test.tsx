@@ -64,6 +64,7 @@ describe("SidebarNav", () => {
       "Apps",
       "Models",
       "Skills",
+      "Personas",
     ]) {
       expect(within(nav).getByRole("link", { name: new RegExp(label) })).toBeTruthy();
     }

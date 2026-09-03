@@ -7,6 +7,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { Avatar } from "@/components/avatar";
 import { LiveStatusPill } from "@/components/chat/status-pill";
+import { PersonaChip } from "@/components/personas/persona-chip";
 import { avatarProps } from "@/lib/media";
 import type { AgentAvatar, Conversation, ConversationAgentSummary } from "@/lib/types";
 
@@ -147,6 +148,7 @@ export function ChatHeader({
             {agentName}
             {role ? ` · ${role}` : ""}
           </span>
+          {agent?.persona ? <PersonaChip persona={agent.persona} /> : null}
           {archived ? <span className="shrink-0 text-faint">· Archived</span> : null}
           <LiveStatusPill conversation={conversation} />
         </p>
