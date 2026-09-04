@@ -523,6 +523,24 @@ describe("Composer", () => {
     expect(onStop).toHaveBeenCalledTimes(1);
   });
 
+  it("puts the settings chips on the controls row, ahead of Stop and Send", () => {
+    render(
+      <Composer
+        value=""
+        onChange={() => {}}
+        onSend={() => {}}
+        canStop
+        onStop={() => {}}
+        controls={<button type="button">Model</button>}
+      />,
+    );
+    const controls = screen.getByTestId("composer-controls");
+    const chip = screen.getByRole("button", { name: "Model" });
+    const send = screen.getByRole("button", { name: "Send message" });
+    expect(controls.contains(chip)).toBe(true);
+    expect(chip.compareDocumentPosition(send) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it("disables the Stop button while a stop/pause/resume request is in flight", () => {
     render(
       <Composer value="" onChange={() => {}} onSend={() => {}} canStop stopping onStop={() => {}} />,

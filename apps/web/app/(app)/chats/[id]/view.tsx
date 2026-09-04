@@ -7,8 +7,8 @@ import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChatHeader } from "@/components/chat/chat-header";
 import { Composer, type ComposerHandle } from "@/components/chat/composer";
+import { ChatComposerControls } from "@/components/chat/composer-controls";
 import { ContextPanel } from "@/components/chat/context-panel";
-import { ChatQuickControls } from "@/components/chat/quick-controls";
 import { Transcript } from "@/components/chat/transcript";
 import { Button, Dialog, ErrorNote, Spinner } from "@/components/ui";
 import { useSegmentAfter } from "@/lib/use-route-segment";
@@ -322,9 +322,6 @@ export default function ChatThreadPage() {
           onTogglePin={() => update.mutate({ pinned: !conversation.pinned })}
           onToggleArchive={() => update.mutate({ status: archived ? "active" : "archived" })}
           busy={update.isPending}
-          quickControls={
-            <ChatQuickControls workspaceId={workspaceId} detail={data} isAdmin={can("admin")} />
-          }
         />
         {actionError ? (
           <div className="px-4 pt-3 sm:px-8">
@@ -368,6 +365,19 @@ export default function ChatThreadPage() {
               onStop={() => setConfirmStop(true)}
               stopping={taskAction.isPending}
               stopLabel={`Stop ${agentName}`}
+              controls={
+                <ChatComposerControls
+                  workspaceId={workspaceId}
+                  agentId={agent?.id ?? null}
+                  agentName={agentName}
+                  isAdmin={can("admin")}
+                  usage={{
+                    inputTokens: data.total_input_tokens,
+                    outputTokens: data.total_output_tokens,
+                    costMicros: data.total_cost_micros,
+                  }}
+                />
+              }
             />
           </div>
         </div>

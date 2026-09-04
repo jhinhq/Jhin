@@ -46,6 +46,10 @@ export const Composer = forwardRef<
     stopping?: boolean;
     /** Accessible name for the Stop button, e.g. "Stop Scout". */
     stopLabel?: string;
+    /** Chips that sit on the bar itself — model, mode, tools, cost. Passed in
+     * as a slot so the composer stays free of data hooks, and so the home
+     * hero and a thread can put different things there. */
+    controls?: React.ReactNode;
   }
 >(function Composer(
   {
@@ -63,6 +67,7 @@ export const Composer = forwardRef<
     onStop,
     stopping = false,
     stopLabel = "Stop",
+    controls = null,
   },
   ref,
 ) {
@@ -114,8 +119,9 @@ export const Composer = forwardRef<
 
   // The text field owns a full-width row of its own, so its horizontal
   // padding is the whole inset on both sides: left inset === right inset,
-  // whatever trailing controls happen to be visible. The controls sit on
-  // their own row underneath instead of eating into the field's width.
+  // whatever controls happen to be visible. The controls sit on their own row
+  // underneath instead of eating into the field's width — which is also what
+  // leaves room for the settings chips on the left of that row.
   const fieldPad = variant === "large" ? COMPOSER_FIELD_PAD.large : COMPOSER_FIELD_PAD.docked;
   const controlsPad = variant === "large" ? "px-3 pb-3" : "px-2 pb-2";
 
@@ -151,8 +157,9 @@ export const Composer = forwardRef<
         </label>
         <div
           data-testid="composer-controls"
-          className={`flex shrink-0 items-center justify-end gap-2 ${controlsPad}`}
+          className={`flex shrink-0 items-center gap-2 ${controlsPad}`}
         >
+          <div className="flex min-w-0 flex-1 items-center">{controls}</div>
           {canStop ? (
             <button
               type="button"

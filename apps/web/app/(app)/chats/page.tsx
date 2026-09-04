@@ -8,6 +8,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useMemo, useRef, useState } from "react";
 import { AgentPicker } from "@/components/chat/agent-picker";
 import { Composer } from "@/components/chat/composer";
+import { ChatComposerControls } from "@/components/chat/composer-controls";
 import { FirstRunSteps } from "@/components/first-run-steps";
 import { LogoMark } from "@/components/brand/logo-mark";
 import { EmptyState, ErrorNote, Spinner } from "@/components/ui";
@@ -161,6 +162,16 @@ function ChatsHome() {
                 selectedAgent
                   ? `Talking to ${selectedAgent.name}${selectedAgent.role_title ? `, ${selectedAgent.role_title}` : ""}. Enter to send · Shift+Enter for a new line`
                   : null
+              }
+              controls={
+                selectedAgent ? (
+                  <ChatComposerControls
+                    workspaceId={workspaceId}
+                    agentId={selectedAgent.id}
+                    agentName={selectedAgent.name}
+                    isAdmin={can("admin")}
+                  />
+                ) : null
               }
             />
             <ErrorNote message={error} />

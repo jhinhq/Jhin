@@ -238,13 +238,6 @@ describe("ChatHeader view toggles", () => {
     expect(onToggleDetailed).toHaveBeenCalledTimes(1);
   });
 
-  it("renders the quick-controls slot before the header's own buttons", () => {
-    renderHeader({ quickControls: <button type="button">Model</button> });
-    const quick = screen.getByRole("button", { name: "Model" });
-    const details = screen.getByLabelText("Show details");
-    expect(quick.parentElement).toBe(details.parentElement);
-    expect(quick.compareDocumentPosition(details) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  });
 });
 
 /* The title has to survive a phone-width header. There is no layout in jsdom,
