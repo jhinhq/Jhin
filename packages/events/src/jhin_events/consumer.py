@@ -6,7 +6,6 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import cast
 
-from nats.errors import TimeoutError as NatsTimeoutError
 from nats.js import JetStreamContext
 from nats.js.api import AckPolicy, ConsumerConfig
 from nats.js.errors import NotFoundError
@@ -72,7 +71,13 @@ async def run_pull_consumer(
     while not stop.is_set():
         try:
             messages = await subscription.fetch(batch=batch, timeout=fetch_timeout_seconds)
-        except NatsTimeoutError:
+        except TimeoutError:
+            # An idle window is the normal case, not a fault: no events arrived
+            # inside fetch_timeout_seconds. Catch the BUILT-IN TimeoutError,
+            # which asyncio.TimeoutError has aliased since 3.11. nats.errors
+            # .TimeoutError is a *subclass* of it, so catching that one alone
+            # missed the plain one nats.js raises from _fetch_n, and an idle
+            # consumer took the whole worker down through its TaskGroup.
             continue
         for message in messages:
             await dispatch_or_nak(
