@@ -553,9 +553,9 @@ LIVE_SCENARIOS = {
             "tests/integration/test_phase7_exit.py",
             "tests/integration/test_phase9_exit.py",
         ),
-        # 2 + 6 + 5 + 10. test_phase6_exit.py grew from the single SWE loop to
+        # 2 + 11 + 5 + 10. test_phase6_exit.py grew from the single SWE loop to
         # the loop plus the containment proofs that surround it.
-        expected_tests=23,
+        expected_tests=28,
     ),
     "extended": LiveScenario(
         nodes=(

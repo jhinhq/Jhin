@@ -92,6 +92,13 @@ async def _get(client: httpx.AsyncClient, path: str, **params: Any) -> Any:
     return response.json()
 
 
+async def _put(client: httpx.AsyncClient, path: str, body: dict[str, Any]) -> dict[str, Any]:
+    response = await client.put(path, json=body, headers=_csrf(client))
+    assert response.status_code == 200, f"{path}: {response.status_code} {response.text}"
+    payload: dict[str, Any] = response.json()
+    return payload
+
+
 # --- fake Linear driving ---
 
 
@@ -317,18 +324,36 @@ async def test_linear_todo_starts_swe_task_that_opens_pr(
                 "name": f"P7 CLI {tag}",
                 "auth_type": "none",
                 "credentials": {},
-                "config": {"default_network": "none", "git_connection_id": github["id"]},
+                "config": {
+                    "default_network": "none",
+                    "git_connection_id": github["id"],
+                    # The instance may only touch repositories written down
+                    # here; a checkout of anything else is refused before a
+                    # credential is minted.
+                    "allowed_repositories": ["octo/alpha"],
+                },
             },
         )
     )["connection"]
     agent = await _make_agent(client, ws, tag)
+    branch = f"agent/p7-{tag}"
     grants = {
         "cli.repository.checkout": {"connection_id": cli["id"], "repository": "octo/alpha"},
         "cli.file.read": {"connection_id": cli["id"], "path": "*"},
-        "cli.file.write": {"connection_id": cli["id"], "path": "*"},
+        "cli.file.edit": {"connection_id": cli["id"], "path": "*"},
         "cli.test.run": {"connection_id": cli["id"], "command": "bash *"},
-        "cli.command.execute": {"connection_id": cli["id"], "command": "git *"},
-        "github.pull_request.create": {"connection_id": github["id"], "repository": "octo/alpha"},
+        # A push grant names the branches the agent may land on, and a pull
+        # request grant names the base it may open against.
+        "cli.repository.push": {
+            "connection_id": cli["id"],
+            "repository": "octo/alpha",
+            "branch": "agent/*",
+        },
+        "github.pull_request.create": {
+            "connection_id": github["id"],
+            "repository": "octo/alpha",
+            "base": "main",
+        },
     }
     for capability, scope in grants.items():
         await _post(
@@ -336,6 +361,15 @@ async def test_linear_todo_starts_swe_task_that_opens_pr(
             f"/api/v1/workspaces/{ws}/agents/{agent['id']}/grants",
             {"capability": capability, "scope": scope, "effect": "allow"},
         )
+    # cli.repository.push is ELEVATED, so under the risk defaults this run
+    # would park for a human and a trigger-started task would sit unattended
+    # forever. Phase 6 owns that approval gate; the slice this file proves is
+    # the unattended one, which is what an Autonomous agent is for.
+    await _put(
+        client,
+        f"/api/v1/workspaces/{ws}/agents/{agent['id']}/policy",
+        {"preset": "autonomous"},
+    )
     linear, _secret = await _linear_connection(client, ws, tag)
     trigger = await _make_trigger(
         client,
@@ -349,9 +383,7 @@ async def test_linear_todo_starts_swe_task_that_opens_pr(
     # ENG-142's fix instructions, in fake-provider marker form so the model
     # replays the exact Phase 6 SWE flow (checkout → red → fix → green →
     # push → PR).
-    branch = f"agent/p7-{tag}"
     cli_id = cli["id"]
-    push_command = f"git add -A && git commit -m fix-value && git push origin {branch}"
     markers = " ".join(
         [
             f'[[tool:cli.repository.checkout {{"connection_id": "{cli_id}", '
@@ -359,12 +391,16 @@ async def test_linear_todo_starts_swe_task_that_opens_pr(
             f'[[tool:cli.file.read {{"connection_id": "{cli_id}", "path": "app.py"}}]]',
             f'[[tool:cli.test.run {{"connection_id": "{cli_id}", '
             f'"command": "bash ./run_tests.sh"}}]]',
-            f'[[tool:cli.file.write {{"connection_id": "{cli_id}", "path": "app.py", '
-            f'"content": "VALUE = 2\\n"}}]]',
+            f'[[tool:cli.file.edit {{"connection_id": "{cli_id}", "path": "app.py", '
+            f'"old_string": "VALUE = 1", "new_string": "VALUE = 2", "expected_count": 1}}]]',
             f'[[tool:cli.test.run {{"connection_id": "{cli_id}", '
             f'"command": "bash ./run_tests.sh"}}]]',
-            f'[[tool:cli.command.execute {{"connection_id": "{cli_id}", '
-            f'"command": "{push_command}", "network": "internet"}}]]',
+            # The branch leaves the sandbox through the tool that holds the
+            # credential. A model-authored shell has no git credential at all,
+            # so a scripted "git push" here would only prove the refusal.
+            f'[[tool:cli.repository.push {{"connection_id": "{cli_id}", '
+            f'"repository": "octo/alpha", "branch": "{branch}", '
+            f'"commit_message": "Fix VALUE {tag}"}}]]',
             f'[[tool:github.pull_request.create {{"connection_id": "{github["id"]}", '
             f'"repository": "octo/alpha", "title": "Fix VALUE {tag}", '
             f'"head": "{branch}", "base": "main", "body": "Automated by Jhin."}}]]',
@@ -444,9 +480,9 @@ async def test_linear_todo_starts_swe_task_that_opens_pr(
         "cli.repository.checkout",
         "cli.file.read",
         "cli.test.run",
-        "cli.file.write",
+        "cli.file.edit",
         "cli.test.run",
-        "cli.command.execute",
+        "cli.repository.push",
         "github.pull_request.create",
         "system.trigger.sync_external",
     ], calls

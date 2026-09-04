@@ -186,7 +186,11 @@ async def _create_agent(
     if custom_rules is None:
         assert current["preset"] == preset
     else:
-        assert current["preset"] is None
+        # A preset answers for risk levels. These rules name capabilities and
+        # say nothing about risk, so every call they do not name is answered
+        # from the risk defaults — which are the Balanced expansion, and that
+        # is what the agent is reported as running.
+        assert current["preset"] == "balanced"
         assert current["rules"] == custom_rules
     return agent
 
@@ -1104,11 +1108,27 @@ async def test_parked_approvals_recheck_grant_policy_connection_and_definition(
     _, forbidden_call = await _decide(client, workspace_id, forbidden)
     assert forbidden_call["status"] == "denied", forbidden_call
     assert forbidden_call["error_code"] == "forbidden_by_policy"
-    restored = await _put(
+    # Choosing a preset re-states the risk levels and leaves a per-capability
+    # decision standing: a mode switch in the sidebar must not quietly delete
+    # the gate somebody put on one tool. So the forbid outlives this call, and
+    # taking it off means saying so — an explicit rule list is the policy.
+    kept = await _put(
         client,
         f"/api/v1/workspaces/{workspace_id}/agents/{agent['id']}/policy",
         {"preset": "balanced"},
     )
+    assert kept["preset"] == "balanced"
+    # Kept, and kept first: rules are first-match, so a risk-level rule ahead
+    # of it would answer for the capability before the forbid was reached.
+    assert kept["rules"][0]["capability"] == "vercel.deployment.redeploy"
+    assert kept["rules"][0]["action"] == "forbid"
+    restored = await _put(
+        client,
+        f"/api/v1/workspaces/{workspace_id}/agents/{agent['id']}/policy",
+        {"rules": []},
+    )
+    assert restored["rules"] == []
+    # No rule of its own: the risk defaults decide, and they are Balanced.
     assert restored["preset"] == "balanced"
 
     rotated = await _park(

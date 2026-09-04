@@ -377,6 +377,42 @@ async def test_review_projection_waits_for_the_decision(world: World) -> None:
     assert pending.value.type == "review_pending" and pending.value.non_retryable is False
 
 
+async def test_a_reviewed_sandbox_job_reaches_the_timeline(world: World) -> None:
+    """As on the approval path: the job that ran because a reviewer let it
+    through belongs in the timeline that reviewer will read back."""
+    params = await world.seed(
+        tool_status=ToolCallStatus.COMPLETED.value,
+        review_status=WorkReviewStatus.APPROVED.value,
+        tool_name="cli.test.run",
+        output={
+            "sandbox_job_id": "01a06e90-0000-7000-8000-0000000012cd",
+            "command": "bash ./run_tests.sh",
+            "status": "completed",
+            "exit_code": 0,
+            "duration_ms": 88,
+            "stdout": "ok",
+            "stderr": "",
+        },
+    )
+
+    await ActivityEnvironment().run(world.projections.commit_review_projection_activity, params)
+
+    types = await world.event_types()
+    assert types.count("sandbox.job") == 1, types
+    assert types.index("node.execute_tool") < types.index("sandbox.job") < types.index("tool.call")
+    async with world.sessions() as session:
+        event = await session.scalar(
+            select(RunEvent).where(
+                RunEvent.run_id == world.run_id, RunEvent.event_type == "sandbox.job"
+            )
+        )
+    assert event is not None
+    assert event.payload_json["sandbox_job_id"] == "01a06e90-0000-7000-8000-0000000012cd"
+    assert event.payload_json["command"] == "bash ./run_tests.sh"
+    assert event.payload_json["tool_name"] == "cli.test.run"
+    assert event.payload_json["after_review"] is True
+
+
 async def test_review_projection_commits_the_resumed_outcome_once(world: World) -> None:
     params = await world.seed(
         tool_status=ToolCallStatus.COMPLETED.value,

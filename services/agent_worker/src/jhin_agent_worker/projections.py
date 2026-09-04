@@ -845,6 +845,33 @@ class AgentProjectionActivities:
             approval=approval,
         )
 
+    @staticmethod
+    def _sandbox_job_payload(result: _ProjectedToolOutcome) -> dict[str, Any] | None:
+        """The sandbox job behind one ``cli.*`` call, as the task timeline
+        shows it (plan 14, plan 45 Phase 6 UI), or ``None`` for a call that ran
+        no job.
+
+        Every path that records an executed tool call emits this, including the
+        two that resume a parked one. A job that ran only because a human
+        pressed approve is the one an operator is most likely to go looking
+        for, and leaving it out of the timeline hid exactly that job — the
+        ``sandbox_job`` row and its audit events were written either way, so
+        the loss was the reader's, not the record's.
+        """
+        output = result.row.sanitized_output_json
+        if not result.manifest.tool_name.startswith("cli.") or not output:
+            return None
+        default_status = "completed" if result.status == "executed" else "failed"
+        return {
+            "sandbox_job_id": output.get("sandbox_job_id"),
+            "command": output.get("command"),
+            "job_status": output.get("status", default_status),
+            "exit_code": output.get("exit_code"),
+            "job_duration_ms": output.get("duration_ms"),
+            "stdout": output.get("stdout", ""),
+            "stderr": output.get("stderr", ""),
+        }
+
     def _record_gateway_result(
         self,
         session: AsyncSession,
@@ -882,21 +909,9 @@ class AgentProjectionActivities:
                 "node.execute_tool",
                 {"status": result.status, "duration_ms": result.row.duration_ms},
             )
-            output = result.row.sanitized_output_json
-            if result.manifest.tool_name.startswith("cli.") and output:
-                default_status = "completed" if result.status == "executed" else "failed"
-                emit(
-                    "sandbox.job",
-                    {
-                        "sandbox_job_id": output.get("sandbox_job_id"),
-                        "command": output.get("command"),
-                        "job_status": output.get("status", default_status),
-                        "exit_code": output.get("exit_code"),
-                        "job_duration_ms": output.get("duration_ms"),
-                        "stdout": output.get("stdout", ""),
-                        "stderr": output.get("stderr", ""),
-                    },
-                )
+            sandbox_job = self._sandbox_job_payload(result)
+            if sandbox_job is not None:
+                emit("sandbox.job", sandbox_job)
             emit("node.observe", {"chars": len(result.observation_json())})
         elif result.status in ("denied", "rejected"):
             emit("node.observe", {"denied": True, "reason": result.decision_reason})
@@ -1681,6 +1696,24 @@ class AgentProjectionActivities:
                     },
                 )
                 seq += 1
+                sandbox_job = self._sandbox_job_payload(result)
+                if sandbox_job is not None:
+                    self._add_run_event(
+                        session,
+                        workspace_id=workspace_id,
+                        run_id=run_id,
+                        task_id=task_id,
+                        seq=seq,
+                        event_type="sandbox.job",
+                        payload={
+                            "tool_name": manifest.tool_name,
+                            "tool_call_id": str(tool_call_id),
+                            "risk": result.risk,
+                            "after_approval": True,
+                            **sandbox_job,
+                        },
+                    )
+                    seq += 1
             self._add_run_event(
                 session,
                 workspace_id=workspace_id,
@@ -1983,6 +2016,24 @@ class AgentProjectionActivities:
                         },
                     )
                     seq += 1
+                    sandbox_job = self._sandbox_job_payload(result)
+                    if sandbox_job is not None:
+                        self._add_run_event(
+                            session,
+                            workspace_id=workspace_id,
+                            run_id=run_id,
+                            task_id=task_id,
+                            seq=seq,
+                            event_type="sandbox.job",
+                            payload={
+                                "tool_name": manifest.tool_name,
+                                "tool_call_id": str(tool_call_id),
+                                "risk": result.risk,
+                                "after_review": True,
+                                **sandbox_job,
+                            },
+                        )
+                        seq += 1
             self._add_run_event(
                 session,
                 workspace_id=workspace_id,

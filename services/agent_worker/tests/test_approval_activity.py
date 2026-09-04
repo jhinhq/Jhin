@@ -72,6 +72,9 @@ async def _seed_terminal_approval(
     include_reasoning: bool = True,
     approval_status: str = ApprovalStatus.APPROVED.value,
     run_status: str = RunStatus.RUNNING.value,
+    tool_name: str = "system.demo.destructive",
+    risk: str = "destructive",
+    output: dict[str, Any] | None = None,
 ) -> CommitApprovalProjectionInput:
     async with sessions() as session:
         workspace = Workspace(name="Approval", slug=f"approval-{new_uuid7().hex[:8]}")
@@ -102,16 +105,16 @@ async def _seed_terminal_approval(
             task_id=task.id,
             run_id=run.id,
             requested_by_agent_id=agent.id,
-            action_type="system.demo.destructive",
+            action_type=tool_name,
             action_payload_sanitized={
                 "approval_format_version": 2,
                 "workspace_id": str(workspace.id),
                 "agent_id": str(agent.id),
                 "run_id": str(run.id),
                 "task_id": str(task.id),
-                "tool_name": "system.demo.destructive",
-                "capability": "system.demo.destructive",
-                "risk": "destructive",
+                "tool_name": tool_name,
+                "capability": tool_name,
+                "risk": risk,
                 "input": {"label": "once"},
                 "connection_authorization_digest": None,
                 "provider_call_id": "provider-call-1",
@@ -128,10 +131,10 @@ async def _seed_terminal_approval(
             workspace_id=workspace.id,
             run_id=run.id,
             agent_id=agent.id,
-            tool_name="system.demo.destructive",
+            tool_name=tool_name,
             sanitized_input_json={"label": "once"},
             sanitized_output_json=(
-                {"marker": "already-executed"}
+                (output if output is not None else {"marker": "already-executed"})
                 if terminal_status == ToolCallStatus.COMPLETED.value
                 else {}
             ),
@@ -161,7 +164,7 @@ async def _seed_terminal_approval(
                             {
                                 "ordinal": 0,
                                 "lossless": True,
-                                "tool_name": "system.demo.destructive",
+                                "tool_name": tool_name,
                                 "arguments_json": '{"label":"once"}',
                             }
                         ],
@@ -211,7 +214,7 @@ async def _seed_terminal_approval(
                         "tool_call_id": str(tool_call.id),
                         "provider_call_id": "provider-call-1",
                         "approval_id": str(approval.id),
-                        "tool_name": "system.demo.destructive",
+                        "tool_name": tool_name,
                         "status": (
                             "execution_unknown"
                             if terminal_status == ToolCallStatus.EXECUTION_UNKNOWN.value
@@ -269,6 +272,47 @@ async def test_terminal_retry_repairs_a_missing_outer_bundle(
         assert message_count == 1
         assert event_count == 4
     assert len(resources.publisher.events) == 1
+
+
+async def test_an_approved_sandbox_job_reaches_the_timeline(
+    activity_world: ActivityWorld,
+) -> None:
+    """The job a human pressed approve on is the one an operator goes looking
+    for, and the resume path used to be the one path that recorded no
+    ``sandbox.job`` event — so the push in a Phase 6 run was the single job
+    missing from its own timeline."""
+    activities, _resources, sessions = activity_world
+    params = await _seed_terminal_approval(
+        sessions,
+        existing_bundle=False,
+        tool_name="cli.repository.push",
+        risk="elevated",
+        output={
+            "sandbox_job_id": "01a06e90-0000-7000-8000-00000000abcd",
+            "command": "git push",
+            "status": "completed",
+            "exit_code": 0,
+            "duration_ms": 41,
+            "stdout": "pushed",
+            "stderr": "",
+        },
+    )
+
+    await ActivityEnvironment().run(activities.commit_approval_projection_activity, params)
+
+    async with sessions() as session:
+        events = list(await session.scalars(select(RunEvent).order_by(RunEvent.seq)))
+    sandbox = [event for event in events if event.event_type == "sandbox.job"]
+    assert len(sandbox) == 1, [event.event_type for event in events]
+    payload = sandbox[0].payload_json
+    assert payload["sandbox_job_id"] == "01a06e90-0000-7000-8000-00000000abcd"
+    assert payload["job_status"] == "completed" and payload["exit_code"] == 0
+    assert payload["command"] == "git push" and payload["job_duration_ms"] == 41
+    assert payload["tool_name"] == "cli.repository.push" and payload["risk"] == "elevated"
+    assert payload["after_approval"] is True
+    # Between the execution it reports and the call it belongs to.
+    types = [event.event_type for event in events]
+    assert types.index("node.execute_tool") < types.index("sandbox.job") < types.index("tool.call")
 
 
 async def test_terminal_retry_does_not_duplicate_an_existing_outer_bundle(
