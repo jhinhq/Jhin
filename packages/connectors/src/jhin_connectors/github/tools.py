@@ -415,7 +415,13 @@ GITHUB_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor], ...] = (
             output_model=PullRequestCreateOutput,
             required_capability="github.pull_request.create",
             supports_approval=True,
-            scope_keys=_REPO_SCOPE,
+            # head and base are policy dimensions in their own right: without
+            # them a grant that names a repository still lets a pull request
+            # target any base branch in it. ``base`` is required rather than
+            # merely available, because ``scope_matches`` only checks the keys
+            # a grant constrains — an unstated base is an unlimited one.
+            scope_keys=(*_REPO_SCOPE, "head", "base"),
+            required_grant_scope_keys=(*_REPO_SCOPE, "base"),
         ),
         _pull_request_create,
     ),

@@ -39,6 +39,19 @@ export const PRESET_RULES: Record<ApprovalPreset, PolicyRule[]> = {
   ],
 };
 
+/**
+ * The rules a preset does not speak for: decisions about one capability, such
+ * as the approval the Code-editing bundle keeps on `cli.repository.push`.
+ *
+ * A preset expands to risk-level rules only, so the server keeps these when
+ * one is chosen (`jhin_policy.capability_rules`) and reports the preset as
+ * selected regardless. The UI shows them separately for the same reason: they
+ * did not come from the mode and do not leave with it.
+ */
+export function keptRules(rules: PolicyRule[]): PolicyRule[] {
+  return rules.filter((rule) => rule.capability !== "*");
+}
+
 export const PRESET_DESCRIPTIONS: Record<ApprovalPreset, string> = {
   autonomous: "Runs read/write/elevated tools automatically; destructive actions still need a human.",
   balanced: "Runs read/write tools automatically; elevated and destructive actions need approval.",

@@ -6,6 +6,7 @@ import {
   formatScope,
   grantCovers,
   isCapabilityGranted,
+  keptRules,
   PRESET_RULES,
   riskTone,
   sortGrants,
@@ -93,5 +94,15 @@ describe("approval presets", () => {
     expect(describeRule({ capability: "system.echo", risk: null, action: "auto" })).toBe(
       "all calls (system.echo): runs automatically",
     );
+  });
+});
+
+describe("rules a preset does not speak for", () => {
+  const gate = { capability: "cli.repository.push", risk: null, action: "approval" } as const;
+
+  it("separates per-capability rules from the preset's risk rules", () => {
+    expect(keptRules([gate, ...PRESET_RULES.autonomous])).toEqual([gate]);
+    expect(keptRules(PRESET_RULES.autonomous)).toEqual([]);
+    expect(keptRules([])).toEqual([]);
   });
 });

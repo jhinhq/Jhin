@@ -2,7 +2,7 @@
 
 The sandbox runner itself is stateless with respect to Postgres — it holds
 neither database credentials nor the master key. The caller (the CLI
-connector executor inside the agent worker) writes these rows in the same
+connector executor inside the *tool* worker) writes these rows in the same
 transaction as the ``tool_call`` row, so a job is always attributable to the
 run and tool call that started it. ``stdout_tail``/``stderr_tail`` are
 sanitized and size-capped before they reach this table (plan 48.9).

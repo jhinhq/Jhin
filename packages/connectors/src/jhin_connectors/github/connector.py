@@ -75,7 +75,19 @@ class GitHubConnector(Connector):
         token = credentials.get("token", "")
         if not token:
             return ConnectionHealth(ok=False, message="token is missing")
-        user = await github_request("GET", base_url, "/user", token)
+        try:
+            user = await github_request("GET", base_url, "/user", token)
+        except GitHubApiError as exc:
+            # A revoked or expired token has no refresh path, so nothing else
+            # would ever mark this connection as needing attention. Say
+            # "reconnect", not "error": pasting a new token is the whole cure.
+            if exc.status_code == 401:
+                return ConnectionHealth(
+                    ok=False,
+                    message="This token is no longer valid. Paste a new one to reconnect.",
+                    details={"auth": "pat", "needs_reauth": "true"},
+                )
+            raise
         login = str(user.get("login", "unknown"))
         return ConnectionHealth(
             ok=True,

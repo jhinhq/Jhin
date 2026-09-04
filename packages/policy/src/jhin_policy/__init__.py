@@ -14,6 +14,7 @@ from jhin_policy.agent_defaults import (
 from jhin_policy.approvals import (
     PRESET_RULES,
     ApprovalPreset,
+    capability_rules,
     matching_preset,
     rules_for_preset,
 )
@@ -123,6 +124,7 @@ __all__ = [
     "WorkRequestFacts",
     "ask_person_grant_specs",
     "capability_matches",
+    "capability_rules",
     "collaboration_grant_specs",
     "coordination_settings",
     "default_agent_grant_specs",

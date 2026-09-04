@@ -103,14 +103,16 @@ async def test_seed_creates_documented_dev_org(
     qa_granted = {g["capability"] for g in qa_grants}
     assert {
         "organization.report_result",
-        "cli.repository.checkout",
-        "cli.test.run",
-        "cli.file.read",
         "github.repository.read",
         "github.pull_request.read",
         "github.check.read",
     } <= qa_granted
     assert "organization.delegate" not in qa_granted  # QA never delegates
+    # No sandbox grants are seeded. cli.repository.checkout requires a grant
+    # that names a connection and a repository, and a fresh stack has no CLI
+    # Sandbox connection to name — an unscoped grant would only produce a
+    # required_scope_missing denial the first time an agent tried to use it.
+    assert not {capability for capability in qa_granted if capability.startswith("cli.")}
 
     # Every seeded teammate gets the safe-by-default collaboration baseline so
     # a fresh workspace can ask colleagues for help out of the box. QA has no

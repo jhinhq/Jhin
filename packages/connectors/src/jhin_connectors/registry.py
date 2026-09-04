@@ -119,8 +119,9 @@ def build_default_catalog(registry: ConnectorRegistry | None = None) -> ToolCata
     catalog = build_builtin_catalog()
     active = registry if registry is not None else default_registry()
     for connector in active:
+        validators = connector.tool_validators()
         for definition, executor in connector.tools():
-            catalog.register(definition, executor)
+            catalog.register(definition, executor, validators.get(definition.name))
     if active.get("mcp") is not None:
         # MCP tools are discovered per connection; the tool worker resolves
         # them per workspace via ``catalog.for_workspace`` (never at startup).

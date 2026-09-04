@@ -103,8 +103,12 @@ def _seed_delegation_grants(
     - CTO may delegate to direct/indirect subordinates (SWE, QA).
     - SWE may delegate to same-team members, pinned to the QA agent
       (the review_request hop of the engineering lifecycle).
-    - QA gets read/test sandbox tools + GitHub read so it can check out a
-      PR branch and run the test suite — never write access.
+    - QA gets GitHub read so it can look at a pull request. It gets no
+      sandbox grants: ``cli.repository.checkout`` requires a grant that names
+      a connection and a repository, and a fresh stack has no CLI Sandbox
+      connection to name — an unscoped grant here would only produce a
+      ``required_scope_missing`` denial on first use. An operator who connects
+      a sandbox grants checkout and test with that connection pinned.
     - Everyone in the chain may report structured results upward.
     """
     grants: list[tuple[Agent, str, dict[str, object]]] = [
@@ -113,9 +117,6 @@ def _seed_delegation_grants(
         (cto, "organization.report_result", {}),
         (swe, "organization.report_result", {}),
         (qa, "organization.report_result", {}),
-        (qa, "cli.repository.checkout", {}),
-        (qa, "cli.test.run", {}),
-        (qa, "cli.file.read", {}),
         (qa, "github.repository.read", {}),
         (qa, "github.pull_request.read", {}),
         (qa, "github.check.read", {}),

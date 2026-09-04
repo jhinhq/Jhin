@@ -2137,12 +2137,15 @@ async def test_verify_updates_health_fields(
     assert updated.last_error is None
 
 
-async def test_verify_failure_sets_error_status_without_leaking_token(
+async def test_verify_failure_sets_needs_reauth_without_leaking_token(
     session: AsyncSession,
     crypto: SecretCrypto,
     admin_ctx: WorkspaceContext,
     fake_github: FakeGitHubServer,
 ) -> None:
+    """A token GitHub rejects is a dead sign-in, not a broken connection: the
+    connector reports ``needs_reauth`` so the UI offers Reconnect. Either way
+    the rejected token never reaches ``last_error``."""
     connection, _ = await create_github_connection(
         session, crypto, admin_ctx, token="wrong-token-abc", base_url=fake_github.base_url
     )
@@ -2150,7 +2153,7 @@ async def test_verify_failure_sets_error_status_without_leaking_token(
         session, crypto, admin_ctx, connection.id, **REQ
     )
     assert not health.ok
-    assert updated.status == ConnectionStatus.ERROR.value
+    assert updated.status == ConnectionStatus.NEEDS_REAUTH.value
     assert updated.last_error is not None
     assert "wrong-token-abc" not in updated.last_error
 
@@ -2360,7 +2363,7 @@ async def test_rotate_replaces_credential_and_resets_health(
         session, crypto, admin_ctx, token="wrong", base_url=fake_github.base_url
     )
     await service.verify_connection(session, crypto, admin_ctx, connection.id, **REQ)
-    assert connection.status == ConnectionStatus.ERROR.value
+    assert connection.status == ConnectionStatus.NEEDS_REAUTH.value
 
     rotated = await service.rotate_credentials(
         session, crypto, admin_ctx, connection.id, credentials={"token": "fake-github-pat"}, **REQ

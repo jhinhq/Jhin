@@ -225,9 +225,25 @@ def test_personas_directly_follows_0035() -> None:
     assert personas.down_revision == "0035"
 
 
-def test_the_oauth_callback_receipt_directly_follows_0036_and_is_the_head() -> None:
+def test_oauth_callback_receipt_directly_follows_0036() -> None:
+    """0037 sits on 0036. It is no longer the head: the CLI repository
+    allow-list backfill (0038) chains on it."""
     scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
     receipt = scripts.get_revision("0037")
     assert receipt is not None
     assert receipt.down_revision == "0036"
-    assert list(scripts.get_heads()) == ["0037"], "the migration graph must stay linear"
+
+
+def test_the_cli_allowed_repositories_backfill_follows_0037() -> None:
+    scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
+    backfill = scripts.get_revision("0038")
+    assert backfill is not None
+    assert backfill.down_revision == "0037"
+
+
+def test_the_required_grant_scope_backfill_follows_0038_and_is_the_head() -> None:
+    scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
+    backfill = scripts.get_revision("0039")
+    assert backfill is not None
+    assert backfill.down_revision == "0038"
+    assert list(scripts.get_heads()) == ["0039"], "the migration graph must stay linear"

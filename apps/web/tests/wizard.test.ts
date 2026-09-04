@@ -37,6 +37,8 @@ import {
   toCreatePayload,
   grantPayloadsForTools,
   parseExpertise,
+  missingPolicyRules,
+  policyBodyFor,
   toggleTool,
   validateIdentity,
   validatePublicIdentity,
@@ -45,6 +47,7 @@ import {
   type ToolPreset,
 } from "@/lib/wizard";
 import { AVATAR_PALETTE, AVATAR_SHAPES } from "@/lib/shapes";
+import { PRESET_RULES } from "@/lib/policy";
 import { delegationScope } from "@/components/org/tools-access-tab";
 import { persona } from "./helpers/personas";
 
@@ -658,13 +661,20 @@ describe("delegationScope", () => {
 describe("wizard tool presets", () => {
   const catalog = [
     { name: "cli.repository.checkout", scope_keys: ["connection_id", "repository", "image"] },
+    { name: "cli.file.list", scope_keys: ["connection_id", "path"] },
+    { name: "cli.file.search", scope_keys: ["connection_id", "path"] },
     { name: "cli.file.read", scope_keys: ["connection_id", "path"] },
+    { name: "cli.file.edit", scope_keys: ["connection_id", "path"] },
     { name: "cli.file.write", scope_keys: ["connection_id", "path"] },
     { name: "cli.test.run", scope_keys: ["connection_id", "command", "image"] },
+    { name: "cli.repository.push", scope_keys: ["connection_id", "repository", "branch"] },
     { name: "cli.command.execute", scope_keys: ["connection_id", "command", "image", "network"] },
     { name: "github.repository.read", scope_keys: ["connection_id", "repository"] },
     { name: "github.pull_request.read", scope_keys: ["connection_id", "repository"] },
-    { name: "github.pull_request.create", scope_keys: ["connection_id", "repository"] },
+    {
+      name: "github.pull_request.create",
+      scope_keys: ["connection_id", "repository", "head", "base"],
+    },
     { name: "github.pull_request.merge", scope_keys: ["connection_id", "repository"] },
   ];
   const connections = [
@@ -678,17 +688,31 @@ describe("wizard tool presets", () => {
     const next = applyToolPreset(EMPTY_WIZARD, preset, catalog, connections);
     expect(next.grantToolNames).toEqual([
       "cli.repository.checkout",
+      "cli.file.list",
+      "cli.file.search",
       "cli.file.read",
+      "cli.file.edit",
       "cli.file.write",
       "cli.test.run",
-      "cli.command.execute",
+      "cli.repository.push",
       "github.repository.read",
       "github.pull_request.read",
       "github.pull_request.create",
     ]);
-    expect(next.grantScopes["cli.command.execute"]).toEqual({ connection_id: "cli-1", command: "git *" });
+    // A general shell is no longer part of "edit code": the git credential
+    // must never reach a command the agent wrote, so pushing has its own tool.
+    expect(next.grantToolNames).not.toContain("cli.command.execute");
+    expect(next.grantScopes["cli.repository.push"]).toEqual({
+      connection_id: "cli-1",
+      repository: "*",
+      branch: "agent/*",
+    });
     expect(next.grantScopes["cli.file.write"]).toEqual({ connection_id: "cli-1", path: "*" });
-    expect(next.grantScopes["github.pull_request.create"]).toEqual({ connection_id: "gh-1", repository: "*" });
+    expect(next.grantScopes["github.pull_request.create"]).toEqual({
+      connection_id: "gh-1",
+      repository: "*",
+      base: "main",
+    });
     // Merge is deliberately not part of editing.
     expect(next.grantToolNames).not.toContain("github.pull_request.merge");
     // The payloads are complete grants.
@@ -701,11 +725,34 @@ describe("wizard tool presets", () => {
       required_grant_scope_keys: [],
       input_schema: {},
     })));
-    expect(payloads).toHaveLength(8);
+    expect(payloads).toHaveLength(11);
     expect(payloads.find((p) => p.capability === "cli.repository.checkout")?.scope).toEqual({
       connection_id: "cli-1",
       repository: "*",
     });
+  });
+
+  it("ships an approval rule for pushing, ahead of the risk rules", () => {
+    const next = applyToolPreset(EMPTY_WIZARD, preset, catalog, connections);
+    expect(preset.policyRules).toEqual([
+      { capability: "cli.repository.push", risk: null, action: "approval" },
+    ]);
+    // Autonomous runs elevated tools unattended, so without the capability
+    // rule ahead of them a push would land with nobody looking.
+    const autonomous = policyBodyFor(
+      { ...next, approvalPreset: "autonomous" },
+      catalog,
+    );
+    expect(autonomous).toEqual({
+      rules: [
+        { capability: "cli.repository.push", risk: null, action: "approval" },
+        ...PRESET_RULES.autonomous,
+      ],
+    });
+  });
+
+  it("sends the plain preset when no applied bundle asks for a rule", () => {
+    expect(policyBodyFor(EMPTY_WIZARD, catalog)).toEqual({ preset: "balanced" });
   });
 
   it("keeps scopes the user already typed and is idempotent", () => {
@@ -734,12 +781,15 @@ describe("wizard tool presets", () => {
   });
 
   it("skips tools the catalog does not offer and reports them", () => {
-    const partial = catalog.filter((tool) => tool.name.startsWith("cli."));
+    const partial = catalog.filter(
+      (tool) => tool.name.startsWith("cli.") && tool.name !== "cli.command.execute",
+    );
     expect(presetMissingTools(preset, partial)).toEqual([
       "github.repository.read",
       "github.pull_request.read",
       "github.pull_request.create",
     ]);
+    expect(presetMissingTools(preset, catalog)).toEqual([]);
     const next = applyToolPreset(EMPTY_WIZARD, preset, partial, connections);
     expect(next.grantToolNames.every((name) => name.startsWith("cli."))).toBe(true);
   });
@@ -1184,5 +1234,26 @@ describe("streamlined wizard flow", () => {
     await waitFor(() => expect(agentBodies).toHaveLength(1));
     expect(agentBodies[0].persona_id).toBe("p1");
     await waitFor(() => expect(navigation.push).toHaveBeenCalledWith("/agents/agent-new"));
+  });
+});
+
+describe("the rules a tool bundle insists on", () => {
+  const codeEditing = TOOL_PRESETS.find((preset) => preset.id === "code-editing")!;
+  const gate = { capability: "cli.repository.push", risk: null, action: "approval" } as const;
+
+  it("asks for the bundle's rule when the policy does not have one", () => {
+    expect(missingPolicyRules([], codeEditing)).toEqual([gate]);
+    expect(missingPolicyRules(PRESET_RULES.autonomous, codeEditing)).toEqual([gate]);
+  });
+
+  it("leaves a capability the policy already speaks about alone", () => {
+    const chosen = { capability: "cli.repository.push", risk: null, action: "auto" } as const;
+    expect(missingPolicyRules([chosen], codeEditing)).toEqual([]);
+    expect(missingPolicyRules([gate], codeEditing)).toEqual([]);
+  });
+
+  it("asks for nothing for a bundle that insists on nothing", () => {
+    const collaboration = TOOL_PRESETS.find((preset) => preset.id === "collaboration")!;
+    expect(missingPolicyRules([], collaboration)).toEqual([]);
   });
 });

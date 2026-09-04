@@ -29,8 +29,23 @@ GITHUB_MANIFEST = ConnectorManifest(
     icon="github",
     description="Repositories, branches, issues, pull requests, checks, and Actions.",
     auth_schemes=(
-        # Ordered by what the product wants people to reach for first: the two
-        # schemes that ask for nothing at all, then the app, then the key.
+        # Ordered by what the product wants people to reach for first. A
+        # fine-grained token leads because it is the whole setup for the
+        # code-work path and the only scheme whose blast radius the operator
+        # writes down themselves; the browser sign-ins and the app follow.
+        AuthSchemeSpec(
+            type="pat",
+            label="Personal access token",
+            description=(
+                "One fine-grained token, scoped to only the repositories agents "
+                "may write to. Jhin checks its own allow-list too, but GitHub's "
+                "is the one that cannot be argued with. Contents: read and "
+                "write, Pull requests: read and write, Metadata: read."
+            ),
+            secret_fields=(
+                SecretFieldSpec(name="token", label="Personal access token", placeholder="ghp_…"),
+            ),
+        ),
         AuthSchemeSpec(
             type="oauth",
             label="Sign in with GitHub",
@@ -70,14 +85,6 @@ GITHUB_MANIFEST = ConnectorManifest(
                     multiline=True,
                 ),
                 SecretFieldSpec(name="installation_id", label="Installation ID"),
-            ),
-        ),
-        AuthSchemeSpec(
-            type="pat",
-            label="Personal access token",
-            description="Simple self-hosted path: one fine-grained or classic PAT.",
-            secret_fields=(
-                SecretFieldSpec(name="token", label="Personal access token", placeholder="ghp_…"),
             ),
         ),
     ),

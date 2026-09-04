@@ -206,7 +206,11 @@ async def test_pat_verify_connection_against_fake(fake_github: FakeGitHubServer)
         )
     )
     assert not bad.ok
-    assert "401" in bad.message
+    # A dead PAT has no refresh path, so the only useful thing to say is
+    # "reconnect". ``needs_reauth`` is what makes the UI offer that button
+    # instead of showing a red error nobody can act on.
+    assert "reconnect" in bad.message.lower()
+    assert bad.details["needs_reauth"] == "true"
 
 
 async def test_app_verify_connection_against_fake(fake_github: FakeGitHubServer) -> None:

@@ -29,6 +29,7 @@ import {
   describeRule,
   formatScope,
   isCapabilityGranted,
+  keptRules,
   PRESET_DESCRIPTIONS,
   PRESET_RULES,
   riskTone,
@@ -37,6 +38,7 @@ import {
 import type { Agent, ApprovalPreset, GrantEffect } from "@/lib/types";
 import {
   isPresetGranted,
+  missingPolicyRules,
   presetCapabilities,
   presetGrantsToAdd,
   presetGrantsToRevoke,
@@ -152,6 +154,17 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
         await api(`/api/v1/workspaces/${workspaceId}/agents/${agent.id}/grants`, {
           method: "POST",
           body,
+        });
+      }
+      // The bundle's own approval rules, the same ones the wizard writes: a
+      // capability granted here must arrive with the gate the bundle promises,
+      // not only when the agent was created through the wizard.
+      const existing = policy.data?.rules ?? [];
+      const missing = missingPolicyRules(existing, preset);
+      if (missing.length > 0) {
+        await api(`/api/v1/workspaces/${workspaceId}/agents/${agent.id}/policy`, {
+          method: "PUT",
+          body: { rules: [...missing, ...existing] },
         });
       }
     },
@@ -534,9 +547,18 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
                   {describeRule(rule)}
                   {rules.length === 0 ? " (default)" : ""}
                 </span>
+                {rule.capability !== "*" ? (
+                  <Badge tone="neutral">kept when the mode changes</Badge>
+                ) : null}
               </li>
             ))}
           </ul>
+          {keptRules(rules).length > 0 ? (
+            <p data-testid="kept-rules-note" className="mt-2 text-xs text-dim">
+              A rule about one tool is a decision of its own: picking another mode restates the
+              risk levels and leaves it standing.
+            </p>
+          ) : null}
         </div>
       </section>
     </div>

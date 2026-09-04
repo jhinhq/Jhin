@@ -19,7 +19,13 @@ from jhin_api.agents import service as agents_service
 from jhin_api.audit import service as audit
 from jhin_api.deps import WorkspaceContext
 from jhin_db.models import Agent, AgentCapabilityGrant
-from jhin_policy import ApprovalPreset, PolicyRule, matching_preset, rules_for_preset
+from jhin_policy import (
+    ApprovalPreset,
+    PolicyRule,
+    capability_rules,
+    matching_preset,
+    rules_for_preset,
+)
 
 
 async def list_grants(
@@ -170,7 +176,16 @@ async def update_policy(
     request_id: UUID,
     ip_hash: str,
 ) -> Agent:
-    """Persist explicit rules; a preset is expanded before persisting (plan 42)."""
+    """Persist explicit rules; a preset is expanded before persisting (plan 42).
+
+    A preset answers for risk levels, so choosing one restates those and keeps
+    the agent's per-capability rules — the approval gate the Code-editing
+    bundle puts on ``cli.repository.push`` is one of those, and a mode switch
+    in the chat sidebar is not a decision to remove it. They are kept ahead of
+    the preset's rules because matching is first-match. Sending explicit
+    ``rules`` still means exactly what it says: that list becomes the policy,
+    and it is how a rule is deliberately removed.
+    """
     agent = await agents_service.get_agent(db, ctx.workspace_id, agent_id)
 
     if preset is not None and rules is not None:
@@ -179,7 +194,8 @@ async def update_policy(
             detail="Provide either a preset or explicit rules, not both",
         )
     if preset is not None:
-        new_rules = list(rules_for_preset(ApprovalPreset(preset)))
+        kept = capability_rules(parse_rules(list(agent.approval_policy_json or [])))
+        new_rules = [*kept, *rules_for_preset(ApprovalPreset(preset))]
     elif rules is not None:
         new_rules = [PolicyRule.model_validate(rule) for rule in rules]
     else:

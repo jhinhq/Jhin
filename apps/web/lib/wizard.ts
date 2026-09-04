@@ -3,13 +3,19 @@
  * and pure validation functions (unit-tested).
  */
 
-import type { ApprovalPreset, AutonomyLevel, Grant, ToolInfo } from "@/lib/types";
+import type {
+  ApprovalPreset,
+  AutonomyLevel,
+  Grant,
+  PolicyRule,
+  ToolInfo,
+} from "@/lib/types";
 import {
   buildToolScope,
   missingRequiredScopeKeys,
   type ToolScopeValues,
 } from "@/lib/connectors";
-import { isCapabilityGranted } from "@/lib/policy";
+import { isCapabilityGranted, PRESET_RULES } from "@/lib/policy";
 import { defaultShapeFor } from "@/lib/shapes";
 
 export interface WizardState {
@@ -451,6 +457,13 @@ export interface ToolPreset {
   summary: string;
   /** Tool name → scope values (the connection id is filled in separately). */
   tools: Record<string, ToolScopeValues>;
+  /**
+   * Approval rules this preset insists on, whatever approval preset the
+   * creator picks. A capability-matched rule is found before a risk-matched
+   * one, so this is how a bundle keeps a gate that "Autonomous" would
+   * otherwise open — see {@link policyBodyFor}.
+   */
+  policyRules?: PolicyRule[];
 }
 
 /** The id of the safe-by-default collaboration preset (applied to new
@@ -477,17 +490,24 @@ export const TOOL_PRESETS: ToolPreset[] = [
     label: "Code editing",
     summary: "Write code: check out a repo, edit files, run tests, and open pull requests",
     description:
-      "Clone a repository into the sandbox, read and edit files, run tests, commit and push with git, and open pull requests. Needs a CLI Sandbox connection and a GitHub connection.",
+      "Clone a repository into the sandbox, find your way around it, read and change files, run tests, and — once a human approves it — push a branch and open a pull request. Needs a CLI Sandbox connection (with the repositories it may use listed on it) and a GitHub connection. Running tests means running a command the agent chose, inside the checkout, so it can change files there — but it never holds the git credential, and the push tool re-checks the repository against what Jhin recorded at checkout rather than trusting anything the sandbox left behind.",
     tools: {
       "cli.repository.checkout": { repository: "*" },
+      "cli.file.list": { path: "*" },
+      "cli.file.search": { path: "*" },
       "cli.file.read": { path: "*" },
+      "cli.file.edit": { path: "*" },
       "cli.file.write": { path: "*" },
       "cli.test.run": { command: "*" },
-      "cli.command.execute": { command: "git *" },
+      "cli.repository.push": { repository: "*", branch: "agent/*" },
       "github.repository.read": { repository: "*" },
       "github.pull_request.read": { repository: "*" },
-      "github.pull_request.create": { repository: "*" },
+      "github.pull_request.create": { repository: "*", base: "main" },
     },
+    // Pushing to a real repository is the first thing that leaves the
+    // sandbox, so it asks — even for an Autonomous agent, where the ELEVATED
+    // risk level alone would run it unattended.
+    policyRules: [{ capability: "cli.repository.push", risk: null, action: "approval" }],
   },
   {
     id: "team-building",
@@ -633,6 +653,50 @@ export function toggleToolPreset(
   return isPresetApplied(state, preset, tools)
     ? removeToolPreset(state, preset)
     : applyToolPreset(state, preset, tools, connections);
+}
+
+/**
+ * The capability rules a tool bundle insists on that this policy does not
+ * carry yet — what to add when the bundle is switched on somewhere other than
+ * the wizard (the agent's Tools & Access tab).
+ *
+ * A capability the policy already speaks about is left alone whatever it says:
+ * an operator who set `cli.repository.push` to run automatically made that
+ * decision on purpose, and a bundle toggle is not the place to overrule it.
+ */
+export function missingPolicyRules(rules: PolicyRule[], preset: ToolPreset): PolicyRule[] {
+  const spokenFor = new Set(rules.map((rule) => rule.capability));
+  return (preset.policyRules ?? []).filter((rule) => !spokenFor.has(rule.capability));
+}
+
+/**
+ * The approval policy to PUT for a new agent: the chosen preset's risk rules,
+ * with any capability rules its applied tool presets insist on placed first.
+ *
+ * Rules are first-match, so ordering is the whole mechanism: a capability rule
+ * ahead of the risk rules survives "Autonomous", and a preset that adds none
+ * still produces exactly the preset expansion the server would have written.
+ * Changing the approval preset later keeps these rules — the server restates
+ * the risk levels and leaves what a preset does not speak for (see
+ * `jhin_policy.capability_rules`).
+ */
+export function policyBodyFor(
+  state: WizardState,
+  tools: Pick<ToolInfo, "name">[],
+  presets: ToolPreset[] = TOOL_PRESETS,
+): { preset: ApprovalPreset } | { rules: PolicyRule[] } {
+  const capabilityRules = presets
+    .filter((preset) => isPresetApplied(state, preset, tools))
+    .flatMap((preset) => preset.policyRules ?? []);
+  if (capabilityRules.length === 0) return { preset: state.approvalPreset };
+  const seen = new Set<string>();
+  const deduped = capabilityRules.filter((rule) => {
+    const key = `${rule.capability}:${rule.risk ?? ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return { rules: [...deduped, ...PRESET_RULES[state.approvalPreset]] };
 }
 
 /** What the agent will be able to do, in plain language: the presets that

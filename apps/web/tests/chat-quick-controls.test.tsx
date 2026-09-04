@@ -119,6 +119,7 @@ function setup({
   isAdmin = true,
   modelProfileId = "m1" as string | null,
   preset = "balanced" as AgentPolicy["preset"],
+  rules = [] as AgentPolicy["rules"],
   grants = [grant("g1", "github.repository.read")],
 } = {}) {
   vi.mocked(useAgent).mockReturnValue({
@@ -132,7 +133,7 @@ function setup({
     isError: false,
   } as unknown as ReturnType<typeof useModelProfiles>);
   vi.mocked(useAgentPolicy).mockReturnValue({
-    data: { rules: [], preset, autonomy_level: "supervised" },
+    data: { rules, preset, autonomy_level: "supervised" },
     isPending: false,
     isError: false,
   } as unknown as ReturnType<typeof useAgentPolicy>);
@@ -227,6 +228,27 @@ describe("ChatQuickControls", () => {
       }),
     );
     await waitFor(() => expect(invalidateAccess).toHaveBeenCalled());
+  });
+
+  it("says which rule the mode buttons will not change", async () => {
+    // The gate on pushing code is a decision of its own: the server keeps it
+    // across a preset change, and the panel says so rather than leaving the
+    // mode buttons looking like they replace everything.
+    setup({
+      preset: "autonomous",
+      rules: [{ capability: "cli.repository.push", risk: null, action: "approval" }],
+    });
+    openPanel();
+    expect(screen.getByTestId("quick-mode-kept").textContent).toContain(
+      "cli.repository.push",
+    );
+    expect(screen.getByTestId("quick-mode-kept").textContent).toContain("needs approval");
+  });
+
+  it("says nothing extra when every rule came from the mode", () => {
+    setup({ preset: "balanced" });
+    openPanel();
+    expect(screen.queryByTestId("quick-mode-kept")).toBeNull();
   });
 
   it("shows non-admins the values with a plain reason instead of controls", () => {

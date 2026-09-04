@@ -127,3 +127,88 @@ def test_sanitizer_strips_registered_tokens_from_error_bodies() -> None:
     assert "ghs_installation_token_abcdef" not in text
     assert "[REDACTED]" in sanitized["error"]
     assert "[REDACTED]" in sanitized["nested"]["echo"]
+
+
+def test_pull_request_create_scopes_head_and_base() -> None:
+    """A grant that names a repository must still be able to say which base
+    branch a pull request may target. Without ``base`` as a scope key the
+    fnmatch never sees it, so ``repository: octo/alpha`` also authorised a
+    pull request into ``production``."""
+    definition = _tool("github.pull_request.create")
+    assert definition.scope_keys == ("connection_id", "repository", "head", "base")
+    # Required, not merely available: an unstated base is an unlimited one,
+    # because scope_matches only walks the keys a grant constrains.
+    assert definition.required_grant_scope_keys == ("connection_id", "repository", "base")
+
+    grants = [
+        Grant(
+            capability="github.pull_request.create",
+            scope={"connection_id": CONNECTION, "repository": "octo/alpha", "base": "main"},
+            effect=GrantEffect.ALLOW,
+        )
+    ]
+    into_main = evaluate(
+        definition,
+        grants=grants,
+        rules=[],
+        requested_scope={
+            "connection_id": CONNECTION,
+            "repository": "octo/alpha",
+            "head": "agent/fix",
+            "base": "main",
+        },
+    )
+    into_production = evaluate(
+        definition,
+        grants=grants,
+        rules=[],
+        requested_scope={
+            "connection_id": CONNECTION,
+            "repository": "octo/alpha",
+            "head": "agent/fix",
+            "base": "production",
+        },
+    )
+    assert into_main.decision.value == "allow"
+    assert into_production.code == "scope_mismatch"
+
+
+def test_pull_request_create_refuses_a_grant_that_names_no_base() -> None:
+    """The hand-written grant shape the wizard never writes: a repository and
+    a connection, no base. It used to authorise a pull request into any branch
+    of that repository; now it is denied, and the denial names the key."""
+    decision = evaluate(
+        _tool("github.pull_request.create"),
+        grants=[
+            Grant(
+                capability="github.pull_request.create",
+                scope={"connection_id": CONNECTION, "repository": "octo/alpha"},
+                effect=GrantEffect.ALLOW,
+            )
+        ],
+        rules=[],
+        requested_scope={
+            "connection_id": CONNECTION,
+            "repository": "octo/alpha",
+            "head": "agent/fix",
+            "base": "production",
+        },
+    )
+    assert decision.code == "required_scope_missing"
+    assert "base" in decision.reason
+
+
+def test_pull_request_create_refuses_an_unscoped_grant() -> None:
+    """A bare ``github.*`` grant can no longer open pull requests anywhere."""
+    decision = evaluate(
+        _tool("github.pull_request.create"),
+        grants=[Grant(capability="github.*", scope={}, effect=GrantEffect.ALLOW)],
+        rules=[],
+        requested_scope={
+            "connection_id": CONNECTION,
+            "repository": "octo/alpha",
+            "head": "agent/fix",
+            "base": "main",
+        },
+    )
+    assert decision.code == "required_scope_missing"

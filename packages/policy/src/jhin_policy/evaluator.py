@@ -158,10 +158,11 @@ def evaluate(
         )
     required_scope_keys = set(tool.required_grant_scope_keys)
     if not required_scope_keys.issubset(scope):
+        missing = ", ".join(sorted(required_scope_keys - set(scope)))
         return PolicyDecision(
             decision=DecisionType.DENY,
             code="required_scope_missing",
-            reason=f"call for '{capability}' is missing a required scope dimension",
+            reason=f"call for '{capability}' is missing a required scope dimension: {missing}",
         )
 
     # Required scope keys are a property of each allow grant, not of the
@@ -171,10 +172,18 @@ def evaluate(
         grant for grant in allow_grants if required_scope_keys.issubset(grant.scope)
     ]
     if not scoped_allow_grants:
+        # Name the dimensions. A grant written before a tool started requiring
+        # one fails here, and "is missing a required scope dimension" gives an
+        # operator nothing to act on — this says which key to add.
+        closest = max(allow_grants, key=lambda grant: len(required_scope_keys & set(grant.scope)))
+        missing = ", ".join(sorted(required_scope_keys - set(closest.scope)))
         return PolicyDecision(
             decision=DecisionType.DENY,
             code="required_scope_missing",
-            reason=f"grant for '{capability}' is missing a required scope dimension",
+            reason=(
+                f"no grant for '{capability}' is scoped by every required dimension; "
+                f"the closest is missing: {missing}"
+            ),
         )
 
     if not tool.defers_scope and not any(

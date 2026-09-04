@@ -20,6 +20,7 @@ import { PRESET_FRIENDLY, describeGrant, policySummary } from "@/components/comp
 import { ErrorNote, Select, focusRing } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import { formatCostMicros, formatTokens } from "@/lib/format";
+import { describeRule, keptRules } from "@/lib/policy";
 import {
   useAgent,
   useAgentGrants,
@@ -301,6 +302,15 @@ function QuickControlsBody({
                 ? PRESET_FRIENDLY[currentPreset]
                 : policySummary(policy.data)}
             </p>
+            {keptRules(policy.data?.rules ?? []).length > 0 ? (
+              <p data-testid="quick-mode-kept" className="text-xs text-dim">
+                Whichever mode you pick,{" "}
+                {keptRules(policy.data?.rules ?? [])
+                  .map((rule) => describeRule(rule))
+                  .join("; ")}
+                .
+              </p>
+            ) : null}
           </>
         ) : (
           <p data-testid="quick-mode-readonly" className="text-ink">

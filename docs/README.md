@@ -26,6 +26,8 @@ and trust boundary to its authoritative document:
 - [Vercel and Supabase connectors](architecture/vercel-and-supabase.md)
 - [Events and triggers](architecture/events.md)
 - [Sandboxing](architecture/sandboxing.md)
+- [Pointing an agent at a real repository](operations/github-token-setup.md)
+- [Upgrading: grants that now name a connection, branch and base](operations/grant-scope-migration.md)
 - [Deterministic tool-worker boundary](architecture/tool-worker-boundary.md)
 - [Curated long-term memory](architecture/memory.md)
 - [Agent Skills](architecture/skills.md)

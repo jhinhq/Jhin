@@ -5,8 +5,12 @@ from jhin_connectors.manifest import AuthSchemeSpec, ConfigFieldSpec, ConnectorM
 CLI_CAPABILITIES: tuple[str, ...] = (
     "cli.command.execute",
     "cli.repository.checkout",
+    "cli.repository.push",
     "cli.test.run",
+    "cli.file.list",
+    "cli.file.search",
     "cli.file.read",
+    "cli.file.edit",
     "cli.file.write",
 )
 
@@ -51,8 +55,21 @@ CLI_MANIFEST = ConnectorManifest(
             required=False,
             placeholder="UUID of a GitHub connection",
             help=(
-                "cli.repository.checkout (and git push from cli.command.execute) "
-                "mint a short-lived token from this connection."
+                "cli.repository.checkout and cli.repository.push mint a "
+                "short-lived token from this connection. No tool call can "
+                "choose a different one."
+            ),
+        ),
+        ConfigFieldSpec(
+            name="allowed_repositories",
+            label="Repositories this sandbox may use",
+            required=False,
+            kind="string_list",
+            help=(
+                "owner/name, fnmatch allowed (octo/*). Empty means this "
+                "connection cannot check out or push any repository. Scope the "
+                "GitHub token to the same list: GitHub's allow-list is the one "
+                "that cannot be argued with."
             ),
         ),
     ),

@@ -12,7 +12,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-REPOSITORY_PATTERN = r"^[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+$"
+# ``owner/name``, with neither half made of dots alone: every request path
+# here is built as ``/repos/{repository}/…``, so a segment of ``..`` would be
+# a traversal out of ``/repos`` and into another part of the API. The middle
+# character class is the rule — each segment carries a character that is not a
+# dot. (``cli/schemas.py`` states the same rule for the sandbox tools.)
+_SEGMENT = r"[A-Za-z0-9_.\-]*[A-Za-z0-9_\-][A-Za-z0-9_.\-]*"
+REPOSITORY_PATTERN = rf"^{_SEGMENT}/{_SEGMENT}$"
 _REF_MAX = 250
 
 

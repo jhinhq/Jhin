@@ -103,6 +103,26 @@ Everything lives under one new package directory; no other service changes.
    (e.g. `github.pull_request.create`). Choose risk levels conservatively:
    destructive or hard-to-reverse actions are `elevated` and should set
    `supports_approval=True`.
+5. Set `required_grant_scope_keys` on any tool that must never be authorized by
+   an unscoped or wildcard grant. `cli.repository.checkout` and
+   `cli.repository.push` require `connection_id` and `repository`, so no
+   `cli.*` grant can reach a repository by accident.
+6. Override `tool_validators()` when authorization depends on connection state
+   a grant scope cannot express. It returns tool name → `ToolValidator`, and
+   the gateway runs the validator after grants and rules at all three
+   authorization points — policy decision, approval resume, and execution bind
+   — so a narrowed connection invalidates an approval that is already parked.
+   The CLI connector's per-connection repository allow-list is the shipped
+   example. Connectors whose tools are discovered per connection cannot carry
+   one: `ToolCatalog.for_workspace` registers dynamic-source tools without a
+   validator, so their enforcement must live in scope keys.
+
+Order `auth_schemes` by what an operator should reach for first — GitHub leads
+with the fine-grained PAT, because it is the whole setup for the code-work path
+and the only scheme whose blast radius the operator writes down themselves.
+Removing a scheme later is a data migration, not a deletion:
+`public_connection_config` re-runs `normalize_config` against the row's stored
+`auth_type` and fails closed to `{}`.
 
 The UI (gallery, connection create form, grant scoping) and the API
 (connections CRUD, verify, webhook ingress) are entirely manifest-driven, so

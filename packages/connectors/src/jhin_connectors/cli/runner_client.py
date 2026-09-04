@@ -1,7 +1,10 @@
 """HTTP client for the internal sandbox runner API (plan 14.2).
 
-Runs inside the agent worker only: the ``runner`` compose network is the
-wall, the shared bearer token from ``SANDBOX_RUNNER_TOKEN`` is the lock.
+Runs inside the tool worker only — ``SANDBOX_RUNNER_URL`` and
+``SANDBOX_RUNNER_TOKEN`` are set on that service alone (compose.yaml), and the
+agent worker is forbidden from importing this module by
+``tests/test_worker_dependency_boundaries.py``. The ``runner`` compose network
+is the wall, the shared bearer token is the lock.
 Submit is fire-and-poll — the runner answers 202 immediately and the client
 polls status until the job reaches a terminal state or the client-side
 deadline passes (a backstop; the runner enforces the real per-job timeout).

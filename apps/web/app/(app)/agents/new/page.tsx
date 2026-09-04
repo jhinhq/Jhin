@@ -44,6 +44,7 @@ import {
   AGENT_TEMPLATES,
   applyTemplate,
   applyToolPreset,
+  policyBodyFor,
   COLLABORATION_PRESET_ID,
   capabilitySummary,
   effectiveAvatar,
@@ -225,7 +226,7 @@ function WizardInner() {
       }
       await api(`/api/v1/workspaces/${workspaceId}/agents/${agent.id}/policy`, {
         method: "PUT",
-        body: { preset: state.approvalPreset },
+        body: policyBodyFor(state, tools.data ?? []),
       });
       return agent;
     },

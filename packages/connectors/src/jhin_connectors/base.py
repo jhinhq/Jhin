@@ -7,6 +7,8 @@ Every connector implements :class:`Connector`:
 - ``tools()`` — tool definitions plus executors, registered into the same
   catalog and gateway the Phase 4 built-ins use (plan 12);
 - ``tool_definitions()`` — the definition-only view safe for API discovery;
+- ``tool_validators()`` — optional per-call policy vetoes the gateway runs
+  at decision, approval resume, and execution bind (plan 7.5);
 - ``normalize_event(raw)`` — maps raw provider webhook payloads to canonical
   ``connector.<type>.<entity>.<event>`` domain events (plan 9.2).
 
@@ -27,7 +29,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 from jhin_connectors.manifest import ConnectorManifest
 from jhin_policy import ToolDefinition
-from jhin_tools.builtin import ToolExecutor
+from jhin_tools.builtin import ToolExecutor, ToolValidator
 
 _EVENT_TYPE_RE = re.compile(r"^connector(\.[a-z0-9_]+)+$")
 
@@ -117,6 +119,19 @@ class Connector(ABC):
     @abstractmethod
     def tool_definitions(self) -> tuple[ToolDefinition, ...]:
         """Tool definitions without executor callables."""
+
+    def tool_validators(self) -> Mapping[str, ToolValidator]:
+        """Tool-specific policy validators, keyed by tool name.
+
+        A validator is policy code: it runs in the gateway after grants and
+        rules, before an approval is staged and again before execution, and
+        returns a DENY decision or None. Use it where authorization depends on
+        connection state the grant scope cannot express — the CLI connector's
+        per-connection repository allow-list is the shipped example. Connectors
+        whose tools are discovered per connection cannot carry one (the
+        dynamic-source path registers definitions without validators), so
+        their enforcement must live in scope keys instead."""
+        return {}
 
     def connection_tool_definitions(self, config: Mapping[str, Any]) -> tuple[ToolDefinition, ...]:
         """Tool definitions as seen through one stored connection.

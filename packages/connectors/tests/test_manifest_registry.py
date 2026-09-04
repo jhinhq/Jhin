@@ -467,3 +467,49 @@ def test_example_connector_is_registrable_alongside_github() -> None:
     assert catalog.registry.get("example.ping") is not None
     assert catalog.registry.get("github.repository.read") is not None
     assert ExampleConnector.manifest.webhook_secret_mode == "generated"
+
+
+def test_connector_tool_validators_are_registered() -> None:
+    """A connector's per-call policy veto has to reach the catalog, or the
+    repository allow-list is a field nothing reads (plan 7.5)."""
+    catalog = build_default_catalog()
+    assert catalog.validator_for("cli.repository.checkout") is not None
+    assert catalog.validator_for("cli.repository.push") is not None
+    # Only the tools that name a repository carry one.
+    assert catalog.validator_for("cli.file.read") is None
+    assert catalog.validator_for("github.pull_request.create") is None
+
+
+async def test_validators_survive_for_workspace() -> None:
+    """``ToolCatalog.for_workspace`` rebuilds the catalog when a dynamic tool
+    source exists. Static validators must be carried over, or connecting an
+    MCP server would quietly disable the allow-list."""
+    from uuid import uuid4
+
+    catalog = build_default_catalog()
+    assert catalog.has_dynamic_sources  # the MCP source is registered by default
+    view = await catalog.for_workspace(_NoSession(), uuid4())
+    assert view.validator_for("cli.repository.checkout") is not None
+    assert view.validator_for("cli.repository.push") is not None
+
+
+class _NoSession:
+    """The MCP tool source only queries; a workspace with no MCP connection
+    yields nothing, so a stub that returns no rows is enough here."""
+
+    async def scalars(self, *args: Any, **kwargs: Any) -> Any:
+        return _Empty()
+
+    async def execute(self, *args: Any, **kwargs: Any) -> Any:
+        return _Empty()
+
+    async def scalar(self, *args: Any, **kwargs: Any) -> Any:
+        return None
+
+
+class _Empty:
+    def all(self) -> list[Any]:
+        return []
+
+    def __iter__(self) -> Any:
+        return iter(())

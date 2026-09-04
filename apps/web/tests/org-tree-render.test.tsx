@@ -165,6 +165,30 @@ const accessTools: ToolInfo[] = [
   },
 ];
 
+/** Enough of the Code-editing bundle to switch it on. */
+const codeEditingTools: ToolInfo[] = [
+  {
+    name: "cli.repository.checkout",
+    description: "Clone a repository",
+    risk: "write",
+    required_capability: "cli.repository.checkout",
+    supports_approval: true,
+    scope_keys: ["connection_id", "repository", "image"],
+    required_grant_scope_keys: ["connection_id", "repository"],
+    input_schema: {},
+  },
+  {
+    name: "cli.repository.push",
+    description: "Push the working branch",
+    risk: "elevated",
+    required_capability: "cli.repository.push",
+    supports_approval: true,
+    scope_keys: ["connection_id", "repository", "branch"],
+    required_grant_scope_keys: ["connection_id", "repository", "branch"],
+    input_schema: {},
+  },
+];
+
 function json(data: unknown): Response {
   return new Response(JSON.stringify(data), {
     status: 200,
@@ -186,8 +210,10 @@ function grantRecord(capability: string, scope: Record<string, unknown> = {}) {
 function renderToolsAccess(
   toolCatalog: ToolInfo[] = accessTools,
   initialGrants: ReturnType<typeof grantRecord>[] = [],
+  initialRules: { capability: string; risk: string | null; action: string }[] = [],
 ) {
   const grantBodies: Record<string, unknown>[] = [];
+  const policyBodies: Record<string, unknown>[] = [];
   const revoked: string[] = [];
   const store = [...initialGrants];
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -208,7 +234,11 @@ function renderToolsAccess(
       return json({});
     }
     if (path.endsWith("/agents/agent-1/policy")) {
-      return json({ preset: "balanced", autonomy_level: "supervised", rules: [] });
+      if (method === "PUT") {
+        policyBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return json({ preset: null, autonomy_level: "supervised", rules: initialRules });
+      }
+      return json({ preset: "balanced", autonomy_level: "supervised", rules: initialRules });
     }
     if (path.endsWith("/tools")) return json(toolCatalog);
     if (path.endsWith("/connections")) {
@@ -231,7 +261,7 @@ function renderToolsAccess(
       </WorkspaceProvider>
     </QueryClientProvider>,
   );
-  return { grantBodies, revoked };
+  return { grantBodies, policyBodies, revoked };
 }
 
 describe("ToolsAccessTab", () => {
@@ -374,5 +404,39 @@ describe("ToolsAccessTab capabilities", () => {
     renderToolsAccess(webAccessTools);
     const codeEditing = await screen.findByTestId("capability-preset-code-editing");
     expect((codeEditing as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("gives code editing the approval rule the bundle promises", async () => {
+    // The wizard writes this rule at creation; an agent that is given code
+    // editing here has to arrive with it too, or "pushing code always asks"
+    // is only true for agents made one particular way.
+    const { policyBodies } = renderToolsAccess(codeEditingTools);
+    fireEvent.click(await screen.findByTestId("capability-preset-code-editing"));
+
+    await waitFor(() => expect(policyBodies).toHaveLength(1));
+    expect(policyBodies[0]).toEqual({
+      rules: [{ capability: "cli.repository.push", risk: null, action: "approval" }],
+    });
+  });
+
+  it("does not overrule a decision somebody already made about that tool", async () => {
+    const chosen = { capability: "cli.repository.push", risk: null, action: "auto" };
+    const { policyBodies } = renderToolsAccess(codeEditingTools, [], [chosen]);
+    fireEvent.click(await screen.findByTestId("capability-preset-code-editing"));
+
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("capability-preset-code-editing").getAttribute("aria-pressed"),
+      ).toBe("true"),
+    );
+    expect(policyBodies).toEqual([]);
+  });
+
+  it("shows which rules survive a change of mode", async () => {
+    renderToolsAccess(codeEditingTools, [], [
+      { capability: "cli.repository.push", risk: null, action: "approval" },
+    ]);
+    expect(await screen.findByTestId("kept-rules-note")).toBeDefined();
+    expect(screen.getByText("kept when the mode changes")).toBeDefined();
   });
 });
