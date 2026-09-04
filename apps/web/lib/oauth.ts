@@ -138,26 +138,85 @@ export function formatCountdown(seconds: number): string {
   return `${minutes}:${String(safe % 60).padStart(2, "0")}`;
 }
 
+export interface OAuthLandingCopy {
+  title: string;
+  body: string;
+  /** Whether to offer the operator hint. Declining is a choice, not a fault. */
+  operatorHint: boolean;
+}
+
 /**
  * What the callback's `?oauth_error=` means, in words a person can act on.
  *
  * The provider's own `error_description` never reaches the browser — it is
- * attacker-influenced text — so the vocabulary here is closed.
+ * attacker-influenced text — so the vocabulary here is closed and anything
+ * outside it falls back to the generic copy rather than being rendered.
+ *
+ * Every one of these sentences says the same two things somewhere: nothing
+ * was connected and nothing was changed, and here is the next thing to do.
+ * The old copy said "start again from the app you were connecting", which
+ * asked somebody who had just been bounced back to a wall of app cards to go
+ * find it themselves.
  */
-export function oauthErrorMessage(code: string | null): string | null {
-  if (code === "denied") {
-    return "The permission request was declined, so nothing was connected. You can try again whenever you like.";
-  }
-  if (code === "failed") {
-    return "That connection attempt could not be completed. Start again from the app you were connecting.";
-  }
-  if (code === "client_rejected") {
-    return "GitHub did not accept this app's client id and secret, so nothing was connected. Forget the registration under Settings → OAuth and set the app up again from Apps → Connect GitHub.";
-  }
-  if (code === "callback_mismatch") {
-    return "GitHub says the callback URL listed on the app is not this instance's redirect URL. Add the redirect URL shown under Settings → OAuth to the app on GitHub, then try again.";
-  }
-  return code ? "That connection attempt could not be completed. Start again from the app you were connecting." : null;
+const LANDING_COPY: Record<string, OAuthLandingCopy> = {
+  signed_out: {
+    title: "You were signed out while you were away",
+    body: "Your Jhin session ended while you were at the provider, so nothing was connected and nothing was changed. You are signed in again now — start the connection and it will go through.",
+    operatorHint: true,
+  },
+  expired: {
+    title: "That sign-in link had already been used",
+    body: "Sign-in links work once, and only for a short while. Nothing was connected and nothing was changed. Start the connection again and Jhin will make a fresh one.",
+    operatorHint: true,
+  },
+  denied: {
+    title: "The permission request was declined",
+    body: "The permission request was declined, so nothing was connected. You can try again whenever you like.",
+    operatorHint: false,
+  },
+  failed: {
+    title: "That connection could not be finished",
+    body: "Something went wrong between here and the provider, so nothing was connected and nothing was changed. Try again — most of the time the second attempt goes through.",
+    operatorHint: true,
+  },
+  client_rejected: {
+    title: "The provider did not accept this app",
+    body: "The provider did not accept this app's client id and secret, so nothing was connected. Forget the registration under Settings → OAuth and set the app up again from Apps.",
+    operatorHint: true,
+  },
+  callback_mismatch: {
+    title: "The app's callback URL does not match",
+    body: "The provider says the callback URL listed on the app is not this instance's redirect URL. Add the redirect URL shown under Settings → OAuth to the app at the provider, then try again.",
+    operatorHint: true,
+  },
+  redirect_changed: {
+    title: "This instance's address changed mid sign-in",
+    body: "Jhin's redirect URL changed while you were signing in, so it would not accept the result. Nothing was connected. Try again — and if it keeps happening, the app at the provider needs the redirect URL shown under Settings → OAuth.",
+    operatorHint: true,
+  },
+  issuer_mismatch: {
+    title: "That sign-in came back from the wrong service",
+    body: "The reply came from a different service than the one Jhin sent you to, so nothing was connected. Try again. If it happens again, tell whoever runs this Jhin before you sign in.",
+    operatorHint: true,
+  },
+  registration_gone: {
+    title: "That app registration is no longer stored",
+    body: "The registration this sign-in was using has been removed, so nothing was connected. Register the app again under Settings → OAuth, then connect from here.",
+    operatorHint: true,
+  },
+};
+
+export function oauthLanding(code: string | null): OAuthLandingCopy | null {
+  if (code === null) return null;
+  return LANDING_COPY[code] ?? LANDING_COPY.failed;
+}
+
+/** The connector type the landing named, or null. Matched against the same
+ * pattern the API validated it with before it went into the URL — the
+ * address bar is not a source we trust twice. */
+export function readLandingConnector(params: URLSearchParams): string | null {
+  const value = params.get("app");
+  return value !== null && /^[a-z][a-z0-9_]{0,49}$/.test(value) ? value : null;
 }
 
 /**

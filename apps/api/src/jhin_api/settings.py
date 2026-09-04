@@ -84,9 +84,39 @@ class Settings(ObservabilitySettings):
     # API share an origin through the Next.js proxy. Set it only when the
     # browser reaches Jhin at a different origin than APP_URL.
     oauth_redirect_base_url: str = ""
-    # How long a pending authorization stays claimable. Ten minutes is the
-    # MCP security-considerations recommendation for state lifetime.
-    oauth_state_ttl_seconds: int = 600
+    # How long a pending authorization stays claimable. Thirty minutes, not
+    # ten: a single round trip can contain an SSO login at the edge (a Jhin
+    # behind Cloudflare Access adds one, and it can include an emailed
+    # one-time code), a provider sign-in with a second factor, a consent
+    # screen somebody actually reads, and — for a GitHub App — an
+    # installation picker where they choose an org and repositories. Ten
+    # minutes is a tight budget for that sequence, not a generous one.
+    #
+    # This is the fourth control in front of the callback, never the first:
+    # the handle is 256 bits, only sha256(handle) is stored, the row is
+    # single-use, and it is bound to the initiating user's session. Widening
+    # this widens the window only for somebody who already holds both the
+    # handle and the victim's live session — and holding both means the flow
+    # is already lost. It is also not a new maximum:
+    # DEVICE_FLOW_MAX_TTL_SECONDS is already 1800, and the manifest flow's
+    # 3600 stays the outlier, dictated by GitHub's conversion-code lifetime.
+    #
+    # It buys diagnosability too. GitHub's authorization *code* is valid ten
+    # minutes. Under a ten-minute state a twelve-minute round trip dies at
+    # the claim as an indistinguishable state_expired/state_unknown; under
+    # thirty it reaches the exchange and fails as invalid_grant, which
+    # oauth.code_exchange_failed names outright. The longer window does not
+    # only let slow round trips succeed — it makes the ones that still fail
+    # legible.
+    oauth_state_ttl_seconds: int = 1800
+    # How long a *consumed* authorization remembers what it produced, so a
+    # refresh, a back-button, or a link prefetch that spent the single-use
+    # state does not cost somebody the connection they actually made. A
+    # receipt holds no secret, is readable only by the session that could
+    # have completed the flow, and produces only a redirect to a page that
+    # session already reaches. Clamped to an hour in code; 0 disables
+    # receipts entirely and every repeat gets the uniform refusal.
+    oauth_callback_receipt_ttl_seconds: int = 600
     # client_name sent during dynamic client registration; what the user sees
     # on the provider's consent screen.
     oauth_client_name: str = "Jhin"
@@ -225,6 +255,34 @@ class Settings(ObservabilitySettings):
                 f"{source} ({base!r}) is plaintext HTTP on a public host. An OAuth "
                 "authorization code sent back over plaintext can be stolen in transit; "
                 "serve Jhin over HTTPS or set APP_ENV=dev for a local install."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_oauth_state_ttl(self) -> Settings:
+        """Refuse a state or receipt lifetime that cannot mean what it says.
+
+        The state TTL is a defence-in-depth bound, not the control that stops
+        a forged callback — the 256-bit handle, its ``sha256``-only storage,
+        the single-use claim, and the session binding are. So the range is
+        wide, and both ends are real: below a minute no round trip through a
+        provider's consent screen can finish, and above an hour a pending
+        authorization outlives the GitHub App conversion code, which is the
+        longest-lived credential this subsystem holds.
+        """
+        if not 60 <= self.oauth_state_ttl_seconds <= 3600:
+            raise InsecureDeploymentError(
+                f"OAUTH_STATE_TTL_SECONDS is {self.oauth_state_ttl_seconds}. It must be "
+                "between 60 and 3600 seconds: below a minute no real round trip through a "
+                "provider's consent screen can finish, and above an hour a pending "
+                "authorization outlives the GitHub App conversion code, which is the "
+                "longest-lived credential this subsystem holds."
+            )
+        if not 0 <= self.oauth_callback_receipt_ttl_seconds <= 3600:
+            raise InsecureDeploymentError(
+                f"OAUTH_CALLBACK_RECEIPT_TTL_SECONDS is "
+                f"{self.oauth_callback_receipt_ttl_seconds}. It must be between 0 "
+                "(receipts disabled) and 3600 seconds."
             )
         return self
 

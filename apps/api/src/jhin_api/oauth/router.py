@@ -28,6 +28,7 @@ OAuth client rather than a proxy somebody can aim somewhere else.
 
 from __future__ import annotations
 
+import contextlib
 from typing import Annotated
 from uuid import UUID
 
@@ -77,7 +78,10 @@ SettingsDep = Annotated[Settings, Depends(get_settings_dep)]
 
 #: The callbacks accept these query parameters and echo none of them. The
 #: bounds exist so somebody who reaches this URL cannot make us allocate
-#: megabytes before we refuse.
+#: megabytes before we refuse. They are applied *inside* the handlers rather
+#: than on the signature: a ``Query(max_length=...)`` makes FastAPI answer a
+#: JSON 422 before the handler runs, and a JSON body in a browser is the dead
+#: end these routes exist not to be.
 MAX_CALLBACK_PARAM_LENGTH = 2_048
 MAX_STATE_LENGTH = 256
 
@@ -96,6 +100,37 @@ def _no_store(location: str) -> Response:
         status_code=status.HTTP_303_SEE_OTHER,
         headers={"Location": location, "Cache-Control": "no-store"},
     )
+
+
+def _is_navigation(request: Request) -> bool:
+    """Whether this is a person's browser arriving, or a machine's guess.
+
+    A prefetch that spends a single-use state, leaving the real navigation to
+    find its row gone, is the classic cause of a callback that refuses a
+    handle nobody misused. A request that *announces itself* as one is
+    answered before anything is looked up.
+
+    Absence proves nothing and is never held against a request: a browser
+    sending none of these headers is treated as a navigation, so no real
+    callback is ever lost to a header we did not receive.
+    """
+    headers = request.headers
+    if "prefetch" in headers.get("sec-purpose", "").lower():
+        return False
+    if headers.get("purpose", "").strip().lower() == "prefetch":
+        return False
+    if headers.get("x-moz", "").strip().lower() == "prefetch":
+        return False
+    mode = headers.get("sec-fetch-mode", "").strip().lower()
+    if mode and mode != "navigate":
+        return False
+    dest = headers.get("sec-fetch-dest", "").strip().lower()
+    return not (dest and dest != "document")
+
+
+def _bounded(value: str | None, limit: int) -> str | None:
+    """A query value we are willing to look at, or nothing. Never a 422."""
+    return value if value is not None and len(value) <= limit else None
 
 
 async def _ensure_refresher(request: Request, workspace_id: UUID, settings: Settings) -> None:
@@ -154,10 +189,10 @@ async def oauth_callback(
     crypto: SecretCryptoDep,
     settings: SettingsDep,
     http_client: OAuthHttpClientDep,
-    state: Annotated[str, Query(min_length=1, max_length=MAX_STATE_LENGTH)],
-    code: Annotated[str | None, Query(max_length=MAX_CALLBACK_PARAM_LENGTH)] = None,
-    iss: Annotated[str | None, Query(max_length=MAX_CALLBACK_PARAM_LENGTH)] = None,
-    error: Annotated[str | None, Query(max_length=MAX_CALLBACK_PARAM_LENGTH)] = None,
+    state: Annotated[str | None, Query()] = None,
+    code: Annotated[str | None, Query()] = None,
+    iss: Annotated[str | None, Query()] = None,
+    error: Annotated[str | None, Query()] = None,
 ) -> Response:
     """Where a provider sends the browser back. The security-critical route.
 
@@ -165,8 +200,20 @@ async def oauth_callback(
     must pass: the handle is well formed, a row exists for its hash, the
     single-use claim wins, the live session belongs to the user who started
     the flow, and ``iss`` byte-matches the issuer recorded before we
-    redirected. Every failure returns the same 400 with the same body, so a
-    probe learns nothing from which one it tripped.
+    redirected.
+
+    **No refusal has a body.** This handler has one ``return`` and it always
+    builds a 303 from :func:`redirect_module.app_return_url`. That is why the
+    query bounds are enforced in the body rather than on the signature: a
+    ``Query(max_length=...)`` makes FastAPI answer a JSON 422 before the
+    handler runs, which is exactly the dead end this route exists not to be.
+
+    **Two tiers.** Everything decided before the single-use claim succeeds
+    gets one flag, ``expired``, byte-identically, because any session at all
+    can reach it. A caller with no session gets ``signed_out`` before the
+    database is touched at all. Everything decided after the claim may name a
+    cause: reaching that tier needs the raw 256-bit handle *and* the owner's
+    browser.
 
     ``error_description`` and ``error_uri`` are accepted by the URL and read
     by nothing. They are text whoever reached this URL chose, and rendering
@@ -174,37 +221,80 @@ async def oauth_callback(
     boolean and never shown.
 
     The ``Location`` is built by :func:`redirect_module.app_return_url` from
-    settings plus a connection id proven to be thirty-two hex characters.
-    Nothing from this request can reach it, which is what closes the
+    settings plus a connection id proven to be thirty-two hex characters and a
+    connector type proven to match its pattern — both read out of a database
+    column. Nothing from this request can reach it, which is what closes the
     open-redirect surface by construction rather than by filtering.
     """
+    if not _is_navigation(request):
+        # A prefetch or background fetch. Answered before anything is looked
+        # up, so the single-use row survives for the real navigation. A plain
+        # ``/apps`` because a prerendered document is what the person sees if
+        # the prerender activates, and a 204 renders as a blank page.
+        logger.debug("oauth.callback_prefetch_ignored", flow="authorization_code")
+        return _no_store(redirect_module.app_return_url(settings, public_id=None))
+
+    result = service.CallbackResult(connection=None, error="expired")
+    handle = _bounded(state, MAX_STATE_LENGTH)
+    bounded_code = _bounded(code, MAX_CALLBACK_PARAM_LENGTH)
+    bounded_iss = _bounded(iss, MAX_CALLBACK_PARAM_LENGTH)
+    bounded_error = _bounded(error, MAX_CALLBACK_PARAM_LENGTH)
     if auth is None:
         # The session died while the person was at the provider — the most
         # likely real-world failure, and the one that used to escape the
         # "every failure looks the same" promise by answering a raw 401 JSON
         # body. Nothing is claimed and no token is exchanged without a
-        # session; this only decides what the browser is shown.
-        return _no_store(redirect_module.app_return_url(settings, public_id=None, error="failed"))
-    result = await service.complete_authorization(
-        db,
-        crypto,
-        http_client,
-        settings,
-        user_id=auth.user.id,
-        state=state,
-        code=code,
-        iss=iss,
-        provider_error=error,
-        request_id=req_id(request),
-        ip_hash=ip_hash(request),
-    )
-    if result.connection is not None:
-        await _ensure_refresher(request, result.connection.workspace_id, settings)
+        # session; this only decides what the browser is shown, and it is
+        # decided before the database is touched at all.
+        service.log_callback_refusal("no_session", flow="authorization_code")
+        result = service.CallbackResult(connection=None, error="signed_out")
+    elif handle is None:
+        service.log_callback_refusal("state_malformed", flow="authorization_code")
+    elif (
+        (code is not None and bounded_code is None)
+        or (iss is not None and bounded_iss is None)
+        or (error is not None and bounded_error is None)
+    ):
+        # A refusal in its own right, never a silent drop: treating an
+        # over-long ``code`` as absent would file "the provider sent something
+        # absurd" under "the person declined", and skipping an over-long
+        # ``iss`` would skip a check.
+        service.log_callback_refusal("param_too_long", flow="authorization_code")
+    else:
+        try:
+            result = await service.complete_authorization(
+                db,
+                crypto,
+                http_client,
+                settings,
+                user_id=auth.user.id,
+                state=handle,
+                code=bounded_code,
+                iss=bounded_iss,
+                provider_error=bounded_error,
+                request_id=req_id(request),
+                ip_hash=ip_hash(request),
+            )
+        except Exception:
+            # The last line of the promise: no exception from this subsystem
+            # reaches a browser as a body. The reason is logged from the
+            # closed vocabulary; the exception itself is not, because a
+            # driver's message is not ours to render.
+            with contextlib.suppress(Exception):
+                await db.rollback()
+            service.log_callback_refusal("internal_error", flow="authorization_code")
+            result = service.CallbackResult(connection=None, error="expired")
+        else:
+            # A replay is a pure read plus a redirect: no Temporal call, no
+            # network, nothing.
+            if result.connection is not None and not result.replayed:
+                await _ensure_refresher(request, result.connection.workspace_id, settings)
     return _no_store(
         redirect_module.app_return_url(
             settings,
-            public_id=result.connection.public_id if result.connection is not None else None,
+            public_id=result.public_id,
             error=result.error,
+            connector_type=result.connector_type,
         )
     )
 
@@ -217,35 +307,71 @@ async def github_app_callback(
     crypto: SecretCryptoDep,
     settings: SettingsDep,
     http_client: OAuthHttpClientDep,
-    state: Annotated[str, Query(min_length=1, max_length=MAX_STATE_LENGTH)],
-    code: Annotated[str | None, Query(max_length=MAX_CALLBACK_PARAM_LENGTH)] = None,
+    state: Annotated[str | None, Query()] = None,
+    code: Annotated[str | None, Query()] = None,
 ) -> Response:
     """Where GitHub sends the browser after creating this instance's own app.
 
-    Same five checks as the OAuth callback, same single refusal. The
+    Same five checks as the OAuth callback, and the same two tiers. The
     conversion code is worth a full set of app credentials for exactly one
     hour, which is why the pending row for this flow is the only one with a
-    TTL longer than ten minutes and why it is still single-use.
+    TTL longer than the authorization-code state and why it is still
+    single-use.
+
+    Every refusal decided *before* the claim lands on the shared recovery
+    page with bytes identical to the OAuth callback's, so neither callback
+    can be used as a differential oracle for the other. ``?github_app=`` is
+    reached only past a successful claim, or from a receipt.
 
     A session that died while the person was on GitHub's form is handled
     exactly as the OAuth callback handles it: nothing is claimed, nothing is
     converted, and the browser is sent back to Apps with a flag rather than
     a raw 401 body. The pending row survives for a retry within the hour.
     """
+    if not _is_navigation(request):
+        logger.debug("oauth.callback_prefetch_ignored", flow="github_app_manifest")
+        return _no_store(redirect_module.app_return_url(settings, public_id=None))
+
+    result = service.CallbackResult(connection=None, error="expired")
+    handle = _bounded(state, MAX_STATE_LENGTH)
+    bounded_code = _bounded(code, MAX_CALLBACK_PARAM_LENGTH)
     if auth is None:
-        return _no_store(redirect_module.app_return_url(settings, public_id=None, error="failed"))
-    created = await service.complete_github_app_manifest(
-        db,
-        crypto,
-        http_client,
-        settings,
-        user_id=auth.user.id,
-        state=state,
-        code=code,
-        request_id=req_id(request),
-        ip_hash=ip_hash(request),
+        service.log_callback_refusal("no_session", flow="github_app_manifest")
+        result = service.CallbackResult(connection=None, error="signed_out")
+    elif handle is None:
+        service.log_callback_refusal("state_malformed", flow="github_app_manifest")
+    elif code is not None and bounded_code is None:
+        service.log_callback_refusal("param_too_long", flow="github_app_manifest")
+    else:
+        try:
+            result = await service.complete_github_app_manifest(
+                db,
+                crypto,
+                http_client,
+                settings,
+                user_id=auth.user.id,
+                state=handle,
+                code=bounded_code,
+                request_id=req_id(request),
+                ip_hash=ip_hash(request),
+            )
+        except Exception:
+            with contextlib.suppress(Exception):
+                await db.rollback()
+            service.log_callback_refusal("internal_error", flow="github_app_manifest")
+            result = service.CallbackResult(connection=None, error="expired")
+    if result.manifest_created is not None:
+        return _no_store(
+            redirect_module.github_app_return_url(settings, created=result.manifest_created)
+        )
+    return _no_store(
+        redirect_module.app_return_url(
+            settings,
+            public_id=None,
+            error=result.error,
+            connector_type=result.connector_type,
+        )
     )
-    return _no_store(redirect_module.github_app_return_url(settings, created=created))
 
 
 # --- Workspace routes --------------------------------------------------

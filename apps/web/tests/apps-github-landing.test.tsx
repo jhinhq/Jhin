@@ -3,7 +3,7 @@
  * step — Connect GitHub, open by itself. */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import AppsPage from "@/app/(app)/apps/page";
 import type { CatalogApp, ConnectorInfo, OAuthProbeOut, OAuthRedirectOut } from "@/lib/types";
@@ -97,7 +97,23 @@ function json(data: unknown, status = 200): Response {
   });
 }
 
-function installServer() {
+const CONNECTION = {
+  id: "connection-1",
+  public_id: "a".repeat(32),
+  workspace_id: "workspace-1",
+  connector_type: "github",
+  name: "GitHub",
+  status: "needs_reauth",
+  auth_type: "oauth",
+  config_json: {},
+  created_at: "2026-09-01T00:00:00Z",
+  updated_at: "2026-09-01T00:00:00Z",
+  last_verified_at: null,
+  last_error: null,
+  needs_reauth: true,
+};
+
+function installServer(connections: unknown[] = []) {
   const probes: string[] = [];
   vi.stubGlobal(
     "fetch",
@@ -106,7 +122,9 @@ function installServer() {
       const method = init?.method ?? "GET";
       if (path === "/api/v1/connectors") return json([GITHUB_CONNECTOR]);
       if (path === "/api/v1/connectors/catalog") return json(CATALOG);
-      if (path === "/api/v1/workspaces/workspace-1/connections" && method === "GET") return json([]);
+      if (path === "/api/v1/workspaces/workspace-1/connections" && method === "GET") {
+        return json(connections);
+      }
       if (path === "/api/v1/oauth/redirect-uri") return json(REDIRECT);
       if (path === "/api/v1/workspaces/workspace-1/oauth/probe" && method === "POST") {
         probes.push(String(init?.body));
@@ -192,5 +210,78 @@ describe("AppsPage after the GitHub App handshake", () => {
       await screen.findByText(/callback URL listed on the app is not this instance's redirect URL/),
     ).toBeTruthy();
     expect(screen.queryByTestId("oauth-consent-step")).toBeNull();
+  });
+});
+
+describe("AppsPage after a refused OAuth round trip", () => {
+  it("offers the library when the callback did not name an app, and opens no drawer", async () => {
+    installServer();
+    renderPage("?oauth_error=expired");
+
+    const card = await screen.findByTestId("oauth-landing");
+    expect(card.textContent).toContain("That sign-in link had already been used");
+    expect(screen.getByTestId("oauth-landing-browse")).toBeTruthy();
+    expect(screen.queryByTestId("oauth-consent-step")).toBeNull();
+    await waitFor(() => expect(window.location.search).toBe(""));
+  });
+
+  it("offers the app by name, and the retry opens the connect panel for it", async () => {
+    const probes = installServer();
+    renderPage("?oauth_error=signed_out&app=github");
+
+    const retry = await screen.findByTestId("oauth-landing-retry");
+    expect(retry.textContent).toContain("Connect GitHub again");
+    expect(screen.getByTestId("oauth-landing").textContent).toContain(
+      "You were signed out while you were away",
+    );
+
+    fireEvent.click(retry);
+
+    expect(await screen.findByTestId("oauth-consent-step")).toBeTruthy();
+    await waitFor(() => expect(probes).toHaveLength(1));
+    expect(probes[0]).toContain('"connector_type":"github"');
+    await waitFor(() => expect(window.location.search).toBe(""));
+  });
+
+  it("offers Reconnect when the refusal names a connection that already exists", async () => {
+    installServer([CONNECTION]);
+    renderPage(`?oauth_error=failed&connection=${"a".repeat(32)}&app=github`);
+
+    const card = await screen.findByTestId("oauth-landing");
+    // The card renders the product's one Reconnect implementation — the same
+    // component the standing banner above it uses, not a second copy.
+    await waitFor(() => expect(within(card).getByTestId("reconnect-GitHub")).toBeTruthy());
+    expect(card.textContent).toContain("only its sign-in needs redoing");
+    // The success drawer belongs to a round trip that worked.
+    expect(screen.queryByText("GitHub is connected")).toBeNull();
+    await waitFor(() => expect(window.location.search).toBe(""));
+  });
+
+  it("still opens the drawer, and no card, when the round trip succeeded", async () => {
+    installServer([{ ...CONNECTION, status: "active", needs_reauth: false }]);
+    renderPage(`?connection=${"a".repeat(32)}`);
+
+    expect(await screen.findByText("GitHub is connected")).toBeTruthy();
+    expect(screen.queryByTestId("oauth-landing")).toBeNull();
+    await waitFor(() => expect(window.location.search).toBe(""));
+  });
+
+  it("renders Jhin's own sentence for a flag it does not recognise", async () => {
+    installServer();
+    renderPage("?oauth_error=%3Cscript%3Ealert(1)%3C%2Fscript%3E");
+
+    const card = await screen.findByTestId("oauth-landing");
+    expect(card.textContent).toContain("That connection could not be finished");
+    expect(document.body.textContent).not.toContain("alert(1)");
+    expect(document.querySelector("script")).toBeNull();
+  });
+
+  it("can be dismissed", async () => {
+    installServer();
+    renderPage("?oauth_error=expired");
+
+    fireEvent.click(await screen.findByTestId("oauth-landing-dismiss"));
+
+    await waitFor(() => expect(screen.queryByTestId("oauth-landing")).toBeNull());
   });
 });

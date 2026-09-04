@@ -16,6 +16,7 @@ from apps.api.tests.oauth_callback_harness import (
     CallbackHarness,
 )
 from fastapi import FastAPI, Request
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from jhin_api.deps import (
@@ -95,6 +96,14 @@ async def callback(
         ]
     )
     await session.commit()
+    # Detached on purpose. The harness shares one session with the app, and a
+    # callback that releases a wrong-session claim rolls that session back —
+    # which expires every instance in its identity map, including these two.
+    # The real app gets a fresh session per request and never sees it; here,
+    # keeping the actors out of the identity map is what stops a test's own
+    # ``callback.admin.id`` from becoming a synchronous lazy load.
+    session.expunge(admin)
+    session.expunge(other)
 
     actor = {"user": admin}
     app = FastAPI()
@@ -119,6 +128,13 @@ async def callback(
 
     async def override_auth() -> AuthContext:
         user = actor["user"]
+        if sa_inspect(user).expired:
+            # A previous request rolled its transaction back, which expires
+            # every instance in this session's identity map. The real app
+            # gets a fresh session per request and never sees this; the
+            # harness shares one, so the actor is reloaded here rather than
+            # blowing up on a lazy attribute read inside the dependency.
+            await session.refresh(user)
         return AuthContext(
             user=user,
             session_record=UserSession(
@@ -150,6 +166,7 @@ async def callback(
             actor=actor,
             admin=admin,
             other=other,
+            auth_override=override_auth,
         )
 
 

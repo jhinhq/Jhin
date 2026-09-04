@@ -16,13 +16,20 @@ import { LogoTile } from "@/components/catalog/logo-tile";
 import { CatalogEntryDialog } from "@/components/catalog-entry-dialog";
 import { Disclosure, LoadError, StatusPill } from "@/components/company/bits";
 import { ConnectPanel } from "@/components/connect/connect-panel";
+import { OAuthLandingCard } from "@/components/connect/oauth-landing";
 import { ReconnectBanner, ReconnectButton } from "@/components/connect/reconnect-banner";
 import { ConnectionDetailDialog, WebhookSecretDialog } from "@/components/connection-detail";
 import { ConnectorsGallery } from "@/components/connectors-gallery";
 import { Button, EmptyState, ErrorNote, Spinner } from "@/components/ui";
 import { connectTarget, type ConnectTarget } from "@/lib/apps";
 import { formatDateTime } from "@/lib/format";
-import { consumeReturnRoute, oauthErrorMessage, readGitHubAppLanding } from "@/lib/oauth";
+import {
+  consumeReturnRoute,
+  type OAuthLandingCopy,
+  oauthLanding,
+  readGitHubAppLanding,
+  readLandingConnector,
+} from "@/lib/oauth";
 import {
   useAppCatalog,
   useCatalogFacets,
@@ -61,30 +68,52 @@ const PUBLIC_ID_PATTERN = /^[0-9a-f]{32}$/;
 
 /** What an OAuth round trip left in the address bar on the way back. */
 interface OAuthLanding {
-  error: string | null;
+  copy: OAuthLandingCopy | null;
   publicId: string | null;
+  /** The connector the flow concerned, so the card can offer the retry. */
+  connectorType: string | null;
   /** The GitHub App handshake's flag, or GitHub's own install return. */
   githubApp: ReturnType<typeof readGitHubAppLanding>;
 }
+
+const NO_LANDING: OAuthLanding = {
+  copy: null,
+  publicId: null,
+  connectorType: null,
+  githubApp: null,
+};
 
 /**
  * Read the callback's own parameters, once.
  *
  * All are written server-side or matched against a closed set: `?connection=`
  * is a public id built from the row that was just created, `?oauth_error=`
- * and `?github_app=` are constants, and `?setup_action=` is read only for its
- * shape. Nothing a provider wrote reaches this page, and the id is checked
- * against its shape before it is ever used to look anything up.
+ * and `?github_app=` are constants, `?app=` is a connector type re-matched
+ * against the same pattern the API validated it with, and `?setup_action=` is
+ * read only for its shape. Nothing a provider wrote reaches this page, and
+ * the id is checked against its shape before it is ever used to look
+ * anything up.
  */
 function readOAuthLanding(): OAuthLanding {
-  if (typeof window === "undefined") return { error: null, publicId: null, githubApp: null };
+  if (typeof window === "undefined") return NO_LANDING;
   const params = new URLSearchParams(window.location.search);
   const connected = params.get("connection");
   return {
-    error: oauthErrorMessage(params.get("oauth_error")),
+    copy: oauthLanding(params.get("oauth_error")),
     publicId: connected !== null && PUBLIC_ID_PATTERN.test(connected) ? connected : null,
+    connectorType: readLandingConnector(params),
     githubApp: readGitHubAppLanding(params),
   };
+}
+
+/** Put the cursor in the library's search box, for "Choose an app". */
+function focusLibrarySearch(): void {
+  const box = document.querySelector<HTMLInputElement>('input[aria-label="Search apps"]');
+  if (box === null) return;
+  if (typeof box.scrollIntoView === "function") {
+    box.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+  box.focus();
 }
 
 const GITHUB_APP_STATUS: Record<"created" | "installed", string> = {
@@ -150,6 +179,8 @@ export default function AppsPage() {
   const [showAllConnections, setShowAllConnections] = useState(false);
   /** The OAuth callback's own parameters, read once on the way in. */
   const [landing, setLanding] = useState<OAuthLanding>(readOAuthLanding);
+  /** "Not now" on the recovery card. The one event that ends it. */
+  const [landingDismissed, setLandingDismissed] = useState(false);
 
   /**
    * Tidy up after an OAuth round trip.
@@ -161,7 +192,7 @@ export default function AppsPage() {
    * once at mount and derived from thereafter.
    */
   useEffect(() => {
-    if (landing.error === null && landing.publicId === null && landing.githubApp === null) return;
+    if (landing.copy === null && landing.publicId === null && landing.githubApp === null) return;
     window.history.replaceState(null, "", window.location.pathname);
     const back = consumeReturnRoute();
     if (back !== null && back !== window.location.pathname) window.location.assign(back);
@@ -299,14 +330,22 @@ export default function AppsPage() {
       ? undefined
       : connectionList.find((connection) => connection.public_id === landing.publicId);
 
+  /**
+   * The drawer celebrates a connection; the card recovers from a failure.
+   * Both can name the same connection — a reconnect that was refused carries
+   * `?connection=` beside its flag so the card can offer Reconnect — so the
+   * drawer opens only when the round trip actually succeeded.
+   */
+  const drawerConnection = landing.copy === null ? landedConnection : undefined;
+
   const detail =
     connectionList.find((connection) => connection.id === detailId) ??
     (created && created.id === detailId ? created : null) ??
-    landedConnection ??
+    drawerConnection ??
     null;
   const justConnected =
     (created !== null && created.id === detailId) ||
-    (detailId === null && landedConnection !== undefined);
+    (detailId === null && drawerConnection !== undefined);
 
   const closeDetail = () => {
     setDetailId(null);
@@ -384,7 +423,22 @@ export default function AppsPage() {
           <>
             <section className="space-y-3">
               <h2 className="font-display text-base font-semibold tracking-tight text-ink">Connected</h2>
-              <ErrorNote message={landing.error ?? githubAppFailure} />
+              <ErrorNote message={githubAppFailure} />
+              {landing.copy !== null && !landingDismissed ? (
+                <OAuthLandingCard
+                  copy={landing.copy}
+                  connector={
+                    landing.connectorType !== null
+                      ? connectorFor(landing.connectorType) ?? null
+                      : null
+                  }
+                  connection={landedConnection ?? null}
+                  workspaceId={workspaceId}
+                  onRetry={(connector) => setCreateFor({ connector })}
+                  onBrowse={focusLibrarySearch}
+                  onDismiss={() => setLandingDismissed(true)}
+                />
+              ) : null}
               {githubAppStatus ? (
                 <p
                   role="status"

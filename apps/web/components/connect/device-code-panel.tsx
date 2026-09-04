@@ -79,10 +79,17 @@ export function DeviceCodePanel({
   }, [poll.data, onConnected, appSettingsUrl]);
 
   const status = poll.data?.status ?? "pending";
-  /** A 410 from the poll: the handle is spent or expired server-side. Not a
-   * transient failure, so it is not "try again in a moment". */
+  /** A 410 or a 400 from the poll: the handle is spent, expired, or refused
+   * server-side. Neither is transient, so neither is "try again in a moment".
+   *
+   * The 400 case is the one that used to lie. ``poll_device_flow`` answers
+   * 400 on a provider refusal *after* it has already deleted the row, and the
+   * panel rendered any non-410 poll error as "It is still valid — try again",
+   * which told somebody to keep waiting on a handle that no longer existed. */
   const gone = poll.error instanceof ApiError && poll.error.status === 410;
-  const expired = status === "expired" || gone || (remaining === 0 && status !== "connected");
+  const refused = poll.error instanceof ApiError && poll.error.status === 400;
+  const terminal = gone || refused;
+  const expired = status === "expired" || terminal || (remaining === 0 && status !== "connected");
   const restart = onRestart ?? onCancel;
   const label = verificationLabel(device.verification_uri);
   const openUrl =
@@ -150,9 +157,11 @@ export function DeviceCodePanel({
     return (
       <div className="space-y-4" data-testid="device-code-panel">
         <p className="rounded-2xl border border-warn/30 bg-warn-soft px-4 py-3 text-sm text-warn">
-          {gone
-            ? "This sign-in attempt is no longer valid. Start again."
-            : "That code expired before it was approved. Codes are short-lived on purpose."}
+          {refused && poll.error instanceof ApiError
+            ? poll.error.detail
+            : gone
+              ? "This sign-in attempt is no longer valid. Start again."
+              : "That code expired before it was approved. Codes are short-lived on purpose."}
         </p>
         <div className="flex justify-end gap-2">
           <Button type="button" variant="ghost" onClick={onCancel}>
@@ -218,7 +227,9 @@ export function DeviceCodePanel({
 
       <ErrorNote
         message={
-          poll.isError ? "Checking on that code failed. It is still valid — try again." : null
+          poll.isError && !terminal
+            ? "Checking on that code failed. It is still valid — try again."
+            : null
         }
       />
 

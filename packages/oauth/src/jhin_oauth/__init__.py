@@ -42,6 +42,7 @@ from jhin_oauth.lifecycle import (
     token_map,
 )
 from jhin_oauth.persistence import (
+    ClaimRefusal,
     OAuthClientStore,
     PendingAuthorizationInvalid,
     PendingAuthorizationStore,
@@ -77,6 +78,7 @@ from jhin_oauth.urls import (
 __all__ = [
     "REFRESH_MARGIN_SECONDS",
     "AuthorizationServerMetadata",
+    "ClaimRefusal",
     "ClientCredentials",
     "ClientForgottenError",
     "ConnectionTokenService",

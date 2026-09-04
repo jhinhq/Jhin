@@ -196,6 +196,24 @@ describe("DeviceCodePanel", () => {
     expect(onRestart).toHaveBeenCalledTimes(1);
   });
 
+  it("treats a 400 from the poll as terminal and shows the API's own sentence", async () => {
+    // ``poll_device_flow`` answers 400 on a provider refusal *after* it has
+    // deleted the row. Telling somebody the code "is still valid" then sends
+    // them to wait on a handle that no longer exists.
+    pollState = {
+      data: undefined,
+      dataUpdatedAt: 0,
+      isError: true,
+      error: new ApiError(400, "The provider refused this device sign-in. Start again from Apps."),
+    };
+    const { onRestart } = renderPanel();
+    const panel = await screen.findByTestId("device-code-panel");
+    expect(panel.textContent).toContain("The provider refused this device sign-in.");
+    expect(panel.textContent).not.toContain("It is still valid");
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(onRestart).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps a passing poll failure passing", async () => {
     pollState = {
       data: undefined,

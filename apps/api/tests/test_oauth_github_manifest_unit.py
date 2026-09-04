@@ -54,6 +54,16 @@ async def _pending_rows(session: AsyncSession) -> int:
     return int(count or 0)
 
 
+async def _unconsumed_rows(session: AsyncSession) -> int:
+    """Rows still claimable. A settled row survives as a receipt and is not one."""
+    count = await session.scalar(
+        select(func.count())
+        .select_from(OAuthAuthorization)
+        .where(OAuthAuthorization.consumed_at.is_(None))
+    )
+    return int(count or 0)
+
+
 async def _refused(
     session: AsyncSession,
     crypto: SecretCrypto,
@@ -135,7 +145,7 @@ async def test_the_conversion_stores_a_confidential_registration(
     with FakeGitHubOAuthServer() as fake:
         _allow(fake.base_url)
         async with httpx.AsyncClient(base_url=fake.base_url) as http_client:
-            created = await service.complete_github_app_manifest(
+            result = await service.complete_github_app_manifest(
                 session,
                 crypto,
                 http_client,
@@ -146,7 +156,8 @@ async def test_the_conversion_stores_a_confidential_registration(
                 **REQ,  # type: ignore[arg-type]
             )
 
-    assert created is True
+    assert result.manifest_created is True
+    assert result.error is None
     found = await OAuthClientStore(session, crypto).get(
         admin_ctx.workspace_id,
         issuer="https://github.com",
@@ -159,5 +170,12 @@ async def test_the_conversion_stores_a_confidential_registration(
     assert credentials.client_id.startswith("Iv1.fake")
     assert credentials.client_secret
     assert credentials.client_secret.startswith("fake-github-client-secret-")
-    # The row is spent: a second arrival with the same state is refused.
-    assert await _pending_rows(session) == 0
+    # The row is spent. It survives as a receipt — outcome only, no secret —
+    # so a refresh of GitHub's return lands where the first arrival did
+    # rather than being told the handshake is no longer valid.
+    assert await _unconsumed_rows(session) == 0
+    receipt = await session.scalar(select(OAuthAuthorization))
+    assert receipt is not None
+    assert receipt.outcome == "github_app_created"
+    assert receipt.verifier_secret_id is None
+    assert receipt.draft_json == {}

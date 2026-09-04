@@ -112,7 +112,10 @@ class OAuthAuthorization(Base, UuidPkMixin, CreatedAtMixin):
     through. Four properties close it: the lookup key is a hash of a 256-bit
     handle the attacker does not have, ``expires_at`` bounds the window,
     ``consumed_at`` makes a replay a no-op, and ``user_id`` means a stolen
-    handle still needs the initiating user's browser session.
+    handle still needs the initiating user's browser session. And once
+    consumed the row keeps only what it produced — a constant from a closed
+    vocabulary and a foreign key — for a short window, so a refresh does not
+    cost somebody the connection they made.
     """
 
     __tablename__ = "oauth_authorization"
@@ -122,7 +125,17 @@ class OAuthAuthorization(Base, UuidPkMixin, CreatedAtMixin):
             "flow IN ('authorization_code', 'device_code', 'github_app_manifest')",
             name="ck_oauth_authorization_flow",
         ),
+        CheckConstraint(
+            "outcome IS NULL OR outcome IN ('connected','denied','failed',"
+            "'client_rejected','callback_mismatch','redirect_changed',"
+            "'issuer_mismatch','registration_gone','github_app_created',"
+            "'github_app_failed')",
+            name="ck_oauth_authorization_outcome",
+        ),
+        # Kept: ``claim`` and ``peek`` still filter on ``expires_at``. Only
+        # ``purge_expired``'s range scan moved to ``retain_until``.
         Index("ix_oauth_authorization_expires_at", "expires_at"),
+        Index("ix_oauth_authorization_retain_until", "retain_until"),
         Index("ix_oauth_authorization_workspace", "workspace_id"),
     )
 
@@ -169,5 +182,24 @@ class OAuthAuthorization(Base, UuidPkMixin, CreatedAtMixin):
     #: The store refuses any key that looks like credential material.
     draft_json: Mapped[dict[str, Any]] = mapped_column(JsonDict, default=dict)
     poll_interval_seconds: Mapped[int] = mapped_column(Integer, default=5)
+    #: The window in which this row may be *claimed*, and nothing else.
     expires_at: Mapped[datetime] = mapped_column(UtcDateTime)
     consumed_at: Mapped[datetime | None] = mapped_column(UtcDateTime, default=None)
+    #: What this row produced once it was consumed, from a closed vocabulary.
+    #: NULL while pending, and NULL forever when the claim was made by
+    #: anybody other than the row's own user: a burn by the wrong session
+    #: must never leave a receipt the legitimate owner could be handed.
+    outcome: Mapped[str | None] = mapped_column(String(32), default=None)
+    #: The connection this flow concerns — the one it created, or the one it
+    #: was re-authorizing — so a repeat callback can send the browser to the
+    #: same page without minting anything. ``SET NULL``, because a receipt
+    #: must never be the reason a deleted connection stays referenced, and
+    #: must never itself vanish when one is deleted.
+    outcome_connection_id: Mapped[UUID | None] = mapped_column(
+        StdUuid, ForeignKey("connection.id", ondelete="SET NULL"), default=None
+    )
+    #: The instant after which this row is garbage. ``expires_at`` while
+    #: pending; ``consumed_at + receipt TTL`` once settled. ``purge_expired``
+    #: reads only this, so a sweep cannot take a receipt out from under a
+    #: refresh already in flight.
+    retain_until: Mapped[datetime] = mapped_column(UtcDateTime)

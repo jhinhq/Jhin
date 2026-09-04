@@ -150,18 +150,65 @@ def test_app_return_url_refuses_anything_that_is_not_a_public_id(public_id: str)
 
 
 def test_the_return_error_vocabulary_is_closed_and_every_member_lands_on_apps() -> None:
-    """Four constants, chosen by the service, never provider text."""
+    """Nine constants, chosen by the service, never provider text.
+
+    Two of them — ``signed_out`` and ``expired`` — are the whole pre-claim
+    tier; the other seven are reachable only past a claim. Adding a tenth
+    means deciding which tier it belongs to, which is why the set is pinned
+    here as well as in ``test_oauth_router_unit.py``.
+    """
     assert set(get_args(OAuthReturnError)) == {
+        "signed_out",
+        "expired",
         "denied",
         "failed",
+        "issuer_mismatch",
         "client_rejected",
         "callback_mismatch",
+        "redirect_changed",
+        "registration_gone",
     }
     settings = _settings(app_url="https://jhin.example.com")
     for code in get_args(OAuthReturnError):
         assert app_return_url(settings, public_id=None, error=code) == (
             f"https://jhin.example.com/apps?oauth_error={code}"
         )
+
+
+def test_a_connector_type_decorates_the_landing_and_junk_is_dropped() -> None:
+    """The retry button's label, proven shape-safe at the door.
+
+    Dropped rather than raised: this whole change exists so that no callback
+    ends in a 500, and a hand-edited ``connector_type`` is not worth one.
+    """
+    settings = _settings(app_url="https://jhin.example.com")
+    assert app_return_url(settings, public_id=None, error="denied", connector_type="github") == (
+        "https://jhin.example.com/apps?oauth_error=denied&app=github"
+    )
+    for junk in ["../evil", "GitHub", "", "a" * 51, "gi thub", "github?x=1"]:
+        assert app_return_url(settings, public_id=None, error="denied", connector_type=junk) == (
+            "https://jhin.example.com/apps?oauth_error=denied"
+        )
+
+
+def test_an_error_may_carry_the_connection_it_concerns() -> None:
+    """A reconnect refusal names the connection, so the card can offer Reconnect."""
+    settings = _settings(app_url="https://jhin.example.com")
+    assert app_return_url(settings, public_id="a" * 32, error="failed", connector_type="mcp") == (
+        f"https://jhin.example.com/apps?oauth_error=failed&connection={'a' * 32}&app=mcp"
+    )
+
+
+def test_a_bad_public_id_still_raises_even_beside_an_error() -> None:
+    """That can only be a bug in our own code, so it stays loud."""
+    with pytest.raises(ValueError):
+        app_return_url(_settings(), public_id="not-hex", error="failed")
+
+
+def test_the_landing_flag_is_percent_encoded() -> None:
+    """It is a closed set today; the encoding is what keeps that a safe fact."""
+    settings = _settings(app_url="https://jhin.example.com")
+    assert "%2F" not in app_return_url(settings, public_id=None, error="denied")
 
 
 def test_the_manifest_handshake_lands_on_apps_with_a_boolean_flag() -> None:

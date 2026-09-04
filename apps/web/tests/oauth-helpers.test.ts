@@ -12,9 +12,10 @@ import {
   formatCountdown,
   formatUserCode,
   needsReauth,
-  oauthErrorMessage,
+  oauthLanding,
   postFormTo,
   readGitHubAppLanding,
+  readLandingConnector,
   safeHttpsUrl,
   saveReturnRoute,
   secondsUntil,
@@ -146,24 +147,87 @@ describe("devicePollDelayMs", () => {
   });
 });
 
-describe("oauthErrorMessage", () => {
+describe("oauthLanding", () => {
+  const CODES = [
+    "signed_out",
+    "expired",
+    "denied",
+    "failed",
+    "client_rejected",
+    "callback_mismatch",
+    "redirect_changed",
+    "issuer_mismatch",
+    "registration_gone",
+  ];
+
   it("has a closed vocabulary and never echoes the provider", () => {
-    expect(oauthErrorMessage(null)).toBeNull();
-    expect(oauthErrorMessage("denied")).toContain("declined");
-    expect(oauthErrorMessage("failed")).toContain("could not be completed");
+    expect(oauthLanding(null)).toBeNull();
+    for (const code of CODES) {
+      const copy = oauthLanding(code);
+      expect(copy).not.toBeNull();
+      expect(copy?.title.length).toBeGreaterThan(0);
+      expect(copy?.body.length).toBeGreaterThan(0);
+    }
     // Anything unrecognised — including text a provider influenced — collapses
-    // to the same Jhin-authored sentence.
-    expect(oauthErrorMessage("<script>alert(1)</script>")).toBe(oauthErrorMessage("failed"));
+    // to the same Jhin-authored copy.
+    expect(oauthLanding("<script>alert(1)</script>")).toBe(oauthLanding("failed"));
+    expect(oauthLanding("nonsense")).toBe(oauthLanding("failed"));
+  });
+
+  it("always names a next step, and reassures wherever reassurance is the point", () => {
+    for (const code of CODES) {
+      const body = oauthLanding(code)?.body.toLowerCase() ?? "";
+      // What to do now. Never "start again from the app you were connecting",
+      // which is what the old copy said to somebody looking at a wall of app
+      // cards with no idea which one they had just been on.
+      expect(body).toMatch(
+        /try again|start the connection|connect from here|set the app up again/,
+      );
+    }
+    // "Nothing was connected" is the first thing somebody bounced back from a
+    // provider wants to know. The one exception is callback_mismatch, whose
+    // whole body is the operator-side fix.
+    for (const code of CODES.filter((value) => value !== "callback_mismatch")) {
+      expect(oauthLanding(code)?.body.toLowerCase()).toContain("nothing was connected");
+    }
+  });
+
+  it("offers the operator hint everywhere except a declined request", () => {
+    // Declining is a choice somebody made, not a fault worth explaining.
+    expect(oauthLanding("denied")?.operatorHint).toBe(false);
+    for (const code of CODES.filter((value) => value !== "denied")) {
+      expect(oauthLanding(code)?.operatorHint).toBe(true);
+    }
   });
 
   it("names the two first-setup mistakes a person can fix", () => {
-    const rejected = oauthErrorMessage("client_rejected");
-    expect(rejected).toContain("did not accept this app's client id and secret");
-    expect(rejected).toContain("Settings → OAuth");
-    expect(rejected).toContain("Apps → Connect GitHub");
-    const mismatch = oauthErrorMessage("callback_mismatch");
-    expect(mismatch).toContain("callback URL listed on the app is not this instance's redirect URL");
-    expect(mismatch).toContain("Settings → OAuth");
+    const rejected = oauthLanding("client_rejected");
+    expect(rejected?.body).toContain("did not accept this app's client id and secret");
+    expect(rejected?.body).toContain("Settings → OAuth");
+    const mismatch = oauthLanding("callback_mismatch");
+    expect(mismatch?.body).toContain(
+      "callback URL listed on the app is not this instance's redirect URL",
+    );
+    expect(mismatch?.body).toContain("Settings → OAuth");
+  });
+
+  it("tells somebody whose session died that nothing is wrong with them", () => {
+    const copy = oauthLanding("signed_out");
+    expect(copy?.title).toContain("signed out");
+    expect(copy?.body).toContain("start the connection and it will go through");
+  });
+});
+
+describe("readLandingConnector", () => {
+  it("re-matches the pattern the API validated, because the address bar is not trusted twice", () => {
+    const read = (value: string) => readLandingConnector(new URLSearchParams({ app: value }));
+    expect(read("github")).toBe("github");
+    expect(read("mcp")).toBe("mcp");
+    expect(read("a_b9")).toBe("a_b9");
+    for (const junk of ["../evil", "GitHub", "", "9lives", "a".repeat(51), "gi thub", "a-b"]) {
+      expect(read(junk)).toBeNull();
+    }
+    expect(readLandingConnector(new URLSearchParams())).toBeNull();
   });
 });
 

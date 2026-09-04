@@ -21,7 +21,8 @@ import pytest
 from pydantic import BaseModel
 
 from jhin_api.access.route_scopes import ROUTE_SCOPES, required_scope
-from jhin_api.oauth import schemas
+from jhin_api.oauth import redirect as redirect_module
+from jhin_api.oauth import schemas, service
 from jhin_api.oauth.router import oauth_public_router, oauth_router
 from jhin_domain import ALL_SCOPE_KEYS
 
@@ -183,6 +184,64 @@ def test_no_oauth_route_accepts_a_redirect_uri_or_client_id_from_a_request() -> 
         assert "redirect_uri" not in fields, model.__name__
         assert "client_id" not in fields, model.__name__
         assert fields & {"next", "return_to", "return_url"} == set(), model.__name__
+
+
+def test_the_public_callbacks_declare_no_error_body() -> None:
+    """A browser-facing route with a response model is a JSON body waiting to happen.
+
+    Both callbacks answer a bare ``Response`` — a 303 with an empty body — on
+    every path, success and refusal alike. That is the shape the operator's
+    dead end came from breaking.
+    """
+    callbacks = [
+        route
+        for route in oauth_public_router.routes
+        if getattr(route, "path", "").endswith("callback")
+    ]
+    assert len(callbacks) == 2
+    for route in callbacks:
+        assert route.status_code == 303, route.path  # type: ignore[attr-defined]
+        assert route.response_model is None, route.path  # type: ignore[attr-defined]
+
+
+def test_the_return_flag_vocabulary_is_the_one_that_was_analysed() -> None:
+    """Nine flags, two tiers. A tenth means redoing the leak analysis.
+
+    ``signed_out`` and ``expired`` are the pre-claim tier — reachable by any
+    caller, so they say nothing. The other seven are reachable only past a
+    claim, which needs the raw 256-bit handle *and* the owning session.
+    """
+    assert get_args(redirect_module.OAuthReturnError) == (
+        "signed_out",
+        "expired",
+        "denied",
+        "failed",
+        "issuer_mismatch",
+        "client_rejected",
+        "callback_mismatch",
+        "redirect_changed",
+        "registration_gone",
+    )
+
+
+def test_the_admin_only_landings_are_a_subset_of_the_vocabulary() -> None:
+    """The four that name a configuration fact, gated on current membership."""
+    assert set(get_args(redirect_module.OAuthReturnError)) >= service._ADMIN_ONLY_LANDINGS
+    assert {
+        "redirect_changed",
+        "registration_gone",
+        "client_rejected",
+        "callback_mismatch",
+    } == service._ADMIN_ONLY_LANDINGS
+
+
+def test_every_stored_outcome_renders_as_a_flag_or_as_nothing() -> None:
+    """No receipt can name a landing the redirect builder does not know."""
+    renderable = set(get_args(redirect_module.OAuthReturnError)) | {"connected"}
+    for outcome in service.CALLBACK_OUTCOMES:
+        if outcome.startswith("github_app_"):
+            continue
+        assert outcome in renderable, outcome
 
 
 def test_the_only_request_model_with_a_client_id_is_the_manual_registration() -> None:

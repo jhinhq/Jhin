@@ -11,7 +11,12 @@ The callback is the security-critical half, and its rules are absolute:
 * five checks, every one of which must pass — a well-formed handle, a row that
   exists, an atomic single-use claim, the *initiating user's own session*, and
   an ``iss`` that byte-matches the issuer recorded before we redirected;
-* one refusal, byte-identical for all five, so nobody can tell which failed;
+* one landing for every refusal decided *before* the claim succeeds, byte for
+  byte, so nobody holding any session can tell which of them they tripped; a
+  named cause only past the claim, which needs the raw 256-bit handle *and*
+  the owning session — the pair that could have completed the flow anyway;
+* no refusal has a body: every path returns a :class:`CallbackResult` and the
+  router turns it into a 303 to a page Jhin controls;
 * no value from the request ever reaches a ``Location`` header, an exception
   message, a log line, or a stored row. Not ``error_description``, not
   ``error_uri``, not a ``next`` parameter somebody hoped we would honour.
@@ -29,7 +34,7 @@ import contextlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Final
+from typing import Any, Final, Literal, cast, get_args
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -59,7 +64,8 @@ from jhin_api.oauth.schemas import (
 )
 from jhin_api.settings import Settings
 from jhin_connectors.endpoints import EndpointPolicyError
-from jhin_db.models import Connection, OAuthAuthorization
+from jhin_db.models import Connection, OAuthAuthorization, WorkspaceMembership
+from jhin_domain import WorkspaceRole, role_satisfies
 from jhin_oauth.discovery import (
     probe_mcp_endpoint,
     select_scopes,
@@ -112,19 +118,20 @@ DEVICE_FLOW_MAX_TTL_SECONDS: Final[int] = 1_800
 GITHUB_MANIFEST_TTL_SECONDS: Final[int] = 3_600
 #: GitHub speaks OAuth from one origin; DCR credentials are keyed by it.
 GITHUB_ISSUER: Final[str] = "https://github.com"
-PURGE_OLDER_THAN_SECONDS: Final[int] = 3_600
+# Four hours, not one. An expired row is what lets the log say
+# ``state_expired`` rather than ``state_unknown``, and an operator who reports
+# a failed connect an hour later should still get the specific answer. The
+# table is one row per Connect click; keeping them costs nil.
+PURGE_OLDER_THAN_SECONDS: Final[int] = 14_400
 PURGE_LIMIT: Final[int] = 200
 
+#: The device poll's 410 body. The browser callbacks no longer raise anything
+#: — they redirect — so this survives only for the XHR the device panel makes.
 _INVALID_ATTEMPT_DETAIL: Final[str] = PendingAuthorizationInvalid.MESSAGE
 
 
 def _bad_request(detail: str) -> HTTPException:
     return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
-
-
-def invalid_attempt() -> HTTPException:
-    """The one refusal every failed callback produces, byte for byte."""
-    return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_INVALID_ATTEMPT_DETAIL)
 
 
 def _upstream_unavailable(detail: str) -> HTTPException:
@@ -774,12 +781,275 @@ def _source_of(raw: str) -> RegistrationSource:
 # --- The callback ------------------------------------------------------
 
 
+CallbackReason = Literal[
+    "no_session",
+    "state_malformed",
+    "param_too_long",
+    "state_unknown",
+    "state_expired",
+    "state_consumed",
+    "wrong_user",
+    "wrong_workspace",
+    "wrong_flow",
+    "redirect_uri_changed",
+    "issuer_missing",
+    "issuer_mismatch",
+    "provider_denied",
+    "no_code",
+    "registration_missing",
+    "verifier_missing",
+    "endpoint_blocked",
+    "exchange_refused",
+    "connection_not_created",
+    "manifest_no_code",
+    "manifest_unavailable",
+    "manifest_conversion_failed",
+    "internal_error",
+]
+CALLBACK_REASONS: Final[frozenset[str]] = frozenset(get_args(CallbackReason))
+
+CallbackFlow = Literal["authorization_code", "device_code", "github_app_manifest"]
+CALLBACK_FLOWS: Final[frozenset[str]] = frozenset(get_args(CallbackFlow))
+
+#: What a settled row may remember. One value per landing the first pass
+#: produced, plus the two manifest outcomes.
+CALLBACK_OUTCOMES: Final[frozenset[str]] = frozenset(
+    {
+        "connected",
+        "denied",
+        "failed",
+        "client_rejected",
+        "callback_mismatch",
+        "redirect_changed",
+        "issuer_mismatch",
+        "registration_gone",
+        "github_app_created",
+        "github_app_failed",
+    }
+)
+
+#: The four landings that name a fact about instance configuration or a
+#: stored registration. ``claim`` binds to the row's ``user_id``, not to
+#: current workspace-admin membership, so somebody demoted mid-flow would
+#: otherwise be told something they can no longer read through the API.
+_ADMIN_ONLY_LANDINGS: Final[frozenset[str]] = frozenset(
+    {"redirect_changed", "registration_gone", "client_rejected", "callback_mismatch"}
+)
+
+#: The claim's own word for a refusal, in this module's vocabulary. Identity
+#: for seven; ``verifier_missing`` cannot come out of ``claim`` at all and is
+#: mapped for completeness.
+_CLAIM_REASONS: Final[dict[str, CallbackReason]] = {
+    "state_malformed": "state_malformed",
+    "state_unknown": "state_unknown",
+    "state_expired": "state_expired",
+    "state_consumed": "state_consumed",
+    "wrong_user": "wrong_user",
+    "wrong_workspace": "wrong_workspace",
+    "wrong_flow": "wrong_flow",
+    "verifier_missing": "verifier_missing",
+}
+
+
 @dataclass(frozen=True, slots=True)
 class CallbackResult:
     """Where the browser goes next, and nothing the request could influence."""
 
     connection: Connection | None
     error: redirect_module.OAuthReturnError | None
+    #: For the landing's retry button. Known only after a claim or a recall.
+    connector_type: str | None = None
+    #: The connection this flow concerns, for the landing's Reconnect button
+    #: and for the success landing alike. Always a 32-hex public id or None.
+    public_id: str | None = None
+    #: A receipt was replayed: nothing was exchanged, created, or started.
+    replayed: bool = False
+    #: Set only by the manifest callback, and only past a successful claim or
+    #: a recall: ``True`` the app was created, ``False`` it was not. ``None``
+    #: means the refusal was decided before the claim, and the browser gets
+    #: the shared recovery landing rather than a ``?github_app=`` flag.
+    manifest_created: bool | None = None
+
+
+class _CallbackContextError(Exception):
+    """A post-claim context check failed: which one, and what to remember."""
+
+    def __init__(self, reason: CallbackReason, outcome: str) -> None:
+        super().__init__(reason)
+        self.reason: CallbackReason = reason
+        self.outcome = outcome
+
+
+def log_callback_refusal(
+    reason: CallbackReason, *, flow: CallbackFlow, connector_type: str = "other"
+) -> None:
+    """The only place a callback refusal is recorded. No secrets, no prose.
+
+    ``reason`` is Jhin's own word for what happened and never leaves this
+    process; every pre-claim reason produces the identical landing. Nothing
+    from the request is passed here — not the handle, not the provider's
+    ``error_description``, not the issuer, not an id.
+    """
+    logger.info("oauth.callback_refused", reason=reason, flow=flow, connector_type=connector_type)
+
+
+def receipt_ttl(settings: Settings) -> int:
+    """Clamped in code, so no configuration can turn a receipt into a token."""
+    return max(0, min(settings.oauth_callback_receipt_ttl_seconds, 3600))
+
+
+async def _still_admin(db: AsyncSession, *, user_id: UUID, workspace_id: UUID) -> bool:
+    """Whether this session may still be told a configuration fact.
+
+    Fails closed on any error: a landing is downgraded, never widened, by a
+    query that did not answer. Uses the same membership row and the same
+    ``role_satisfies`` comparison ``deps.require_workspace_role`` uses.
+    """
+    try:
+        membership = await db.scalar(
+            select(WorkspaceMembership).where(
+                WorkspaceMembership.workspace_id == workspace_id,
+                WorkspaceMembership.user_id == user_id,
+            )
+        )
+    except Exception:
+        return False
+    if membership is None:
+        return False
+    try:
+        role = WorkspaceRole(membership.role)
+    except ValueError:
+        return False
+    return role_satisfies(role, WorkspaceRole.ADMIN)
+
+
+async def _landing(
+    db: AsyncSession, outcome: str, *, user_id: UUID, workspace_id: UUID
+) -> redirect_module.OAuthReturnError | None:
+    """The flag a stored outcome renders as, for this session, right now.
+
+    Applied on the first pass and on every replay, so a demotion between the
+    two is honoured. An outcome outside the vocabulary — only reachable by a
+    hand-edited row — degrades to ``failed`` rather than being cast into a
+    ``Literal`` it does not belong to.
+    """
+    if outcome == "connected":
+        return None
+    if outcome not in CALLBACK_OUTCOMES or outcome.startswith("github_app_"):
+        return "failed"
+    if outcome in _ADMIN_ONLY_LANDINGS and not await _still_admin(
+        db, user_id=user_id, workspace_id=workspace_id
+    ):
+        return "failed"
+    return cast(redirect_module.OAuthReturnError, outcome)
+
+
+async def _receipt_connection(db: AsyncSession, receipt: OAuthAuthorization) -> Connection | None:
+    """The connection a receipt points at, if it is still this workspace's."""
+    if receipt.outcome_connection_id is None:
+        return None
+    connection = await db.get(Connection, receipt.outcome_connection_id)
+    if connection is None or connection.workspace_id != receipt.workspace_id:
+        return None
+    return connection
+
+
+async def _reconnect_target(db: AsyncSession, row: OAuthAuthorization) -> Connection | None:
+    """The connection a *pending* row was re-authorizing, if any.
+
+    Must be read before :meth:`PendingAuthorizationStore.settle` nulls
+    ``row.connection_id``.
+    """
+    if row.connection_id is None:
+        return None
+    connection = await db.get(Connection, row.connection_id)
+    if connection is None or connection.workspace_id != row.workspace_id:
+        return None
+    return connection
+
+
+async def _replay_or_refuse(
+    db: AsyncSession,
+    pending: PendingAuthorizationStore,
+    state: str,
+    *,
+    user_id: UUID,
+    flow: CallbackFlow,
+    reason: CallbackReason,
+) -> CallbackResult:
+    """Hand back the receipt this state left, or the one refusal everybody gets.
+
+    ``recall`` runs for every reason, including "no such handle", so a caller
+    cannot tell the shapes apart by how much work we did. The claim that just
+    failed is released first: a callback delivered into the wrong session must
+    not destroy the right session's flow.
+    """
+    with contextlib.suppress(Exception):
+        await db.rollback()
+    receipt = await pending.recall(handle=state, expected_user_id=user_id, expected_flow=flow)
+    if receipt is None:
+        log_callback_refusal(reason, flow=flow)
+        return CallbackResult(connection=None, error="expired")
+    connection = await _receipt_connection(db, receipt)
+    logger.info(
+        "oauth.callback_replayed",
+        landing=receipt.outcome,
+        flow=flow,
+        connector_type=receipt.connector_type,
+    )
+    outcome = receipt.outcome or "failed"
+    error = await _landing(db, outcome, user_id=user_id, workspace_id=receipt.workspace_id)
+    return CallbackResult(
+        connection=connection,
+        error=error,
+        connector_type=receipt.connector_type,
+        public_id=connection.public_id if connection is not None else None,
+        replayed=True,
+        manifest_created=(
+            outcome == "github_app_created" if outcome.startswith("github_app_") else None
+        ),
+    )
+
+
+async def _settle_refusal(
+    db: AsyncSession,
+    pending: PendingAuthorizationStore,
+    row: OAuthAuthorization,
+    settings: Settings,
+    *,
+    reason: CallbackReason,
+    outcome: str,
+    flow: CallbackFlow = "authorization_code",
+) -> CallbackResult:
+    """A spent row, a receipt naming what the person saw, and a commit.
+
+    Every refusal past the claim commits, because the claim itself is only
+    flushed: returning without a commit would silently un-consume the row.
+    """
+    log_callback_refusal(reason, flow=flow, connector_type=row.connector_type)
+    connector_type = row.connector_type
+    workspace_id = row.workspace_id
+    user_id = row.user_id
+    target = await _reconnect_target(db, row)
+    target_public_id = target.public_id if target is not None else None
+    target_id = target.id if target is not None else None
+    with contextlib.suppress(Exception):
+        await pending.settle(
+            row,
+            outcome=outcome,
+            connection_id=target_id,
+            receipt_ttl_seconds=receipt_ttl(settings),
+        )
+        await db.commit()
+    return CallbackResult(
+        connection=None,
+        error=await _landing(db, outcome, user_id=user_id, workspace_id=workspace_id),
+        connector_type=connector_type,
+        public_id=target_public_id,
+        manifest_created=(
+            outcome == "github_app_created" if outcome.startswith("github_app_") else None
+        ),
+    )
 
 
 async def complete_authorization(
@@ -798,10 +1068,18 @@ async def complete_authorization(
 ) -> CallbackResult:
     """Judge one provider callback and, if it survives, create the connection.
 
-    Raises :class:`fastapi.HTTPException` with the single invalid-attempt body
-    for every rejection. ``provider_error`` is used only as a boolean — the
-    provider's ``error``, ``error_description``, and ``error_uri`` are
-    attacker-influenced text and are never read, stored, logged, or rendered.
+    Returns a :class:`CallbackResult` on every path and raises nothing: the
+    router has one ``return`` and it always builds a 303. ``provider_error``
+    is used only as a boolean — the provider's ``error``,
+    ``error_description``, and ``error_uri`` are attacker-influenced text and
+    are never read, stored, logged, or rendered.
+
+    Two tiers, and the boundary is the security boundary. Everything decided
+    *before* the single-use claim succeeds produces one landing, ``expired``,
+    byte-identically, because any session at all can reach that tier.
+    Everything decided *after* it may name a cause, because reaching it needs
+    the raw 256-bit handle *and* the initiating user's own browser session —
+    the pair that could have completed the flow.
     """
     pending = PendingAuthorizationStore(db, crypto)
     try:
@@ -809,35 +1087,61 @@ async def complete_authorization(
             handle=state, expected_user_id=user_id, expected_flow="authorization_code"
         )
     except PendingAuthorizationInvalid as exc:
-        raise invalid_attempt() from exc
+        return await _replay_or_refuse(
+            db,
+            pending,
+            state,
+            user_id=user_id,
+            flow="authorization_code",
+            reason=_CLAIM_REASONS[exc.reason],
+        )
 
     try:
         _verify_callback_context(row, settings=settings, iss=iss)
-    except PendingAuthorizationInvalid as exc:
-        await _abandon(db, pending, row)
-        raise invalid_attempt() from exc
+    except _CallbackContextError as exc:
+        return await _settle_refusal(
+            db, pending, row, settings, reason=exc.reason, outcome=exc.outcome
+        )
 
     if provider_error is not None or not code:
         # The user said no at the provider, or the provider refused. The row is
         # spent either way; the browser goes back to Apps with a flag, never
         # with the provider's own words.
-        await _abandon(db, pending, row)
-        return CallbackResult(connection=None, error="denied")
+        return await _settle_refusal(
+            db,
+            pending,
+            row,
+            settings,
+            reason="provider_denied" if provider_error is not None else "no_code",
+            outcome="denied",
+        )
 
     clients = OAuthClientStore(db, crypto)
     if row.client_registration_id is None:
-        await _abandon(db, pending, row)
-        raise invalid_attempt()
+        return await _settle_refusal(
+            db, pending, row, settings, reason="registration_missing", outcome="registration_gone"
+        )
     try:
         registration, credentials = await clients.get_by_id(
             row.workspace_id, row.client_registration_id
         )
-    except LookupError as exc:
-        await _abandon(db, pending, row)
-        raise invalid_attempt() from exc
+    except LookupError:
+        return await _settle_refusal(
+            db, pending, row, settings, reason="registration_missing", outcome="registration_gone"
+        )
 
-    verifier = await pending.reveal_verifier(row)
-    metadata = _metadata_from_row(row)
+    try:
+        verifier = await pending.reveal_verifier(row)
+    except PendingAuthorizationInvalid:
+        return await _settle_refusal(
+            db, pending, row, settings, reason="verifier_missing", outcome="failed"
+        )
+    try:
+        metadata = _metadata_from_row(row)
+    except PendingAuthorizationInvalid:
+        return await _settle_refusal(
+            db, pending, row, settings, reason="endpoint_blocked", outcome="failed"
+        )
     try:
         tokens = await exchange_code(
             http_client,
@@ -850,20 +1154,27 @@ async def complete_authorization(
         )
     except ClientForgottenError:
         return await _exchange_refused(
-            db, pending, row, error_code="invalid_client", error="client_rejected"
+            db, pending, row, settings, error_code="invalid_client", outcome="client_rejected"
         )
     except TokenError as exc:
         return await _exchange_refused(
             db,
             pending,
             row,
+            settings,
             error_code=exc.error_code,
-            error=_EXCHANGE_REFUSAL_LANDINGS.get(exc.error_code, "failed"),
+            outcome=_EXCHANGE_REFUSAL_LANDINGS.get(exc.error_code, "failed"),
         )
     except (OAuthError, EndpointPolicyError, httpx.HTTPError):
-        return await _exchange_refused(db, pending, row, error_code="unknown", error="failed")
+        return await _exchange_refused(
+            db, pending, row, settings, error_code="unknown", outcome="failed"
+        )
 
     await clients.touch(registration)
+    # Captured before the try: after a rollback the ORM instance is expired
+    # and reading any attribute of it would issue a fresh query or raise.
+    row_id = row.id
+    connector_type = row.connector_type
     try:
         connection = await _persist_connection(
             db,
@@ -881,16 +1192,42 @@ async def complete_authorization(
         # The tokens are real but the connection could not be written — a name
         # taken while the user was at the provider, or a config the connector
         # now rejects. Send them back to a page we control rather than an
-        # error body, and hand the tokens back to the provider on the way out
-        # so nothing usable is left behind unattached to a connection.
-        logger.warning("oauth.connection_not_created", connector_type=row.connector_type)
+        # error body.
+        logger.warning("oauth.connection_not_created", connector_type=connector_type)
         with contextlib.suppress(Exception):
             await db.rollback()
-        await _abandon(db, pending, row)
-        return CallbackResult(connection=None, error="failed")
-    await pending.finish(row)
+        reloaded = await db.get(OAuthAuthorization, row_id)
+        if reloaded is None:
+            log_callback_refusal(
+                "connection_not_created",
+                flow="authorization_code",
+                connector_type=connector_type,
+            )
+            return CallbackResult(connection=None, error="failed", connector_type=connector_type)
+        # The rollback released the claim; re-assert it before settling, so
+        # the receipt describes a row that is genuinely spent.
+        reloaded.consumed_at = datetime.now(UTC)
+        return await _settle_refusal(
+            db,
+            pending,
+            reloaded,
+            settings,
+            reason="connection_not_created",
+            outcome="failed",
+        )
+    await pending.settle(
+        row,
+        outcome="connected",
+        connection_id=connection.id,
+        receipt_ttl_seconds=receipt_ttl(settings),
+    )
     await db.commit()
-    return CallbackResult(connection=connection, error=None)
+    return CallbackResult(
+        connection=connection,
+        error=None,
+        connector_type=connector_type,
+        public_id=connection.public_id,
+    )
 
 
 #: Which landing flag a refused exchange picks, by the provider's
@@ -899,7 +1236,7 @@ async def complete_authorization(
 #: — a wrong secret, a callback URL the app does not list — and the flag is
 #: what lets the Apps page say so. Everything else is ``failed``: a spent or
 #: refused code has no fix beyond starting again.
-_EXCHANGE_REFUSAL_LANDINGS: Final[dict[str, redirect_module.OAuthReturnError]] = {
+_EXCHANGE_REFUSAL_LANDINGS: Final[dict[str, str]] = {
     "incorrect_client_credentials": "client_rejected",
     "invalid_client": "client_rejected",
     "redirect_uri_mismatch": "callback_mismatch",
@@ -910,9 +1247,10 @@ async def _exchange_refused(
     db: AsyncSession,
     pending: PendingAuthorizationStore,
     row: OAuthAuthorization,
+    settings: Settings,
     *,
     error_code: str,
-    error: redirect_module.OAuthReturnError,
+    outcome: str,
 ) -> CallbackResult:
     """A failed exchange: the row is spent and the browser goes back to Apps.
 
@@ -920,12 +1258,18 @@ async def _exchange_refused(
     from the closed vocabulary and the ``Location`` carries a flag from
     Jhin's own closed set. The person is told to try again from a page Jhin
     controls, in a sentence Jhin wrote.
+
+    Two lines, with distinct jobs and one ``request_id`` between them: this
+    one names the provider's machine-readable code, and ``_settle_refusal``
+    records ``oauth.callback_refused`` so that one grep on that event finds
+    every failed connect attempt without knowing the sibling event names.
     """
     logger.warning(
         "oauth.code_exchange_failed", connector_type=row.connector_type, error_code=error_code
     )
-    await _abandon(db, pending, row)
-    return CallbackResult(connection=None, error=error)
+    return await _settle_refusal(
+        db, pending, row, settings, reason="exchange_refused", outcome=outcome
+    )
 
 
 def _verify_callback_context(
@@ -948,14 +1292,16 @@ def _verify_callback_context(
     except redirect_module.OAuthRedirectMisconfigured as exc:
         # The instance can no longer compute its own redirect URI, so nothing
         # arriving here can be honoured until an operator fixes that.
-        raise PendingAuthorizationInvalid() from exc
+        raise _CallbackContextError("redirect_uri_changed", "redirect_changed") from exc
     if row.redirect_uri != expected_uri:
-        raise PendingAuthorizationInvalid()
+        raise _CallbackContextError("redirect_uri_changed", "redirect_changed")
     if row.iss_parameter_supported:
-        if iss is None or iss != row.issuer:
-            raise PendingAuthorizationInvalid()
+        if iss is None:
+            raise _CallbackContextError("issuer_missing", "issuer_mismatch")
+        if iss != row.issuer:
+            raise _CallbackContextError("issuer_mismatch", "issuer_mismatch")
     elif iss is not None and row.issuer and iss != row.issuer:
-        raise PendingAuthorizationInvalid()
+        raise _CallbackContextError("issuer_mismatch", "issuer_mismatch")
 
 
 def _metadata_from_row(row: OAuthAuthorization) -> AuthorizationServerMetadata:
@@ -1238,23 +1584,41 @@ async def poll_device_flow(
             expected_flow="device_code",
         )
     except PendingAuthorizationInvalid as exc:
+        # Same event as the browser callbacks, deliberately: one grep on
+        # ``oauth.callback_refused`` answers "why did nothing connect" for
+        # every flow, without knowing which one somebody used.
+        log_callback_refusal(_CLAIM_REASONS[exc.reason], flow="device_code")
         raise HTTPException(
             status_code=status.HTTP_410_GONE, detail=_INVALID_ATTEMPT_DETAIL
         ) from exc
 
     clients = OAuthClientStore(db, crypto)
     if row.client_registration_id is None:
+        log_callback_refusal(
+            "registration_missing", flow="device_code", connector_type=row.connector_type
+        )
         raise HTTPException(status_code=status.HTTP_410_GONE, detail=_INVALID_ATTEMPT_DETAIL)
     try:
         registration, credentials = await clients.get_by_id(
             row.workspace_id, row.client_registration_id
         )
     except LookupError as exc:
+        log_callback_refusal(
+            "registration_missing", flow="device_code", connector_type=row.connector_type
+        )
         raise HTTPException(
             status_code=status.HTTP_410_GONE, detail=_INVALID_ATTEMPT_DETAIL
         ) from exc
 
-    device_code = await pending.reveal_device_code(row)
+    try:
+        device_code = await pending.reveal_device_code(row)
+    except PendingAuthorizationInvalid as exc:
+        log_callback_refusal(
+            "verifier_missing", flow="device_code", connector_type=row.connector_type
+        )
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE, detail=_INVALID_ATTEMPT_DETAIL
+        ) from exc
     try:
         result = await poll_device_token(
             http_client,
@@ -1267,9 +1631,13 @@ async def poll_device_flow(
             client_secret=None,
         )
     except DeviceAuthorizationDenied:
+        log_callback_refusal(
+            "provider_denied", flow="device_code", connector_type=row.connector_type
+        )
         await _abandon(db, pending, row)
         return DevicePollResult(status="denied", interval_seconds=None, connection=None)
     except DeviceCodeExpired:
+        log_callback_refusal("state_expired", flow="device_code", connector_type=row.connector_type)
         await _abandon(db, pending, row)
         return DevicePollResult(status="expired", interval_seconds=None, connection=None)
     except TransientOAuthError:
@@ -1277,6 +1645,9 @@ async def poll_device_flow(
             status="pending", interval_seconds=row.poll_interval_seconds, connection=None
         )
     except (OAuthError, EndpointPolicyError, httpx.HTTPError) as exc:
+        log_callback_refusal(
+            "exchange_refused", flow="device_code", connector_type=row.connector_type
+        )
         await _abandon(db, pending, row)
         raise _bad_request(
             "The provider refused this device sign-in. Start again from Apps."
@@ -1575,13 +1946,16 @@ async def complete_github_app_manifest(
     code: str | None,
     request_id: UUID,
     ip_hash: str,
-) -> bool:
+) -> CallbackResult:
     """Turn GitHub's conversion code into this workspace's stored app credentials.
 
-    Same refusal discipline as the OAuth callback: the state is claimed once,
-    checked against the initiating user's session, and every failure produces
-    the identical body. The private key and webhook secret are registered with
-    the redactor by the conversion helper before they reach this function.
+    Same refusal discipline as the OAuth callback, and the same two tiers: a
+    claim that fails lands on the *shared* recovery page with bytes identical
+    to the OAuth callback's, so neither callback can be used as an oracle for
+    the other. Only a failure past the claim reaches ``?github_app=failed``.
+
+    The private key and webhook secret are registered with the redactor by the
+    conversion helper before they reach this function.
     """
     pending = PendingAuthorizationStore(db, crypto)
     try:
@@ -1589,21 +1963,49 @@ async def complete_github_app_manifest(
             handle=state, expected_user_id=user_id, expected_flow="github_app_manifest"
         )
     except PendingAuthorizationInvalid as exc:
-        raise invalid_attempt() from exc
+        return await _replay_or_refuse(
+            db,
+            pending,
+            state,
+            user_id=user_id,
+            flow="github_app_manifest",
+            reason=_CLAIM_REASONS[exc.reason],
+        )
     if not code:
-        await _abandon(db, pending, row)
-        return False
+        return await _settle_refusal(
+            db,
+            pending,
+            row,
+            settings,
+            reason="manifest_no_code",
+            outcome="github_app_failed",
+            flow="github_app_manifest",
+        )
 
     github_oauth = _github_oauth_module()
     if github_oauth is None:
-        await _abandon(db, pending, row)
-        return False
+        return await _settle_refusal(
+            db,
+            pending,
+            row,
+            settings,
+            reason="manifest_unavailable",
+            outcome="github_app_failed",
+            flow="github_app_manifest",
+        )
     try:
         app = await github_oauth.convert_app_manifest(http_client, code)
     except (OAuthError, EndpointPolicyError, httpx.HTTPError):
         logger.warning("oauth.github_app_conversion_failed")
-        await _abandon(db, pending, row)
-        return False
+        return await _settle_refusal(
+            db,
+            pending,
+            row,
+            settings,
+            reason="manifest_conversion_failed",
+            outcome="github_app_failed",
+            flow="github_app_manifest",
+        )
 
     store = OAuthClientStore(db, crypto)
     await store.save(
@@ -1629,9 +2031,16 @@ async def complete_github_app_manifest(
         ip_hash=ip_hash,
         metadata={"issuer": GITHUB_ISSUER, "app_slug": app.slug},
     )
-    await pending.finish(row)
+    await pending.settle(
+        row,
+        outcome="github_app_created",
+        connection_id=None,
+        receipt_ttl_seconds=receipt_ttl(settings),
+    )
     await db.commit()
-    return True
+    return CallbackResult(
+        connection=None, error=None, connector_type="github", manifest_created=True
+    )
 
 
 # --- Re-authorization --------------------------------------------------

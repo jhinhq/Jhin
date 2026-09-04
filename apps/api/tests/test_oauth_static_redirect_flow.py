@@ -154,6 +154,31 @@ async def test_continue_authorize_connected(
     assert "resource" not in body
 
 
+async def test_walking_the_same_callback_url_twice_connects_once(
+    callback: CallbackHarness, fake: FakeGitHubOAuthServer
+) -> None:
+    """A refresh, a back-button, or a prefetch that beat the navigation.
+
+    The state is single-use and stays single-use: the second request reaches
+    no token endpoint at all. It is answered from the receipt the first one
+    left, so the person lands on the connection they made rather than on a
+    dead end telling them their sign-in link is no longer valid.
+    """
+    await _register(callback, secret=RIGHT_SECRET)
+
+    first = await _sign_in(callback)
+    assert first.status_code == 303
+    exchanges = len(fake.recorded_bodies())
+
+    url = str(first.request.url)
+    second = await callback.client.get(url)
+
+    assert second.status_code == 303
+    assert second.headers["location"] == first.headers["location"]
+    assert len(await _connections(callback)) == 1
+    assert len(fake.recorded_bodies()) == exchanges, "the code was exchanged twice"
+
+
 async def test_a_wrong_client_secret_lands_on_client_rejected_and_connects_nothing(
     callback: CallbackHarness, fake: FakeGitHubOAuthServer
 ) -> None:
@@ -162,7 +187,7 @@ async def test_a_wrong_client_secret_lands_on_client_rejected_and_connects_nothi
     response = await _sign_in(callback)
 
     assert response.status_code == 303
-    assert response.headers["location"].endswith("/apps?oauth_error=client_rejected")
+    assert response.headers["location"].endswith("/apps?oauth_error=client_rejected&app=github")
     assert await _connections(callback) == []
     assert fake.recorded_bodies()[-1]["client_secret"] == WRONG_SECRET
 
@@ -176,7 +201,7 @@ async def test_a_callback_url_the_app_does_not_list_lands_on_callback_mismatch(
     response = await _sign_in(callback)
 
     assert response.status_code == 303
-    assert response.headers["location"].endswith("/apps?oauth_error=callback_mismatch")
+    assert response.headers["location"].endswith("/apps?oauth_error=callback_mismatch&app=github")
     assert await _connections(callback) == []
     # Never the fake's own prose.
     assert "fake GitHub" not in response.headers["location"]

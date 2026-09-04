@@ -38,6 +38,7 @@ sequenceDiagram
     A->>S: token exchange (code + PKCE verifier + resource)
     S-->>A: access token, refresh token
     A-->>B: 303 to the connection's page
+    Note over A,B: every refusal is also a 303, to /apps with a flag
 ```
 
 Only the callback is a public route. Everything else is workspace-scoped and
@@ -134,7 +135,7 @@ In order, and all of them:
 
 1. **The `state` handle names a live row.** Only `sha256(state)` is stored,
    so a database read grants nobody the ability to complete somebody else's
-   pending authorization. Ten-minute TTL, single use.
+   pending authorization. Thirty-minute TTL, single use.
 2. **The live session is the user who started it.** This comparison is the
    load-bearing CSRF defense — not the state parameter, which only proves the
    request came back from where it was sent.
@@ -152,32 +153,152 @@ In order, and all of them:
    without it, somebody who administers two workspaces could drive one
    workspace's authorization through the other's URL.
 
-The only failure that does not produce the shared 400 is an absent or expired
-session, which cannot be told apart from "never started a flow" anyway. It
-redirects back to the app with a generic error, because the likeliest real
-cause is a consent screen that outlived the session and a raw JSON 401 is a
-dead end for the person reading it. Nothing is claimed and no code is
-exchanged on that path.
-
 Then the code is exchanged with the PKCE verifier and the `resource`
-indicator. A failed exchange abandons the pending row: the code is spent, and
-the user is told to start again from a page Jhin controls. GitHub reports a
-refused exchange with **HTTP 200** and the error in the body, exactly as its
-device flow does; `exchange_code` classifies that body like any refusal, and
-the callback logs `oauth.code_exchange_failed error_code=…` with the code
-from the closed vocabulary. The flag the browser is sent back with comes
-from a closed set of its own — `denied | failed | client_rejected |
-callback_mismatch` — chosen by the service from the machine-readable code,
-never carrying provider text. The two named ones are the first-setup
-mistakes a person can fix: a wrong client secret, and a callback URL the app
-on GitHub does not list. (Refresh keeps its existing classification, which
-reads the status code; classifying HTTP-200 bodies there is a follow-up.)
+indicator. A failed exchange spends the pending row and the user is told to
+start again from a page Jhin controls. GitHub reports a refused exchange with
+**HTTP 200** and the error in the body, exactly as its device flow does;
+`exchange_code` classifies that body like any refusal, and the callback logs
+`oauth.code_exchange_failed error_code=…` with the code from the closed
+vocabulary. (Refresh keeps its existing classification, which reads the
+status code; classifying HTTP-200 bodies there is a follow-up.)
 
 Provider error text is never rendered, returned, or embedded in an exception
 anywhere in this subsystem. An authorization server's `error_description` is
 attacker-influenced prose. The machine-readable code — narrowed to
 `jhin_oauth.errors.KNOWN_ERROR_CODES` — selects one of Jhin's own sentences
 instead.
+
+**No refusal has a body.** `complete_authorization` returns a
+`CallbackResult` on every path and raises nothing; the handler has one
+`return` and it always builds a 303 from `app_return_url`. There is no code
+in this route that can put JSON in a browser — including the validation
+errors the query parameters used to raise, which is why the bounds moved off
+the signature into the handler. This closes the defect an operator hit head
+on: they clicked Connect and got
+`{"detail": "This connection attempt is no longer valid. Start again from Apps."}`
+in the address bar, with no way forward.
+
+**Two tiers, and the boundary is the security boundary.** Everything decided
+*before* the single-use claim succeeds gets one flag, `expired`,
+byte-identical — unknown, expired, already-spent, another user's, another
+workspace's, another flow's, malformed, over-long. Anybody with any session
+can reach that tier, so it says nothing. A caller with no session gets
+`signed_out` before the database is touched at all, which reveals only that
+they sent no cookie.
+
+Everything decided *after* the claim may name a cause, because `claim`
+returns a row only when the row's `user_id` matches the live session:
+reaching that tier requires the raw 256-bit handle **and** the owner's
+browser — the pair that could have completed the flow. Four of those flags
+name a fact about instance configuration or a stored registration
+(`redirect_changed`, `registration_gone`, `client_rejected`,
+`callback_mismatch`) and are additionally gated on the caller still being a
+workspace admin, because `claim` binds to a user id and a membership can be
+revoked mid-flow. The full set is
+`signed_out | expired | denied | failed | issuer_mismatch | client_rejected |
+callback_mismatch | redirect_changed | registration_gone`; the web app turns
+each into a sentence Jhin wrote, in a card whose primary control starts the
+thing the person was trying to do.
+
+**Thirty minutes, not ten.** `OAUTH_STATE_TTL_SECONDS` is `1800`. One round
+trip can contain an SSO login at the edge, a provider sign-in with a second
+factor, a consent screen somebody reads, and a GitHub App installation
+picker. It is the fourth control in front of this route, not the first, and
+it is the only one lengthening touches. It also buys legibility: GitHub's
+authorization *code* lives ten minutes, so under a ten-minute state a
+twelve-minute round trip died at the claim as an indistinguishable
+`state_expired`; under thirty it reaches the exchange and fails as
+`invalid_grant`, which `oauth.code_exchange_failed` names outright.
+
+**A prefetch is not a navigation.** A request carrying `Sec-Purpose:
+prefetch`, `Purpose: prefetch`, `X-Moz: prefetch`, or a
+`Sec-Fetch-Mode`/`Sec-Fetch-Dest` that is not a document navigation is
+answered `303 → /apps` before anything is looked up, and claims nothing. A
+browser sending none of those headers is treated as a navigation — absence
+never costs a real callback.
+
+**The wrong-session claim is released, not committed.** `claim` consumes the
+row inside the transaction before it checks the binding; `_replay_or_refuse`
+rolls that back. Committing it would let a callback delivered into the wrong
+browser destroy the right one's in-flight authorization. Single use is
+unaffected — the winner among genuine concurrent callbacks is still decided
+by one atomic statement.
+
+**Everything is logged, and only in the log.** `oauth.callback_refused`
+carries `reason` from a closed vocabulary, `flow`, and `connector_type` when
+a row was claimed — and nothing else: no handle, no hash, no code, no
+provider prose, no issuer, no ids. Which check failed is a question the
+server may answer and the browser may not, so it is answered here and nowhere
+else. Deciding it costs one read-only `SELECT` after the conditional `UPDATE`
+has already lost; that query changes nothing, its answer reaches no response,
+and a failure in it degrades to `state_unknown` rather than to a 500.
+
+### What each `reason` means
+
+| `reason` | What to do about it |
+| --- | --- |
+| `state_expired` | the round trip is outrunning `OAUTH_STATE_TTL_SECONDS` |
+| `state_consumed` | something spent the state first — a prefetch, or a duplicated navigation |
+| `state_unknown` | a handle this instance never minted, or one purged after four hours |
+| `no_session` | the browser session died while the person was at the provider |
+| `redirect_uri_changed` | `OAUTH_REDIRECT_BASE_URL` or `APP_URL` moved mid-flow |
+| `issuer_missing`, `issuer_mismatch` | RFC 9207: the `iss` returned is not the one we talked to |
+| `endpoint_blocked` | `JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS` no longer allows a stored endpoint |
+| `exchange_refused` | read `oauth.code_exchange_failed` beside it for the provider's code |
+| `provider_denied`, `no_code` | the person declined at the provider |
+| `wrong_user`, `wrong_workspace`, `wrong_flow`, `state_malformed`, `param_too_long` | a handle presented by the wrong browser, from the wrong workspace, at the wrong endpoint, or in the wrong shape |
+| `registration_missing`, `verifier_missing`, `connection_not_created`, `internal_error` | Jhin's own fault; the sibling event says more |
+
+## A callback that arrives twice
+
+The OAuth `state` is single-use by design, and a browser spends it more than
+once for reasons nobody chose: a link prefetch, a refresh, a back-button, a
+Cloudflare Access re-issue in the middle of the round trip. The second
+request found no row and was refused — even when the first request had
+created the connection perfectly. The person was told their sign-in link was
+dead while looking at a connection that existed.
+
+So a consumed row keeps a **receipt**: one `outcome` string from a
+ten-value vocabulary a check constraint pins down, and one
+`outcome_connection_id` pointing at the connection the flow concerns. At the
+same instant it forgets the PKCE verifier (the `secret` row is deleted and
+`verifier_secret_id` nulled), the draft payload, and the pending reconnect
+pointer. It holds no secret at any point in its life.
+
+`retain_until` is how long the receipt is honoured —
+`OAUTH_CALLBACK_RECEIPT_TTL_SECONDS`, ten minutes by default, clamped to an
+hour in code, `0` to disable receipts entirely. It is a second column rather
+than a reuse of `expires_at` because the two windows answer different
+questions: `expires_at` is how long the row may be *claimed* — the security
+bound — and `retain_until` is how long a spent row is *kept*. Conflating
+them would force one number to be both. `purge_expired` reads only
+`retain_until`, so a sweep cannot take a receipt out from under a refresh
+already in flight.
+
+What the callback may do with one is build the same `Location` the first pass
+built. Nothing else: no exchange, no token, no write, no refresher, no
+`reveal_verifier`. Five properties make that safe.
+
+1. **Addressable only by the handle** — `recall` looks up `sha256(handle)`.
+2. **Bound to the row's own user** — the same predicate `claim` applies.
+3. **Holds no secret** — see above.
+4. **Discloses only a projection of what the session already sees** — a
+   connection's `public_id` is returned by `GET …/connections`. If the
+   connection was deleted, `ON DELETE SET NULL` empties the pointer and the
+   replay lands on plain `/apps`.
+5. **Produces nothing** — and it does not extend `retain_until`, so it is not
+   a sliding window.
+
+The landing a receipt renders as is recomputed on every replay, so the
+admin gate above is honoured for a demotion that happened after the fact.
+
+Under READ COMMITTED a second callback's `UPDATE` blocks on the winner's row
+lock, re-evaluates the predicate after the winner commits, misses, and then
+reads the winner's committed receipt — so a prefetch racing a real navigation
+resolves to two identical success landings and one connection. The honest
+cost: the winner does not commit until after the token exchange, a network
+round trip, so the loser holds a database connection for that duration. That
+is pre-existing, and the prefetch guard is what keeps it rare.
 
 ## What is stored, and what is not
 
@@ -189,7 +310,7 @@ as connection credentials already are.
 | Table | Row | Key |
 | --- | --- | --- |
 | `oauth_client_registration` | one workspace's client identity at one authorization server | `(workspace_id, issuer, redirect_uri)` |
-| `oauth_authorization` | one pending authorization, 10-minute TTL, single use | `sha256(state)` |
+| `oauth_authorization` | one pending authorization: 30-minute claim window, single use, then a 10-minute receipt | `sha256(state)` |
 
 Registrations are **never shared between workspaces**. Workspaces are Jhin's
 tenancy boundary everywhere else, and a client secret reaching across one
@@ -331,6 +452,15 @@ the same place; the checkbox on GitHub is named only when no browser sign-in
 is possible — a registration with no secret (`oauth.device_start_refused` in
 the log carries the provider's code either way).
 
+The poll's `410` and `400` are answers to an XHR into a panel that is already
+on screen with its own retry button, not to a navigation, so they stay
+statuses rather than becoming redirects. Both are now treated as **terminal**
+by the panel: a `400` follows the row being deleted server-side, and telling
+somebody the code "is still valid — try again" sent them to wait on a handle
+that no longer existed. Every device-poll refusal is recorded as
+`oauth.callback_refused` with `flow="device_code"`, so one grep answers "why
+did nothing connect" for every flow.
+
 **GitHub app-manifest provisioning.** The operator clicks once, GitHub
 creates this instance's own GitHub App, and a single exchange returns its
 client id, client secret, webhook secret, and private key. Nothing is copied
@@ -350,7 +480,11 @@ OAuth callback, which has no pending row to bind it to and refuses it by
 construction. `setup_url` is `/apps`, and the page reads only `setup_action`
 (`install` | `update`) from what GitHub appends, never `installation_id`.
 The manifest callback treats a dead session exactly as the OAuth callback
-does: nothing claimed, a redirect to `/apps?oauth_error=failed`.
+does — nothing claimed, a redirect to `/apps?oauth_error=signed_out` — and
+treats every other pre-claim refusal that way too: a claim that fails lands
+on the shared recovery page with the identical bytes, so neither callback can
+be used as an oracle for the other. Only a failure *after* the claim lands on
+`?github_app=failed`.
 
 One-click creation needs the instance's own origin to pass the outbound
 policy, because the manifest embeds it. `GET /oauth/redirect-uri` reports
@@ -408,7 +542,8 @@ about a moment, and nothing downstream may edit one in place.
 | Setting | Default | Notes |
 | --- | --- | --- |
 | `OAUTH_REDIRECT_BASE_URL` | `""` | empty means "use `APP_URL`", right for every deployment where the browser reaches the API through the web app's rewrite proxy. On a loopback origin, `JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS` must list it for one-click GitHub App creation; the browser sign-in itself needs no allow-list |
-| `OAUTH_STATE_TTL_SECONDS` | `600` | the MCP security-considerations recommendation for state lifetime |
+| `OAUTH_STATE_TTL_SECONDS` | `1800` | thirty minutes, not ten: one round trip can contain an SSO login at the edge, a provider sign-in with a second factor, and an app-installation picker. The handle is 256 bits, single-use, and bound to the initiating user's session, so this is a defence-in-depth bound rather than the control that stops a forged callback. Refused at startup outside 60–3600 |
+| `OAUTH_CALLBACK_RECEIPT_TTL_SECONDS` | `600` | how long a *consumed* authorization remembers what it produced, so a refresh or a prefetch that spent the state does not cost somebody the connection they made. Holds no secret; readable only by the session that could have completed the flow; clamped to 3600; `0` disables |
 | `OAUTH_CLIENT_NAME` | `Jhin` | `client_name` sent during DCR; what the user sees on the consent screen |
 | `OAUTH_REFRESH_INTERVAL_SECONDS` | `300` | proactive sweep cadence |
 | `OAUTH_PREFER_DEVICE_CODE` | `false` | offer the sign-in code before the browser sign-in for a native provider that can do both; never removes a flow; does not affect MCP |

@@ -39,7 +39,29 @@ _PUBLIC_ID_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{32}$")
 #: The closed set of flags a browser leaving the callback can carry. Chosen
 #: by the service from the provider's *machine-readable* code, never from its
 #: prose; the web app turns each into a sentence Jhin wrote.
-OAuthReturnError = Literal["denied", "failed", "client_rejected", "callback_mismatch"]
+OAuthReturnError = Literal[
+    # Decided before any row is claimed. ``signed_out`` is a function of the
+    # caller's own cookie; ``expired`` is what every other pre-claim refusal
+    # gets, byte-identically.
+    "signed_out",
+    "expired",
+    # Decided only after ``claim`` returned a row, which requires the raw
+    # handle *and* a live session for the row's own user. Nothing here is
+    # observable without that pair; see docs/architecture/oauth.md.
+    "denied",
+    "failed",
+    "issuer_mismatch",
+    "client_rejected",
+    "callback_mismatch",
+    "redirect_changed",
+    "registration_gone",
+]
+
+#: A connector type on its way into a ``Location``. It comes from a column,
+#: never from a request — but the rule in this module is that anything
+#: reaching a ``Location`` is re-proven shape-safe at the door, so a
+#: hand-edited row cannot become a second string in a URL.
+_CONNECTOR_TYPE_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9_]{0,49}$")
 
 
 class OAuthRedirectMisconfigured(InsecureDeploymentError):
@@ -125,23 +147,34 @@ def app_return_url(
     *,
     public_id: str | None,
     error: OAuthReturnError | None = None,
+    connector_type: str | None = None,
 ) -> str:
     """Where the browser goes after the callback. The only such builder.
 
-    Built from settings plus, at most, one connection public id that has been
-    proven to be thirty-two hex characters. Nothing a request supplied — no
-    ``next``, no ``redirect_uri``, no ``state`` payload — can reach this
-    function, which is what closes the open-redirect surface by construction
-    rather than by validation.
+    Built from settings plus, at most, one connection public id proven to be
+    thirty-two hex characters and one connector type proven to match
+    :data:`_CONNECTOR_TYPE_RE`. Both come from a database column. Nothing a
+    request supplied — no ``next``, no ``redirect_uri``, no ``state`` payload
+    — can reach this function, which is what closes the open-redirect surface
+    by construction rather than by validation.
+
+    A ``public_id`` that is not 32 hex still raises: that can only be a bug in
+    our own code. A ``connector_type`` that fails its pattern is *dropped*,
+    because the whole point of this change is that no callback ends in a 500,
+    and the value it decorates is a retry button's label rather than anything
+    load-bearing.
     """
     base = settings.app_url.strip().rstrip("/")
-    if error is not None:
-        return f"{base}/apps?oauth_error={quote(error, safe='')}"
-    if public_id is None:
-        return f"{base}/apps"
-    if not _PUBLIC_ID_RE.fullmatch(public_id):
+    if public_id is not None and not _PUBLIC_ID_RE.fullmatch(public_id):
         raise ValueError("connection public id is not a 32-character hex token")
-    return f"{base}/apps?connection={public_id}"
+    if error is None:
+        return f"{base}/apps" if public_id is None else f"{base}/apps?connection={public_id}"
+    url = f"{base}/apps?oauth_error={quote(error, safe='')}"
+    if public_id is not None:
+        url = f"{url}&connection={public_id}"
+    if connector_type is not None and _CONNECTOR_TYPE_RE.fullmatch(connector_type):
+        url = f"{url}&app={connector_type}"
+    return url
 
 
 def github_app_return_url(settings: Settings, *, created: bool) -> str:

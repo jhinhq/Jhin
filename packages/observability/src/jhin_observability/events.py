@@ -279,6 +279,27 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
     },
     "oauth.connection_not_created": {"connector_type": FieldKind.ENUM},
     "oauth.github_app_conversion_failed": {},
+    # Every callback that did not end in a connection, named from a closed
+    # vocabulary. It exists because nothing was logged here at all and an
+    # operator could not tell an expired state from a spent one from a
+    # forged one. It is deliberately the *only* place that distinction is
+    # visible: the browser is told the same thing for all of them.
+    "oauth.callback_refused": {
+        "reason": FieldKind.ENUM,
+        "flow": FieldKind.ENUM,
+        "connector_type": FieldKind.ENUM,
+    },
+    # A repeat of a callback whose state was already spent, answered from the
+    # row's receipt. Nothing was exchanged, created, or started.
+    "oauth.callback_replayed": {
+        "landing": FieldKind.ENUM,
+        "flow": FieldKind.ENUM,
+        "connector_type": FieldKind.ENUM,
+    },
+    # A prefetch or background fetch of a callback URL, answered before
+    # anything was looked up so the single-use row survives the real
+    # navigation. On a browser that prefetches, this is the normal case.
+    "oauth.callback_prefetch_ignored": {"flow": FieldKind.ENUM},
     "oauth.refresher_not_started": {},
     "oauth.refresh_signal_failed": {"error_type": FieldKind.ERROR_TYPE},
     "oauth.refresh_start_failed": {"error_type": FieldKind.ERROR_TYPE},
@@ -403,6 +424,59 @@ _OAUTH_ERROR_CODES: frozenset[str] = frozenset(
         "unknown",
     }
 )
+# Why a callback refused, in Jhin's own words. This vocabulary is the whole
+# point of the callback log: the browser is told the same thing for every
+# pre-claim refusal, so the only place the distinction survives is here. Kept
+# literal so this registry stays a leaf package importing no other Jhin
+# package; ``test_oauth_callback_logging.py`` holds it equal to the service's
+# own ``CALLBACK_REASONS``, because an unregistered reason is *dropped* by
+# ``normalize_log_field`` rather than recorded as prose.
+_OAUTH_CALLBACK_REASONS: frozenset[str] = frozenset(
+    {
+        "no_session",
+        "state_malformed",
+        "param_too_long",
+        "state_unknown",
+        "state_expired",
+        "state_consumed",
+        "wrong_user",
+        "wrong_workspace",
+        "wrong_flow",
+        "redirect_uri_changed",
+        "issuer_missing",
+        "issuer_mismatch",
+        "provider_denied",
+        "no_code",
+        "registration_missing",
+        "verifier_missing",
+        "endpoint_blocked",
+        "exchange_refused",
+        "connection_not_created",
+        "manifest_no_code",
+        "manifest_unavailable",
+        "manifest_conversion_failed",
+        "internal_error",
+    }
+)
+#: What a settled authorization remembers having produced — one value per
+#: landing the first pass produced, plus the two manifest outcomes.
+_OAUTH_CALLBACK_LANDINGS: frozenset[str] = frozenset(
+    {
+        "connected",
+        "denied",
+        "failed",
+        "client_rejected",
+        "callback_mismatch",
+        "redirect_changed",
+        "issuer_mismatch",
+        "registration_gone",
+        "github_app_created",
+        "github_app_failed",
+    }
+)
+_OAUTH_FLOWS: frozenset[str] = frozenset(
+    {"authorization_code", "device_code", "github_app_manifest"}
+)
 EVENT_FIELD_ENUM_VALUES: dict[tuple[str, str], frozenset[str]] = {
     ("budget.warning", "scope"): frozenset({"agent", "workspace"}),
     ("telemetry.export_failed", "error_code"): frozenset({"export_timeout", "export_failed"}),
@@ -412,6 +486,11 @@ EVENT_FIELD_ENUM_VALUES: dict[tuple[str, str], frozenset[str]] = {
     ("oauth.token_request_refused", "error_code"): _OAUTH_ERROR_CODES,
     ("oauth.device_start_refused", "error_code"): _OAUTH_ERROR_CODES,
     ("oauth.code_exchange_failed", "error_code"): _OAUTH_ERROR_CODES,
+    ("oauth.callback_refused", "reason"): _OAUTH_CALLBACK_REASONS,
+    ("oauth.callback_refused", "flow"): _OAUTH_FLOWS,
+    ("oauth.callback_replayed", "landing"): _OAUTH_CALLBACK_LANDINGS,
+    ("oauth.callback_replayed", "flow"): _OAUTH_FLOWS,
+    ("oauth.callback_prefetch_ignored", "flow"): _OAUTH_FLOWS,
     # Only the optional endpoints reach this event; a refused *required* URL
     # raises instead of logging.
     ("oauth.metadata_field_refused", "field"): frozenset(

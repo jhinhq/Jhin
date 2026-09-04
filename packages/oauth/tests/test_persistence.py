@@ -47,6 +47,12 @@ from jhin_secrets import SecretCrypto
 # Re-exported so pytest sees the fixtures this module's cases ask for.
 __all__ = ["Tenant", "crypto", "session", "session_factory", "tenant"]
 
+
+def _as_naive(value: Any) -> Any:
+    """SQLite hands back naive datetimes; Postgres does not."""
+    return value.replace(tzinfo=None) if value.tzinfo is not None else value
+
+
 VERIFIER = "v" * 43
 ISSUER = "https://auth.example.com"
 REDIRECT_URI = "https://jhin.example.com/api/v1/oauth/callback"
@@ -424,7 +430,10 @@ async def test_purging_expired_rows_leaves_no_orphan_ciphertext(
     store = PendingAuthorizationStore(session, crypto)
     for _ in range(3):
         row, _handle = await _create(store, tenant)
+        # ``retain_until`` is the garbage horizon the sweep reads; while a row
+        # is pending the two columns mean the same instant.
         row.expires_at = datetime.now(UTC) - timedelta(hours=3)
+        row.retain_until = row.expires_at
     fresh_row, _fresh = await _create(store, tenant)
     await session.commit()
 
@@ -454,9 +463,240 @@ async def test_purging_leaves_rows_that_are_merely_expired_but_recent(
     store = PendingAuthorizationStore(session, crypto)
     row, _handle = await _create(store, tenant)
     row.expires_at = datetime.now(UTC) - timedelta(minutes=1)
+    row.retain_until = row.expires_at
     await session.commit()
 
     assert await store.purge_expired(older_than_seconds=3600) == 0
+
+
+# --- Receipts -----------------------------------------------------------
+
+
+async def test_settling_a_row_destroys_its_verifier_and_keeps_only_a_constant(
+    session: AsyncSession, crypto: SecretCrypto, tenant: Tenant
+) -> None:
+    """A receipt is a projection of what the owning session already sees."""
+    from datetime import UTC, datetime
+
+    store = PendingAuthorizationStore(session, crypto)
+    _row, handle = await _create(store, tenant)
+    await session.commit()
+    claimed = await store.claim(handle=handle, expected_user_id=tenant.user_id)
+    secret_id = claimed.verifier_secret_id
+
+    await store.settle(claimed, outcome="denied", connection_id=None, receipt_ttl_seconds=600)
+    await session.commit()
+
+    assert claimed.outcome == "denied"
+    assert claimed.verifier_secret_id is None
+    assert claimed.draft_json == {}
+    assert claimed.connection_id is None
+    assert claimed.outcome_connection_id is None
+    assert _as_naive(claimed.retain_until) > _as_naive(datetime.now(UTC))
+    assert await session.get(Secret, secret_id) is None
+
+
+async def test_settling_with_no_receipt_window_deletes_the_row(
+    session: AsyncSession, crypto: SecretCrypto, tenant: Tenant
+) -> None:
+    """``0`` disables receipts, and every repeat gets the uniform refusal."""
+    store = PendingAuthorizationStore(session, crypto)
+    row, handle = await _create(store, tenant)
+    row_id = row.id
+    await session.commit()
+    claimed = await store.claim(handle=handle, expected_user_id=tenant.user_id)
+
+    await store.settle(claimed, outcome="denied", connection_id=None, receipt_ttl_seconds=0)
+    await session.commit()
+
+    assert await session.get(OAuthAuthorization, row_id) is None
+
+
+async def test_a_receipt_is_recalled_only_by_the_session_that_could_have_finished(
+    session: AsyncSession, crypto: SecretCrypto, tenant: Tenant
+) -> None:
+    """Bound by exactly what ``claim`` binds by: the handle, the user, the flow."""
+    store = PendingAuthorizationStore(session, crypto)
+    _row, handle = await _create(store, tenant)
+    await session.commit()
+    claimed = await store.claim(handle=handle, expected_user_id=tenant.user_id)
+    await store.settle(claimed, outcome="denied", connection_id=None, receipt_ttl_seconds=600)
+    await session.commit()
+
+    assert (
+        await store.recall(
+            handle=handle, expected_user_id=tenant.user_id, expected_flow="authorization_code"
+        )
+        is not None
+    )
+    assert (
+        await store.recall(
+            handle=handle, expected_user_id=new_uuid7(), expected_flow="authorization_code"
+        )
+        is None
+    )
+    assert (
+        await store.recall(
+            handle=handle, expected_user_id=tenant.user_id, expected_flow="device_code"
+        )
+        is None
+    )
+    assert (
+        await store.recall(
+            handle="not a handle!",
+            expected_user_id=tenant.user_id,
+            expected_flow="authorization_code",
+        )
+        is None
+    )
+
+
+async def test_a_pending_row_has_no_receipt_to_recall(
+    session: AsyncSession, crypto: SecretCrypto, tenant: Tenant
+) -> None:
+    store = PendingAuthorizationStore(session, crypto)
+    _row, handle = await _create(store, tenant)
+    await session.commit()
+
+    assert (
+        await store.recall(
+            handle=handle, expected_user_id=tenant.user_id, expected_flow="authorization_code"
+        )
+        is None
+    )
+
+
+async def test_a_receipt_stops_being_readable_at_its_horizon_and_reading_never_extends_it(
+    session: AsyncSession, crypto: SecretCrypto, tenant: Tenant
+) -> None:
+    """Not a sliding window: a replay is a read, and reads change nothing."""
+    from datetime import UTC, datetime, timedelta
+
+    store = PendingAuthorizationStore(session, crypto)
+    _row, handle = await _create(store, tenant)
+    await session.commit()
+    claimed = await store.claim(handle=handle, expected_user_id=tenant.user_id)
+    await store.settle(claimed, outcome="denied", connection_id=None, receipt_ttl_seconds=600)
+    await session.commit()
+
+    before = (claimed.consumed_at, claimed.retain_until, claimed.outcome)
+    recalled = await store.recall(
+        handle=handle, expected_user_id=tenant.user_id, expected_flow="authorization_code"
+    )
+    assert recalled is not None
+    assert (recalled.consumed_at, recalled.retain_until, recalled.outcome) == before
+
+    claimed.retain_until = datetime.now(UTC) - timedelta(seconds=1)
+    await session.commit()
+    assert (
+        await store.recall(
+            handle=handle, expected_user_id=tenant.user_id, expected_flow="authorization_code"
+        )
+        is None
+    )
+
+
+async def test_purging_keeps_a_live_receipt_and_removes_an_aged_one(
+    session: AsyncSession, crypto: SecretCrypto, tenant: Tenant
+) -> None:
+    """A sweep must not take a receipt out from under a refresh in flight."""
+    from datetime import UTC, datetime, timedelta
+
+    store = PendingAuthorizationStore(session, crypto)
+    _live, live_handle = await _create(store, tenant)
+    await session.commit()
+    live = await store.claim(handle=live_handle, expected_user_id=tenant.user_id)
+    await store.settle(live, outcome="denied", connection_id=None, receipt_ttl_seconds=600)
+
+    _aged, aged_handle = await _create(store, tenant)
+    await session.commit()
+    aged = await store.claim(handle=aged_handle, expected_user_id=tenant.user_id)
+    await store.settle(aged, outcome="denied", connection_id=None, receipt_ttl_seconds=600)
+    aged.retain_until = datetime.now(UTC) - timedelta(hours=3)
+    await session.commit()
+
+    assert await store.purge_expired(older_than_seconds=3600) == 1
+    await session.commit()
+    assert await session.get(OAuthAuthorization, live.id) is not None
+
+
+async def test_a_failing_diagnostic_degrades_to_state_unknown(
+    session: AsyncSession, crypto: SecretCrypto, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read that only ever feeds a log line must never cost a response."""
+    store = PendingAuthorizationStore(session, crypto)
+
+    async def exploding(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("the diagnostic query fell over")
+
+    monkeypatch.setattr(store._session, "scalar", exploding)
+    assert await store._diagnose("a" * 43) == "state_unknown"
+
+
+async def test_every_claim_refusal_carries_a_reason_and_the_same_message(
+    session: AsyncSession, crypto: SecretCrypto, tenant: Tenant
+) -> None:
+    """The reason is for the log. The message is the constant everybody gets.
+
+    This is the test that stops the reason leaking into the message later:
+    the whole design rests on the browser being told one thing while the
+    server records another.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    store = PendingAuthorizationStore(session, crypto)
+
+    async def refusal(**kwargs: Any) -> str:
+        try:
+            await store.claim(**kwargs)
+        except PendingAuthorizationInvalid as exc:
+            assert str(exc) == PendingAuthorizationInvalid.MESSAGE
+            return exc.reason
+        raise AssertionError("the claim was not refused")
+
+    assert (
+        await refusal(handle="not a handle!", expected_user_id=tenant.user_id) == "state_malformed"
+    )
+    assert await refusal(handle="a" * 43, expected_user_id=tenant.user_id) == "state_unknown"
+
+    expired, expired_handle = await _create(store, tenant)
+    expired.expires_at = datetime.now(UTC) - timedelta(minutes=1)
+    await session.commit()
+    assert await refusal(handle=expired_handle, expected_user_id=tenant.user_id) == "state_expired"
+
+    spent, spent_handle = await _create(store, tenant)
+    spent.consumed_at = datetime.now(UTC)
+    await session.commit()
+    assert await refusal(handle=spent_handle, expected_user_id=tenant.user_id) == "state_consumed"
+
+    _flow_row, flow_handle = await _create(store, tenant, flow="device_code")
+    await session.commit()
+    assert (
+        await refusal(
+            handle=flow_handle,
+            expected_user_id=tenant.user_id,
+            expected_flow="authorization_code",
+        )
+        == "wrong_flow"
+    )
+    await session.rollback()
+
+    _ws_row, ws_handle = await _create(store, tenant)
+    await session.commit()
+    assert (
+        await refusal(
+            handle=ws_handle,
+            expected_user_id=tenant.user_id,
+            expected_workspace_id=new_uuid7(),
+        )
+        == "wrong_workspace"
+    )
+    await session.rollback()
+
+    _other_row, other_handle = await _create(store, tenant)
+    await session.commit()
+    assert await refusal(handle=other_handle, expected_user_id=new_uuid7()) == "wrong_user"
+    await session.rollback()
 
 
 # --- Client registrations -----------------------------------------------

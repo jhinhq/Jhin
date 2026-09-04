@@ -15530,18 +15530,23 @@
     },
     "/api/v1/oauth/callback": {
       "get": {
-        "description": "Where a provider sends the browser back. The security-critical route.\n\nFive checks stand between this request and a stored token, and all five\nmust pass: the handle is well formed, a row exists for its hash, the\nsingle-use claim wins, the live session belongs to the user who started\nthe flow, and ``iss`` byte-matches the issuer recorded before we\nredirected. Every failure returns the same 400 with the same body, so a\nprobe learns nothing from which one it tripped.\n\n``error_description`` and ``error_uri`` are accepted by the URL and read\nby nothing. They are text whoever reached this URL chose, and rendering\nthem would let them write our error page. ``error`` itself is used as a\nboolean and never shown.\n\nThe ``Location`` is built by :func:`redirect_module.app_return_url` from\nsettings plus a connection id proven to be thirty-two hex characters.\nNothing from this request can reach it, which is what closes the\nopen-redirect surface by construction rather than by filtering.\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
+        "description": "Where a provider sends the browser back. The security-critical route.\n\nFive checks stand between this request and a stored token, and all five\nmust pass: the handle is well formed, a row exists for its hash, the\nsingle-use claim wins, the live session belongs to the user who started\nthe flow, and ``iss`` byte-matches the issuer recorded before we\nredirected.\n\n**No refusal has a body.** This handler has one ``return`` and it always\nbuilds a 303 from :func:`redirect_module.app_return_url`. That is why the\nquery bounds are enforced in the body rather than on the signature: a\n``Query(max_length=...)`` makes FastAPI answer a JSON 422 before the\nhandler runs, which is exactly the dead end this route exists not to be.\n\n**Two tiers.** Everything decided before the single-use claim succeeds\ngets one flag, ``expired``, byte-identically, because any session at all\ncan reach it. A caller with no session gets ``signed_out`` before the\ndatabase is touched at all. Everything decided after the claim may name a\ncause: reaching that tier needs the raw 256-bit handle *and* the owner's\nbrowser.\n\n``error_description`` and ``error_uri`` are accepted by the URL and read\nby nothing. They are text whoever reached this URL chose, and rendering\nthem would let them write our error page. ``error`` itself is used as a\nboolean and never shown.\n\nThe ``Location`` is built by :func:`redirect_module.app_return_url` from\nsettings plus a connection id proven to be thirty-two hex characters and a\nconnector type proven to match its pattern — both read out of a database\ncolumn. Nothing from this request can reach it, which is what closes the\nopen-redirect surface by construction rather than by filtering.\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
         "operationId": "oauth_callback_api_v1_oauth_callback_get",
         "parameters": [
           {
             "in": "query",
             "name": "state",
-            "required": true,
+            "required": false,
             "schema": {
-              "maxLength": 256,
-              "minLength": 1,
-              "title": "State",
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "State"
             }
           },
           {
@@ -15551,7 +15556,6 @@
             "schema": {
               "anyOf": [
                 {
-                  "maxLength": 2048,
                   "type": "string"
                 },
                 {
@@ -15568,7 +15572,6 @@
             "schema": {
               "anyOf": [
                 {
-                  "maxLength": 2048,
                   "type": "string"
                 },
                 {
@@ -15585,7 +15588,6 @@
             "schema": {
               "anyOf": [
                 {
-                  "maxLength": 2048,
                   "type": "string"
                 },
                 {
@@ -15629,18 +15631,23 @@
     },
     "/api/v1/oauth/github-app/callback": {
       "get": {
-        "description": "Where GitHub sends the browser after creating this instance's own app.\n\nSame five checks as the OAuth callback, same single refusal. The\nconversion code is worth a full set of app credentials for exactly one\nhour, which is why the pending row for this flow is the only one with a\nTTL longer than ten minutes and why it is still single-use.\n\nA session that died while the person was on GitHub's form is handled\nexactly as the OAuth callback handles it: nothing is claimed, nothing is\nconverted, and the browser is sent back to Apps with a flag rather than\na raw 401 body. The pending row survives for a retry within the hour.\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
+        "description": "Where GitHub sends the browser after creating this instance's own app.\n\nSame five checks as the OAuth callback, and the same two tiers. The\nconversion code is worth a full set of app credentials for exactly one\nhour, which is why the pending row for this flow is the only one with a\nTTL longer than the authorization-code state and why it is still\nsingle-use.\n\nEvery refusal decided *before* the claim lands on the shared recovery\npage with bytes identical to the OAuth callback's, so neither callback\ncan be used as a differential oracle for the other. ``?github_app=`` is\nreached only past a successful claim, or from a receipt.\n\nA session that died while the person was on GitHub's form is handled\nexactly as the OAuth callback handles it: nothing is claimed, nothing is\nconverted, and the browser is sent back to Apps with a flag rather than\na raw 401 body. The pending row survives for a retry within the hour.\n\n**Session only.** This endpoint touches credential material and is sealed against API keys at every scope; it needs a browser session.",
         "operationId": "github_app_callback_api_v1_oauth_github_app_callback_get",
         "parameters": [
           {
             "in": "query",
             "name": "state",
-            "required": true,
+            "required": false,
             "schema": {
-              "maxLength": 256,
-              "minLength": 1,
-              "title": "State",
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "State"
             }
           },
           {
@@ -15650,7 +15657,6 @@
             "schema": {
               "anyOf": [
                 {
-                  "maxLength": 2048,
                   "type": "string"
                 },
                 {

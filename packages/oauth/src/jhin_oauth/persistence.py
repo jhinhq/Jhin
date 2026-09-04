@@ -50,6 +50,19 @@ _MAX_DRAFT_DEPTH: Final[int] = 8
 OAuthFlow = Literal["authorization_code", "device_code", "github_app_manifest"]
 RegistrationSource = Literal["dcr", "manual", "static"]
 
+#: Why a claim was refused. Jhin's own word for it, for Jhin's own log, and
+#: never anything a caller is told — see :class:`PendingAuthorizationInvalid`.
+ClaimRefusal = Literal[
+    "state_malformed",
+    "state_unknown",
+    "state_expired",
+    "state_consumed",
+    "wrong_user",
+    "wrong_workspace",
+    "wrong_flow",
+    "verifier_missing",
+]
+
 
 def _as_utc(value: datetime) -> datetime:
     """SQLite (unit tests) hands back naive datetimes; Postgres does not."""
@@ -85,18 +98,25 @@ def _row_matches(
 
 
 class PendingAuthorizationInvalid(Exception):
-    """This authorization cannot be completed, and we will not say why.
+    """This authorization cannot be completed, and we will not *say* why.
 
     Unknown handle, already consumed, expired, a different user's session, a
     redirect URI that no longer matches, an issuer that does not: one class,
     one message, deliberately. Distinguishable failures would tell somebody
     probing the callback which of their guesses was closest.
+
+    ``MESSAGE`` is a constant and stays one. ``reason`` is for this server's
+    own log line and nothing else: it must never select a message, reach a
+    response body, or reach a ``Location``. The distinction this class was
+    written to hide is exactly the distinction the operator running the
+    instance needs, and the two are only in tension if somebody renders it.
     """
 
     MESSAGE: Final[str] = "This connection attempt is no longer valid. Start again from Apps."
 
-    def __init__(self) -> None:
+    def __init__(self, reason: ClaimRefusal = "state_unknown") -> None:
         super().__init__(self.MESSAGE)
+        self.reason: ClaimRefusal = reason
 
 
 class PendingAuthorizationStore:
@@ -178,6 +198,9 @@ class PendingAuthorizationStore:
             poll_interval_seconds=max(1, min(poll_interval_seconds, 3600)),
             created_at=now,
             expires_at=now + timedelta(seconds=max(1, ttl_seconds)),
+            # While pending, the garbage horizon *is* the claim window. It
+            # moves out to ``consumed_at + receipt TTL`` only in ``settle``.
+            retain_until=now + timedelta(seconds=max(1, ttl_seconds)),
         )
         self._session.add(row)
         await self._session.flush()
@@ -210,7 +233,7 @@ class PendingAuthorizationStore:
         be walked through the authorization-code path.
         """
         if not _is_well_formed_handle(handle):
-            raise PendingAuthorizationInvalid()
+            raise PendingAuthorizationInvalid("state_malformed")
         now = datetime.now(UTC)
         claimed_id = await self._session.scalar(
             update(OAuthAuthorization)
@@ -224,7 +247,7 @@ class PendingAuthorizationStore:
             .execution_options(synchronize_session=False)
         )
         if claimed_id is None:
-            raise PendingAuthorizationInvalid()
+            raise PendingAuthorizationInvalid(await self._diagnose(handle))
         # ``populate_existing`` so an instance already in this session's
         # identity map reflects the claim rather than its pre-claim state.
         row = await self._session.scalar(
@@ -232,18 +255,53 @@ class PendingAuthorizationStore:
             .where(OAuthAuthorization.id == claimed_id)
             .execution_options(populate_existing=True)
         )
-        if row is None or not _row_matches(
-            row,
-            expected_user_id=expected_user_id,
-            expected_workspace_id=expected_workspace_id,
-            expected_flow=expected_flow,
-        ):
-            # A valid handle presented by somebody else's browser, from another
-            # workspace, or at the wrong flow's endpoint. The row is already
-            # consumed, which is the right outcome: whoever holds the handle has
-            # spent it, and the legitimate user starts over.
-            raise PendingAuthorizationInvalid()
+        if row is None:
+            raise PendingAuthorizationInvalid("state_unknown")
+        # A valid handle presented by somebody else's browser, from another
+        # workspace, or at the wrong flow's endpoint. The row is consumed *in
+        # this transaction* and the caller is expected to release it — see
+        # ``service._replay_or_refuse``, which rolls back explicitly.
+        # Committing the burn here would let a callback delivered into the
+        # wrong session destroy a legitimate in-flight authorization, which is
+        # a denial of service on the victim's flow. Single use is unaffected:
+        # the winner among genuine concurrent callbacks is still decided by
+        # one atomic statement.
+        if expected_flow is not None and row.flow != expected_flow:
+            raise PendingAuthorizationInvalid("wrong_flow")
+        if expected_workspace_id is not None and row.workspace_id != expected_workspace_id:
+            raise PendingAuthorizationInvalid("wrong_workspace")
+        if row.user_id != expected_user_id:
+            raise PendingAuthorizationInvalid("wrong_user")
         return row
+
+    async def _diagnose(self, handle: str) -> ClaimRefusal:
+        """Why the conditional UPDATE matched nothing. Read-only, log-only.
+
+        Runs *after* the claim has already lost, reads nothing it can act on,
+        and its answer reaches no response, no ``Location``, no status code
+        and no exception message — only a log line. Which of these it is, is
+        exactly the question an operator's instance could not answer and
+        exactly the question a prober must not be able to ask, so it is
+        answered in the log and nowhere else.
+
+        Fails soft: any error here degrades to ``state_unknown``, because a
+        diagnostic must never be able to turn a refusal into a 500.
+        """
+        try:
+            row = await self._session.scalar(
+                select(OAuthAuthorization).where(
+                    OAuthAuthorization.state_hash == state_hash(handle)
+                )
+            )
+        except Exception:
+            return "state_unknown"
+        if row is None:
+            return "state_unknown"
+        if row.consumed_at is not None:
+            return "state_consumed"
+        if _as_utc(row.expires_at) <= datetime.now(UTC):
+            return "state_expired"
+        return "state_unknown"  # claimed between the UPDATE and this read
 
     async def peek(
         self,
@@ -261,21 +319,55 @@ class PendingAuthorizationStore:
         a poll cannot reach across a workspace or a flow either.
         """
         if not _is_well_formed_handle(handle):
-            raise PendingAuthorizationInvalid()
+            raise PendingAuthorizationInvalid("state_malformed")
         row = await self._session.scalar(
             select(OAuthAuthorization).where(OAuthAuthorization.state_hash == state_hash(handle))
         )
-        if row is None or row.consumed_at is not None:
-            raise PendingAuthorizationInvalid()
+        if row is None:
+            raise PendingAuthorizationInvalid("state_unknown")
+        if row.consumed_at is not None:
+            raise PendingAuthorizationInvalid("state_consumed")
+        if expected_flow is not None and row.flow != expected_flow:
+            raise PendingAuthorizationInvalid("wrong_flow")
+        if expected_workspace_id is not None and row.workspace_id != expected_workspace_id:
+            raise PendingAuthorizationInvalid("wrong_workspace")
+        if row.user_id != expected_user_id:
+            raise PendingAuthorizationInvalid("wrong_user")
+        if _as_utc(row.expires_at) <= datetime.now(UTC):
+            raise PendingAuthorizationInvalid("state_expired")
+        return row
+
+    async def recall(
+        self, *, handle: str, expected_user_id: UUID, expected_flow: str
+    ) -> OAuthAuthorization | None:
+        """The receipt a spent row left, for the person who owns it.
+
+        Reaches no secret, no token, no provider, and no write. It exists so
+        that a refresh, a back-button, or a link prefetch that consumed the
+        single-use state does not cost somebody the connection they actually
+        made.
+
+        Bound by exactly what :meth:`claim` binds by — the ``sha256`` of a
+        256-bit handle, the row's own ``user_id``, and the flow — so nobody
+        who could not have completed the flow can read one. Never extends the
+        receipt, never un-consumes the row, never touches the connection.
+        """
+        if not _is_well_formed_handle(handle):
+            return None
+        row = await self._session.scalar(
+            select(OAuthAuthorization).where(OAuthAuthorization.state_hash == state_hash(handle))
+        )
+        if row is None or row.outcome is None or row.consumed_at is None:
+            return None
         if not _row_matches(
             row,
             expected_user_id=expected_user_id,
-            expected_workspace_id=expected_workspace_id,
+            expected_workspace_id=None,
             expected_flow=expected_flow,
         ):
-            raise PendingAuthorizationInvalid()
-        if _as_utc(row.expires_at) <= datetime.now(UTC):
-            raise PendingAuthorizationInvalid()
+            return None
+        if _as_utc(row.retain_until) <= datetime.now(UTC):
+            return None
         return row
 
     async def reveal_verifier(self, row: OAuthAuthorization) -> str:
@@ -288,11 +380,11 @@ class PendingAuthorizationStore:
 
     async def _reveal_attached_secret(self, row: OAuthAuthorization) -> str:
         if row.verifier_secret_id is None:
-            raise PendingAuthorizationInvalid()
+            raise PendingAuthorizationInvalid("verifier_missing")
         try:
             plaintext: str = await self._secrets.reveal(row.workspace_id, row.verifier_secret_id)
         except SecretNotFoundError:
-            raise PendingAuthorizationInvalid() from None
+            raise PendingAuthorizationInvalid("verifier_missing") from None
         return plaintext
 
     async def finish(self, row: OAuthAuthorization) -> None:
@@ -304,19 +396,68 @@ class PendingAuthorizationStore:
         if secret_id is not None:
             await self._delete_secret(workspace_id, secret_id)
 
+    async def settle(
+        self,
+        row: OAuthAuthorization,
+        *,
+        outcome: str,
+        connection_id: UUID | None,
+        receipt_ttl_seconds: int,
+    ) -> None:
+        """Turn a spent row into a receipt: what it produced, and nothing else.
+
+        The PKCE verifier is destroyed here exactly as :meth:`finish` destroys
+        it, and ``draft_json`` is emptied. What survives is one string from a
+        ten-value vocabulary and, at most, a foreign key to a connection the
+        row's own user can already read through the connections API. A receipt
+        is therefore a *projection of what the owning session already sees*,
+        which is the whole reason handing one back leaks nothing.
+
+        ``row.connection_id`` — the pending reconnect pointer — is nulled at
+        the same instant. It carries ``ON DELETE CASCADE``, so leaving it in
+        place would mean deleting a re-authorized connection deletes the whole
+        receipt rather than nulling one column, and a reconnect repeat would
+        behave differently from a fresh-connection repeat.
+        ``outcome_connection_id`` (``SET NULL``) is the receipt's only pointer.
+
+        ``receipt_ttl_seconds <= 0`` writes no receipt at all: the row is
+        deleted and every repeat falls back to the uniform refusal.
+        """
+        if receipt_ttl_seconds <= 0:
+            await self.finish(row)
+            return
+        secret_id = row.verifier_secret_id
+        workspace_id = row.workspace_id
+        row.verifier_secret_id = None
+        row.draft_json = {}
+        row.outcome = outcome
+        row.outcome_connection_id = connection_id
+        row.connection_id = None
+        settled_at = _as_utc(row.consumed_at) if row.consumed_at is not None else datetime.now(UTC)
+        row.retain_until = settled_at + timedelta(seconds=receipt_ttl_seconds)
+        await self._session.flush()
+        if secret_id is not None:
+            await self._delete_secret(workspace_id, secret_id)
+
     async def purge_expired(self, *, older_than_seconds: int = 3600, limit: int = 200) -> int:
         """Opportunistic cleanup of long-dead rows; returns how many went.
 
         Bounded and called from the start of a new authorization rather than
         scheduled: the work is proportional to the traffic that creates it,
-        and no sweeper is needed to keep a table of ten-minute rows small.
+        and no sweeper is needed to keep a table of short-lived rows small.
+
+        Filters on ``retain_until``, never ``expires_at``: a receipt is
+        honoured until ``retain_until`` and physically present for up to
+        ``older_than_seconds`` beyond it, so a sweep cannot take one out from
+        under a refresh already in flight. For a pending row the two columns
+        are equal, so nothing changes for them.
         """
         cutoff = datetime.now(UTC) - timedelta(seconds=max(0, older_than_seconds))
         rows = list(
             await self._session.scalars(
                 select(OAuthAuthorization)
-                .where(OAuthAuthorization.expires_at < cutoff)
-                .order_by(OAuthAuthorization.expires_at)
+                .where(OAuthAuthorization.retain_until < cutoff)
+                .order_by(OAuthAuthorization.retain_until)
                 .limit(max(1, limit))
             )
         )
