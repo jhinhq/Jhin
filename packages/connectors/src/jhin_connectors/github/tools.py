@@ -12,12 +12,12 @@ from __future__ import annotations
 
 import base64
 import binascii
-from typing import cast
+from typing import Any, cast
 
 from pydantic import BaseModel
 
 from jhin_connectors.execution import resolve_connection
-from jhin_connectors.github.auth import resolve_access_token
+from jhin_connectors.github.auth import AUTH_GITHUB_APP, resolve_access_token
 from jhin_connectors.github.client import DEFAULT_BASE_URL, github_request
 from jhin_connectors.github.schemas import (
     BranchCreateInput,
@@ -40,6 +40,9 @@ from jhin_connectors.github.schemas import (
     PullRequestMergeOutput,
     PullRequestReadInput,
     PullRequestReadOutput,
+    RepositoryListEntry,
+    RepositoryListInput,
+    RepositoryListOutput,
     RepositoryReadInput,
     RepositoryReadOutput,
     WorkflowDispatchInput,
@@ -48,21 +51,41 @@ from jhin_connectors.github.schemas import (
     WorkflowRunStatusInput,
     WorkflowRunStatusOutput,
 )
-from jhin_policy import RiskLevel, ToolDefinition
+from jhin_policy import RiskLevel, ToolDefinition, result_scope_admits
 from jhin_tools.builtin import ToolExecutionContext, ToolExecutor
+from jhin_tools.sanitize import MAX_DOCUMENT_BYTES
 
 # File contents re-enter the prompt; cap well below the sanitizer's document
 # limit so one file read cannot evict everything else.
 _MAX_FILE_CHARS = 6_000
 
+# Repository listing bounds. 100 is GitHub's maximum page size; five pages
+# is the whole inventory of every connection we have seen and still a fixed
+# ceiling on what one call may cost. A description is a sentence in a list,
+# not a document.
+_LIST_PAGE_SIZE = 100
+_MAX_LIST_PAGES = 5
+_MAX_DESCRIPTION_CHARS = 200
+# Room left under the gateway's document cap for the rest of the payload
+# (the truncated and limited_by_grant flags, the JSON scaffolding) so a
+# listing is trimmed by this tool, which can say so, rather than replaced
+# wholesale by the sanitizer's preview marker, which cannot.
+_RESULT_BYTES_HEADROOM = 2_048
 
-async def _bearer(ctx: ToolExecutionContext, connection_id: str) -> tuple[str, str]:
-    """(base_url, token) for one call — the credential resolution path."""
+
+async def _bearer_with_auth(ctx: ToolExecutionContext, connection_id: str) -> tuple[str, str, str]:
+    """(base_url, token, auth_type) for one call — the credential path."""
     resolved = await resolve_connection(ctx, connection_id, connector_type="github")
     base_url = str(resolved.config.get("base_url") or DEFAULT_BASE_URL)
     token = await resolve_access_token(
         resolved.connection.auth_type, resolved.credentials, base_url
     )
+    return base_url, token, resolved.connection.auth_type
+
+
+async def _bearer(ctx: ToolExecutionContext, connection_id: str) -> tuple[str, str]:
+    """(base_url, token) for one call — the credential resolution path."""
+    base_url, token, _auth_type = await _bearer_with_auth(ctx, connection_id)
     return base_url, token
 
 
@@ -80,6 +103,125 @@ async def _repository_read(ctx: ToolExecutionContext, payload: BaseModel) -> Bas
         forks=int(repo.get("forks_count", 0)),
         stars=int(repo.get("stargazers_count", 0)),
     )
+
+
+def _within_grant(ctx: ToolExecutionContext, repo: dict[str, Any]) -> bool:
+    """Whether one provider row is inside the grants that authorized this
+    call. Separate from the caller's own query so the executor can tell a
+    row the agent may not see from one it simply did not ask for.
+    """
+    full_name = str(repo.get("full_name", ""))
+    return bool(full_name) and result_scope_admits(ctx.authorizing_grants, "repository", full_name)
+
+
+def _listable(ctx: ToolExecutionContext, data: RepositoryListInput, repo: dict[str, Any]) -> bool:
+    """Whether one provider row belongs in this agent's listing.
+
+    The grant filter is the least-privilege half of a call that names no
+    repository. The gateway has already allowed the call; the repository
+    patterns of the allow grants that authorized *it* then bound the rows,
+    so an agent granted ``octo/*`` reads back octo names and nothing else.
+    This is narrowing, never deciding: it cannot allow a call the evaluator
+    denied, and it is not a place to enforce policy. With no authorizing
+    grants in the context it admits nothing — a listing that lost its
+    provenance returns an empty page rather than the whole inventory.
+    """
+    full_name = str(repo.get("full_name", ""))
+    if not full_name:
+        return False
+    if not _within_grant(ctx, repo):
+        return False
+    owner = full_name.partition("/")[0]
+    if data.owner is not None and owner.casefold() != data.owner.strip().casefold():
+        return False
+    return data.query is None or data.query.strip().casefold() in full_name.casefold()
+
+
+def _list_entry(repo: dict[str, Any]) -> RepositoryListEntry:
+    return RepositoryListEntry(
+        full_name=str(repo.get("full_name", "")),
+        private=bool(repo.get("private", False)),
+        default_branch=str(repo.get("default_branch", "")),
+        can_push=bool((repo.get("permissions") or {}).get("push", False)),
+        description=str(repo.get("description") or "")[:_MAX_DESCRIPTION_CHARS],
+    )
+
+
+async def _repository_list(ctx: ToolExecutionContext, payload: BaseModel) -> BaseModel:
+    """The repositories this connection's token can reach, in name order.
+
+    Which endpoint answers is decided by the connection's auth type, not by
+    asking GitHub what it can do: a GitHub App's installation token may only
+    call ``/installation/repositories``, and every user token (PAT, browser
+    or device sign-in) may only call ``/user/repos``. Nothing here consults
+    ``/user/installations``, so a token whose installations list is empty —
+    the ordinary state of a browser sign-in — still lists its repositories.
+    """
+    data = cast(RepositoryListInput, payload)
+    base_url, token, auth_type = await _bearer_with_auth(ctx, data.connection_id)
+    installation = auth_type == AUTH_GITHUB_APP
+    path = "/installation/repositories" if installation else "/user/repos"
+    # ``/user/repos`` orders the whole result set, so that walk may stop as
+    # soon as it holds one row more than was asked for. The installation
+    # endpoint takes no sort, so its rows are ordered here instead and its
+    # walk runs to the page cap before anything is cut.
+    params: dict[str, Any] = {"per_page": _LIST_PAGE_SIZE}
+    if not installation:
+        params["sort"] = "full_name"
+
+    entries: list[RepositoryListEntry] = []
+    truncated = False
+    limited_by_grant = False
+    for page in range(1, _MAX_LIST_PAGES + 1):
+        body = await github_request("GET", base_url, path, token, params={**params, "page": page})
+        batch = body.get("repositories") if isinstance(body, dict) else body
+        if not isinstance(batch, list) or not batch:
+            break
+        rows = [repo for repo in batch if isinstance(repo, dict)]
+        limited_by_grant = limited_by_grant or any(not _within_grant(ctx, repo) for repo in rows)
+        entries.extend(_list_entry(repo) for repo in rows if _listable(ctx, data, repo))
+        if len(batch) < _LIST_PAGE_SIZE:
+            break
+        if not installation and len(entries) > data.limit:
+            break
+        if page == _MAX_LIST_PAGES:
+            # The cap stopped the walk, not the provider. Say so, rather
+            # than let a partial answer read as the whole inventory.
+            truncated = True
+    if installation:
+        entries.sort(key=lambda entry: entry.full_name.casefold())
+    if len(entries) > data.limit:
+        truncated = True
+        entries = entries[: data.limit]
+    kept = _within_result_bytes(entries)
+    if len(kept) < len(entries):
+        truncated = True
+        entries = kept
+    return RepositoryListOutput(
+        repositories=entries, truncated=truncated, limited_by_grant=limited_by_grant
+    )
+
+
+def _within_result_bytes(entries: list[RepositoryListEntry]) -> list[RepositoryListEntry]:
+    """As many rows as a tool result may carry, and no more.
+
+    The gateway size-caps every result, and a document over the cap is not
+    trimmed but *replaced* by a preview marker — which would throw the whole
+    listing away and hand back a ``truncated`` of its own that means
+    something else. A hundred rows of long names and descriptions can reach
+    that size, so the answer is cut here, where the cut can be reported
+    honestly as this tool's own truncation.
+    """
+    budget = MAX_DOCUMENT_BYTES - _RESULT_BYTES_HEADROOM
+    kept: list[RepositoryListEntry] = []
+    used = 0
+    for entry in entries:
+        size = len(entry.model_dump_json().encode()) + 1
+        if used + size > budget:
+            break
+        kept.append(entry)
+        used += size
+    return kept
 
 
 async def _branch_list(ctx: ToolExecutionContext, payload: BaseModel) -> BaseModel:
@@ -343,6 +485,28 @@ GITHUB_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor], ...] = (
             scope_keys=_REPO_SCOPE,
         ),
         _repository_read,
+    ),
+    (
+        ToolDefinition(
+            name="github.repository.list",
+            description=(
+                "Find repositories: list the ones this GitHub connection can reach, in name "
+                "order, with an optional query matching part of owner/name. Takes no "
+                "repository — call it when you need a repository's owner/name and do not "
+                "already know it."
+            ),
+            risk=RiskLevel.READ,
+            input_model=RepositoryListInput,
+            output_model=RepositoryListOutput,
+            required_capability="github.repository.list",
+            # ``repository`` is a scope key the *call* never names: listing
+            # is how an agent finds one. A grant's repository patterns
+            # therefore bound the rows the executor returns, and the
+            # evaluator matches such a grant on the connection alone.
+            scope_keys=_REPO_SCOPE,
+            result_scope_keys=("repository",),
+        ),
+        _repository_list,
     ),
     (
         ToolDefinition(

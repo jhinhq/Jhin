@@ -98,6 +98,9 @@ _BAD_MANIFEST_CODE_MESSAGE: Final[str] = "That is not a GitHub app-creation code
 # error, not a silently under-permissioned app: see :func:`app_permissions`.
 _CAPABILITY_PERMISSIONS: Final[Mapping[str, tuple[str, str]]] = {
     "github.repository.read": ("contents", "read"),
+    # Listing an installation's repositories needs nothing beyond the
+    # metadata every app is granted anyway: it reads names, not contents.
+    "github.repository.list": ("metadata", "read"),
     "github.branch.create": ("contents", "write"),
     "github.issue.read": ("issues", "read"),
     "github.issue.comment": ("issues", "write"),

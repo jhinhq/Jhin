@@ -66,7 +66,7 @@ creation wizard). It grants:
 
 `cli.repository.checkout`, `cli.file.list`, `cli.file.search`, `cli.file.read`,
 `cli.file.edit`, `cli.file.write`, `cli.test.run`, `cli.repository.push`,
-`github.repository.read`, `github.pull_request.read`,
+`github.repository.list`, `github.repository.read`, `github.pull_request.read`,
 `github.pull_request.create`.
 
 The **Repositories** step of the setup dialog is where `*` becomes real

@@ -64,6 +64,22 @@ the tool worker's master key, and registers every credential value with the
 the duration of the call. The durable PostgreSQL `ToolCall`/`Approval` claim,
 not a worker process or retry, is the effect authority.
 
+**Listing tools and result scopes.** One shape of call names no resource
+because finding one is its whole point: `github.repository.list` takes a
+connection and no `repository`. A grant's `repository` pattern would then have
+nothing to match, so such a tool declares that dimension in
+`result_scope_keys`: the evaluator matches its grants on the dimensions the
+call *does* name (a grant scoped to `octo/*` still authorizes the listing; a
+*deny* carrying a repository still blocks it, because a listing cannot honour
+a deny row by row), and the rows come back narrowed instead. The gateway hands
+the executor the allow grants that authorized this very call
+(`authorizing_allow_grants` → `ToolExecutionContext.authorizing_grants`) and
+the executor drops every row outside them, so an agent granted one repository
+never reads back the names of the others. This narrows a READ result and
+decides nothing: the gateway has already allowed or denied the call, and an
+executor with no authorizing grants returns an empty page rather than
+everything.
+
 **Webhooks.** `POST /api/v1/webhooks/{connector_type}/{public_id}` has no
 session auth (plan 19). The API looks up the connection by `public_id`,
 decrypts its webhook secret, and calls `parse_webhook` — HMAC verification
@@ -106,7 +122,14 @@ Everything lives under one new package directory; no other service changes.
 5. Set `required_grant_scope_keys` on any tool that must never be authorized by
    an unscoped or wildcard grant. `cli.repository.checkout` and
    `cli.repository.push` require `connection_id` and `repository`, so no
-   `cli.*` grant can reach a repository by accident.
+   `cli.*` grant can reach a repository by accident. Set `result_scope_keys`
+   instead on a tool whose call spans a dimension rather than naming it —
+   a listing — and filter its rows in the executor with
+   `result_scope_admits(ctx.authorizing_grants, key, value)`. Give a listing
+   its own capability (`github.repository.list`, not `github.repository.read`)
+   so an operator can hand out "find a repository" and "read that repository"
+   separately, and bound it: a page size, a cap on pages walked, and a
+   `truncated` flag that says when either one cut the answer short.
 6. Override `tool_validators()` when authorization depends on connection state
    a grant scope cannot express. It returns tool name → `ToolValidator`, and
    the gateway runs the validator after grants and rules at all three

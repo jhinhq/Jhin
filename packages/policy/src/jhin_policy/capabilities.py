@@ -114,6 +114,15 @@ class ToolDefinition(BaseModel):
     # and a tool-specific validator registered with the catalog owns scope
     # enforcement — still policy code, never model output (plan 52).
     defers_scope: bool = False
+    # Scope dimensions a call of this tool spans instead of naming: a
+    # listing names no repository, so a grant's ``repository`` pattern
+    # bounds the *rows it may return* rather than the request. The evaluator
+    # matches such a grant on the dimensions the call does name (so a grant
+    # scoped to one repository still authorizes the listing, and a *deny*
+    # carrying one still blocks it), and the executor — handed the grants
+    # that authorized this very call — drops the rows outside them. This
+    # narrows a READ result; it never decides a call.
+    result_scope_keys: tuple[str, ...] = ()
 
     @field_validator("name", "required_capability")
     @classmethod
@@ -127,12 +136,12 @@ class ToolDefinition(BaseModel):
         for field_name, keys in (
             ("scope_keys", self.scope_keys),
             ("required_grant_scope_keys", self.required_grant_scope_keys),
+            ("result_scope_keys", self.result_scope_keys),
         ):
-            display_name = (
-                "required grant scope keys"
-                if field_name == "required_grant_scope_keys"
-                else "scope keys"
-            )
+            display_name = {
+                "required_grant_scope_keys": "required grant scope keys",
+                "result_scope_keys": "result scope keys",
+            }.get(field_name, "scope keys")
             if len(keys) != len(set(keys)):
                 raise ValueError(f"{display_name} must contain unique keys")
             invalid = [key for key in keys if not _SCOPE_KEY_RE.fullmatch(key)]
@@ -148,6 +157,25 @@ class ToolDefinition(BaseModel):
             raise ValueError(
                 "defers_scope tools cannot declare required grant scope keys; "
                 "their validator owns the complete scope contract"
+            )
+        unknown = set(self.result_scope_keys) - set(self.scope_keys)
+        if unknown:
+            raise ValueError(
+                f"result scope keys must be a subset of scope keys; missing {sorted(unknown)!r}"
+            )
+        # A required key must be matched against a value the call names, and
+        # a result key is exactly the value a call never names — a tool
+        # declaring both would deny every call it ever received.
+        both = set(self.result_scope_keys) & set(self.required_grant_scope_keys)
+        if both:
+            raise ValueError(
+                "a scope key cannot be both required of the grant and a result "
+                f"dimension: {sorted(both)!r}"
+            )
+        if self.defers_scope and self.result_scope_keys:
+            raise ValueError(
+                "defers_scope tools cannot declare result scope keys; their "
+                "validator owns the complete scope contract"
             )
         return self
 

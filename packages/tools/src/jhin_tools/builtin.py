@@ -43,7 +43,16 @@ class ToolExecutionContext:
     None for processes that hold no master key, and system tools never
     touch it. ``tool_call_id`` is set by the gateway just before execution
     so executors that spawn linked records (e.g. sandbox jobs, plan 14) can
-    attribute them to the exact tool call."""
+    attribute them to the exact tool call.
+
+    ``authorizing_grants`` is the gateway's answer to "which allow grants
+    covered this call" (:func:`jhin_policy.authorizing_allow_grants`), and
+    exists for one job: a listing executor narrowing its own rows to the
+    scope those grants carry, so an agent granted one repository does not
+    read back the names of every other. It is **not** a decision and never
+    stands in for one — the gateway has already allowed or denied the call
+    by the time an executor can see this, and an executor that ignored it
+    would still be inside the policy the evaluator applied."""
 
     session: AsyncSession
     workspace_id: UUID
@@ -55,6 +64,7 @@ class ToolExecutionContext:
     session_factory: async_sessionmaker[AsyncSession] | None = None
     tool_call_id: UUID | None = None
     test_barrier: CrashBarrier | None = None
+    authorizing_grants: tuple[Grant, ...] = ()
 
 
 ToolExecutor = Callable[[ToolExecutionContext, BaseModel], Awaitable[BaseModel]]

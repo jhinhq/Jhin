@@ -8,6 +8,27 @@ versions.
 
 ## [Unreleased]
 
+### Added
+
+- `github.repository.list` — an agent can find a repository instead of asking
+  a person for its `owner/name`. Every other GitHub tool takes an
+  `owner/name` it must already know, so an agent asked about "the Password1
+  repo" had nothing to call. The new tool lists the repositories the
+  connection's token can reach (user tokens and GitHub App installation
+  tokens alike, whether or not the app is installed anywhere), in name order,
+  with an optional substring `query` and `owner` filter, a per-call limit, a
+  cap on pages walked, and a `truncated` flag that says when either cut the
+  answer short. It is in the GitHub (read) and Code editing bundles, so
+  re-applying a bundle an agent already holds adds exactly this one row.
+- Grant scopes now bound the *rows* a listing returns, not just the calls that
+  name a resource. A tool may declare `result_scope_keys` for a dimension its
+  call spans rather than names; the evaluator matches such a grant on the
+  dimensions the call does name, and the gateway hands the executor the allow
+  grants that authorized that very call so it can drop everything outside
+  them. An agent granted `octo/*` lists `octo` repositories and learns nothing
+  about the rest of the token's reach. The gateway still decides every call:
+  this only narrows a READ result.
+
 ### Security
 
 - `DELETE /api/v1/workspaces/{workspace_id}` no longer accepts an API key at

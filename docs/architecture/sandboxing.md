@@ -304,6 +304,7 @@ deny anyway.
    | `cli.file.write` | `connection_id`, `path` | write a whole file (needs the `read_token`) |
    | `cli.test.run` | `connection_id`, `command` | run the test command, always isolated |
    | `cli.repository.push` | `connection_id`, `repository`, `branch: "agent/*"` | commit and push the working branch |
+   | `github.repository.list` | `connection_id`, `repository` (bounds the rows, not the call) | find the repository's `owner/name` |
    | `github.repository.read` | `connection_id`, `repository` | inspect the repository |
    | `github.pull_request.read` | `connection_id`, `repository` | read pull requests |
    | `github.pull_request.create` | `connection_id`, `repository`, `base: "*"` | open the PR from the pushed branch |

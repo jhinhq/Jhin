@@ -60,7 +60,9 @@ from jhin_policy.evaluator import (
     GrantEffect,
     PolicyDecision,
     PolicyRule,
+    authorizing_allow_grants,
     evaluate,
+    result_scope_admits,
     scope_matches,
 )
 from jhin_policy.memory import (
@@ -158,6 +160,7 @@ __all__ = [
     "WorkRequestDecision",
     "WorkRequestFacts",
     "ask_person_grant_specs",
+    "authorizing_allow_grants",
     "bundle_by_id",
     "bundle_capabilities",
     "bundle_state",
@@ -188,6 +191,7 @@ __all__ = [
     "repository_covered_by_allow_list",
     "repository_matches",
     "resolve_reviewer",
+    "result_scope_admits",
     "rules_for_preset",
     "scope_matches",
 ]

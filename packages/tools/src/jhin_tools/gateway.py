@@ -25,7 +25,7 @@ import copy
 import hashlib
 import json
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -55,6 +55,7 @@ from jhin_policy import (
     GrantEffect,
     PolicyRule,
     ToolDefinition,
+    authorizing_allow_grants,
     evaluate,
 )
 from jhin_tools.builtin import ToolCatalog, ToolExecutionContext, ToolExecutor
@@ -1104,11 +1105,26 @@ class ToolGateway:
         definition: ToolDefinition,
         row: ToolCall,
         validated_input: BaseModel,
+        *,
+        grants: Sequence[Grant],
+        requested_scope: Mapping[str, Any],
     ) -> GatewayOutcome:
-        """Run the executor and finalize the (already staged) tool_call row."""
+        """Run the executor and finalize the (already staged) tool_call row.
+
+        ``grants`` and ``requested_scope`` are the ones this call was just
+        decided on, live from Postgres; the allow grants among them that
+        cover the call travel to the executor (see
+        :attr:`ToolExecutionContext.authorizing_grants`). Recomputing the
+        subset here rather than passing it in keeps every caller — direct,
+        post-approval, post-review — handing over the same live rows the
+        evaluator saw.
+        """
         executor_entry = self._catalog.get(definition.name)
         assert executor_entry is not None  # caller already resolved it
         _, executor = executor_entry
+        authorized_by = authorizing_allow_grants(
+            definition, grants=grants, requested_scope=requested_scope
+        )
         durably_claimed = row.status == ToolCallStatus.EXECUTING.value
 
         if durably_claimed:
@@ -1133,6 +1149,7 @@ class ToolGateway:
                 executor=executor,
                 session=execution_session,
                 commit_terminal=True,
+                authorized_by=authorized_by,
             )
 
         return await self._run_executor(
@@ -1142,6 +1159,7 @@ class ToolGateway:
             executor=executor,
             session=self._ctx.session,
             commit_terminal=durably_claimed,
+            authorized_by=authorized_by,
         )
 
     async def _run_executor(
@@ -1153,12 +1171,20 @@ class ToolGateway:
         executor: ToolExecutor,
         session: AsyncSession,
         commit_terminal: bool,
+        authorized_by: Sequence[Grant],
     ) -> GatewayOutcome:
         """Dispatch one claimed executor and durably record its outcome."""
 
         # The executor sees which tool_call row it is serving so records it
-        # creates (sandbox jobs) can link back to it (plan 14).
-        execution_ctx = replace(self._ctx, session=session, tool_call_id=row.id)
+        # creates (sandbox jobs) can link back to it (plan 14), and which
+        # allow grants covered the call so a listing can narrow its own rows
+        # to them. Neither is authorization: the decision is already made.
+        execution_ctx = replace(
+            self._ctx,
+            session=session,
+            tool_call_id=row.id,
+            authorizing_grants=tuple(authorized_by),
+        )
         tool_call_id = row.id
 
         started = time.monotonic()
@@ -1631,7 +1657,9 @@ class ToolGateway:
             )
             self._ctx.session.add(row)
             self._audit("tool.call.requested", row.id, {"tool_name": definition.name})
-        return await self._execute(definition, row, validated)
+        return await self._execute(
+            definition, row, validated, grants=grants, requested_scope=requested_scope
+        )
 
     async def _review_gate(
         self,
@@ -2054,7 +2082,9 @@ class ToolGateway:
         replay = await self._claim_reviewed_call(row)
         if replay is not None:
             return replay
-        return await self._execute(definition, row, validated)
+        return await self._execute(
+            definition, row, validated, grants=grants, requested_scope=requested_scope
+        )
 
     async def _claim_reviewed_call(self, row: ToolCall) -> GatewayOutcome | None:
         """Atomically move ``pending_review`` to the stable executing claim and
@@ -2399,7 +2429,9 @@ class ToolGateway:
             row.id,
             {"approval_id": str(approval_id), "tool_name": definition.name},
         )
-        return await self._execute(definition, row, validated)
+        return await self._execute(
+            definition, row, validated, grants=grants, requested_scope=requested_scope
+        )
 
     async def resolve_rejected(self, approval_id: UUID) -> GatewayOutcome:
         """Resolve one rejection under the call's full lifecycle lock."""

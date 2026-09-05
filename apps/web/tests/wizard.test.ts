@@ -669,6 +669,7 @@ describe("wizard tool presets", () => {
     { name: "cli.test.run", scope_keys: ["connection_id", "command", "image"] },
     { name: "cli.repository.push", scope_keys: ["connection_id", "repository", "branch"] },
     { name: "cli.command.execute", scope_keys: ["connection_id", "command", "image", "network"] },
+    { name: "github.repository.list", scope_keys: ["connection_id", "repository"] },
     { name: "github.repository.read", scope_keys: ["connection_id", "repository"] },
     { name: "github.pull_request.read", scope_keys: ["connection_id", "repository"] },
     {
@@ -695,6 +696,7 @@ describe("wizard tool presets", () => {
       "cli.file.write",
       "cli.test.run",
       "cli.repository.push",
+      "github.repository.list",
       "github.repository.read",
       "github.pull_request.read",
       "github.pull_request.create",
@@ -725,7 +727,7 @@ describe("wizard tool presets", () => {
       required_grant_scope_keys: [],
       input_schema: {},
     })));
-    expect(payloads).toHaveLength(11);
+    expect(payloads).toHaveLength(12);
     expect(payloads.find((p) => p.capability === "cli.repository.checkout")?.scope).toEqual({
       connection_id: "cli-1",
       repository: "*",
@@ -785,6 +787,7 @@ describe("wizard tool presets", () => {
       (tool) => tool.name.startsWith("cli.") && tool.name !== "cli.command.execute",
     );
     expect(presetMissingTools(preset, partial)).toEqual([
+      "github.repository.list",
       "github.repository.read",
       "github.pull_request.read",
       "github.pull_request.create",

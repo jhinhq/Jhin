@@ -193,7 +193,7 @@ async def test_code_editing_without_a_sandbox_answers_with_a_need_and_writes_not
     assert await _count(session, Connection) == 1
 
 
-async def test_code_editing_creates_the_sandbox_and_writes_eleven_grants_and_one_rule(
+async def test_code_editing_creates_the_sandbox_and_writes_twelve_grants_and_one_rule(
     session: AsyncSession, crypto: SecretCrypto, admin_ctx: WorkspaceContext
 ) -> None:
     agent = await _agent(session, admin_ctx)
@@ -213,10 +213,10 @@ async def test_code_editing_creates_the_sandbox_and_writes_eleven_grants_and_one
         "git_connection_id": str(github.id),
         "allowed_repositories": ["*"],
     }
-    assert len(result.grants_created) == 11
+    assert len(result.grants_created) == 12
     assert result.grants_existing == []
     rows = await _grant_rows(session, agent)
-    assert len(rows) == 11
+    assert len(rows) == 12
     cli_id, gh_id = str(sandbox.id), str(github.id)
     scopes = {(row.capability, tuple(sorted(row.scope_json.items()))) for row in rows}
     assert (
@@ -238,7 +238,7 @@ async def test_code_editing_creates_the_sandbox_and_writes_eleven_grants_and_one
     assert refreshed.approval_policy_json == [GATE]
 
     granted = await _audit(session, "agent.permission.granted")
-    assert len(granted) == 11
+    assert len(granted) == 12
     assert all(event.metadata_json["bundle"] == "code-editing" for event in granted)
     policy = await _audit(session, "agent.policy.updated")
     assert len(policy) == 1
@@ -262,7 +262,7 @@ async def test_dry_run_computes_everything_and_writes_nothing(
 
     assert result.dry_run is True
     assert result.created_connection is None
-    assert len(result.grants_created) == 11
+    assert len(result.grants_created) == 12
     assert [rule.capability for rule in result.rules_added] == ["cli.repository.push"]
     assert await _grant_rows(session, agent) == []
     assert await _count(session, Connection) == 1
@@ -308,7 +308,7 @@ async def test_reapplying_is_idempotent_and_keeps_a_hand_made_read_row(
         **REQ,
     )
     first = await _apply(session, crypto, admin_ctx, agent, **_sandbox_request(github))
-    assert len(first.grants_created) == 11
+    assert len(first.grants_created) == 12
     assert first.grants_existing == []
     assert first.created_connection is not None
 
@@ -317,11 +317,11 @@ async def test_reapplying_is_idempotent_and_keeps_a_hand_made_read_row(
     )
 
     assert again.grants_created == []
-    assert len(again.grants_existing) == 11
+    assert len(again.grants_existing) == 12
     assert again.rules_added == []
     assert [rule.capability for rule in again.rules_kept] == ["cli.repository.push"]
     rows = await _grant_rows(session, agent)
-    assert len(rows) == 12
+    assert len(rows) == 13
     kept = next(row for row in rows if row.id == hand_made.id)
     assert kept.scope_json == {"connection_id": str(github.id)}
     (_row, problems, _name), *_ = await grants_service.annotate_grants(
@@ -386,7 +386,7 @@ async def test_creating_a_second_sandbox_for_the_same_github_connection_is_refus
         connections={"github": github.id},
         dry_run=True,
     )
-    assert len(created.grants_created) == 11
+    assert len(created.grants_created) == 12
 
     await _sandbox(session, crypto, admin_ctx, git=github, allowed=["*"], name="Mine")
     with pytest.raises(HTTPException) as caught:
@@ -526,16 +526,17 @@ async def test_removing_revokes_only_unshared_capabilities_and_names_hand_made_r
         session, admin_ctx, agent.id, "code-editing", dry_run=True, **REQ
     )
 
-    # github.repository.read and github.pull_request.read are also GitHub
-    # (read)'s, which is on, so they stay; the nine cli rows, the hand-made
-    # cli.file.read and pull_request.create go.
+    # github.repository.list, github.repository.read and
+    # github.pull_request.read are also GitHub (read)'s, which is on, so they
+    # stay; the nine cli rows, the hand-made cli.file.read and
+    # pull_request.create go.
     revoked = {row.capability for row in preview.revoked}
     assert "github.repository.read" not in revoked
     assert "github.pull_request.read" not in revoked
     assert "github.pull_request.create" in revoked
     assert len(preview.revoked) == 10
     assert [row.id for row in preview.hand_made] == [by_hand.id]
-    assert len(await _grant_rows(session, agent)) == 15
+    assert len(await _grant_rows(session, agent)) == 16
 
     result = await bundles.remove_bundle(
         session, admin_ctx, agent.id, "code-editing", dry_run=False, **REQ
@@ -544,6 +545,7 @@ async def test_removing_revokes_only_unshared_capabilities_and_names_hand_made_r
     assert len(result.revoked) == 10
     remaining = await _grant_rows(session, agent)
     assert {row.capability for row in remaining} == {
+        "github.repository.list",
         "github.repository.read",
         "github.pull_request.read",
         "github.issue.read",

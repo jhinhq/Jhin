@@ -625,7 +625,7 @@ async def test_agent_grant_writes_the_sandbox_the_grants_and_the_rule_as_the_con
     emit(result, as_json=True)
     payload = json.loads(capsys.readouterr().out)
     assert payload["agent"]["name"] == ENGINEER
-    assert len(payload["grants_created"]) == 11
+    assert len(payload["grants_created"]) == 12
     assert payload["grants_existing"] == []
     assert [rule["capability"] for rule in payload["rules_added"]] == ["cli.repository.push"]
     sandbox = await console.session.scalar(
@@ -644,7 +644,7 @@ async def test_agent_grant_writes_the_sandbox_the_grants_and_the_rule_as_the_con
             select(AgentCapabilityGrant).where(AgentCapabilityGrant.agent_id == agent.id)
         )
     )
-    assert len(rows) == 11
+    assert len(rows) == 12
     refreshed = await console.session.get(Agent, agent.id)
     assert refreshed is not None
     assert refreshed.approval_policy_json == [
@@ -655,7 +655,7 @@ async def test_agent_grant_writes_the_sandbox_the_grants_and_the_rule_as_the_con
             select(AuditEvent).where(AuditEvent.action == "agent.permission.granted")
         )
     )
-    assert len(granted) == 11
+    assert len(granted) == 12
     assert all(event.actor_type == "system" for event in granted)
     assert all(
         event.metadata_json["cli"] == "jhin-admin agent grant"
@@ -687,7 +687,7 @@ async def test_agent_grant_dry_run_writes_nothing(
     result = await console.run(*GRANT_ARGV, "--create-sandbox", "--dry-run")
 
     assert result.data["dry_run"] is True
-    assert len(result.data["grants_created"]) == 11
+    assert len(result.data["grants_created"]) == 12
     assert "Dry run: nothing was written." in result.lines
     assert await console.count(AgentCapabilityGrant) == 0
     assert await console.count(Connection) == 1
@@ -831,13 +831,13 @@ async def test_agent_revoke_bundle_names_hand_made_rows_and_leaves_the_rule(
         "path=docs/*",
         "--yes",
     )
-    assert await console.count(AgentCapabilityGrant) == 12
+    assert await console.count(AgentCapabilityGrant) == 13
 
     result = await console.run(
         "agent", "revoke", "--agent", ENGINEER, "--bundle", "code-editing", "--yes"
     )
 
-    assert len(result.data["revoked"]) == 12
+    assert len(result.data["revoked"]) == 13
     assert [row["capability"] for row in result.data["hand_made"]] == ["cli.file.read"]
     assert result.data["hand_made"][0]["scope_json"]["path"] == "docs/*"
     assert await console.count(AgentCapabilityGrant) == 0

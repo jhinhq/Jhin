@@ -1,9 +1,12 @@
 """Strict input/output models for the GitHub tools (plan 21.4).
 
-Every input carries ``connection_id`` and ``repository`` — the gateway
-matches both against grant scopes (connection-scoped, repo-glob-scoped
-access, plan 6.6). ``extra="forbid"`` everywhere: a hallucinated field is a
-schema violation, not a silent pass-through.
+Every input carries ``connection_id``, and every input naming one
+repository carries ``repository`` — the gateway matches both against grant
+scopes (connection-scoped, repo-glob-scoped access, plan 6.6). The one
+exception is the listing input, which names no repository because finding
+one is its whole point; a grant's repository patterns bound its rows
+instead. ``extra="forbid"`` everywhere: a hallucinated field is a schema
+violation, not a silent pass-through.
 """
 
 from __future__ import annotations
@@ -47,6 +50,54 @@ class RepositoryReadOutput(BaseModel):
     open_issues: int
     forks: int
     stars: int
+
+
+# --- github.repository.list ---
+
+
+class RepositoryListInput(BaseModel):
+    """The one GitHub input that names no repository: it is how an agent
+    finds one. ``connection_id`` is still the authorization scope; the
+    repositories a grant names bound the *rows* (``result_scope_keys``)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    connection_id: str = Field(description="Id of the GitHub connection to use.")
+    query: str | None = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "Optional filter: keep repositories whose owner/name contains this text "
+            "(case-insensitive)."
+        ),
+    )
+    owner: str | None = Field(
+        default=None,
+        max_length=200,
+        description="Optional filter: keep repositories owned by this account (case-insensitive).",
+    )
+    limit: int = Field(default=30, ge=1, le=100, description="Most rows to return.")
+
+
+class RepositoryListEntry(BaseModel):
+    full_name: str
+    private: bool
+    default_branch: str
+    can_push: bool
+    description: str = ""
+
+
+class RepositoryListOutput(BaseModel):
+    repositories: list[RepositoryListEntry]
+    #: True when matches were left out — the limit was reached, the walk
+    #: stopped at its page cap before the provider ran out, or the answer
+    #: was trimmed to fit the size a tool result may carry.
+    truncated: bool = False
+    #: True when this agent's own grants narrowed the listing. What came
+    #: back is what the agent may see, not everything the connection can
+    #: reach — said plainly so a reply can be honest about which it is.
+    #: No count: how much was withheld is outside what the agent may know.
+    limited_by_grant: bool = False
 
 
 # --- github.branch.list ---

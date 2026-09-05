@@ -399,6 +399,19 @@ def compose_system_prompt(
             "what would fix it, and finish the task as well as you can without "
             "it."
         )
+        # A call that needs an identifier a person used loosely ("the
+        # Password1 repo") is not a reason to go back and ask, if a tool in
+        # this same list finds identifiers. Naming that here rather than in
+        # the platform preamble keeps the preamble version stable.
+        parts.append(
+            "When a call needs an exact identifier the person gave you only "
+            "loosely — a repository's owner/name, a project, a board — look "
+            "for a tool in your list that finds or lists them, call it with "
+            "what you were given as the search text, and use the identifier "
+            "it returns. Ask the person only when no such tool is offered, or "
+            "when what came back is ambiguous — then say what you found and "
+            "which one you need."
+        )
     parts.append(
         "Execution constraints: work in focused steps and finish with a "
         f"clear final answer. You have at most {snapshot.run_limits.max_steps} "

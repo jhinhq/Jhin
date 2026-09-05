@@ -22,6 +22,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from jhin_policy.capabilities import ToolDefinition, capability_matches
+from jhin_policy.repositories import repository_matches
 from jhin_policy.risk import DEFAULT_ACTION_BY_RISK, RiskLevel, RuleAction
 
 
@@ -98,6 +99,83 @@ def scope_matches(granted_scope: Mapping[str, Any], requested_scope: Mapping[str
     return True
 
 
+def _request_dimensions(
+    tool: ToolDefinition, granted_scope: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    """The part of a grant scope the *call* names.
+
+    Identical to the grant scope for every ordinary tool. For a listing —
+    a tool declaring ``result_scope_keys`` — the dimensions it spans rather
+    than names are left out here, because they bound the rows the executor
+    may return instead of the request (see
+    :func:`authorizing_allow_grants`).
+    """
+    if not tool.result_scope_keys:
+        return granted_scope
+    dropped = set(tool.result_scope_keys)
+    return {key: value for key, value in granted_scope.items() if key not in dropped}
+
+
+def authorizing_allow_grants(
+    tool: ToolDefinition,
+    *,
+    grants: Sequence[Grant],
+    requested_scope: Mapping[str, Any] | None = None,
+) -> tuple[Grant, ...]:
+    """The allow grants that cover one call: allow effect, capability match,
+    every required dimension present, and a scope matching the request.
+
+    ``evaluate`` makes its final allow check with exactly this function, so
+    "the grants that authorized the call" means what the gateway decided on
+    and nothing else. It is **not** a decision: an explicit deny, a policy
+    rule, the review gate or an approval can still stop a call whose
+    authorizing grants are non-empty, and only the gateway's
+    :class:`PolicyDecision` says whether the call runs.
+    """
+    scope = requested_scope or {}
+    required = set(tool.required_grant_scope_keys)
+    return tuple(
+        grant
+        for grant in grants
+        if grant.effect is GrantEffect.ALLOW
+        and capability_matches(grant.capability, tool.required_capability)
+        and required.issubset(grant.scope)
+        and (tool.defers_scope or scope_matches(_request_dimensions(tool, grant.scope), scope))
+    )
+
+
+def result_scope_admits(grants: Sequence[Grant], key: str, value: str) -> bool:
+    """Whether one result row is inside what ``grants`` bound for ``key``.
+
+    ``grants`` are the authorizing grants of a listing call. A grant that
+    constrains the dimension admits the values its pattern matches; a grant
+    that leaves it unconstrained admits everything (an unscoped grant is an
+    unlimited one, exactly as :func:`scope_matches` reads it). The same
+    matcher as the evaluator, so a row this admits is a row the agent could
+    also have named in a scoped call.
+
+    ``repository`` is matched a segment at a time by
+    :func:`~jhin_policy.repositories.repository_matches`, not by bare
+    ``fnmatch``: ``fnmatch``'s ``*`` crosses ``/``, so ``octo*`` would
+    otherwise show an agent every repository of ``octo-labs`` as well. A
+    filter that decides what an agent may *see* has to be the strict one.
+    """
+    return any(
+        _result_value_admits(key, grant.scope[key], value) if key in grant.scope else True
+        for grant in grants
+    )
+
+
+def _result_value_admits(key: str, granted: Any, value: str) -> bool:
+    """One granted scope value against one result row's value."""
+    if key != "repository":
+        return _scope_value_matches(granted, value)
+    patterns = granted if isinstance(granted, list) else [granted]
+    return any(
+        isinstance(pattern, str) and repository_matches(pattern, value) for pattern in patterns
+    )
+
+
 def _first_matching_rule(
     rules: Sequence[PolicyRule], capability: str, risk: RiskLevel
 ) -> PolicyRule | None:
@@ -134,7 +212,11 @@ def evaluate(
             continue
         if not capability_matches(grant.capability, capability):
             continue
-        covers = not grant.scope if tool.defers_scope else scope_matches(grant.scope, scope)
+        covers = (
+            not grant.scope
+            if tool.defers_scope
+            else scope_matches(_request_dimensions(tool, grant.scope), scope)
+        )
         if covers:
             return PolicyDecision(
                 decision=DecisionType.DENY,
@@ -186,9 +268,7 @@ def evaluate(
             ),
         )
 
-    if not tool.defers_scope and not any(
-        scope_matches(grant.scope, scope) for grant in scoped_allow_grants
-    ):
+    if not authorizing_allow_grants(tool, grants=scoped_allow_grants, requested_scope=scope):
         return PolicyDecision(
             decision=DecisionType.DENY,
             code="scope_mismatch",

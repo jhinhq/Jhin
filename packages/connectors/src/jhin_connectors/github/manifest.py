@@ -11,6 +11,7 @@ from jhin_connectors.manifest import (
 
 GITHUB_CAPABILITIES: tuple[str, ...] = (
     "github.repository.read",
+    "github.repository.list",
     "github.branch.create",
     "github.issue.read",
     "github.issue.comment",

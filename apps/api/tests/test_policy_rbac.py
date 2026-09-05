@@ -379,7 +379,7 @@ async def test_admin_can_turn_a_bundle_on_and_off_through_the_routes(
     assert applied.status_code == 200, applied.text
     body = applied.json()
     assert body["needs"] == []
-    assert len(body["grants_created"]) == 5
+    assert len(body["grants_created"]) == 6
     assert all(row["connection_name"] == "GitHub" for row in body["grants_created"])
 
     statuses = await policy_rbac.client.get(
@@ -396,7 +396,7 @@ async def test_admin_can_turn_a_bundle_on_and_off_through_the_routes(
     assert preview.json()["dry_run"] is True
     # The fixture's own read row is a github-read capability too: turning the
     # bundle off means off, and the preview names it as hand-made.
-    assert len(preview.json()["revoked"]) == 6
+    assert len(preview.json()["revoked"]) == 7
     assert [row["id"] for row in preview.json()["hand_made"]] == [
         str(policy_rbac.existing_grant.id)
     ]

@@ -110,7 +110,7 @@ def test_connector_types_are_derived_from_the_tools() -> None:
 # --- Planning -------------------------------------------------------------
 
 
-def test_code_editing_plans_exactly_the_eleven_rows_with_base_star() -> None:
+def test_code_editing_plans_exactly_the_twelve_rows_with_base_star() -> None:
     plan = plan_bundle(CODE_EDITING, catalog=catalog(), connections=[github(), sandbox()])
 
     assert plan.needs == ()
@@ -127,6 +127,7 @@ def test_code_editing_plans_exactly_the_eleven_rows_with_base_star() -> None:
             "cli.repository.push",
             (("branch", "agent/*"), ("connection_id", CLI), ("repository", "*")),
         ),
+        ("github.repository.list", (("connection_id", GH), ("repository", "*"))),
         ("github.repository.read", (("connection_id", GH), ("repository", "*"))),
         ("github.pull_request.read", (("connection_id", GH), ("repository", "*"))),
         (
@@ -134,24 +135,26 @@ def test_code_editing_plans_exactly_the_eleven_rows_with_base_star() -> None:
             (("base", "*"), ("connection_id", GH), ("repository", "*")),
         ),
     }
-    assert len(plan.grants) == 11
+    assert len(plan.grants) == 12
     assert plan.rules == (
         PolicyRule(capability="cli.repository.push", risk=None, action=RuleAction.APPROVAL),
     )
 
 
-def test_github_read_plans_five_rows_and_web_access_two() -> None:
+def test_github_read_plans_six_rows_and_web_access_two() -> None:
     read = plan_bundle(GITHUB_READ, catalog=catalog(), connections=[github()])
-    # Seven tools, five capabilities: branch.list and file.read ride on
-    # repository.read, so their rows collapse into one.
+    # Eight tools, six capabilities: branch.list and file.read ride on
+    # repository.read, so their rows collapse into one. Finding a repository
+    # is its own capability, so it is its own row.
     assert {spec.capability for spec in read.grants} == {
+        "github.repository.list",
         "github.repository.read",
         "github.pull_request.read",
         "github.issue.read",
         "github.check.read",
         "github.workflow_run.read",
     }
-    assert len(read.grants) == 5
+    assert len(read.grants) == 6
     assert all(spec.scope == {"connection_id": GH, "repository": "*"} for spec in read.grants)
 
     browse = plan_bundle(WEB_ACCESS, catalog=catalog(), connections=[web()])
@@ -261,7 +264,7 @@ def test_repositories_default_to_star_and_a_list_gives_one_row_each() -> None:
     )
     reads = [spec for spec in plan.grants if spec.capability == "github.repository.read"]
     assert [spec.scope["repository"] for spec in reads] == ["octo/alpha", "octo/beta"]
-    assert len(plan.grants) == 10
+    assert len(plan.grants) == 12
 
 
 def test_a_bad_repository_entry_is_refused_by_sentence() -> None:

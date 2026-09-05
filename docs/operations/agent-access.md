@@ -18,8 +18,8 @@ row and a hand-made row are the same kind of row with the same audit trail.
 
 | Bundle | Gives | Needs |
 | --- | --- | --- |
-| `github-read` — GitHub (read) | repositories, branches, files, issues, pull requests, checks and workflow runs, read only | a GitHub connection |
-| `code-editing` — Code editing | check out, browse, search, read, edit, run tests, push `agent/*` branches (always with approval), read GitHub, open pull requests | a GitHub connection; the CLI Sandbox connection is created for you |
+| `github-read` — GitHub (read) | find repositories, then read branches, files, issues, pull requests, checks and workflow runs, read only | a GitHub connection |
+| `code-editing` — Code editing | find a repository, check out, browse, search, read, edit, run tests, push `agent/*` branches (always with approval), read GitHub, open pull requests | a GitHub connection; the CLI Sandbox connection is created for you |
 | `web-access` — Web search & browsing | search the web and read public pages | a Web connection |
 | `collaboration`, `team-building`, `skills`, `skill-authoring` | organization and skills tools | nothing to connect |
 
@@ -47,6 +47,11 @@ The dialog shows every step, pre-filled when the answer is unambiguous:
 3. **Repositories** — every repository the sandbox allows, or a list. An
    entry outside the sandbox's list is refused here, not discovered later.
    Under *Advanced*, the pull request base branch pattern (default `*`).
+   The same entries also bound what `github.repository.list` shows the agent:
+   a listing names no repository, so the repository patterns of the grants
+   that authorized the call are what narrow its rows. An agent granted
+   `octo/*` can find every `octo` repository by name and learns nothing about
+   the rest of the token's reach.
 4. **Review** — what the agent will be able to do, the exact rows and rules
    this writes (a dry run against the server), and any warnings: an explicit
    deny that still wins, or a wildcard grant that also covers these tools.
@@ -129,7 +134,7 @@ docker compose -f compose.yaml -f compose.desktop.yaml exec -T api jhin-admin ag
 
 The first command names the one workspace; the second creates `Sandbox for
 GitHub` (`default_network: none`, `git_connection_id` = the GitHub connection,
-`allowed_repositories: ["*"]`), writes the eleven Code editing rows and the
+`allowed_repositories: ["*"]`), writes the twelve Code editing rows and the
 `cli.repository.push → approval` rule, and prints them; the third shows Code
 editing `on`, GitHub (read) `partial` (the issue, check and workflow-run reads
 are not part of Code editing), the grants with their problems, and the tools
@@ -154,6 +159,15 @@ truth about what they can use now, to look at it before saying a tool is
 missing, and never to report a block they did not observe — when a call is
 denied, the result carries an error code and a reason, and that is what the
 agent relays.
+
+The tool guidance that follows it (composed per run, not part of the
+preamble) adds the other half: when a call needs an exact identifier the
+person gave loosely — "the Password1 repo" — the agent looks for a tool in
+the same list that finds identifiers, calls it with what it was given, and
+asks a person only when nothing offered can find it or the answer is
+ambiguous. `github.repository.list` is what makes that possible for
+repositories; before it existed an agent holding every other GitHub tool
+still had to ask for an `owner/name` it could have looked up.
 
 ## Grants that cannot work
 

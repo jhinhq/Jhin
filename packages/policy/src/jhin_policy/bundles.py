@@ -118,11 +118,12 @@ BUNDLES: tuple[Bundle, ...] = (
             "checks and workflow runs"
         ),
         description=(
-            "Look at repositories, branches and files, and read issues, pull requests, "
-            "check results and workflow runs through a GitHub connection. Nothing is "
-            "written."
+            "Find the repositories a GitHub connection can reach, look at their branches "
+            "and files, and read issues, pull requests, check results and workflow runs. "
+            "Nothing is written."
         ),
         tools={
+            "github.repository.list": _ANY_REPOSITORY_SCOPE,
             "github.repository.read": _ANY_REPOSITORY_SCOPE,
             "github.branch.list": _ANY_REPOSITORY_SCOPE,
             "github.file.read": _ANY_REPOSITORY_SCOPE,
@@ -138,9 +139,10 @@ BUNDLES: tuple[Bundle, ...] = (
         label="Code editing",
         summary="Write code: check out a repo, edit files, run tests, and open pull requests",
         description=(
-            "Clone a repository into the sandbox, find your way around it, read and change "
-            "files, run tests, and — once a human approves it — push a branch and open a "
-            "pull request. Needs a GitHub connection; the CLI Sandbox it runs in is created "
+            "Find a repository on GitHub, clone it into the sandbox, find your way around "
+            "it, read and change files, run tests, and — once a human approves it — push a "
+            "branch and open a pull request. "
+            "Needs a GitHub connection; the CLI Sandbox it runs in is created "
             "for you when the capability is turned on. Running tests means running a "
             "command the agent chose, inside the checkout, so it can change files there — "
             "but it never holds the git credential, and the push tool re-checks the "
@@ -156,6 +158,7 @@ BUNDLES: tuple[Bundle, ...] = (
             "cli.file.write": {"path": "*"},
             "cli.test.run": {"command": "*"},
             "cli.repository.push": {"repository": "*", "branch": AGENT_BRANCH_PATTERN},
+            "github.repository.list": {"repository": "*"},
             "github.repository.read": {"repository": "*"},
             "github.pull_request.read": {"repository": "*"},
             "github.pull_request.create": {"repository": "*", "base": "*"},

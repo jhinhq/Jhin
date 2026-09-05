@@ -3,8 +3,12 @@
 Stdlib-only (``http.server``) like the fake model provider, so it runs as a
 pytest fixture, on a dev host, or as a compose service
 (``python -m jhin_connectors.testing.fake_github``). It implements exactly
-the endpoints the GitHub connector tools use, plus GitHub App token minting
-and a ``/_state`` inspection endpoint for exit tests.
+the endpoints the GitHub connector tools use — including the two repository
+inventories (``GET /user/repos`` for a user token, ``GET
+/installation/repositories`` for an installation one), with GitHub's own
+``per_page``/``page`` paging so a client's page walk terminates here the way
+it does against the real API — plus GitHub App token minting and a
+``/_state`` inspection endpoint for exit tests.
 
 Auth model:
 
@@ -27,9 +31,11 @@ import json
 import os
 import re
 import threading
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from urllib.parse import parse_qs
 
 DEFAULT_TOKEN = "fake-github-pat"
 DEFAULT_REPOS = "octo/alpha,octo/beta"
@@ -126,6 +132,14 @@ class FakeGitHubState:
         with self.lock:
             return token == self.token or token in self.minted_tokens
 
+    def is_minted_token(self, header: str | None) -> bool:
+        """True for an installation token this server minted, as opposed to
+        the user token — the two reach different repository endpoints."""
+        if not header or not header.startswith("Bearer "):
+            return False
+        with self.lock:
+            return header.removeprefix("Bearer ").strip() in self.minted_tokens
+
     def refresh_from_git(self, full_name: str) -> None:
         """Merge branch heads from the bare git repository into REST state,
         so pushed branches are immediately valid PR heads."""
@@ -168,15 +182,45 @@ class FakeGitHubState:
             return copied
 
 
+def _repository_summary(repo: dict[str, Any]) -> dict[str, Any]:
+    """One repository as the list endpoints return it (no branches/files)."""
+    return {
+        "full_name": repo["full_name"],
+        "name": repo["full_name"].split("/", 1)[1],
+        "owner": {"login": repo["full_name"].split("/", 1)[0]},
+        "description": repo["description"],
+        "default_branch": repo["default_branch"],
+        "private": repo["private"],
+        "permissions": {"admin": False, "push": True, "pull": True},
+    }
+
+
+def _paginate(rows: list[dict[str, Any]], query: Mapping[str, str]) -> list[dict[str, Any]]:
+    """``per_page``/``page`` exactly as GitHub applies them, so a client's
+    page walk terminates here the same way it does against the real API."""
+    try:
+        per_page = min(max(int(query.get("per_page", "30")), 1), 100)
+    except ValueError:
+        per_page = 30
+    try:
+        page = max(int(query.get("page", "1")), 1)
+    except ValueError:
+        page = 1
+    start = (page - 1) * per_page
+    return rows[start : start + per_page]
+
+
 def handle_request(
     state: FakeGitHubState,
     method: str,
     path: str,
     headers: dict[str, str],
     body: dict[str, Any],
+    query: Mapping[str, str] | None = None,
 ) -> tuple[int, dict[str, Any] | list[Any]]:
     """Pure request router, separated for direct unit testing."""
     auth = headers.get("Authorization")
+    params = dict(query or {})
 
     # --- App auth endpoints (JWT bearer) ---
     if method == "GET" and path == "/app":
@@ -201,6 +245,24 @@ def handle_request(
 
     if method == "GET" and path == "/user":
         return 200, {"login": "fake-user", "id": 1}
+
+    # The repository inventories the listing tool walks. ``/user/repos``
+    # answers a user token and ``/installation/repositories`` an app's
+    # installation token — GitHub refuses each to the other kind, and so
+    # does this. Neither has anything to do with ``/user/installations``:
+    # a token whose installations list is empty still lists its repos.
+    if method == "GET" and path in ("/user/repos", "/installation/repositories"):
+        installation_token = state.is_minted_token(auth)
+        if (path == "/user/repos") is installation_token:
+            return 403, {"message": "Resource not accessible by integration"}
+        with state.lock:
+            rows = [_repository_summary(repo) for repo in state.repos.values()]
+        if params.get("sort") == "full_name":
+            rows.sort(key=lambda row: str(row["full_name"]))
+        page = _paginate(rows, params)
+        if path == "/user/repos":
+            return 200, page
+        return 200, {"total_count": len(rows), "repositories": page}
 
     if method == "GET" and path == "/user/installations":
         if state.installations_forbidden:
@@ -431,7 +493,15 @@ def _make_handler(state: FakeGitHubState) -> type[BaseHTTPRequestHandler]:
             if not isinstance(body, dict):
                 body = {}
             headers = {"Authorization": self.headers.get("Authorization", "")}
-            status, payload = handle_request(state, method, self.path.split("?")[0], headers, body)
+            route, _, raw_query = self.path.partition("?")
+            status, payload = handle_request(
+                state,
+                method,
+                route,
+                headers,
+                body,
+                {key: values[-1] for key, values in parse_qs(raw_query).items()},
+            )
             # HTTP/1.1 keep-alive framing: Content-Length must match exactly
             # what is written (204 responses carry no body at all).
             data = b"" if status == 204 else json.dumps(payload).encode()

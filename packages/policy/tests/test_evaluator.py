@@ -12,8 +12,10 @@ from jhin_policy import (
     RiskLevel,
     RuleAction,
     ToolDefinition,
+    authorizing_allow_grants,
     evaluate,
     matching_preset,
+    result_scope_admits,
     rules_for_preset,
     scope_matches,
 )
@@ -34,6 +36,7 @@ def _tool(
     supports_approval: bool = True,
     scope_keys: tuple[str, ...] = (),
     required_grant_scope_keys: tuple[str, ...] = (),
+    result_scope_keys: tuple[str, ...] = (),
 ) -> ToolDefinition:
     return ToolDefinition(
         name=capability,
@@ -45,6 +48,7 @@ def _tool(
         supports_approval=supports_approval,
         scope_keys=scope_keys,
         required_grant_scope_keys=required_grant_scope_keys,
+        result_scope_keys=result_scope_keys,
     )
 
 
@@ -293,6 +297,112 @@ class TestScopes:
             )
 
 
+class TestResultScopes:
+    """A listing names no repository, so the grant's repository patterns
+    bound its rows instead of its request (``result_scope_keys``)."""
+
+    LISTING = _tool(
+        RiskLevel.READ,
+        scope_keys=("connection_id", "repository"),
+        result_scope_keys=("repository",),
+    )
+    SCOPED = Grant(
+        capability="system.demo",
+        scope={"connection_id": "connection-1", "repository": "octo/*"},
+        effect=GrantEffect.ALLOW,
+    )
+
+    def test_a_repository_scoped_grant_still_authorizes_a_listing(self) -> None:
+        """The same grant that denies an out-of-scope *read* allows the
+        listing: the dimension it constrains is one the call never names."""
+        ordinary = _tool(RiskLevel.READ, scope_keys=("connection_id", "repository"))
+        assert (
+            evaluate(
+                ordinary,
+                grants=[self.SCOPED],
+                rules=[],
+                requested_scope={"connection_id": "connection-1"},
+            ).code
+            == "scope_mismatch"
+        )
+        assert evaluate(
+            self.LISTING,
+            grants=[self.SCOPED],
+            rules=[],
+            requested_scope={"connection_id": "connection-1"},
+        ).allowed
+
+    def test_the_other_dimensions_still_have_to_match(self) -> None:
+        decision = evaluate(
+            self.LISTING,
+            grants=[self.SCOPED],
+            rules=[],
+            requested_scope={"connection_id": "connection-2"},
+        )
+        assert decision.code == "scope_mismatch"
+
+    def test_a_repository_scoped_deny_blocks_the_whole_listing(self) -> None:
+        """Fail closed: a listing cannot honour a deny row by row, so a deny
+        naming a repository covers the call rather than leaking the name."""
+        decision = evaluate(
+            self.LISTING,
+            grants=[
+                self.SCOPED,
+                Grant(
+                    capability="system.demo",
+                    scope={"repository": "octo/secret"},
+                    effect=GrantEffect.DENY,
+                ),
+            ],
+            rules=[],
+            requested_scope={"connection_id": "connection-1"},
+        )
+        assert decision.code == "explicit_deny"
+
+    def test_authorizing_grants_are_the_ones_the_decision_rested_on(self) -> None:
+        other_connection = Grant(
+            capability="system.demo",
+            scope={"connection_id": "connection-2", "repository": "other/*"},
+            effect=GrantEffect.ALLOW,
+        )
+        wrong_capability = Grant(capability="system.other", scope={}, effect=GrantEffect.ALLOW)
+        a_deny = Grant(capability="system.demo", scope={}, effect=GrantEffect.DENY)
+        assert authorizing_allow_grants(
+            self.LISTING,
+            grants=[self.SCOPED, other_connection, wrong_capability, a_deny],
+            requested_scope={"connection_id": "connection-1"},
+        ) == (self.SCOPED,)
+
+    def test_rows_are_admitted_by_the_grant_patterns_not_the_request(self) -> None:
+        assert result_scope_admits([self.SCOPED], "repository", "octo/widgets")
+        assert not result_scope_admits([self.SCOPED], "repository", "other/widgets")
+
+    def test_a_grant_leaving_the_dimension_open_admits_every_row(self) -> None:
+        unscoped = Grant(capability="system.demo", scope={"connection_id": "connection-1"})
+        assert result_scope_admits([unscoped], "repository", "anything/at-all")
+
+    def test_no_authorizing_grants_admits_nothing(self) -> None:
+        """An executor that lost its provenance returns an empty page."""
+        assert not result_scope_admits([], "repository", "octo/widgets")
+
+    def test_a_result_dimension_cannot_also_be_required_of_the_grant(self) -> None:
+        with pytest.raises(ValidationError, match="both required of the grant"):
+            _tool(
+                RiskLevel.READ,
+                scope_keys=("connection_id", "repository"),
+                required_grant_scope_keys=("repository",),
+                result_scope_keys=("repository",),
+            )
+
+    def test_a_result_dimension_must_be_a_scope_key(self) -> None:
+        with pytest.raises(ValidationError, match="result scope keys"):
+            _tool(
+                RiskLevel.READ,
+                scope_keys=("connection_id",),
+                result_scope_keys=("repository",),
+            )
+
+
 class TestRiskDefaults:
     """Plan 12.2: read/write auto once granted; elevated/destructive approval."""
 
@@ -380,3 +490,30 @@ class TestPresets:
                 _tool(RiskLevel.READ), grants=[], rules=list(rules_for_preset(preset))
             )
             assert decision.code == "no_grant"
+
+
+def test_a_result_scope_admits_repositories_a_segment_at_a_time() -> None:
+    """``result_scope_admits`` decides what an agent may see in a listing,
+    so ``repository`` is matched by the repository matcher rather than by
+    bare ``fnmatch``, whose ``*`` crosses ``/``. Other dimensions keep the
+    evaluator's ordinary matching.
+    """
+    from jhin_policy import Grant, GrantEffect, result_scope_admits
+
+    def grant(**scope: str) -> Grant:
+        return Grant(
+            capability="github.repository.list", scope=dict(scope), effect=GrantEffect.ALLOW
+        )
+
+    owner = [grant(repository="octo/*")]
+    assert result_scope_admits(owner, "repository", "octo/alpha") is True
+    # The trap: fnmatch would call this a match.
+    assert result_scope_admits([grant(repository="octo*")], "repository", "octo-labs/x") is False
+    assert result_scope_admits(owner, "repository", "octo-labs/x") is False
+    # A value that is not a plain owner/name is never admitted, even by *.
+    assert result_scope_admits([grant(repository="*")], "repository", "../evil") is False
+    assert result_scope_admits([grant(repository="*")], "repository", "octo/alpha") is True
+    # An unconstrained grant is unlimited, as everywhere else.
+    assert result_scope_admits([grant(connection_id="c1")], "repository", "octo/alpha") is True
+    # A dimension that is not a repository keeps ordinary matching.
+    assert result_scope_admits([grant(branch="agent/*")], "branch", "agent/fix") is True

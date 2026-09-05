@@ -1670,3 +1670,148 @@ async def test_schema_denial_names_the_offending_fields(
     assert row is not None
     assert row.sanitized_output_json["error"] == "invalid_input"
     assert "text: string_type" in row.sanitized_output_json["reason"]
+
+
+# --- The grants an executor is handed -------------------------------------
+
+
+class _ListingInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    connection_id: str
+
+
+class _ListingOutput(BaseModel):
+    scopes: list[str]
+
+
+def _listing_catalog(seen: list[Sequence[Grant]]) -> ToolCatalog:
+    """A listing-shaped tool: it names a connection, never a repository, and
+    a grant's repository patterns bound its rows instead."""
+
+    async def executor(ctx: ToolExecutionContext, _payload: BaseModel) -> _ListingOutput:
+        seen.append(ctx.authorizing_grants)
+        return _ListingOutput(
+            scopes=[str(grant.scope.get("repository", "*")) for grant in ctx.authorizing_grants]
+        )
+
+    catalog = ToolCatalog()
+    catalog.register(
+        ToolDefinition(
+            name="test.listing",
+            description="List what the connection reaches.",
+            risk=RiskLevel.READ,
+            input_model=_ListingInput,
+            output_model=_ListingOutput,
+            required_capability="test.listing",
+            scope_keys=("connection_id", "repository"),
+            result_scope_keys=("repository",),
+        ),
+        executor,
+    )
+    return catalog
+
+
+async def _scoped_grant(
+    session: AsyncSession,
+    ctx: ToolExecutionContext,
+    capability: str,
+    scope: dict[str, Any],
+    effect: str = "allow",
+) -> None:
+    session.add(
+        AgentCapabilityGrant(
+            workspace_id=ctx.workspace_id,
+            agent_id=ctx.agent_id,
+            capability=capability,
+            scope_json=scope,
+            effect=effect,
+        )
+    )
+    await session.flush()
+
+
+async def test_the_executor_is_handed_the_grants_that_allowed_the_call(
+    session: AsyncSession, context: ToolExecutionContext
+) -> None:
+    """Only the covering allow grants travel: not the one pinned to another
+    connection, not one for another capability, and never a deny (this one
+    lands on another connection; a deny that covered the call would have
+    stopped it in the evaluator, before any executor)."""
+    seen: list[Sequence[Grant]] = []
+    gateway = ToolGateway(context, _listing_catalog(seen))
+    await _scoped_grant(
+        session, context, "test.listing", {"connection_id": "conn-1", "repository": "octo/*"}
+    )
+    await _scoped_grant(
+        session, context, "test.listing", {"connection_id": "conn-2", "repository": "other/*"}
+    )
+    await _scoped_grant(session, context, "test.other", {})
+    await _scoped_grant(session, context, "test.listing", {"connection_id": "conn-2"}, "deny")
+
+    outcome = await gateway.request("test.listing", '{"connection_id":"conn-1"}')
+
+    assert outcome.status == "executed"
+    assert outcome.sanitized_output == {"scopes": ["octo/*"]}
+    assert [grant.scope for grant in seen[0]] == [
+        {"connection_id": "conn-1", "repository": "octo/*"}
+    ]
+
+
+async def test_an_ordinary_executor_gets_the_grants_without_being_asked() -> None:
+    """The field defaults to empty, so an executor built before it existed —
+    and any caller constructing a context by hand — still type-checks and
+    still runs."""
+    assert (
+        ToolExecutionContext(
+            session=cast(Any, None),
+            workspace_id=new_uuid7(),
+            task_id=new_uuid7(),
+            run_id=new_uuid7(),
+            agent_id=new_uuid7(),
+            agent_name="Scout",
+        ).authorizing_grants
+        == ()
+    )
+
+
+async def test_the_grants_are_read_live_at_approval_time_not_when_parked(
+    session: AsyncSession, context: ToolExecutionContext
+) -> None:
+    """A grant narrowed while the call waited for a human narrows the rows
+    it comes back with: the executor sees the live rows, like the evaluator."""
+    seen: list[Sequence[Grant]] = []
+    catalog = _listing_catalog(seen)
+    definition = catalog.registry.get("test.listing")
+    assert definition is not None
+    narrow = ToolCatalog()
+    narrow.register(
+        definition.model_copy(update={"risk": RiskLevel.ELEVATED, "supports_approval": True}),
+        catalog.get("test.listing")[1],  # type: ignore[index]
+    )
+    gateway = ToolGateway(context, narrow)
+    await _persist_execution_context(session, context)
+    row = AgentCapabilityGrant(
+        workspace_id=context.workspace_id,
+        agent_id=context.agent_id,
+        capability="test.listing",
+        scope_json={"connection_id": "conn-1", "repository": "*"},
+        effect="allow",
+    )
+    session.add(row)
+    await session.flush()
+
+    parked = await gateway.request("test.listing", '{"connection_id":"conn-1"}')
+    assert parked.status == "needs_approval"
+    assert parked.approval_id is not None
+    approval = await session.get(Approval, parked.approval_id)
+    assert approval is not None
+    approval.status = ApprovalStatus.APPROVED.value
+    approval.decided_at = datetime.now(UTC)
+    row.scope_json = {"connection_id": "conn-1", "repository": "octo/*"}
+    await session.flush()
+
+    outcome = await gateway.resolve_approved(parked.approval_id)
+
+    assert outcome.status == "executed"
+    assert outcome.sanitized_output == {"scopes": ["octo/*"]}

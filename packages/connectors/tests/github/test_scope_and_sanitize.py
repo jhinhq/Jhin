@@ -2,7 +2,14 @@
 token redaction in sanitized error payloads (plan 6.6, 12, 48.9)."""
 
 from jhin_connectors.registry import build_default_catalog
-from jhin_policy import Grant, GrantEffect, evaluate, scope_matches
+from jhin_policy import (
+    Grant,
+    GrantEffect,
+    authorizing_allow_grants,
+    evaluate,
+    result_scope_admits,
+    scope_matches,
+)
 from jhin_secrets.redaction import SecretRedactor
 from jhin_tools.sanitize import sanitize_payload
 
@@ -212,3 +219,42 @@ def test_pull_request_create_refuses_an_unscoped_grant() -> None:
         },
     )
     assert decision.code == "required_scope_missing"
+
+
+def test_a_repository_scoped_grant_authorizes_the_listing_and_bounds_its_rows() -> None:
+    """The one call that names no repository. The same grant shape that
+    scopes every other GitHub tool has to keep working here, or an agent
+    granted one repository could not find out what it is called."""
+    grant = Grant(
+        capability="github.repository.list",
+        scope={"connection_id": CONNECTION, "repository": "octo/*"},
+        effect=GrantEffect.ALLOW,
+    )
+    definition = _tool("github.repository.list")
+    decision = evaluate(
+        definition, grants=[grant], rules=[], requested_scope={"connection_id": CONNECTION}
+    )
+
+    assert decision.decision.value == "allow"
+    # ...and the pattern the call never named is what the executor filters by.
+    assert authorizing_allow_grants(
+        definition, grants=[grant], requested_scope={"connection_id": CONNECTION}
+    ) == (grant,)
+    assert result_scope_admits([grant], "repository", "octo/alpha")
+    assert not result_scope_admits([grant], "repository", "other/gamma")
+
+
+def test_the_listing_is_still_pinned_to_its_connection() -> None:
+    decision = evaluate(
+        _tool("github.repository.list"),
+        grants=[
+            Grant(
+                capability="github.repository.list",
+                scope={"connection_id": CONNECTION, "repository": "*"},
+                effect=GrantEffect.ALLOW,
+            )
+        ],
+        rules=[],
+        requested_scope={"connection_id": "0198c5f2-0000-7000-8000-00000000dead"},
+    )
+    assert decision.code == "scope_mismatch"
