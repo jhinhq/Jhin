@@ -180,6 +180,9 @@ async def test_two_agents_two_profiles_run_through_temporal(
             "memory.retrieved",
             "agent.step.tool_manifest",
             "agent.step.reasoning",
+            # Each step also records the tool names it was offered, in the
+            # same commit as the manifest/reasoning pair it belongs to.
+            "agent.step.tools_offered",
             "node.load_context",
             "node.reason",
             "agent.step.committed",

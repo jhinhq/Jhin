@@ -203,11 +203,13 @@ async def _grant(
     scope: dict[str, str],
     *,
     effect: str = "allow",
+    expect: int = 201,
 ) -> dict[str, Any]:
     return await _post(
         client,
         f"/api/v1/workspaces/{workspace_id}/agents/{agent_id}/grants",
         {"capability": capability, "scope": scope, "effect": effect},
+        expect=expect,
     )
 
 
@@ -809,23 +811,35 @@ async def test_vercel_mutations_require_exact_scope_and_balanced_approval(
     assert denied["error_code"] == "no_grant"
 
     unscoped = await _create_agent(client, workspace_id, "Unscoped Vercel grant")
-    await _grant(
+    # A grant carrying none of the scope this mutation requires is refused where
+    # it is written — the evaluator would have denied every call it could ever
+    # cover — and the refusal names the keys that are missing.
+    unscoped_refusal = await _grant(
         client,
         workspace_id,
         str(unscoped["id"]),
         "vercel.deployment.preview.create",
         {},
+        expect=422,
     )
+    assert unscoped_refusal["detail"] == (
+        "vercel.deployment.preview.create needs connection_id, project_id, "
+        "environment, repository_id in its grant scope; a grant without it is "
+        "refused on every call."
+    )
+    # Refused, not saved to fail later: the agent holds nothing at all, so the
+    # call that row would have covered stops for want of a grant and the
+    # provider is never reached.
     _, unscoped_call = await _run(
         client,
         workspace_id,
         str(unscoped["id"]),
         "vercel.deployment.preview.create",
         preview_payload,
-        label="preview with incomplete grant",
+        label="preview after the incomplete grant was refused",
     )
     assert unscoped_call["status"] == "denied"
-    assert unscoped_call["error_code"] == "required_scope_missing"
+    assert unscoped_call["error_code"] == "no_grant"
     assert (await _fake_state(FAKE_VERCEL_URL))["counters"]["preview_create"] == 0
 
     agent = await _create_agent(client, workspace_id, "Vercel release agent")
@@ -1988,64 +2002,60 @@ async def test_supabase_authority_planes_and_workspaces_cannot_substitute(
     assert database_on_management["status"] == "failed", database_on_management
     assert database_on_management["error_code"] == "unsupported_auth_type"
 
+    # A connection belongs to exactly one workspace, so there is no moment when
+    # the foreign workspace may name this one — no window in which such a grant
+    # is valid and only later lapses. The substitution is refused at the grant
+    # itself, and that refusal is the proof: the foreign workspace cannot even
+    # write down the authority it wanted to borrow. What the refusal says
+    # matters as much as that it refuses — it reports the connection as absent,
+    # never that it lives in a workspace this caller cannot see.
     foreign_workspace = await _workspace(client, "Foreign workspace")
     foreign_agent = await _create_agent(client, foreign_workspace, "Foreign agent")
     foreign_scope = {
         "connection_id": management_id,
         "project_ref": SUPABASE_PROJECT_REF,
     }
-    await _grant(
+    foreign_refusal = await _grant(
         client,
         foreign_workspace,
         str(foreign_agent["id"]),
         "supabase.project.read",
         foreign_scope,
+        expect=422,
     )
-    _, foreign_call = await _run(
-        client,
-        foreign_workspace,
-        str(foreign_agent["id"]),
-        "supabase.project.read",
-        foreign_scope,
-        label="foreign workspace connection",
-    )
-    assert foreign_call["status"] == "failed", foreign_call
-    assert foreign_call["error_code"] == "connection_unavailable"
-    assert "workspace" not in json.dumps(foreign_call).casefold()
+    assert foreign_refusal["detail"] == "Connection no longer exists."
+    assert "workspace" not in json.dumps(foreign_refusal).casefold()
 
     foreign_database_scope = {
         "connection_id": database_id,
         "project_ref": SUPABASE_PROJECT_REF,
         "schema": "public",
     }
-    await _grant(
+    foreign_database_refusal = await _grant(
         client,
         foreign_workspace,
         str(foreign_agent["id"]),
         "supabase.database.read",
         foreign_database_scope,
+        expect=422,
     )
-    _, foreign_database_call = await _run(
+    assert foreign_database_refusal["detail"] == "Connection no longer exists."
+    assert "workspace" not in json.dumps(foreign_database_refusal).casefold()
+    # Refused, not saved to fail later: the foreign agent ends up holding no
+    # supabase authority at all, so there is no row a later call could ride.
+    foreign_grants = await _get(
         client,
-        foreign_workspace,
-        str(foreign_agent["id"]),
-        "supabase.database.read",
-        {
-            **foreign_database_scope,
-            "sql": "SELECT public.widgets.id FROM public.widgets",
-            "params": [],
-        },
-        label="foreign workspace database connection",
+        f"/api/v1/workspaces/{foreign_workspace}/agents/{foreign_agent['id']}/grants",
     )
-    assert foreign_database_call["status"] == "failed", foreign_database_call
-    assert foreign_database_call["error_code"] == "connection_unavailable"
-    assert "workspace" not in json.dumps(foreign_database_call).casefold()
+    assert [row for row in foreign_grants if row["capability"].startswith("supabase.")] == [], (
+        foreign_grants
+    )
     _assert_no_secrets(
         [
             management_on_database,
             database_on_management,
-            foreign_call,
-            foreign_database_call,
+            foreign_refusal,
+            foreign_database_refusal,
         ]
     )
 
@@ -2371,7 +2381,10 @@ async def test_supabase_database_mutations_recheck_live_authority_and_bounds(
             workspace_id,
             "Database writer missing schema scope",
         )
-        await _grant(
+        # ``schema`` is the bound every database write is checked against, so a
+        # write grant without one is refused where it is written rather than
+        # denied on each call it would have covered.
+        missing_scope_refusal = await _grant(
             client,
             workspace_id,
             str(missing_scope_agent["id"]),
@@ -2380,7 +2393,15 @@ async def test_supabase_database_mutations_recheck_live_authority_and_bounds(
                 "connection_id": connection_id,
                 "project_ref": SUPABASE_PROJECT_REF,
             },
+            expect=422,
         )
+        assert missing_scope_refusal["detail"] == (
+            "supabase.database.write needs schema in its grant scope; a grant "
+            "without it is refused on every call."
+        )
+        # Refused, not saved to fail later: the row does not exist, so the write
+        # it would have covered stops for want of a grant and the table is
+        # untouched (asserted with the other counts below).
         _, missing_scope_call = await _run(
             client,
             workspace_id,
@@ -2391,10 +2412,10 @@ async def test_supabase_database_mutations_recheck_live_authority_and_bounds(
                 "sql": f'INSERT INTO public."{table}" (id, value) VALUES ($1, $2)',
                 "params": [91, "missing-scope"],
             },
-            label="database missing required schema scope",
+            label="database write after the schema-less grant was refused",
         )
         assert missing_scope_call["status"] == "denied", missing_scope_call
-        assert missing_scope_call["error_code"] == "required_scope_missing"
+        assert missing_scope_call["error_code"] == "no_grant"
 
         wrong_risk = await _park(
             client,
@@ -2849,12 +2870,15 @@ async def test_control_plane_rbac_access_summary_and_outputs_hide_secrets(
         "vercel.project.read",
         allow_scope,
     )
-    incomplete = await _grant(
+    # This row used to be deliberately incomplete; such a grant is refused at
+    # POST now, so the viewer holds a complete allow and is blocked by the deny
+    # that overlaps it — which is what this summary is here to show.
+    blocked_allow = await _grant(
         client,
         workspace_id,
         str(blocked["id"]),
         "vercel.project.read",
-        {"connection_id": connection_id},
+        allow_scope,
     )
     deny = await _grant(
         client,
@@ -2864,7 +2888,10 @@ async def test_control_plane_rbac_access_summary_and_outputs_hide_secrets(
         allow_scope,
         effect="deny",
     )
-    assert {allow["effect"], incomplete["effect"], deny["effect"]} == {"allow", "deny"}
+    assert {allow["effect"], blocked_allow["effect"], deny["effect"]} == {
+        "allow",
+        "deny",
+    }
 
     _, read_call = await _run(
         client,
@@ -2892,7 +2919,13 @@ async def test_control_plane_rbac_access_summary_and_outputs_hide_secrets(
     assert blocked_row["authorized"] is False
     assert blocked_row["authorized_tool_names"] == []
     assert {row["effect"] for row in blocked_row["grants"]} == {"allow", "deny"}
-    assert any(row["eligibility_reason"] for row in blocked_row["grants"])
+    # Both of this viewer's rows are live — a grant the evaluator would refuse
+    # on every call never reaches the database — so the summary reports no
+    # reason against either one, and the block is the deny's doing alone.
+    assert all(
+        row["eligible_tool_names"] == ["vercel.project.read"] for row in blocked_row["grants"]
+    ), blocked_row
+    assert all(row["eligibility_reason"] is None for row in blocked_row["grants"]), blocked_row
 
     viewer_email = f"phase9-viewer-{uuid4().hex[:10]}@example.com"
     viewer_password = f"Phase9-{uuid4().hex}-password"

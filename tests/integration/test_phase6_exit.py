@@ -1021,7 +1021,12 @@ async def test_push_to_an_unallowed_repository_is_denied_and_leaks_nothing(
     even names it — the connection does not, so both checkout and push stop."""
     client, ws = owner
     tag = uuid4().hex[:8]
-    _, cli = await _connections(client, ws, tag, allowed=["octo/alpha"])
+    # The grants are written while the connection still allows every ``octo``
+    # repository, because a row wider than the allow-list is refused at POST
+    # now. Narrowing the list afterwards is the state this test is about, and
+    # connection settings are create-only through the API, so — as in the
+    # parked-approval case below — it is applied where it lives.
+    _, cli = await _connections(client, ws, tag, allowed=["octo/*"])
     agent = await _make_agent(client, ws, tag)
     cli_id = cli["id"]
     branch = f"agent/beta-{tag}"
@@ -1038,6 +1043,11 @@ async def test_push_to_an_unallowed_repository_is_denied_and_leaks_nothing(
         agent["id"],
         "cli.repository.push",
         {"connection_id": cli_id, "repository": "octo/*", "branch": "agent/*"},
+    )
+    _psql(
+        "update connection set config_json = jsonb_set(config_json::jsonb, "
+        "'{allowed_repositories}', '[\"octo/alpha\"]'::jsonb) "
+        "where id = '" + cli_id + "'"
     )
 
     markers = " ".join(
