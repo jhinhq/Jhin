@@ -55,9 +55,15 @@ from jhin_db.models import (
     TriggerInvocation,
 )
 from jhin_db.models.connection import new_public_id
-from jhin_domain import ConnectionStatus, SecretType
+from jhin_domain import ActorType, ConnectionStatus, SecretType
 from jhin_oauth.lifecycle import ConnectionTokenService
-from jhin_policy import RiskLevel, ToolDefinition, capability_matches, scope_matches
+from jhin_policy import (
+    RiskLevel,
+    ToolDefinition,
+    capability_matches,
+    is_repository_pattern,
+    scope_matches,
+)
 from jhin_secrets import (
     SecretCrypto,
     SecretMaterialError,
@@ -681,7 +687,33 @@ async def delete_impact(
             )
             or 0
         )
-    return {"trigger_count": len(trigger_ids), "trigger_invocation_count": invocation_count}
+    pinned = await _pinned_grants(db, workspace_id, connection_id)
+    return {
+        "trigger_count": len(trigger_ids),
+        "trigger_invocation_count": invocation_count,
+        "grant_count": len(pinned),
+        "agent_count": len({grant.agent_id for grant in pinned}),
+    }
+
+
+async def _pinned_grants(
+    db: AsyncSession, workspace_id: UUID, connection_id: UUID
+) -> list[AgentCapabilityGrant]:
+    """Every grant in the workspace whose scope pins this connection.
+
+    Filtered in Python rather than in SQL: the JSON column is portable across
+    the SQLite the unit tests run on and Postgres, and a workspace's grant set
+    is small.
+    """
+    rows = await db.scalars(
+        select(AgentCapabilityGrant).where(AgentCapabilityGrant.workspace_id == workspace_id)
+    )
+    wanted = str(connection_id)
+    return [
+        grant
+        for grant in rows
+        if isinstance(grant.scope_json, dict) and grant.scope_json.get("connection_id") == wanted
+    ]
 
 
 def _duplicate_server_slug(server_slug: str, existing_name: str) -> HTTPException:
@@ -761,6 +793,41 @@ async def create_connection(
 ) -> tuple[Connection, str | None]:
     """Create a connection; returns it plus the webhook signing secret
     plaintext (shown exactly once) when the connector supports webhooks."""
+    created = await _create_connection(
+        db,
+        crypto,
+        ctx,
+        connector_type=connector_type,
+        name=name,
+        auth_type=auth_type,
+        credentials=credentials,
+        config=config,
+        request_id=request_id,
+        ip_hash=ip_hash,
+    )
+    await db.commit()
+    return created
+
+
+async def _create_connection(
+    db: AsyncSession,
+    crypto: SecretCrypto,
+    ctx: WorkspaceContext,
+    *,
+    connector_type: str,
+    name: str,
+    auth_type: str,
+    credentials: dict[str, str],
+    config: dict[str, object],
+    request_id: UUID,
+    ip_hash: str | None,
+    actor_type: ActorType = ActorType.USER,
+    extra_audit_metadata: dict[str, Any] | None = None,
+) -> tuple[Connection, str | None]:
+    """Everything :func:`create_connection` does except the commit, so a
+    caller that writes a connection *and* something else (the Code editing
+    bundle creates the sandbox its grants point at) can make both one
+    transaction."""
     connector = get_connector(connector_type)
     _validate_credentials(connector, auth_type, credentials)
     try:
@@ -832,12 +899,17 @@ async def create_connection(
         target_type="connection",
         target_id=connection.id,
         workspace_id=ctx.workspace_id,
+        actor_type=actor_type,
         actor_id=ctx.user.id,
         request_id=request_id,
         ip_hash=ip_hash,
-        metadata={"connector_type": connector_type, "name": name, "auth_type": auth_type},
+        metadata={
+            "connector_type": connector_type,
+            "name": name,
+            "auth_type": auth_type,
+            **(extra_audit_metadata or {}),
+        },
     )
-    await db.commit()
     return connection, webhook_plaintext
 
 
@@ -1217,6 +1289,103 @@ async def set_status(
     return connection
 
 
+async def update_config(
+    db: AsyncSession,
+    ctx: WorkspaceContext,
+    connection_id: UUID,
+    *,
+    config: dict[str, Any],
+    request_id: UUID,
+    ip_hash: str,
+) -> Connection:
+    """Change the connection's manifest-declared settings — the ones named.
+
+    A field the body omits keeps its value: the submitted fields are laid
+    over the settings the connection already has (as ``GET`` shows them)
+    before the same normalization and connector validation a create goes
+    through, so a body of one key changes one key. A sandbox that loses its
+    ``git_connection_id`` cannot check out or push, and no partial edit
+    should be able to do that quietly; to clear a field, send it empty. Keys
+    the manifest does not declare — OAuth bookkeeping, discovered MCP tools,
+    risk overrides — stay exactly as they are. A CLI Sandbox additionally has
+    its allow-list entries checked as repository patterns and its GitHub
+    connection checked to be one of this workspace's. Narrowing
+    ``allowed_repositories`` already invalidates parked approvals (the
+    allow-list validator runs again on resume). The audit row names every
+    changed key with its value before and after, so a widening — the
+    allow-list opened up, ``default_network`` set to ``internet`` — is
+    written down as the widening it is.
+    """
+    connection = await get_connection(db, ctx.workspace_id, connection_id)
+    connector = get_connector(connection.connector_type)
+    try:
+        normalized = normalize_config(
+            connector.manifest,
+            connection.auth_type,
+            {**public_connection_config(connection), **config},
+        )
+        normalized = connector.validate_settings(connection.auth_type, normalized)
+    except ValueError as exc:
+        raise _bad_request(str(exc)) from None
+    if connection.connector_type == "cli":
+        raw_allowed = normalized.get("allowed_repositories")
+        for entry in raw_allowed if isinstance(raw_allowed, list) else ():
+            if not isinstance(entry, str) or not is_repository_pattern(entry):
+                raise _bad_request(
+                    f"'{entry}' is not a repository: use owner/name, owner/*, or * for every "
+                    "repository."
+                )
+        git_connection_id = normalized.get("git_connection_id")
+        if git_connection_id:
+            try:
+                git_uuid: UUID | None = UUID(str(git_connection_id))
+            except ValueError:
+                git_uuid = None
+            github = (
+                await db.scalar(
+                    select(Connection.id).where(
+                        Connection.id == git_uuid,
+                        Connection.workspace_id == ctx.workspace_id,
+                        Connection.connector_type == "github",
+                    )
+                )
+                if git_uuid is not None
+                else None
+            )
+            if github is None:
+                raise _bad_request(
+                    f"'{git_connection_id}' is not a GitHub connection in this workspace."
+                )
+    declared = {field.name for field in connector.manifest.config_fields}
+    previous = dict(connection.config_json)
+    kept = {key: value for key, value in previous.items() if key not in declared}
+    updated = {**kept, **normalized}
+    changed_keys = sorted(key for key in declared if previous.get(key) != updated.get(key))
+    connection.config_json = updated
+    audit.record(
+        db,
+        action="connection.config_updated",
+        target_type="connection",
+        target_id=connection.id,
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user.id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        metadata={
+            "name": connection.name,
+            "changed_keys": changed_keys,
+            # Public settings only (the manifest declares no credential), so
+            # the values themselves can be recorded: what a key was and what
+            # it became is what makes a widening visible in the trail.
+            "changes": {
+                key: {"from": previous.get(key), "to": updated.get(key)} for key in changed_keys
+            },
+        },
+    )
+    await db.commit()
+    return connection
+
+
 async def delete_connection(
     db: AsyncSession,
     ctx: WorkspaceContext,
@@ -1252,6 +1421,30 @@ async def delete_connection(
         ip_hash=ip_hash,
         metadata={"connector_type": connection.connector_type, "name": connection.name},
     )
+    # A grant pinned to this connection can never work again, so it goes with
+    # the connection — each one audited as a revocation with its reason, so an
+    # agent that stops being able to reach an app has a trail saying why.
+    # Disabling revokes nothing: it is reversible, and the grants come back
+    # with the connection.
+    for grant in await _pinned_grants(db, ctx.workspace_id, connection.id):
+        audit.record(
+            db,
+            action="agent.permission.revoked",
+            target_type="agent",
+            target_id=grant.agent_id,
+            workspace_id=ctx.workspace_id,
+            actor_id=ctx.user.id,
+            request_id=request_id,
+            ip_hash=ip_hash,
+            metadata={
+                "grant_id": str(grant.id),
+                "capability": grant.capability,
+                "effect": grant.effect,
+                "reason": "connection.deleted",
+                "connection_id": str(connection.id),
+            },
+        )
+        await db.delete(grant)
     await db.delete(connection)
     # The connection's secrets have no other consumers; remove them too so no
     # orphaned ciphertext lingers.

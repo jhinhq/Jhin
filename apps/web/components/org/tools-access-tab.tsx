@@ -1,15 +1,25 @@
 "use client";
 
-/** Agent drawer "Tools & Access" tab (plan 17.5): capability grants,
- * approval-policy preset with its underlying rules, and autonomy display. */
+/** Agent drawer "Tools & Access" tab (plan 17.5): capability bundles, the
+ * grants behind them (with what is wrong with any that cannot work as
+ * written), approval-policy preset with its underlying rules, and autonomy
+ * display. Connector bundles go through the bundle endpoints; organization
+ * bundles keep the client loop they always had. */
 
 import { useMutation } from "@tanstack/react-query";
-import { Check, ChevronDown, Plus, ShieldCheck, ShieldOff, SlidersHorizontal, Trash2 } from "lucide-react";
+import { Check, ChevronDown, Minus, Plus, ShieldCheck, ShieldOff, SlidersHorizontal, Trash2 } from "lucide-react";
 import { useState } from "react";
-import { Badge, Button, ErrorNote, Field, focusRing, Select, Spinner, StatusLabel } from "@/components/ui";
+import { Badge, Button, ConfirmDialog, ErrorNote, Field, focusRing, Select, Spinner, StatusLabel } from "@/components/ui";
+import { BundleSetupDialog } from "@/components/org/bundle-setup-dialog";
 import { ScopeEditor } from "@/components/scope-editor";
 import { api, ApiError } from "@/lib/api";
 import { describeRisk } from "@/lib/apps";
+import {
+  bundleAppliedNotice,
+  connectorLabel,
+  isConnectorBundle,
+  repositoryScopeError,
+} from "@/lib/bundles";
 import {
   buildToolScope,
   mcpServerSlug,
@@ -18,16 +28,19 @@ import {
   type ToolScopeValues,
 } from "@/lib/connectors";
 import {
+  useAgentBundles,
   useAgentGrants,
   useAgentPolicy,
   useConnections,
   useInvalidateAgentAccess,
   useOrgGraph,
+  useRemoveBundle,
   useTools,
 } from "@/lib/hooks";
 import {
   describeRule,
   formatScope,
+  grantCovers,
   isCapabilityGranted,
   keptRules,
   PRESET_DESCRIPTIONS,
@@ -35,15 +48,21 @@ import {
   riskTone,
   sortGrants,
 } from "@/lib/policy";
-import type { Agent, ApprovalPreset, GrantEffect } from "@/lib/types";
+import type {
+  Agent,
+  ApprovalPreset,
+  BundleRemoveOut,
+  BundleStatusOut,
+  ConnectionInfo,
+  Grant,
+  GrantEffect,
+  ToolInfo,
+} from "@/lib/types";
 import {
   isPresetGranted,
   missingPolicyRules,
-  presetCapabilities,
   presetGrantsToAdd,
   presetGrantsToRevoke,
-  presetMissingTools,
-  presetScopeGaps,
   TOOL_PRESETS,
   type ToolPreset,
 } from "@/lib/wizard";
@@ -59,28 +78,74 @@ export function delegationScope(targets: string, pinAgentId: string): Record<str
   return scope;
 }
 
+/** What the advanced form starts with for a tool: the only active matching
+ * connection, `*` for the free-text keys, `agent/*` for a branch. Every
+ * value is editable; the defaults exist so a required key is never blank by
+ * accident. */
+export function prefillScope(tool: ToolInfo, connections: ConnectionInfo[]): ToolScopeValues {
+  const type = tool.name.split(".", 1)[0];
+  const matching = connections.filter((c) => c.connector_type === type && c.status === "active");
+  const values: ToolScopeValues = {};
+  for (const key of tool.scope_keys) {
+    if (key === "connection_id") {
+      if (matching.length === 1) values[key] = matching[0].id;
+    } else if (["repository", "path", "command", "name", "domain", "base"].includes(key)) {
+      values[key] = "*";
+    } else if (key === "branch") {
+      values[key] = "agent/*";
+    }
+  }
+  return values;
+}
+
+/** Whether a tool is callable given these annotated grants: a covering allow
+ * grant with no problems, or only problem rows ("needs attention"), or none. */
+export function toolGrantState(grants: Grant[], capability: string): "granted" | "attention" | "none" {
+  if (!isCapabilityGranted(grants, capability)) return "none";
+  const covering = grants.filter(
+    (grant) => grant.effect === "allow" && grantCovers(grant.capability, capability),
+  );
+  return covering.some((grant) => (grant.problems ?? []).length === 0) ? "granted" : "attention";
+}
+
+function turnOffBody(bundle: BundleStatusOut, preview: BundleRemoveOut): string {
+  const handMade = preview.hand_made;
+  const byHand =
+    handMade.length > 0
+      ? `, including ${handMade.length} you added by hand: ${handMade.map((row) => row.capability).join(", ")}`
+      : "";
+  return `This revokes ${preview.revoked.length} grants${byHand}. Anything else the agent can do stays as it is.`;
+}
+
 export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: boolean }) {
   const { workspace, can } = useWorkspace();
   const workspaceId = workspace.workspace_id;
   const grants = useAgentGrants(workspaceId, agent.id);
   const policy = useAgentPolicy(workspaceId, agent.id);
   const tools = useTools(workspaceId);
+  const bundles = useAgentBundles(workspaceId, agent.id);
   const connections = useConnections(workspaceId, can("admin"));
   const graph = useOrgGraph(workspaceId);
   const invalidate = useInvalidateAgentAccess(workspaceId, agent.id);
+  const removeBundle = useRemoveBundle(workspaceId, agent.id);
 
   const [toolName, setToolName] = useState("");
   const [effect, setEffect] = useState<GrantEffect>("allow");
   const [scopeValues, setScopeValues] = useState<ToolScopeValues>({});
+  const [prefilled, setPrefilled] = useState<string[]>([]);
   const [delegationTargets, setDelegationTargets] = useState("subordinates");
   const [delegationPin, setDelegationPin] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [setup, setSetup] = useState<BundleStatusOut | null>(null);
+  const [turningOff, setTurningOff] = useState<{ bundle: BundleStatusOut; preview: BundleRemoveOut } | null>(null);
 
   const [wholeServer, setWholeServer] = useState(false);
   /** null = follow the grants (open when something was granted by hand). */
   const [advancedOverride, setAdvancedOverride] = useState<boolean | null>(null);
 
   const toolList = tools.data ?? [];
+  const connectionList = connections.data ?? [];
   const selectedTool = toolList.find((tool) => tool.name === toolName);
   const selectedServerSlug = selectedTool ? mcpServerSlug(selectedTool.name) : null;
   const capability =
@@ -88,12 +153,16 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
       ? mcpWildcardCapability(selectedServerSlug)
       : selectedTool?.required_capability ?? "";
   const isDelegate = capability === "organization.delegate";
-  const matchingConnections = (connections.data ?? []).filter(
+  const matchingConnections = connectionList.filter(
     (connection) => connection.connector_type === selectedTool?.name.split(".", 1)[0],
   );
   const missingRequired = selectedTool
     ? missingRequiredScopeKeys(selectedTool, scopeValues)
     : [];
+  const repositoryError =
+    selectedTool && (scopeValues.repository ?? "").trim()
+      ? repositoryScopeError(scopeValues.repository)
+      : null;
 
   const addGrant = useMutation({
     mutationFn: () =>
@@ -113,6 +182,7 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
       setError(null);
       setToolName("");
       setScopeValues({});
+      setPrefilled([]);
       setDelegationPin("");
       setWholeServer(false);
       invalidate();
@@ -132,9 +202,10 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
     onError: (err) => setError(err instanceof ApiError ? err.detail : "Revoking failed."),
   });
 
-  /** One capability preset on or off: add the grants it needs, or revoke the
-   * grants it owns and no other capability that is still on needs. */
-  const toggleCapability = useMutation({
+  /** An organization bundle on or off, the way the tab always did it: add
+   * the grants it needs, or revoke the grants it owns and no other bundle
+   * that is still on needs. Connector bundles go through the server. */
+  const toggleOrganizationBundle = useMutation({
     mutationFn: async (preset: ToolPreset) => {
       const current = grants.data ?? [];
       const catalog = tools.data ?? [];
@@ -150,15 +221,12 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
         }
         return;
       }
-      for (const body of presetGrantsToAdd(current, preset, catalog, connections.data ?? [])) {
+      for (const body of presetGrantsToAdd(current, preset, catalog, connectionList)) {
         await api(`/api/v1/workspaces/${workspaceId}/agents/${agent.id}/grants`, {
           method: "POST",
           body,
         });
       }
-      // The bundle's own approval rules, the same ones the wizard writes: a
-      // capability granted here must arrive with the gate the bundle promises,
-      // not only when the agent was created through the wizard.
       const existing = policy.data?.rules ?? [];
       const missing = missingPolicyRules(existing, preset);
       if (missing.length > 0) {
@@ -189,27 +257,69 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
     onError: (err) => setError(err instanceof ApiError ? err.detail : "Updating policy failed."),
   });
 
-  if (grants.isPending || tools.isPending || policy.isPending) {
+  if (grants.isPending || tools.isPending || policy.isPending || bundles.isPending) {
     return <Spinner label="Loading tools & access…" />;
   }
 
   const grantList = sortGrants(grants.data ?? []);
+  const problemRows = grantList.filter((grant) => (grant.problems ?? []).length > 0);
   const currentPreset = policy.data?.preset ?? null;
   const rules = policy.data?.rules ?? [];
-  const appliedPresets = TOOL_PRESETS.filter((preset) =>
-    isPresetGranted(grantList, preset, toolList),
-  );
-  const presetCapabilitySet = new Set(
-    appliedPresets.flatMap((preset) => presetCapabilities(preset, toolList)),
+  const bundleList = bundles.data ?? [];
+  const bundleCapabilitySet = new Set(
+    bundleList
+      .filter((bundle) => bundle.state === "on")
+      .flatMap((bundle) => bundle.tools.map((tool) => tool.capability)),
   );
   const handPickedGrants = grantList.filter(
-    (grant) => !presetCapabilitySet.has(grant.capability),
+    (grant) => !bundleCapabilitySet.has(grant.capability),
   );
   const advancedOpen = advancedOverride ?? handPickedGrants.length > 0;
+
+  const onBundleClick = async (bundle: BundleStatusOut) => {
+    setError(null);
+    setNotice(null);
+    const preset = TOOL_PRESETS.find((candidate) => candidate.id === bundle.id);
+    if (bundle.state === "on") {
+      if (!isConnectorBundle(bundle.id)) {
+        if (preset) toggleOrganizationBundle.mutate(preset);
+        return;
+      }
+      try {
+        const preview = await removeBundle.mutateAsync({ bundleId: bundle.id, dryRun: true });
+        setTurningOff({ bundle, preview });
+      } catch (err) {
+        setError(err instanceof ApiError ? err.detail : `Turning off ${bundle.label} failed.`);
+      }
+      return;
+    }
+    if (isConnectorBundle(bundle.id)) {
+      setSetup(bundle);
+      return;
+    }
+    if (preset) toggleOrganizationBundle.mutate(preset);
+  };
+
+  const confirmTurnOff = async () => {
+    if (!turningOff) return;
+    try {
+      await removeBundle.mutateAsync({ bundleId: turningOff.bundle.id, dryRun: false });
+      setTurningOff(null);
+      invalidate();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.detail : `Turning off ${turningOff.bundle.label} failed.`);
+      setTurningOff(null);
+    }
+  };
 
   return (
     <div className="space-y-6">
       <ErrorNote message={error} />
+      {notice ? (
+        <p role="status" data-testid="bundle-notice" className="rounded-xl border border-ok/30 bg-ok-soft px-3.5 py-2.5 text-sm text-ok">
+          {notice}
+        </p>
+      ) : null}
 
       <section>
         <h3 className="mb-1 font-display text-base font-semibold">Capabilities</h3>
@@ -218,43 +328,50 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
           behind it; anything not listed here stays blocked.
         </p>
         <div className="grid gap-2 sm:grid-cols-2">
-          {TOOL_PRESETS.map((preset) => {
-            const granted = isPresetGranted(grantList, preset, toolList);
-            const missing = presetMissingTools(preset, toolList);
-            const gaps = granted
-              ? []
-              : presetScopeGaps(preset, toolList, connections.data ?? []);
-            const unavailable = missing.length === Object.keys(preset.tools).length;
-            const blocked = !granted && gaps.length > 0;
+          {bundleList.map((bundle) => {
+            const on = bundle.state === "on";
+            const partial = bundle.state === "partial";
+            const unavailable = bundle.state === "off" && bundle.readiness.state === "unavailable";
+            const needs = bundle.state === "off" && bundle.readiness.state === "needs";
+            const needLabel = needs
+              ? connectorLabel(bundle.readiness.needs[0]?.connector_type ?? "")
+              : "";
+            const total = bundle.granted_capabilities.length + bundle.missing_capabilities.length;
+            const subLine = partial
+              ? `${bundle.granted_capabilities.length} of ${total} capabilities granted · Finish setup`
+              : needs
+                ? `Needs a ${needLabel} connection — set it up here`
+                : bundle.summary;
             return (
               <button
-                key={preset.id}
+                key={bundle.id}
                 type="button"
-                data-testid={`capability-preset-${preset.id}`}
-                aria-pressed={granted}
+                data-testid={`capability-preset-${bundle.id}`}
+                data-state={bundle.state}
+                aria-pressed={on}
                 title={
-                  blocked
-                    ? `Needs a connection first: ${gaps.join(", ")}`
-                    : preset.description
+                  unavailable
+                    ? `This workspace's catalog does not include: ${bundle.readiness.missing_tools.join(", ")}`
+                    : bundle.description
                 }
-                disabled={!canEdit || unavailable || blocked || toggleCapability.isPending}
-                onClick={() => toggleCapability.mutate(preset)}
+                disabled={!canEdit || unavailable || toggleOrganizationBundle.isPending || removeBundle.isPending}
+                onClick={() => void onBundleClick(bundle)}
                 className={`rounded-xl border px-3 py-2.5 text-left text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${focusRing} ${
-                  granted ? "border-accent bg-accent-soft" : "border-line bg-raised hover:border-line-strong"
+                  on ? "border-accent bg-accent-soft" : "border-line bg-raised hover:border-line-strong"
                 }`}
               >
                 <span className="flex items-center gap-2">
                   <span
                     aria-hidden
                     className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-[5px] border ${
-                      granted ? "border-accent bg-accent text-white" : "border-line-strong"
+                      on ? "border-accent bg-accent text-white" : partial ? "border-accent text-accent" : "border-line-strong"
                     }`}
                   >
-                    {granted ? <Check size={11} strokeWidth={3} /> : null}
+                    {on ? <Check size={11} strokeWidth={3} /> : partial ? <Minus size={11} strokeWidth={3} /> : null}
                   </span>
-                  <span className="font-medium">{preset.label}</span>
+                  <span className="font-medium">{bundle.label}</span>
                 </span>
-                <span className="mt-1 block text-xs leading-snug text-dim">{preset.summary}</span>
+                <span className="mt-1 block text-xs leading-snug text-dim">{subLine}</span>
               </button>
             );
           })}
@@ -267,6 +384,12 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
           Deny-by-default: this agent can only call tools matching an allow grant, and an
           explicit deny always wins. Changes apply immediately, even mid-run.
         </p>
+        {problemRows.length > 0 ? (
+          <p data-testid="grant-problems-note" className="mb-3 rounded-xl border border-warn/30 bg-warn-soft px-3.5 py-2.5 text-sm text-warn">
+            {problemRows.length} grants cannot work as written. The agent is shown these tools until
+            they are revoked, but every call would fail.
+          </p>
+        ) : null}
         {grantList.length === 0 ? (
           <p
             data-testid="no-grants"
@@ -276,32 +399,46 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
           </p>
         ) : (
           <ul className="space-y-2">
-            {grantList.map((grant) => (
-              <li
-                key={grant.id}
-                className="flex flex-wrap items-center gap-3 rounded-xl border border-line bg-raised px-3 py-2 text-sm"
-              >
-                {grant.effect === "allow" ? (
-                  <ShieldCheck size={15} className="shrink-0 text-ok" />
-                ) : (
-                  <ShieldOff size={15} className="shrink-0 text-danger" />
-                )}
-                <code className="min-w-0 flex-1 truncate font-mono text-[13px]" title={grant.capability}>{grant.capability}</code>
-                <span className="min-w-0 truncate text-xs text-faint" title={formatScope(grant.scope_json)}>{formatScope(grant.scope_json)}</span>
-                <Badge tone={grant.effect === "allow" ? "ok" : "danger"}>{grant.effect}</Badge>
-                {canEdit ? (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    aria-label={`Revoke ${grant.capability}`}
-                    disabled={revokeGrant.isPending}
-                    onClick={() => revokeGrant.mutate(grant.id)}
-                  >
-                    <Trash2 size={13} />
-                  </Button>
-                ) : null}
-              </li>
-            ))}
+            {grantList.map((grant) => {
+              const problems = grant.problems ?? [];
+              const scopeText = formatScope({
+                ...grant.scope_json,
+                ...(grant.scope_json.connection_id && grant.connection_name
+                  ? { connection_id: grant.connection_name }
+                  : {}),
+              });
+              return (
+                <li
+                  key={grant.id}
+                  data-testid={`grant-row-${grant.id}`}
+                  className="flex flex-wrap items-center gap-3 rounded-xl border border-line bg-raised px-3 py-2 text-sm"
+                >
+                  {grant.effect === "allow" ? (
+                    <ShieldCheck size={15} className="shrink-0 text-ok" />
+                  ) : (
+                    <ShieldOff size={15} className="shrink-0 text-danger" />
+                  )}
+                  <code className="min-w-0 flex-1 truncate font-mono text-[13px]" title={grant.capability}>{grant.capability}</code>
+                  <span className="min-w-0 truncate text-xs text-faint" title={scopeText}>{scopeText}</span>
+                  <Badge tone={grant.effect === "allow" ? "ok" : "danger"}>{grant.effect}</Badge>
+                  {problems.length > 0 ? <Badge tone="warn">needs attention</Badge> : null}
+                  {problems.length > 0 ? (
+                    <span className="basis-full text-xs text-warn">{problems.join(" · ")}</span>
+                  ) : null}
+                  {canEdit ? (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      aria-label={`Revoke ${grant.capability}`}
+                      disabled={revokeGrant.isPending}
+                      onClick={() => revokeGrant.mutate(grant.id)}
+                    >
+                      <Trash2 size={13} />
+                    </Button>
+                  ) : null}
+                </li>
+              );
+            })}
           </ul>
         )}
 
@@ -341,7 +478,7 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
             className="mt-3 space-y-2"
             onSubmit={(event) => {
               event.preventDefault();
-              if (selectedTool && missingRequired.length === 0) addGrant.mutate();
+              if (selectedTool && missingRequired.length === 0 && !repositoryError) addGrant.mutate();
             }}
           >
             <div className="flex flex-wrap items-end gap-2">
@@ -352,7 +489,10 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
                     value={toolName}
                     onChange={(e) => {
                       setToolName(e.target.value);
-                      setScopeValues({});
+                      const tool = toolList.find((candidate) => candidate.name === e.target.value);
+                      const defaults = tool ? prefillScope(tool, connectionList) : {};
+                      setScopeValues(defaults);
+                      setPrefilled(Object.keys(defaults));
                     }}
                   >
                     <option value="">Choose a capability…</option>
@@ -382,7 +522,7 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
               <Button
                 type="submit"
                 variant="primary"
-                disabled={!selectedTool || missingRequired.length > 0 || addGrant.isPending}
+                disabled={!selectedTool || missingRequired.length > 0 || Boolean(repositoryError) || addGrant.isPending}
               >
                 <Plus size={13} /> Add
               </Button>
@@ -455,7 +595,13 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
                   connections={matchingConnections}
                   values={scopeValues}
                   onChange={setScopeValues}
+                  prefilled={prefilled}
                 />
+                {repositoryError ? (
+                  <p role="alert" className="mt-2 text-xs text-danger">
+                    {repositoryError}
+                  </p>
+                ) : null}
               </div>
             ) : null}
           </form>
@@ -468,7 +614,7 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
         </p>
         <ul className="space-y-2">
           {toolList.map((tool) => {
-            const granted = isCapabilityGranted(grantList, tool.required_capability);
+            const state = toolGrantState(grantList, tool.required_capability);
             return (
               <li
                 key={tool.name}
@@ -480,8 +626,10 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
                   <Badge tone={riskTone(tool.risk)}>{tool.risk}</Badge>
                   {tool.supports_approval ? <Badge tone="neutral">approvable</Badge> : null}
                   <span className="ml-auto">
-                    {granted ? (
+                    {state === "granted" ? (
                       <StatusLabel tone="ok" className="!text-xs">granted</StatusLabel>
+                    ) : state === "attention" ? (
+                      <StatusLabel tone="warn" className="!text-xs">granted, needs attention</StatusLabel>
                     ) : (
                       <StatusLabel tone="neutral" className="!text-xs text-faint">not granted</StatusLabel>
                     )}
@@ -561,6 +709,32 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
           ) : null}
         </div>
       </section>
+
+      {setup ? (
+        <BundleSetupDialog
+          agent={agent}
+          bundle={setup}
+          connections={connectionList}
+          onClose={() => setSetup(null)}
+          onDone={(result) => {
+            setSetup(null);
+            setNotice(bundleAppliedNotice(setup.label, result));
+            invalidate();
+          }}
+        />
+      ) : null}
+      {turningOff ? (
+        <ConfirmDialog
+          open
+          title={`Turn off ${turningOff.bundle.label}?`}
+          body={turnOffBody(turningOff.bundle, turningOff.preview)}
+          confirmLabel="Turn off"
+          cancelLabel="Keep"
+          busy={removeBundle.isPending}
+          onConfirm={() => void confirmTurnOff()}
+          onClose={() => setTurningOff(null)}
+        />
+      ) : null}
     </div>
   );
 }

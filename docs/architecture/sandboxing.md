@@ -269,19 +269,30 @@ carries that field; relying on a connection default does not broaden the grant.
 
 An agent edits code only inside a sandbox job, and the change reaches the
 repository only through `cli.repository.push` — a script Jhin writes, not a
-command the agent writes. The minimum setup is:
+command the agent writes. The way in is the **Code editing** capability
+bundle: the setup dialog on the agent's Tools & Access tab (or **Give to an
+agent…** on the GitHub connection), or `jhin-admin agent grant --bundle
+code-editing --create-sandbox` on the console
+([agent-access](../operations/agent-access.md)). Either one does the setup
+below in one transaction and refuses, by sentence, anything the gateway would
+deny anyway.
 
 1. **Connections.** A `github` connection (a fine-grained PAT is the shortest
    path) for the repository, and a `cli` connection (auth type `none`) whose
    `git_connection_id` points at it and whose **`allowed_repositories`** lists
-   the repositories this instance may touch. That list is deny-by-default: a
-   CLI connection with an empty list can neither check out nor push anything.
-   Scope the GitHub token to the same repositories — Jhin's allow-list is the
-   one you can edit, GitHub's is the one that cannot be argued with. Leave
-   `default_network` at `none`; only checkout and push reach the bridge, and
-   they set that themselves.
-2. **Grants** (Tools & Access on the agent, or the wizard's **Code editing**
-   preset, which issues exactly these):
+   the repositories this instance may touch. The bundle creates the `cli`
+   connection for you, pointing at the GitHub connection you chose, with the
+   allow-list you gave it (`*` for every repository the token can reach); it
+   can be narrowed later on the connection (`PATCH /connections/{id}/config`,
+   the *Allowed repositories* editor under Apps). That list is deny-by-default:
+   a CLI connection with an empty list can neither check out nor push
+   anything, and a grant naming a repository outside it is refused when it is
+   written. Scope the GitHub token to the same repositories — Jhin's
+   allow-list is the one you can edit, GitHub's is the one that cannot be
+   argued with. Leave `default_network` at `none`; only checkout and push
+   reach the bridge, and they set that themselves.
+2. **Grants** (what the bundle writes; the rows are ordinary grants and show
+   under Capability grants):
 
    | Capability | Scope | Why |
    | --- | --- | --- |
@@ -294,10 +305,18 @@ command the agent writes. The minimum setup is:
    | `cli.test.run` | `connection_id`, `command` | run the test command, always isolated |
    | `cli.repository.push` | `connection_id`, `repository`, `branch: "agent/*"` | commit and push the working branch |
    | `github.repository.read` | `connection_id`, `repository` | inspect the repository |
-   | `github.pull_request.create` | `connection_id`, `repository`, `base` | open the PR from the pushed branch |
+   | `github.pull_request.read` | `connection_id`, `repository` | read pull requests |
+   | `github.pull_request.create` | `connection_id`, `repository`, `base: "*"` | open the PR from the pushed branch |
 
    `connection_id` and `repository` are **required** grant scope keys on
-   checkout and push: a bare `cli.*` grant cannot reach a repository.
+   checkout and push: a bare `cli.*` grant cannot reach a repository, and
+   `POST /grants` now refuses a row that lacks a required key rather than
+   writing one the gateway denies on every call. `base` defaults to `*`
+   (any base branch); the dialog's *Advanced* step narrows it.
+   Deleting a connection revokes every grant pinned to it (each audited with
+   `reason: connection.deleted`), and a grant pinned to a connection that is
+   not active is not advertised to the model at all — disabling revokes
+   nothing, so re-enabling brings the tools back.
    `cli.command.execute` is deliberately **not** in this bundle. It remains in
    the product as an operator-granted escape hatch for builds and linters, and
    it never receives a git credential.

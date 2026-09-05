@@ -2401,3 +2401,207 @@ async def test_unknown_connection_verify_404(
             session, crypto, admin_ctx, UUID("00000000-0000-0000-0000-000000000001"), **REQ
         )
     assert excinfo.value.status_code == 404
+
+
+# --- PATCH /config and the delete impact (docs/operations/agent-access.md) ---
+
+
+async def _sandbox_for(
+    session: AsyncSession, crypto: SecretCrypto, ctx: WorkspaceContext, github: Connection
+) -> Connection:
+    sandbox, _ = await service.create_connection(
+        session,
+        crypto,
+        ctx,
+        connector_type="cli",
+        name="Sandbox",
+        auth_type="none",
+        credentials={},
+        config={
+            "default_network": "none",
+            "git_connection_id": str(github.id),
+            "allowed_repositories": ["*"],
+        },
+        **REQ,
+    )
+    return sandbox
+
+
+async def test_update_config_replaces_public_settings_and_keeps_bookkeeping(
+    session: AsyncSession, crypto: SecretCrypto, admin_ctx: WorkspaceContext
+) -> None:
+    from jhin_db.models import AuditEvent
+
+    github, _ = await create_github_connection(session, crypto, admin_ctx)
+    sandbox = await _sandbox_for(session, crypto, admin_ctx, github)
+    sandbox.config_json = {**sandbox.config_json, "oauth_token_endpoint": "https://x/token"}
+    await session.commit()
+
+    updated = await service.update_config(
+        session,
+        admin_ctx,
+        sandbox.id,
+        config={
+            "default_network": "none",
+            "git_connection_id": str(github.id),
+            "allowed_repositories": ["octo/alpha", "octo/*"],
+        },
+        **REQ,
+    )
+
+    assert updated.config_json["allowed_repositories"] == ["octo/alpha", "octo/*"]
+    assert updated.config_json["git_connection_id"] == str(github.id)
+    # A key the manifest does not declare is not the caller's to remove.
+    assert updated.config_json["oauth_token_endpoint"] == "https://x/token"
+    audit = await session.scalar(
+        select(AuditEvent).where(AuditEvent.action == "connection.config_updated")
+    )
+    assert audit is not None
+    assert audit.target_id == sandbox.id
+    assert audit.metadata_json["changed_keys"] == ["allowed_repositories"]
+
+
+async def test_update_config_refuses_a_bad_repository_and_a_foreign_git_connection(
+    session: AsyncSession, crypto: SecretCrypto, admin_ctx: WorkspaceContext
+) -> None:
+    github, _ = await create_github_connection(session, crypto, admin_ctx)
+    sandbox = await _sandbox_for(session, crypto, admin_ctx, github)
+
+    with pytest.raises(HTTPException) as bad:
+        await service.update_config(
+            session,
+            admin_ctx,
+            sandbox.id,
+            config={"git_connection_id": str(github.id), "allowed_repositories": ["../x"]},
+            **REQ,
+        )
+    assert bad.value.status_code == 422
+    assert bad.value.detail == (
+        "'../x' is not a repository: use owner/name, owner/*, or * for every repository."
+    )
+
+    foreign = str(uuid4())
+    with pytest.raises(HTTPException) as missing:
+        await service.update_config(
+            session,
+            admin_ctx,
+            sandbox.id,
+            config={"git_connection_id": foreign, "allowed_repositories": ["*"]},
+            **REQ,
+        )
+    assert missing.value.detail == f"'{foreign}' is not a GitHub connection in this workspace."
+
+    refreshed = await session.get(Connection, sandbox.id)
+    assert refreshed is not None
+    assert refreshed.config_json["allowed_repositories"] == ["*"]
+
+
+async def test_delete_impact_counts_pinned_grants_and_the_agents_holding_them(
+    session: AsyncSession, crypto: SecretCrypto, admin_ctx: WorkspaceContext
+) -> None:
+    from jhin_db.models import Agent, AgentCapabilityGrant
+
+    github, _ = await create_github_connection(session, crypto, admin_ctx)
+    agents = [
+        Agent(
+            workspace_id=admin_ctx.workspace_id,
+            name=f"A{index}",
+            slug=f"a{index}-{uuid4().hex[:6]}",
+        )
+        for index in range(2)
+    ]
+    session.add_all(agents)
+    await session.flush()
+    session.add_all(
+        [
+            AgentCapabilityGrant(
+                workspace_id=admin_ctx.workspace_id,
+                agent_id=agents[0].id,
+                capability="github.repository.read",
+                scope_json={"connection_id": str(github.id)},
+                effect="allow",
+            ),
+            AgentCapabilityGrant(
+                workspace_id=admin_ctx.workspace_id,
+                agent_id=agents[0].id,
+                capability="github.issue.read",
+                scope_json={"connection_id": str(github.id)},
+                effect="allow",
+            ),
+            AgentCapabilityGrant(
+                workspace_id=admin_ctx.workspace_id,
+                agent_id=agents[1].id,
+                capability="github.repository.read",
+                scope_json={"connection_id": str(github.id), "repository": "*"},
+                effect="allow",
+            ),
+            AgentCapabilityGrant(
+                workspace_id=admin_ctx.workspace_id,
+                agent_id=agents[1].id,
+                capability="memory.recall",
+                scope_json={},
+                effect="allow",
+            ),
+        ]
+    )
+    await session.commit()
+
+    impact = await service.delete_impact(session, admin_ctx.workspace_id, github.id)
+
+    assert impact["grant_count"] == 3
+    assert impact["agent_count"] == 2
+
+
+async def test_update_config_changes_only_the_fields_named_and_records_the_values(
+    session: AsyncSession, crypto: SecretCrypto, admin_ctx: WorkspaceContext
+) -> None:
+    """A body of one key changes one key: the sandbox keeps its GitHub
+    credential and network policy through an allow-list edit (a sandbox
+    that silently lost ``git_connection_id`` could neither check out nor
+    push), a field sent empty is cleared, and the audit row says what each
+    changed key was and became — so the list widening, or the network
+    opening, is written down as the widening it is."""
+    from jhin_db.models import AuditEvent
+
+    github, _ = await create_github_connection(session, crypto, admin_ctx)
+    sandbox = await _sandbox_for(session, crypto, admin_ctx, github)
+
+    narrowed = await service.update_config(
+        session, admin_ctx, sandbox.id, config={"allowed_repositories": ["octo/a"]}, **REQ
+    )
+    assert narrowed.config_json == {
+        "default_network": "none",
+        "git_connection_id": str(github.id),
+        "allowed_repositories": ["octo/a"],
+    }
+    opened = await service.update_config(
+        session, admin_ctx, sandbox.id, config={"default_network": "internet"}, **REQ
+    )
+    assert opened.config_json == {
+        "default_network": "internet",
+        "git_connection_id": str(github.id),
+        "allowed_repositories": ["octo/a"],
+    }
+    cleared = await service.update_config(
+        session, admin_ctx, sandbox.id, config={"git_connection_id": ""}, **REQ
+    )
+    assert cleared.config_json["git_connection_id"] == ""
+    assert cleared.config_json["allowed_repositories"] == ["octo/a"]
+
+    events = list(
+        await session.scalars(
+            select(AuditEvent)
+            .where(AuditEvent.action == "connection.config_updated")
+            .order_by(AuditEvent.id)
+        )
+    )
+    assert [event.metadata_json["changed_keys"] for event in events] == [
+        ["allowed_repositories"],
+        ["default_network"],
+        ["git_connection_id"],
+    ]
+    assert [event.metadata_json["changes"] for event in events] == [
+        {"allowed_repositories": {"from": ["*"], "to": ["octo/a"]}},
+        {"default_network": {"from": "none", "to": "internet"}},
+        {"git_connection_id": {"from": str(github.id), "to": ""}},
+    ]

@@ -11,7 +11,7 @@ credentials.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol, cast
@@ -410,13 +410,34 @@ def build_builtin_catalog() -> ToolCatalog:
 
 
 def allowed_tool_definitions(
-    catalog: ToolCatalog | ToolDefinitionCatalog, grants: Sequence[Grant]
+    catalog: ToolCatalog | ToolDefinitionCatalog,
+    grants: Sequence[Grant],
+    *,
+    live_connection_ids: Collection[str] | None = None,
 ) -> tuple[ToolDefinition, ...]:
     """Tools worth advertising to the model: those with any matching allow
     grant. Advertisement is prompt economy, not authorization — the gateway
     re-decides every call against live grants, scopes, and policy (plan 52).
+
+    When ``live_connection_ids`` is given, an allow grant pinned to a
+    connection outside that set (deleted, disabled, or waiting to be
+    reconnected) is ignored here: a tool the agent could only ever be denied
+    is not worth offering, and offering it is what taught agents to report
+    blocks they never observed. Unpinned grants and deny grants are
+    unaffected, and the gateway still decides every call from live rows.
     """
-    allow_patterns = [g.capability for g in grants if g.effect is GrantEffect.ALLOW]
+    allow_patterns: list[str] = []
+    for grant in grants:
+        if grant.effect is not GrantEffect.ALLOW:
+            continue
+        pinned = grant.scope.get("connection_id")
+        if (
+            live_connection_ids is not None
+            and isinstance(pinned, str)
+            and pinned not in live_connection_ids
+        ):
+            continue
+        allow_patterns.append(grant.capability)
     return tuple(
         definition
         for definition in catalog.definitions()

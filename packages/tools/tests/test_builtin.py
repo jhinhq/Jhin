@@ -290,3 +290,44 @@ def test_the_reporting_tool_never_reads_as_how_to_end_a_chat() -> None:
     description = entry[0].description
     assert "delegated" in description
     assert "answer them in your reply" in description
+
+
+def test_allowed_definitions_withhold_grants_pinned_outside_the_live_set() -> None:
+    """A grant pinned to a deleted or disabled connection advertises nothing:
+    a tool the agent could only ever be denied is not worth offering."""
+    catalog = build_builtin_catalog()
+    live = "01a02d06-7971-7280-9511-0e579bd4d0a0"
+    dead = "01a02d06-7971-7280-9511-0e579bd4d0a1"
+    grants = [
+        Grant(capability="system.echo", scope={"connection_id": dead}, effect=GrantEffect.ALLOW),
+        Grant(capability="system.time", scope={"connection_id": live}, effect=GrantEffect.ALLOW),
+        Grant(capability="system.demo.*", scope={}, effect=GrantEffect.ALLOW),
+    ]
+
+    names = {d.name for d in allowed_tool_definitions(catalog, grants, live_connection_ids={live})}
+
+    assert "system.echo" not in names
+    assert "system.time" in names
+    assert {"system.demo.elevated", "system.demo.destructive"} <= names
+
+
+def test_allowed_definitions_keep_a_tool_with_one_live_pin_among_dead_ones() -> None:
+    catalog = build_builtin_catalog()
+    live = "01a02d06-7971-7280-9511-0e579bd4d0a0"
+    grants = [
+        Grant(capability="system.echo", scope={"connection_id": "gone"}, effect=GrantEffect.ALLOW),
+        Grant(capability="system.echo", scope={"connection_id": live}, effect=GrantEffect.ALLOW),
+    ]
+    names = {d.name for d in allowed_tool_definitions(catalog, grants, live_connection_ids={live})}
+    assert names == {"system.echo"}
+
+
+def test_allowed_definitions_are_unchanged_without_a_live_set() -> None:
+    catalog = build_builtin_catalog()
+    grants = [
+        Grant(capability="system.echo", scope={"connection_id": "gone"}, effect=GrantEffect.ALLOW),
+    ]
+    assert {d.name for d in allowed_tool_definitions(catalog, grants)} == {"system.echo"}
+    assert {
+        d.name for d in allowed_tool_definitions(catalog, grants, live_connection_ids=None)
+    } == {"system.echo"}

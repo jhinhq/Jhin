@@ -29,6 +29,11 @@ import type {
   ApprovalList,
   AuditEventPage,
   BootstrapStatus,
+  BundleApply,
+  BundleApplyOut,
+  BundleOut,
+  BundleRemoveOut,
+  BundleStatusOut,
   CatalogApp,
   CatalogEntryDetail,
   CatalogFacets,
@@ -483,7 +488,59 @@ export function useInvalidateAgentAccess(workspaceId: string, agentId: string) {
     void queryClient.invalidateQueries({ queryKey: ["agent-grants", workspaceId, agentId] });
     void queryClient.invalidateQueries({ queryKey: ["agent-policy", workspaceId, agentId] });
     void queryClient.invalidateQueries({ queryKey: ["agent", workspaceId, agentId] });
+    void queryClient.invalidateQueries({ queryKey: ["agent-bundles", workspaceId, agentId] });
+    // Turning Code editing on can create the sandbox connection.
+    void queryClient.invalidateQueries({ queryKey: ["connections", workspaceId] });
   };
+}
+
+// --- Capability bundles (docs/operations/agent-access.md) ---
+
+export function useWorkspaceBundles(workspaceId: string) {
+  return useQuery({
+    queryKey: ["workspace-bundles", workspaceId],
+    queryFn: () => api<BundleOut[]>(`/api/v1/workspaces/${workspaceId}/tools/bundles`),
+  });
+}
+
+export function useAgentBundles(workspaceId: string, agentId: string) {
+  return useQuery({
+    queryKey: ["agent-bundles", workspaceId, agentId],
+    queryFn: () =>
+      api<BundleStatusOut[]>(`/api/v1/workspaces/${workspaceId}/agents/${agentId}/bundles`),
+  });
+}
+
+export function useApplyBundle(workspaceId: string, agentId: string) {
+  return useMutation({
+    mutationFn: ({ bundleId, body }: { bundleId: string; body: BundleApply }) =>
+      api<BundleApplyOut>(
+        `/api/v1/workspaces/${workspaceId}/agents/${agentId}/bundles/${bundleId}`,
+        { method: "POST", body },
+      ),
+  });
+}
+
+export function useRemoveBundle(workspaceId: string, agentId: string) {
+  return useMutation({
+    mutationFn: ({ bundleId, dryRun }: { bundleId: string; dryRun: boolean }) =>
+      api<BundleRemoveOut>(
+        `/api/v1/workspaces/${workspaceId}/agents/${agentId}/bundles/${bundleId}`,
+        { method: "DELETE", params: dryRun ? { dry_run: "true" } : {} },
+      ),
+  });
+}
+
+export function useUpdateConnectionConfig(workspaceId: string, connectionId: string) {
+  const invalidate = useInvalidateConnections(workspaceId);
+  return useMutation({
+    mutationFn: (config: Record<string, unknown>) =>
+      api<ConnectionInfo>(
+        `/api/v1/workspaces/${workspaceId}/connections/${connectionId}/config`,
+        { method: "PATCH", body: { config } },
+      ),
+    onSuccess: () => invalidate(),
+  });
 }
 
 /** Invalidate task/run views after a task mutation. */
@@ -566,6 +623,11 @@ export function useInvalidateConnections(workspaceId: string) {
     void queryClient.invalidateQueries({ queryKey: ["connection-tools", workspaceId] });
     // Discovered MCP tools are part of the workspace tool catalog.
     void queryClient.invalidateQueries({ queryKey: ["tools", workspaceId] });
+    // A deleted connection takes its pinned grants with it, and whether a
+    // bundle can be turned on depends on which connections are active.
+    void queryClient.invalidateQueries({ queryKey: ["agent-grants", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["agent-bundles", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["workspace-bundles", workspaceId] });
   };
 }
 

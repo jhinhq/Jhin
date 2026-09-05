@@ -2764,6 +2764,488 @@
         "title": "BudgetSettingsIn",
         "type": "object"
       },
+      "BundleApply": {
+        "additionalProperties": false,
+        "properties": {
+          "base": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base"
+          },
+          "connections": {
+            "additionalProperties": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Connections",
+            "type": "object"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "repositories": {
+            "default": [
+              "*"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Repositories",
+            "type": "array"
+          },
+          "sandbox": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SandboxCreate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "BundleApply",
+        "type": "object"
+      },
+      "BundleApplyOut": {
+        "description": "What applying the bundle wrote — or, under ``dry_run``, would write.\n\nPreview rows in ``grants_created`` carry a nil id and the current time,\nsince they do not exist yet; ``grants_existing`` are real rows.",
+        "properties": {
+          "bundle_id": {
+            "title": "Bundle Id",
+            "type": "string"
+          },
+          "callable_tools": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Callable Tools",
+            "type": "array"
+          },
+          "created_connection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConnectionOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "dry_run": {
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "grants_created": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/GrantOut"
+            },
+            "title": "Grants Created",
+            "type": "array"
+          },
+          "grants_existing": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/GrantOut"
+            },
+            "title": "Grants Existing",
+            "type": "array"
+          },
+          "needs": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/BundleNeedOut"
+            },
+            "title": "Needs",
+            "type": "array"
+          },
+          "rules_added": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/PolicyRuleIn"
+            },
+            "title": "Rules Added",
+            "type": "array"
+          },
+          "rules_kept": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/PolicyRuleIn"
+            },
+            "title": "Rules Kept",
+            "type": "array"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "bundle_id",
+          "dry_run"
+        ],
+        "title": "BundleApplyOut",
+        "type": "object"
+      },
+      "BundleGrantProblemOut": {
+        "properties": {
+          "capability": {
+            "title": "Capability",
+            "type": "string"
+          },
+          "grant_id": {
+            "format": "uuid",
+            "title": "Grant Id",
+            "type": "string"
+          },
+          "problems": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Problems",
+            "type": "array"
+          }
+        },
+        "required": [
+          "grant_id",
+          "capability",
+          "problems"
+        ],
+        "title": "BundleGrantProblemOut",
+        "type": "object"
+      },
+      "BundleNeedChoiceOut": {
+        "properties": {
+          "allowed_repositories": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allowed Repositories"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "status"
+        ],
+        "title": "BundleNeedChoiceOut",
+        "type": "object"
+      },
+      "BundleNeedOut": {
+        "description": "A question the operator has to answer before the bundle can be\nwritten: connect an app, choose between two, create a sandbox, or a tool\nthis workspace's catalog does not offer.",
+        "properties": {
+          "choices": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/BundleNeedChoiceOut"
+            },
+            "title": "Choices",
+            "type": "array"
+          },
+          "connector_type": {
+            "title": "Connector Type",
+            "type": "string"
+          },
+          "detail": {
+            "default": "",
+            "title": "Detail",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "connect",
+              "choose",
+              "create_sandbox",
+              "catalog"
+            ],
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "connector_type"
+        ],
+        "title": "BundleNeedOut",
+        "type": "object"
+      },
+      "BundleOut": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "not_included": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Not Included",
+            "type": "array"
+          },
+          "readiness": {
+            "$ref": "#/components/schemas/BundleReadinessOut"
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/PolicyRuleIn"
+            },
+            "title": "Rules",
+            "type": "array"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/BundleToolOut"
+            },
+            "title": "Tools",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "summary",
+          "description",
+          "tools",
+          "rules",
+          "not_included",
+          "readiness"
+        ],
+        "title": "BundleOut",
+        "type": "object"
+      },
+      "BundleReadinessOut": {
+        "properties": {
+          "missing_tools": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Tools",
+            "type": "array"
+          },
+          "needs": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/BundleNeedOut"
+            },
+            "title": "Needs",
+            "type": "array"
+          },
+          "state": {
+            "enum": [
+              "ready",
+              "needs",
+              "unavailable"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "title": "BundleReadinessOut",
+        "type": "object"
+      },
+      "BundleRemoveOut": {
+        "properties": {
+          "bundle_id": {
+            "title": "Bundle Id",
+            "type": "string"
+          },
+          "dry_run": {
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "hand_made": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/GrantOut"
+            },
+            "title": "Hand Made",
+            "type": "array"
+          },
+          "revoked": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/GrantOut"
+            },
+            "title": "Revoked",
+            "type": "array"
+          }
+        },
+        "required": [
+          "bundle_id",
+          "dry_run"
+        ],
+        "title": "BundleRemoveOut",
+        "type": "object"
+      },
+      "BundleStatusOut": {
+        "description": "A bundle as it stands on one agent.",
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "granted_capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Granted Capabilities",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "missing_capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Capabilities",
+            "type": "array"
+          },
+          "not_included": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Not Included",
+            "type": "array"
+          },
+          "problems": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/BundleGrantProblemOut"
+            },
+            "title": "Problems",
+            "type": "array"
+          },
+          "readiness": {
+            "$ref": "#/components/schemas/BundleReadinessOut"
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/PolicyRuleIn"
+            },
+            "title": "Rules",
+            "type": "array"
+          },
+          "state": {
+            "enum": [
+              "on",
+              "partial",
+              "off"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/BundleToolOut"
+            },
+            "title": "Tools",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "summary",
+          "description",
+          "tools",
+          "rules",
+          "not_included",
+          "readiness",
+          "state",
+          "granted_capabilities",
+          "missing_capabilities"
+        ],
+        "title": "BundleStatusOut",
+        "type": "object"
+      },
+      "BundleToolOut": {
+        "properties": {
+          "capability": {
+            "title": "Capability",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "scope": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Scope",
+            "type": "object"
+          }
+        },
+        "required": [
+          "name",
+          "capability",
+          "scope"
+        ],
+        "title": "BundleToolOut",
+        "type": "object"
+      },
       "CatalogAppOut": {
         "description": "One Apps-library entry (public identity only; no secrets, no state).",
         "properties": {
@@ -3986,6 +4468,8 @@
           "delete_impact": {
             "$ref": "#/components/schemas/ConnectionDeleteImpactOut",
             "default": {
+              "agent_count": 0,
+              "grant_count": 0,
               "trigger_count": 0,
               "trigger_invocation_count": 0
             }
@@ -4059,6 +4543,19 @@
         "title": "ConnectionAuthorizedByOut",
         "type": "object"
       },
+      "ConnectionConfigUpdate": {
+        "additionalProperties": false,
+        "description": "Change the manifest-declared settings of a connection: the fields\ngiven are laid over the ones it has, a field omitted keeps its value,\nand a field sent empty is cleared (never a credential; those go through\nrotate).",
+        "properties": {
+          "config": {
+            "additionalProperties": true,
+            "title": "Config",
+            "type": "object"
+          }
+        },
+        "title": "ConnectionConfigUpdate",
+        "type": "object"
+      },
       "ConnectionCreated": {
         "properties": {
           "connection": {
@@ -4084,6 +4581,16 @@
       "ConnectionDeleteImpactOut": {
         "description": "What a delete would take with the connection (plan 17.9).\n\nTriggers and their invocation history cascade off the connection row, so\nthe delete confirmation can name the cost before anyone accepts it.",
         "properties": {
+          "agent_count": {
+            "default": 0,
+            "title": "Agent Count",
+            "type": "integer"
+          },
+          "grant_count": {
+            "default": 0,
+            "title": "Grant Count",
+            "type": "integer"
+          },
           "trigger_count": {
             "default": 0,
             "title": "Trigger Count",
@@ -5468,6 +5975,17 @@
             "title": "Capability",
             "type": "string"
           },
+          "connection_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Connection Name"
+          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
@@ -5481,6 +5999,14 @@
             "format": "uuid",
             "title": "Id",
             "type": "string"
+          },
+          "problems": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Problems",
+            "type": "array"
           },
           "scope_json": {
             "additionalProperties": true,
@@ -11130,6 +11656,39 @@
           "created_at"
         ],
         "title": "RunOut",
+        "type": "object"
+      },
+      "SandboxCreate": {
+        "additionalProperties": false,
+        "description": "A CLI Sandbox connection to create alongside the Code editing bundle,\npointing at the GitHub connection whose credential it borrows.",
+        "properties": {
+          "allowed_repositories": {
+            "default": [
+              "*"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Allowed Repositories",
+            "type": "array"
+          },
+          "git_connection_id": {
+            "format": "uuid",
+            "title": "Git Connection Id",
+            "type": "string"
+          },
+          "name": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "git_connection_id"
+        ],
+        "title": "SandboxCreate",
         "type": "object"
       },
       "ScopeCatalogOut": {
@@ -16993,6 +17552,241 @@
         "x-jhin-scope": "agents:write"
       }
     },
+    "/api/v1/workspaces/{workspace_id}/agents/{agent_id}/bundles": {
+      "get": {
+        "description": "Every bundle as it stands on this agent: on, partial, or off, and\nwhich of its grants cannot work as written.\n\n**Scope.** An API key needs `agents:read`.",
+        "operationId": "list_agent_bundles_api_v1_workspaces__workspace_id__agents__agent_id__bundles_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Agent Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/BundleStatusOut"
+                  },
+                  "title": "Response List Agent Bundles Api V1 Workspaces  Workspace Id  Agents  Agent Id  Bundles Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": [
+              "agents:read"
+            ]
+          }
+        ],
+        "summary": "List Agent Bundles",
+        "tags": [
+          "policy"
+        ],
+        "x-jhin-scope": "agents:read"
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/agents/{agent_id}/bundles/{bundle_id}": {
+      "delete": {
+        "description": "Turn a bundle off: revoke the grants it owns that no other bundle\nstill needs. Policy rules stay.\n\n**Scope.** An API key needs `agents:admin`.",
+        "operationId": "remove_bundle_api_v1_workspaces__workspace_id__agents__agent_id__bundles__bundle_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Agent Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "bundle_id",
+            "required": true,
+            "schema": {
+              "title": "Bundle Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "dry_run",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Dry Run",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BundleRemoveOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": [
+              "agents:admin"
+            ]
+          }
+        ],
+        "summary": "Remove Bundle",
+        "tags": [
+          "policy"
+        ],
+        "x-jhin-scope": "agents:admin"
+      },
+      "post": {
+        "description": "Turn a bundle on: write its grants (and, for Code editing, the sandbox\nit runs in) in one transaction, or say what is still needed.\n\n**Scope.** An API key needs `agents:admin`.",
+        "operationId": "apply_bundle_api_v1_workspaces__workspace_id__agents__agent_id__bundles__bundle_id__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Agent Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "bundle_id",
+            "required": true,
+            "schema": {
+              "title": "Bundle Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BundleApply"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BundleApplyOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": [
+              "agents:admin"
+            ]
+          }
+        ],
+        "summary": "Apply Bundle",
+        "tags": [
+          "policy"
+        ],
+        "x-jhin-scope": "agents:admin"
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/agents/{agent_id}/grants": {
       "get": {
         "description": "**Scope.** An API key needs `agents:read`.",
@@ -19283,6 +20077,81 @@
           "connections"
         ],
         "x-jhin-scope": "apps:read"
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/connections/{connection_id}/config": {
+      "patch": {
+        "description": "Replace the connection's public settings — for a CLI Sandbox, the\nrepositories it may use and the GitHub connection it borrows from.\n\n**Scope.** An API key needs `apps:write`.",
+        "operationId": "update_connection_config_api_v1_workspaces__workspace_id__connections__connection_id__config_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Connection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectionConfigUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": [
+              "apps:write"
+            ]
+          }
+        ],
+        "summary": "Update Connection Config",
+        "tags": [
+          "connections"
+        ],
+        "x-jhin-scope": "apps:write"
       }
     },
     "/api/v1/workspaces/{workspace_id}/connections/{connection_id}/disable": {
@@ -28551,6 +29420,65 @@
           }
         ],
         "summary": "List Tools",
+        "tags": [
+          "policy"
+        ],
+        "x-jhin-scope": "agents:read"
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/tools/bundles": {
+      "get": {
+        "description": "The capability bundles and whether this workspace can turn each on\nas it stands (docs/operations/agent-access.md).\n\n**Scope.** An API key needs `agents:read`.",
+        "operationId": "list_bundles_api_v1_workspaces__workspace_id__tools_bundles_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/BundleOut"
+                  },
+                  "title": "Response List Bundles Api V1 Workspaces  Workspace Id  Tools Bundles Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "ApiKeyBearer": [
+              "agents:read"
+            ]
+          }
+        ],
+        "summary": "List Bundles",
         "tags": [
           "policy"
         ],

@@ -490,7 +490,7 @@ export const TOOL_PRESETS: ToolPreset[] = [
     label: "Code editing",
     summary: "Write code: check out a repo, edit files, run tests, and open pull requests",
     description:
-      "Clone a repository into the sandbox, find your way around it, read and change files, run tests, and — once a human approves it — push a branch and open a pull request. Needs a CLI Sandbox connection (with the repositories it may use listed on it) and a GitHub connection. Running tests means running a command the agent chose, inside the checkout, so it can change files there — but it never holds the git credential, and the push tool re-checks the repository against what Jhin recorded at checkout rather than trusting anything the sandbox left behind.",
+      "Clone a repository into the sandbox, find your way around it, read and change files, run tests, and — once a human approves it — push a branch and open a pull request. Needs a GitHub connection; the CLI Sandbox it runs in is created for you when the capability is turned on. Running tests means running a command the agent chose, inside the checkout, so it can change files there — but it never holds the git credential, and the push tool re-checks the repository against what Jhin recorded at checkout rather than trusting anything the sandbox left behind.",
     tools: {
       "cli.repository.checkout": { repository: "*" },
       "cli.file.list": { path: "*" },
@@ -502,7 +502,7 @@ export const TOOL_PRESETS: ToolPreset[] = [
       "cli.repository.push": { repository: "*", branch: "agent/*" },
       "github.repository.read": { repository: "*" },
       "github.pull_request.read": { repository: "*" },
-      "github.pull_request.create": { repository: "*", base: "main" },
+      "github.pull_request.create": { repository: "*", base: "*" },
     },
     // Pushing to a real repository is the first thing that leaves the
     // sandbox, so it asks — even for an Autonomous agent, where the ELEVATED

@@ -18,13 +18,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from jhin_api.deps import WorkspaceContext
 from jhin_api.policy import service
 from jhin_db.models import Agent
-from jhin_domain import new_uuid7
+from jhin_domain import ActorType, new_uuid7
 from jhin_policy import (
     ApprovalPreset,
     DecisionType,
     Grant,
     PolicyRule,
     RiskLevel,
+    RuleAction,
     ToolDefinition,
     evaluate,
     rules_for_preset,
@@ -191,4 +192,61 @@ async def test_a_malformed_persisted_rule_is_not_carried_forward(
     updated = await _set_preset(session, admin_ctx, agent, "balanced")
 
     assert all(PolicyRule.model_validate(rule) for rule in updated.approval_policy_json)
+    assert updated.approval_policy_json.count(GATE) == 1
+
+
+async def test_a_rule_the_bundle_wrote_survives_a_later_preset_change(
+    session: AsyncSession, admin_ctx: WorkspaceContext
+) -> None:
+    """``ensure_capability_rules`` is what the bundle endpoint writes with;
+    the gate it prepends is a per-capability rule like the wizard's, so the
+    next mode switch keeps it — and asking twice adds nothing."""
+    agent = Agent(
+        workspace_id=admin_ctx.workspace_id,
+        name="Bundled",
+        slug=f"bundled-{new_uuid7().hex[:8]}",
+        role_title="",
+        description="",
+        system_prompt="",
+        approval_policy_json=[
+            rule.model_dump(mode="json") for rule in rules_for_preset(ApprovalPreset.BALANCED)
+        ],
+    )
+    session.add(agent)
+    await session.flush()
+    gate = PolicyRule(capability="cli.repository.push", risk=None, action=RuleAction.APPROVAL)
+
+    added = await service.ensure_capability_rules(
+        session,
+        admin_ctx,
+        agent,
+        [gate],
+        request_id=new_uuid7(),
+        ip_hash=None,
+        actor_type=ActorType.USER,
+        extra_metadata=None,
+        bundle_id="code-editing",
+    )
+    await session.commit()
+
+    assert added == [gate]
+    assert agent.approval_policy_json[0] == GATE
+    assert _push_decision(agent) is DecisionType.REQUIRE_APPROVAL
+
+    updated = await _set_preset(session, admin_ctx, agent, "autonomous")
+    assert updated.approval_policy_json[0] == GATE
+    assert _push_decision(updated) is DecisionType.REQUIRE_APPROVAL
+
+    again = await service.ensure_capability_rules(
+        session,
+        admin_ctx,
+        updated,
+        [gate],
+        request_id=new_uuid7(),
+        ip_hash=None,
+        actor_type=ActorType.USER,
+        extra_metadata=None,
+        bundle_id="code-editing",
+    )
+    assert again == []
     assert updated.approval_policy_json.count(GATE) == 1

@@ -654,7 +654,7 @@ export default function AppsPage() {
           title={justConnected ? `${detail.name} is connected` : undefined}
           intro={
             justConnected
-              ? "Here is what it offers. Give an agent access from its profile under Tools & Access."
+              ? "Connected. Who may use it? Give it to an agent below and Jhin writes their permissions."
               : undefined
           }
           initialTab={justConnected ? "tools" : "overview"}

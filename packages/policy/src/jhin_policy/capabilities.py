@@ -70,6 +70,23 @@ def is_forbidden_capability(capability: str) -> bool:
     )
 
 
+def grant_pattern_problem(pattern: str) -> str | None:
+    """Why ``pattern`` can never be a grant's capability, or ``None``.
+
+    A grant names a capability exactly, a subtree (``github.*``) or
+    everything (``*``); anything else is not a pattern, and a pattern in a
+    forbidden namespace is refused whatever its shape. Every grant writer —
+    the HTTP schema and the service the console drives — asks this one
+    function, so all of them refuse in the same words.
+    """
+    base = pattern.removesuffix(".*") if pattern.endswith(".*") else pattern
+    if pattern != "*" and not is_valid_capability(base):
+        return "not a valid dotted capability name or pattern"
+    if is_forbidden_capability(base):
+        return "capabilities in this namespace can never be granted to agents"
+    return None
+
+
 class ToolDefinition(BaseModel):
     """One callable tool (plan 12.1)."""
 

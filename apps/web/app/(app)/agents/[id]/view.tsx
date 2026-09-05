@@ -31,26 +31,30 @@ import {
 import { Chip, Disclosure, LoadError, SectionCard, StatusPill, Tabs } from "@/components/company/bits";
 import { useWorkingAgentIds } from "@/components/company/use-working";
 import { AgentDrawer } from "@/components/org/agent-drawer";
+import { BundleSetupDialog } from "@/components/org/bundle-setup-dialog";
 import { PersonaChip } from "@/components/personas/persona-chip";
-import { Button, ButtonLink, Dialog, ErrorNote, Spinner } from "@/components/ui";
+import { Badge, Button, ButtonLink, Dialog, ErrorNote, Spinner } from "@/components/ui";
 import { useSegmentAfter } from "@/lib/use-route-segment";
 import { api, ApiError } from "@/lib/api";
 import { timeAgo } from "@/lib/activity";
+import { bundleAppliedNotice, isConnectorBundle } from "@/lib/bundles";
 import { formatDateTime } from "@/lib/format";
 import {
   useAgent,
   useAgentAvatarMap,
+  useAgentBundles,
   useAgentGrants,
   useAgentPolicy,
   useConnections,
   useConversations,
+  useInvalidateAgentAccess,
   useInvalidateOrg,
   useOrgGraph,
   useTools,
 } from "@/lib/hooks";
 import { avatarProps, identityAvatarProps } from "@/lib/media";
 import { formatScope } from "@/lib/policy";
-import type { Agent, AgentAvatar, MemoryScope } from "@/lib/types";
+import type { Agent, AgentAvatar, Grant, MemoryScope } from "@/lib/types";
 import { useWorkspace } from "@/lib/workspace-context";
 
 type TabId =
@@ -487,10 +491,33 @@ function AccessSection({ workspaceId, agentId, isAdmin }: { workspaceId: string;
   const policy = useAgentPolicy(workspaceId, agentId);
   const tools = useTools(workspaceId);
   const connections = useConnections(workspaceId, isAdmin);
+  const bundles = useAgentBundles(workspaceId, agentId);
+  const invalidateAccess = useInvalidateAgentAccess(workspaceId, agentId);
+  const router = useRouter();
+  // "Give to an agent…" on a connection lands here with the bundle and the
+  // connection to pre-choose; the dialog opens once, then the URL is cleaned.
+  const search = useSearchParams();
+  const linkedBundle = search.get("bundle") ?? "";
+  const linkedConnection = search.get("connection") ?? "";
+  const [dismissed, setDismissed] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const connectionNames = useMemo(
-    () => Object.fromEntries((connections.data ?? []).map((connection) => [connection.id, connection.name])),
-    [connections.data],
+    () =>
+      Object.fromEntries([
+        ...(connections.data ?? []).map((connection) => [connection.id, connection.name]),
+        ...(grants.data ?? []).flatMap((grant) =>
+          grant.connection_name && typeof grant.scope_json.connection_id === "string"
+            ? [[grant.scope_json.connection_id, grant.connection_name]]
+            : [],
+        ),
+      ]),
+    [connections.data, grants.data],
   );
+  const linkedBundleStatus =
+    isAdmin && !dismissed && linkedBundle && linkedConnection && isConnectorBundle(linkedBundle)
+      ? (bundles.data ?? []).find((bundle) => bundle.id === linkedBundle) ?? null
+      : null;
+  const agentName = useAgent(workspaceId, agentId).data?.name ?? "this agent";
 
   if (grants.isPending || policy.isPending || tools.isPending) {
     return <Spinner label="Loading access…" />;
@@ -509,9 +536,38 @@ function AccessSection({ workspaceId, agentId, isAdmin }: { workspaceId: string;
   }
   const allowed = (grants.data ?? []).filter((grant) => grant.effect === "allow");
   const denied = (grants.data ?? []).filter((grant) => grant.effect === "deny");
+  const problemsOf = (grant: Grant) =>
+    (grant.problems ?? []).length > 0 ? (
+      <span className="ml-2 inline-flex items-center gap-1 text-xs text-warn">
+        <Badge tone="warn">needs attention</Badge> {(grant.problems ?? []).join(" · ")}
+      </span>
+    ) : null;
 
   return (
     <div className="grid gap-4 lg:grid-cols-3">
+      {notice ? (
+        <p role="status" className="rounded-xl border border-ok/30 bg-ok-soft px-3.5 py-2.5 text-sm text-ok lg:col-span-3">
+          {notice}
+        </p>
+      ) : null}
+      {linkedBundleStatus ? (
+        <BundleSetupDialog
+          agent={{ id: agentId, name: agentName }}
+          bundle={linkedBundleStatus}
+          connections={connections.data ?? []}
+          initial={{ connectionId: linkedConnection }}
+          onClose={() => {
+            setDismissed(true);
+            router.replace(`/agents/${agentId}?tab=access`);
+          }}
+          onDone={(result) => {
+            setDismissed(true);
+            setNotice(bundleAppliedNotice(linkedBundleStatus.label, result));
+            invalidateAccess();
+            router.replace(`/agents/${agentId}?tab=access`);
+          }}
+        />
+      ) : null}
       <SectionCard title="Apps and tools" className="lg:col-span-2">
         {allowed.length === 0 ? (
           <p className="text-sm text-dim">
@@ -522,7 +578,10 @@ function AccessSection({ workspaceId, agentId, isAdmin }: { workspaceId: string;
             {allowed.map((grant) => (
               <li key={grant.id} className="flex items-start gap-2">
                 <span aria-hidden className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-ok" />
-                {describeGrant(grant, tools.data ?? [], connectionNames)}
+                <span>
+                  {describeGrant(grant, tools.data ?? [], connectionNames)}
+                  {problemsOf(grant)}
+                </span>
               </li>
             ))}
             {denied.map((grant) => (

@@ -80,5 +80,7 @@ flowchart LR
 
 Full details: [roles and permissions](rbac.md), [API keys](api-keys.md),
 [API versioning](api-versioning.md),
-[sandboxing](sandboxing.md), and [tool-worker-boundary](tool-worker-boundary.md). Deployment-facing
+[sandboxing](sandboxing.md), and [tool-worker-boundary](tool-worker-boundary.md). Giving an
+agent an app — capability bundles, grant validation, and the `jhin-admin agent` commands — is
+in [agent-access](../operations/agent-access.md). Deployment-facing
 consequences are in the [deployment guide](../deployment.md).

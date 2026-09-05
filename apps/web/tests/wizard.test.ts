@@ -711,7 +711,7 @@ describe("wizard tool presets", () => {
     expect(next.grantScopes["github.pull_request.create"]).toEqual({
       connection_id: "gh-1",
       repository: "*",
-      base: "main",
+      base: "*",
     });
     // Merge is deliberately not part of editing.
     expect(next.grantToolNames).not.toContain("github.pull_request.merge");

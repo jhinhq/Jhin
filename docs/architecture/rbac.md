@@ -52,6 +52,8 @@ signals a running task require member.
 | Create, edit, delete agents | – | – | • | • | |
 | Pause / resume an agent | – | – | • | • | Changes shared state for everyone. |
 | Grant or revoke agent capabilities; edit autonomy policy | – | – | • | • | Plan §20.3: agent capability is separate from user role. |
+| Turn a capability bundle on or off (`/agents/{id}/bundles/{bundle}`) | – | – | • | • | Reads (`/tools/bundles`, `/agents/{id}/bundles`) are viewer+, but a need's connection `choices` (ids, names, statuses, allow-lists) are shown only to a caller who could read `/connections`: an admin, and an API key holding `apps:read`. |
+| Edit a connection's settings (`PATCH /connections/{id}/config`) | – | – | • | • | Never a credential; rotate is separate. |
 | **Teams** | | | | | |
 | Read teams and membership | • | • | • | • | |
 | Create, edit, delete teams; move agents between them | – | – | • | • | |
@@ -95,6 +97,7 @@ signals a running task require member.
 | Create a key for yourself, list keys, revoke your own | • | • | • | • | Capped by your own role — see [API keys](api-keys.md). |
 | Revoke someone else's key | – | – | • | • | |
 | Read the usage log | • | • | • | • | Scope of what you see depends on role. |
+The same rule covers a grant row's `connection_name` and the sentences in its `problems`: a caller who may not read connections gets no name and a neutral sentence ("The pinned connection is disabled.", "Outside the sandbox's allowed repositories.") instead of one that names a connection, its status or an allow-list.
 
 ## Two decisions worth spelling out
 

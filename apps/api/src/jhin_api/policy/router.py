@@ -8,11 +8,16 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
 
-from jhin_api.deps import AdminCtx, DbSession, ViewerCtx
+from jhin_api.deps import AdminCtx, DbSession, SecretCryptoDep, ViewerCtx
 from jhin_api.deps import client_ip_hash as ip_hash
 from jhin_api.deps import get_request_id as req_id
-from jhin_api.policy import service
+from jhin_api.policy import bundles, service
 from jhin_api.policy.schemas import (
+    BundleApply,
+    BundleApplyOut,
+    BundleOut,
+    BundleRemoveOut,
+    BundleStatusOut,
     GrantCreate,
     GrantOut,
     PolicyOut,
@@ -52,10 +57,84 @@ async def list_tools(ctx: ViewerCtx, db: DbSession) -> list[ToolOut]:
     ]
 
 
+@router.get("/tools/bundles")
+async def list_bundles(ctx: ViewerCtx, db: DbSession) -> list[BundleOut]:
+    """The capability bundles and whether this workspace can turn each on
+    as it stands (docs/operations/agent-access.md)."""
+    return await bundles.workspace_bundles(
+        db, ctx.workspace_id, include_connections=bundles.may_read_connections(ctx)
+    )
+
+
 @router.get("/agents/{agent_id}/grants")
 async def list_grants(agent_id: UUID, ctx: ViewerCtx, db: DbSession) -> list[GrantOut]:
-    rows = await service.list_grants(db, ctx.workspace_id, agent_id)
-    return [GrantOut.model_validate(row, from_attributes=True) for row in rows]
+    rows = await service.list_grants(
+        db, ctx.workspace_id, agent_id, redact=not bundles.may_read_connections(ctx)
+    )
+    return [
+        GrantOut.model_validate(row, from_attributes=True).model_copy(
+            update={"problems": problems, "connection_name": connection_name}
+        )
+        for row, problems, connection_name in rows
+    ]
+
+
+@router.get("/agents/{agent_id}/bundles")
+async def list_agent_bundles(
+    agent_id: UUID, ctx: ViewerCtx, db: DbSession
+) -> list[BundleStatusOut]:
+    """Every bundle as it stands on this agent: on, partial, or off, and
+    which of its grants cannot work as written."""
+    return await bundles.agent_bundles(
+        db, ctx.workspace_id, agent_id, include_connections=bundles.may_read_connections(ctx)
+    )
+
+
+@router.post("/agents/{agent_id}/bundles/{bundle_id}")
+async def apply_bundle(
+    agent_id: UUID,
+    bundle_id: str,
+    payload: BundleApply,
+    request: Request,
+    ctx: AdminCtx,
+    db: DbSession,
+    crypto: SecretCryptoDep,
+) -> BundleApplyOut:
+    """Turn a bundle on: write its grants (and, for Code editing, the sandbox
+    it runs in) in one transaction, or say what is still needed."""
+    return await bundles.apply_bundle(
+        db,
+        crypto,
+        ctx,
+        agent_id,
+        bundle_id,
+        payload,
+        request_id=req_id(request),
+        ip_hash=ip_hash(request),
+        include_connections=bundles.may_read_connections(ctx),
+    )
+
+
+@router.delete("/agents/{agent_id}/bundles/{bundle_id}")
+async def remove_bundle(
+    agent_id: UUID,
+    bundle_id: str,
+    request: Request,
+    ctx: AdminCtx,
+    db: DbSession,
+    dry_run: bool = False,
+) -> BundleRemoveOut:
+    """Turn a bundle off: revoke the grants it owns that no other bundle
+    still needs. Policy rules stay."""
+    return await bundles.remove_bundle(
+        db,
+        ctx,
+        agent_id,
+        bundle_id,
+        dry_run=dry_run,
+        request_id=req_id(request),
+        ip_hash=ip_hash(request),
+    )
 
 
 @router.post("/agents/{agent_id}/grants", status_code=201)
@@ -72,7 +151,12 @@ async def create_grant(
         request_id=req_id(request),
         ip_hash=ip_hash(request),
     )
-    return GrantOut.model_validate(grant, from_attributes=True)
+    (_row, problems, connection_name), *_ = await service.annotate_grants(
+        db, ctx.workspace_id, [grant]
+    )
+    return GrantOut.model_validate(grant, from_attributes=True).model_copy(
+        update={"problems": problems, "connection_name": connection_name}
+    )
 
 
 @router.delete("/agents/{agent_id}/grants/{grant_id}", status_code=204)

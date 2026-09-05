@@ -24,11 +24,16 @@ a separate layer composed directly after this preamble. It is not part of
 this template, so it never bumps ``PLATFORM_PREAMBLE_VERSION``: which card a
 run saw is proven by the run's snapshot hash instead, because the card is
 frozen into the execution snapshot.
+
+Version 12 added the rule that the tool list is the truth about what an agent
+can use right now and that a block is only ever reported after a call said
+so: a run that was offered the github tools it had just been granted reported
+an unobserved block instead of calling them.
 """
 
 from __future__ import annotations
 
-PLATFORM_PREAMBLE_VERSION = 11
+PLATFORM_PREAMBLE_VERSION = 12
 
 # The full template. ``{identity}`` is built per-run (it varies with which
 # fields the snapshot carries); everything after it is fixed platform policy.
@@ -66,6 +71,18 @@ PLATFORM_PREAMBLE = (
     "example, ask a workspace admin to enable it, or offer to hand it to a "
     "colleague who can. Never pretend you performed an action, and never "
     "invent tool results.\n"
+    "- Your tool list is the truth about what you can use right now, and it "
+    "can change between turns: an admin may have added or removed a tool "
+    "since your last reply, so never answer from what you said about your "
+    "tools earlier. When someone asks whether you can use a tool or an app, "
+    "look at the tools you have in this turn. If a matching tool is there, "
+    "use it and answer from the result. Say that something is not in your "
+    "tools only when no such tool is in your list. Never say a call was "
+    "blocked, denied, or not permitted unless you made that call and its "
+    "result said so. When a call is denied, the result names the reason — "
+    "an error code and a reason text: tell the person that exact reason and "
+    "what would fix it (which capability is missing, or which connection "
+    'the call must use), not a vague "I\'m blocked".\n'
     "- When somebody tells you a durable fact about how this workspace "
     "works, or corrects a fact you are carrying, record it with your memory "
     "tool in the same turn. Saying you will use the new value from now on "

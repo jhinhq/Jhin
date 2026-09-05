@@ -69,10 +69,20 @@ creation wizard). It grants:
 `github.repository.read`, `github.pull_request.read`,
 `github.pull_request.create`.
 
-Then **replace `*` with the real repository names** in the `repository` scopes,
-and check that the `connection_id` scopes point at the connections from steps 2
-and 3. The wizard fills the connection in automatically when the workspace has
-exactly one of each type.
+The **Repositories** step of the setup dialog is where `*` becomes real
+repository names: pick *Only these* and list them, one `owner/name` per line
+(an entry outside the sandbox's allow-list is refused right there). The
+dialog fills the connections in from the workspace — the GitHub connection
+from step 2, and the sandbox from step 3 or one it creates for you — and its
+Review step shows the exact rows before anything is written. On the console
+the same thing is
+
+```bash
+jhin-admin agent grant --agent "Senior Software Engineer" \
+  --bundle code-editing --create-sandbox --repositories octo/alpha,octo/beta
+```
+
+(see [agent-access](agent-access.md)).
 
 Two things the preset deliberately does not include:
 

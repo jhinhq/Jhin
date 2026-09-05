@@ -385,3 +385,49 @@ async def test_same_decision_retry_repairs_commit_to_signal_failure(
         )
         == 1
     )
+
+
+def test_public_tools_offered_projection_keeps_only_the_allow_listed_keys() -> None:
+    from jhin_api.public_payloads import public_run_event_payload
+
+    projected = public_run_event_payload(
+        "agent.step.tools_offered",
+        {
+            "step": 2,
+            "count": 3,
+            "tools": ["github.repository.read", 42, "x" * 201, "memory.recall"],
+            "truncated": False,
+            "descriptions": ["never public"],
+        },
+    )
+
+    assert projected == {
+        "step": 2,
+        "count": 3,
+        "tools": ["github.repository.read", "memory.recall"],
+        "truncated": False,
+    }
+
+
+def test_public_tools_offered_projection_caps_and_fails_closed() -> None:
+    from jhin_api.public_payloads import public_run_event_payload
+
+    capped = public_run_event_payload(
+        "agent.step.tools_offered",
+        {"step": 0, "count": 300, "tools": [f"tool.{i}" for i in range(300)], "truncated": True},
+    )
+    assert len(capped["tools"]) == 256
+    assert capped["count"] == 300
+    assert capped["truncated"] is True
+
+    empty = {"count": 0, "tools": [], "truncated": False}
+    assert public_run_event_payload("agent.step.tools_offered", {}) == empty
+    assert public_run_event_payload("agent.step.tools_offered", {"tools": "x", "count": 1}) == empty
+    assert (
+        public_run_event_payload("agent.step.tools_offered", {"tools": [], "count": True}) == empty
+    )
+    assert public_run_event_payload("agent.step.tools_offered", {"tools": [], "count": -1}) == empty
+    # ``step`` is only kept as an int, never a bool.
+    assert "step" not in public_run_event_payload(
+        "agent.step.tools_offered", {"tools": [], "count": 0, "step": True}
+    )

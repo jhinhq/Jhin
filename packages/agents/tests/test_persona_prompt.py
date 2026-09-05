@@ -282,7 +282,7 @@ def test_no_persona_means_no_block() -> None:
 def test_preamble_version_is_untouched_by_the_persona_layer() -> None:
     """The block is a separate, snapshot-hashed layer, not a preamble
     wording change; the version audits key on stays where it was."""
-    assert PLATFORM_PREAMBLE_VERSION == 11
+    assert PLATFORM_PREAMBLE_VERSION == 12
 
 
 # --- the snapshot carries the card --------------------------------------

@@ -31,11 +31,17 @@ from jhin_api.cli.commands import COMMANDS
 from jhin_api.cli.main import main
 from jhin_api.cli.parser import PROGRAM, build_parser
 from jhin_api.cli.runtime import CommandError, Result, Runtime, emit
+from jhin_api.connections import service as connections_service
+from jhin_api.deps import WorkspaceContext
 from jhin_api.security.passwords import verify_password
 from jhin_api.security.tokens import hash_token
 from jhin_db.base import Base
 from jhin_db.migrate import alembic_config
 from jhin_db.models import (
+    Agent,
+    AgentCapabilityGrant,
+    AuditEvent,
+    Connection,
     Skill,
     User,
     UserSession,
@@ -44,7 +50,12 @@ from jhin_db.models import (
     WorkspaceMembership,
 )
 from jhin_domain import WorkspaceRole, new_uuid7
-from jhin_secrets.crypto import generate_master_key_material
+from jhin_secrets import SecretCrypto
+from jhin_secrets.crypto import (
+    MasterKey,
+    decode_master_key_material,
+    generate_master_key_material,
+)
 from jhin_skills import load_builtin_skills
 
 # Obviously fake and local to this module: long enough for the account policy,
@@ -499,3 +510,466 @@ async def test_workspace_create_gives_the_new_workspace_its_starter_skills(
     )
     assert membership is not None
     assert membership.role == WorkspaceRole.OWNER.value
+
+
+# --- agent: giving an agent an app from the console --------------------------
+
+ENGINEER = "Senior Software Engineer"
+GRANT_ARGV = ("agent", "grant", "--agent", ENGINEER, "--bundle", "code-editing")
+
+
+async def _seed_agent(console: Console, name: str = ENGINEER) -> Agent:
+    workspace = await console.session.scalar(select(Workspace))
+    assert workspace is not None
+    agent = Agent(
+        workspace_id=workspace.id,
+        name=name,
+        slug=f"{name.lower().replace(' ', '-')}-{new_uuid7().hex[-6:]}",
+    )
+    console.session.add(agent)
+    await console.session.commit()
+    return agent
+
+
+async def _owner_context(console: Console) -> WorkspaceContext:
+    workspace = await console.session.scalar(select(Workspace))
+    owner = await console.session.scalar(select(User))
+    assert workspace is not None and owner is not None
+    return WorkspaceContext(user=owner, workspace_id=workspace.id, role=WorkspaceRole.OWNER)
+
+
+def _master_key(monkeypatch: pytest.MonkeyPatch) -> SecretCrypto:
+    material = generate_master_key_material()
+    monkeypatch.delenv("MASTER_KEY_FILE", raising=False)
+    monkeypatch.setenv("MASTER_KEY", material)
+    return SecretCrypto(MasterKey(key=decode_master_key_material(material)))
+
+
+async def _seed_github(
+    console: Console, crypto: SecretCrypto, *, name: str = "GitHub"
+) -> Connection:
+    connection, _ = await connections_service.create_connection(
+        console.session,
+        crypto,
+        await _owner_context(console),
+        connector_type="github",
+        name=name,
+        auth_type="pat",
+        credentials={"token": "github-pat-for-tests"},
+        config={},
+        request_id=new_uuid7(),
+        ip_hash="test",
+    )
+    return connection
+
+
+async def _seed_sandbox(
+    console: Console,
+    crypto: SecretCrypto,
+    github: Connection,
+    *,
+    allowed: list[str],
+    name: str = "Existing sandbox",
+) -> Connection:
+    connection, _ = await connections_service.create_connection(
+        console.session,
+        crypto,
+        await _owner_context(console),
+        connector_type="cli",
+        name=name,
+        auth_type="none",
+        credentials={},
+        config={
+            "default_network": "none",
+            "git_connection_id": str(github.id),
+            "allowed_repositories": allowed,
+        },
+        request_id=new_uuid7(),
+        ip_hash="test",
+    )
+    return connection
+
+
+def test_the_agent_group_parses_and_refuses_a_bundle_beside_a_capability() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [*GRANT_ARGV, "--create-sandbox", "--repositories", "octo/a,octo/b", "--yes", "--json"]
+    )
+    assert args.command == "agent grant"
+    assert args.create_sandbox is True
+    assert args.repositories == "octo/a,octo/b"
+    assert parser.parse_args(["agent", "access", "--agent", "x"]).command == "agent access"
+    assert parser.parse_args(["agent", "list"]).command == "agent list"
+    assert parser.parse_args(["agent", "revoke", "--agent", "x", "--grant", "y"]).command == (
+        "agent revoke"
+    )
+    with pytest.raises(SystemExit):
+        parser.parse_args([*GRANT_ARGV, "--capability", "github.issue.read"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["agent", "revoke", "--agent", "x", "--bundle", "b", "--grant", "g"])
+
+
+async def test_agent_grant_writes_the_sandbox_the_grants_and_the_rule_as_the_console(
+    console: Console, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    await console.bootstrap()
+    crypto = _master_key(monkeypatch)
+    agent = await _seed_agent(console)
+    github = await _seed_github(console, crypto)
+
+    result = await console.run(
+        *GRANT_ARGV, "--create-sandbox", "--repositories", "*", "--yes", "--json"
+    )
+
+    capsys.readouterr()  # the master-key warning lands on stdout under test
+    emit(result, as_json=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["agent"]["name"] == ENGINEER
+    assert len(payload["grants_created"]) == 11
+    assert payload["grants_existing"] == []
+    assert [rule["capability"] for rule in payload["rules_added"]] == ["cli.repository.push"]
+    sandbox = await console.session.scalar(
+        select(Connection).where(Connection.connector_type == "cli")
+    )
+    assert sandbox is not None
+    assert sandbox.name == "Sandbox for GitHub"
+    assert sandbox.config_json == {
+        "default_network": "none",
+        "git_connection_id": str(github.id),
+        "allowed_repositories": ["*"],
+    }
+    assert payload["created_connection"]["id"] == str(sandbox.id)
+    rows = list(
+        await console.session.scalars(
+            select(AgentCapabilityGrant).where(AgentCapabilityGrant.agent_id == agent.id)
+        )
+    )
+    assert len(rows) == 11
+    refreshed = await console.session.get(Agent, agent.id)
+    assert refreshed is not None
+    assert refreshed.approval_policy_json == [
+        {"capability": "cli.repository.push", "risk": None, "action": "approval"}
+    ]
+    granted = list(
+        await console.session.scalars(
+            select(AuditEvent).where(AuditEvent.action == "agent.permission.granted")
+        )
+    )
+    assert len(granted) == 11
+    assert all(event.actor_type == "system" for event in granted)
+    assert all(
+        event.metadata_json["cli"] == "jhin-admin agent grant"
+        and event.metadata_json["bundle"] == "code-editing"
+        for event in granted
+    )
+    created = await console.session.scalar(
+        select(AuditEvent).where(
+            AuditEvent.action == "connection.created", AuditEvent.target_id == sandbox.id
+        )
+    )
+    assert created is not None
+    assert created.actor_type == "system"
+    assert created.metadata_json["cli"] == "jhin-admin agent grant"
+    assert created.metadata_json["agent_id"] == str(agent.id)
+    assert "granted   cli.repository.push" in "\n".join(result.lines)
+    assert any(line.startswith("connection created  Sandbox for GitHub") for line in result.lines)
+    assert any("Push branches named agent/*" in line for line in result.lines)
+
+
+async def test_agent_grant_dry_run_writes_nothing(
+    console: Console, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await console.bootstrap()
+    crypto = _master_key(monkeypatch)
+    agent = await _seed_agent(console)
+    await _seed_github(console, crypto)
+
+    result = await console.run(*GRANT_ARGV, "--create-sandbox", "--dry-run")
+
+    assert result.data["dry_run"] is True
+    assert len(result.data["grants_created"]) == 11
+    assert "Dry run: nothing was written." in result.lines
+    assert await console.count(AgentCapabilityGrant) == 0
+    assert await console.count(Connection) == 1
+    refreshed = await console.session.get(Agent, agent.id)
+    assert refreshed is not None
+    assert refreshed.approval_policy_json == []
+
+
+async def test_agent_grant_refusals_are_sentences(
+    console: Console, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await console.bootstrap()
+    crypto = _master_key(monkeypatch)
+    await _seed_agent(console)
+
+    with pytest.raises(CommandError) as unknown:
+        await console.run("agent", "grant", "--agent", "Nobody", "--bundle", "code-editing")
+    assert "No agent matches 'Nobody' in Acme HQ" in str(unknown.value)
+
+    with pytest.raises(CommandError) as no_github:
+        await console.run(*GRANT_ARGV, "--create-sandbox")
+    assert str(no_github.value) == (
+        "Acme HQ has no active GitHub connection. Connect one under Apps first."
+    )
+
+    github = await _seed_github(console, crypto)
+    with pytest.raises(CommandError) as no_sandbox:
+        await console.run(*GRANT_ARGV)
+    assert str(no_sandbox.value) == (
+        "No CLI Sandbox connection uses 'GitHub'. Pass --create-sandbox to make one pointing "
+        "at it (repositories: *), or --sandbox <name|id>."
+    )
+
+    with pytest.raises(CommandError) as scope:
+        await console.run(
+            "agent",
+            "grant",
+            "--agent",
+            ENGINEER,
+            "--capability",
+            "cli.repository.push",
+            "--scope",
+            "connection_id=x",
+            "--yes",
+        )
+    assert str(scope.value) == (
+        "`cli.repository.push` needs `repository` in its scope; pass --scope repository=... "
+        "(for example *)."
+    )
+
+    sandbox = await _seed_sandbox(console, crypto, github, allowed=["octo/alpha"])
+    with pytest.raises(HTTPException) as outside:
+        await console.run(
+            *GRANT_ARGV, "--sandbox", "Existing sandbox", "--repositories", "octo/beta"
+        )
+    assert "'Existing sandbox' allows only: octo/alpha" in str(outside.value.detail)
+
+    with pytest.raises(HTTPException) as taken:
+        await console.run(*GRANT_ARGV, "--create-sandbox", "--yes")
+    assert str(taken.value.detail).startswith(
+        f"A CLI Sandbox connection '{sandbox.name}' already uses 'GitHub'"
+    )
+
+    await _seed_agent(console, name="Twin")
+    await _seed_agent(console, name="Twin")
+    with pytest.raises(CommandError) as twins:
+        await console.run("agent", "access", "--agent", "twin")
+    assert str(twins.value).startswith("Two agents in Acme HQ are called 'twin':")
+
+    await console.run("workspace", "create", "--name", "Second", "--owner", OWNER_EMAIL)
+    with pytest.raises(CommandError) as ambiguous:
+        await console.run("agent", "list")
+    assert str(ambiguous.value) == (
+        "More than one workspace exists; pass --workspace (`jhin-admin workspace list` shows them)."
+    )
+
+    monkeypatch.delenv("MASTER_KEY", raising=False)
+    with pytest.raises(CommandError) as no_key:
+        await console.run(*GRANT_ARGV, "--workspace", "acme-hq", "--create-sandbox", "--yes")
+    assert "JHIN_MASTER_KEY is not available" in str(no_key.value)
+    assert await console.count(AgentCapabilityGrant) == 0
+
+
+async def test_agent_access_lists_problems_and_what_would_be_offered(
+    console: Console, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    await console.bootstrap()
+    crypto = _master_key(monkeypatch)
+    agent = await _seed_agent(console)
+    await _seed_github(console, crypto)
+    await console.run(*GRANT_ARGV, "--create-sandbox", "--yes")
+    console.session.add(
+        AgentCapabilityGrant(
+            workspace_id=agent.workspace_id,
+            agent_id=agent.id,
+            capability="linear.issue.read",
+            scope_json={"connection_id": str(new_uuid7())},
+            effect="allow",
+        )
+    )
+    await console.session.commit()
+
+    result = await console.run("agent", "access", "--agent", ENGINEER, "--json")
+
+    text = "\n".join(result.lines)
+    assert text.startswith(f"{ENGINEER} ({agent.id}) in Acme HQ")
+    assert "Code editing" in text and " on" in text
+    assert "needs attention: Connection no longer exists." in text
+    assert "Dangling grants: 1" in text
+    assert "rule  cli.repository.push risk=any -> approval" in text
+    assert "linear.issue.read" not in text.split("Would be offered")[1]
+    assert "cli.repository.checkout" in text.split("Would be offered")[1]
+    capsys.readouterr()  # the master-key warning lands on stdout under test
+    emit(result, as_json=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["dangling_grants"] == 1
+    assert "github.pull_request.create" in payload["would_be_offered"]
+    code_editing = next(b for b in payload["bundles"] if b["id"] == "code-editing")
+    assert code_editing["state"] == "on"
+
+
+async def test_agent_revoke_bundle_names_hand_made_rows_and_leaves_the_rule(
+    console: Console, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await console.bootstrap()
+    crypto = _master_key(monkeypatch)
+    agent = await _seed_agent(console)
+    await _seed_github(console, crypto)
+    granted = await console.run(*GRANT_ARGV, "--create-sandbox", "--yes")
+    sandbox_id = granted.data["created_connection"]["id"]
+    await console.run(
+        "agent",
+        "grant",
+        "--agent",
+        ENGINEER,
+        "--capability",
+        "cli.file.read",
+        "--scope",
+        f"connection_id={sandbox_id}",
+        "--scope",
+        "path=docs/*",
+        "--yes",
+    )
+    assert await console.count(AgentCapabilityGrant) == 12
+
+    result = await console.run(
+        "agent", "revoke", "--agent", ENGINEER, "--bundle", "code-editing", "--yes"
+    )
+
+    assert len(result.data["revoked"]) == 12
+    assert [row["capability"] for row in result.data["hand_made"]] == ["cli.file.read"]
+    assert result.data["hand_made"][0]["scope_json"]["path"] == "docs/*"
+    assert await console.count(AgentCapabilityGrant) == 0
+    refreshed = await console.session.get(Agent, agent.id)
+    assert refreshed is not None
+    assert refreshed.approval_policy_json == [
+        {"capability": "cli.repository.push", "risk": None, "action": "approval"}
+    ]
+    again = await console.run("agent", "revoke", "--agent", ENGINEER, "--bundle", "code-editing")
+    assert again.lines == [f"Nothing to revoke: Code editing is not on for {ENGINEER}."]
+
+
+async def test_agent_grant_capability_refuses_what_the_api_refuses_before_writing(
+    console: Console, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--capability`` never saw the API's request schema, so it once wrote an
+    allow row in a namespace no agent may hold. The one validation path the
+    API uses now runs first — before the confirmation, before a dry run —
+    and the refusal reaches the terminal as the API's own sentence."""
+    await console.bootstrap()
+    crypto = _master_key(monkeypatch)
+    await _seed_agent(console)
+    github = await _seed_github(console, crypto)
+    sandbox = await _seed_sandbox(console, crypto, github, allowed=["octo/alpha"])
+    pinned = f"connection_id={sandbox.id}"
+
+    async def grant(*argv: str) -> Result:
+        return await console.run("agent", "grant", "--agent", ENGINEER, "--capability", *argv)
+
+    with pytest.raises(HTTPException) as forbidden:
+        await grant("agent.permission.grant", "--yes")
+    assert forbidden.value.detail == (
+        "capabilities in this namespace can never be granted to agents"
+    )
+    with pytest.raises(HTTPException) as malformed:
+        await grant("GitHub.Repository.Read", "--dry-run")
+    assert malformed.value.detail == "not a valid dotted capability name or pattern"
+    with pytest.raises(HTTPException) as wide:
+        await grant(
+            "cli.repository.checkout", "--scope", pinned, "--scope", "repository=*", "--yes"
+        )
+    assert str(wide.value.detail) == (
+        "'Existing sandbox' allows only: octo/alpha — '*' is outside it. Add it to the "
+        "sandbox's allowed repositories under Apps, or grant only what the sandbox allows."
+    )
+    with pytest.raises(HTTPException) as protected:
+        await grant(
+            "cli.repository.push",
+            "--scope",
+            pinned,
+            "--scope",
+            "repository=octo/alpha",
+            "--scope",
+            "branch=main",
+            "--yes",
+        )
+    assert str(protected.value.detail).startswith("branch 'main' is refused on every push")
+    assert await console.count(AgentCapabilityGrant) == 0
+
+    inside = await grant(
+        "cli.repository.checkout", "--scope", pinned, "--scope", "repository=octo/alpha", "--yes"
+    )
+    assert inside.data["grant"]["problems"] == []
+    assert await console.count(AgentCapabilityGrant) == 1
+
+
+async def test_agent_grant_bounds_the_repository_list_in_the_planner_s_words(
+    console: Console, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await console.bootstrap()
+    crypto = _master_key(monkeypatch)
+    await _seed_agent(console)
+    await _seed_github(console, crypto)
+    fifty = [f"octo/r{index}" for index in range(50)]
+
+    with pytest.raises(CommandError) as too_many:
+        await console.run(
+            *GRANT_ARGV,
+            "--create-sandbox",
+            "--repositories",
+            ",".join([*fifty, "octo/one-more"]),
+            "--dry-run",
+        )
+    assert str(too_many.value) == "At most 50 repositories can be granted at once."
+    assert await console.count(Connection) == 1
+
+    # Duplicates count once, as the planner counts them.
+    result = await console.run(
+        *GRANT_ARGV, "--create-sandbox", "--repositories", ",".join(fifty + fifty), "--dry-run"
+    )
+    assert result.data["dry_run"] is True
+    checkouts = [
+        row
+        for row in result.data["grants_created"]
+        if row["capability"] == "cli.repository.checkout"
+    ]
+    assert len(checkouts) == 50
+    assert await console.count(AgentCapabilityGrant) == 0
+
+
+async def test_agent_grant_repositories_absent_is_everything_but_empty_is_refused(
+    console: Console, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--repositories`` left off means every repository the allow-list
+    permits. Given and empty (a bare comma, whitespace) it once silently
+    became ``*`` too; now it is refused in the planner's own words, the way
+    the API refuses ``repositories: []``."""
+    from jhin_api.cli.commands import CommandError
+    from jhin_policy.bundles import NO_REPOSITORIES_SENTENCE
+
+    await console.bootstrap()
+    crypto = _master_key(monkeypatch)
+    await _seed_agent(console)
+    await _seed_github(console, crypto)
+
+    for empty in (",", " , ", ""):
+        with pytest.raises(CommandError) as refused:
+            await console.run(
+                "agent",
+                "grant",
+                "--agent",
+                ENGINEER,
+                "--bundle",
+                "github-read",
+                "--repositories",
+                empty,
+                "--yes",
+            )
+        assert str(refused.value) == NO_REPOSITORIES_SENTENCE
+
+    result = await console.run(
+        "agent", "grant", "--agent", ENGINEER, "--bundle", "github-read", "--yes", "--json"
+    )
+    rows = result.data["grants_created"]
+    assert rows and all(row["scope_json"].get("repository") == "*" for row in rows), rows

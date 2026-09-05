@@ -9,6 +9,7 @@ from jhin_policy import (
     RiskLevel,
     ToolDefinition,
     capability_matches,
+    grant_pattern_problem,
     is_valid_capability,
 )
 
@@ -100,3 +101,26 @@ class TestRegistry:
     def test_invalid_tool_name_rejected(self) -> None:
         with pytest.raises(ValueError, match="not a valid dotted capability"):
             _tool("Not A Capability")
+
+
+class TestGrantPatterns:
+    """One answer for every grant writer: the HTTP schema and the service the
+    console drives ask the same function, so they refuse in the same words."""
+
+    def test_names_and_patterns_pass(self) -> None:
+        assert grant_pattern_problem("github.repository.read") is None
+        assert grant_pattern_problem("github.*") is None
+        assert grant_pattern_problem("*") is None
+
+    def test_malformed_names_are_not_patterns(self) -> None:
+        sentence = "not a valid dotted capability name or pattern"
+        assert grant_pattern_problem("GitHub.Repository.Read") == sentence
+        assert grant_pattern_problem("github.*.read") == sentence
+        assert grant_pattern_problem("") == sentence
+
+    def test_forbidden_namespaces_are_refused_whatever_the_shape(self) -> None:
+        sentence = "capabilities in this namespace can never be granted to agents"
+        assert grant_pattern_problem("agent.permission.grant") == sentence
+        assert grant_pattern_problem("agent.permission.*") == sentence
+        assert grant_pattern_problem("secret") == sentence
+        assert grant_pattern_problem("policy.*") == sentence

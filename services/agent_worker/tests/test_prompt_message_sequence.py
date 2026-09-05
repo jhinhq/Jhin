@@ -31,6 +31,7 @@ from jhin_db.models import (
     AgentRun,
     Conversation,
     Message,
+    RunEvent,
     Task,
     User,
     Workspace,
@@ -48,7 +49,7 @@ from jhin_domain import (
 )
 from jhin_models import ModelRequest, ModelResponse, ModelUsage
 from jhin_observability import noop_metrics, noop_tracer
-from jhin_workflows.agent_task.shared import ReasonAgentStepInput
+from jhin_workflows.agent_task.shared import AdvertisedTool, ReasonAgentStepInput
 
 T0 = datetime(2026, 8, 27, 9, 0, tzinfo=UTC)
 
@@ -115,7 +116,9 @@ class ChatWorld:
             run_limits=RunLimits(max_steps=5, max_run_minutes=5),
         )
 
-    async def run_step(self, task: Task, *, step_index: int = 0) -> list[tuple[str, str]]:
+    async def run_step(
+        self, task: Task, *, step_index: int = 0, tools: tuple[str, ...] = ()
+    ) -> list[tuple[str, str]]:
         """Run one reasoning step and return the (role, content) sequence the
         model client was handed."""
         async with self.sessions() as session:
@@ -136,7 +139,10 @@ class ChatWorld:
                 agent_id=str(self.agent.id),
                 snapshot_json=self.snapshot().model_dump_json(),
                 step_index=step_index,
-                advertised_tools=[],
+                advertised_tools=[
+                    AdvertisedTool(name=name, description=name, parameters={"type": "object"})
+                    for name in tools
+                ],
             )
         )
         request = self.model.requests[before]
@@ -340,3 +346,101 @@ async def test_an_assigned_work_task_keeps_its_brief_first(chat: ChatWorld) -> N
 
     assert sequence[1][0] == "user"
     assert sequence[1][1] == "Task: Audit the retry logic\n\nCheck every backoff path."
+
+
+async def _previous_run_offered(
+    world: ChatWorld, session: AsyncSession, task: Task, tools: list[str]
+) -> None:
+    """A finished run of ``task`` that recorded what it was offered."""
+    run = AgentRun(
+        workspace_id=world.workspace.id,
+        agent_id=world.agent.id,
+        task_id=task.id,
+        status=RunStatus.COMPLETED.value,
+    )
+    session.add(run)
+    await session.flush()
+    session.add(
+        RunEvent(
+            workspace_id=world.workspace.id,
+            task_id=task.id,
+            run_id=run.id,
+            seq=3,
+            event_type="agent.step.tools_offered",
+            payload_json={"step": 0, "count": len(tools), "tools": tools, "truncated": False},
+        )
+    )
+
+
+NOTICE = "Your tools changed since your last reply in this conversation."
+
+
+async def test_tools_changed_notice_names_what_was_added_and_removed(chat: ChatWorld) -> None:
+    """The reported failure: asked "can you try now?" eight seconds after the
+    grant, the engineer answered from what it had said a turn earlier. The
+    previous run's durable offer is what the notice is built from."""
+    async with chat.sessions() as session:
+        previous = await _turn(
+            chat,
+            session,
+            seconds=0,
+            text="Can you use the github tool?",
+            reply="I do not have a GitHub tool.",
+        )
+        await _previous_run_offered(chat, session, previous, ["memory.recall", "linear.issue.read"])
+        current = await _turn(chat, session, seconds=100, text="Can you try now?", reply=None)
+        await session.commit()
+
+    chat.model.responses.append(_reply("Trying now."))
+    sequence = await chat.run_step(
+        current, tools=("memory.recall", "github.repository.read", "github.branch.list")
+    )
+
+    system = sequence[0][1]
+    assert (
+        f"{NOTICE} Added: github.branch.list, github.repository.read. Removed: "
+        "linear.issue.read. Do not rely on anything you said about your tools before this turn."
+    ) in system
+    # It sits with the situation blocks, ahead of the tool guidance.
+    assert system.index("Current time:") < system.index(NOTICE)
+    assert system.index(NOTICE) < system.index("You may call the provided tools")
+
+
+async def test_no_notice_on_a_first_turn_or_when_the_set_is_unchanged(chat: ChatWorld) -> None:
+    async with chat.sessions() as session:
+        first = await _turn(chat, session, seconds=0, text="Hello?", reply=None)
+        await session.commit()
+    chat.model.responses.append(_reply("Hi."))
+    assert NOTICE not in (await chat.run_step(first, tools=("memory.recall",)))[0][1]
+
+    async with chat.sessions() as session:
+        previous = await _turn(chat, session, seconds=100, text="Still there?", reply="Yes.")
+        await _previous_run_offered(chat, session, previous, ["memory.recall"])
+        current = await _turn(chat, session, seconds=200, text="Same tools?", reply=None)
+        await session.commit()
+    chat.model.responses.append(_reply("Same."))
+    assert NOTICE not in (await chat.run_step(current, tools=("memory.recall",)))[0][1]
+
+
+async def test_no_notice_on_assigned_work(chat: ChatWorld) -> None:
+    """Work has no earlier reply of its own to contradict, so nothing is said
+    even when a chat run of this agent recorded another set."""
+    async with chat.sessions() as session:
+        previous = await _turn(chat, session, seconds=0, text="Earlier chat", reply="Done.")
+        await _previous_run_offered(chat, session, previous, ["linear.issue.read"])
+        task = Task(
+            workspace_id=chat.workspace.id,
+            title="Audit the retry logic",
+            description="Check every backoff path.",
+            assigned_agent_id=chat.agent.id,
+            conversation_id=chat.conversation.id,
+            correlation_id=new_uuid7(),
+            metadata_json={"origin": "delegation"},
+        )
+        session.add(task)
+        await session.commit()
+
+    chat.model.responses.append(_reply("Audited."))
+    system = (await chat.run_step(task, tools=("memory.recall",)))[0][1]
+
+    assert NOTICE not in system

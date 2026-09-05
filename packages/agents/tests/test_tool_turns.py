@@ -80,3 +80,7 @@ def test_tool_guidance_only_when_tools_advertised() -> None:
     without_tools = build_messages(make_snapshot(), task, has_tools=False)[0].content
     assert "granted capabilities" in with_tools
     assert "granted capabilities" not in without_tools
+    # A denial is relayed with the code and reason the result carries, not
+    # paraphrased into "I'm blocked".
+    assert "relay the error code and reason" in with_tools
+    assert "do not retry" in with_tools

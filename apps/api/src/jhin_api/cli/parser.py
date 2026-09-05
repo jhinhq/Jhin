@@ -63,7 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog=PROGRAM,
         description=(
             "Administer a self-hosted Jhin from the machine it runs on: check the "
-            "install, create accounts and workspaces, recover a locked-out owner."
+            "install, create accounts and workspaces, recover a locked-out owner, "
+            "give an agent access to an app."
         ),
         epilog=f"Run `{PROGRAM} <group> --help` for the arguments of one command.",
     )
@@ -154,5 +155,91 @@ def build_parser() -> argparse.ArgumentParser:
         "--role", required=True, type=workspace_role, help=f"role they will hold: {_ROLE_NAMES}"
     )
     invite_create.set_defaults(command="invite create")
+
+    agent = groups.add_parser(
+        "agent", help="what an agent may use, and giving it an app"
+    ).add_subparsers(dest="action", metavar="<action>", required=True)
+
+    agent_list = agent.add_parser("list", parents=[common], help="list the agents of a workspace")
+    agent_list.add_argument(
+        "--workspace", default=None, help="workspace slug or id (optional when there is one)"
+    )
+    agent_list.set_defaults(command="agent list")
+
+    agent_access = agent.add_parser(
+        "access",
+        parents=[common],
+        help="what one agent can use: bundles, grants and their problems, rules",
+    )
+    agent_access.add_argument("--agent", required=True, help="agent name, slug or id")
+    agent_access.add_argument(
+        "--workspace", default=None, help="workspace slug or id (optional when there is one)"
+    )
+    agent_access.set_defaults(command="agent access")
+
+    agent_grant = agent.add_parser(
+        "grant",
+        parents=[common, confirmation],
+        help="give an agent a capability bundle, an app, or one capability",
+    )
+    agent_grant.add_argument("--agent", required=True, help="agent name, slug or id")
+    agent_grant.add_argument(
+        "--workspace", default=None, help="workspace slug or id (optional when there is one)"
+    )
+    what = agent_grant.add_mutually_exclusive_group(required=True)
+    what.add_argument(
+        "--bundle",
+        help="a capability bundle: code-editing, github-read, web-access, collaboration, ...",
+    )
+    what.add_argument("--app", help="the bundle for an app: github, web, or cli")
+    what.add_argument("--capability", help="one capability, with --scope key=value")
+    agent_grant.add_argument(
+        "--scope",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="scope for --capability; repeat for each key (required keys are never guessed)",
+    )
+    agent_grant.add_argument("--github", help="the GitHub connection to use (name or id)")
+    agent_grant.add_argument("--sandbox", help="an existing CLI Sandbox connection (name or id)")
+    agent_grant.add_argument(
+        "--create-sandbox",
+        action="store_true",
+        dest="create_sandbox",
+        help="create a CLI Sandbox connection pointing at the GitHub connection",
+    )
+    agent_grant.add_argument(
+        "--sandbox-name", dest="sandbox_name", help="name for the sandbox created"
+    )
+    agent_grant.add_argument(
+        "--repositories",
+        default="*",
+        help="comma-separated owner/name or owner/* entries, or * for every repository",
+    )
+    agent_grant.add_argument("--base", default=None, help="pull request base branch pattern")
+    agent_grant.add_argument(
+        "--effect", choices=("allow", "deny"), default="allow", help="for --capability"
+    )
+    agent_grant.add_argument(
+        "--as", dest="actor_email", help="the admin or owner the audit trail records as acting"
+    )
+    agent_grant.add_argument(
+        "--dry-run", action="store_true", dest="dry_run", help="show the plan and write nothing"
+    )
+    agent_grant.set_defaults(command="agent grant")
+
+    agent_revoke = agent.add_parser(
+        "revoke",
+        parents=[common, confirmation],
+        help="take a capability bundle, or one grant, away from an agent",
+    )
+    agent_revoke.add_argument("--agent", required=True, help="agent name, slug or id")
+    agent_revoke.add_argument(
+        "--workspace", default=None, help="workspace slug or id (optional when there is one)"
+    )
+    which = agent_revoke.add_mutually_exclusive_group(required=True)
+    which.add_argument("--bundle", help="the bundle to turn off")
+    which.add_argument("--grant", help="the id of one grant to revoke")
+    agent_revoke.set_defaults(command="agent revoke")
 
     return parser

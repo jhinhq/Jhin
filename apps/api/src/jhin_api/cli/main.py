@@ -8,6 +8,11 @@ wherever the API image runs::
 
     docker compose run --rm --no-deps api jhin-admin doctor
 
+It is also the console way to give an agent an app — ``agent list``,
+``agent access``, ``agent grant`` and ``agent revoke`` drive the same bundle
+service the Tools & Access tab does, so a grant made here is indistinguishable
+from one made in the browser (docs/operations/agent-access.md).
+
 Failures reach the terminal as sentences. A traceback in a container log is
 not an answer to "why can I not sign in", so every foreseeable refusal is a
 :class:`~jhin_api.cli.runtime.CommandError` and even an unforeseen one is

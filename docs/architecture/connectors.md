@@ -186,6 +186,26 @@ search is the separate opt-in path 2. Both are described in
 - Tools are deny-by-default: no grant → `no_grant`; grant scope mismatch
   (connection/repository/branch) → `scope_mismatch`. Both are persisted as
   denied `tool_call` rows and audited.
+- No grant writer may persist a row the evaluator refuses: `POST /grants`,
+  the capability bundle endpoints and `jhin-admin agent grant` all run
+  `jhin_policy.grant_problems` first, and the bundle planner never emits a
+  row it would itself flag (docs/operations/agent-access.md). Rows that are
+  merely dead today (a lapsed connection, an MCP tool not yet discovered)
+  are written and reported back in `GrantOut.problems`.
+- A connection's public settings change only through
+  `PATCH /connections/{id}/config` (admin). The fields sent are laid over the
+  settings the connection has, so a body of one key changes one key and a
+  sandbox cannot lose its `git_connection_id` to a partial edit; a field sent
+  empty is cleared. Audited as `connection.config_updated` with the changed
+  keys and, for each, the value before and after — a widened allow-list or a
+  `default_network` opened to `internet` is written down as such. A CLI
+  Sandbox's allow-list entries are validated as repository patterns and its
+  `git_connection_id` must be a GitHub connection of the same workspace.
+- Deleting a connection revokes every grant pinned to it, each audited as
+  `agent.permission.revoked` with `reason: connection.deleted`; disabling
+  revokes nothing. Advertisement withholds any grant pinned to a connection
+  that is not `active`, while the gateway still decides every call from the
+  live rows.
 - Workspace isolation: `resolve_connection` filters by the executing
   workspace id; a connection id from another workspace behaves as not found.
 - Worker isolation: connector executors, resolved credentials, sandbox runner

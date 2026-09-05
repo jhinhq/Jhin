@@ -85,6 +85,48 @@ every required dimension; the closest is missing: connection_id
 which names the key to add. Add it on the agent's **Permissions** tab (or
 re-apply the **Code editing** tool preset, which writes all of them).
 
+## New grants are validated
+
+The migration restates rows that already exist; a row written *now* is
+checked before it is written, so a dead grant cannot be made by hand again.
+`POST /agents/{id}/grants` refuses (422, with the sentence as `detail`):
+
+- a wildcard (`*`, `cli.*`) over tools that require scope — `A wildcard grant
+  cannot carry the scope ['cli.repository.checkout', 'cli.repository.push']
+  require. Grant those capabilities by name, or turn on the Code editing
+  capability.`;
+- a missing required key — `cli.repository.push needs branch in its grant
+  scope; a grant without it is refused on every call.`;
+- a scope key the tool does not have — `'branch' is not a scope key of
+  github.repository.read (known keys: ['connection_id', 'repository']).`;
+- a connection that does not exist or is of another type — `Connection no
+  longer exists.` / `Connection 'Web' is a web connection, not github.`;
+- a malformed repository — `repository must be owner/name, owner/*, or *.`;
+- a repository the pinned sandbox's allow-list does not cover — `'Sandbox'
+  allows only: octo/a — '*' is outside it. Add it to the sandbox's allowed
+  repositories under Apps, or grant only what the sandbox allows.` (the
+  sentence the Code editing bundle refuses the same width with);
+- a push branch the sandbox refuses on every call — `branch 'main' is
+  refused on every push: the sandbox never pushes to main, master or HEAD.
+  Use a pattern such as agent/*.` (`*` and any other pattern stand: which
+  branches an agent may push to is the admin's choice, above);
+- and, for either effect, a capability that is not a dotted name or pattern
+  (`not a valid dotted capability name or pattern`) or that sits in a
+  namespace no agent may hold (`capabilities in this namespace can never be
+  granted to agents`). The request schema says the same thing first for
+  HTTP callers; the service check is what makes `jhin-admin agent grant
+  --capability`, which never sees the schema, refuse in the same words.
+
+Two problems are accepted and only reported back, because the row can come
+alive without being rewritten: a capability the catalog does not know yet
+(`Matches no tool in this workspace's catalog.` — MCP servers register tools
+after the connection exists) and a connection that is disabled or waiting to
+be reconnected. Every grant the API returns carries these sentences in
+`GrantOut.problems`, the Capability grants list shows them as *needs
+attention*, and `jhin-admin agent access` counts them as dangling. The
+Code editing bundle ([agent-access](agent-access.md)) never writes a row that
+carries a problem.
+
 ## What to do after upgrading
 
 1. Open **Agents → *agent* → Permissions** for every agent with sandbox or pull
@@ -96,7 +138,8 @@ re-apply the **Code editing** tool preset, which writes all of them).
    list (migration `0038` grandfathered existing connections to `*`). It is the
    per-instance bound underneath every agent's grants.
 3. Agents created through the wizard need nothing: the Code-editing preset has
-   always written `branch: agent/*` and `base: main`.
+   always written `branch: agent/*`, and `base: *` (any base branch; it was
+   `main` before the bundle work — narrow it on the Repositories step).
 
 ## Rolling back
 

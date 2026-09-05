@@ -1283,3 +1283,32 @@ async def test_the_empty_completion_note_carries_a_reported_summary(
         "Projector could not complete this request and did not leave a reply. "
         "Its reported result: Looked up Connie's record."
     )
+
+
+async def test_a_tools_offered_event_does_not_disturb_the_pair_lookup(
+    world: ProjectionWorld,
+) -> None:
+    """The offer is a third, differently typed row; the manifest/reasoning
+    lookups select by event type and step, so it is invisible to them."""
+    await world.seed_step(statuses=[ToolCallStatus.COMPLETED.value])
+    async with world.sessions() as session:
+        session.add(
+            RunEvent(
+                workspace_id=world.workspace_id,
+                task_id=world.task_id,
+                run_id=world.run_id,
+                seq=2,
+                event_type="agent.step.tools_offered",
+                payload_json={"step": 0, "count": 1, "tools": ["system.echo"], "truncated": False},
+            )
+        )
+        await session.commit()
+    canonical = str(stable_tool_invocation_id(world.run_id, 0, 0))
+
+    result = await world.projections.commit_agent_step_activity(
+        world.commit_params(ids=[canonical])
+    )
+
+    assert result.execution_unknown_tool_call_id is None
+    assert await world.count_events("agent.step.committed") == 1
+    assert await world.count_events("agent.step.tools_offered") == 1

@@ -144,6 +144,21 @@ class ConnectionDeleteImpactOut(BaseModel):
 
     trigger_count: int = 0
     trigger_invocation_count: int = 0
+    # Grants pinned to this connection are revoked with it (each audited),
+    # so the confirmation names how many, on how many agents.
+    grant_count: int = 0
+    agent_count: int = 0
+
+
+class ConnectionConfigUpdate(BaseModel):
+    """Change the manifest-declared settings of a connection: the fields
+    given are laid over the ones it has, a field omitted keeps its value,
+    and a field sent empty is cleared (never a credential; those go through
+    rotate)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    config: dict[str, Any] = Field(default_factory=dict)
 
 
 class ConnectionAccessSummaryOut(BaseModel):

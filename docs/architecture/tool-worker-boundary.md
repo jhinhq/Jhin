@@ -41,6 +41,19 @@ legacy repair path may append a missing reasoning sidecar for an already-bound
 Phase 9 manifest, and only after a fresh model result reproduces that manifest
 exactly; it never rewrites the manifest.
 
+A third record rides in the same commit on the new-bind path, at `seq + 3`
+directly after the pair: `agent.step.tools_offered`, the tool names the model
+was offered on that step — the same list `to_model_tool_schemas` rendered.
+Its payload is `{step, count, tools, truncated}`: names only (each cut to 200
+characters), the first 256 in advertised order, `truncated` when there were
+more. The replay path and the legacy sidecar repair never write it, and the
+pair lookups select by their own event types, so it is invisible to them. Its
+public API payload keeps exactly those four keys and fails closed to
+`{"count": 0, "tools": [], "truncated": false}` on anything malformed. It is
+what the task timeline renders as **Tools offered**, and what the next chat
+turn compares against to tell the agent its tools changed
+(docs/operations/agent-access.md).
+
 `execute_bound_tool` receives only workspace ID, run ID, step index, and
 ordinal. Its SQL projection selects only `ordinal`, `lossless`, `tool_name`,
 and `arguments_json` from the requested manifest entry. It never loads

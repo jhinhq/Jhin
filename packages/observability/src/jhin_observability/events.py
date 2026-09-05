@@ -108,6 +108,10 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
     # Situational awareness (clock + interlocutor) is best-effort too; a
     # failure degrades to no time/interlocutor blocks rather than a dead run.
     "situation.context_failed": {"error_type": FieldKind.ERROR_TYPE},
+    # The "your tools changed" notice (docs/operations/agent-access.md):
+    # reading the previous run's tools_offered event failed; the step goes on
+    # without the block.
+    "tools_changed.context_failed": {"error_type": FieldKind.ERROR_TYPE},
     "work_request.finalized": {
         "work_request_id": FieldKind.ID,
         "task_id": FieldKind.ID,

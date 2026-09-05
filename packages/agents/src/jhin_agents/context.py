@@ -88,6 +88,11 @@ class TaskContext(BaseModel):
     # callers that do not supply them keep composing unchanged.
     time_context: str = ""
     interlocutor_context: str = ""
+    # The "your tools changed" notice (``jhin_agents.tool_change``): rendered
+    # by the caller from the previous run's durable ``agent.step.tools_offered``
+    # event when the set differs from this turn's, so the model does not
+    # answer from what it said about its tools last time. "" drops it.
+    tools_changed_context: str = ""
     # Personas: the "How you work" block, rendered by the caller with
     # ``persona_block()`` from the run snapshot's card plus the live
     # interlocutor, so the register facet follows who is actually there.
@@ -349,6 +354,7 @@ def compose_system_prompt(
     has_tools: bool = False,
     time_context: str = "",
     interlocutor_context: str = "",
+    tools_changed_context: str = "",
     persona_context: str = "",
 ) -> str:
     # Layer 1 — the platform preamble carries the agent's identity (name,
@@ -381,7 +387,7 @@ def compose_system_prompt(
     # the tool guidance and the appended roster/memory/skills blocks)
     # because "who am I speaking to" and "what time is it" frame every
     # other instruction. Both are re-derived live on each run.
-    for section in (time_context, interlocutor_context):
+    for section in (time_context, interlocutor_context, tools_changed_context):
         if section:
             parts.append(section)
     if has_tools:
@@ -389,8 +395,9 @@ def compose_system_prompt(
             "You may call the provided tools. Every call is checked against "
             "your granted capabilities; some calls require human approval and "
             "some will be denied. If a call is denied or rejected, do not "
-            "retry it — explain the situation and finish the task as well as "
-            "you can without it."
+            "retry it — relay the error code and reason the result gives, say "
+            "what would fix it, and finish the task as well as you can without "
+            "it."
         )
     parts.append(
         "Execution constraints: work in focused steps and finish with a "
@@ -447,6 +454,7 @@ def build_messages(
         has_tools=has_tools,
         time_context=task.time_context,
         interlocutor_context=task.interlocutor_context,
+        tools_changed_context=task.tools_changed_context,
         persona_context=task.persona_context,
     )
     for section in (

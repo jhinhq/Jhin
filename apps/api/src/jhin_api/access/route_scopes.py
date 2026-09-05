@@ -94,6 +94,12 @@ ROUTE_SCOPES: dict[tuple[str, ...], RouteRule] = {
     ("agents", "resume"): _rule(None, "agents:write"),
     ("agents", "grants"): _rule("agents:read", "agents:admin"),
     ("agents", "policy"): _rule("agents:read", "agents:admin"),
+    # Capability bundles: the same admin scope as the grants they write. The
+    # read side is an agent fact (on, partial, off), but a bundle's open
+    # questions can name connections; those choices are withheld unless the
+    # caller also holds what ("connections",) reads with
+    # (``jhin_api.policy.bundles.may_read_connections``).
+    ("agents", "bundles"): _rule("agents:read", "agents:admin"),
     ("agents", "relationships"): _rule("agents:read", "agents:write"),
     ("agents", "memberships"): _rule("teams:read", "teams:write"),
     ("agents", "skills"): _rule("skills:read", "skills:write"),
@@ -173,6 +179,7 @@ ROUTE_SCOPES: dict[tuple[str, ...], RouteRule] = {
     ("connections", "verify"): _rule(None, "apps:write"),
     ("connections", "enable"): _rule(None, "apps:write"),
     ("connections", "disable"): _rule(None, "apps:write"),
+    ("connections", "config"): _rule(None, "apps:write"),
     ("connections", "rotate"): _SEALED,
     # Re-authorizing mints a fresh grant and a fresh token for a connection:
     # credential material, on the same footing as rotating one by hand.
@@ -201,6 +208,9 @@ ROUTE_SCOPES: dict[tuple[str, ...], RouteRule] = {
     ("secrets",): _SEALED,
     ("secrets", "rotate"): _SEALED,
     ("tools",): _rule("agents:read", None),
+    # Connection choices in a bundle's needs follow the ("agents", "bundles")
+    # note above.
+    ("tools", "bundles"): _rule("agents:read", None),
     ("model-providers",): _rule("models:read", "models:write"),
     ("model-providers", "models"): _rule("models:read", None),
     ("model-providers", "balance"): _rule("models:read", None),

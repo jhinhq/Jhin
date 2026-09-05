@@ -21,6 +21,7 @@ from jhin_api.connections.schemas import (
     CatalogAppOut,
     ConnectionAccessSummaryOut,
     ConnectionAuthorizedByOut,
+    ConnectionConfigUpdate,
     ConnectionCreate,
     ConnectionCreated,
     ConnectionOut,
@@ -476,6 +477,27 @@ async def store_webhook_secret(
         request_id=req_id(request),
         ip_hash=ip_hash(request),
     )
+
+
+@router.patch("/{connection_id}/config")
+async def update_connection_config(
+    connection_id: UUID,
+    payload: ConnectionConfigUpdate,
+    request: Request,
+    ctx: AdminCtx,
+    db: DbSession,
+) -> ConnectionOut:
+    """Replace the connection's public settings — for a CLI Sandbox, the
+    repositories it may use and the GitHub connection it borrows from."""
+    connection = await service.update_config(
+        db,
+        ctx,
+        connection_id,
+        config=payload.config,
+        request_id=req_id(request),
+        ip_hash=ip_hash(request),
+    )
+    return await serialize_connection(db, connection)
 
 
 @router.post("/{connection_id}/disable")

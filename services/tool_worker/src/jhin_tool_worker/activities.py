@@ -960,8 +960,14 @@ class ToolActivities:
                 if task_id is not None
                 else None
             )
+            # A grant pinned to a connection that is not ACTIVE — deleted,
+            # disabled, lapsed — advertises nothing: the labels above are
+            # exactly the live pins, so they double as the allow-list.
             definitions = task_scoped_tool_definitions(
-                allowed_tool_definitions(catalog, grants), task
+                allowed_tool_definitions(
+                    catalog, grants, live_connection_ids=set(connection_labels)
+                ),
+                task,
             )
         return [
             AdvertisedTool(

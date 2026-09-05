@@ -13,7 +13,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from jhin_api.connections import service
 from jhin_api.deps import WorkspaceContext
 from jhin_connectors.testing.fake_github import FakeGitHubServer
-from jhin_db.models import Connection, Secret, Trigger, TriggerInvocation, User, Workspace
+from jhin_db.models import (
+    Agent,
+    AgentCapabilityGrant,
+    AuditEvent,
+    Connection,
+    Secret,
+    Trigger,
+    TriggerInvocation,
+    User,
+    Workspace,
+)
 from jhin_domain import ConnectionStatus, TriggerInvocationStatus, WorkspaceRole, new_uuid7
 from jhin_secrets import SecretCrypto, SecretStore
 
@@ -311,7 +321,12 @@ async def test_access_summary_reports_what_deleting_the_connection_removes(
         session, admin_ctx.workspace_id, connection.id
     )
 
-    assert summary["delete_impact"] == {"trigger_count": 1, "trigger_invocation_count": 3}
+    assert summary["delete_impact"] == {
+        "trigger_count": 1,
+        "trigger_invocation_count": 3,
+        "grant_count": 0,
+        "agent_count": 0,
+    }
 
 
 async def test_delete_impact_is_zero_when_nothing_depends_on_the_connection(
@@ -326,4 +341,99 @@ async def test_delete_impact_is_zero_when_nothing_depends_on_the_connection(
         session, admin_ctx.workspace_id, connection.id
     )
 
-    assert summary["delete_impact"] == {"trigger_count": 0, "trigger_invocation_count": 0}
+    assert summary["delete_impact"] == {
+        "trigger_count": 0,
+        "trigger_invocation_count": 0,
+        "grant_count": 0,
+        "agent_count": 0,
+    }
+
+
+# --- Deleting a connection revokes what pointed at it -------------------
+
+
+async def _grants_pinned_to(
+    session: AsyncSession, ctx: WorkspaceContext, github: Connection, other: Connection
+) -> tuple[Agent, list[AgentCapabilityGrant]]:
+    agent = Agent(
+        workspace_id=ctx.workspace_id, name="Reader", slug=f"reader-{new_uuid7().hex[:6]}"
+    )
+    session.add(agent)
+    await session.flush()
+    rows = [
+        AgentCapabilityGrant(
+            workspace_id=ctx.workspace_id,
+            agent_id=agent.id,
+            capability=capability,
+            scope_json=scope,
+            effect="allow",
+        )
+        for capability, scope in (
+            ("github.repository.read", {"connection_id": str(github.id), "repository": "*"}),
+            ("github.issue.read", {"connection_id": str(github.id)}),
+            ("github.repository.read", {"connection_id": str(other.id)}),
+            ("memory.recall", {}),
+        )
+    ]
+    session.add_all(rows)
+    await session.commit()
+    return agent, rows
+
+
+async def test_deleting_a_connection_revokes_its_pinned_grants_with_a_reason(
+    session: AsyncSession,
+    crypto: SecretCrypto,
+    admin_ctx: WorkspaceContext,
+) -> None:
+    github = await _github(session, crypto, admin_ctx)
+    other = await _github(session, crypto, admin_ctx, name="Other GitHub")
+    agent, rows = await _grants_pinned_to(session, admin_ctx, github, other)
+
+    await service.delete_connection(session, admin_ctx, github.id, **REQ)
+
+    remaining = list(
+        await session.scalars(
+            select(AgentCapabilityGrant).where(AgentCapabilityGrant.agent_id == agent.id)
+        )
+    )
+    assert {row.id for row in remaining} == {rows[2].id, rows[3].id}
+    revocations = list(
+        await session.scalars(
+            select(AuditEvent).where(AuditEvent.action == "agent.permission.revoked")
+        )
+    )
+    assert len(revocations) == 2
+    assert {event.metadata_json["grant_id"] for event in revocations} == {
+        str(rows[0].id),
+        str(rows[1].id),
+    }
+    assert all(event.metadata_json["reason"] == "connection.deleted" for event in revocations)
+    assert all(event.metadata_json["connection_id"] == str(github.id) for event in revocations)
+    assert all(event.target_id == agent.id for event in revocations)
+
+
+async def test_disabling_a_connection_revokes_nothing(
+    session: AsyncSession,
+    crypto: SecretCrypto,
+    admin_ctx: WorkspaceContext,
+) -> None:
+    github = await _github(session, crypto, admin_ctx)
+    other = await _github(session, crypto, admin_ctx, name="Other GitHub")
+    agent, rows = await _grants_pinned_to(session, admin_ctx, github, other)
+
+    await service.set_status(session, admin_ctx, github.id, disabled=True, **REQ)
+
+    remaining = list(
+        await session.scalars(
+            select(AgentCapabilityGrant).where(AgentCapabilityGrant.agent_id == agent.id)
+        )
+    )
+    assert {row.id for row in remaining} == {row.id for row in rows}
+    assert (
+        await session.scalar(
+            select(func.count())
+            .select_from(AuditEvent)
+            .where(AuditEvent.action == "agent.permission.revoked")
+        )
+        == 0
+    )

@@ -437,14 +437,21 @@ function WizardInner() {
                   const missing = presetMissingTools(preset, toolList);
                   const applied = isPresetApplied(state, preset, toolList);
                   const unavailable = missing.length === Object.keys(preset.tools).length;
+                  // Code editing needs a sandbox created alongside its grants,
+                  // which the wizard cannot do yet; Tools & Access can.
+                  const afterCreation = preset.id === "code-editing";
                   return (
                     <button
                       key={preset.id}
                       type="button"
                       data-testid={`tool-preset-${preset.id}`}
                       aria-pressed={applied}
-                      title={preset.description}
-                      disabled={unavailable}
+                      title={
+                        afterCreation
+                          ? "Turn this on under Tools & Access after creating the agent — the sandbox is created for you there."
+                          : preset.description
+                      }
+                      disabled={unavailable || afterCreation}
                       onClick={() =>
                         setState(
                           toggleToolPreset(state, preset, toolList, connections.data ?? []),

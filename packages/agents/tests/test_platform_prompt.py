@@ -111,7 +111,23 @@ def test_old_snapshots_without_workspace_name_still_render() -> None:
 
 
 def test_preamble_is_versioned() -> None:
-    assert PLATFORM_PREAMBLE_VERSION == 11
+    assert PLATFORM_PREAMBLE_VERSION == 12
+
+
+def test_preamble_tells_agents_to_consult_the_tool_list_and_relay_denials() -> None:
+    """A run that had just been offered the github tools told the person
+    they were being blocked — a block it never observed. The tool list is the
+    truth about what the agent can use, and a denial is only ever reported
+    after a call returned one, with the reason the result gave."""
+    text = render_platform_preamble(agent_name="Connie")
+    assert "look at the tools you have in this turn" in text
+    assert "only when no such tool is in your list" in text
+    assert "an error code and a reason text" in text
+    assert "never answer from what you said about your tools earlier" in text
+    # Directly after the "tools you have been granted" rule it qualifies.
+    assert text.index("You act only through the tools you have been granted") < text.index(
+        "Your tool list is the truth"
+    )
 
 
 def test_preamble_tells_agents_to_look_before_saying_they_do_not_know() -> None:

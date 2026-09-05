@@ -28,6 +28,7 @@ and trust boundary to its authoritative document:
 - [Sandboxing](architecture/sandboxing.md)
 - [Pointing an agent at a real repository](operations/github-token-setup.md)
 - [Upgrading: grants that now name a connection, branch and base](operations/grant-scope-migration.md)
+- [Giving an agent an app: bundles, the setup dialog, `jhin-admin agent`](operations/agent-access.md)
 - [Deterministic tool-worker boundary](architecture/tool-worker-boundary.md)
 - [Curated long-term memory](architecture/memory.md)
 - [Agent Skills](architecture/skills.md)

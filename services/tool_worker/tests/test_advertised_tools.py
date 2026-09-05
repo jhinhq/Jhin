@@ -16,8 +16,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 import jhin_tool_worker.main as main_module
 import jhin_tool_worker.resources as resources_module
 from jhin_db.base import Base
-from jhin_db.models import Agent, AgentCapabilityGrant, Task, Workspace
-from jhin_domain import new_uuid7
+from jhin_db.models import Agent, AgentCapabilityGrant, Connection, Task, Workspace
+from jhin_db.models.connection import new_public_id
+from jhin_domain import ConnectionStatus, new_uuid7
 from jhin_observability import ObservabilityRuntime, noop_metrics, noop_tracer
 from jhin_policy import RiskLevel, ToolDefinition
 from jhin_tool_worker.activities import ToolActivities
@@ -615,3 +616,67 @@ async def test_resource_graph_retains_runtime_and_tracer_identity(
 
 async def _async_value(value: object) -> object:
     return value
+
+
+async def test_a_grant_pinned_to_a_missing_or_disabled_connection_is_not_advertised(
+    advertised_world: _AdvertisedWorld,
+) -> None:
+    """The engineer's four linear rows pointed at a connection that no longer
+    existed and were still offered. Only an ACTIVE pin advertises; the grant
+    row itself is untouched, so re-enabling the app brings the tool back."""
+    async with advertised_world.sessions() as session:
+        connection = Connection(
+            workspace_id=advertised_world.workspace.id,
+            connector_type="linear",
+            name="Linear",
+            auth_type="api_key",
+            public_id=new_public_id(),
+            config_json={},
+        )
+        session.add(connection)
+        await session.flush()
+        pinned = await session.scalar(
+            select(AgentCapabilityGrant).where(
+                AgentCapabilityGrant.agent_id == advertised_world.agent.id,
+                AgentCapabilityGrant.capability == "linear.issue.get",
+            )
+        )
+        assert pinned is not None
+        pinned.scope_json = {"connection_id": str(connection.id)}
+        deleted = await session.scalar(
+            select(AgentCapabilityGrant).where(
+                AgentCapabilityGrant.agent_id == advertised_world.agent.id,
+                AgentCapabilityGrant.capability == "system.echo",
+            )
+        )
+        assert deleted is not None
+        deleted.scope_json = {"connection_id": str(new_uuid7())}
+        await session.commit()
+        connection_id = connection.id
+
+    names = await advertised_world.advertised()
+    assert "linear.issue.get" in names
+    assert "system.echo" not in names
+
+    async with advertised_world.sessions() as session:
+        row = await session.get(Connection, connection_id)
+        assert row is not None
+        row.status = ConnectionStatus.DISABLED.value
+        await session.commit()
+    assert "linear.issue.get" not in await advertised_world.advertised()
+
+    async with advertised_world.sessions() as session:
+        row = await session.get(Connection, connection_id)
+        assert row is not None
+        row.status = ConnectionStatus.ACTIVE.value
+        await session.commit()
+    assert "linear.issue.get" in await advertised_world.advertised()
+    async with advertised_world.sessions() as session:
+        grants = list(
+            await session.scalars(
+                select(AgentCapabilityGrant).where(
+                    AgentCapabilityGrant.agent_id == advertised_world.agent.id
+                )
+            )
+        )
+    assert len(grants) == 3  # advertisement narrowed; nothing was revoked

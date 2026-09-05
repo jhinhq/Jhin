@@ -29,17 +29,25 @@ export function ScopeEditor({
   connections,
   values,
   onChange,
+  prefilled = [],
 }: {
   tool: ToolInfo;
   connections: ConnectionInfo[];
   values: ToolScopeValues;
   onChange: (values: ToolScopeValues) => void;
+  /** Keys the form filled with a default (`*`, `agent/*`, the only
+   * connection); an optional one of these says so instead of "constraint". */
+  prefilled?: string[];
 }) {
   return (
     <div className="grid gap-3 sm:grid-cols-2">
       {tool.scope_keys.map((key) => {
         const required = tool.required_grant_scope_keys.includes(key);
-        const hint = required ? "Required for this tool" : "Optional grant constraint";
+        const hint = required
+          ? "Required for this tool"
+          : prefilled.includes(key)
+            ? "Default: any — narrow it if you want"
+            : "Optional grant constraint";
         const update = (value: string) => onChange({ ...values, [key]: value });
         return (
           <Field key={key} label={LABELS[key] ?? key.replaceAll("_", " ")} hint={hint}>

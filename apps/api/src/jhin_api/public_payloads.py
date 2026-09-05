@@ -15,6 +15,9 @@ _DATABASE_TOOLS = frozenset(
 )
 _LOSSLESS_MANIFEST_EVENT = "agent.step.tool_manifest"
 _AGENT_ONLY_REASONING_EVENT = "agent.step.reasoning"
+_TOOLS_OFFERED_EVENT = "agent.step.tools_offered"
+_MAX_TOOLS_OFFERED_NAMES = 256
+_MAX_TOOL_NAME_CHARS = 200
 
 
 def public_tool_payload(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -67,6 +70,9 @@ def public_run_event_payload(event_type: str, payload: dict[str, Any]) -> dict[s
     if event_type == _AGENT_ONLY_REASONING_EVENT:
         return {}
 
+    if event_type == _TOOLS_OFFERED_EVENT:
+        return _public_tools_offered(payload)
+
     if event_type != _LOSSLESS_MANIFEST_EVENT:
         return deepcopy(payload)
 
@@ -94,6 +100,35 @@ def public_run_event_payload(event_type: str, payload: dict[str, Any]) -> dict[s
         safe_calls.append(safe)
 
     projected: dict[str, Any] = {"manifest": {"count": len(safe_calls), "calls": safe_calls}}
+    step = payload.get("step")
+    if isinstance(step, int) and not isinstance(step, bool):
+        projected["step"] = step
+    return projected
+
+
+def _public_tools_offered(payload: dict[str, Any]) -> dict[str, Any]:
+    """The tools a step offered the model: names only, bounded, fail-closed.
+
+    Kept: ``step`` (int), ``count`` (int, >= 0), ``tools`` (strings of at
+    most 200 characters, at most 256 of them, in order), ``truncated``
+    (bool). Anything else in the durable payload is dropped; a malformed
+    payload projects as an empty offer.
+    """
+    empty: dict[str, Any] = {"count": 0, "tools": [], "truncated": False}
+    tools = payload.get("tools")
+    count = payload.get("count")
+    if not isinstance(tools, list) or isinstance(count, bool) or not isinstance(count, int):
+        return empty
+    if count < 0:
+        return empty
+    names = [name for name in tools if isinstance(name, str) and len(name) <= _MAX_TOOL_NAME_CHARS][
+        :_MAX_TOOLS_OFFERED_NAMES
+    ]
+    projected: dict[str, Any] = {
+        "count": count,
+        "tools": names,
+        "truncated": payload.get("truncated") is True,
+    }
     step = payload.get("step")
     if isinstance(step, int) and not isinstance(step, bool):
         projected["step"] = step

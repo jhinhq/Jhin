@@ -272,6 +272,18 @@ async def test_reasoning_returns_count_after_atomic_lossless_bind(
     assert await world.tool_call_count() == 0
     assert world.effect.count == 0
     assert world.model.requests[0].tools[0].name == "system.echo"
+    # The third record of the step: exactly what the model was offered, in
+    # advertised order, bound in the same commit right after the pair.
+    offered = await world.load_event("agent.step.tools_offered")
+    assert offered.payload_json == {
+        "step": 0,
+        "count": 1,
+        "tools": ["system.echo"],
+        "truncated": False,
+    }
+    assert offered.seq == manifest.seq + 2
+    assert offered.seq == reasoning.seq + 1
+    assert await world.count_events("agent.step.tools_offered") == 1
 
 
 async def test_budget_exhausted_stops_before_the_model_call(world: ReasoningWorld) -> None:
@@ -345,6 +357,7 @@ async def test_new_reasoning_bind_rolls_back_manifest_and_reasoning_together(
 
     assert await world.count_events("agent.step.tool_manifest") == 0
     assert await world.count_events("agent.step.reasoning") == 0
+    assert await world.count_events("agent.step.tools_offered") == 0
     assert await world.tool_call_count() == 0
     assert world.effect.count == 0
 
@@ -424,6 +437,8 @@ async def test_complete_reasoning_pair_replays_without_model_call(world: Reasoni
     assert len(world.model.requests) == 1
     assert await world.count_events("agent.step.tool_manifest") == 1
     assert await world.count_events("agent.step.reasoning") == 1
+    # A replay reuses the pair; it never writes a second offer.
+    assert await world.count_events("agent.step.tools_offered") == 1
 
 
 async def test_manifest_without_reasoning_fails_closed_for_new_activity(
@@ -517,6 +532,7 @@ async def test_step_prompt_carries_memory_and_records_retrieval_provenance(
         "memory.retrieved",
         "agent.step.tool_manifest",
         "agent.step.reasoning",
+        "agent.step.tools_offered",
     ]
     retrieved = events[0].payload_json
     assert len(retrieved["record_ids"]) == 1
@@ -707,6 +723,8 @@ async def test_empty_completion_triggers_one_reflective_retry(world: ReasoningWo
     reasoning = await world.load_event("agent.step.reasoning")
     assert reasoning.payload_json["completion_sanitized"] == reply
     assert reasoning.payload_json["done"] is True
+    # One offer for the step, whatever the retry did.
+    assert await world.count_events("agent.step.tools_offered") == 1
     # Usage of both calls is folded together for cost accounting.
     assert reasoning.payload_json["usage"]["input_tokens"] == 14
     assert reasoning.payload_json["usage"]["output_tokens"] == 6
@@ -728,3 +746,20 @@ async def test_reflective_retry_is_bounded_and_replay_safe(world: ReasoningWorld
     replay = await world.reasoning.reason_agent_step_activity(world.params)
     assert replay == ReasonAgentStepResult(call_count=0)
     assert len(world.model.requests) == 2  # replay short-circuits, no new call
+
+
+async def test_tools_offered_is_bounded_to_256_names(world: ReasoningWorld) -> None:
+    world.params.advertised_tools = [
+        AdvertisedTool(name=f"tool.{index:03d}", description="", parameters={"type": "object"})
+        for index in range(300)
+    ]
+    world.model.responses.append(_done_response())
+
+    await world.reasoning.reason_agent_step_activity(world.params)
+
+    offered = await world.load_event("agent.step.tools_offered")
+    assert offered.payload_json["count"] == 300
+    assert len(offered.payload_json["tools"]) == 256
+    assert offered.payload_json["tools"][0] == "tool.000"
+    assert offered.payload_json["tools"][-1] == "tool.255"
+    assert offered.payload_json["truncated"] is True

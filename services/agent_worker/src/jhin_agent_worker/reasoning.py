@@ -11,7 +11,7 @@ import asyncio
 import json
 import math
 import sys
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import Annotated, Any, Literal, cast
 from uuid import UUID
@@ -30,6 +30,7 @@ from jhin_agents import AgentExecutionSnapshot
 from jhin_agents.context import ConversationTurn, TaskContext, persona_block
 from jhin_agents.graph import NodeTransition
 from jhin_agents.runtime import StepOutcome, estimate_cost_micros, execute_step
+from jhin_agents.tool_change import tools_changed_block
 from jhin_db.budget import budget_denial_message
 from jhin_db.models import Agent, AgentRun, AuditEvent, Message, RunEvent, Task, Workspace
 from jhin_domain import (
@@ -487,6 +488,26 @@ def _validate_complete_pair(
         expected_call_count=len(calls),
     )
     return calls, record
+
+
+# The third record of a step (docs/architecture/tool-worker-boundary.md):
+# the tool names the model was offered, bound at ``seq + 3`` after the
+# manifest/reasoning pair in the same transaction. Names only, bounded, and
+# written on the new-bind path alone — a replay reuses the recorded pair and
+# the legacy sidecar repair never fabricates what an old step was offered.
+TOOLS_OFFERED_EVENT = "agent.step.tools_offered"
+MAX_TOOLS_OFFERED_NAMES = 256
+_MAX_TOOL_NAME_CHARS = 200
+
+
+def tools_offered_payload(step: int, tools: Sequence[AdvertisedTool]) -> dict[str, Any]:
+    names = [str(tool.name)[:_MAX_TOOL_NAME_CHARS] for tool in tools[:MAX_TOOLS_OFFERED_NAMES]]
+    return {
+        "step": step,
+        "count": len(tools),
+        "tools": names,
+        "truncated": len(tools) > MAX_TOOLS_OFFERED_NAMES,
+    }
 
 
 async def _next_seq(session: AsyncSession, run_id: UUID) -> int:
@@ -1118,6 +1139,62 @@ class AgentReasoningActivities:
                 time_context="", interlocutor_context="", interlocutor_kind=None
             )
 
+    async def _tools_changed_context(
+        self,
+        *,
+        workspace_id: UUID,
+        agent_id: UUID,
+        task: Task,
+        run_id: UUID,
+        advertised_names: Sequence[str],
+        conversation_turn: bool,
+    ) -> str:
+        """The "your tools changed" notice, from the previous run of this
+        agent in the same conversation and its last ``tools_offered`` event.
+
+        Only on a chat turn: assigned work has no earlier reply to contradict.
+        Best-effort, own session; a failure logs and drops the block.
+        """
+        if not conversation_turn or task.conversation_id is None:
+            return ""
+        try:
+            async with self._resources.session_factory() as session:
+                previous_run_id = await session.scalar(
+                    select(AgentRun.id)
+                    .join(Task, Task.id == AgentRun.task_id)
+                    .where(
+                        AgentRun.workspace_id == workspace_id,
+                        AgentRun.agent_id == agent_id,
+                        AgentRun.id != run_id,
+                        Task.workspace_id == workspace_id,
+                        Task.conversation_id == task.conversation_id,
+                    )
+                    .order_by(AgentRun.created_at.desc())
+                    .limit(1)
+                )
+                if previous_run_id is None:
+                    return ""
+                event = await session.scalar(
+                    select(RunEvent)
+                    .where(
+                        RunEvent.run_id == previous_run_id,
+                        RunEvent.event_type == TOOLS_OFFERED_EVENT,
+                    )
+                    .order_by(RunEvent.seq.desc())
+                    .limit(1)
+                )
+            if event is None:
+                return ""
+            payload = event.payload_json if isinstance(event.payload_json, dict) else {}
+            raw = payload.get("tools")
+            previous = (
+                [name for name in raw if isinstance(name, str)] if isinstance(raw, list) else []
+            )
+            return tools_changed_block(previous, advertised_names)
+        except Exception as error:
+            logger.warning("tools_changed.context_failed", error_type=type(error).__name__)
+            return ""
+
     async def _skills_context(self, *, workspace_id: UUID, agent_id: UUID) -> str:
         """The "Skills available to you" block; best-effort, own session
         (docs/architecture/skills.md). Failure degrades to no block."""
@@ -1458,6 +1535,14 @@ class AgentReasoningActivities:
                 workspace_id=workspace_id,
                 task=task,
             )
+            tools_changed = await self._tools_changed_context(
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                task=task,
+                run_id=run_id,
+                advertised_names=[tool.name for tool in params.advertised_tools],
+                conversation_turn=conversation_turn,
+            )
             # Pure composition over the frozen snapshot and the live
             # counterpart: no database read and no failure path of its own.
             # The card was validated when it was written and is hashed into
@@ -1505,6 +1590,7 @@ class AgentReasoningActivities:
                 skills_context=skills,
                 time_context=situation.time_context,
                 interlocutor_context=situation.interlocutor_context,
+                tools_changed_context=tools_changed,
                 persona_context=persona_context,
                 conversation_turn=conversation_turn,
             )
@@ -1755,6 +1841,18 @@ class AgentReasoningActivities:
                 seq=seq + 2,
                 event_type="agent.step.reasoning",
                 payload=reasoning.to_payload(),
+            )
+            # What the model was offered — the same list ``to_model_tool_schemas``
+            # rendered above — so the timeline can prove what a run could
+            # have called, in the same commit as the pair it belongs to.
+            _add_run_event(
+                session,
+                workspace_id=workspace_id,
+                task_id=task_id,
+                run_id=run_id,
+                seq=seq + 3,
+                event_type=TOOLS_OFFERED_EVENT,
+                payload=tools_offered_payload(params.step_index, params.advertised_tools),
             )
             await session.commit()
             await self._after_reasoning_bind_commit()

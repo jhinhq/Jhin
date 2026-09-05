@@ -18,6 +18,7 @@ import {
   Webhook,
   XCircle,
 } from "lucide-react";
+import Link from "next/link";
 import { useState } from "react";
 import { ReconnectButton } from "@/components/connect/reconnect-banner";
 import { ConnectionAccessSummary } from "@/components/connection-access-summary";
@@ -31,18 +32,27 @@ import {
   ErrorNote,
   Field,
   Input,
+  Select,
   Spinner,
   Tabs,
   Textarea,
 } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
+import {
+  agentAccessHref,
+  allowedRepositoriesOf,
+  bundleForConnector,
+  sandboxRepositoryError,
+} from "@/lib/bundles";
 import { findAuthScheme, webhookPayloadUrl } from "@/lib/connectors";
 import { formatDateTime } from "@/lib/format";
 import {
+  useAgents,
   useConnectionAccessSummary,
   useConnectionToolCalls,
   useConnectionTools,
   useInvalidateConnections,
+  useUpdateConnectionConfig,
 } from "@/lib/hooks";
 import type {
   ConnectionDeleteImpact,
@@ -65,13 +75,154 @@ function plural(count: number, one: string, many: string): string {
  * connection are deleted with it, along with everything they have ever run,
  * and neither comes back — so the delete is only informed if it says so. */
 export function impactSentence(impact: ConnectionDeleteImpact | undefined): string | null {
-  if (!impact || impact.trigger_count === 0) return null;
+  if (!impact) return null;
+  const grants = impact.grant_count ?? 0;
+  const revokes =
+    grants > 0
+      ? ` and revoke ${plural(grants, "grant", "grants")} on ${plural(impact.agent_count ?? 0, "agent", "agents")}`
+      : "";
+  if (impact.trigger_count === 0) {
+    return grants > 0 ? `Deleting also revokes${revokes.slice(" and revoke".length)}.` : null;
+  }
   const automations = plural(impact.trigger_count, "automation", "automations");
   if (impact.trigger_invocation_count === 0) {
-    return `Deleting also removes ${automations} built on this app.`;
+    return `Deleting also removes ${automations} built on this app${revokes}.`;
   }
   const runs = plural(impact.trigger_invocation_count, "recorded run", "recorded runs");
-  return `Deleting also removes ${automations} built on this app, and their ${runs}.`;
+  return `Deleting also removes ${automations} built on this app, and their ${runs}${revokes}.`;
+}
+
+/** "Give to an agent…": pick an agent, land on its Tools & Access tab with
+ * the right bundle's setup dialog open on this connection. */
+export function GiveToAgent({
+  workspaceId,
+  connection,
+}: {
+  workspaceId: string;
+  connection: ConnectionInfo;
+}) {
+  const agents = useAgents(workspaceId);
+  const [open, setOpen] = useState(false);
+  const [agentId, setAgentId] = useState("");
+  const defaultBundle = bundleForConnector(connection.connector_type);
+  const [bundleId, setBundleId] = useState(defaultBundle ?? "");
+  const active = (agents.data ?? []).filter((agent) => agent.status !== "disabled");
+  const bundleChoices =
+    connection.connector_type === "github"
+      ? [
+          ["github-read", "GitHub (read)"],
+          ["code-editing", "Code editing"],
+        ]
+      : defaultBundle
+        ? [[defaultBundle, defaultBundle === "web-access" ? "Web search & browsing" : "Code editing"]]
+        : [];
+  return (
+    <div data-testid="give-to-agent" className="space-y-2">
+      {!open ? (
+        <Button size="sm" variant="primary" onClick={() => setOpen(true)}>
+          Give to an agent…
+        </Button>
+      ) : defaultBundle === null ? (
+        <p className="text-xs text-dim">
+          No capability bundle for this app yet; grant tools under the agent&rsquo;s Tools &amp; Access.
+        </p>
+      ) : (
+        <div className="flex flex-wrap items-end gap-2 rounded-xl border border-line bg-raised px-3.5 py-3">
+          <div className="min-w-[12rem] flex-1">
+            <Field label="Agent">
+              <Select value={agentId} onChange={(event) => setAgentId(event.target.value)}>
+                <option value="">Choose an agent…</option>
+                {active.map((agent) => (
+                  <option key={agent.id} value={agent.id}>
+                    {agent.name}
+                    {agent.role_title ? ` — ${agent.role_title}` : ""}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </div>
+          <div className="min-w-[10rem]">
+            <Field label="Capability">
+              <Select value={bundleId} onChange={(event) => setBundleId(event.target.value)}>
+                {bundleChoices.map(([id, label]) => (
+                  <option key={id} value={id}>
+                    {label}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </div>
+          {agentId ? (
+            <Link
+              href={agentAccessHref(agentId, bundleId, connection.id)}
+              data-testid="give-to-agent-link"
+              className="inline-flex items-center rounded-xl bg-accent px-3 py-2 text-sm font-medium text-white hover:bg-accent-strong"
+            >
+              Open Tools &amp; Access
+            </Link>
+          ) : null}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The repositories a CLI Sandbox may use — the outer limit under every
+ * agent's grants — editable in place through PATCH /config. */
+export function AllowedRepositoriesEditor({
+  workspaceId,
+  connection,
+}: {
+  workspaceId: string;
+  connection: ConnectionInfo;
+}) {
+  const [text, setText] = useState(allowedRepositoriesOf(connection).join("\n"));
+  const [saved, setSaved] = useState(false);
+  const update = useUpdateConnectionConfig(workspaceId, connection.id);
+  const entries = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const invalid = entries.some((entry) => sandboxRepositoryError(entry) !== null);
+  return (
+    <form
+      data-testid="allowed-repositories"
+      className="space-y-2 rounded-xl border border-line bg-raised px-3.5 py-3"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (invalid) return;
+        setSaved(false);
+        update.mutate(
+          { ...connection.config_json, allowed_repositories: entries },
+          { onSuccess: () => setSaved(true) },
+        );
+      }}
+    >
+      <Field label="Allowed repositories" hint="One owner/name per line; owner/* and * work too. Empty means no repository work at all.">
+        <Textarea
+          rows={3}
+          value={text}
+          onChange={(event) => {
+            setText(event.target.value);
+            setSaved(false);
+          }}
+          className="font-mono text-xs"
+        />
+      </Field>
+      {invalid ? (
+        <p role="alert" className="text-xs text-danger">
+          Every entry must be owner/name, owner/*, or *.
+        </p>
+      ) : null}
+      <ErrorNote message={errText(update.error, "Saving the repositories failed.")} />
+      <div className="flex items-center gap-2">
+        <Button type="submit" size="sm" disabled={invalid || update.isPending}>
+          {update.isPending ? "Saving…" : "Save"}
+        </Button>
+        {saved ? <span className="text-xs text-ok">Saved.</span> : null}
+      </div>
+    </form>
+  );
 }
 
 export function statusTone(status: string): "ok" | "danger" | "neutral" | "warn" {
@@ -399,6 +550,18 @@ export function ConnectionDetailDialog({
               canManage={canManage}
               onChanged={() => invalidateAll()}
             />
+          </section>
+        ) : null}
+
+        {canManage ? (
+          <section hidden={tab !== "overview"}>
+            <GiveToAgent workspaceId={workspaceId} connection={connection} />
+          </section>
+        ) : null}
+
+        {canManage && connection.connector_type === "cli" ? (
+          <section hidden={tab !== "overview"}>
+            <AllowedRepositoriesEditor workspaceId={workspaceId} connection={connection} />
           </section>
         ) : null}
 

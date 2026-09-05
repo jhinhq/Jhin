@@ -13,6 +13,7 @@ import {
   GitFork,
   Hand,
   Hourglass,
+  ListChecks,
   Pause,
   Play,
   Send,
@@ -402,6 +403,7 @@ function eventStyle(event: RunEvent): { dot: string; icon: React.ReactNode | nul
     };
   }
   if (type === "node.execute_tool") return { dot: "bg-accent", icon: <Wrench size={12} className="text-dim" /> };
+  if (type === "agent.step.tools_offered") return { dot: "bg-accent", icon: <ListChecks size={12} className="text-dim" /> };
   if (type === "node.observe") return { dot: "bg-accent", icon: <Eye size={12} className="text-dim" /> };
   if (type === "node.request_approval" || type === "approval.requested") {
     return { dot: "bg-warn", icon: <ShieldQuestion size={12} className="text-warn" /> };
@@ -459,7 +461,46 @@ function SandboxJobEvent({ payload }: { payload: Record<string, unknown> }) {
   );
 }
 
-function Timeline({ events, live }: { events: RunEvent[]; live: boolean }) {
+/** The tools a step offered the model (`agent.step.tools_offered`): proof of
+ * what a run could have called, whatever it said about its tools. */
+function ToolsOfferedEvent({ payload }: { payload: Record<string, unknown> }) {
+  const count = typeof payload.count === "number" ? payload.count : 0;
+  const step = typeof payload.step === "number" ? payload.step : null;
+  const tools = Array.isArray(payload.tools)
+    ? payload.tools.filter((name): name is string => typeof name === "string")
+    : [];
+  const truncated = payload.truncated === true;
+  if (count === 0) {
+    return (
+      <p className="text-xs text-dim" data-testid="tools-offered-empty">
+        No tools offered
+        <span className="block text-[11px] text-faint">
+          This agent had no grant that advertises on this kind of task.
+        </span>
+      </p>
+    );
+  }
+  return (
+    <div data-testid="tools-offered" className="text-xs text-dim">
+      <p>
+        {count} tools{step !== null ? ` · step ${step + 1}` : ""}
+        {truncated ? " · list truncated" : ""}
+      </p>
+      <details className="mt-0.5">
+        <summary className="cursor-pointer text-faint">Show tools</summary>
+        <ul className="mt-1 flex flex-wrap gap-1">
+          {tools.map((name) => (
+            <li key={name}>
+              <code className="rounded-md border border-line bg-raised px-1.5 py-0.5 font-mono text-[11px]">{name}</code>
+            </li>
+          ))}
+        </ul>
+      </details>
+    </div>
+  );
+}
+
+export function Timeline({ events, live }: { events: RunEvent[]; live: boolean }) {
   if (events.length === 0) {
     return (
       <p className="rounded-xl border border-dashed border-line-strong bg-surface/60 px-4 py-6 text-center text-sm text-dim">
@@ -483,7 +524,7 @@ function Timeline({ events, live }: { events: RunEvent[]; live: boolean }) {
             />
             <p className="flex items-center gap-1.5 text-[13px] font-medium text-ink">
               {icon}
-              {event.event_type}
+              {event.event_type === "agent.step.tools_offered" ? "Tools offered" : event.event_type}
               {event.event_type === "tool.call" && risk ? (
                 <Badge tone={riskTone(risk)}>{risk}</Badge>
               ) : null}
@@ -515,6 +556,7 @@ function Timeline({ events, live }: { events: RunEvent[]; live: boolean }) {
               <p className="mt-0.5 break-words text-xs text-danger">{payload.error_message}</p>
             ) : null}
             {event.event_type === "sandbox.job" ? <SandboxJobEvent payload={payload} /> : null}
+            {event.event_type === "agent.step.tools_offered" ? <ToolsOfferedEvent payload={payload} /> : null}
           </li>
         );
       })}

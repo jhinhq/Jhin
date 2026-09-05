@@ -228,6 +228,9 @@ describe("AppsPage", () => {
       config: { server_url: "https://mcp.fake.test/mcp", server_slug: "fake", transport: "auto" },
     });
     expect(await screen.findByRole("heading", { name: "Fake MCP (dev) is connected" })).toBeDefined();
+    expect(
+      screen.getByText("Connected. Who may use it? Give it to an agent below and Jhin writes their permissions."),
+    ).toBeDefined();
     const tool = await screen.findByTestId("connection-tool-mcp.fake.echo");
     expect(within(tool).getAllByText("read").some((el) => el.tagName === "SPAN")).toBe(true);
     expect(within(tool).getByText("Reads information only")).toBeDefined();

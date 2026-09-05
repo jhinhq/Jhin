@@ -541,6 +541,15 @@ printf %s "$NEW_PASSWORD" |
 Every command takes `--json` for scripting, and `jhin-admin user list`,
 `workspace list` and `user set-role` cover the rest of the day-to-day.
 
+Giving an agent an app is a console command too. `jhin-admin agent list`
+names the agents, `agent access --agent <name>` shows what one can use (and
+which of its grants cannot work as written), `agent grant --agent <name>
+--bundle code-editing --create-sandbox --repositories octo/alpha` writes the
+whole Code editing setup — the sandbox connection, eleven grants and the
+push-needs-approval rule — in one transaction, and `agent revoke` takes a
+bundle or one grant away again. Every refusal is a sentence naming what to
+do; see [docs/operations/agent-access.md](docs/operations/agent-access.md).
+
 ## Production deployment
 
 Production installs use the pull-based release bundle

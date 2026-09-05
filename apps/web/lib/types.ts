@@ -717,6 +717,11 @@ export interface Grant {
   scope_json: Record<string, unknown>;
   effect: GrantEffect;
   created_at: string;
+  /** What is wrong with this row, as sentences (empty when it can work as
+   * written). Absent only on an API that predates grant validation. */
+  problems?: string[];
+  /** The pinned connection's name when it still exists. */
+  connection_name?: string | null;
 }
 
 export interface PolicyRule {
@@ -861,6 +866,9 @@ interface ConnectionAgentAccessOut {
 export interface ConnectionDeleteImpact {
   trigger_count: number;
   trigger_invocation_count: number;
+  /** Grants pinned to the connection, revoked with it; absent on an older API. */
+  grant_count?: number;
+  agent_count?: number;
 }
 
 export interface ConnectionAccessSummaryOut {
@@ -868,6 +876,87 @@ export interface ConnectionAccessSummaryOut {
   agents: ConnectionAgentAccessOut[];
   /** Absent only when an older API is still serving this route. */
   delete_impact?: ConnectionDeleteImpact;
+}
+
+// --- Capability bundles (docs/operations/agent-access.md) ---
+
+export interface BundleTool {
+  name: string;
+  capability: string;
+  scope: Record<string, string>;
+}
+
+export interface BundleNeedChoice {
+  id: string;
+  name: string;
+  status: string;
+  allowed_repositories?: string[] | null;
+}
+
+/** A question the operator must answer before a bundle can be written. */
+export interface BundleNeed {
+  kind: "connect" | "choose" | "create_sandbox" | "catalog";
+  connector_type: string;
+  choices: BundleNeedChoice[];
+  detail: string;
+}
+
+export interface BundleReadiness {
+  state: "ready" | "needs" | "unavailable";
+  needs: BundleNeed[];
+  missing_tools: string[];
+}
+
+export interface BundleOut {
+  id: string;
+  label: string;
+  summary: string;
+  description: string;
+  tools: BundleTool[];
+  rules: PolicyRule[];
+  not_included: string[];
+  readiness: BundleReadiness;
+}
+
+export interface BundleStatusOut extends BundleOut {
+  state: "on" | "partial" | "off";
+  granted_capabilities: string[];
+  missing_capabilities: string[];
+  problems: { grant_id: string; capability: string; problems: string[] }[];
+}
+
+export interface SandboxCreate {
+  name: string;
+  git_connection_id: string;
+  allowed_repositories: string[];
+}
+
+export interface BundleApply {
+  connections: Record<string, string>;
+  repositories: string[];
+  base: string | null;
+  sandbox?: SandboxCreate;
+  dry_run: boolean;
+}
+
+export interface BundleApplyOut {
+  bundle_id: string;
+  dry_run: boolean;
+  created_connection: ConnectionInfo | null;
+  grants_created: Grant[];
+  grants_existing: Grant[];
+  rules_added: PolicyRule[];
+  rules_kept: PolicyRule[];
+  callable_tools: string[];
+  needs: BundleNeed[];
+  warnings: string[];
+}
+
+export interface BundleRemoveOut {
+  bundle_id: string;
+  dry_run: boolean;
+  revoked: Grant[];
+  hand_made: Grant[];
 }
 
 export interface ConnectionCreated {
