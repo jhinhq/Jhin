@@ -4117,7 +4117,7 @@ def test_start_stack_uses_bounded_build_key_up_migrate_readiness_and_ports(
 
 def test_live_scenarios_use_exact_pytest_selection_without_default_addopts() -> None:
     regressions = LIVE_SCENARIOS["regressions"]
-    assert regressions.expected_tests == 23
+    assert regressions.expected_tests == 28
     assert build_live_pytest_command(regressions)[:7] == (
         os.fspath(Path(sys.executable)),
         "-m",
