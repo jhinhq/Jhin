@@ -309,6 +309,10 @@ class FakeGitHubOAuthServer:
             query = {"code": f"fake-github-code-{stdlib_secrets.token_hex(8)}"}
             if params.get("state"):
                 query["state"] = params["state"]
+            # Real GitHub adopted RFC 9207 in 2026 and identifies itself by its
+            # OAuth path, not its origin. Sending the same string here is what
+            # lets the redirect-flow test prove the callback accepts it.
+            query["iss"] = "https://github.com/login/oauth"
             if not redirect_uri:
                 return PlainTextResponse("missing redirect_uri", status_code=400)
             return Response(

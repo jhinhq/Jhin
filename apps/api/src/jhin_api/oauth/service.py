@@ -463,6 +463,32 @@ def _static_provider_for(connector_type: str) -> Any:
     return None
 
 
+def _static_provider_for_issuer(issuer: str) -> Any:
+    """The static provider whose registrations are keyed by ``issuer``, or ``None``."""
+    try:
+        from jhin_connectors.oauth_providers import STATIC_PROVIDERS
+    except ImportError:  # pragma: no cover - provider table not installed
+        return None
+    for provider in STATIC_PROVIDERS.values():
+        if provider.issuer == issuer:
+            return provider
+    return None
+
+
+def _expected_iss(row: OAuthAuthorization) -> str:
+    """The one string an RFC 9207 ``iss`` on this row's callback may equal.
+
+    A discovered server's ``iss`` is its metadata ``issuer``, so the row's
+    issuer is the answer. A static provider may identify itself on the
+    callback by a different string than the key its registrations are filed
+    under -- GitHub says ``https://github.com/login/oauth`` while its rows are
+    keyed by ``https://github.com`` -- and the table records which.
+    """
+    provider = _static_provider_for_issuer(row.issuer)
+    declared = getattr(provider, "authorization_response_iss", "") if provider else ""
+    return declared or row.issuer
+
+
 def _static_provider_by_key(provider_key: str) -> Any:
     try:
         from jhin_connectors.oauth_providers import STATIC_PROVIDERS
@@ -1295,12 +1321,13 @@ def _verify_callback_context(
         raise _CallbackContextError("redirect_uri_changed", "redirect_changed") from exc
     if row.redirect_uri != expected_uri:
         raise _CallbackContextError("redirect_uri_changed", "redirect_changed")
+    expected_iss = _expected_iss(row)
     if row.iss_parameter_supported:
         if iss is None:
             raise _CallbackContextError("issuer_missing", "issuer_mismatch")
-        if iss != row.issuer:
+        if iss != expected_iss:
             raise _CallbackContextError("issuer_mismatch", "issuer_mismatch")
-    elif iss is not None and row.issuer and iss != row.issuer:
+    elif iss is not None and expected_iss and iss != expected_iss:
         raise _CallbackContextError("issuer_mismatch", "issuer_mismatch")
 
 

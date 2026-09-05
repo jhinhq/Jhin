@@ -794,3 +794,38 @@ async def test_a_dead_session_at_the_github_app_callback_redirects_rather_than_4
 def test_the_async_cases_above_actually_run() -> None:
     """Guard against a config change quietly turning these into no-ops."""
     assert asyncio.iscoroutinefunction(test_unknown_state_is_refused)
+
+
+async def test_github_identifies_itself_by_its_oauth_path_on_the_callback(
+    callback: CallbackHarness,
+) -> None:
+    """RFC 9207 at GitHub: ``iss`` is ``https://github.com/login/oauth``.
+
+    Registrations stay keyed by ``https://github.com``, so the two strings
+    differ on purpose. The comparison stays byte-exact: the declared value
+    passes the issuer check, the bare origin does not, and neither does
+    anybody else.
+    """
+    mismatch = f"{APP_URL}/apps?oauth_error=issuer_mismatch&app=github"
+
+    _row, handle = await callback.pending(
+        issuer="https://github.com", connector_type="github", iss_parameter_supported=False
+    )
+    accepted = await _get(callback, state=handle, code="x", iss="https://github.com/login/oauth")
+    assert accepted.status_code == 303
+    assert accepted.headers["location"] != mismatch
+    assert "issuer_mismatch" not in accepted.headers["location"]
+
+    _row, handle = await callback.pending(
+        issuer="https://github.com", connector_type="github", iss_parameter_supported=False
+    )
+    origin_only = await _get(callback, state=handle, code="x", iss="https://github.com")
+    assert origin_only.headers["location"] == mismatch
+
+    _row, handle = await callback.pending(
+        issuer="https://github.com", connector_type="github", iss_parameter_supported=False
+    )
+    stranger = await _get(
+        callback, state=handle, code="x", iss="https://attacker.example/login/oauth"
+    )
+    assert stranger.headers["location"] == mismatch

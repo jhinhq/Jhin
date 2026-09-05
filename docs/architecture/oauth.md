@@ -242,7 +242,7 @@ and a failure in it degrades to `state_unknown` rather than to a 500.
 | `state_unknown` | a handle this instance never minted, or one purged after four hours |
 | `no_session` | the browser session died while the person was at the provider |
 | `redirect_uri_changed` | `OAUTH_REDIRECT_BASE_URL` or `APP_URL` moved mid-flow |
-| `issuer_missing`, `issuer_mismatch` | RFC 9207: the `iss` returned is not the one we talked to |
+| `issuer_missing`, `issuer_mismatch` | RFC 9207: the `iss` returned is not the one we talked to. The value compared against is the provider's `authorization_response_iss` when the static table declares one (GitHub says `https://github.com/login/oauth` while its registrations stay keyed by `https://github.com`), otherwise the recorded issuer |
 | `endpoint_blocked` | `JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS` no longer allows a stored endpoint |
 | `exchange_refused` | read `oauth.code_exchange_failed` beside it for the provider's code |
 | `provider_denied`, `no_code` | the person declined at the provider |

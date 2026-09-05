@@ -112,3 +112,12 @@ def test_a_revocation_endpoint_is_validated_on_the_way_out() -> None:
     with pytest.raises(Exception) as excinfo:
         provider_metadata(hostile)
     assert "169.254" not in str(excinfo.value)
+
+
+def test_github_names_itself_by_its_oauth_path_under_rfc_9207() -> None:
+    """The registration key and the callback identity are different jobs."""
+    github = STATIC_PROVIDERS["github"]
+    assert github.issuer == "https://github.com"
+    assert github.authorization_response_iss == "https://github.com/login/oauth"
+    # Compared when it arrives, never demanded: GitHub's rollout was partial.
+    assert provider_metadata(github).authorization_response_iss_parameter_supported is False
