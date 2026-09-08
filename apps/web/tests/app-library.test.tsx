@@ -15,6 +15,7 @@ function entry(overrides: Partial<CatalogApp>): CatalogApp {
     icon: "plug",
     description: "",
     connector_type: null,
+    sign_in: "auto",
     mcp_url: null,
     url_unverified: false,
     transport: "unknown",
@@ -103,6 +104,25 @@ describe("AppLibrary", () => {
     expect(files.getByText("Self-hosted")).toBeDefined();
     expect(files.queryByRole("button", { name: "Connect" })).toBeNull();
     expect(files.getByText(/stdio not supported yet/)).toBeDefined();
+  });
+
+  it("says how each app connects in the words a person would use", () => {
+    // `sign_in` answers directly where the entry has classified itself; "auto"
+    // falls back to the shape-of-the-entry guess the library always made.
+    const classified = [
+      entry({ slug: "supabase", name: "Supabase", connector_type: "supabase", sign_in: "remote_mcp", mcp_url: "https://mcp.supabase.com/mcp" }),
+      entry({ slug: "stripe", name: "Stripe", sign_in: "key", mcp_url: "https://mcp.stripe.com" }),
+      entry({ slug: "deepwiki", name: "DeepWiki", sign_in: "none", auth_hint: "none", mcp_url: "https://mcp.deepwiki.com/mcp" }),
+    ];
+    render(
+      <AppLibrary entries={classified} connections={[]} canManage onConnect={() => {}} onOpenConnection={() => {}} />,
+    );
+    expect(within(screen.getByTestId("app-supabase")).getByText(/Sign in with your account/)).toBeDefined();
+    // A native connector no longer gets to claim the card when the sign-in
+    // happens at the provider's own server.
+    expect(within(screen.getByTestId("app-supabase")).queryByText(/Built-in connector/)).toBeNull();
+    expect(within(screen.getByTestId("app-stripe")).getByText(/this app has no sign-in/)).toBeDefined();
+    expect(within(screen.getByTestId("app-deepwiki")).getByText(/No sign-in needed/)).toBeDefined();
   });
 
   it("hides connect actions for non-admins", () => {

@@ -6,7 +6,8 @@ Everything a server reports is untrusted input. Discovery therefore:
 - bounds the number of tools, description length, and schema size;
 - derives a :class:`RiskLevel` from the server's annotations
   (``readOnlyHint`` → read, ``destructiveHint`` → destructive, otherwise
-  write) and lets admins override it per tool (``tool_risk_overrides``).
+  write), raises it to the floor its own name implies when the server said
+  nothing, and lets admins override it per tool (``tool_risk_overrides``).
 
 The result is persisted in ``connection.config_json["mcp_tools"]`` so the
 tool worker can build definitions without talking to the server, and so the
@@ -37,6 +38,48 @@ MAX_SCHEMA_BYTES = 16_384
 SERVER_SLUG_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 TOOL_SLUG_RE = re.compile(r"^[a-z0-9_]{1,64}$")
 _NON_SLUG_RE = re.compile(r"[^a-z0-9_]+")
+
+# Word boundaries inside a provider tool name: runs of punctuation, and the
+# camelCase and acronym seams (``deleteIssue``, ``SQLQuery``) that would
+# otherwise collapse the whole name into one unreadable token.
+_NAME_SEAM_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+_NAME_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+
+# Verbs that decide a tool's risk on their own, whatever the server says.
+# Each names an effect a person would want to see before it happens and
+# cannot undo afterwards. Words that merely often accompany such an effect
+# (update, write, set, create) are deliberately absent: they are the ordinary
+# writes the ``write`` default already covers, and flooring them would ask
+# for approval on most of a server.
+_DESTRUCTIVE_WORDS: frozenset[tuple[str, ...]] = frozenset(
+    {
+        ("delete",),
+        ("remove",),
+        ("drop",),
+        ("purge",),
+        ("destroy",),
+        ("truncate",),
+        ("revoke",),
+        ("uninstall",),
+        ("cancel",),
+        ("archive",),
+    }
+)
+
+# Shapes that hand the model an instruction the schema cannot bound: a SQL
+# string, a shell line, an expression to evaluate. The call may only read,
+# or it may rewrite the database — the name is the last point at which
+# anyone can tell, so a human is asked.
+_ELEVATED_WORDS: frozenset[tuple[str, ...]] = frozenset(
+    {
+        ("sql",),
+        ("query",),
+        ("execute",),
+        ("exec",),
+        ("run", "command"),
+        ("eval",),
+    }
+)
 
 _RISK_ORDER: dict[RiskLevel, int] = {
     RiskLevel.READ: 0,
@@ -100,6 +143,43 @@ def derive_risk(annotations: McpToolAnnotations) -> RiskLevel:
     return RiskLevel.WRITE
 
 
+def _name_words(name: str) -> tuple[str, ...]:
+    return tuple(
+        word for word in _NAME_SPLIT_RE.split(_NAME_SEAM_RE.sub("_", name).lower()) if word
+    )
+
+
+def _says(words: tuple[str, ...], phrase: tuple[str, ...]) -> bool:
+    """Whole-word match, so ``list_deleted_issues`` is not read as a delete."""
+    width = len(phrase)
+    return any(words[index : index + width] == phrase for index in range(len(words) - width + 1))
+
+
+def risk_floor_for_name(name: str) -> RiskLevel | None:
+    """The lowest risk a tool called this may carry, or None when the name
+    says nothing.
+
+    A tool with no annotations derives ``write``, and ``write`` runs without
+    asking. That is a fair default for a name nobody can read anything into,
+    but plenty of servers ship no annotations at all — and for those, the
+    default quietly makes ``delete_project`` and ``execute_sql`` auto-execute.
+    The names of those two are the best evidence anyone has, so they set a
+    floor beneath which the derived risk may not fall.
+
+    A guess about a name is still only a guess, so it moves in one direction.
+    Callers raise the derived risk to meet the floor and never lower it, and
+    they ignore the floor entirely when the server declared
+    ``readOnlyHint: true``: a provider stating what its own tool does is
+    better evidence than our reading of what it called it.
+    """
+    words = _name_words(name)
+    if any(_says(words, phrase) for phrase in _DESTRUCTIVE_WORDS):
+        return RiskLevel.DESTRUCTIVE
+    if any(_says(words, phrase) for phrase in _ELEVATED_WORDS):
+        return RiskLevel.ELEVATED
+    return None
+
+
 def annotations_from_mcp(raw: mcp_types.ToolAnnotations | None) -> McpToolAnnotations:
     if raw is None:
         return McpToolAnnotations()
@@ -138,6 +218,10 @@ def discovered_from_mcp(tools: Sequence[mcp_types.Tool]) -> list[DiscoveredTool]
         seen.add(slug)
         annotations = annotations_from_mcp(tool.annotations)
         schema, truncated = _bounded_schema(tool.inputSchema)
+        risk = derive_risk(annotations)
+        floor = risk_floor_for_name(tool.name)
+        if floor is not None and annotations.read_only_hint is not True:
+            risk = max(risk, floor, key=risk_rank)
         result.append(
             DiscoveredTool(
                 name=tool.name[:200],
@@ -146,7 +230,7 @@ def discovered_from_mcp(tools: Sequence[mcp_types.Tool]) -> list[DiscoveredTool]
                 input_schema=schema,
                 schema_truncated=truncated,
                 annotations=annotations,
-                derived_risk=derive_risk(annotations),
+                derived_risk=risk,
             )
         )
     return result
@@ -223,6 +307,7 @@ __all__ = [
     "discovery_payload",
     "effective_risk",
     "is_valid_server_slug",
+    "risk_floor_for_name",
     "risk_rank",
     "stored_overrides",
     "stored_tools",

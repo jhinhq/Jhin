@@ -8,6 +8,7 @@ import {
   connectTarget,
   describeRisk,
   filterCatalog,
+  nativeTarget,
 } from "@/lib/apps";
 import type { CatalogApp, ConnectionInfo, ConnectorInfo } from "@/lib/types";
 
@@ -19,6 +20,7 @@ function entry(overrides: Partial<CatalogApp>): CatalogApp {
     icon: "plug",
     description: "",
     connector_type: null,
+    sign_in: "auto",
     mcp_url: null,
     url_unverified: false,
     transport: "unknown",
@@ -37,6 +39,19 @@ const NOTION = entry({ slug: "notion", name: "Notion", category: "Documents & kn
 const SLACK = entry({ slug: "slack", name: "Slack", category: "Communication", url_unverified: true, setup_note: "Run a community server." });
 const ATLASSIAN = entry({ slug: "atlassian", name: "Atlassian", category: "Project management", mcp_url: "https://mcp.atlassian.com/v1/sse", transport: "sse", auth_hint: "none" });
 const FILES = entry({ slug: "filesystem", name: "Filesystem", category: "Storage", url_unverified: true, stdio_only: true, setup_note: "stdio not supported yet." });
+/** The case the whole `sign_in` field exists for: a provider that runs its own
+ * MCP server *and* has a native Jhin connector. */
+const SUPABASE = entry({
+  slug: "supabase",
+  name: "Supabase",
+  connector_type: "supabase",
+  sign_in: "remote_mcp",
+  mcp_url: "https://mcp.supabase.com/mcp",
+  transport: "streamable_http",
+  auth_hint: "oauth",
+  setup_note: "SQL access is a separate step.",
+  connector_config: { project_ref: "abc" },
+});
 const ENTRIES = [GITHUB, NOTION, SLACK, ATLASSIAN, FILES];
 
 const CONNECTOR = (type: string): ConnectorInfo => ({
@@ -142,7 +157,9 @@ describe("connectTarget", () => {
       server_url: "https://mcp.notion.com/mcp",
       transport: "auto",
     });
-    expect(target.prefill.authType).toBe("bearer");
+    // An OAuth server is offered the sign-in it actually has. The bearer box
+    // it used to get asked for a token the provider never issues.
+    expect(target.prefill.authType).toBe("oauth");
     expect(target.prefill.name).toBe("Notion");
     expect(target.prefill.hint).toContain("OAuth only");
   });
@@ -166,6 +183,62 @@ describe("connectTarget", () => {
   it("reports stdio-only servers and a missing MCP connector as unsupported", () => {
     expect(connectTarget(FILES, CONNECTORS)).toEqual({ kind: "unsupported", reason: "stdio not supported yet." });
     expect(connectTarget(NOTION, [CONNECTOR("github")]).kind).toBe("unsupported");
+  });
+});
+
+describe("connectTarget and sign_in", () => {
+  const CONNECTORS_WITH_SUPABASE = [...CONNECTORS, CONNECTOR("supabase")];
+
+  it("sends a remote_mcp entry to the provider's own server, native connector or not", () => {
+    const target = connectTarget(SUPABASE, CONNECTORS_WITH_SUPABASE);
+    expect(target.kind).toBe("mcp");
+    if (target.kind !== "mcp") return;
+    expect(target.connector.connector_type).toBe("mcp");
+    expect(target.prefill.authType).toBe("oauth");
+    expect(target.prefill.config).toEqual({
+      server_slug: "supabase",
+      server_url: "https://mcp.supabase.com/mcp",
+      transport: "auto",
+    });
+  });
+
+  it("leaves an 'auto' entry routing exactly as it always did", () => {
+    // The same row without the classification is still the native connector's:
+    // the field only ever changes what it was set on.
+    const target = connectTarget(entry({ ...SUPABASE, sign_in: "auto" }), CONNECTORS_WITH_SUPABASE);
+    expect(target.kind).toBe("native");
+    if (target.kind !== "native") return;
+    expect(target.connector.connector_type).toBe("supabase");
+    expect(connectTarget(GITHUB, CONNECTORS).kind).toBe("native");
+  });
+
+  it("still falls through to MCP when the native connector is not installed", () => {
+    const target = connectTarget(entry({ ...SUPABASE, sign_in: "auto" }), CONNECTORS);
+    expect(target.kind).toBe("mcp");
+  });
+
+  it("leaves 'key' and 'none' routing alone — they only change what is said", () => {
+    expect(connectTarget(entry({ ...SLACK, sign_in: "key" }), CONNECTORS)).toEqual(
+      connectTarget(SLACK, CONNECTORS),
+    );
+    expect(connectTarget(entry({ ...ATLASSIAN, sign_in: "none" }), CONNECTORS)).toEqual(
+      connectTarget(ATLASSIAN, CONNECTORS),
+    );
+  });
+});
+
+describe("nativeTarget", () => {
+  it("keeps the native connector reachable for a remote_mcp entry", () => {
+    const native = nativeTarget(SUPABASE, [...CONNECTORS, CONNECTOR("supabase")]);
+    expect(native).not.toBeNull();
+    expect(native?.connector.connector_type).toBe("supabase");
+    expect(native?.prefill.config).toEqual({ project_ref: "abc" });
+    expect(native?.prefill.hint).toContain("SQL access is a separate step.");
+  });
+
+  it("is null when the entry has no native connector, or the server lacks it", () => {
+    expect(nativeTarget(NOTION, CONNECTORS)).toBeNull();
+    expect(nativeTarget(SUPABASE, CONNECTORS)).toBeNull();
   });
 });
 

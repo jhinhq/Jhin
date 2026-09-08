@@ -22,9 +22,10 @@
     "icon_url": "https://github.com/linearapp.png?size=128",
     "connector_type": "linear",
     "mcp_url": "https://mcp.linear.app/mcp",
+    "sign_in": "remote_mcp",
     "transport": "streamable_http",
     "auth_hint": "oauth",
-    "auth_note": "Linear's remote MCP server uses OAuth sign-in, which Jhin does not support yet. Use the native Linear app with a personal API key instead.",
+    "auth_note": "Sign in with your Linear account; nothing to paste. A personal API key still works through the native Linear app.",
     "docs_url": "https://linear.app/docs/mcp"
   },
   {
@@ -36,6 +37,7 @@
     "icon_url": "https://github.com/vercel.png?size=128",
     "connector_type": "vercel",
     "mcp_url": "https://mcp.vercel.com",
+    "sign_in": "remote_mcp",
     "transport": "streamable_http",
     "auth_hint": "oauth",
     "auth_note": "The remote server uses OAuth; the native Vercel app works with an access token.",
@@ -50,10 +52,12 @@
     "icon_url": "https://github.com/supabase.png?size=128",
     "connector_type": "supabase",
     "mcp_url": "https://mcp.supabase.com/mcp",
+    "sign_in": "remote_mcp",
     "transport": "streamable_http",
     "auth_hint": "oauth",
-    "auth_note": "The hosted server signs in with OAuth; the native Supabase app uses a management token or database connection.",
-    "docs_url": "https://supabase.com/docs/guides/getting-started/mcp"
+    "auth_note": "Sign in with your Supabase account; nothing to paste.",
+    "docs_url": "https://supabase.com/docs/guides/getting-started/mcp",
+    "setup_note": "Signing in covers projects, edge functions, and logs. Running SQL against a database is a separate step: add direct database access with that database's connection string."
   },
   {
     "slug": "notion",
@@ -63,9 +67,10 @@
     "description": "Pages, databases, and comments in your Notion workspace.",
     "icon_url": "https://github.com/makenotion.png?size=128",
     "mcp_url": "https://mcp.notion.com/mcp",
+    "sign_in": "remote_mcp",
     "transport": "streamable_http",
     "auth_hint": "oauth",
-    "auth_note": "Notion's hosted server uses OAuth sign-in (not supported yet). Self-host the open-source Notion MCP server with an integration token as a bearer token instead.",
+    "auth_note": "Sign in with your Notion account. A self-hosted Notion MCP server with an integration token works with the bearer option.",
     "docs_url": "https://developers.notion.com/docs/mcp"
   },
   {
@@ -89,9 +94,10 @@
     "description": "Jira issues and Confluence pages through Atlassian's remote server.",
     "icon_url": "https://github.com/atlassian.png?size=128",
     "mcp_url": "https://mcp.atlassian.com/v1/sse",
+    "sign_in": "remote_mcp",
     "transport": "sse",
     "auth_hint": "oauth",
-    "auth_note": "Atlassian's remote server uses OAuth sign-in, which Jhin does not support yet; self-hosted servers with API tokens work with the bearer option.",
+    "auth_note": "Sign in with your Atlassian account; self-hosted servers with API tokens work with the bearer option.",
     "docs_url": "https://support.atlassian.com/atlassian-rovo-mcp-server/docs/getting-started-with-the-atlassian-remote-mcp-server/"
   },
   {
@@ -128,6 +134,7 @@
     "description": "Issues, events, and releases.",
     "icon_url": "https://github.com/getsentry.png?size=128",
     "mcp_url": "https://mcp.sentry.dev/mcp",
+    "sign_in": "remote_mcp",
     "transport": "streamable_http",
     "auth_hint": "oauth",
     "auth_note": "The hosted server uses OAuth; self-host sentry-mcp with an auth token for the bearer option.",
@@ -141,6 +148,7 @@
     "description": "Cloudflare documentation search (no sign-in). Other Cloudflare servers need OAuth.",
     "icon_url": "https://github.com/cloudflare.png?size=128",
     "mcp_url": "https://docs.mcp.cloudflare.com/mcp",
+    "sign_in": "none",
     "transport": "streamable_http",
     "auth_hint": "none",
     "docs_url": "https://github.com/cloudflare/mcp-server-cloudflare"
@@ -204,9 +212,10 @@
     "description": "Tasks, projects, and goals.",
     "icon_url": "https://github.com/asana.png?size=128",
     "mcp_url": "https://mcp.asana.com/sse",
+    "sign_in": "remote_mcp",
     "transport": "sse",
     "auth_hint": "oauth",
-    "auth_note": "Asana's remote server uses OAuth sign-in (not supported yet).",
+    "auth_note": "Sign in with your Asana account; nothing to paste.",
     "docs_url": "https://developers.asana.com/docs/using-asanas-model-control-protocol-mcp-server"
   },
   {
@@ -242,9 +251,10 @@
     "description": "Designs, folders, and exports.",
     "icon_url": "https://github.com/canva.png?size=128",
     "mcp_url": "https://mcp.canva.com/mcp",
+    "sign_in": "remote_mcp",
     "transport": "streamable_http",
     "auth_hint": "oauth",
-    "auth_note": "Canva's server uses OAuth sign-in (not supported yet).",
+    "auth_note": "Sign in with your Canva account; nothing to paste.",
     "docs_url": "https://www.canva.dev/docs/connect/canva-mcp-server-setup/"
   },
   {
@@ -255,9 +265,10 @@
     "description": "Files, components, and design context.",
     "icon_url": "https://github.com/figma.png?size=128",
     "mcp_url": "https://mcp.figma.com/mcp",
+    "sign_in": "remote_mcp",
     "transport": "streamable_http",
     "auth_hint": "oauth",
-    "auth_note": "Figma's remote server uses OAuth sign-in (not supported yet).",
+    "auth_note": "Sign in with your Figma account; nothing to paste.",
     "docs_url": "https://help.figma.com/hc/en-us/articles/32132100833559-Guide-to-the-Figma-MCP-server"
   },
   {
@@ -353,6 +364,7 @@
     "description": "Web and local search.",
     "icon_url": "https://github.com/brave.png?size=128",
     "url_unverified": true,
+    "sign_in": "key",
     "auth_hint": "header",
     "docs_url": "https://github.com/brave/brave-search-mcp-server",
     "setup_note": "Self-host the Brave Search MCP server with your API key and paste its URL."
@@ -366,6 +378,7 @@
     "icon_url": "https://github.com/tavily-ai.png?size=128",
     "mcp_url": "https://mcp.tavily.com/mcp/",
     "url_unverified": true,
+    "sign_in": "key",
     "auth_hint": "header",
     "auth_note": "Tavily's hosted endpoint expects the API key in the URL, which Jhin does not store; check the docs for header-based auth or self-host.",
     "docs_url": "https://docs.tavily.com/documentation/mcp"
@@ -379,6 +392,7 @@
     "icon_url": "https://github.com/exa-labs.png?size=128",
     "mcp_url": "https://mcp.exa.ai/mcp",
     "url_unverified": true,
+    "sign_in": "key",
     "auth_hint": "header",
     "auth_note": "Check the docs for how the API key is passed; URL query keys are not supported.",
     "docs_url": "https://docs.exa.ai/reference/exa-mcp"
@@ -391,6 +405,7 @@
     "description": "Scrape and crawl websites into clean text.",
     "icon_url": "https://github.com/firecrawl.png?size=128",
     "url_unverified": true,
+    "sign_in": "key",
     "auth_hint": "header",
     "auth_note": "Firecrawl's hosted endpoint embeds the API key in the URL; prefer self-hosting with a header token.",
     "docs_url": "https://docs.firecrawl.dev/mcp-server"
@@ -402,6 +417,7 @@
     "icon": "book-open",
     "description": "Up-to-date library documentation for coding agents.",
     "mcp_url": "https://mcp.context7.com/mcp",
+    "sign_in": "none",
     "transport": "streamable_http",
     "auth_hint": "none",
     "auth_note": "Works without a key; add an API key with the custom header option for higher limits.",
@@ -415,6 +431,7 @@
     "description": "Send transactional email.",
     "icon_url": "https://github.com/resend.png?size=128",
     "url_unverified": true,
+    "sign_in": "key",
     "auth_hint": "bearer",
     "docs_url": "https://github.com/resend/mcp-send-email",
     "setup_note": "Self-host the Resend MCP server with your API key and paste its URL.",
@@ -428,6 +445,7 @@
     "description": "SMS, voice, and messaging APIs.",
     "icon_url": "https://github.com/twilio.png?size=128",
     "url_unverified": true,
+    "sign_in": "key",
     "auth_hint": "bearer",
     "docs_url": "https://github.com/twilio-labs/mcp",
     "setup_note": "Self-host Twilio's MCP server with an API key and paste its URL.",
@@ -512,6 +530,7 @@
     "description": "Models, datasets, spaces, and papers.",
     "icon_url": "https://github.com/huggingface.png?size=128",
     "mcp_url": "https://huggingface.co/mcp",
+    "sign_in": "key",
     "transport": "streamable_http",
     "auth_hint": "bearer",
     "auth_note": "Works anonymously; add a Hugging Face token as the bearer token for private resources.",
@@ -524,6 +543,7 @@
     "icon": "book-open",
     "description": "Ask questions about any public GitHub repository.",
     "mcp_url": "https://mcp.deepwiki.com/mcp",
+    "sign_in": "none",
     "transport": "streamable_http",
     "auth_hint": "none",
     "docs_url": "https://docs.devin.ai/work-with-devin/deepwiki-mcp"
@@ -535,6 +555,7 @@
     "icon": "book-open",
     "description": "Official Microsoft and Azure documentation search.",
     "mcp_url": "https://learn.microsoft.com/api/mcp",
+    "sign_in": "none",
     "transport": "streamable_http",
     "auth_hint": "none",
     "docs_url": "https://learn.microsoft.com/training/support/mcp"
@@ -547,6 +568,7 @@
     "description": "Serverless Postgres projects, branches, and SQL.",
     "icon_url": "https://github.com/neondatabase.png?size=128",
     "mcp_url": "https://mcp.neon.tech/mcp",
+    "sign_in": "remote_mcp",
     "transport": "streamable_http",
     "auth_hint": "oauth",
     "auth_note": "Neon's remote server uses OAuth; self-host neon-mcp with an API key for the bearer option.",
@@ -583,6 +605,7 @@
     "description": "Web search plus bounded page fetch for agents, using a Tavily API key.",
     "icon_url": "https://github.com/tavily-ai.png?size=128",
     "connector_type": "web",
+    "sign_in": "key",
     "auth_hint": "bearer",
     "auth_note": "Use a Tavily API key (tvly-…) as the API key.",
     "docs_url": "https://docs.tavily.com/",
@@ -596,6 +619,7 @@
     "description": "Web search plus bounded page fetch for agents, using a Brave Search API key.",
     "icon_url": "https://github.com/brave.png?size=128",
     "connector_type": "web",
+    "sign_in": "key",
     "auth_hint": "bearer",
     "auth_note": "Use a Brave Search API subscription token as the API key.",
     "docs_url": "https://brave.com/search/api/",
@@ -609,6 +633,7 @@
     "description": "Web search plus bounded page fetch for agents, using an Exa API key.",
     "icon_url": "https://github.com/exa-labs.png?size=128",
     "connector_type": "web",
+    "sign_in": "key",
     "auth_hint": "bearer",
     "auth_note": "Use an Exa API key as the API key.",
     "docs_url": "https://docs.exa.ai/",

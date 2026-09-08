@@ -3326,6 +3326,11 @@
             "title": "Setup Note",
             "type": "string"
           },
+          "sign_in": {
+            "default": "auto",
+            "title": "Sign In",
+            "type": "string"
+          },
           "slug": {
             "title": "Slug",
             "type": "string"
@@ -3502,6 +3507,11 @@
           "setup_note": {
             "default": "",
             "title": "Setup Note",
+            "type": "string"
+          },
+          "sign_in": {
+            "default": "auto",
+            "title": "Sign In",
             "type": "string"
           },
           "skill": {
@@ -3688,6 +3698,11 @@
           "popularity": {
             "title": "Popularity",
             "type": "number"
+          },
+          "sign_in": {
+            "default": "auto",
+            "title": "Sign In",
+            "type": "string"
           },
           "slug": {
             "title": "Slug",

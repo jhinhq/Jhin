@@ -1761,6 +1761,19 @@ export interface ManagerRollup {
 
 export type CatalogAuthHint = "none" | "bearer" | "header" | "oauth";
 
+/**
+ * How a person connects an app — a different question from which credential
+ * the protocol carries, which is what `auth_hint` answers.
+ *
+ * `auto` resolves the way it always has: a native connector when Jhin ships
+ * one, the generic MCP connector otherwise. `remote_mcp` says the provider
+ * runs its own MCP server and the sign-in happens there, so that path wins
+ * even for an app Jhin also has a native connector for. `key` is the honest
+ * admission that a provider offers no sign-in at all and a key really must be
+ * pasted, and `none` is a server with nothing to sign in to.
+ */
+export type CatalogSignIn = "auto" | "remote_mcp" | "key" | "none";
+
 export interface CatalogApp {
   slug: string;
   name: string;
@@ -1769,6 +1782,7 @@ export interface CatalogApp {
   description: string;
   /** Native Jhin connector type when one exists (github, linear, …). */
   connector_type: string | null;
+  sign_in: CatalogSignIn;
   /** Official remote MCP endpoint when known. */
   mcp_url: string | null;
   url_unverified: boolean;
@@ -1815,6 +1829,8 @@ export interface CatalogEntry {
   default_risk: RiskLevel;
   popularity: number;
   connector_type: string | null;
+  /** Only a curated row ever says anything but "auto"; a synced one cannot. */
+  sign_in: CatalogSignIn;
   mcp_url: string | null;
   url_unverified: boolean;
   transport: "streamable_http" | "sse" | "unknown";

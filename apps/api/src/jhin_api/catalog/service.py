@@ -529,6 +529,7 @@ def _builtin_out(item: _Builtin) -> CatalogEntryOut:
         default_risk=_BUILTIN_RISK,
         popularity=_BUILTIN_POPULARITY,
         connector_type=app.connector_type,
+        sign_in=app.sign_in,
         mcp_url=app.mcp_url,
         url_unverified=app.url_unverified,
         transport=app.transport,
@@ -554,6 +555,11 @@ def _entry_out(row: CatalogEntry) -> CatalogEntryOut:
         default_risk=_synced_risk(row).value,
         popularity=row.popularity,
         connector_type=_SYNCED_CONNECTOR_TYPE,
+        # ``sign_in`` is left at "auto" on purpose. "Sign in with your account"
+        # is a promise that a redirect exists and lands somewhere real, and the
+        # only evidence behind that promise is somebody at Jhin having walked
+        # it. A crawled row has nobody behind it and no column to carry the
+        # claim, so it cannot make one.
         mcp_url=_external_url(row.mcp_url) or None,
         url_unverified=row.url_unverified,
         transport=cast(TransportHint, row.transport),

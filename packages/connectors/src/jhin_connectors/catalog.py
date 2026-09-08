@@ -7,6 +7,11 @@ whose endpoint could not be confirmed against the provider's documentation
 carry ``url_unverified=True`` so the UI asks for the URL from the provider's
 docs instead of pre-filling a guess. Servers that only ship as stdio
 processes are flagged ``stdio_only`` — Jhin does not spawn stdio servers yet.
+
+``sign_in`` is the curated answer to "how does a person connect this?" for
+the entries where the fields above would mislead: an app whose own remote
+server signs you in, and a provider that has no sign-in at all and really
+does want a pasted key.
 """
 
 from __future__ import annotations
@@ -15,14 +20,15 @@ import json
 import re
 from functools import cache
 from importlib import resources
-from typing import Final, Literal
+from typing import Final, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from jhin_connectors.mcp.discovery import SERVER_SLUG_RE
 
 AuthHint = Literal["none", "bearer", "header", "oauth"]
 TransportHint = Literal["streamable_http", "sse", "unknown"]
+SignIn = Literal["auto", "remote_mcp", "key", "none"]
 
 # The one URL shape ``icon_url`` may hold here: GitHub's owner avatar,
 # byte-identical to ``ICON_URL_GITHUB_RE`` in the producer that writes
@@ -68,6 +74,11 @@ class CatalogApp(BaseModel):
     # Official remote MCP endpoint when known.
     mcp_url: str | None = None
     url_unverified: bool = False
+    # How a person actually connects this app, when the fields above cannot
+    # say. Preferring a native connector is the right guess for most entries,
+    # but it cannot tell a provider you sign in to at its own MCP server from
+    # one that only ever takes a pasted key. "auto" is that guess, unchanged.
+    sign_in: SignIn = "auto"
     transport: TransportHint = "unknown"
     auth_hint: AuthHint = "bearer"
     auth_note: str = ""
@@ -120,6 +131,20 @@ class CatalogApp(BaseModel):
             raise ValueError("catalog MCP endpoints must be https")
         return value
 
+    @model_validator(mode="after")
+    def _validate_sign_in(self) -> Self:
+        if self.sign_in == "remote_mcp" and (
+            self.mcp_url is None or self.url_unverified or self.stdio_only
+        ):
+            # The promise "sign in with your account" is only honest when
+            # there is a confirmed endpoint to send the browser to. Without
+            # one the reader would redirect nobody and land on a blank URL
+            # form — worse than the paste form the entry started with.
+            raise ValueError("sign_in 'remote_mcp' needs a verified remote MCP endpoint")
+        if self.sign_in == "none" and self.auth_hint != "none":
+            raise ValueError("sign_in 'none' needs auth_hint 'none'")
+        return self
+
     @property
     def connectable(self) -> bool:
         """Whether the Connect button can do something today."""
@@ -141,5 +166,6 @@ __all__ = [
     "ICON_URL_GITHUB_RE",
     "AuthHint",
     "CatalogApp",
+    "SignIn",
     "load_catalog",
 ]

@@ -258,6 +258,28 @@ async def test_the_version_endpoint_reports_the_active_generation(
     assert body["activated_at"] is not None
 
 
+async def test_a_curated_entry_publishes_how_it_is_connected(
+    catalog_routes: CatalogRoutes,
+) -> None:
+    """``sign_in`` crosses four hand-written projections between the entry and
+    the browser, and every one of them drops a field it was not told about. A
+    field that never arrives looks exactly like a field that always says
+    "auto", so this compares the whole published column against the catalog
+    rather than spot-checking that it parses."""
+    payload = await _get(catalog_routes, ENTRIES, limit=100)
+
+    published = {item["slug"]: item["sign_in"] for item in payload["items"]}
+    assert published == {app.slug: app.sign_in for app in load_catalog()}
+    assert "remote_mcp" in set(published.values()), (
+        "a column that is 'auto' everywhere would pass the comparison above "
+        "while telling the browser nothing"
+    )
+
+    detail = await catalog_routes.client.get(f"{ENTRIES}/supabase")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["sign_in"] == published["supabase"] == "remote_mcp"
+
+
 # --------------------------------------------------------------------------
 # ranking and curated precedence
 # --------------------------------------------------------------------------
@@ -971,6 +993,33 @@ async def test_a_synced_row_cannot_wear_a_native_connector(
 
     assert body["connector_type"] is None
     assert body["config_schema"]["connector_type"] == "mcp"
+
+
+async def test_a_synced_row_never_claims_a_sign_in_method(
+    catalog_routes: CatalogRoutes, session: AsyncSession
+) -> None:
+    """The row below carries everything a curated ``remote_mcp`` entry carries
+    -- an https endpoint, a verified URL, ``oauth`` -- and still reports
+    "auto". "Sign in with your account" promises a redirect that lands
+    somewhere real, and the evidence for it is a person at Jhin having walked
+    it; a crawled row has nobody behind it."""
+    await _publish(
+        session,
+        {
+            "slug": "crawled_oauth",
+            "name": "Crawled OAuth",
+            "auth_hint": "oauth",
+            "url_unverified": False,
+        },
+    )
+
+    listed = (await catalog_routes.client.get(f"{ENTRIES}?q=crawled_oauth")).json()
+    entry = next(item for item in listed["items"] if item["slug"] == "crawled_oauth")
+    assert entry["sign_in"] == "auto"
+    assert entry["auth_hint"] == "oauth", "the hint is the row's; the routing decision is not"
+
+    detail = (await catalog_routes.client.get(f"{ENTRIES}/crawled_oauth")).json()
+    assert detail["sign_in"] == "auto"
 
 
 async def test_hostile_detail_text_arrives_bounded_and_inert(

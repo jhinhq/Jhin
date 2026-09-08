@@ -26,11 +26,13 @@ import {
   connectTarget,
   friendlyCatalogName,
   isSafeExternalUrl,
+  nativeTarget,
   riskFloorLabel,
   selfHostedTarget,
   trustLabel,
   trustTone,
   type ConnectTarget,
+  type NativeTarget,
 } from "@/lib/apps";
 import { normalizeConfigSchema } from "@/lib/config-schema";
 import { useCatalogEntry } from "@/lib/hooks";
@@ -99,13 +101,22 @@ function SkillFacts({ entry }: { entry: CatalogEntryDetail }) {
   );
 }
 
+/** The second plane's button, named after the connector that provides it —
+ * this is not a Supabase feature, it is what any app with both a remote
+ * server and a native connector needs. */
+function nativePlaneLabel(native: NativeTarget): string {
+  return `Add direct ${native.connector.display_name} access`;
+}
+
 function EntryBody({
   entry,
   target,
   packageName,
   manualConnectable,
+  nativePlane,
   onConnect,
   onManualConnect,
+  onNativeConnect,
   onClose,
 }: {
   entry: CatalogEntryDetail;
@@ -114,8 +125,11 @@ function EntryBody({
   packageName: string | null;
   /** Whether "I have a URL — connect it" has a connector to open. */
   manualConnectable: boolean;
+  /** The native connector kept alongside a remote sign-in, when there is one. */
+  nativePlane: NativeTarget | null;
   onConnect: () => void;
   onManualConnect: () => void;
+  onNativeConnect: () => void;
   onClose: () => void;
 }) {
   const connectable = entry.connectable && target !== null && target.kind !== "unsupported";
@@ -205,10 +219,23 @@ function EntryBody({
         </div>
       ) : null}
 
+      {nativePlane ? (
+        <p className="text-[13px] leading-relaxed text-dim" data-testid="native-plane-note">
+          Connect signs you in at this app&rsquo;s own server. Jhin&rsquo;s built-in{" "}
+          {nativePlane.connector.display_name} connector is a separate step —{" "}
+          {nativePlane.connector.description}
+        </p>
+      ) : null}
+
       <div className="flex flex-wrap items-start justify-end gap-x-2 gap-y-1">
         <Button type="button" variant="ghost" onClick={onClose}>
           Cancel
         </Button>
+        {nativePlane ? (
+          <Button type="button" onClick={onNativeConnect}>
+            {nativePlaneLabel(nativePlane)}
+          </Button>
+        ) : null}
         {connectable ? (
           <Button type="button" variant="primary" onClick={onConnect}>
             Connect
@@ -238,8 +265,9 @@ export function CatalogEntryDialog({
   onCreated: (created: ConnectionCreated) => void;
 }) {
   const entry = useCatalogEntry(slug);
-  /** Which Connect path is open: the entry's own, or the self-hosted URL one. */
-  const [connecting, setConnecting] = useState<"entry" | "manual" | null>(null);
+  /** Which Connect path is open: the entry's own, the self-hosted URL one, or
+   * the native connector kept alongside a remote sign-in. */
+  const [connecting, setConnecting] = useState<"entry" | "manual" | "native" | null>(null);
 
   const detail = entry.data ?? null;
   const app = detail ? catalogEntryToApp(detail) : null;
@@ -250,6 +278,11 @@ export function CatalogEntryDialog({
   // A stdio-only entry cannot be dialled, but somebody already hosting it can
   // still point the generic MCP connector at their own URL.
   const manual = app && detail?.stdio_only ? selfHostedTarget(app, connectors) : null;
+  // Routing Connect to the provider's own server must not cost anybody the
+  // native connector's plane: Supabase's SQL access runs behind a schema
+  // allowlist, a write gate and query timeouts that the remote server has no
+  // equivalent for. It stays here as an explicit second step, never a default.
+  const nativePlane = app && app.sign_in === "remote_mcp" ? nativeTarget(app, connectors) : null;
   // The server's contract when it could build one; anything unusable falls
   // back to the manifest-driven form rather than refusing to open. The manual
   // path skips it — its whole point is a blank URL of the person's own.
@@ -258,7 +291,8 @@ export function CatalogEntryDialog({
   // The title a person should read; the raw package name rides underneath.
   const friendly = detail ? friendlyCatalogName(detail.name) : null;
 
-  const activeTarget = connecting === "manual" ? manual : target;
+  const activeTarget =
+    connecting === "manual" ? manual : connecting === "native" ? nativePlane : target;
   const prefill: ConnectionPrefill | undefined =
     activeTarget && activeTarget.kind !== "unsupported" ? activeTarget.prefill : undefined;
 
@@ -279,8 +313,10 @@ export function CatalogEntryDialog({
             target={target}
             packageName={friendly?.packageName ?? null}
             manualConnectable={manual !== null}
+            nativePlane={nativePlane}
             onConnect={() => setConnecting("entry")}
             onManualConnect={() => setConnecting("manual")}
+            onNativeConnect={() => setConnecting("native")}
             onClose={onClose}
           />
         ) : null}
