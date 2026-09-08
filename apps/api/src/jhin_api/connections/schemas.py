@@ -251,6 +251,11 @@ class CatalogAppOut(BaseModel):
     # upstream URL.
     logo_url: str | None = None
     connector_type: str | None = None
+    # How a person actually connects this app, in the entry's own words, so the
+    # browser stops inferring it from the fields below: a native connector is
+    # not evidence that pasting a key is what the provider expects. "auto"
+    # means the entry never said, and the old inference stands.
+    sign_in: str = "auto"
     mcp_url: str | None = None
     url_unverified: bool = False
     transport: str = "unknown"

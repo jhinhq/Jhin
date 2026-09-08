@@ -51,8 +51,14 @@ export function connectionsForApp(
   });
 }
 
+export interface NativeTarget {
+  kind: "native";
+  connector: ConnectorInfo;
+  prefill: NativePrefill;
+}
+
 export type ConnectTarget =
-  | { kind: "native"; connector: ConnectorInfo; prefill: NativePrefill }
+  | NativeTarget
   | { kind: "mcp"; connector: ConnectorInfo; prefill: McpPrefill }
   | { kind: "unsupported"; reason: string };
 
@@ -65,7 +71,7 @@ export interface NativePrefill {
 
 export interface McpPrefill {
   name: string;
-  authType: "none" | "bearer" | "header";
+  authType: "none" | "oauth" | "bearer" | "header";
   config: Record<string, string>;
   /** Shown when the endpoint is unknown or unverified. */
   hint: string | null;
@@ -102,30 +108,49 @@ export function friendlyCatalogName(raw: string): { title: string; packageName: 
 function authTypeFor(entry: CatalogApp): McpPrefill["authType"] {
   if (entry.auth_hint === "none") return "none";
   if (entry.auth_hint === "header") return "header";
-  // OAuth-only servers still get a bearer form: self-hosted alternatives
-  // and provider-issued tokens use it, and the auth note explains the rest.
+  // OAuth is a real scheme on the MCP connector — declared first, and with no
+  // secret fields at all, because its tokens arrive from the authorization
+  // flow rather than from a form. Offering an OAuth server a bearer box asked
+  // people for a token the provider never issued them.
+  if (entry.auth_hint === "oauth") return "oauth";
   return "bearer";
 }
 
-/** What pressing Connect on a catalog card should open. Native connectors
- * win; otherwise the generic MCP connector is pre-filled from the entry. */
+/**
+ * The native connector's own dialog, when Jhin ships one for this entry and
+ * the server has it installed.
+ *
+ * Split out of `connectTarget` because an app can have two planes: a remote
+ * MCP server it signs in to, and a native connector whose guardrails have no
+ * equivalent there. `connectTarget` picks the front door; this stays available
+ * as the deliberate second step.
+ */
+export function nativeTarget(entry: CatalogApp, connectors: ConnectorInfo[]): NativeTarget | null {
+  if (!entry.connector_type) return null;
+  const native = connectors.find((connector) => connector.connector_type === entry.connector_type);
+  if (!native) return null;
+  const hints: string[] = [];
+  if (entry.auth_note) hints.push(entry.auth_note);
+  if (entry.setup_note) hints.push(entry.setup_note);
+  return {
+    kind: "native",
+    connector: native,
+    prefill: {
+      name: entry.name,
+      config: { ...(entry.connector_config ?? {}) },
+      hint: hints.length > 0 ? hints.join(" ") : null,
+    },
+  };
+}
+
+/** What pressing Connect on a catalog card should open. An entry that signs in
+ * at the provider's own MCP server takes that path even when Jhin has a native
+ * connector for it; otherwise a native connector wins, and failing both the
+ * generic MCP connector is pre-filled from the entry. */
 export function connectTarget(entry: CatalogApp, connectors: ConnectorInfo[]): ConnectTarget {
-  if (entry.connector_type) {
-    const native = connectors.find((connector) => connector.connector_type === entry.connector_type);
-    if (native) {
-      const nativeHints: string[] = [];
-      if (entry.auth_note) nativeHints.push(entry.auth_note);
-      if (entry.setup_note) nativeHints.push(entry.setup_note);
-      return {
-        kind: "native",
-        connector: native,
-        prefill: {
-          name: entry.name,
-          config: { ...(entry.connector_config ?? {}) },
-          hint: nativeHints.length > 0 ? nativeHints.join(" ") : null,
-        },
-      };
-    }
+  if (entry.sign_in !== "remote_mcp") {
+    const native = nativeTarget(entry, connectors);
+    if (native) return native;
   }
   if (entry.stdio_only) {
     return {
@@ -221,6 +246,7 @@ export function catalogEntryToApp(entry: CatalogEntryDetail): CatalogApp {
     icon: entry.icon,
     description: entry.description || entry.summary,
     connector_type: entry.connector_type,
+    sign_in: entry.sign_in,
     mcp_url: entry.mcp_url,
     url_unverified: entry.url_unverified,
     transport: entry.transport,

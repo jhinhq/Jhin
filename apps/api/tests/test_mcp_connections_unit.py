@@ -17,6 +17,7 @@ from jhin_api.connections.schemas import CatalogAppOut, ConnectionToolsOut
 from jhin_api.deps import WorkspaceContext
 from jhin_api.policy.router import list_tools
 from jhin_api.settings import Settings
+from jhin_connectors.catalog import load_catalog
 from jhin_connectors.mcp import DISCOVERY_KEY, OVERRIDES_KEY
 from jhin_connectors.testing.fake_mcp import DEFAULT_TOKEN, FakeMcpServer
 from jhin_db.models import Agent, AgentCapabilityGrant, AuditEvent, Connection
@@ -324,6 +325,27 @@ async def test_catalog_endpoint_hides_dev_doubles_on_production() -> None:
     assert entries, "the curated library itself still lists"
     assert not any(entry.slug in {"fake", "fake_websearch"} for entry in entries)
     assert not any("(dev)" in entry.name for entry in entries)
+
+
+async def test_the_catalog_endpoint_publishes_how_each_app_signs_in() -> None:
+    """``CatalogAppOut`` is validated from the entry's dump, so every field it
+    does not declare is dropped -- which is exactly how ``icon_url`` stays on
+    the server. A field the browser routes on disappears just as quietly, so
+    the whole published column is compared against the catalog.
+
+    A dev install is the one that publishes every entry, so it is the only
+    setting under which that comparison is a fair one."""
+    entries = await list_catalog(_auth=None, settings=Settings())  # type: ignore[arg-type]
+
+    assert {entry.slug: entry.sign_in for entry in entries} == {
+        app.slug: app.sign_in for app in load_catalog()
+    }
+
+    supabase = next(entry for entry in entries if entry.slug == "supabase")
+    assert supabase.sign_in == "remote_mcp"
+    assert supabase.connector_type == "supabase", (
+        "routing Connect to the remote server does not retire the native SQL plane"
+    )
 
 
 async def test_a_reconnect_draft_survives_both_gates_that_used_to_reject_it(

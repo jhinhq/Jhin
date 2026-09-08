@@ -41,9 +41,18 @@ import type {
   ConnectionInfo,
 } from "@/lib/types";
 
-type ConnectShape = Pick<CatalogApp, "connector_type" | "stdio_only" | "mcp_url" | "url_unverified">;
+type ConnectShape = Pick<
+  CatalogApp,
+  "sign_in" | "connector_type" | "stdio_only" | "mcp_url" | "url_unverified"
+>;
 
+/** What a person is in for, in the words they would use. An entry that has
+ * classified itself answers directly; "auto" is still guessed from the shape
+ * of the entry, which is all the library ever had to go on. */
 function howItConnects(entry: ConnectShape): string {
+  if (entry.sign_in === "remote_mcp") return "Sign in with your account";
+  if (entry.sign_in === "key") return "Needs a key — this app has no sign-in";
+  if (entry.sign_in === "none") return "No sign-in needed";
   if (entry.connector_type) return "Built-in connector";
   if (entry.stdio_only) return "Needs a self-hosted server";
   if (entry.mcp_url && !entry.url_unverified) return "Official MCP server";
@@ -63,7 +72,12 @@ const MORE_FILTER_ROWS: { key: FacetDimension; label: string }[] = [
 
 /** Transport and sign-in are protocol trivia — useful to the person hosting a
  * server, noise to everyone else — so they sit one step further back, behind
- * an "Advanced" disclosure inside More filters. */
+ * an "Advanced" disclosure inside More filters.
+ *
+ * The sign-in row stays keyed on `auth_hint` rather than the new `sign_in`:
+ * only a curated entry ever carries `sign_in`, the search endpoint cannot
+ * filter or bucket on it, and a chip that quietly excluded every synced row
+ * would be a worse answer than the credential hint it replaced. */
 const ADVANCED_FILTER_ROWS: { key: FacetDimension; label: string }[] = [
   { key: "transport", label: "Transport" },
   { key: "auth_hint", label: "Sign-in" },

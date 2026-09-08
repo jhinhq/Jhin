@@ -52,6 +52,29 @@ const MCP_CONNECTOR: ConnectorInfo = {
   docs_url: "",
 };
 
+/** A native connector with a plane the remote server has no equivalent for —
+ * the reason a `remote_mcp` entry still offers a second, deliberate step. */
+const SUPABASE_CONNECTOR: ConnectorInfo = {
+  ...MCP_CONNECTOR,
+  connector_type: "supabase",
+  display_name: "Supabase",
+  icon: "supabase",
+  description: "Project logs and Edge Functions, plus a least-privilege PostgreSQL connection.",
+  auth_schemes: [
+    {
+      type: "postgres",
+      label: "PostgreSQL database",
+      description: "",
+      secret_fields: [
+        { name: "database_url", label: "Database URL", placeholder: "postgresql://…", multiline: false, required: true },
+      ],
+    },
+  ],
+  config_fields: [
+    { name: "project_ref", label: "Project reference", required: true, placeholder: "", help: "", kind: "text", auth_types: [], default: null, minimum: null, maximum: null },
+  ],
+};
+
 const CONFIG_SCHEMA = {
   version: 1,
   connector_type: "mcp",
@@ -119,6 +142,7 @@ function detail(overrides: Partial<CatalogEntryDetail> = {}): CatalogEntryDetail
     default_risk: "write",
     popularity: 0.75,
     connector_type: null,
+    sign_in: "auto",
     mcp_url: "https://mcp.example.com/kestrel",
     url_unverified: false,
     transport: "streamable_http",
@@ -195,7 +219,12 @@ function installServer(entry: CatalogEntryDetail) {
   return writes;
 }
 
-function renderDialog(entry: CatalogEntryDetail, onCreated = vi.fn(), onClose = vi.fn()) {
+function renderDialog(
+  entry: CatalogEntryDetail,
+  onCreated = vi.fn(),
+  onClose = vi.fn(),
+  connectors: ConnectorInfo[] = [MCP_CONNECTOR],
+) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -204,7 +233,7 @@ function renderDialog(entry: CatalogEntryDetail, onCreated = vi.fn(), onClose = 
       <CatalogEntryDialog
         slug={entry.slug}
         workspaceId="workspace-1"
-        connectors={[MCP_CONNECTOR]}
+        connectors={connectors}
         onClose={onClose}
         onCreated={onCreated}
       />
@@ -451,6 +480,53 @@ describe("CatalogEntryDialog", () => {
     expect(await screen.findByTestId("connect-panel")).toBeDefined();
     expect(await screen.findByTestId("oauth-consent-step")).toBeDefined();
     expect(screen.queryByTestId("create-connection-form")).toBeNull();
+  });
+
+  it("keeps a native connector's own plane reachable beside a remote sign-in", async () => {
+    // Supabase's SQL access runs behind guardrails the remote server has no
+    // equivalent for, so routing Connect to supabase.com must not bury it.
+    const supabase = detail({
+      slug: "supabase",
+      name: "Supabase",
+      source: "builtin",
+      trust_tier: "curated",
+      connector_type: "supabase",
+      sign_in: "remote_mcp",
+      auth_hint: "oauth",
+      mcp_url: "https://mcp.supabase.com/mcp",
+      config_schema: null,
+      connector_config: { project_ref: "abcdefghijklmnopqrst" },
+      setup_note: "SQL access is a separate step, with a database connection string.",
+      mcp: null,
+    });
+    installServer(supabase);
+    renderDialog(supabase, vi.fn(), vi.fn(), [MCP_CONNECTOR, SUPABASE_CONNECTOR]);
+
+    const dialog = await screen.findByTestId("catalog-entry-dialog");
+    // Signing in stays the primary action…
+    expect(await within(dialog).findByRole("button", { name: "Connect" })).toBeDefined();
+
+    // …and the second plane is named after the connector that provides it.
+    const secondary = within(dialog).getByRole("button", { name: "Add direct Supabase access" });
+    fireEvent.click(secondary);
+
+    const form = await screen.findByTestId("create-connection-form");
+    expect((within(form).getByLabelText("Project reference") as HTMLInputElement).value).toBe(
+      "abcdefghijklmnopqrst",
+    );
+    expect(within(form).getByPlaceholderText("postgresql://…")).toBeDefined();
+    // The MCP form's fields belong to the other plane and must not appear here.
+    expect(within(form).queryByLabelText("Server URL")).toBeNull();
+  });
+
+  it("offers no second plane for an entry that only signs in remotely", async () => {
+    const asana = detail({ slug: "asana", name: "Asana", sign_in: "remote_mcp", auth_hint: "oauth", config_schema: null });
+    installServer(asana);
+    renderDialog(asana);
+
+    const dialog = await screen.findByTestId("catalog-entry-dialog");
+    await within(dialog).findByRole("button", { name: "Connect" });
+    expect(within(dialog).queryByTestId("native-plane-note")).toBeNull();
   });
 
   it("titles a package-named entry by its friendly name, package underneath", async () => {

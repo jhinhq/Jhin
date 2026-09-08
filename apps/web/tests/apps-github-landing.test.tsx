@@ -51,6 +51,7 @@ const CATALOG: CatalogApp[] = [
     icon: "github",
     description: "Repositories.",
     connector_type: "github",
+    sign_in: "auto",
     mcp_url: null,
     url_unverified: false,
     transport: "unknown",
