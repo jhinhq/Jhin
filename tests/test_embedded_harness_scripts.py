@@ -32,8 +32,13 @@ def _embedded_scripts() -> list[tuple[str, str]]:
         if not name.endswith("_SCRIPT"):
             continue
         value = node.value
-        # The constants are written as r"""...""" and usually .strip()ed.
-        literal = value.func.value if isinstance(value, ast.Call) else value
+        # The constants are written as r"""...""" and usually .strip()ed, so
+        # the literal sits under the call's attribute target when one is there.
+        literal: ast.expr = value
+        if isinstance(value, ast.Call):
+            if not isinstance(value.func, ast.Attribute):
+                continue
+            literal = value.func.value
         try:
             source = ast.literal_eval(literal)
         except ValueError:  # pragma: no cover - a form this test does not model
