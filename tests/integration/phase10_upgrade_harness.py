@@ -273,7 +273,11 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from jhin_models.testing.fake_openai import DEFAULT_MODELS, build_completion
+from jhin_models.testing.fake_openai import (
+    DEFAULT_MODELS,
+    build_completion,
+    completion_stream_chunks,
+)
 
 marker = sys.argv[1]
 count = 0
@@ -289,6 +293,29 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
+
+    def send_stream(self, payload, include_usage):
+        # Agent reasoning steps stream now; this fixture has to answer the way
+        # the shared fake does, or the adapter reads no SSE frames and the step
+        # dies before it ever has a usage record to report.
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        try:
+            for chunk in completion_stream_chunks(payload, include_usage=include_usage):
+                self.wfile.write(("data: " + json.dumps(chunk) + "
+
+").encode())
+                self.wfile.flush()
+            self.wfile.write(b"data: [DONE]
+
+")
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def do_GET(self):
         global count
@@ -343,6 +370,11 @@ class Handler(BaseHTTPRequestHandler):
                 count += 1
                 advertised = names
         status, payload = build_completion(body)
+        if status == 200 and body.get("stream") is True:
+            options = body.get("stream_options")
+            include_usage = isinstance(options, dict) and bool(options.get("include_usage"))
+            self.send_stream(payload, include_usage)
+            return
         self.send_json(status, payload)
 
     def log_message(self, format, *args):
