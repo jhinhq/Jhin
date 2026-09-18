@@ -306,13 +306,9 @@ class Handler(BaseHTTPRequestHandler):
         self.close_connection = True
         try:
             for chunk in completion_stream_chunks(payload, include_usage=include_usage):
-                self.wfile.write(("data: " + json.dumps(chunk) + "
-
-").encode())
+                self.wfile.write(("data: " + json.dumps(chunk) + "\n\n").encode())
                 self.wfile.flush()
-            self.wfile.write(b"data: [DONE]
-
-")
+            self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
             pass
