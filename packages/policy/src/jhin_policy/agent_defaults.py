@@ -48,38 +48,12 @@ def default_agent_grant_specs() -> tuple[tuple[str, dict[str, Any]], ...]:
         + ask_person_grant_specs()
         + persona_grant_specs()
         + identity_grant_specs()
-        + (
-            ("variables.read", {}),
-            ("variables.write", {}),
-            ("schedules.read", {}),
-            ("schedules.manage", {}),
-            ("ghost.connection.bind", {}),
-            ("unsplash.connection.bind", {}),
-        )
-        + tuple(
-            (name, {"variable_audience": True})
-            for name in (
-                "ghost.post.list",
-                "ghost.post.read",
-                "ghost.draft.create",
-                "ghost.draft.update",
-                "ghost.review.request",
-                "ghost.review.read",
-                "ghost.review.decide",
-                "ghost.post.publish",
-                "ghost.assignment.create",
-                "ghost.assignment.read",
-                "ghost.assignment.revise",
-                "ghost.assignment.cancel",
-                "ghost.assignment.attach_evidence",
-                "ghost.archive.sync",
-                "ghost.archive.status",
-                "ghost.archive.search",
-                "ghost.archive.read",
-                "unsplash.photos.search",
-                "unsplash.photos.select",
-            )
-        )
+        # Connector capabilities are deliberately NOT here. A newly created
+        # agent is born able to collaborate, remember, choose its persona and
+        # name itself -- not to publish somebody's blog. Ghost and Unsplash
+        # rights, and the shared credentials behind them, are granted per agent
+        # on purpose: only the designated publisher may release an article, and
+        # a grant nobody asked for is the first layer of that gone.
     )
 
 
