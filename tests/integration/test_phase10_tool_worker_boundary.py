@@ -9819,7 +9819,7 @@ async def test_all_effect_classes_cross_tool_queue_once() -> None:
             client,
             f"/api/v1/workspaces/{workspace_id}/agents",
             {
-                "name": f"P10 cleanup agent {cleanup_tag}",
+                "name": f"P10 cleanup {cleanup_tag}",
                 "system_prompt": "Use the requested tool exactly once.",
                 "model_profile_id": cleanup_profile["id"],
             },

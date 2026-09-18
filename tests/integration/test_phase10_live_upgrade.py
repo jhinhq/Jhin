@@ -161,7 +161,7 @@ async def _cleanup_agent(
         client,
         f"/api/v1/workspaces/{workspace_id}/agents",
         {
-            "name": f"P10 upgrade cleanup agent {tag}",
+            "name": f"P10 upgrade {tag}",
             "system_prompt": "Use the requested CLI tool exactly once.",
             "model_profile_id": profile["id"],
         },
