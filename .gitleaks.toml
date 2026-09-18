@@ -29,6 +29,15 @@
 #       gitleaks 8.21 honours only a single global allowlist block and offers
 #       no per-rule scoping there, so an exact literal is the narrowest form
 #       available.
+#
+#   Two UUIDv7 identifiers in docs/testing/agent-work-live-2026-09-12.md
+#       The generic-api-key rule fires on a high-entropy identifier sitting
+#       next to the word "key" -- the sample list there labelled them
+#       "Key-only conversation" and "Shared-key editorial review". They are
+#       workspace-scoped record ids, not credentials, and the labels have
+#       since been reworded so nothing new trips this. The two values are
+#       matched exactly, because they are already in a published commit and
+#       history cannot be corrected at the source.
 
 [extend]
 useDefault = true
@@ -41,4 +50,6 @@ paths = [
 ]
 regexes = [
   '''^jhin_xxxxxxxx_your-key-here$''',
+  '''^01a094e4-71c2-7043-9714-87d6f31105d5$''',
+  '''^01a09523-0a1f-71b3-901d-4e7508338c03$''',
 ]

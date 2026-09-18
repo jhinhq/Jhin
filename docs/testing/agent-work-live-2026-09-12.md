@@ -38,16 +38,16 @@ Set `JHIN_LIVE_API_KEY` in the process environment and run the read-only `script
 This installation's samples:
 
 - Workspace: `01a050e9-bf9b-7501-89b7-acc85e4741a3`
-- Key-only conversation: `01a094e4-71c2-7043-9714-87d6f31105d5`
+- Credential-only conversation: `01a094e4-71c2-7043-9714-87d6f31105d5`
 - Editorial conversation: `01a094e7-6d96-7951-8f16-9fb52388edcf`
 - Writer: `01a094e4-4f84-7311-9e12-a58d7f9d64d0`
 - Director: `01a094e4-4f66-7b32-9e06-235292c7a172`
 - Editorial review: `01a094e7-ec21-7612-bfa1-a54517bd31dc`
 - Retired schedule: `01a094e6-fe3c-7da0-a5a4-f1c660686303`
 - Completed occurrence task: `01a094eb-8c8b-77a3-a7db-0fc3350e0e1e`
-- Shared-key editorial conversation: `01a09522-cf68-7c31-a595-93d3ddfbe16b`
-- Shared-key editorial review: `01a09523-0a1f-71b3-901d-4e7508338c03`
-- Shared-key published post: `6aa527acea30f00001966c11`
+- Shared-credential editorial conversation: `01a09522-cf68-7c31-a595-93d3ddfbe16b`
+- Shared-credential editorial review: `01a09523-0a1f-71b3-901d-4e7508338c03`
+- Shared-credential published post: `6aa527acea30f00001966c11`
 - Explicit Engineering conversation: `01a0953e-2fd5-7b22-ad11-4ed9bf5187b6`
 - Engineering child task: `01a0953e-488b-7713-be3a-c4cc16e0137c`
 - Final reconnect conversation: `01a09539-f4d4-79a0-94bf-dd26c166ab61`
