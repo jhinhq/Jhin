@@ -245,6 +245,41 @@ wanting the same slug is a real possibility; the loader drops the second and
 counts it as rejected rather than letting a unique-constraint violation take
 the whole refresh down.
 
+### One app card across registries
+
+Reserved slugs prevent impersonation, but they do not identify equivalent
+apps: ingest intentionally gives a colliding slug a digest suffix. Before
+browsing, `jhin_catalog_sync.identity` groups MCP records using exact normalized
+endpoints, package identifiers, full repositories including monorepo subpaths,
+or the same normalized app name and repository owner. Against built-ins it also
+recognizes their names, slugs, and the deterministic ingest suffix. Name
+normalization ignores case, separators, and boundary words such as "MCP server"
+and "API". Scoped MCP package names, corroborated publisher prefixes, reviewed
+provider-wrapper aliases, and Smithery's qualified server identity cover names
+that differ across registries. This does not turn "GitHub Analytics" into
+"GitHub". A shared community name alone or a shared hosting domain is
+insufficient. Skills are not grouped this way.
+
+Jhin's built-in card always wins. Community equivalents have one stable winner
+by trust rank, then popularity, then canonical key. The API resolves these
+groups once from the active generation before applying search, category or
+trust filters, counts, facets, and pagination. A community-only filter cannot
+bring a hidden duplicate back. This works immediately for previously imported
+generations, without waiting for another sync. Version counts still describe
+the raw imported generation; browse totals describe the visible cards.
+
+The API caches only the duplicate-key tuples for at most two immutable
+generations per database engine. Concurrent cold readers share one scan;
+failed or cancelled scans are not cached. Every request still resolves the
+active version, so a generation switch takes effect immediately. The web app
+invalidates catalog cards, facets, and detail queries when it observes a new
+version, retaining the user's filters and page size.
+
+Grouping affects browsing only. Imported rows, slugs, provenance, connections,
+and tool names remain intact. Direct detail and risk-floor lookup for a legacy
+synced slug still resolve that original synced entry: hiding its card must not
+grant it a native connector or lower its risk to the built-in tier.
+
 ## Running it
 
 The refresh is a cron job, not a service. There is no Temporal workflow and

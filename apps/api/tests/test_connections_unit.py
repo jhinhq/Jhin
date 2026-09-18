@@ -55,6 +55,7 @@ class _RequestAuditArgs(TypedDict):
 
 
 REQ: _RequestAuditArgs = {"request_id": new_uuid7(), "ip_hash": "test"}
+pytestmark = pytest.mark.usefixtures("skip_remote_initial_connection_checks")
 CSRF_TOKEN = "connection-route-csrf"
 CSRF_HEADERS = {"x-csrf-token": CSRF_TOKEN}
 MAX_SENSITIVE_CONNECTION_BODY_BYTES = 65_536
@@ -675,9 +676,14 @@ async def test_sensitive_body_content_length_cap_rejects_before_stream_iteration
 
 
 async def test_create_stores_encrypted_credentials_and_webhook_secret(
-    session: AsyncSession, crypto: SecretCrypto, admin_ctx: WorkspaceContext
+    session: AsyncSession,
+    crypto: SecretCrypto,
+    admin_ctx: WorkspaceContext,
+    fake_github: FakeGitHubServer,
 ) -> None:
-    connection, webhook_secret = await create_github_connection(session, crypto, admin_ctx)
+    connection, webhook_secret = await create_github_connection(
+        session, crypto, admin_ctx, base_url=fake_github.base_url
+    )
     assert connection.status == ConnectionStatus.ACTIVE.value
     assert len(connection.public_id) == 32
     # GitHub supports webhooks: signing secret returned exactly once.
@@ -2212,6 +2218,7 @@ async def test_verify_hides_arbitrary_provider_exception_and_raw_cause(
         token=token,
         name="Raising provider health",
     )
+    previous_error = connection.last_error
     monkeypatch.setattr(
         service,
         "get_connector",
@@ -2226,7 +2233,7 @@ async def test_verify_hides_arbitrary_provider_exception_and_raw_cause(
     assert token not in str(excinfo.value)
     assert excinfo.value.__cause__ is None
     assert excinfo.value.__suppress_context__ is True
-    assert connection.last_error is None
+    assert connection.last_error == previous_error
 
 
 async def test_verify_rejects_malformed_stored_credentials_without_leaking(
@@ -2343,6 +2350,7 @@ async def test_verify_rejects_oversized_provider_details_without_persisting_them
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     connection, _ = await create_github_connection(session, crypto, admin_ctx)
+    previous_error = connection.last_error
     connector = _OversizedProviderConnector()
     monkeypatch.setattr(service, "get_connector", lambda _connector_type: connector)
 
@@ -2350,7 +2358,7 @@ async def test_verify_rejects_oversized_provider_details_without_persisting_them
         await service.verify_connection(session, crypto, admin_ctx, connection.id, **REQ)
 
     assert excinfo.value.status_code == 502
-    assert connection.last_error is None
+    assert connection.last_error == previous_error
 
 
 async def test_rotate_replaces_credential_and_resets_health(

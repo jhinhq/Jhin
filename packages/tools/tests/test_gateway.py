@@ -11,7 +11,8 @@ from typing import Any, cast
 from uuid import UUID
 
 import pytest
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic_core import PydanticCustomError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -38,7 +39,7 @@ from jhin_tools.builtin import (
     build_builtin_catalog,
 )
 from jhin_tools.errors import ToolExecutionError
-from jhin_tools.gateway import GatewayOutcome, GatewayStateError, ToolGateway
+from jhin_tools.gateway import GatewayOutcome, GatewayStateError, ToolGateway, _schema_error_summary
 from jhin_tools.sanitize import MAX_STRING_CHARS, invalid_tool_arguments_json
 from jhin_tools.test_barriers import (
     TOOL_AFTER_CLAIM,
@@ -1670,6 +1671,107 @@ async def test_schema_denial_names_the_offending_fields(
     assert row is not None
     assert row.sanitized_output_json["error"] == "invalid_input"
     assert "text: string_type" in row.sanitized_output_json["reason"]
+
+
+async def test_schema_denial_includes_command_length_limit_without_rejected_input(
+    session: AsyncSession, context: ToolExecutionContext
+) -> None:
+    class CommandInput(BaseModel):
+        command: str = Field(max_length=4_000)
+
+    async def must_not_execute(_ctx: ToolExecutionContext, _payload: BaseModel) -> BaseModel:
+        pytest.fail("schema-denied command must never execute")
+
+    catalog = ToolCatalog()
+    catalog.register(
+        ToolDefinition(
+            name="test.command",
+            description="Bounded command",
+            risk=RiskLevel.READ,
+            input_model=CommandInput,
+            output_model=CommandInput,
+            required_capability="test.command",
+        ),
+        must_not_execute,
+    )
+    submitted = "private-submitted-command-" + "x" * 4_000
+    outcome = await ToolGateway(context, catalog).request(
+        "test.command", json.dumps({"command": submitted})
+    )
+    assert outcome.status == "denied" and outcome.decision_code == "invalid_input"
+    assert "command: string_too_long (max_length=4000)" in outcome.decision_reason
+    assert "private-submitted-command" not in outcome.decision_reason
+    row = await session.get(ToolCall, outcome.tool_call_id)
+    assert row is not None
+    assert "max_length=4000" in row.sanitized_output_json["reason"]
+    assert set(row.sanitized_input_json) == {"_raw_arguments"}
+
+
+@pytest.mark.parametrize("constraint", ["secret-in-context", True, float("nan"), float("inf")])
+def test_schema_summary_does_not_echo_arbitrary_constraint_context(constraint: object) -> None:
+    class CustomInput(BaseModel):
+        value: str
+
+        @field_validator("value")
+        @classmethod
+        def reject(cls, _value: str) -> str:
+            raise PydanticCustomError(
+                "string_too_long",
+                "secret-message {secret}",
+                {"max_length": constraint, "secret": "secret-in-context"},
+            )
+
+    with pytest.raises(ValidationError) as error:
+        CustomInput(value="private-submitted-value")
+    summary = _schema_error_summary(error.value)
+    assert summary == "1 error(s) — value: string_too_long"
+
+
+def test_schema_summary_includes_safe_numeric_range_constraints() -> None:
+    class RangeInput(BaseModel):
+        count: int = Field(le=480)
+
+    with pytest.raises(ValidationError) as error:
+        RangeInput(count=481)
+    assert "count: less_than_equal (le=480)" in _schema_error_summary(error.value)
+
+
+@pytest.mark.parametrize("value", ['{"topic":"private-submitted-topic"}', "private prose"])
+def test_nested_model_type_error_explains_object_shape_without_echoing_input(value: str) -> None:
+    class Brief(BaseModel):
+        topic: str
+
+    class Input(BaseModel):
+        brief: Brief
+
+    with pytest.raises(ValidationError) as error:
+        Input.model_validate({"brief": value})
+    summary = _schema_error_summary(error.value)
+    assert "brief: model_type" in summary
+    assert "expected a JSON object" in summary
+    assert "do not quote or JSON-encode" in summary
+    assert value not in summary and "private" not in summary
+
+
+async def test_schema_summary_redacts_input_controlled_error_locations(
+    gateway: ToolGateway, session: AsyncSession
+) -> None:
+    canary = "private-extra-field-name-secret"
+    get_redactor().register(canary)
+
+    class ClosedInput(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+    with pytest.raises(ValidationError) as error:
+        ClosedInput.model_validate({canary: 1})
+    assert canary not in _schema_error_summary(error.value)
+    assert "[REDACTED]: extra_forbidden" in _schema_error_summary(error.value)
+
+    outcome = await gateway.request("system.echo", json.dumps({"text": "safe", canary: 1}))
+    assert canary not in outcome.decision_reason
+    row = await session.get(ToolCall, outcome.tool_call_id)
+    assert row is not None
+    assert canary not in json.dumps(row.sanitized_output_json)
 
 
 # --- The grants an executor is handed -------------------------------------

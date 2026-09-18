@@ -280,9 +280,21 @@ def test_no_persona_means_no_block() -> None:
 
 
 def test_preamble_version_is_untouched_by_the_persona_layer() -> None:
-    """The block is a separate, snapshot-hashed layer, not a preamble
-    wording change; the version audits key on stays where it was."""
-    assert PLATFORM_PREAMBLE_VERSION == 12
+    """Persona remains separate from the v22 editorial/memory preamble."""
+    assert PLATFORM_PREAMBLE_VERSION == 22
+    snapshot = make_snapshot()
+    preamble = render_platform_preamble(
+        agent_name=snapshot.name,
+        role_title=snapshot.role_title,
+        workspace_name=snapshot.workspace_name,
+    )
+    for card in (None, make_card()):
+        task = TaskContext(
+            title="Verify",
+            description="",
+            persona_context=persona_block(card, interlocutor_kind="human") if card else "",
+        )
+        assert build_messages(snapshot, task, has_tools=True)[0].content.startswith(preamble)
 
 
 # --- the snapshot carries the card --------------------------------------

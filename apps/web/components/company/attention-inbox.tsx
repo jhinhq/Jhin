@@ -15,6 +15,7 @@ import { Button, Dialog, EmptyState, Field, Textarea } from "@/components/ui";
 import { timeAgo } from "@/lib/activity";
 import { humanizeToolName, matchedConditionLabels, REVIEW_MODE_LABELS, reviewSubject, workRequestStatus } from "@/lib/coordination";
 import { formatDateTime } from "@/lib/format";
+import { editorialReviewHref } from "@/lib/editorial-reviews";
 import { avatarProps } from "@/lib/media";
 import { kindLabel, scopeLabel } from "@/lib/memory";
 import type { AgentAvatar, Attention, MemoryRecord, ReviewVerdict, WorkRequest, WorkReview } from "@/lib/types";
@@ -288,6 +289,7 @@ export function AttentionInbox({
                         <p className="mt-1 text-xs text-warn">The agent is paused until someone decides.</p>
                       ) : null}
                       <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                        {editorialReviewHref(review.evidence_json ?? {}) ? <Chip href={editorialReviewHref(review.evidence_json ?? {})!}>Director review</Chip> : null}
                         {review.task_id ? (
                           <Chip href={`/tasks/${review.task_id}`}>
                             <ExternalLink size={12} className="mr-1" aria-hidden /> Open in Advanced
@@ -295,7 +297,7 @@ export function AttentionInbox({
                         ) : null}
                       </div>
                     </div>
-                    {canDecide && onReviewDecide ? (
+                    {canDecide && onReviewDecide && !editorialReviewHref(review.evidence_json ?? {}) ? (
                       <Button size="sm" variant="primary" onClick={() => setReviewing(review)} disabled={decidingId === review.id}>
                         Decide
                       </Button>
@@ -348,6 +350,7 @@ export function AttentionInbox({
                         </p>
                       ) : null}
                       <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                        {editorialReviewHref(review.evidence_json ?? {}) ? <Chip href={editorialReviewHref(review.evidence_json ?? {})!}>Director review</Chip> : null}
                         {review.reviewer_agent_id ? <Chip href={`/agents/${review.reviewer_agent_id}`}>{review.reviewer_agent_name ?? "Reviewer"}</Chip> : null}
                         {review.task_id ? (
                           <Chip href={`/tasks/${review.task_id}`}>
@@ -356,7 +359,7 @@ export function AttentionInbox({
                         ) : null}
                       </div>
                     </div>
-                    {isAdmin && onReviewDecide ? (
+                    {isAdmin && onReviewDecide && !editorialReviewHref(review.evidence_json ?? {}) ? (
                       <Button size="sm" onClick={() => setReviewing(review)} disabled={decidingId === review.id}>
                         Decide instead
                       </Button>
@@ -469,7 +472,14 @@ export function AttentionInbox({
       {failed_tasks.length > 0 ? (
         <SectionCard
           title={`Ran into a problem (${failed_tasks.length})`}
-          description="These pieces of work stopped. Open the chat to see what happened and ask the agent to try again, or dismiss the ones you have dealt with."
+          // Deliberately not a promise of a retry button. A chat offers to
+          // pick a turn back up only for its newest message, only when
+          // nothing is running, and only when nothing on that turn was left
+          // unaccounted for; a colleague's delegated task or an automation
+          // has no such control at all. The place that can tell whether the
+          // offer exists is the chat itself, so this points there and lets
+          // the failure say what it can do.
+          description="These pieces of work stopped. Open one to see what went wrong — where a chat can try the message again, it says so on the failure — or dismiss the ones you have dealt with."
           action={
             canDecide && onDismissAllFailures ? (
               <Button size="sm" variant="ghost" onClick={onDismissAllFailures} disabled={decidingId === "failures:all"} data-testid="dismiss-all-failures">

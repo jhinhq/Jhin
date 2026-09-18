@@ -3,11 +3,13 @@
 (a) THREE TURNS — a conversation, then two follow-ups, each sent only after
     the previous task completed so all three take the new_task path. Every
     reply must answer the question that was *just* asked. The fake provider
-    echoes the last user message it saw ("[{model}] Completed: {text}"), so
+    echoes the latest original user message ("[{model}] Completed: {text}"), so
     the reply text is a direct read-out of prompt ordering: if the current
     question is not the newest user turn reaching the provider, the echo
     names the previous one and this test says so. That is the live guard for
     the regression where turn 2 answered turn 1 and turn 3 repeated turn 2.
+    The opt-in echo marker ignores only the worker's evidence-review retry
+    nudge; ordinary user follow-ups still determine the exact echoed text.
 (b) MID-RUN TURN — a turn sent while the first run is still live is delivered
     into that run as an instruction, and no second task is forked.
 
@@ -103,7 +105,7 @@ async def _make_agent(client: httpx.AsyncClient, ws: str, tag: str, name: str) -
         f"/api/v1/workspaces/{ws}/agents",
         {
             "name": f"Chat {name} {tag}",
-            "system_prompt": "You answer the person's latest question.",
+            "system_prompt": "You answer the person's latest question. [[echo_latest_user]]",
             "model_profile_id": profile["id"],
         },
     )

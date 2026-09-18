@@ -15,6 +15,11 @@ from jhin_domain import activity_phrase, waiting_for_colleague_phrase
         ("skills.read", "Reading a skill"),
         ("skills.create", "Writing a skill"),
         ("organization.request_work", "Asking a colleague"),
+        ("organization.persona.assign_self", "Choosing a persona"),
+        # ``organization`` has no family fallback, so a missing entry here is
+        # not a near-miss sentence — it is "Working…" while an agent changes
+        # what every colleague calls it.
+        ("organization.identity.set_name", "Changing its name"),
         ("organization.review.submit", "Reviewing work"),
         ("organization.create_team", "Changing the organization"),
         ("web.search", "Searching the web"),

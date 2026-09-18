@@ -1,9 +1,14 @@
 """Thin async HTTP layer for the GitHub REST API (plan 11.2).
 
 All requests pin the API version header, validate the exact destination
-origin, and use the shared redirect-free streaming response cap. Error
-mapping is deliberately conservative: provider bodies, request headers,
-URLs, and tokens never enter exception text.
+origin, and use the shared redirect-free streaming response cap. Request
+headers, URLs and tokens never enter exception text.
+
+A failed response's *message* does, on the ``detail`` channel and nowhere
+else: bounded, control-stripped, and redacted where it is stored. Discarding
+it made every GitHub failure a three-digit number, which cost a real run a
+pull request nobody could explain — GitHub had said why, and Jhin had thrown
+it away.
 """
 
 from __future__ import annotations
@@ -46,6 +51,13 @@ class GitHubApiError(ToolExecutionError):
     A ``ToolExecutionError`` so the gateway records an ordinary ``failed``
     outcome (e.g. ``github_http_404``) the model can act on, instead of an
     execution-unknown reconciliation that aborts the run.
+
+    ``provider_message`` is GitHub's own sentence about the failure and travels
+    as ``detail``. A pull request refused with ``github_http_403`` and nothing
+    else told the agent to retry and told the operator nothing at all; GitHub
+    had already said "Resource not accessible by integration", which names the
+    one thing that fixes it. It is redacted where it is stored, and it is
+    evidence rather than instruction: nothing here acts on it.
     """
 
     def __init__(
@@ -55,11 +67,13 @@ class GitHubApiError(ToolExecutionError):
         status_code: int | None = None,
         method: str = "GET",
         code: str | None = None,
+        provider_message: str = "",
     ) -> None:
         super().__init__(
             message,
             code=code or _api_error_code("github", status_code),
             side_effect_possible=_side_effect_possible(method, status_code),
+            detail=f"GitHub said: {provider_message}" if provider_message else "",
         )
         self.status_code = status_code
 
@@ -113,6 +127,7 @@ async def github_request(
             message,
             status_code=exc.status_code,
             method=method,
+            provider_message=exc.provider_message,
         ) from None
     except Exception:
         raise GitHubApiError("GitHub API request failed", method=method) from None

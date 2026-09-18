@@ -1,7 +1,7 @@
 """Route handlers for /api/v1/workspaces/{workspace_id}/agents.
 
-CRUD requires admin; pause/resume are operational actions available to
-members (plan 20.2: members operate agents, admins manage them).
+CRUD and shared-agent pause/resume require admin access. Members may
+operate their own tasks without changing a shared agent's lifecycle.
 """
 
 from uuid import UUID

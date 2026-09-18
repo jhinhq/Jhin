@@ -108,7 +108,7 @@ back.
 
 | # | Call | Gate |
 | --- | --- | --- |
-| 1 | `cli.repository.checkout` — clone, branch `agent/<task>-<repo>`, returns the base ref and the top-level entries | auto |
+| 1 | `cli.repository.checkout` — clone, branch `agent/<repo>-<task id>` (resumed if it already exists), returns the base ref and the top-level entries | auto |
 | 2 | `cli.file.search` — where is the failing symbol | auto |
 | 3 | `cli.test.run` — red | auto |
 | 4 | `cli.file.read` — the relevant page, with a `read_token` | auto |

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
 import math
 import re
+import warnings
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 from ipaddress import ip_address
@@ -31,6 +33,14 @@ _HTTP_AUTHORITIES = frozenset(
 _CANONICAL_INTEGER_RE = re.compile(r"(?:0|[1-9][0-9]*)\Z")
 _CANONICAL_RATIO_RE = re.compile(r"(?:0|1)(?:\.[0-9]+)?\Z")
 _DNS_LABEL_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
+#: The levels a service may be configured to run at. Closed, because the value
+#: reaches ``logging.setLevel``, and an unrecognised name there is either a
+#: crash at startup or -- worse -- silently no level at all.
+LOG_LEVELS = frozenset({"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"})
+#: What an unrecognised ``LOG_LEVEL`` falls back to. It is the level every
+#: install has actually been running at, whatever its compose file said, for
+#: as long as ``log_level`` went nowhere.
+DEFAULT_LOG_LEVEL = "INFO"
 
 
 class ObservabilityConfigurationError(RuntimeError):
@@ -46,6 +56,26 @@ class ObservabilityConfig:
     service_name: str
     service_version: str
     environment: str
+    #: The level the root logger runs at. ``ObservabilitySettings.log_level``
+    #: read ``LOG_LEVEL`` from the environment and then went nowhere: the
+    #: config had no field for it, ``_construct_runtime`` never passed one, and
+    #: ``configure_json_logging``'s default won on every service. Every
+    #: install has therefore run at INFO whatever its compose file said, and
+    #: an operator who set ``LOG_LEVEL=DEBUG`` to debug something got INFO and
+    #: no error. That is an accident, not a decision, and it is also what kept
+    #: two DEBUG-only library leaks out of sight rather than out of the logs.
+    #:
+    #: A name that is not a level is a *programming* error here and still
+    #: raises. It is only a *deployment* error when it arrives from the
+    #: environment, and there
+    #: :meth:`ObservabilitySettings.observability_config` warns and falls back
+    #: rather than constructing this. The two are not the same mistake: a
+    #: literal in code is read once by whoever wrote it, and ``LOG_LEVEL`` is
+    #: a value nobody has ever had to set correctly, because for as long as it
+    #: went nowhere every spelling of it worked. Making the day it started
+    #: being read the day those installs stopped booting would be a footgun
+    #: hidden inside a fix.
+    log_level: str = DEFAULT_LOG_LEVEL
     otlp_endpoint: str | None = None
     otlp_insecure: bool = False
     otlp_ca_file: Path | None = None
@@ -64,6 +94,8 @@ class ObservabilityConfig:
     def __post_init__(self) -> None:
         if not self.service_name or not self.service_version or not self.environment:
             raise ValueError("service name, version, and environment are required")
+        if self.log_level not in LOG_LEVELS:
+            raise ValueError(f"log level must be one of {', '.join(sorted(LOG_LEVELS))}")
         self._validate_transport()
         self._validate_sampling()
         self._validate_numeric_limits()
@@ -172,7 +204,7 @@ class ObservabilitySettings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore", env_prefix="")
 
     app_env: Literal["dev", "test", "staging", "production"] = "dev"
-    log_level: str = "INFO"
+    log_level: str = DEFAULT_LOG_LEVEL
     otel_exporter_otlp_endpoint: str | None = None
     otel_exporter_otlp_insecure: bool = False
     otel_exporter_otlp_certificate: Path | None = None
@@ -238,6 +270,48 @@ class ObservabilitySettings(BaseSettings):
             raise ValueError("trace sample ratio must be between zero and one")
         return parsed
 
+    def resolved_log_level(self) -> str:
+        """``LOG_LEVEL`` as a level this process can actually run at.
+
+        An unrecognised name warns and falls back to INFO instead of refusing
+        to boot, and the reason is the history of this one setting: until
+        ``log_level`` started reaching the root logger, *every* spelling of it
+        worked, because none of them did anything. Every install has been
+        running at INFO whatever its compose file says. Turning the first
+        release that reads the value into the first release that refuses to
+        start on a typo would take a setting nobody has had to get right and
+        make it a deployment outage -- and it would do that to gain nothing,
+        because INFO is exactly where those installs already are.
+
+        It warns rather than falling back in silence: silence is what made
+        this setting a decoration in the first place.
+
+        The warning is a Python warning and not a log line, deliberately. The
+        log contract is a closed vocabulary of registered events and this is a
+        sentence about one process's own configuration, arriving before
+        logging is configured at all -- there is nothing here for a log
+        pipeline to key on, and inventing an event for it would put a
+        one-install-in-a-thousand typo in the vocabulary every service shares.
+        ``warn_explicit`` rather than ``warn`` so the warning is attributed to
+        the caller that read the setting -- what ``stacklevel=2`` would have
+        meant -- and so the repository's logging audit, which recognises a
+        *logger* by the method name ``warn``, is not asked to classify
+        something that is not one.
+        """
+        candidate = self.log_level.strip().upper()
+        if candidate in LOG_LEVELS:
+            return candidate
+        frame = inspect.currentframe()
+        caller = frame.f_back if frame is not None else None
+        warnings.warn_explicit(
+            f"LOG_LEVEL={self.log_level!r} is not one of "
+            f"{', '.join(sorted(LOG_LEVELS))}; running at {DEFAULT_LOG_LEVEL}",
+            RuntimeWarning,
+            caller.f_code.co_filename if caller is not None else __file__,
+            caller.f_lineno if caller is not None else 0,
+        )
+        return DEFAULT_LOG_LEVEL
+
     def observability_config(
         self,
         *,
@@ -250,6 +324,7 @@ class ObservabilitySettings(BaseSettings):
             service_name=service_name,
             service_version=service_version,
             environment=self.app_env,
+            log_level=self.resolved_log_level(),
             otlp_endpoint=endpoint,
             otlp_insecure=self.otel_exporter_otlp_insecure,
             otlp_ca_file=self.otel_exporter_otlp_certificate,
@@ -275,6 +350,8 @@ def service_version(distribution_name: str) -> str:
 
 
 __all__ = [
+    "DEFAULT_LOG_LEVEL",
+    "LOG_LEVELS",
     "MAX_EXPORT_TIMEOUT_MILLIS",
     "MAX_METRIC_EXPORT_INTERVAL_MILLIS",
     "MAX_SPAN_EXPORT_BATCH_SIZE",

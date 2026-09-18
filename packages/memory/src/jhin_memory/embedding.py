@@ -34,6 +34,7 @@ from jhin_models import (
 )
 from jhin_observability import JhinMetrics, MetricName, get_logger, noop_metrics, noop_tracer
 from jhin_secrets import SecretCrypto, SecretStore
+from jhin_secrets.intake import redact_legacy_text
 
 logger = get_logger(__name__)
 
@@ -149,7 +150,9 @@ class MemoryEmbedder:
             return EmbeddingResult(vectors=(), model=self._config.model)
         try:
             result = await self._embedder.embed(
-                texts, model=self._config.model, dimensions=self._config.dimensions
+                [redact_legacy_text(text) for text in texts],
+                model=self._config.model,
+                dimensions=self._config.dimensions,
             )
         except Exception as error:
             logger.warning(

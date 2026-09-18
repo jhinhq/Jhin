@@ -326,10 +326,10 @@ export function navigateToProvider(url: string): void {
  * in at all, so there is nothing to ask the server about and the API-key form
  * is reached with no round trip at all.
  */
-export const SIGN_IN_SCHEMES = new Set(["oauth", "device_code", "device_flow", "device"]);
+export const SIGN_IN_SCHEMES = new Set(["oauth", "device_code", "device_flow", "device", "managed"]);
 
-export function connectorSignsIn(connector: { auth_schemes: { type: string }[] }): boolean {
-  return connector.auth_schemes.some((scheme) => SIGN_IN_SCHEMES.has(scheme.type));
+export function connectorSignsIn(connector: { auth_schemes: { type: string }[]; managed_auth?: { provider: string } }): boolean {
+  return connector.managed_auth?.provider === "composio" || connector.auth_schemes.some((scheme) => SIGN_IN_SCHEMES.has(scheme.type));
 }
 
 /**

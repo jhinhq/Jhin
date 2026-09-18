@@ -27,6 +27,7 @@ from jhin_domain.enums import (
     RUN_ACTIVE_STATUSES,
     RUN_TERMINAL_STATUSES,
     TASK_TERMINAL_STATES,
+    UNRECONCILED_TOOL_STATUSES,
     WORK_REQUEST_ACTIVE_STATUSES,
     WORK_REQUEST_OPEN_STATUSES,
     ActivityKind,
@@ -69,6 +70,11 @@ from jhin_domain.enums import (
     WorkspaceStatus,
     role_satisfies,
 )
+from jhin_domain.failures import (
+    DEFAULT_SUMMARY,
+    FailureNotice,
+    failure_notice,
+)
 from jhin_domain.ids import new_uuid7
 from jhin_domain.messages import artifact, structured_content
 from jhin_domain.scopes import (
@@ -87,6 +93,7 @@ from jhin_domain.scopes import (
     scopes_above_role,
     scopes_for_role,
 )
+from jhin_domain.timing import Wait, WorkingTime, working_time
 
 __all__ = [
     "ACTIVITY_LABELS",
@@ -98,6 +105,7 @@ __all__ = [
     "CATEGORIES",
     "CATEGORY_BY_KEY",
     "CATEGORY_SCOPES",
+    "DEFAULT_SUMMARY",
     "GRANTABLE_SCOPE_KEYS",
     "MEMORY_RETRIEVABLE_STATUSES",
     "MEMORY_SCOPE_ORDER",
@@ -107,6 +115,7 @@ __all__ = [
     "SCOPES",
     "SCOPE_BY_KEY",
     "TASK_TERMINAL_STATES",
+    "UNRECONCILED_TOOL_STATUSES",
     "WORK_REQUEST_ACTIVE_STATUSES",
     "WORK_REQUEST_OPEN_STATUSES",
     "ActivityKind",
@@ -119,6 +128,7 @@ __all__ = [
     "ConnectionStatus",
     "ConversationStatus",
     "EndpointPolicyError",
+    "FailureNotice",
     "MediaAssetStatus",
     "MemoryKind",
     "MemoryScope",
@@ -146,14 +156,17 @@ __all__ = [
     "TriggerType",
     "UserQuestionStatus",
     "UserStatus",
+    "Wait",
     "WorkRequestStatus",
     "WorkReviewStatus",
+    "WorkingTime",
     "WorkspaceRole",
     "WorkspaceStatus",
     "activity_phrase",
     "artifact",
     "effective_scopes",
     "expand_scopes",
+    "failure_notice",
     "is_known_scope",
     "new_uuid7",
     "role_satisfies",
@@ -164,4 +177,5 @@ __all__ = [
     "validate_postgres_target",
     "validate_public_http_url",
     "waiting_for_colleague_phrase",
+    "working_time",
 ]

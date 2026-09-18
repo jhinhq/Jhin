@@ -170,11 +170,16 @@ def test_an_expired_token_always_needs_renewing() -> None:
 # --- Storing ------------------------------------------------------------
 
 
+@pytest.mark.parametrize("initial_status", [ConnectionStatus.ERROR, ConnectionStatus.DISABLED])
 async def test_storing_tokens_writes_the_secret_and_every_column_at_once(
-    session: AsyncSession, crypto: SecretCrypto, tenant: Tenant
+    session: AsyncSession,
+    crypto: SecretCrypto,
+    tenant: Tenant,
+    initial_status: ConnectionStatus,
 ) -> None:
     """A row that says active and a secret holding a dead token are one lie."""
     connection = await _connection(session, tenant)
+    connection.status = initial_status.value
     service = ConnectionTokenService(session, crypto, httpx.AsyncClient())
     refresh_expires = datetime.now(UTC) + timedelta(days=30)
 
@@ -187,7 +192,17 @@ async def test_storing_tokens_writes_the_secret_and_every_column_at_once(
         authorized_by_user_id=tenant.user_id,
     )
 
-    assert connection.status == ConnectionStatus.ACTIVE.value
+    assert connection.status == (
+        ConnectionStatus.DISABLED.value
+        if initial_status == ConnectionStatus.DISABLED
+        else ConnectionStatus.ACTIVE.value
+    )
+    await session.refresh(connection)
+    assert connection.status == (
+        ConnectionStatus.DISABLED.value
+        if initial_status == ConnectionStatus.DISABLED
+        else ConnectionStatus.ACTIVE.value
+    )
     assert connection.last_error is None
     assert connection.oauth_issuer == ISSUER
     assert connection.oauth_resource == RESOURCE

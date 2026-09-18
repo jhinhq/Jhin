@@ -36,13 +36,13 @@ import hashlib
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from jhin_db.models import Agent, AuditEvent, Message, Task, WorkRequest, Workspace
+from jhin_db.models import Agent, AuditEvent, Conversation, Message, Task, WorkRequest, Workspace
 from jhin_domain import (
     WORK_REQUEST_ACTIVE_STATUSES,
     WORK_REQUEST_OPEN_STATUSES,
@@ -161,20 +161,19 @@ async def load_work_request_facts(
         return WorkRequestFacts(
             requester_agent_id=str(requester_agent_id), target_agent_id=str(target_uuid)
         )
-    requester = await session.scalar(
-        select(Agent).where(Agent.id == requester_agent_id, Agent.workspace_id == workspace_id)
-    )
     task = None
     if task_id is not None:
         task = await session.scalar(
             select(Task).where(Task.id == task_id, Task.workspace_id == workspace_id)
         )
     root = await root_task_id(session, workspace_id, task_id)
-    same_team = (
-        requester is not None
-        and requester.team_id is not None
-        and requester.team_id == target.team_id
+    from jhin_db.memberships import active_team_ids
+
+    same_team = bool(
+        set(await active_team_ids(session, workspace_id, requester_agent_id))
+        & set(await active_team_ids(session, workspace_id, target_uuid))
     )
+
     # Everything this agent has asked for that has not come back yet —
     # awaiting a decision *and* already running. Counting only the
     # undecided ones would make the cap vanish the moment requests
@@ -767,10 +766,16 @@ async def finalize_work_request(
     request completed/failed and post the standardized ``result`` message on
     the requester's task (summary, artifacts, risks — never a transcript).
     Idempotent: a second call returns the already-terminal request."""
-    request = await get_work_request(session, workspace_id, request_id)
+    request = await session.scalar(
+        select(WorkRequest)
+        .where(WorkRequest.id == request_id, WorkRequest.workspace_id == workspace_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if request is None:
         return None
     if request.status in (WorkRequestStatus.COMPLETED.value, WorkRequestStatus.FAILED.value):
+        await ensure_work_request_continuation(session, request)
         return request
     task = await session.get(Task, request.created_task_id) if request.created_task_id else None
     reported = task.metadata_json.get("reported_result") if task is not None else None
@@ -806,6 +811,7 @@ async def finalize_work_request(
             "artifacts": reported.get("artifacts", []),
             "risks": reported.get("risks", []),
             "recommended_next_action": reported.get("recommended_next_action", ""),
+            "missing_inputs": reported.get("missing_inputs", []),
             "created_task_id": str(request.created_task_id) if request.created_task_id else "",
             "run_status": run_status,
         },
@@ -822,8 +828,155 @@ async def finalize_work_request(
     # Deterministic pointer for the worker: the requester agent learns from
     # this result message (memory maintenance keyed to the message id).
     request.metadata_json = {**request.metadata_json, "result_message_id": str(message.id)}
+    await ensure_work_request_continuation(session, request)
     await session.flush()
     return request
+
+
+async def prepare_work_request_continuation(
+    session: AsyncSession,
+    *,
+    workspace_id: UUID,
+    request_id: UUID,
+    requester_task_id: UUID,
+    requester_agent_id: UUID,
+) -> WorkRequest:
+    """Arm durable delivery before the requester relinquishes its run slot.
+
+    Re-running this against an already-running/completed child attaches to
+    the persisted result instead of depending on a Temporal child handle.
+    """
+    request = await session.scalar(
+        select(WorkRequest)
+        .where(WorkRequest.id == request_id, WorkRequest.workspace_id == workspace_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if (
+        request is None
+        or request.requester_task_id != requester_task_id
+        or request.requester_agent_id != requester_agent_id
+    ):
+        raise ValueError("Only the recorded requester can prepare result continuation")
+    if request.continuation_requested_at is None:
+        request.continuation_requested_at = _now()
+    await ensure_work_request_continuation(session, request)
+    await session.flush()
+    return request
+
+
+async def ensure_work_request_continuation(session: AsyncSession, request: WorkRequest) -> None:
+    """Materialize one successor in the same transaction as the result.
+
+    Call with the work-request row locked. Conversation locking uses the same
+    queue predecessor rule as ordinary conversation turns, so competing human
+    turns and multiple results do not run two writers at once.
+    """
+    if (
+        request.continuation_requested_at is None
+        or request.continuation_task_id is not None
+        or request.continuation_suppressed_reason is not None
+        or not request.metadata_json.get("result_message_id")
+    ):
+        return
+    source = (
+        await session.get(Task, request.requester_task_id) if request.requester_task_id else None
+    )
+    if source is None or source.workspace_id != request.workspace_id:
+        request.continuation_suppressed_reason = "requester_missing"
+        return
+    if source.state == TaskState.CANCELLED.value or source.metadata_json.get("stop_requested_at"):
+        request.continuation_suppressed_reason = "requester_cancelled"
+        return
+    assignment_id = request.metadata_json.get("editorial_assignment_id")
+    if assignment_id:
+        from jhin_db.models.editorial import EditorialAssignment
+
+        assignment = await session.get(EditorialAssignment, UUID(str(assignment_id)))
+        if (
+            assignment is None
+            or assignment.workspace_id != request.workspace_id
+            or assignment.phase == "cancelled"
+        ):
+            request.continuation_suppressed_reason = "assignment_cancelled_or_missing"
+            return
+    predecessor = source.id
+    if request.conversation_id:
+        await session.scalar(
+            select(Conversation)
+            .where(
+                Conversation.id == request.conversation_id,
+                Conversation.workspace_id == request.workspace_id,
+            )
+            .with_for_update()
+        )
+        queued = await session.scalar(
+            select(Task)
+            .where(
+                Task.workspace_id == request.workspace_id,
+                Task.conversation_id == request.conversation_id,
+                Task.assigned_agent_id == request.requester_agent_id,
+                Task.state.in_(_ACTIVE_TASK_STATES),
+                Task.parent_task_id.is_(None),
+            )
+            .order_by(Task.created_at.desc(), Task.id.desc())
+            .limit(1)
+        )
+        if queued is not None:
+            predecessor = queued.id
+    result = await session.get(Message, UUID(request.metadata_json["result_message_id"]))
+    summary = str((result.content_json if result else {}).get("summary", ""))
+    task_id = uuid5(NAMESPACE_URL, f"jhin:work-request-result:{request.workspace_id}:{request.id}")
+    metadata: dict[str, Any] = {
+        key: source.metadata_json[key]
+        for key in ("model_profile_id", "execution_mode", "editorial_assignment_id")
+        if key in source.metadata_json
+    }
+    metadata.update(
+        {
+            key: request.metadata_json[key]
+            for key in (
+                "editorial_assignment_id",
+                "editorial_review_id",
+                "editorial_package_id",
+                "revision_round",
+                "prior_review_id",
+            )
+            if key in request.metadata_json
+        }
+    )
+    metadata.update(
+        {
+            "origin": "work_request_continuation",
+            "queue_after_task_id": str(predecessor),
+            "work_request_result": {
+                "work_request_id": str(request.id),
+                "requester_task_id": str(source.id),
+                "result_message_id": str(request.metadata_json["result_message_id"]),
+            },
+        }
+    )
+    session.add(
+        Task(
+            id=task_id,
+            workspace_id=request.workspace_id,
+            title=f"Continue: {source.title}"[:500],
+            description=(
+                f"Continue the original assignment after the colleague's result. "
+                f"Read the linked result and current assignment/review state before "
+                f"acting; a result is not publication authority.\n\n"
+                f"Original brief:\n{source.description}\n\nColleague result:\n{summary}"
+            ),
+            assigned_agent_id=request.requester_agent_id,
+            conversation_id=request.conversation_id,
+            correlation_id=source.correlation_id,
+            state=TaskState.QUEUED.value,
+            temporal_workflow_id=f"task-{task_id}",
+            metadata_json=metadata,
+        )
+    )
+    await session.flush()
+    request.continuation_task_id = task_id
 
 
 # --- gateway tools ---
@@ -845,6 +998,7 @@ class RequestWorkInput(BaseModel):
 
     target_agent_name: str = Field(default="", max_length=200)
     target_agent_id: str = Field(default="", max_length=64)
+    cross_team_reason: str = Field(default="", max_length=1000)
     description: str = Field(min_length=1, max_length=20_000)
     # Optional: a short label for the ask. Derived from ``description`` when
     # the model does not bother — a question does not need a headline.
@@ -965,9 +1119,43 @@ async def validate_request_work(
     workspace = await ctx.session.get(Workspace, ctx.workspace_id)
     settings = coordination_settings(workspace.settings_json if workspace is not None else None)
     decision = evaluate_work_request(grants, facts, settings)
-    if decision.allowed:
-        return None
-    return PolicyDecision(decision=DecisionType.DENY, code=decision.code, reason=decision.reason)
+    if not decision.allowed:
+        return PolicyDecision(
+            decision=DecisionType.DENY, code=decision.code, reason=decision.reason
+        )
+    if not facts.target_in_same_team and not data.cross_team_reason.strip():
+        return PolicyDecision(
+            decision=DecisionType.DENY,
+            code="cross_team_reason_required",
+            reason="Prefer relevant colleagues on your team. For company-wide "
+            "expertise or an explicitly requested colleague, provide "
+            "cross_team_reason explaining the need.",
+        )
+    root = await root_task_id(ctx.session, ctx.workspace_id, ctx.task_id)
+    previous = await ctx.session.scalars(
+        select(WorkRequest)
+        .where(
+            WorkRequest.workspace_id == ctx.workspace_id,
+            WorkRequest.requester_agent_id == ctx.agent_id,
+            WorkRequest.root_task_id == root,
+            WorkRequest.status.in_(["failed", "declined"]),
+        )
+        .order_by(WorkRequest.created_at.desc())
+        .limit(30)
+    )
+
+    def normalize(text: str) -> str:
+        return " ".join(text.casefold().split())
+
+    if sum(normalize(row.description) == normalize(data.description) for row in previous) >= 2:
+        return PolicyDecision(
+            decision=DecisionType.DENY,
+            code="unchanged_work_request_limit",
+            reason="This unchanged request already failed twice. Resolve the missing "
+            "input or failure before asking again; do not move it to another "
+            "colleague to repeat the same failed work.",
+        )
+    return None
 
 
 class WorkRequestActivation(BaseModel):
@@ -1084,6 +1272,11 @@ async def _request_work(ctx: ToolExecutionContext, payload: BaseModel) -> BaseMo
         expected_output=data.expected_output,
         idempotency_key=key,
     )
+    if created and data.cross_team_reason:
+        request.metadata_json = {
+            **request.metadata_json,
+            "cross_team_reason": data.cross_team_reason,
+        }
     workspace = await ctx.session.get(Workspace, ctx.workspace_id)
     settings = coordination_settings(workspace.settings_json if workspace is not None else None)
     activation = await activate_work_request(
@@ -1181,6 +1374,8 @@ WORK_REQUEST_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor, ToolValidator | No
                 "from a teammate — \"can you ask the CTO what he's working "
                 'on?" is exactly this tool — and whenever a colleague is '
                 "better placed than you to answer or to do a piece of work. "
+                "Prefer role-relevant teammates; provide cross_team_reason for "
+                "company-wide expertise or an explicit user-selected colleague. "
                 "Pass target_agent_name (their name as you know it, e.g. "
                 '"CTO") and description (what you are asking them, in '
                 "plain words). Nothing else is required. The colleague "

@@ -642,6 +642,48 @@ export const PROVIDER_TYPES: { value: ModelProviderType; label: string; needsKey
   { value: "openai_compatible", label: "OpenAI-compatible endpoint", needsKey: false },
 ];
 
+/** Form examples, not saved defaults. The provider's model list remains authoritative. */
+export const PROVIDER_EXAMPLES: Record<
+  ModelProviderType,
+  { displayName: string; baseUrl: string; apiKey: string; profileName: string; modelName: string }
+> = {
+  openai: {
+    displayName: "OpenAI (production)",
+    baseUrl: "https://api.openai.com/v1",
+    apiKey: "sk-…",
+    profileName: "GPT-4o mini (default)",
+    modelName: "gpt-4o-mini",
+  },
+  anthropic: {
+    displayName: "Anthropic (production)",
+    baseUrl: "https://api.anthropic.com/v1",
+    apiKey: "sk-ant-…",
+    profileName: "Claude Sonnet (default)",
+    modelName: "claude-sonnet-4-20250514",
+  },
+  openrouter: {
+    displayName: "OpenRouter (production)",
+    baseUrl: "https://openrouter.ai/api/v1",
+    apiKey: "Your OpenRouter API key",
+    profileName: "GPT-4o via OpenRouter",
+    modelName: "openai/gpt-4o",
+  },
+  ollama: {
+    displayName: "Ollama (local)",
+    baseUrl: "http://localhost:11434/v1",
+    apiKey: "Optional for authenticated endpoints",
+    profileName: "Qwen (local)",
+    modelName: "qwen3.8:latest",
+  },
+  openai_compatible: {
+    displayName: "My model server",
+    baseUrl: "https://models.example.com/v1",
+    apiKey: "API key, if required by your endpoint",
+    profileName: "My custom model",
+    modelName: "your-model-id",
+  },
+};
+
 /** "OpenAI", "Ollama (local)", … — the type as a person reads it. An
  * unknown type passes through so a newer API never renders as blank. */
 export function providerTypeLabel(type: ModelProviderType): string {

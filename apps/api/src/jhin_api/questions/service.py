@@ -35,9 +35,12 @@ from jhin_api.audit import service as audit
 from jhin_api.deps import WorkspaceContext
 from jhin_api.memory.service import authority_for
 from jhin_api.questions.schemas import AnswerQuestionIn, QuestionOptionOut, QuestionOut
-from jhin_db.models import Agent, Message, Task, User, UserQuestion
+from jhin_db.models import Agent, Conversation, Message, Task, User, UserQuestion, Workspace
 from jhin_domain import MemoryScope, UserQuestionStatus
 from jhin_memory.policy import scope_exceeds
+from jhin_secrets.crypto import SecretCrypto
+from jhin_secrets.intake import capture_input, merge_capture_metadata, secret_spans
+from jhin_secrets.variables import VariableError
 from jhin_workflows.agent_task.shared import SIGNAL_QUESTION_ANSWER
 
 MAX_PAGE_SIZE = 200
@@ -123,6 +126,9 @@ async def _project(
             agent_id=row.agent_id,
             agent_name=agent_names.get(row.agent_id),
             kind=row.kind,
+            required=row.required,
+            input_key=row.input_key,
+            value_type=row.value_type,
             question=row.question,
             context=row.context,
             options=[QuestionOptionOut(**option) for option in _options(row)],
@@ -238,6 +244,16 @@ def _grant_for(
     told an admin has to record it, which is the same rule the Memories page
     already enforces.
     """
+    if question.input_key.startswith("schedule_activate_"):
+        if answer_kind != ANSWER_KIND_OPTION:
+            return "", "", REASON_FREE_TEXT
+        if option_value != "activate":
+            return "", "", ""
+        if ctx.role not in {"owner", "admin"} or (
+            ctx.api_key is not None and "automations:write" not in ctx.api_key.scopes
+        ):
+            return "", "", REASON_INSUFFICIENT_AUTHORITY
+        return "", "workspace", ""
     if question.kind != _MEMORY_SCOPE_KIND:
         return "", "", ""
     if answer_kind != ANSWER_KIND_OPTION:
@@ -312,7 +328,26 @@ async def answer(
     *,
     request_id: UUID,
     ip_hash: str,
+    crypto: SecretCrypto | None = None,
 ) -> tuple[QuestionOut, bool]:
+    # The same order as chat ingestion and variable writes; intake deduplication
+    # must serialize before any question, task or transcript row is changed.
+    await db.scalar(
+        select(Workspace.id).where(Workspace.id == ctx.workspace_id).with_for_update(key_share=True)
+    )
+    conversation_id = await db.scalar(
+        select(UserQuestion.conversation_id).where(
+            UserQuestion.id == question_id, UserQuestion.workspace_id == ctx.workspace_id
+        )
+    )
+    if conversation_id:
+        await db.scalar(
+            select(Conversation.id)
+            .where(
+                Conversation.id == conversation_id, Conversation.workspace_id == ctx.workspace_id
+            )
+            .with_for_update()
+        )
     question = await db.scalar(
         select(UserQuestion)
         .where(UserQuestion.id == question_id, UserQuestion.workspace_id == ctx.workspace_id)
@@ -329,6 +364,41 @@ async def answer(
                 "Send it as a message instead."
             ),
         )
+
+    if payload.other_text is not None and question.allow_other:
+        from jhin_tools.readiness import validate_answer
+
+        try:
+            # Structured fields must stay usable as their declared type.
+            # Secret-bearing URLs are refused rather than persisted or echoed.
+            if question.value_type != "text" and secret_spans(payload.other_text):
+                raise ValueError("Provide the requested input without credentials")
+            validated = validate_answer(payload.other_text, question.value_type)
+            if question.conversation_id is None:
+                if secret_spans(validated):
+                    raise VariableError("Send credentials in an agent conversation", 422)
+            else:
+                captured = await capture_input(
+                    db,
+                    crypto,
+                    workspace_id=ctx.workspace_id,
+                    conversation_id=question.conversation_id,
+                    agent_id=question.agent_id,
+                    user_id=ctx.user.id,
+                    text=validated,
+                )
+                validated = captured.text
+                if question.task_id and question.status != UserQuestionStatus.ANSWERED.value:
+                    task = await db.get(Task, question.task_id)
+                    if task and task.workspace_id == ctx.workspace_id:
+                        task.metadata_json = merge_capture_metadata(
+                            task.metadata_json or {}, captured
+                        )
+            payload = payload.model_copy(update={"other_text": validated})
+        except VariableError as exc:
+            raise HTTPException(exc.status_code, str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
 
     if question.status == UserQuestionStatus.ANSWERED.value:
         if not _same_answer(question, payload):
@@ -352,7 +422,7 @@ async def answer(
         if chosen is None:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=f"Unknown option '{payload.option_value}'",
+                detail="Unknown option",
             )
         answer_kind = ANSWER_KIND_OPTION
         option_value = chosen["value"]
@@ -368,6 +438,34 @@ async def answer(
         answer_kind = ANSWER_KIND_OTHER
         option_value = ""
         answer_text = (payload.other_text or "").strip()
+
+    from jhin_tools.readiness import resolve_required_answer
+
+    try:
+        typed_choice = answer_kind == ANSWER_KIND_OPTION and question.value_type != "text"
+        resolved = await resolve_required_answer(
+            db, question, option_value if typed_choice else answer_text
+        )
+        if not typed_choice:
+            answer_text = resolved
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    if (question.required or question.input_key.startswith("schedule_activate_")) and (
+        question.input_key and question.task_id
+    ):
+        from jhin_api.human_authority import human_content
+
+        task = await db.get(Task, question.task_id)
+        if task is not None and task.workspace_id == ctx.workspace_id:
+            previous = (task.metadata_json or {}).get("resolved_input_authority", {})
+            task.metadata_json = {
+                **(task.metadata_json or {}),
+                "resolved_input_authority": {
+                    **(previous if isinstance(previous, dict) else {}),
+                    question.input_key: human_content(ctx, {"user_id": str(ctx.user.id)}),
+                },
+            }
 
     granted_scope, granted_authority, denied_reason = _grant_for(
         question, ctx, answer_kind=answer_kind, option_value=option_value

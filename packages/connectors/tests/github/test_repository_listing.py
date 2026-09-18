@@ -70,7 +70,21 @@ async def _list(
         RepositoryListInput(connection_id=connection_id, **arguments),  # type: ignore[arg-type]
     )
     assert isinstance(output, RepositoryListOutput)
+    # Count only the final visible rows: never provider rows removed by grants,
+    # query filters, pagination limits, or the tool-result byte budget.
+    assert output.returned_count == len(output.repositories)
+    assert output.model_dump(mode="json")["returned_count"] == len(output.repositories)
     return output
+
+
+def test_returned_count_is_part_of_the_output_schema() -> None:
+    schema = RepositoryListOutput.model_json_schema()
+    count = schema["properties"]["returned_count"]
+
+    assert count["type"] == "integer"
+    assert count["minimum"] == 0
+    assert "returned_count" in schema["required"]
+    assert "returned" in count["description"]
 
 
 async def test_a_query_finds_the_repository_a_person_named_loosely(

@@ -38,6 +38,19 @@ LIVE_A = "We deploy every other Thursday."
 LIVE_B = "The release day is every other Thursday."
 
 
+def test_adjudication_projects_credentials_before_pair_bounds():
+    from jhin_memory.adjudication import MAX_PAIR_TEXT_CHARS
+
+    key = "a" * 24 + ":" + "b" * 64
+    content = "x" * (MAX_PAIR_TEXT_CHARS - 40) + " " + key
+    pair = AdjudicationPair(content_a=content, content_b=content, subject_a=key, subject_b=key)
+    request = build_adjudication_request(model="test", pairs=[pair])
+    text = request.messages[-1].content
+    assert "a" * 24 not in text and "b" * 64 not in text
+    assert "REDACTED" in text
+    assert pair.content_a == content and pair.subject_a == key
+
+
 class TestClassification:
     def test_rule_duplicate_is_classified_duplicate(self) -> None:
         verdict = compare_contents(
@@ -417,3 +430,82 @@ class TestWritePathAdjudication:
         )
         assert len(result.created) == 1
         assert result.adjudicated == 0
+
+
+class TestServingWindow:
+    """Adjudication runs against the workspace default profile's own instance.
+    Ollama reloads the runner whenever the effective ``num_ctx`` changes, so a
+    request that pinned nothing would drop the instance back to the host
+    default under every other Jhin path sharing that profile."""
+
+    async def test_adjudication_asks_for_the_profile_window(self) -> None:
+        client = StubClient('{"verdicts": ["SAME"]}')
+        adjudicator = MemoryAdjudicator(
+            client, model="qwen3.8:latest", provider_type="ollama", context_window=131_072
+        )
+        await adjudicator.adjudicate(
+            [AdjudicationPair(content_a=LIVE_A, content_b=LIVE_B)], workspace_id=WS
+        )
+        assert client.requests[0].extra == {"options": {"num_ctx": 131_072}}
+
+    def test_an_unconfigured_profile_pins_nothing(self) -> None:
+        request = build_adjudication_request(
+            model="qwen3.8:latest",
+            pairs=[AdjudicationPair(content_a=LIVE_A, content_b=LIVE_B)],
+            provider_type="ollama",
+            context_window=None,
+        )
+        assert request.extra == {}
+
+    def test_a_provider_whose_window_jhin_cannot_set_is_asked_for_nothing(self) -> None:
+        request = build_adjudication_request(
+            model="gpt-4o-mini",
+            pairs=[AdjudicationPair(content_a=LIVE_A, content_b=LIVE_B)],
+            provider_type="openai_compatible",
+            context_window=128_000,
+        )
+        assert request.extra == {}
+
+    async def test_the_resolver_carries_the_profiles_window(self, session: AsyncSession) -> None:
+        workspace = await self._ollama_workspace(session, context_window=131_072)
+        adjudicator = await resolve_memory_adjudicator(session, None, workspace_id=workspace.id)
+        assert adjudicator is not None
+        assert adjudicator.requested_context_window == 131_072
+        await adjudicator.close()
+
+    async def test_the_resolver_pins_nothing_for_an_unconfigured_profile(
+        self, session: AsyncSession
+    ) -> None:
+        workspace = await self._ollama_workspace(session, context_window=None)
+        adjudicator = await resolve_memory_adjudicator(session, None, workspace_id=workspace.id)
+        assert adjudicator is not None
+        assert adjudicator.requested_context_window is None
+        await adjudicator.close()
+
+    async def _ollama_workspace(
+        self, session: AsyncSession, *, context_window: int | None
+    ) -> Workspace:
+        workspace = Workspace(name="W", slug=f"w-{new_uuid7().hex[:8]}")
+        session.add(workspace)
+        await session.flush()
+        provider = ModelProvider(
+            workspace_id=workspace.id,
+            type="ollama",
+            display_name="local",
+            base_url="http://ollama.local:11434/v1",
+            enabled=True,
+        )
+        session.add(provider)
+        await session.flush()
+        profile = ModelProfile(
+            workspace_id=workspace.id,
+            provider_id=provider.id,
+            display_name="qwen3.8",
+            model_name="qwen3.8:latest",
+            context_window=context_window,
+        )
+        session.add(profile)
+        await session.flush()
+        workspace.default_model_profile_id = profile.id
+        await session.flush()
+        return workspace

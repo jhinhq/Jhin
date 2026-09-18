@@ -128,6 +128,30 @@ def embedder(client: StubEmbeddingClient) -> MemoryEmbedder:
     )
 
 
+@pytest.mark.parametrize("path", ["query", "candidates", "records", "backfill"])
+async def test_every_embedding_path_projects_legacy_credentials(session, w, path):
+    key = "a" * 24 + ":" + "b" * 64
+    original = f"Ghost setup uses {key}; drafts need review."
+    record = await seed(session, w, original)
+    original_hash = record.content_hash
+    client = StubEmbeddingClient()
+    service = embedder(client)
+    if path == "query":
+        assert await service.embed_query(original, workspace_id=w.workspace.id)
+    elif path == "candidates":
+        assert await service.embed_texts([original], workspace_id=w.workspace.id)
+    elif path == "records":
+        assert await service.embed_records(session, [record], workspace_id=w.workspace.id) == 1
+    else:
+        assert (await service.embed_missing(session, workspace_id=w.workspace.id))[0] == 1
+    assert len(client.calls) == 1
+    sent = client.calls[0][0]
+    assert key not in sent and "b" * 64 not in sent
+    assert "REDACTED legacy credential" in sent and "drafts need review" in sent
+    await session.refresh(record)
+    assert record.content == original and record.content_hash == original_hash
+
+
 async def seed(session: AsyncSession, w: World, content: str, **overrides: Any) -> MemoryRecord:
     values: dict[str, Any] = {
         "workspace_id": w.workspace.id,
@@ -138,7 +162,7 @@ async def seed(session: AsyncSession, w: World, content: str, **overrides: Any) 
         "content_hash": new_uuid7().hex,
         "visibility": "agent",
         "status": MemoryStatus.ACTIVE.value,
-        "created_by_type": "agent",
+        "created_by_type": "user",
         "created_by_id": w.agent.id,
     }
     values.update(overrides)

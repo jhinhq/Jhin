@@ -89,6 +89,18 @@ function renderPage() {
 }
 
 describe("OAuthSettingsPage", () => {
+  it("shows managed connection configuration without exposing credentials", async () => {
+    installServer({ ...REDIRECT, composio: { configured: true, callback_url: "https://jhin.example.com/api/v1/oauth/composio/callback", toolkits: ["supabase", "linear"] } }, []);
+    renderPage();
+    const card = await screen.findByTestId("composio-settings");
+    expect(card.textContent).toContain("Configured");
+    expect(card.textContent).toContain("supabase, linear");
+    expect(card.textContent).toContain("https://jhin.example.com/api/v1/oauth/composio/callback");
+    expect(card.textContent).toContain("Settings → General → Configuration");
+    expect(card.textContent).toContain("callback identity verifier");
+    expect(card.textContent).toContain("public HTTPS");
+  });
+
   it("says the browser sign-in comes first and needs nothing on GitHub", async () => {
     installServer(REDIRECT, [client()]);
     renderPage();

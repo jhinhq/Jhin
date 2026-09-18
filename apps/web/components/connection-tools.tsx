@@ -85,7 +85,7 @@ export function ConnectionTools({
           {data.tools.length} {data.tools.length === 1 ? "tool" : "tools"}
           {data.dynamic && data.discovered_at ? ` · checked ${formatDateTime(data.discovered_at)}` : ""}
         </span>
-        {data.capability_pattern ? (
+        {data.dynamic && data.capability_pattern ? (
           <span>
             · grant <code className="font-mono text-ink">{data.capability_pattern}</code> for everything here
           </span>

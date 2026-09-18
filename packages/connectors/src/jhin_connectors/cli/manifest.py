@@ -10,6 +10,7 @@ CLI_CAPABILITIES: tuple[str, ...] = (
     "cli.file.list",
     "cli.file.search",
     "cli.file.read",
+    "cli.file.publish",
     "cli.file.edit",
     "cli.file.write",
 )

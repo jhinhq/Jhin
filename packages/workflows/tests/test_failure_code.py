@@ -55,3 +55,11 @@ def test_other_types_keep_the_default_code() -> None:
     cause = ApplicationError("openai: HTTP 500", type="model_provider_error")
     assert _failure_code(_activity_error(cause), "step_failed") == "step_failed"
     assert _failure_code(RuntimeError("plain"), "step_failed") == "step_failed"
+
+
+def test_truncated_model_output_keeps_its_code_and_explanation() -> None:
+    message = "The model response reached its output limit; the task is incomplete."
+    cause = ApplicationError(message, type="model_output_truncated", non_retryable=True)
+    wrapped = _activity_error(cause)
+    assert _failure_code(wrapped, "step_failed") == "model_output_truncated"
+    assert _failure_message(wrapped) == message

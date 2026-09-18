@@ -4,6 +4,7 @@ contradiction, and promotion rules (no I/O)."""
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from jhin_domain import ActorType, MemoryScope, MemorySensitivity, MemoryStatus, new_uuid7
 from jhin_memory import (
@@ -37,6 +38,26 @@ AGENT_ACTOR = ActorFacts(actor_type=ActorType.AGENT, actor_id=AGENT)
 
 
 class TestScreening:
+    @pytest.mark.parametrize("credential", ["a" * 24 + ":" + "b" * 64, "sb_secret_" + "c" * 32])
+    def test_shared_credential_formats_cannot_be_remembered(self, credential: str) -> None:
+        result = screen_content(f"Ghost setup uses {credential}; drafts need review.")
+        assert result.rejected and result.content == ""
+
+    def test_credential_in_subject_is_rejected_before_normalization(self) -> None:
+        decision = evaluate_candidate(
+            MemoryCandidate(
+                content="Drafts need director review.", subject="a" * 24 + ":" + "b" * 64
+            ),
+            source(),
+            AGENT_ACTOR,
+        )
+        assert decision.outcome == "reject"
+
+    @pytest.mark.parametrize("tag", ["a" * 24 + ":" + "b" * 64, "sb_secret_" + "c" * 80])
+    def test_credential_tag_is_rejected_before_fifty_character_bound(self, tag: str) -> None:
+        with pytest.raises(ValidationError, match="credential"):
+            MemoryCandidate(content="Drafts need review.", tags=(tag,))
+
     @pytest.mark.parametrize(
         "text",
         [
@@ -63,6 +84,23 @@ class TestScreening:
         assert result.redacted
         assert "hunter2" not in result.content
         assert "[REDACTED]" in result.content
+
+    @pytest.mark.parametrize("label", ["password", "passwd", "passphrase", "pin"])
+    @pytest.mark.parametrize("quote", ['"', "'"])
+    def test_quoted_password_alias_redacts_the_complete_value(self, label: str, quote: str) -> None:
+        value = "synthetic multi word"
+        result = screen_content(
+            f"The staging {label} is {quote}{value}{quote} and rotates monthly."
+        )
+        assert result.redacted and not result.rejected
+        assert not any(word in result.content.split(" is ", 1)[1] for word in value.split())
+        assert "[REDACTED] and rotates monthly." in result.content
+
+    def test_escaped_quotes_in_password_alias_do_not_leave_a_tail(self) -> None:
+        result = screen_content('passwd is "synthetic \\"multi\\" word" and rotates monthly.')
+        assert result.redacted and not result.rejected
+        assert all(word not in result.content for word in ("synthetic", "multi", "word"))
+        assert "rotates monthly" in result.content
 
     def test_ordinary_text_passes(self) -> None:
         result = screen_content("Varand prefers concise status updates on Mondays.")

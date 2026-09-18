@@ -23,6 +23,7 @@ Worker integration points for the Phase 10 activities merge:
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -58,6 +59,7 @@ from jhin_memory import (
 from jhin_models import build_model_client
 from jhin_observability import get_logger
 from jhin_secrets import SecretStore
+from jhin_secrets.intake import redact_legacy_payload, redact_legacy_text
 from jhin_secrets.redaction import redact_text
 from jhin_workflows.memory_maintenance import (
     ACTIVITY_APPLY_MEMORY_CANDIDATES,
@@ -108,7 +110,7 @@ async def load_known_memories(
 
 
 def _message_text(message: Message) -> str:
-    content = message.content_json or {}
+    content = redact_legacy_payload(message.content_json or {})
     for key in ("text", "summary", "instructions", "body"):
         value = content.get(key)
         if isinstance(value, str) and value.strip():
@@ -130,7 +132,7 @@ def _render_messages(messages: list[Message], agent_id: UUID) -> str:
             role = "system"
         text = _message_text(message)
         if text:
-            lines.append(f"{role}: {text}")
+            lines.append(f"[source_message_id={message.id}] {role}: {text}")
     return "\n".join(lines)
 
 
@@ -189,8 +191,8 @@ async def load_source_text(
         refs["task_id"] = str(task.id)
         if task.conversation_id is not None:
             refs["conversation_id"] = str(task.conversation_id)
-        parts = [f"task: {task.title}"]
-        metadata = task.metadata_json or {}
+        parts = [f"task: {redact_legacy_text(task.title)}"]
+        metadata = redact_legacy_payload(task.metadata_json or {})
         # Structured agent↔agent exchange context so a delegated / work-request
         # child learns from what it was told and what it reported.
         delegation = metadata.get("delegation")
@@ -206,7 +208,7 @@ async def load_source_text(
             who = str(work_request.get("requester_agent_name", "") or "another agent")
             parts.append(f"work request from {who}")
         if task.description:
-            parts.append(f"description: {task.description[:2_000]}")
+            parts.append(f"description: {redact_legacy_text(task.description)[:2_000]}")
         for key in ("result", "reported_result"):
             result = metadata.get(key)
             if isinstance(result, dict):
@@ -247,7 +249,7 @@ async def load_source_text(
                 )
             )
             for row in feedback_rows:
-                content = row.content_json or {}
+                content = redact_legacy_payload(row.content_json or {})
                 if str(content.get("child_task_id", "")) != str(task.id):
                     continue
                 summary = str(content.get("summary", "") or "").strip()
@@ -267,7 +269,7 @@ async def load_source_text(
     # Defence in depth: the source may contain a pasted credential; the
     # extraction prompt forbids copying it and policy screens candidates, but
     # we also never send known secret values to the model.
-    return redact_text(text)[-MAX_SOURCE_CHARS:], refs
+    return redact_text(redact_legacy_text(text))[-MAX_SOURCE_CHARS:], refs
 
 
 class MemoryActivities:
@@ -295,6 +297,18 @@ class MemoryActivities:
             source_text, _refs = loaded
             if not source_text.strip():
                 return ExtractMemoryCandidatesResult(ok=True, candidates_json=[])
+            from jhin_memory.capture import available_capture_policies
+
+            policies = await available_capture_policies(
+                session, workspace_id=workspace_id, agent_id=agent_id
+            )
+            if policies:
+                source_text = (
+                    "Current prospective capture policies (planning hints, checked at write): "
+                    + json.dumps(policies, sort_keys=True)
+                    + "\n"
+                    + source_text
+                )
 
             try:
                 snapshot = await resolve_snapshot(session, workspace_id, agent_id)
@@ -334,6 +348,11 @@ class MemoryActivities:
                     source_text=source_text,
                     agent_name=snapshot.name,
                     existing_memories=known,
+                    # This client runs against the agent's own resident model;
+                    # asking for a different window than the agent's steps ask
+                    # for would reload it underneath them.
+                    provider_type=snapshot.model_profile.provider_type,
+                    context_window=snapshot.model_profile.context_window,
                 )
             finally:
                 await client.close()
@@ -432,12 +451,43 @@ class MemoryActivities:
                 metrics=self._metrics,
                 tracer=self._tracer,
             )
-            vectors: list[list[float]] | None = None
+            vectors: list[list[float] | None] | None = None
             try:
                 if embedder is not None:
-                    vectors = await embedder.embed_texts(
-                        [c.content for c in candidates], workspace_id=workspace_id
-                    )
+                    from jhin_memory.capture import resolve_capture_actor
+                    from jhin_memory.evidence import candidate_evidence
+                    from jhin_memory.policy import evaluate_candidate
+                    from jhin_memory.screening import screen_content, unsafe_metadata
+
+                    # Do not send rejected/private/secret candidates to the provider
+                    # before policy has had a chance to reject them. Persistence
+                    # repeats live authority checks after this external call.
+                    safe: list[tuple[int, str]] = []
+                    for index, candidate in enumerate(candidates):
+                        screened = screen_content(candidate.content)
+                        if screened.rejected or unsafe_metadata(candidate.subject, candidate.tags):
+                            continue
+                        candidate_actor = actor
+                        if candidate.capture_class is not None:
+                            evidence = await candidate_evidence(session, candidate, source)
+                            candidate_actor = await resolve_capture_actor(
+                                session, candidate, source, actor, evidence, now=datetime.now(UTC)
+                            )
+                            if candidate_actor.capture_policy_id is None:
+                                continue
+                        decision = evaluate_candidate(
+                            candidate, source, candidate_actor, agent_name=agent.name
+                        )
+                        if decision.outcome != "reject":
+                            safe.append((index, decision.content))
+                    if safe:
+                        embedded_vectors = await embedder.embed_texts(
+                            [text for _, text in safe], workspace_id=workspace_id
+                        )
+                        if embedded_vectors is not None:
+                            vectors = [None] * len(candidates)
+                            for (index, _), vector in zip(safe, embedded_vectors, strict=True):
+                                vectors[index] = vector
                 applied = await apply_candidates(
                     session,
                     candidates=candidates,
@@ -447,6 +497,7 @@ class MemoryActivities:
                     embedding_model=embedder.model if embedder is not None else None,
                     agent_name=agent.name,
                     adjudicator=adjudicator,
+                    require_evidence=True,
                 )
                 summary: dict[str, Any] = applied.summary()
                 embedded = sum(1 for r in applied.created if r.embedding_json)

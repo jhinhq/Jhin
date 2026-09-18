@@ -282,6 +282,10 @@ async def probe(
     provider table the connector ships.
     """
     connector_type = payload.connector_type
+    if payload.provider_key == "composio" or connector_type == "composio":
+        from jhin_api.oauth import composio
+
+        return composio.probe(settings, connector_type)
     if connector_type != MCP_CONNECTOR_TYPE:
         return await _static_provider_probe(db, crypto, ctx, settings, connector_type)
 
@@ -519,6 +523,12 @@ async def start_authorization(
     """
     connector_type = payload.connector_type
     connections.get_connector(connector_type)
+    if payload.provider_key == "composio":
+        from jhin_api.oauth import composio
+
+        return await composio.start(
+            db, crypto, ctx, http_client, settings, payload, request_id=request_id, ip_hash=ip_hash
+        )
     uri = redirect_module.redirect_uri(settings)
 
     pending_store = PendingAuthorizationStore(db, crypto)
@@ -766,8 +776,11 @@ async def _client_for(
             target.metadata,
             redirect_uri=uri,
             client_name=settings.oauth_client_name,
-            client_uri=settings.app_url,
+            client_uri=settings.app_url if settings.app_url.startswith("https://") else None,
             scopes=target.scope,
+            application_type=(
+                "native" if redirect_module.is_loopback_redirect(settings) else "web"
+            ),
         )
     except TransientOAuthError as exc:
         raise _upstream_unavailable(
@@ -1406,6 +1419,14 @@ async def _persist_connection(
         issuer=row.issuer,
         authorized_by_user_id=user_id,
     )
+    if connection.connector_type == "mcp":
+        # A token grant alone supplies no MCP tool definitions. Initialize
+        # the server with the new token now so a new app is ready to assign.
+        await connections.check_initial_connection(db, crypto, connection)
+    else:
+        # Native OAuth providers just validated the authorization code (or
+        # device grant) and returned these tokens. Record that actual check.
+        connection.last_verified_at = datetime.now(UTC)
     audit.record(
         db,
         action="connection.oauth_authorized",
@@ -2081,5 +2102,7 @@ def provider_key_for(connection: Connection) -> str | None:
     back through discovery. Reading it off the connector type keeps the
     Reconnect button from needing the caller to remember which.
     """
+    if connection.oauth_issuer == "https://composio.dev":
+        return "composio"
     provider = _static_provider_for(connection.connector_type)
     return str(provider.key) if provider is not None else None

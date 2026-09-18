@@ -5,14 +5,17 @@ description = "Safe image normalization and the MediaStore boundary for Jhin ava
 requires-python = ">=3.13"
 dependencies = [
     "pillow>=11.0",
+    "pypdf>=5.0",
     "sqlalchemy[asyncio]>=2.0.36",
     "jhin-db",
     "jhin-domain",
+    "jhin-observability",
 ]
 
 [tool.uv.sources]
 jhin-db = { workspace = true }
 jhin-domain = { workspace = true }
+jhin-observability = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

@@ -20,6 +20,9 @@
 import { ExternalLink, Search } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
+import { ConnectionMethodSelect } from "@/components/connect/method-select";
+import type { AppConnectMethod } from "@/lib/apps";
+import type { ConnectorInfo } from "@/lib/types";
 import { CategoryRail } from "@/components/catalog/category-rail";
 import { LogoTile } from "@/components/catalog/logo-tile";
 import { TrustBadge } from "@/components/catalog/trust-badge";
@@ -43,7 +46,7 @@ import type {
 
 type ConnectShape = Pick<
   CatalogApp,
-  "sign_in" | "connector_type" | "stdio_only" | "mcp_url" | "url_unverified"
+  "sign_in" | "connector_type" | "stdio_only" | "mcp_url" | "url_unverified" | "composio_toolkit"
 >;
 
 /** What a person is in for, in the words they would use. An entry that has
@@ -138,6 +141,7 @@ const EMPTY_MESSAGE =
   "No apps match. Any app with an MCP server can still be added with “Add a custom app” at the top of this page.";
 
 function CuratedCard({
+  connectors = [],
   entry,
   connections,
   canManage,
@@ -148,19 +152,21 @@ function CuratedCard({
   entry: CatalogApp;
   connections: ConnectionInfo[];
   canManage: boolean;
-  onConnect: (entry: CatalogApp) => void;
+  connectors?: ConnectorInfo[];
+  onConnect: (entry: CatalogApp, method?: AppConnectMethod) => void;
   onOpenConnection: (connection: ConnectionInfo) => void;
   onOpenDetail?: (slug: string) => void;
 }) {
+  const [method, setMethod] = useState<AppConnectMethod>("default");
   const connected = connectionsForApp(entry, connections);
   // A lapsed sign-in has to be visible on the card people look at, not only
   // in the banner at the top of the page.
   const stale = needsReauth(connected);
-  const connectable = Boolean(entry.connector_type) || !entry.stdio_only;
+  const connectable = Boolean(entry.connector_type) || !entry.stdio_only || (method === "composio" && Boolean(entry.composio_toolkit));
   return (
     <li
       data-testid={`app-${entry.slug}`}
-      className="flex flex-col gap-3 rounded-2xl border border-line bg-surface px-5 py-4 shadow-card"
+      className="flex min-w-0 flex-col gap-3 rounded-2xl border border-line bg-surface px-5 py-4 shadow-card"
     >
       <header className="flex items-center gap-3">
         <LogoTile name={entry.name} icon={entry.icon} logoUrl={entry.logo_url} size={36} />
@@ -180,20 +186,19 @@ function CuratedCard({
       {entry.stdio_only && entry.setup_note ? (
         <p className="text-xs text-faint">{entry.setup_note}</p>
       ) : null}
-      <footer className="mt-auto flex flex-wrap items-center justify-between gap-2 border-t border-line pt-3">
-        {entry.docs_url ? (
-          <a
-            href={entry.docs_url}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-1 text-xs text-accent-strong hover:underline"
-          >
-            <ExternalLink size={12} aria-hidden /> Docs
-          </a>
-        ) : (
-          <span />
-        )}
-        <div className="flex items-center gap-2">
+      <footer className="mt-auto min-w-0 space-y-2 border-t border-line pt-3">
+        {canManage ? <ConnectionMethodSelect entry={entry} connectors={connectors} value={method} onChange={setMethod} /> : null}
+        <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
+          {entry.docs_url ? (
+            <a
+              href={entry.docs_url}
+              target="_blank"
+              rel="noreferrer"
+              className="mr-auto inline-flex items-center gap-1 text-xs text-accent-strong hover:underline"
+            >
+              <ExternalLink size={12} aria-hidden /> Docs
+            </a>
+          ) : null}
           {connected.length > 0 ? (
             <Button
               size="sm"
@@ -209,7 +214,7 @@ function CuratedCard({
             </Button>
           ) : null}
           {canManage && connectable ? (
-            <Button size="sm" variant="primary" onClick={() => onConnect(entry)}>
+            <Button size="sm" variant="primary" onClick={() => onConnect(entry, method)}>
               {connected.length > 0 ? "Connect another" : "Connect"}
             </Button>
           ) : null}
@@ -224,6 +229,7 @@ function CuratedCard({
  * opens the detail sheet first, so nothing is dialled sight unseen. Nothing
  * here dials the server — the URL is only ever a form value. */
 function CatalogCard({
+  connectors = [],
   entry,
   builtin,
   connections,
@@ -237,10 +243,12 @@ function CatalogCard({
   builtin?: CatalogApp;
   connections: ConnectionInfo[];
   canManage: boolean;
-  onConnect: (entry: CatalogApp) => void;
+  connectors?: ConnectorInfo[];
+  onConnect: (entry: CatalogApp, method?: AppConnectMethod) => void;
   onOpenConnection: (connection: ConnectionInfo) => void;
   onOpenDetail?: (slug: string) => void;
 }) {
+  const [method, setMethod] = useState<AppConnectMethod>("default");
   const connected = connectionsForApp(entry, connections);
   const stale = needsReauth(connected);
   const openDetail = onOpenDetail ? () => onOpenDetail(entry.slug) : undefined;
@@ -249,10 +257,10 @@ function CatalogCard({
   const logoUrl = builtin?.logo_url ?? entry.logo_url;
 
   const builtinConnectable =
-    builtin !== undefined && (Boolean(builtin.connector_type) || !builtin.stdio_only);
+    builtin !== undefined && (Boolean(builtin.connector_type) || !builtin.stdio_only || (method === "composio" && Boolean(entry.composio_toolkit ?? builtin.composio_toolkit)));
   const connect = builtin
     ? canManage && builtinConnectable
-      ? () => onConnect(builtin)
+      ? () => onConnect({ ...builtin, composio_toolkit: entry.composio_toolkit ?? builtin.composio_toolkit }, method)
       : undefined
     : canManage && entry.connectable && openDetail !== undefined
       ? openDetail
@@ -261,37 +269,38 @@ function CatalogCard({
   return (
     <li
       data-testid={entry.source === "builtin" ? `app-${entry.slug}` : `catalog-${entry.slug}`}
-      className="flex flex-col gap-3 rounded-2xl border border-line bg-surface px-5 py-4 shadow-card"
+      className="flex min-w-0 flex-col gap-3 rounded-2xl border border-line bg-surface px-5 py-4 shadow-card"
     >
-      <header className="flex items-center gap-3">
-        <LogoTile name={entry.name} icon={entry.icon} logoUrl={logoUrl} size={40} />
-        <div className="min-w-0 flex-1">
-          <h3 className="truncate font-medium text-ink">{entry.name}</h3>
-          <div className="mt-1">
-            <TrustBadge tier={entry.trust_tier} deprecated={entry.deprecated} />
-          </div>
+      <header className="space-y-2">
+        <div className="flex items-center gap-3">
+          <LogoTile name={entry.name} icon={entry.icon} logoUrl={logoUrl} size={40} />
+          <h3 className="min-w-0 truncate font-medium text-ink">{entry.name}</h3>
         </div>
-        {stale.length > 0 ? (
-          <Badge tone="warn">Reconnect needed</Badge>
-        ) : connected.length > 0 ? (
-          <Badge tone="ok">Connected</Badge>
-        ) : entry.stdio_only ? (
-          <Badge tone="neutral">Self-hosted</Badge>
-        ) : null}
+        <div className="flex flex-wrap items-center gap-2">
+          <TrustBadge tier={entry.trust_tier} deprecated={entry.deprecated} />
+          {stale.length > 0 ? (
+            <Badge tone="warn">Reconnect needed</Badge>
+          ) : connected.length > 0 ? (
+            <Badge tone="ok">Connected</Badge>
+          ) : entry.stdio_only ? (
+            <Badge tone="neutral">Self-hosted</Badge>
+          ) : null}
+        </div>
       </header>
       <p className={`line-clamp-2 text-sm leading-relaxed ${summary ? "text-dim" : "text-faint"}`}>
         {summary || "The index carries no description for this one."}
       </p>
       {/* No category here: it truncated badly next to the buttons, and the
         * rail plus the detail sheet already carry it. */}
-      <footer className="mt-auto flex flex-wrap items-center justify-end gap-2 border-t border-line pt-3">
-        <div className="flex shrink-0 items-center gap-2">
+      <footer className="mt-auto min-w-0 space-y-2 border-t border-line pt-3">
+        {canManage && builtin ? <ConnectionMethodSelect entry={{ ...builtin, composio_toolkit: entry.composio_toolkit ?? builtin.composio_toolkit }} connectors={connectors} value={method} onChange={setMethod} /> : null}
+        <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
           {isSafeExternalUrl(docsUrl) ? (
             <a
               href={docsUrl}
               target="_blank"
               rel="noopener noreferrer nofollow ugc"
-              className="inline-flex items-center gap-1 text-xs text-accent-strong hover:underline"
+              className="mr-auto inline-flex items-center gap-1 text-xs text-accent-strong hover:underline"
             >
               <ExternalLink size={12} aria-hidden /> Docs
             </a>
@@ -325,7 +334,8 @@ export interface AppLibraryProps {
   entries: CatalogApp[];
   connections: ConnectionInfo[];
   canManage: boolean;
-  onConnect: (entry: CatalogApp) => void;
+  connectors?: ConnectorInfo[];
+  onConnect: (entry: CatalogApp, method?: AppConnectMethod) => void;
   onOpenConnection: (connection: ConnectionInfo) => void;
   /** Present only in catalog mode: the merged page the server returned. */
   catalogEntries?: CatalogEntry[];
@@ -350,6 +360,7 @@ export interface AppLibraryProps {
 /** The library as it has always been: local search, a category dropdown, and
  * the curated entries. Untouched by the catalog work on purpose. */
 function CuratedLibrary({
+  connectors = [],
   entries,
   connections,
   canManage,
@@ -396,6 +407,7 @@ function CuratedLibrary({
         <ul className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           {visible.map((entry) => (
             <CuratedCard
+              connectors={connectors}
               key={entry.slug}
               entry={entry}
               connections={connections}
@@ -447,6 +459,7 @@ function UnreviewedSwitch({
  * rows behind "More filters" all drive a request, and the grid renders
  * whatever page came back. */
 function CatalogLibrary({
+  connectors = [],
   entries,
   connections,
   canManage,
@@ -581,6 +594,7 @@ function CatalogLibrary({
           <ul className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
             {catalogEntries.map((entry) => (
               <CatalogCard
+                connectors={connectors}
                 key={`${entry.kind}-${entry.slug}`}
                 entry={entry}
                 builtin={entry.source === "builtin" ? curated.get(entry.slug) : undefined}

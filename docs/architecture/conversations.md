@@ -73,6 +73,7 @@ messages or raw tool payloads that are not already public through
 | DELETE | `/{conversation_id}` | admin | 204; tasks keep their rows, `conversation_id` becomes null |
 | GET | `/{conversation_id}/messages` | viewer | query `after` (message id) → `list[ConversationMessageOut]` |
 | POST | `/{conversation_id}/turns` | member | `TurnIn` → `TurnOut` |
+| POST | `/{conversation_id}/resume` | member | no body → `ResumeOut`; 409 when there is nothing to pick up, when the failed turn holds an unaccounted-for call, or when the chat/agent cannot take work |
 | GET | `/{conversation_id}/activity` | viewer | → `ActivityListOut` (cards scoped to this conversation, see below) |
 
 Additional:
@@ -177,6 +178,112 @@ AttentionOut
    `mode = "new_task"`.
 5. Bump `last_activity_at`, audit `conversation.turn`.
 
+### Resuming a failed turn (`POST /{conversation_id}/resume`)
+
+A run that dies leaves the person's question in the thread with nothing after
+it. This sends that same question again — the words are already on the task,
+so nothing is retyped.
+
+It is a **new work episode in the same conversation**, not a restart of the
+old one. The failed task keeps its row, its `failed` activity card and its
+place in the transcript: somebody coming back tomorrow is entitled to see that
+it happened, and the thread is where the context is.
+
+1. Load the conversation; apply the same chat-authority rule as rename and
+   delete (your own chat, or admin).
+2. Take the newest *turn* task — `parent_task_id is None` and
+   `metadata_json.origin in {"conversation", "message"}`, so a colleague's
+   task that merely reports **into** the thread is never a candidate. Only the
+   newest one is resumable: an older failure has been overtaken, and
+   re-running it would answer a question two exchanges old.
+3. If that task is not failed but carries `resume_of_task_id`, this is the
+   second press of a button whose first press already worked: return that task
+   with `created: false`.
+4. Re-read the failed task `FOR UPDATE`. A `resumed_by_task_id` stamp means
+   the same thing — return the successor, `created: false`. That stamp,
+   written in the same transaction as the new task, is what makes the endpoint
+   safe to press twice.
+5. Refuse (409) when any tool call on the failed task's runs is in
+   `UNRECONCILED_TOOL_STATUSES` (below), when the chat is archived, or when
+   the agent is not `ACTIVE`.
+6. Create the new `Task` (same title, `description` = the failed turn's
+   instruction, `metadata_json.resume_of_task_id`), **move** the seed user
+   message onto it (promoting an `instruction` row to `text`), stamp
+   `resumed_by_task_id`, add a system `note` with
+   `content_json.kind == "turn_resumed"` and no `task_id`, bump
+   `last_activity_at`, audit `conversation.resumed`, commit, then start the
+   workflow. A Temporal outage marks the new task failed and raises 503, which
+   leaves the newest turn failed again — offered back rather than stranded.
+
+The seed message is *moved* rather than copied, and that is load-bearing in
+both directions. Copying would show the person's words twice in the
+transcript; leaving it behind would break `_is_chat_turn` on the new task (see
+"The invariant" below), so the question would be restated as a `Task:` brief
+**ahead** of everything said earlier — the shape that has agents answering the
+previous question.
+
+`ConversationDetailOut.resume` is the read side of the same decision, so the
+UI can render the control before anything is pressed:
+
+```text
+ConversationResumeOut | null     # null = nothing to offer; show no control at all
+  task_id                        # the failed turn; match it to a message's task_id
+  run_id: uuid|null
+  state: "ready" | "blocked" | "unavailable"
+  reason: str                    # one sentence, product voice, always present
+  instruction: str               # the words, so a client can put them back
+  unreconciled_tool_call_id: uuid|null    # set when state == "blocked"
+```
+
+`blocked` is not a second safety model. It reads
+`jhin_domain.UNRECONCILED_TOOL_STATUSES` — `executing` and
+`execution_unknown` — which is the row's record of a decision the tool layer
+already took, read from this end:
+
+- `claimed` is deliberately absent: the gateway proves nothing was dispatched
+  there and re-executes such a call itself.
+- A call whose tool declares a repeat safe (`redispatch_is_safe` on the tool
+  definition — a checkout reads a remote, a push changes one) is re-dispatched
+  by recovery, so it ends terminal and never reaches the set either.
+
+What is left is the residue: a call the platform itself declined to repeat.
+Deriving a verdict here from those same inputs would be a second
+classification to keep in step; reading the conclusion keeps one. The refusal
+names what the step was *doing* (`activity_phrase`, never the tool's raw
+name) and what the person can do instead; the web offers the words back in the
+composer, so the person rather than the platform decides whether to repeat a
+call that may already have gone through.
+
+### What a failure says (`jhin_domain.failures`)
+
+A failed run records an `error_code` and an `error_message` written for
+whoever debugs it. Shown verbatim, that put "Run failed: tool call a34dd1dc-…
+execution outcome is unknown; manual reconciliation is required" in front of
+somebody who was mid-conversation. `failure_notice(code, message)` is the
+other half of the record: one sentence per failure class, in the product's
+voice, with the identifier lifted out of the prose.
+
+```text
+FailureNoticeOut        # ConversationMessageOut.failure, on system `error` rows
+  code       # internal; for support, and for clients special-casing one class
+  summary    # one sentence, always present, never containing an identifier
+  detail     # the failure's own words where they add something; "" otherwise
+  reference  # the id support would ask for
+```
+
+Only the *code* chooses words. `error_message` is free text assembled from
+provider errors and container output, so it is carried through as `detail` and
+never parsed for meaning. Where Jhin wrote the message itself
+(`_SELF_DESCRIBED`) the summary replaces it and `detail` is empty; everywhere
+else the original is the actual information and is kept — a provider saying
+"you exceeded your current quota" must not become "a step did not complete".
+
+The stored `content_json` is never rewritten: the row is the record, and a
+projection disagreeing with the database would be worse than the wording it
+fixed. The activity feed's `failed` card composes the same way —
+`"{agent} ran into a problem with “{title}”."` then `detail or summary` — with
+`error_code`, `error_message` and `error_reference` in `detail_json`.
+
 ### Message listing
 
 Returns visible messages (`visibility == VISIBLE`) whose `conversation_id`
@@ -263,10 +370,11 @@ Memory, retrieval, and provenance are out of scope here.
 
 ## Events
 
-Publish `conversation.created` and `conversation.turn` on the existing
-event backbone (`jhin.v1.<workspace>.conversation.*`) with ids only. Audit
-actions: `conversation.created`, `conversation.updated`,
-`conversation.deleted`, `conversation.turn`.
+Publish `conversation.created`, `conversation.turn` and
+`conversation.resumed` on the existing event backbone
+(`jhin.v1.<workspace>.conversation.*`) with ids only. Audit actions:
+`conversation.created`, `conversation.updated`, `conversation.deleted`,
+`conversation.turn`, `conversation.resumed`.
 
 ## Web
 
@@ -275,3 +383,11 @@ The web app calls the endpoints above through `lib/hooks.ts`
 `useConversationActivity`, `useActivity`, `useAttention`) and renders them in
 `/chats`, `/activity`, `/attention`, and agent profiles. Advanced views keep
 linking to `/tasks/{id}` for the underlying work episode.
+
+A failed run renders as `components/chat/failure-card.tsx` rather than a
+system chip, because it is the one system row a person may need to *do*
+something about and a chip has nowhere to put that. The card shows the notice,
+then whichever of the three next steps applies, then the reference and the
+time. A code with a specific cure (out of credit, an unusable model setting)
+keeps its link to Models **and** the retry control on the same card: somebody
+who has just topped up wants the button right there, not back up the thread.

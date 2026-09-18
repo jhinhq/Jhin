@@ -14,10 +14,9 @@ from jhin_connectors.base import (
     WebhookVerificationError,
 )
 from jhin_connectors.linear.client import (
-    AUTH_API_KEY,
-    AUTH_OAUTH,
     DEFAULT_BASE_URL,
     LinearApiError,
+    linear_authorization,
     linear_graphql,
     validate_linear_base_url,
 )
@@ -54,20 +53,9 @@ class LinearConnector(Connector):
         return normalized
 
     async def verify_connection(self, ctx: VerifyContext) -> ConnectionHealth:
-        if ctx.auth_type == AUTH_OAUTH:
-            # Declared in the manifest for forward compatibility; the token
-            # exchange/refresh flow is not implemented yet (plan 11.3).
-            return ConnectionHealth(
-                ok=False,
-                message="OAuth authentication is not implemented yet; use a personal API key.",
-            )
-        if ctx.auth_type != AUTH_API_KEY:
-            return ConnectionHealth(ok=False, message=f"unsupported auth type: {ctx.auth_type!r}")
-        api_key = ctx.credentials.get("api_key", "")
-        if not api_key:
-            return ConnectionHealth(ok=False, message="api_key is missing")
         base_url = str(ctx.config.get("base_url") or DEFAULT_BASE_URL)
         try:
+            api_key = linear_authorization(ctx.auth_type, ctx.credentials)
             data = await linear_graphql(base_url, api_key, _VIEWER_QUERY)
         except LinearApiError as exc:
             return ConnectionHealth(ok=False, message=str(exc))
@@ -78,12 +66,12 @@ class LinearConnector(Connector):
         return ConnectionHealth(
             ok=True,
             message=f"Authenticated as {name}",
-            details={"viewer": name, "auth": "api_key"},
+            details={"viewer": name, "auth": ctx.auth_type},
         )
 
     async def fetch_metadata(self, ctx: VerifyContext) -> dict[str, Any]:
         """Teams and workflow states for UI pickers (trigger builder)."""
-        api_key = ctx.credentials.get("api_key", "")
+        api_key = linear_authorization(ctx.auth_type, ctx.credentials)
         base_url = str(ctx.config.get("base_url") or DEFAULT_BASE_URL)
         data = await linear_graphql(base_url, api_key, TEAMS_QUERY)
         teams: list[dict[str, Any]] = []

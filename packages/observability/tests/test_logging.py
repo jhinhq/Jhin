@@ -9,7 +9,9 @@ from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
+import sqlalchemy as sa
 import structlog
+from sqlalchemy.ext.asyncio import create_async_engine
 
 import jhin_observability
 from jhin_observability import (
@@ -24,7 +26,8 @@ from jhin_observability import (
     normalize_sandbox_outcome,
     structural_redaction,
 )
-from jhin_observability.events import CONTEXT_FIELD_RULES
+from jhin_observability.events import CONTEXT_FIELD_RULES, MAX_LIBRARY_MESSAGE_CHARS
+from jhin_observability.redaction import LOG_SCHEMA_VERSION
 from jhin_secrets.redaction import get_redactor, redact_event_dict
 
 
@@ -115,7 +118,7 @@ def clear_process_secret_registry() -> Iterator[None]:
 
 
 @pytest.mark.parametrize("logger_kind", ["structlog", "stdlib"])
-def test_every_record_has_exact_v1_required_fields(
+def test_every_record_has_exact_required_contract_fields(
     capsys: pytest.CaptureFixture[str], logger_kind: str
 ) -> None:
     configure_json_logging(service="api", environment="test", level="INFO")
@@ -124,14 +127,285 @@ def test_every_record_has_exact_v1_required_fields(
     else:
         logging.getLogger("uvicorn.error").warning("server booted on private-host-canary")
     record = json.loads(capsys.readouterr().out)
-    assert record["schema_version"] == 1
+    assert record["schema_version"] == LOG_SCHEMA_VERSION
     assert record["service"] == "api"
     assert record["environment"] == "test"
     assert record["level"] in {"info", "warning"}
     assert record["event"] in {"api.started", "stdlib.message"}
     assert record["logger"] in {"jhin.test", "uvicorn.error"}
     assert datetime.fromisoformat(record["timestamp"].replace("Z", "+00:00")).tzinfo
-    assert "private-host-canary" not in json.dumps(record)
+    # A structlog event is a registered name and carries no free text; a
+    # foreign record keeps the sentence its library wrote, which is the only
+    # place that sentence exists.
+    if logger_kind == "structlog":
+        assert "message" not in record
+    else:
+        assert record["message"] == "server booted on private-host-canary"
+
+
+def test_library_message_is_kept_but_bounded_stripped_and_redacted(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    redactor = get_redactor()
+    redactor.register("token-canary")
+    configure_json_logging(
+        service="tool-worker",
+        environment="test",
+        level="INFO",
+        extra_processors=(redact_event_dict,),
+    )
+    logging.getLogger("httpx").warning(
+        "HTTP Request:\x1b[31m GET https://user:pw@example.test/p?key=query-canary "
+        "with token-canary " + ("x" * 4_000)
+    )
+    record = json.loads(capsys.readouterr().out)
+
+    message = record["message"]
+    assert record["event"] == "stdlib.message"
+    assert len(message) <= MAX_LIBRARY_MESSAGE_CHARS
+    assert "\x1b" not in message and "\n" not in message
+    assert "query-canary" not in message
+    assert "pw@" not in message
+    assert "token-canary" not in message
+    assert "[REDACTED]" in message
+
+
+def test_library_exception_reaches_the_line_as_a_structured_error(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    configure_json_logging(service="agent-worker", environment="test", level="INFO")
+    try:
+        raise RuntimeError("provider-detail-canary")
+    except RuntimeError:
+        logging.getLogger("temporalio.activity").warning(
+            "Completing activity as failed", exc_info=True
+        )
+    rendered = capsys.readouterr().out
+    record = json.loads(rendered)
+
+    assert record["event"] == "stdlib.message"
+    assert record["message"] == "Completing activity as failed"
+    assert record["error"]["type"] == "RuntimeError"
+    assert record["error"]["code"] == SafeErrorCode.INTERNAL_ERROR.value
+    assert record["error"]["traceback"][-1]["function"] == (
+        "test_library_exception_reaches_the_line_as_a_structured_error"
+    )
+    assert "provider-detail-canary" not in rendered
+
+
+def test_library_message_that_is_only_control_characters_is_dropped(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    configure_json_logging(service="api", environment="test", level="INFO")
+    logging.getLogger("uvicorn.error").warning("\x00\x1b\n\t")
+    record = json.loads(capsys.readouterr().out)
+    assert record["event"] == "stdlib.message"
+    assert "message" not in record
+
+
+@pytest.mark.asyncio
+async def test_a_bound_parameter_cannot_reach_a_log_line(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The whole finding, run through the real engine and the real config.
+
+    ``echo=False`` is not what gates SQLAlchemy's statement log — the logger's
+    effective level is — so a service at INFO used to write its own SQL and
+    every bound parameter to stdout. Both layers are asserted: the records are
+    not emitted at all, and (below) the text would not survive even if they
+    were.
+    """
+    configure_json_logging(service="tool-worker", environment="test", level="INFO")
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False, pool_pre_ping=True)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(sa.text("CREATE TABLE t (a INTEGER, b TEXT)"))
+            await connection.execute(
+                sa.text("INSERT INTO t VALUES (:a, :b)"),
+                {"a": 1, "b": "ghu_unregistered_token_abc123"},
+            )
+    finally:
+        await engine.dispose()
+
+    rendered = capsys.readouterr().out
+    assert "ghu_unregistered_token_abc123" not in rendered
+    assert "INSERT INTO" not in rendered
+    assert logging.getLogger("sqlalchemy.engine.Engine").isEnabledFor(logging.INFO) is False
+
+
+def test_a_data_carrying_logger_keeps_its_name_and_loses_its_sentence(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The second layer, with the first one deliberately defeated.
+
+    A ``sqlalchemy.engine`` record at WARNING is emitted whatever the level
+    pin says, and a future engine configured with ``echo=True`` would emit at
+    INFO as well. Neither can put a statement or a parameter on a line: the
+    text allow-list is what decides, and no ``sqlalchemy`` logger is on it.
+    """
+    configure_json_logging(service="tool-worker", environment="test", level="INFO")
+    logging.getLogger("sqlalchemy.engine.Engine").warning(
+        "[generated in 0.00015s] (1, 'ghu_unregistered_token_abc123')"
+    )
+    rendered = capsys.readouterr().out
+    record = json.loads(rendered)
+
+    assert "ghu_unregistered_token_abc123" not in rendered
+    assert record["event"] == "stdlib.message"
+    assert record["logger"] == "sqlalchemy.engine.Engine"
+    assert record["level"] == "warning"
+    assert "message" not in record
+
+
+def test_an_unread_library_is_silent_rather_than_leaking(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A logger nobody has vetted is not a logger whose words are kept.
+
+    This is the direction the allow-list is chosen for: adding a dependency
+    cannot open a new text channel by itself.
+    """
+    configure_json_logging(service="api", environment="test", level="INFO")
+    logging.getLogger("some_new_dependency.client").warning("payload=customer-canary")
+    record = json.loads(capsys.readouterr().out)
+    assert record["event"] == "stdlib.message"
+    assert record["logger"] == "some_new_dependency.client"
+    assert "message" not in record
+    assert "customer-canary" not in json.dumps(record)
+
+
+def test_the_access_log_query_string_is_not_a_text_channel(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``uvicorn`` is allow-listed; ``uvicorn.access`` is denied under it.
+
+    An access line is a bare path, not a URL, so the URL sanitizer never sees
+    it — and ``/oauth/callback?code=...`` is an access log entry and an
+    authorization code at the same time.
+    """
+    configure_json_logging(service="api", environment="test", level="INFO")
+    logging.getLogger("uvicorn.access").info(
+        '127.0.0.1:52000 - "GET /oauth/callback?code=code-canary HTTP/1.1" 302'
+    )
+    record = json.loads(capsys.readouterr().out)
+    assert record["logger"] == "uvicorn.access"
+    assert "message" not in record
+    assert "code-canary" not in json.dumps(record)
+
+    logging.getLogger("uvicorn.error").info("Application startup complete.")
+    assert json.loads(capsys.readouterr().out)["message"] == "Application startup complete."
+
+
+def test_asyncios_unretrieved_exception_cannot_carry_its_own_message(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``asyncio``'s default exception handler formats ``repr(future)``.
+
+    That repr contains the exception's own ``str``, so allowing this one
+    library's text re-admitted exactly the free exception text
+    ``_normalize_exception`` strips from every other record — a DSN password
+    and a token-shaped string both reached a line this way.
+    """
+    configure_json_logging(service="agent-worker", environment="test", level="INFO")
+    logging.getLogger("asyncio").error(
+        "Future exception was never retrieved\nfuture: <Future finished "
+        "exception=OperationalError('connection to "
+        "postgresql://jhin:pw-canary@postgres:5432/jhin failed; token ghu_tok-canary')>"
+    )
+    rendered = capsys.readouterr().out
+    record = json.loads(rendered)
+
+    assert record["event"] == "stdlib.message"
+    assert record["logger"] == "asyncio"
+    assert record["level"] == "error"
+    assert "message" not in record
+    assert "pw-canary" not in rendered
+    assert "tok-canary" not in rendered
+
+
+def test_a_trace_records_response_headers_are_not_a_text_channel(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``httpcore`` writes response headers into its trace records.
+
+    Including ``set-cookie``. They are DEBUG, which is the only reason nobody
+    had seen one: bootstrap passed no level and every service sat at INFO.
+    Now that ``LOG_LEVEL`` actually reaches the root logger, an install at
+    DEBUG would have written them.
+    """
+    configure_json_logging(service="api", environment="test", level="DEBUG")
+    logging.getLogger("httpcore.http11").debug(
+        "receive_response_headers.complete return_value=(b'HTTP/1.1', 200, "
+        "[(b'set-cookie', b'session=cookie-canary; HttpOnly')])"
+    )
+    rendered = capsys.readouterr().out
+    record = json.loads(rendered)
+
+    assert record["event"] == "stdlib.message"
+    assert record["logger"] == "httpcore.http11"
+    assert "message" not in record
+    assert "cookie-canary" not in rendered
+
+    # httpx, one layer up, still says what it did.
+    logging.getLogger("httpx").info('HTTP Request: GET https://example.test/p "200 OK"')
+    assert "HTTP Request" in json.loads(capsys.readouterr().out)["message"]
+
+
+def test_a_non_http_connection_string_loses_its_password(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The sanitizer matched ``https?://`` and nothing else.
+
+    ``DATABASE_URL`` and ``NATS_URL`` are exactly the shapes it did not match,
+    and neither is registered with the process redactor: a connection string is
+    configuration rather than a credential anybody declared.
+    """
+    configure_json_logging(service="tool-worker", environment="test", level="INFO")
+    logging.getLogger("temporalio.client").warning(
+        "connect failed: postgresql+asyncpg://jhin:dsn-canary@postgres:5432/jhin?sslmode=q-canary "
+        "and nats://user:nats-canary@nats:4222 and amqp://u:amqp-canary@broker:5672/v"
+    )
+    rendered = capsys.readouterr().out
+    record = json.loads(rendered)
+
+    assert "dsn-canary" not in rendered
+    assert "q-canary" not in rendered
+    assert "nats-canary" not in rendered
+    assert "amqp-canary" not in rendered
+    # What the sentence was about survives: scheme, host, port and path.
+    assert "postgresql+asyncpg://postgres:5432/jhin" in record["message"]
+    assert "nats://nats:4222" in record["message"]
+
+
+def test_a_connection_string_in_a_field_loses_its_password() -> None:
+    """The same hole through the structural pass rather than the text one."""
+    redacted = structural_redaction(
+        {"upstream": "redis://default:redis-canary@cache:6379/0?auth=also-canary"}
+    )
+    assert isinstance(redacted, dict)
+    assert redacted["upstream"] == "redis://cache:6379/0"
+
+
+def test_the_configured_log_level_reaches_the_root_logger() -> None:
+    """``ObservabilitySettings.log_level`` read ``LOG_LEVEL`` and went nowhere.
+
+    The config had no field for it and bootstrap never passed one, so every
+    service ran at the default whatever its compose file said — and an
+    operator who set DEBUG to debug something got INFO and no error.
+    """
+    from jhin_observability.config import ObservabilityConfig, ObservabilitySettings
+
+    settings = ObservabilitySettings(app_env="test", log_level="debug")
+    config = settings.observability_config(service_name="api", service_version="0.0.0")
+    assert config.log_level == "DEBUG"
+
+    with pytest.raises(ValueError, match="log level must be one of"):
+        ObservabilityConfig(
+            service_name="api",
+            service_version="0.0.0",
+            environment="test",
+            log_level="chatty",
+        )
 
 
 def test_retained_structlog_proxy_uses_latest_configuration(
@@ -152,7 +426,7 @@ def test_retained_structlog_proxy_uses_latest_configuration(
     retained_logger.info("rootless_transport.ready")
     second_rendered = capsys.readouterr().out
     second = json.loads(second_rendered)
-    assert second["schema_version"] == 1
+    assert second["schema_version"] == LOG_SCHEMA_VERSION
     assert second["service"] == "rootless-docker-transport"
     assert second["environment"] == "test"
     assert second["event"] == "rootless_transport.ready"
@@ -182,8 +456,12 @@ def test_preexisting_named_handler_is_forced_through_single_json_path(
         assert record["event"] == "stdlib.message"
         assert record["logger"] == "uvicorn.error"
         assert captured.err == ""
-        assert canary not in captured.out
-        assert "server booted" not in captured.out
+        # The pre-existing raw formatter is gone: the text appears exactly
+        # once, inside the single JSON line, and never in that handler's
+        # own shape.
+        assert record["message"] == f"server booted with {canary}"
+        assert "RAW:" not in captured.out
+        assert captured.out.count(canary) == 1
     finally:
         named.handlers[:] = original_handlers
         named.setLevel(original_level)

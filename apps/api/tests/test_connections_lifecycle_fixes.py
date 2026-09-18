@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from jhin_api.connections import service
 from jhin_api.deps import WorkspaceContext
 from jhin_connectors.testing.fake_github import FakeGitHubServer
+from jhin_connectors.testing.fake_mcp import DEFAULT_TOKEN, FakeMcpServer
 from jhin_db.models import (
     Agent,
     AgentCapabilityGrant,
@@ -27,9 +28,6 @@ from jhin_db.models import (
 from jhin_domain import ConnectionStatus, TriggerInvocationStatus, WorkspaceRole, new_uuid7
 from jhin_secrets import SecretCrypto, SecretStore
 
-MCP_ORIGIN = "https://mcp.example.com"
-MCP_URL = f"{MCP_ORIGIN}/mcp"
-
 
 class _RequestAuditArgs(TypedDict):
     request_id: UUID
@@ -37,6 +35,7 @@ class _RequestAuditArgs(TypedDict):
 
 
 REQ: _RequestAuditArgs = {"request_id": new_uuid7(), "ip_hash": "test"}
+pytestmark = pytest.mark.usefixtures("skip_remote_initial_connection_checks")
 
 
 @pytest.fixture
@@ -91,17 +90,19 @@ async def _mcp(
     name: str,
     slug: str,
 ) -> Connection:
-    connection, _ = await service.create_connection(
-        session,
-        crypto,
-        ctx,
-        connector_type="mcp",
-        name=name,
-        auth_type="bearer",
-        credentials={"token": "mcp-token"},
-        config={"server_url": MCP_URL, "server_slug": slug},
-        **REQ,
-    )
+    with FakeMcpServer() as server, pytest.MonkeyPatch.context() as patch:
+        patch.setenv("JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS", server.base_url)
+        connection, _ = await service.create_connection(
+            session,
+            crypto,
+            ctx,
+            connector_type="mcp",
+            name=name,
+            auth_type="bearer",
+            credentials={"token": DEFAULT_TOKEN},
+            config={"server_url": server.mcp_url, "server_slug": slug},
+            **REQ,
+        )
     return connection
 
 

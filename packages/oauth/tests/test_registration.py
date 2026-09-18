@@ -125,19 +125,16 @@ async def test_an_issued_secret_is_honoured_and_registered_for_redaction(
     assert credentials.client_secret not in scrubbed
 
 
-async def test_a_secret_without_a_declared_method_defaults_to_basic(
+async def test_an_explicit_unknown_authentication_method_is_refused(
     http_client: httpx.AsyncClient, start_server: StartServer
 ) -> None:
-    # RFC 7591 §2's own default. Believing our own "none" request instead would
-    # send an unauthenticated token request to a confidential client.
+    # The RFC's default applies to an omitted field, not an unknown method.
     server = start_server(
         FakeAsConfig(registration_issues_secret=True, registration_auth_method="unknown-method")
     )
     metadata = await _metadata(http_client, server)
-    credentials = await register_client(
-        http_client, metadata, redirect_uri=REDIRECT_URI, client_name="Jhin"
-    )
-    assert credentials.token_endpoint_auth_method == "client_secret_basic"
+    with pytest.raises(RegistrationError):
+        await register_client(http_client, metadata, redirect_uri=REDIRECT_URI, client_name="Jhin")
 
 
 async def test_invalid_redirect_uri_retries_exactly_once_as_a_native_application(

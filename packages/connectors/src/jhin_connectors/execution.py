@@ -119,8 +119,18 @@ async def resolve_connection(
             "this process holds no master key and cannot use connections"
         )
 
+    from jhin_connectors.composio import (
+        ComposioError,
+        is_managed_connection,
+        resolve_managed_credentials,
+    )
+
     renewer = _renewer
-    if renewer is not None and connection.oauth_expires_at is not None:
+    if (
+        renewer is not None
+        and connection.oauth_expires_at is not None
+        and not is_managed_connection(connection)
+    ):
         # Renew before decrypting, so what we read below is the token the
         # renewal just wrote rather than the one it replaced.
         await renewer(ctx, connection)
@@ -133,4 +143,13 @@ async def resolve_connection(
         raise ConnectionResolutionError(
             f"stored credential for '{connection.name}' is malformed"
         ) from None
+    try:
+        parsed = await resolve_managed_credentials(connection, parsed)
+    except ComposioError as error:
+        if error.needs_reauth:
+            connection.status = ConnectionStatus.NEEDS_REAUTH.value
+            raise ConnectionNeedsReauthError(
+                NEEDS_REAUTH_MESSAGE.format(name=connection.name)
+            ) from None
+        raise ConnectionResolutionError(str(error)) from None
     return ResolvedConnection(connection=connection, credentials=parsed)

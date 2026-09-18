@@ -32,7 +32,7 @@ from typing import Any, Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import Select, or_, select
+from sqlalchemy import Select, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from jhin_db.models import Agent, AgentRelationship, AgentTeamMembership, Team
@@ -44,7 +44,8 @@ from jhin_tools.rollups import ColleagueStatus, build_colleague_status
 
 DIRECTORY_CAPABILITY = "organization.directory.read"
 DIRECTORY_MAX_RESULTS = 25
-DIRECTORY_TOOL_MAX_RESULTS = 10
+DIRECTORY_TOOL_MAX_RESULTS = DIRECTORY_MAX_RESULTS
+DIRECTORY_TOOL_DEFAULT_RESULTS = 10
 ROSTER_MAX_ENTRIES = 40
 ROSTER_MAX_CHARS = 3_000
 # Tools whose arguments are agent ids. The roster prints ids only for an
@@ -114,15 +115,23 @@ async def _primary_team_by_agent(
     ids = [a.id for a in agents]
     primary: dict[UUID, UUID] = {a.id: a.team_id for a in agents if a.team_id is not None}
     rows = await session.execute(
-        select(AgentTeamMembership.agent_id, AgentTeamMembership.team_id).where(
+        select(
+            AgentTeamMembership.agent_id,
+            AgentTeamMembership.team_id,
+            AgentTeamMembership.is_primary,
+            AgentTeamMembership.left_at,
+        ).where(
             AgentTeamMembership.workspace_id == workspace_id,
             AgentTeamMembership.agent_id.in_(ids),
-            AgentTeamMembership.is_primary.is_(True),
-            AgentTeamMembership.left_at.is_(None),
         )
     )
-    for agent_id, team_id in rows.all():
-        primary[agent_id] = team_id
+    memberships = rows.all()
+    for agent_id, team_id, _is_primary, left_at in memberships:
+        if left_at is not None and primary.get(agent_id) == team_id:
+            primary.pop(agent_id, None)
+    for agent_id, team_id, is_primary, left_at in memberships:
+        if is_primary and left_at is None:
+            primary[agent_id] = team_id
     team_ids = list(set(primary.values()))
     names: dict[UUID, str] = {}
     if team_ids:
@@ -172,7 +181,16 @@ async def _team_member_ids(session: AsyncSession, workspace_id: UUID, team_id: U
             AgentTeamMembership.left_at.is_(None),
         )
     )
-    return set(legacy) | set(members)
+    departed = set(
+        await session.scalars(
+            select(AgentTeamMembership.agent_id).where(
+                AgentTeamMembership.workspace_id == workspace_id,
+                AgentTeamMembership.team_id == team_id,
+                AgentTeamMembership.left_at.is_not(None),
+            )
+        )
+    )
+    return (set(legacy) - departed) | set(members)
 
 
 def _match_rank(agent: Agent, needle: str) -> int | None:
@@ -196,6 +214,7 @@ async def search_directory(
     team_id: UUID | None = None,
     expertise: str | None = None,
     limit: int = DIRECTORY_MAX_RESULTS,
+    requester_agent_id: UUID | None = None,
 ) -> tuple[list[DirectoryEntry], bool]:
     """Public directory search: discoverable, active agents of one workspace.
 
@@ -219,16 +238,24 @@ async def search_directory(
 
     needle = (q or "").strip().lower()
     tag = (expertise or "").strip().lower()
-    ranked: list[tuple[int, str, str, Agent]] = []
+    from jhin_db.memberships import active_team_ids
+
+    preferred_ids: set[UUID] = set()
+    if requester_agent_id:
+        for team in await active_team_ids(session, workspace_id, requester_agent_id):
+            preferred_ids.update(await _team_member_ids(session, workspace_id, team))
+    ranked: list[tuple[int, int, str, str, Agent]] = []
     for agent in candidates:
         if tag and tag not in [str(t).lower() for t in (agent.expertise_json or [])]:
             continue
         rank = _match_rank(agent, needle) if needle else 0
         if rank is None:
             continue
-        ranked.append((rank, agent.name.lower(), str(agent.id), agent))
-    ranked.sort(key=lambda item: item[:3])
-    page = [item[3] for item in ranked[: limit + 1]]
+        ranked.append(
+            (0 if agent.id in preferred_ids else 1, rank, agent.name.lower(), str(agent.id), agent)
+        )
+    ranked.sort(key=lambda item: item[:4])
+    page = [item[4] for item in ranked[: limit + 1]]
     has_more = len(page) > limit
     return await entries_for(session, workspace_id, page[:limit]), has_more
 
@@ -387,6 +414,65 @@ async def resolve_agent_reference(
     return found
 
 
+async def resolve_team_reference(session: AsyncSession, workspace_id: UUID, reference: str) -> UUID:
+    """Resolve a directory filter without mistaking an unknown team for an empty one.
+
+    The roster presents team names, so a name is a first-class reference. Names
+    need not be unique: matching several teams requires the caller to choose an
+    id, and every query (including recovery hints) stays in this workspace.
+    """
+    reference = reference.strip()
+    try:
+        team_id = UUID(reference)
+    except ValueError:
+        matches = list(
+            await session.execute(
+                select(Team.id, Team.name)
+                .where(
+                    Team.workspace_id == workspace_id,
+                    func.lower(func.trim(Team.name)) == reference.lower(),
+                )
+                .order_by(Team.name, Team.id)
+                .limit(MAX_HINT_NAMES + 1)
+            )
+        )
+        if len(matches) == 1:
+            return cast(UUID, matches[0][0])
+        if len(matches) > 1:
+            candidates = ", ".join(
+                f"{name} (team_id: {id})" for id, name in matches[:MAX_HINT_NAMES]
+            )
+            if len(matches) > MAX_HINT_NAMES:
+                candidates += ", …"
+            raise ToolExecutionError(
+                f"the team name '{reference}' matches more than one team",
+                code="team_name_ambiguous",
+                side_effect_possible=False,
+                hint=f"pass the exact team_id to select one: {candidates}",
+            ) from None
+    else:
+        found = await session.scalar(
+            select(Team.id).where(Team.workspace_id == workspace_id, Team.id == team_id)
+        )
+        if found is not None:
+            return found
+
+    names = list(
+        await session.scalars(
+            select(Team.name)
+            .where(Team.workspace_id == workspace_id)
+            .order_by(Team.name, Team.id)
+            .limit(MAX_HINT_NAMES + 1)
+        )
+    )
+    raise ToolExecutionError(
+        f"no team '{reference}' in this workspace",
+        code="team_not_found",
+        side_effect_possible=False,
+        hint=names_hint("Teams", names),
+    )
+
+
 async def build_roster(session: AsyncSession, agent: Agent) -> OrganizationRoster:
     """The bounded local roster for one agent's prompt: self, manager,
     reports, primary teammates, close collaborators, secondary teammates."""
@@ -434,9 +520,9 @@ async def build_roster(session: AsyncSession, agent: Agent) -> OrganizationRoste
             )
         )
     )
-    primary_team_id: UUID | None = next(
-        (team for team, is_primary in memberships if is_primary), agent.team_id
-    )
+    from jhin_db.memberships import primary_team_id as current_primary_team
+
+    primary_team_id = await current_primary_team(session, workspace_id, agent.id)
     secondary_ids = [team for team, is_primary in memberships if not is_primary]
 
     async def members(team_id: UUID) -> list[Agent]:
@@ -532,7 +618,11 @@ ROSTER_HEADER = (
     "answer them from this list, by name, in your own words. Knowing a "
     "colleague is not permission to act for them: relationships here grant "
     "no capabilities, and you still act only through the tools you have "
-    "been granted."
+    "been granted. For routine work, prefer a relevant teammate, then "
+    "your manager. Search across the company when expertise or access "
+    "is missing, and explain that need in cross_team_reason. Do not "
+    "select an unrelated colleague merely because they have broad "
+    "tools."
 )
 
 _ID_GUIDANCE = (
@@ -661,10 +751,26 @@ def render_roster(
 class DirectorySearchInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    query: str = Field(default="", max_length=200)
-    team_id: str | None = Field(default=None, max_length=64)
+    query: str = Field(
+        default="",
+        max_length=200,
+        description="Optional colleague name, role, purpose, or expertise.",
+    )
+    team_id: str | None = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "Optional team filter: exact team name (case-insensitive), such as Marketing, "
+            "or a team UUID. Leave query empty to list all members of that team."
+        ),
+    )
     expertise: str | None = Field(default=None, max_length=64)
-    limit: int = Field(default=DIRECTORY_TOOL_MAX_RESULTS, ge=1, le=DIRECTORY_TOOL_MAX_RESULTS)
+    limit: int = Field(
+        default=DIRECTORY_TOOL_DEFAULT_RESULTS,
+        ge=1,
+        le=DIRECTORY_TOOL_MAX_RESULTS,
+        description="Maximum colleagues to return: 1-25; defaults to 10.",
+    )
 
 
 class DirectorySearchOutput(BaseModel):
@@ -675,11 +781,8 @@ class DirectorySearchOutput(BaseModel):
 async def _directory_search(ctx: ToolExecutionContext, payload: BaseModel) -> BaseModel:
     data = cast(DirectorySearchInput, payload)
     team_id: UUID | None = None
-    if data.team_id:
-        try:
-            team_id = UUID(data.team_id)
-        except ValueError:
-            return DirectorySearchOutput(entries=[], has_more=False)
+    if data.team_id and data.team_id.strip():
+        team_id = await resolve_team_reference(ctx.session, ctx.workspace_id, data.team_id)
     entries, has_more = await search_directory(
         ctx.session,
         ctx.workspace_id,
@@ -687,6 +790,7 @@ async def _directory_search(ctx: ToolExecutionContext, payload: BaseModel) -> Ba
         team_id=team_id,
         expertise=data.expertise,
         limit=data.limit,
+        requester_agent_id=ctx.agent_id,
     )
     return DirectorySearchOutput(entries=entries, has_more=has_more)
 
@@ -735,7 +839,8 @@ DIRECTORY_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor, ToolValidator | None]
             name="organization.directory.search",
             description=(
                 "Find colleagues in your organization by name, role, purpose, "
-                "expertise tag, or team. Returns public identity only (id, "
+                "expertise tag, or team. Pass a team name or UUID in team_id; "
+                "omit query to list its members. Returns public identity only (id, "
                 "name, role, purpose, expertise, availability, team, manager)."
             ),
             risk=RiskLevel.READ,

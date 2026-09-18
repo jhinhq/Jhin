@@ -56,3 +56,15 @@ def test_an_unmapped_refusal_still_is_not_a_code() -> None:
 def test_a_stored_memory_says_so() -> None:
     assert _propose_detail("accept", "active", []) == "Remembered."
     assert "review" in _propose_detail("accept", "pending", ["workspace_promotion_requires_review"])
+
+
+def test_a_refused_self_reference_points_at_the_rename_tool() -> None:
+    """The old sentence — "it describes this conversation rather than a
+    durable fact" — was backwards for the case that produces it most. Being
+    told your name IS durable; it is a row rather than a memory, and the
+    model is instructed to relay this sentence to the person who said it."""
+    detail = _propose_detail("reject", "none", ["self_reference"])
+    assert "organization.identity.set_name" in detail
+    assert "describes this conversation" not in detail
+    # And it does not leave the agent thinking nothing can be saved.
+    assert "Facts about anything other than you are fine to save." in detail

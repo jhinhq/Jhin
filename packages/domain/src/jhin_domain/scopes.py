@@ -52,6 +52,7 @@ _CATEGORY_ROWS: tuple[tuple[str, str, str], ...] = (
     ("tasks", "Tasks", "Work given to agents, and steering it while it runs."),
     ("runs", "Runs", "The execution history behind tasks: steps, tools, and timings."),
     ("apps", "Apps", "Connections to outside services such as GitHub or Slack."),
+    ("variables", "Variables", "Agent, team, and company configuration and secret metadata."),
     ("automations", "Automations", "Triggers that start work on a schedule or an event."),
     ("skills", "Skills", "The reusable instruction packs agents can load."),
     ("personas", "Personas", "How agents act and sound: the persona library and who wears which."),
@@ -73,6 +74,20 @@ CATEGORY_BY_KEY: dict[str, ScopeCategory] = {category.key: category for category
 
 
 _SCOPE_ROWS: tuple[tuple[str, str, str, str, WorkspaceRole], ...] = (
+    (
+        "variables",
+        "read",
+        "Read variables",
+        "Read ordinary values and secret metadata; never secret values.",
+        WorkspaceRole.ADMIN,
+    ),
+    (
+        "variables",
+        "write",
+        "Manage variables",
+        "Create, update, and remove scoped settings. Secret writes require a browser session.",
+        WorkspaceRole.ADMIN,
+    ),
     # category, action, label, description, min_role
     (
         "workspace",

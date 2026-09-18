@@ -7,9 +7,8 @@ that RFC 7591 would otherwise default badly:
 
 - ``grant_types`` — the default is ``["authorization_code"]`` alone, and a
   client registered that way silently cannot refresh;
-- ``token_endpoint_auth_method`` — the default is ``client_secret_basic``,
-  which means the server issues a secret Jhin then has to store. Asking for
-  ``none`` and pairing it with PKCE keeps a secret from existing at all.
+- ``token_endpoint_auth_method`` — prefer public PKCE when advertised, then
+  negotiate a supported confidential method with an encrypted local secret.
 """
 
 from __future__ import annotations
@@ -57,13 +56,14 @@ def _registration_document(
     client_uri: str | None,
     scopes: str,
     application_type: str,
+    auth_method: str,
 ) -> dict[str, Any]:
     document: dict[str, Any] = {
         "redirect_uris": [redirect_uri],
         "client_name": client_name,
         "grant_types": list(GRANT_TYPES),
         "response_types": list(RESPONSE_TYPES),
-        "token_endpoint_auth_method": "none",
+        "token_endpoint_auth_method": auth_method,
         "application_type": application_type,
     }
     if client_uri:
@@ -85,14 +85,15 @@ def _parse_credentials(payload: object) -> ClientCredentials:
         secret if isinstance(secret, str) and 0 < len(secret) <= MAX_CLIENT_SECRET_LENGTH else None
     )
 
-    method = payload.get("token_endpoint_auth_method")
-    if isinstance(method, str) and method in AUTH_METHODS:
-        auth_method = method
-    else:
-        # RFC 7591 §2: a server that omits the field registered the default,
-        # which is client_secret_basic. Believing our own request instead would
-        # send an unauthenticated token request to a confidential client.
-        auth_method = "client_secret_basic" if client_secret else "none"
+    # An omitted method defaults to Basic (RFC 7591 §2); an explicit unsupported
+    # method is not permission to substitute a different authentication scheme.
+    auth_method = payload.get("token_endpoint_auth_method", "client_secret_basic")
+    if not isinstance(auth_method, str) or auth_method not in AUTH_METHODS:
+        raise RegistrationError(
+            "the authorization server selected unsupported client authentication"
+        )
+    if auth_method != "none" and client_secret is None:
+        raise RegistrationError("the authorization server returned no usable client secret")
 
     registration_token = payload.get("registration_access_token")
     access_token = (
@@ -168,6 +169,19 @@ async def register_client(
     endpoint = validate_oauth_url(
         metadata.registration_endpoint, kind="client registration endpoint"
     )
+    supported = metadata.token_endpoint_auth_methods_supported or ("client_secret_basic",)
+    auth_method = next(
+        (
+            method
+            for method in ("none", "client_secret_basic", "client_secret_post")
+            if method in supported
+        ),
+        None,
+    )
+    if auth_method is None:
+        raise RegistrationError(
+            "the authorization server offers no supported client authentication"
+        )
 
     attempted: list[str] = [application_type]
     while True:
@@ -177,6 +191,7 @@ async def register_client(
             client_uri=client_uri,
             scopes=scopes,
             application_type=attempted[-1],
+            auth_method=auth_method,
         )
         try:
             response = await send_bounded(

@@ -31,7 +31,7 @@ def test_categories_match_the_connector_catalog_element_for_element() -> None:
 
 
 def test_the_icon_vocabulary_is_closed_and_covers_the_curated_entries() -> None:
-    assert len(CATALOG_ICONS) == 33
+    assert len(CATALOG_ICONS) == 34
     assert len(set(CATALOG_ICONS)) == len(CATALOG_ICONS)
     assert "mcp" in CATALOG_ICONS, "the fallback icon for a plain MCP server"
 

@@ -30,6 +30,7 @@ from jhin_api.tasks.schemas import (
     TaskTreeOut,
     ToolCallOut,
 )
+from jhin_api.tasks.tool_call_projection import project_tool_calls
 
 tasks_router = APIRouter(
     prefix="/api/v1/workspaces/{workspace_id}/tasks",
@@ -62,6 +63,7 @@ async def create_task(
         values=payload.model_dump(),
         request_id=req_id(request),
         ip_hash=ip_hash(request),
+        crypto=getattr(request.app.state, "secret_crypto", None),
     )
     return TaskOut.model_validate(task)
 
@@ -219,6 +221,7 @@ async def task_instruction(
         text=payload.text,
         request_id=req_id(request),
         ip_hash=ip_hash(request),
+        crypto=getattr(request.app.state, "secret_crypto", None),
     )
     return TaskOut.model_validate(task)
 
@@ -257,7 +260,7 @@ async def run_timeline(run_id: UUID, ctx: ViewerCtx, db: DbSession) -> list[RunE
 async def run_tool_calls(run_id: UUID, ctx: ViewerCtx, db: DbSession) -> list[ToolCallOut]:
     await service.get_run(db, ctx.workspace_id, run_id)
     calls = await service.list_run_tool_calls(db, ctx.workspace_id, run_id)
-    return [ToolCallOut.model_validate(c) for c in calls]
+    return await project_tool_calls(db, ctx.workspace_id, calls)
 
 
 # --- Agent actions ---
@@ -280,6 +283,7 @@ async def assign_task(
         values=payload.model_dump(),
         request_id=req_id(request),
         ip_hash=ip_hash(request),
+        crypto=getattr(request.app.state, "secret_crypto", None),
     )
     return TaskOut.model_validate(task)
 
@@ -301,5 +305,6 @@ async def message_agent(
         text=payload.text,
         request_id=req_id(request),
         ip_hash=ip_hash(request),
+        crypto=getattr(request.app.state, "secret_crypto", None),
     )
     return TaskOut.model_validate(task)

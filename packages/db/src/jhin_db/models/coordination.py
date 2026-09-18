@@ -44,6 +44,7 @@ class WorkRequest(Base, UuidPkMixin, TimestampMixin):
             "workspace_id", "idempotency_key", name="uq_work_request_workspace_idempotency"
         ),
         UniqueConstraint("created_task_id", name="uq_work_request_created_task"),
+        UniqueConstraint("continuation_task_id", name="uq_work_request_continuation_task"),
         CheckConstraint("requester_agent_id <> target_agent_id", name="requester_not_target"),
         CheckConstraint("depth >= 1", name="depth_positive"),
         Index(
@@ -98,6 +99,14 @@ class WorkRequest(Base, UuidPkMixin, TimestampMixin):
     responded_at: Mapped[datetime | None] = mapped_column(UtcDateTime, default=None)
     completed_at: Mapped[datetime | None] = mapped_column(UtcDateTime, default=None)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JsonDict, default=dict)
+    # Transactional result outbox. A request owns at most one successor;
+    # dispatch acknowledgement is separate so commit-before-start is recoverable.
+    continuation_requested_at: Mapped[datetime | None] = mapped_column(UtcDateTime, default=None)
+    continuation_task_id: Mapped[UUID | None] = mapped_column(
+        StdUuid, ForeignKey("task.id", ondelete="SET NULL"), default=None
+    )
+    continuation_dispatched_at: Mapped[datetime | None] = mapped_column(UtcDateTime, default=None)
+    continuation_suppressed_reason: Mapped[str | None] = mapped_column(String(100), default=None)
 
 
 class ReviewPolicy(Base, UuidPkMixin, TimestampMixin):

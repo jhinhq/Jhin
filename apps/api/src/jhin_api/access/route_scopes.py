@@ -72,6 +72,47 @@ _SEALED = _rule(None, None)
 
 
 ROUTE_SCOPES: dict[tuple[str, ...], RouteRule] = {
+    ("memories", "summary"): _rule("memories:read", None),
+    ("memories", "summary", "rebuild"): _rule(None, "memories:write"),
+    ("variables",): _rule("variables:read", "variables:write"),
+    ("variables", "copy"): _rule(None, "variables:write"),
+    ("variables", "secrets"): _SEALED,
+    ("variables", "secret"): _SEALED,
+    ("schedules",): _rule("automations:read", "automations:write"),
+    ("schedules", "occurrences"): _rule("automations:read", None),
+    ("projects",): _rule("chats:read", "chats:write"),
+    ("projects", "source"): _rule(None, "chats:write"),
+    ("files",): _rule("chats:read", "chats:write"),
+    ("files", "versions"): _rule("chats:read", None),
+    ("files", "content"): _rule("chats:read", "chats:write"),
+    ("files", "download"): _rule("chats:read", None),
+    ("files", "preview"): _rule("chats:read", None),
+    ("files", "annotations"): _rule("chats:read", "chats:write"),
+    ("conversations", "files"): _rule("chats:read", "chats:write"),
+    ("conversations", "files", "publish"): _rule(None, "chats:write"),
+    ("conversations", "items"): _rule("chats:read", None),
+    ("conversations", "events"): _rule("chats:read", None),
+    ("conversations", "logs"): _rule("chats:read", None),
+    ("conversations", "tool-calls", "logs"): _rule("chats:read", None),
+    ("conversations", "control"): _rule(None, "chats:write"),
+    ("conversations", "queued"): _rule("chats:read", "chats:write"),
+    ("conversations", "branches"): _rule(None, "chats:write"),
+    ("conversations", "changes"): _rule("chats:read", None),
+    ("conversations", "checkpoints"): _rule("chats:read", "chats:write"),
+    ("conversations", "checkpoints", "restore"): _rule(None, "chats:write"),
+    ("conversations", "runtime"): _rule("chats:read", None),
+    ("conversations", "runtime", "files"): _rule("chats:read", None),
+    ("conversations", "runtime", "control"): _rule(None, "chats:write"),
+    ("conversations", "runtime", "import-legacy"): _rule(None, "chats:write"),
+    ("conversations", "terminals"): _rule("chats:read", "chats:write"),
+    ("conversations", "terminals", "ticket"): _SEALED,
+    ("conversations", "terminals", "close"): _rule(None, "chats:write"),
+    ("conversations", "terminals", "interrupt"): _rule(None, "chats:write"),
+    ("conversations", "previews"): _rule("chats:read", "chats:write"),
+    ("conversations", "previews", "ticket"): _SEALED,
+    ("conversations", "previews", "stop"): _rule(None, "chats:write"),
+    ("conversations", "previews", "restart"): _rule(None, "chats:write"),
+    ("conversations", "previews", "refresh"): _rule(None, "chats:write"),
     # PATCH renames the workspace and sets budgets; DELETE destroys it and
     # everything in it. One scope must not buy both, so DELETE is sealed —
     # the same treatment ("deletion-summary",) below already gets.
@@ -93,6 +134,7 @@ ROUTE_SCOPES: dict[tuple[str, ...], RouteRule] = {
     ("agents", "pause"): _rule(None, "agents:write"),
     ("agents", "resume"): _rule(None, "agents:write"),
     ("agents", "grants"): _rule("agents:read", "agents:admin"),
+    ("agents", "terminal-internet"): _rule("agents:admin", "agents:admin"),
     ("agents", "policy"): _rule("agents:read", "agents:admin"),
     # Capability bundles: the same admin scope as the grants they write. The
     # read side is an agent fact (on, partial, off), but a bundle's open
@@ -125,7 +167,11 @@ ROUTE_SCOPES: dict[tuple[str, ...], RouteRule] = {
     ("runs", "tool-calls"): _rule("runs:read", None),
     ("conversations",): _rule("chats:read", "chats:write"),
     ("conversations", "messages"): _rule("chats:read", None),
+    ("conversations", "tool-calls"): _rule("chats:read", None),
     ("conversations", "turns"): _rule(None, "chats:write"),
+    # Sending the failed turn again is sending a turn: same scope, because it
+    # is the same act with the words already written.
+    ("conversations", "resume"): _rule(None, "chats:write"),
     ("conversations", "activity"): _rule("chats:read", None),
     ("activity",): _rule("chats:read", None),
     ("attention",): _rule("tasks:read", None),
@@ -154,6 +200,8 @@ ROUTE_SCOPES: dict[tuple[str, ...], RouteRule] = {
     ("memories", "forget"): _rule(None, "memories:admin"),
     ("memories", "deduplicate"): _rule(None, "memories:admin"),
     ("memories", "embed-missing"): _rule(None, "memories:admin"),
+    ("memory-capture-policies",): _rule("memories:read", "memories:admin"),
+    ("memory-capture-policies", "revoke"): _rule(None, "memories:admin"),
     ("skills",): _rule("skills:read", "skills:write"),
     ("skills", "browse"): _rule("skills:read", None),
     ("skills", "browse", "install"): _rule(None, "skills:write"),
@@ -176,6 +224,11 @@ ROUTE_SCOPES: dict[tuple[str, ...], RouteRule] = {
     ("connections", "access-summary"): _rule("apps:read", None),
     ("connections", "metadata"): _rule("apps:read", None),
     ("connections", "tool-calls"): _rule("runs:read", None),
+    ("connections", "editorial-reviews"): _rule("runs:read", None),
+    ("connections", "editorial-reviews", "assignments"): _rule("runs:read", None),
+    ("connections", "editorial-reviews", "assignments", "release-intent"): _rule(
+        None, "apps:write"
+    ),
     ("connections", "verify"): _rule(None, "apps:write"),
     ("connections", "enable"): _rule(None, "apps:write"),
     ("connections", "disable"): _rule(None, "apps:write"),

@@ -11,9 +11,11 @@ import { Check, ChevronDown, Minus, Plus, ShieldCheck, ShieldOff, SlidersHorizon
 import { useState } from "react";
 import { Badge, Button, ConfirmDialog, ErrorNote, Field, focusRing, Select, Spinner, StatusLabel } from "@/components/ui";
 import { BundleSetupDialog } from "@/components/org/bundle-setup-dialog";
+import { TerminalInternetControl } from "@/components/org/terminal-internet-control";
 import { ScopeEditor } from "@/components/scope-editor";
 import { api, ApiError } from "@/lib/api";
 import { describeRisk } from "@/lib/apps";
+import { toggleOrganizationBundle } from "@/lib/bundle-actions";
 import {
   bundleAppliedNotice,
   connectorLabel,
@@ -58,14 +60,7 @@ import type {
   GrantEffect,
   ToolInfo,
 } from "@/lib/types";
-import {
-  isPresetGranted,
-  missingPolicyRules,
-  presetGrantsToAdd,
-  presetGrantsToRevoke,
-  TOOL_PRESETS,
-  type ToolPreset,
-} from "@/lib/wizard";
+import { TOOL_PRESETS, type ToolPreset } from "@/lib/wizard";
 import { useWorkspace } from "@/lib/workspace-context";
 
 const PRESETS: ApprovalPreset[] = ["autonomous", "balanced", "restricted"];
@@ -202,40 +197,20 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
     onError: (err) => setError(err instanceof ApiError ? err.detail : "Revoking failed."),
   });
 
-  /** An organization bundle on or off, the way the tab always did it: add
-   * the grants it needs, or revoke the grants it owns and no other bundle
-   * that is still on needs. Connector bundles go through the server. */
-  const toggleOrganizationBundle = useMutation({
-    mutationFn: async (preset: ToolPreset) => {
-      const current = grants.data ?? [];
-      const catalog = tools.data ?? [];
-      if (isPresetGranted(current, preset, catalog)) {
-        const keep = TOOL_PRESETS.filter(
-          (other) => other.id !== preset.id && isPresetGranted(current, other, catalog),
-        );
-        for (const grant of presetGrantsToRevoke(current, preset, catalog, keep)) {
-          await api<void>(
-            `/api/v1/workspaces/${workspaceId}/agents/${agent.id}/grants/${grant.id}`,
-            { method: "DELETE" },
-          );
-        }
-        return;
-      }
-      for (const body of presetGrantsToAdd(current, preset, catalog, connectionList)) {
-        await api(`/api/v1/workspaces/${workspaceId}/agents/${agent.id}/grants`, {
-          method: "POST",
-          body,
-        });
-      }
-      const existing = policy.data?.rules ?? [];
-      const missing = missingPolicyRules(existing, preset);
-      if (missing.length > 0) {
-        await api(`/api/v1/workspaces/${workspaceId}/agents/${agent.id}/policy`, {
-          method: "PUT",
-          body: { rules: [...missing, ...existing] },
-        });
-      }
-    },
+  /** An organization bundle on or off. Connector bundles go through the
+   * server; the client loop for the rest lives in lib/bundle-actions so the
+   * in-chat composer controls flip them exactly the same way. */
+  const organizationBundle = useMutation({
+    mutationFn: (preset: ToolPreset) =>
+      toggleOrganizationBundle({
+        workspaceId,
+        agentId: agent.id,
+        preset,
+        grants: grants.data ?? [],
+        tools: tools.data ?? [],
+        connections: connectionList,
+        rules: policy.data?.rules ?? [],
+      }),
     onSuccess: () => {
       setError(null);
       invalidate();
@@ -282,7 +257,7 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
     const preset = TOOL_PRESETS.find((candidate) => candidate.id === bundle.id);
     if (bundle.state === "on") {
       if (!isConnectorBundle(bundle.id)) {
-        if (preset) toggleOrganizationBundle.mutate(preset);
+        if (preset) organizationBundle.mutate(preset);
         return;
       }
       try {
@@ -297,7 +272,7 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
       setSetup(bundle);
       return;
     }
-    if (preset) toggleOrganizationBundle.mutate(preset);
+    if (preset) organizationBundle.mutate(preset);
   };
 
   const confirmTurnOff = async () => {
@@ -320,6 +295,8 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
           {notice}
         </p>
       ) : null}
+
+      {canEdit ? <TerminalInternetControl key={agent.id} workspaceId={workspaceId} agentId={agent.id} onUpdated={invalidate} /> : null}
 
       <section>
         <h3 className="mb-1 font-display text-base font-semibold">Capabilities</h3>
@@ -354,7 +331,7 @@ export function ToolsAccessTab({ agent, canEdit }: { agent: Agent; canEdit: bool
                     ? `This workspace's catalog does not include: ${bundle.readiness.missing_tools.join(", ")}`
                     : bundle.description
                 }
-                disabled={!canEdit || unavailable || toggleOrganizationBundle.isPending || removeBundle.isPending}
+                disabled={!canEdit || unavailable || organizationBundle.isPending || removeBundle.isPending}
                 onClick={() => void onBundleClick(bundle)}
                 className={`rounded-xl border px-3 py-2.5 text-left text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${focusRing} ${
                   on ? "border-accent bg-accent-soft" : "border-line bg-raised hover:border-line-strong"

@@ -2,12 +2,110 @@
 Phase 4 exit tests drive a real tool-call roundtrip with."""
 
 import json
+from uuid import uuid4
 
+import pytest
+
+from jhin_agents.context import ConversationTurn, TaskContext, build_messages
+from jhin_agents.snapshot import AgentExecutionSnapshot, ModelProfileSnapshot, RunLimits
 from jhin_models import ModelMessage, ModelRequest, build_model_client
 from jhin_models.testing import FakeOpenAIServer
 from jhin_models.testing.fake_openai import build_completion, encode_marker_payload
 
 MARKER = '[[tool:system.echo {"text": "hello tools"}]]'
+
+
+@pytest.mark.parametrize("repetitions", [1, 2])
+async def test_current_task_prompt_and_seed_emit_each_scripted_call_once(repetitions: int) -> None:
+    """Assigned work carries the brief and persisted seed; both frame one script."""
+    snapshot = AgentExecutionSnapshot(
+        agent_id=uuid4(),
+        workspace_id=uuid4(),
+        name="Fixture",
+        role_title="Tester",
+        system_prompt="Run each requested tool.",
+        autonomy_level="supervised",
+        team_id=None,
+        team_name=None,
+        manager_agent_id=None,
+        manager_name=None,
+        temperature=None,
+        max_output_tokens=128,
+        run_limits=RunLimits(max_steps=5, max_run_minutes=1),
+        model_profile=ModelProfileSnapshot(
+            profile_id=uuid4(),
+            provider_id=uuid4(),
+            provider_type="openai_compatible",
+            base_url="http://fixture.invalid/v1",
+            secret_id=None,
+            model_name="fake-mini",
+            display_name="Fixture",
+            input_cost_micros_per_million=None,
+            output_cost_micros_per_million=None,
+        ),
+    )
+    description = "Run the script: " + " then ".join([MARKER] * repetitions)
+    history = [ConversationTurn(role="user", text="Fixture task\n" + description)]
+    with FakeOpenAIServer() as server:
+        client = build_model_client("openai_compatible", base_url=server.base_url)
+        try:
+            for index in range(repetitions + 1):
+                messages = build_messages(
+                    snapshot,
+                    TaskContext(
+                        title="Fixture task", description=description, history=tuple(history)
+                    ),
+                    has_tools=True,
+                )
+                events = [
+                    event
+                    async for event in client.stream_events(
+                        ModelRequest(model="fake-mini", messages=messages)
+                    )
+                ]
+                response = events[-1].response
+                assert response is not None
+                if index == repetitions:
+                    assert response.tool_calls == ()
+                    assert response.finish_reason == "stop"
+                    break
+                assert len(response.tool_calls) == 1
+                call = response.tool_calls[0]
+                assert call.name == "system.echo"
+                history.extend(
+                    [
+                        ConversationTurn(
+                            role="agent",
+                            text="",
+                            kind="tool_call",
+                            tool_call_id=call.id,
+                            tool_name=call.name,
+                            arguments_json=call.arguments_json,
+                        ),
+                        ConversationTurn(
+                            role="agent",
+                            text='{"text":"hello tools"}',
+                            kind="tool_result",
+                            tool_call_id=call.id,
+                            tool_name=call.name,
+                        ),
+                    ]
+                )
+        finally:
+            await client.close()
+
+
+def test_later_identical_user_script_is_a_new_request() -> None:
+    body = {
+        "model": "fake-mini",
+        "messages": [
+            {"role": "user", "content": MARKER},
+            {"role": "tool", "content": "{}", "tool_call_id": "call_0"},
+            {"role": "user", "content": MARKER},
+        ],
+    }
+    _, payload = build_completion(body)
+    assert payload["choices"][0]["finish_reason"] == "tool_calls"
 
 
 def test_marker_produces_tool_call() -> None:

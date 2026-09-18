@@ -789,6 +789,8 @@ export interface ConfigFieldSpec {
 }
 
 export interface ConnectorInfo {
+  oauth_provider?: string | null;
+  managed_auth?: { provider: "composio"; configured: boolean; toolkit: string; auth_type: string };
   connector_type: string;
   display_name: string;
   icon: string;
@@ -818,6 +820,7 @@ export interface UserSummary {
 }
 
 export interface ConnectionInfo {
+  auth_provider?: "local" | "composio";
   id: string;
   connector_type: string;
   name: string;
@@ -980,6 +983,7 @@ export interface VerifyResult {
  * so this is the one signal the connect flow routes on.
  */
 export type OAuthConnectMethod =
+  | "composio"
   | "oauth_discovery"
   | "oauth_static"
   | "device_code"
@@ -1034,7 +1038,7 @@ export interface OAuthStartOut {
   scopes: string[];
   resource: string;
   authorized_as_user_id: string;
-  client_source: "dcr" | "manual" | "static";
+  client_source: "dcr" | "manual" | "static" | "composio";
 }
 
 /** `POST /oauth/device/start`. `handle` is the opaque poll handle — never the
@@ -1081,6 +1085,7 @@ export interface OAuthClientCreate {
 /** `GET /oauth/redirect-uri` — the one callback URL this instance registers
  * with every provider, computed from settings. */
 export interface OAuthRedirectOut {
+  composio?: { configured: boolean; callback_url: string; toolkits: string[] };
   redirect_uri: string;
   github_app_redirect_uri: string;
   is_https: boolean;
@@ -1104,6 +1109,20 @@ export interface GitHubAppManifestOut {
   expires_at: string;
 }
 
+export interface SandboxJobSnapshot {
+  job_id: string;
+  status: string;
+  network_policy: string;
+  /** Bounded tail snapshots: replace on refresh, never append as deltas. */
+  stdout: string;
+  stderr: string;
+  output_is_tail?: boolean;
+  exit_code: number | null;
+  started_at: string | null;
+  completed_at: string | null;
+  duration_ms: number | null;
+}
+
 export interface ToolCallRecord {
   id: string;
   run_id: string;
@@ -1111,6 +1130,7 @@ export interface ToolCallRecord {
   tool_name: string;
   sanitized_input_json: Record<string, unknown>;
   sanitized_output_json: Record<string, unknown>;
+  sandbox_job?: SandboxJobSnapshot | null;
   status: string;
   approval_id: string | null;
   started_at: string | null;
@@ -1118,6 +1138,18 @@ export interface ToolCallRecord {
   duration_ms: number | null;
   error_code: string | null;
   created_at: string;
+}
+
+export interface ConversationToolCall extends ToolCallRecord {
+  task_id: string;
+  agent_name: string | null;
+}
+
+export interface ConversationToolCallList {
+  items: ConversationToolCall[];
+  has_more: boolean;
+  limit: number;
+  next_before?: string | null;
 }
 
 // --- Phase 7: triggers ---
@@ -1205,6 +1237,8 @@ export interface LinearTeamMetadata {
 type ConversationStatus = "active" | "archived";
 
 export interface Conversation {
+  project_id?: string | null;
+  workspace_version?: number;
   id: string;
   workspace_id: string;
   title: string;
@@ -1218,6 +1252,40 @@ export interface Conversation {
   active_task_id: string | null;
   active_task_state: TaskState | null;
   active_run_status: string | null;
+  /**
+   * When the run now carrying the active task began — waits included. This is
+   * the run's start as an audit means it, and it is *not* how long the agent
+   * has been thinking: a run parked on an approval keeps this stamp while a
+   * person sleeps on it. Use the two fields below for anything a reader will
+   * understand as thinking time.
+   */
+  active_run_started_at: string | null;
+  /**
+   * When the agent's current stretch of thinking began, with the person's own
+   * waiting already taken out.
+   *
+   * **Optional and nullable are two different facts, and both are load
+   * bearing.** `null` is this API measuring and finding no instant: the run
+   * is parked on somebody right now, or has already finished, or never had a
+   * start stamp to measure from — one value for all of them, because all of
+   * them mean the same thing to a surface (show no clock) and none of them is
+   * distinguishable here, so nothing downstream may name one as *the* cause.
+   * Absent is an API older than the field, which measured
+   * nothing at all. Neither shows a clock, but they are not interchangeable —
+   * a stall is worth saying out loud (with `active_run_working_seconds`,
+   * which is a real figure for what the turn managed before it stopped),
+   * while an old API's silence must stay silent rather than be reported to a
+   * reader as a turn of their own that stalled. See `LiveStatus.since` in
+   * `lib/chat.ts`, which is where the two are kept apart.
+   */
+  active_run_working_since?: string | null;
+  /**
+   * Whole seconds of thinking banked before `active_run_working_since`. A
+   * client shows `active_run_working_seconds + (now - active_run_working_since)`
+   * and ticks only the second half, so nothing is asked of the server per
+   * second and nothing counted twice across a wait.
+   */
+  active_run_working_seconds?: number;
   /**
    * A finished sentence for what the agent is doing right now ("Saving this to
    * memory"), written by the API from the newest tool call — never assembled
@@ -1244,10 +1312,33 @@ export interface ConversationUpdate {
   status?: ConversationStatus;
 }
 
+/**
+ * A run failure as a person reads it, written by the API from
+ * `jhin_domain.failures`. The message's own `content_json.text` is left
+ * untouched beside it — that is the record — and this is the same failure
+ * said in the product's voice.
+ *
+ * `detail` and `reference` are both routinely empty: a failure whose text
+ * Jhin wrote itself has nothing to add beyond `summary`, and most have no
+ * identifier in them. Render both defensively.
+ */
+export interface FailureNotice {
+  /** Internal code. For support and for special-casing one class — never the headline. */
+  code: string;
+  /** One sentence, always present, never containing an identifier. */
+  summary: string;
+  /** The failure's own words where they add something (a provider message). */
+  detail: string;
+  /** The id support would ask for, lifted out of the prose. */
+  reference: string;
+}
+
 export interface ConversationMessage extends TaskMessage {
   conversation_id: string | null;
   sender_name: string | null;
   agent_id: string | null;
+  /** Set only on the system `error` row that records a failed run. */
+  failure?: FailureNotice | null;
 }
 
 export interface TurnOut {
@@ -1255,6 +1346,42 @@ export interface TurnOut {
   message: ConversationMessage;
   task_id: string;
   mode: "new_task" | "instruction";
+}
+
+/**
+ * Whether the last thing that happened in a chat can be picked up again.
+ *
+ * Present on the conversation *detail* only, and only when the newest turn
+ * failed and nothing is running now. `null` means there is nothing to offer,
+ * which is the signal to show no control at all rather than a dead one.
+ */
+export interface ConversationResume {
+  /** The failed turn. Match it against a failure message's `task_id`. */
+  task_id: string;
+  run_id: string | null;
+  /**
+   * `ready` — press it. `blocked` — a call from that turn was never accounted
+   * for, so re-running could repeat something that already happened.
+   * `unavailable` — safe in itself, but the agent or the chat cannot take
+   * work right now.
+   */
+  state: "ready" | "blocked" | "unavailable";
+  /** One sentence: what pressing does, or why it cannot happen. */
+  reason: string;
+  /** What was asked, so the words can go back in the composer unretyped. */
+  instruction: string;
+  /** Set when `state === "blocked"`: the call nobody can account for. */
+  unreconciled_tool_call_id?: string | null;
+}
+
+export interface ResumeOut {
+  conversation: Conversation;
+  /** The work episode now carrying the turn. */
+  task_id: string;
+  /** The failed turn it took over from. */
+  resumed_task_id: string;
+  /** False when an earlier press already started this and nothing new was made. */
+  created: boolean;
 }
 
 // --- Questions an agent asks the person (ask-user contract §5) ---
@@ -1280,6 +1407,9 @@ export interface UserQuestionContent {
   question: string;
   context: string;
   question_kind: "open" | "memory_scope";
+  required?: boolean;
+  input_key?: string;
+  value_type?: "text" | "url" | "timezone" | "time";
   options: UserQuestionOption[];
   allow_other: boolean;
   other_label: string;
@@ -1328,6 +1458,27 @@ export interface MemorySavedContent {
   still_standing: string;
 }
 
+/**
+ * The `content_json` of the `message_type: "status"` row
+ * `organization.identity.set_name` writes when an agent actually changed its
+ * own name. A rename must not be something that only happens inside a
+ * sentence: this row is written in the same transaction as the agent row, so
+ * the card and the new name are true together or neither is.
+ *
+ * `slug` is the agent's handle, which a rename deliberately does NOT change.
+ * It is on the card because "my links have moved" is the first thing a person
+ * would otherwise have to wonder about.
+ */
+export interface AgentRenamedContent {
+  kind: "agent_renamed";
+  /** What it was called before, or "" on a payload that omitted it. */
+  previous_name: string;
+  /** What it is called now. */
+  name: string;
+  /** The unchanged handle. */
+  slug: string;
+}
+
 export interface QuestionOut {
   id: string;
   workspace_id: string;
@@ -1337,6 +1488,9 @@ export interface QuestionOut {
   agent_id: string;
   agent_name: string | null;
   kind: "open" | "memory_scope";
+  required?: boolean;
+  input_key?: string;
+  value_type?: "text" | "url" | "timezone" | "time";
   question: string;
   context: string;
   options: UserQuestionOption[];
@@ -1380,6 +1534,7 @@ export interface ConversationDetail {
   total_output_tokens: number;
   total_cost_micros: number;
   pending_approvals: Approval[];
+  resume?: ConversationResume | null;
 }
 
 export type ActivityKind =
@@ -1478,6 +1633,7 @@ export interface MemoryRecord {
   source_event_id: string | null;
   visibility: string;
   sensitivity: MemorySensitivity;
+  evidence_status?: "supported" | "unsupported";
   confidence: number;
   importance: number;
   tags_json: string[];
@@ -1775,6 +1931,7 @@ export type CatalogAuthHint = "none" | "bearer" | "header" | "oauth";
 export type CatalogSignIn = "auto" | "remote_mcp" | "key" | "none";
 
 export interface CatalogApp {
+  composio_toolkit?: string | null;
   slug: string;
   name: string;
   category: string;
@@ -1817,6 +1974,7 @@ export type CatalogTrustTier =
   | "indexed";
 
 export interface CatalogEntry {
+  composio_toolkit?: string | null;
   slug: string;
   kind: CatalogKind;
   source: CatalogSource;

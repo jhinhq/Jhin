@@ -3,6 +3,7 @@ import type { NextConfig } from "next";
 // Baked into the build (Docker sets API_INTERNAL_URL=http://api:8000).
 // Browser calls go same-origin to /api/* so auth cookies never cross origins.
 const apiInternalUrl = process.env.API_INTERNAL_URL ?? "http://localhost:8000";
+const runtimeGatewayUrl = process.env.JHIN_RUNTIME_GATEWAY_URL ?? "http://runtime-gateway:8086";
 
 const isProduction = process.env.NODE_ENV === "production";
 
@@ -109,18 +110,21 @@ const nextConfig: NextConfig = isDesktopExport
   : {
   // Self-contained server bundle consumed by the Docker runtime stage.
   output: "standalone",
+  // Scoped preview roots keep their trailing slash for relative app assets.
+  // Redirecting before the runtime rewrite exposes the upstream's own origin.
+  skipTrailingSlashRedirect: true,
   poweredByHeader: false,
   async headers() {
     return [
       {
-        source: "/:path*",
+        source: "/((?!api/|runtime/).*)",
         headers: [...baseSecurityHeaders, ...productionOnlyHeaders],
       },
       {
         // The API sets its own, much stricter, `default-src 'none'` policy on
         // /api/* responses; applying the document policy there too would just
         // stack two headers on a JSON body.
-        source: "/((?!api/).*)",
+        source: "/((?!api/|runtime/).*)",
         headers: [{ key: "Content-Security-Policy", value: contentSecurityPolicy }],
       },
     ];
@@ -143,6 +147,16 @@ const nextConfig: NextConfig = isDesktopExport
       {
         source: "/api/:path*",
         destination: `${apiInternalUrl}/api/:path*`,
+      },
+      {
+        // A catch-all parameter drops its final slash when interpolated. Keep
+        // the canonical preview root for relative URLs inside the application.
+        source: "/runtime/previews/:sessionId/:ticket",
+        destination: `${runtimeGatewayUrl}/runtime/previews/:sessionId/:ticket/`,
+      },
+      {
+        source: "/runtime/:path*",
+        destination: `${runtimeGatewayUrl}/runtime/:path*`,
       },
     ];
   },

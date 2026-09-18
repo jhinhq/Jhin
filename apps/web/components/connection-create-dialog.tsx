@@ -32,6 +32,7 @@ import {
   Textarea,
 } from "@/components/ui";
 import { SchemaForm } from "@/components/schema-form";
+import { GhostPublisherSelect } from "@/components/connect/ghost-publisher-select";
 import { api, ApiError } from "@/lib/api";
 import {
   initialValuesFor,
@@ -240,6 +241,7 @@ export function CreateConnectionDialog({
         {schema ? (
           <SchemaForm
             schema={schema}
+            workspaceId={workspaceId}
             values={schemaValues}
             onChange={(field, value) =>
               setSchemaValues((prev) => ({ ...prev, [field]: value }))
@@ -251,8 +253,10 @@ export function CreateConnectionDialog({
           {configFieldsForAuth(connector, authType)
             .filter((field) => field.name !== "allow_writes")
             .map((field) => (
-              <Field key={field.name} label={field.label} hint={field.help}>
-                {field.kind === "boolean" ? (
+              <Field key={field.name} label={connector.connector_type === "ghost" && field.name === "publisher_agent_id" ? "Publishing director" : field.label} hint={field.help}>
+                {connector.connector_type === "ghost" && field.name === "publisher_agent_id" ? (
+                  <GhostPublisherSelect workspaceId={workspaceId} value={String(config[field.name]??"")} onChange={value=>setConfig(prev=>({...prev,[field.name]:value}))} disabled={create.isPending}/>
+                ) : field.kind === "boolean" ? (
                   <input
                     aria-label={field.label}
                     type="checkbox"

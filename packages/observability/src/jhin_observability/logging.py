@@ -13,7 +13,7 @@ import structlog
 from structlog.typing import EventDict, Processor, WrappedLogger
 
 from jhin_observability.errors import SafeErrorCode
-from jhin_observability.events import filter_log_event
+from jhin_observability.events import filter_log_event, library_text_allowed
 from jhin_observability.redaction import (
     LOG_SCHEMA_VERSION,
     MAX_TRACEBACK_FRAMES,
@@ -33,6 +33,22 @@ def _add_contract_fields(
         event_dict["service"] = service
         event_dict["environment"] = environment
         if event_dict.get("_from_structlog") is False:
+            # A record from outside this codebase. ``event`` holds the
+            # library's formatted message rather than one of our registered
+            # event names, so the name becomes ``stdlib.message`` and the
+            # text moves to ``message``, which is a registered field on that
+            # event. Moving it rather than dropping it is the whole point:
+            # dropping it left every Temporal, httpx and uvicorn warning in
+            # production saying nothing at all.
+            #
+            # It only moves for a logger on the text allow-list. That check is
+            # made again downstream in ``filter_log_event`` — this one keeps a
+            # denied library's sentence from travelling through the redaction
+            # processors and the extra processors at all, so the string a
+            # ``sqlalchemy.engine.Engine`` record was formatted from is
+            # dropped at the first opportunity rather than the last.
+            if library_text_allowed(event_dict.get("logger")):
+                event_dict["message"] = event_dict.get("event")
             event_dict["event"] = "stdlib.message"
             event_dict.pop("positional_args", None)
         return event_dict
@@ -109,6 +125,25 @@ def _filter_log_event_processor(
     return filter_log_event(event_dict)
 
 
+#: Loggers pinned to WARNING, whatever the service level is.
+#:
+#: ``sqlalchemy.engine`` logs every statement and every bound parameter at
+#: INFO. ``create_async_engine(..., echo=False)`` does not stop that: ``echo``
+#: only decides whether SQLAlchemy attaches a level of its own, and with none
+#: attached the effective level is inherited from the root — which this module
+#: sets to the service level, and which ``_route_named_loggers_through_root``
+#: resets to NOTSET on every existing logger. So a service running at INFO was
+#: writing its own SQL, and its parameters, to stdout: hundreds of records per
+#: tool-worker run, one of them the row that carried a token.
+#:
+#: This is the half of the fix that stops the record being *emitted*, which is
+#: also what stops the volume. The allow-list in ``events.py`` is the half that
+#: stops the text being *written* — it still applies, and still denies
+#: ``sqlalchemy``, so an engine warning at WARNING keeps its name and loses its
+#: statement.
+_PINNED_LEVELS: tuple[tuple[str, int], ...] = (("sqlalchemy", logging.WARNING),)
+
+
 def _route_named_loggers_through_root() -> None:
     """Remove pre-existing formatter bypasses while preserving logger identity."""
     for candidate in logging.root.manager.loggerDict.values():
@@ -117,6 +152,10 @@ def _route_named_loggers_through_root() -> None:
         candidate.handlers.clear()
         candidate.setLevel(logging.NOTSET)
         candidate.propagate = True
+    for name, level in _PINNED_LEVELS:
+        # After the reset, and by name rather than over the existing loggers,
+        # so a logger SQLAlchemy has not created yet still inherits the pin.
+        logging.getLogger(name).setLevel(level)
 
 
 def configure_json_logging(

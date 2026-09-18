@@ -21,6 +21,7 @@ from jhin_agent_worker.media_activities import MediaActivities
 from jhin_agent_worker.memory_activities import MemoryActivities
 from jhin_agent_worker.oauth_activities import OAuthActivities
 from jhin_agent_worker.resources import Resources
+from jhin_agent_worker.schedule_activities import ScheduleActivities, schedule_reconciliation_loop
 from jhin_agent_worker.settings import Settings
 from jhin_agent_worker.trigger_activities import (
     TriggerActivities,
@@ -39,15 +40,28 @@ from jhin_secrets.redaction import redact_event_dict
 from jhin_workflows import AGENT_TASK_QUEUE
 from jhin_workflows.agent_task import AgentTaskWorkflow
 from jhin_workflows.avatar_generation import AvatarGenerationWorkflow
+from jhin_workflows.blog_corpus import BlogCorpusSyncWorkflow
 from jhin_workflows.delegated_task import DelegatedTaskWorkflow
 from jhin_workflows.engineering_ticket import EngineeringTicketWorkflow
 from jhin_workflows.memory_maintenance import MemoryMaintenanceWorkflow
 from jhin_workflows.oauth_refresh import OAuthRefreshWorkflow
 from jhin_workflows.periodic_review import PeriodicReviewWorkflow
+from jhin_workflows.schedules.workflows import AgentScheduleWorkflow
 from jhin_workflows.triggered_task import TriggeredTaskWorkflow
 from jhin_workflows.work_request_task import WorkRequestTaskWorkflow
 
 logger = get_logger(__name__)
+
+
+async def continuation_reconciliation_loop(activities: CoordinationActivities) -> None:
+    """Recover result continuations after a process or dispatch acknowledgement loss."""
+    while True:
+        try:
+            await activities.dispatch_work_request_continuations()
+            await activities.dispatch_blog_corpus_syncs()
+        except Exception as error:
+            logger.warning("coordination.continuation_retry", error_type=type(error).__name__)
+        await asyncio.sleep(30)
 
 
 async def connect_with_retry(
@@ -97,6 +111,8 @@ async def _cleanup_process(
     runtime: ObservabilityRuntime,
     active_error: BaseException | None,
     active_traceback: TracebackType | None,
+    schedule_task: asyncio.Task[None] | None = None,
+    continuation_task: asyncio.Task[None] | None = None,
 ) -> BaseException | None:
     first_cancellation: asyncio.CancelledError | None = None
     first_error: BaseException | None = None
@@ -115,6 +131,16 @@ async def _cleanup_process(
                 loop.remove_signal_handler(handled_signal)
             except BaseException as error:
                 remember(error)
+    for background_task in (schedule_task, continuation_task):
+        if background_task is None:
+            continue
+        background_task.cancel()
+        try:
+            await background_task
+        except asyncio.CancelledError:
+            pass
+        except BaseException as error:
+            remember(error)
     if worker is not None and worker_exit_needed:
         try:
             await worker.__aexit__(
@@ -172,6 +198,8 @@ async def main() -> None:
     settings = Settings()
     resources: Resources | None = None
     heartbeat_task: asyncio.Task[None] | None = None
+    schedule_task: asyncio.Task[None] | None = None
+    continuation_task: asyncio.Task[None] | None = None
     worker: Any | None = None
     worker_exit_needed = False
     loop: asyncio.AbstractEventLoop | None = None
@@ -197,6 +225,7 @@ async def main() -> None:
         coordination_activities = CoordinationActivities(resources, temporal_client=client)
         media_activities = MediaActivities(resources)
         oauth_activities = OAuthActivities(resources)
+        schedule_activities = ScheduleActivities(resources)
         # Only the proactive sweep runs here. Refresh-on-use is installed by
         # the tool worker, the one process that runs connector tools and can
         # therefore reach the hook in jhin_connectors.execution.
@@ -221,6 +250,8 @@ async def main() -> None:
             MemoryMaintenanceWorkflow,
             PeriodicReviewWorkflow,
             OAuthRefreshWorkflow,
+            AgentScheduleWorkflow,
+            BlogCorpusSyncWorkflow,
         ]
         agent_activities: list[Callable[..., Any]] = [
             activities.resolve_snapshot_activity,
@@ -245,11 +276,14 @@ async def main() -> None:
             media_activities.generate_avatar_activity,
             media_activities.fail_avatar_generation_activity,
             coordination_activities.finalize_work_request_activity,
+            coordination_activities.prepare_work_request_continuation_activity,
             coordination_activities.note_work_request_unanswered_activity,
             coordination_activities.mark_task_paused_activity,
             coordination_activities.load_periodic_review_policy_activity,
             coordination_activities.open_periodic_review_activity,
             oauth_activities.refresh_due_oauth_connections,
+            schedule_activities.claim,
+            schedule_activities.finish,
         ]
         heartbeat_task = asyncio.create_task(run_heartbeat())
         worker = build_temporal_worker(
@@ -261,6 +295,13 @@ async def main() -> None:
         )
         await worker.__aenter__()
         worker_exit_needed = True
+        schedule_task = asyncio.create_task(
+            schedule_reconciliation_loop(resources, client), name="schedule-reconciliation"
+        )
+        continuation_task = asyncio.create_task(
+            continuation_reconciliation_loop(coordination_activities),
+            name="work-request-continuation-reconciliation",
+        )
         logger.info("worker.started", task_queue=AGENT_TASK_QUEUE)
         await stop.wait()
         logger.info("worker.stopping")
@@ -275,6 +316,8 @@ async def main() -> None:
             worker=worker,
             worker_exit_needed=worker_exit_needed,
             heartbeat_task=heartbeat_task,
+            schedule_task=schedule_task,
+            continuation_task=continuation_task,
             resources=resources,
             runtime=runtime,
             active_error=active_error,

@@ -126,6 +126,28 @@ describe("MemoryItemCard", () => {
     );
     expect(screen.queryByRole("button")).toBeNull();
   });
+
+  it("keeps unsupported notes visible and requires reviewing their wording before saving", () => {
+    const item = memory({ evidence_status: "unsupported" });
+    const onAction = vi.fn();
+    render(<ul><MemoryItemCard memory={item} canWrite isAdmin onAction={onAction} now={now} /></ul>);
+    expect(screen.getByText("Source unverified")).toBeDefined();
+    expect(screen.getByText(/Excluded from automatic recall/)).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Pin" }).title).not.toContain("always recalled");
+    fireEvent.click(screen.getByRole("button", { name: "Review and save" }));
+    expect((screen.getByLabelText("Edit memory") as HTMLTextAreaElement).value).toBe(item.content);
+    expect(onAction).not.toHaveBeenCalled();
+    expect(screen.getByText(/Verify this note against its source/)).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Save reviewed memory" }));
+    expect(onAction).toHaveBeenCalledWith(item, { type: "edit", content: item.content });
+  });
+
+  it("shows the recall exclusion to viewers without allowing confirmation", () => {
+    render(<ul><MemoryItemCard memory={memory({ evidence_status: "unsupported" })} canWrite={false} isAdmin={false} onAction={vi.fn()} now={now} /></ul>);
+    expect(screen.getByText(/Excluded from automatic recall/)).toBeDefined();
+    expect(screen.queryByRole("button")).toBeNull();
+  });
 });
 
 function renderPanel(props: { canWrite: boolean; isAdmin: boolean }) {

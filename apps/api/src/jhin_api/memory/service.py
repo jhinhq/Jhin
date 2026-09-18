@@ -38,13 +38,13 @@ from jhin_memory import (
     SourceFacts,
     apply_candidates,
     compare_contents,
-    contains_secret,
     create_version,
     derive_source_facts,
     forget_record,
     resolve_memory_adjudicator,
     resolve_memory_embedder,
 )
+from jhin_memory.screening import screen_content, unsafe_metadata
 from jhin_observability import JhinMetrics
 from jhin_secrets import SecretCrypto
 
@@ -310,7 +310,8 @@ async def update_memory(
     if not values:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Nothing to update")
     content = payload.content if payload.content is not None else previous.content
-    if contains_secret(content):
+    screened = screen_content(content)
+    if screened.rejected or unsafe_metadata(payload.subject, payload.tags or ()):
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"message": "Memory rejected by policy", "reasons": ["secret"]},
@@ -318,7 +319,7 @@ async def update_memory(
     new = await create_version(
         session,
         previous,
-        content=content,
+        content=screened.content,
         actor=_actor(ctx),
         kind=payload.kind.value if payload.kind is not None else None,
         subject=payload.subject if "subject" in values else None,

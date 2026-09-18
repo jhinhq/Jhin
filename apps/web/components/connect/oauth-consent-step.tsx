@@ -62,10 +62,12 @@ export function OAuthConsentStep({
         <p className="flex items-center gap-2 font-display text-sm font-semibold text-ink">
           <ShieldCheck size={15} aria-hidden /> Connect {appName}
         </p>
-        <p className="text-sm leading-relaxed text-ink">
+        {probe.method === "composio" ? (
+          <p className="text-sm leading-relaxed text-ink">Sign in to {appName} through Composio. You will review the requested access before approving the connection.</p>
+        ) : <p className="text-sm leading-relaxed text-ink">
           Jhin will ask <span className="font-medium">{host}</span> for permission to:{" "}
           <span className="font-medium">{accessSummary ?? describeScopes(probe.scopes)}</span>.
-        </p>
+        </p>}
         <p className="text-[13px] leading-relaxed text-dim">
           You are connecting as <strong className="text-ink">{userName}</strong>. Every agent you
           grant this app to will act with your {appName} permissions.
@@ -107,7 +109,7 @@ export function OAuthConsentStep({
           Cancel
         </Button>
         <Button type="button" variant="primary" onClick={onContinue} disabled={busy}>
-          {busy ? "Taking you there…" : `Continue to ${host}`}
+          {busy ? "Taking you there…" : probe.method === "composio" ? "Continue with Composio" : `Continue to ${host}`}
           {busy ? null : <ArrowRight size={14} aria-hidden />}
         </Button>
       </div>

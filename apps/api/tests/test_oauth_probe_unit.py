@@ -104,6 +104,53 @@ async def test_nothing_registered_asks_for_the_app_and_says_where_to_make_one(
     assert probe.app_settings_url == GITHUB_APPS_PAGE
 
 
+@pytest.mark.parametrize(
+    "connector_type, expected", [("github", "oauth_needs_client"), ("supabase", "api_key")]
+)
+async def test_configured_broker_does_not_replace_direct_sign_in(
+    session: AsyncSession,
+    crypto: SecretCrypto,
+    admin_ctx: WorkspaceContext,
+    connector_type: str,
+    expected: str,
+) -> None:
+    result = await _probe(
+        session,
+        crypto,
+        admin_ctx,
+        connector_type=connector_type,
+        settings=_settings(composio_api_key="synthetic-broker-key"),
+    )
+    assert result.method == expected
+
+
+async def test_broker_probe_requires_explicit_provider_selection(
+    session: AsyncSession,
+    crypto: SecretCrypto,
+    admin_ctx: WorkspaceContext,
+) -> None:
+    async with httpx.AsyncClient() as client:
+        result = await service.probe(
+            session,
+            crypto,
+            admin_ctx,
+            client,
+            _settings(composio_api_key="synthetic-broker-key"),
+            OAuthProbeIn(connector_type="github", provider_key="composio"),
+        )
+    assert result.method == "composio"
+
+
+async def test_connector_gallery_names_only_implemented_static_providers() -> None:
+    from jhin_api.connections.router import list_connectors
+
+    entries = await list_connectors(None, _settings())  # type: ignore[arg-type]
+    by_type = {entry.connector_type: entry.model_dump() for entry in entries}
+    assert by_type["github"]["oauth_provider"] == "github"
+    assert by_type["supabase"]["oauth_provider"] is None
+    assert by_type["linear"]["oauth_provider"] is None
+
+
 async def test_a_registration_with_a_secret_goes_to_the_browser_first(
     session: AsyncSession, crypto: SecretCrypto, admin_ctx: WorkspaceContext
 ) -> None:
@@ -165,7 +212,7 @@ async def test_the_operator_can_put_the_code_first_without_losing_the_browser(
 async def test_a_connector_with_no_provider_entry_is_an_api_key(
     session: AsyncSession, crypto: SecretCrypto, admin_ctx: WorkspaceContext
 ) -> None:
-    probe = await _probe(session, crypto, admin_ctx, connector_type="linear")
+    probe = await _probe(session, crypto, admin_ctx, connector_type="http")
 
     assert probe.method == "api_key"
     assert probe.supports_oauth is False

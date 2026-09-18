@@ -40,6 +40,7 @@ from sqlalchemy.sql import ColumnElement
 
 from jhin_api.audit import service as audit
 from jhin_api.catalog.config_schema import build_config_schema
+from jhin_api.catalog.identity_cache import cached_duplicate_keys
 from jhin_api.catalog.schemas import (
     AuthHintName,
     CatalogEntryDetailOut,
@@ -60,6 +61,7 @@ from jhin_api.catalog.schemas import (
 )
 from jhin_api.deps import WorkspaceContext
 from jhin_api.settings import get_settings
+from jhin_catalog_sync.identity import AppIdentity, duplicate_app_keys
 from jhin_catalog_sync.risk import DEFAULT_RISK_BY_TRUST, default_risk, risk_rank
 from jhin_catalog_sync.wire import clean_text, safe_icon_url
 from jhin_connectors.catalog import CatalogApp, load_catalog
@@ -71,6 +73,7 @@ from jhin_connectors.mcp import (
     stored_tools,
 )
 from jhin_connectors.mcp.discovery import is_valid_server_slug
+from jhin_connectors.oauth_providers import STATIC_PROVIDERS
 from jhin_db.models import CatalogEntry, CatalogVersion, Connection
 from jhin_policy import RiskLevel
 from jhin_tools.sanitize import sanitize_payload
@@ -307,7 +310,11 @@ def _connectable_clause() -> ColumnElement[bool]:
 
 
 def _conditions(
-    version_id: UUID, filters: _Filters, *, db: AsyncSession
+    version_id: UUID,
+    filters: _Filters,
+    *,
+    db: AsyncSession,
+    duplicate_keys: tuple[str, ...] = (),
 ) -> list[ColumnElement[bool]]:
     """Every WHERE clause a synced read applies, generation gate first."""
     conditions: list[ColumnElement[bool]] = [
@@ -324,6 +331,8 @@ def _conditions(
         # out is what keeps each facet dimension's buckets summing to `total`.
         CatalogEntry.trust_tier != _BUILTIN_TIER,
     ]
+    if duplicate_keys:
+        conditions.append(CatalogEntry.canonical_key.notin_(duplicate_keys))
     if filters.kind is not None:
         conditions.append(CatalogEntry.kind == filters.kind)
     if filters.category is not None:
@@ -530,6 +539,7 @@ def _builtin_out(item: _Builtin) -> CatalogEntryOut:
         popularity=_BUILTIN_POPULARITY,
         connector_type=app.connector_type,
         sign_in=app.sign_in,
+        composio_toolkit=app.composio_toolkit,
         mcp_url=app.mcp_url,
         url_unverified=app.url_unverified,
         transport=app.transport,
@@ -747,8 +757,22 @@ def _config_schema(
     server cannot be reached from a hosted deployment; neither gets a form."""
     if base.kind != "mcp" or not base.connectable:
         return None
+    connector_type = base.connector_type
+    if (
+        base.auth_hint == "oauth"
+        and base.mcp_url
+        and not base.url_unverified
+        and not any(
+            provider.connector_type == connector_type for provider in STATIC_PROVIDERS.values()
+        )
+    ):
+        connector_type = "mcp"
+    elif base.stdio_only and connector_type is None:
+        # Managed alternatives are explicit methods; they do not replace the
+        # direct connection schema or erase the server's transport needs.
+        return None
     return build_config_schema(
-        connector_type=base.connector_type,
+        connector_type=connector_type,
         slug=base.slug,
         mcp_url=base.mcp_url,
         url_unverified=base.url_unverified,
@@ -832,6 +856,64 @@ async def active_version(db: AsyncSession) -> CatalogVersionOut | None:
     return None if row is None else _version_out(row)
 
 
+async def _duplicate_keys(db: AsyncSession, version_id: UUID) -> tuple[str, ...]:
+    """Share one identity scan per immutable generation across search/facets."""
+    return await cached_duplicate_keys(db, version_id, _compute_duplicate_keys)
+
+
+async def _compute_duplicate_keys(db: AsyncSession, version_id: UUID) -> tuple[str, ...]:
+    """Resolve browse identities before search, facets, and pagination.
+
+    Read existing generations as well as newly synced ones. Fetch only identity
+    metadata, not descriptions or full rows, and never reuse another generation's
+    result or rewrite imported slugs. Detail and risk lookup deliberately retain
+    the original row so a legacy installation keeps its connector and trust.
+    """
+    builtin_identities = [
+        AppIdentity(
+            key=item.canonical_key,
+            slug=item.app.slug,
+            name=item.app.name,
+            endpoint=item.app.mcp_url or "",
+            docs_url=item.app.docs_url,
+        )
+        for item in _builtins()
+    ]
+    rows = await db.execute(
+        select(
+            CatalogEntry.canonical_key,
+            CatalogEntry.slug,
+            CatalogEntry.name,
+            CatalogEntry.mcp_url,
+            CatalogEntry.docs_url,
+            CatalogEntry.homepage,
+            CatalogEntry.mcp_json,
+            CatalogEntry.trust_rank,
+        )
+        .where(
+            CatalogEntry.version_id == version_id,
+            CatalogEntry.kind == "mcp",
+            CatalogEntry.slug.notin_(_reserved_slugs()),
+            CatalogEntry.trust_tier != _BUILTIN_TIER,
+        )
+        .order_by(*_order(""))
+    )
+    identities = [
+        AppIdentity(
+            key=row.canonical_key,
+            slug=row.slug,
+            name=row.name,
+            endpoint=row.mcp_url or "",
+            docs_url=row.docs_url,
+            homepage=row.homepage,
+            metadata=_safe_blob(row.mcp_json),
+            trust_rank=row.trust_rank,
+        )
+        for row in rows
+    ]
+    return duplicate_app_keys(builtin_identities, identities)
+
+
 # --- search -----------------------------------------------------------------
 
 
@@ -877,7 +959,10 @@ async def search_entries(
     if version is None:
         return items, builtin_total, None
 
-    query = select(CatalogEntry).where(*_conditions(version.id, filters, db=db))
+    duplicate_keys = await _duplicate_keys(db, version.id)
+    query = select(CatalogEntry).where(
+        *_conditions(version.id, filters, db=db, duplicate_keys=duplicate_keys)
+    )
     db_total = int(await db.scalar(select(func.count()).select_from(query.subquery())) or 0)
     db_limit = limit - len(page_builtin)
     if db_limit > 0:
@@ -944,6 +1029,7 @@ async def facets(
     )
     version = await _active_version_row(db)
 
+    duplicate_keys = () if version is None else await _duplicate_keys(db, version.id)
     buckets: dict[str, list[CatalogFacetBucket]] = {}
     for dimension in _FACET_DIMENSIONS:
         relaxed = filters.without(dimension)
@@ -956,7 +1042,7 @@ async def facets(
             column = _FACET_COLUMNS[dimension]
             rows = await db.execute(
                 select(column, func.count())
-                .where(*_conditions(version.id, relaxed, db=db))
+                .where(*_conditions(version.id, relaxed, db=db, duplicate_keys=duplicate_keys))
                 .group_by(column)
             )
             for value, count in rows.all():
@@ -965,7 +1051,9 @@ async def facets(
 
     total = sum(1 for item in _builtins() if _builtin_passes(item, filters))
     if version is not None:
-        query = select(CatalogEntry).where(*_conditions(version.id, filters, db=db))
+        query = select(CatalogEntry).where(
+            *_conditions(version.id, filters, db=db, duplicate_keys=duplicate_keys)
+        )
         total += int(await db.scalar(select(func.count()).select_from(query.subquery())) or 0)
 
     return CatalogFacetsOut(

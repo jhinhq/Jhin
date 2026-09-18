@@ -20,9 +20,11 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
-import { ReconnectButton } from "@/components/connect/reconnect-banner";
+import { BrowserSignInButton, ReconnectButton } from "@/components/connect/reconnect-banner";
 import { ConnectionAccessSummary } from "@/components/connection-access-summary";
+import { ConnectionAgentAssignment } from "@/components/connection-agent-assignment";
 import { ConnectionTools } from "@/components/connection-tools";
+import { GhostPublisherSettings } from "@/components/connect/ghost-publisher-select";
 import { Disclosure } from "@/components/company/bits";
 import {
   Badge,
@@ -94,7 +96,7 @@ export function impactSentence(impact: ConnectionDeleteImpact | undefined): stri
 
 /** "Give to an agent…": pick an agent, land on its Tools & Access tab with
  * the right bundle's setup dialog open on this connection. */
-export function GiveToAgent({
+function BundleAssignmentShortcut({
   workspaceId,
   connection,
 }: {
@@ -163,6 +165,20 @@ export function GiveToAgent({
           ) : null}
         </div>
       )}
+    </div>
+  );
+}
+
+export function GiveToAgent({ workspaceId, connection }: { workspaceId: string; connection: ConnectionInfo }) {
+  return (
+    <div className="space-y-3">
+      <ConnectionAgentAssignment key={connection.id} workspaceId={workspaceId} connection={connection} />
+      {bundleForConnector(connection.connector_type) ? (
+        <details>
+          <summary className="cursor-pointer text-xs text-dim">Or use a capability bundle</summary>
+          <BundleAssignmentShortcut workspaceId={workspaceId} connection={connection} />
+        </details>
+      ) : null}
     </div>
   );
 }
@@ -460,7 +476,7 @@ export function ConnectionDetailDialog({
           <Badge tone={statusTone(connection.status)}>{statusLabel(connection.status)}</Badge>
           <Badge tone="neutral">{connection.connector_type}</Badge>
           <Badge tone="neutral">
-            <KeyRound size={11} /> {scheme?.label ?? connection.auth_type}
+            <KeyRound size={11} /> {connection.auth_provider === "composio" ? "Connected through Composio" : scheme?.label ?? connection.auth_type}
           </Badge>
           {connection.authorized_by ? (
             <Badge tone="neutral">
@@ -472,6 +488,12 @@ export function ConnectionDetailDialog({
             {connection.last_verified_at ? formatDateTime(connection.last_verified_at) : "never"}
           </span>
         </div>
+
+        {canManage ? <BrowserSignInButton workspaceId={workspaceId} connection={connection} connector={connector} /> : null}
+
+        {connection.auth_provider === "composio" && connection.status !== "needs_reauth" && canManage ? (
+          <ReconnectButton workspaceId={workspaceId} connection={connection} />
+        ) : null}
 
         {connection.status === "needs_reauth" ? (
           /* The one thing to do about this connection, above everything that
@@ -494,9 +516,10 @@ export function ConnectionDetailDialog({
           </div>
         ) : null}
 
+        {connection.connector_type === "ghost" ? <GhostPublisherSettings key={`${connection.id}:${String(connection.config_json.publisher_agent_id??"")}`} workspaceId={workspaceId} connection={connection} canManage={canManage}/> : null}
         {Object.keys(connection.config_json).length > 0 ? (
           <dl className="space-y-1 rounded-xl border border-line bg-raised px-3.5 py-2.5 text-xs">
-            {Object.entries(connection.config_json).map(([key, value]) => (
+            {Object.entries(connection.config_json).filter(([key])=>connection.connector_type!=="ghost"||key!=="publisher_agent_id").map(([key, value]) => (
               <div key={key} className="flex gap-2">
                 <dt className="shrink-0 text-faint">{key}:</dt>
                 <dd className="min-w-0 truncate font-mono">{String(value)}</dd>
@@ -658,7 +681,7 @@ export function ConnectionDetailDialog({
                   </div>
                 ) : null}
 
-                {rotating ? (
+                {rotating && connection.auth_provider !== "composio" ? (
                   <form
                     className="space-y-3 rounded-xl border border-accent/40 bg-accent-soft px-3.5 py-3"
                     onSubmit={(event) => {
@@ -706,9 +729,9 @@ export function ConnectionDetailDialog({
                 ) : null}
 
                 <div className="flex flex-wrap items-center gap-2">
-                  <Button size="sm" onClick={() => setRotating(true)} disabled={rotating}>
+                  {connection.auth_provider !== "composio" ? <Button size="sm" onClick={() => setRotating(true)} disabled={rotating}>
                     <RefreshCw size={13} /> Rotate credential
-                  </Button>
+                  </Button> : null}
                   <Button size="sm" onClick={() => toggle.mutate()} disabled={toggle.isPending}>
                     {connection.status === "disabled" ? "Enable" : "Disable"}
                   </Button>

@@ -18,11 +18,15 @@ compose ``fake-github`` service (plan 32.2).
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
+import os
+import tempfile
 import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -205,6 +209,38 @@ async def test_connection_create_verify_and_no_plaintext(
 # --- (a) granted agent: read repo, create branch, open + comment PR -----------
 
 
+def _seed_pr_source_branch(tag: str) -> str:
+    """Prepare a real ahead-of-main commit in the isolated fake's Git store.
+
+    This is a fixture prerequisite, not a claimed agent code change. Phase 6
+    separately proves the agent's checkout/edit/commit/push path.
+    """
+    from jhin_connectors.testing.fake_git import _git
+
+    source = f"fixture/p5-source-{tag}"
+    # Use the published fake Git endpoint, preserving the lease's narrow
+    # Compose operation allowlist. The synthetic PAT stays out of the URL,
+    # arguments and repository config; no real host Git config is consulted.
+    basic = base64.b64encode(f"fixture:{FAKE_GITHUB_PAT}".encode()).decode()
+    with tempfile.TemporaryDirectory(prefix="p5-source-") as directory:
+        git_env = {
+            "HOME": directory,
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.extraHeader",
+            "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}",
+        }
+        _git("clone", f"{FAKE_GITHUB_HOST}/git/octo/alpha.git", directory, env=git_env)
+        _git("checkout", "-b", source, "origin/main", cwd=directory, env=git_env)
+        Path(directory, "phase5-fixture.txt").write_text(
+            "Synthetic PR prerequisite: " + source + "\n"
+        )
+        _git("add", "phase5-fixture.txt", cwd=directory, env=git_env)
+        _git("commit", "-m", "Seed isolated Phase 5 PR prerequisite", cwd=directory, env=git_env)
+        _git("push", "origin", source, cwd=directory, env=git_env)
+    return source
+
+
 async def test_granted_agent_reads_repo_creates_branch_and_pr(
     owner: tuple[httpx.AsyncClient, str],
 ) -> None:
@@ -212,6 +248,7 @@ async def test_granted_agent_reads_repo_creates_branch_and_pr(
     tag = uuid4().hex[:8]
     connection, _ = await _make_connection(client, ws, tag)
     agent = await _make_agent(client, ws, tag, "coder")
+    source_branch = _seed_pr_source_branch(tag)
 
     scope = {"connection_id": connection["id"], "repository": "octo/alpha"}
     for capability in (
@@ -220,7 +257,10 @@ async def test_granted_agent_reads_repo_creates_branch_and_pr(
         "github.pull_request.create",
         "github.pull_request.comment",
     ):
-        await _grant(client, ws, agent["id"], capability, scope)
+        exact_scope = (
+            {**scope, "base": "main"} if capability == "github.pull_request.create" else scope
+        )
+        await _grant(client, ws, agent["id"], capability, exact_scope)
 
     branch = f"agent/p5-{tag}"
     conn = connection["id"]
@@ -229,7 +269,8 @@ async def test_granted_agent_reads_repo_creates_branch_and_pr(
             f'[[tool:github.repository.read {{"connection_id": "{conn}", '
             f'"repository": "octo/alpha"}}]]',
             f'[[tool:github.branch.create {{"connection_id": "{conn}", '
-            f'"repository": "octo/alpha", "branch": "{branch}"}}]]',
+            f'"repository": "octo/alpha", "branch": "{branch}", '
+            f'"from_branch": "{source_branch}"}}]]',
             f'[[tool:github.pull_request.create {{"connection_id": "{conn}", '
             f'"repository": "octo/alpha", "title": "P5 fix {tag}", '
             f'"head": "{branch}", "base": "main", "body": "Automated by Jhin."}}]]',
@@ -257,6 +298,8 @@ async def test_granted_agent_reads_repo_creates_branch_and_pr(
     state = await _fake_github_state()
     repo = state["repos"]["octo/alpha"]
     assert branch in repo["branches"]
+    assert repo["branches"][branch] == repo["branches"][source_branch]
+    assert repo["branches"][branch] != repo["branches"]["main"]
     assert str(pr_number) in repo["pulls"]
     assert repo["pulls"][str(pr_number)]["title"] == f"P5 fix {tag}"
     assert repo["pulls"][str(pr_number)]["head"]["ref"] == branch

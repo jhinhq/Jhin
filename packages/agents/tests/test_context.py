@@ -46,8 +46,8 @@ def test_prompt_layers_in_order() -> None:
     assert system.role == "system"
     # Layer order (plan 7.2): platform preamble before role, role before org context.
     assert system.content.startswith(
-        "You are Senior SWE, Senior Software Engineer, an AI teammate "
-        "in the Acme Rockets workspace on Jhin."
+        "Your name is Senior SWE. Your role is Senior Software Engineer. You are an "
+        "AI teammate in the Acme Rockets workspace on Jhin."
     )
     assert system.content.index("Senior SWE") < system.content.index("Engineering team")
     assert "Your manager is CTO." in system.content

@@ -112,6 +112,7 @@ class _PauseAfterDirectClaimGateway(ToolGateway):
         sanitized_input: dict[str, Any],
         dumped: dict[str, Any],
         connection_id: UUID | None,
+        adopt_claim: bool = False,
     ) -> tuple[ToolCall | None, GatewayOutcome | None]:
         row, replay = await super()._claim_direct_call(
             definition,
@@ -119,6 +120,7 @@ class _PauseAfterDirectClaimGateway(ToolGateway):
             sanitized_input=sanitized_input,
             dumped=dumped,
             connection_id=connection_id,
+            adopt_claim=adopt_claim,
         )
         if row is not None and replay is None:
             self._claim_committed.set()
@@ -160,6 +162,7 @@ class _CrashAfterDirectClaimGateway(ToolGateway):
         sanitized_input: dict[str, Any],
         dumped: dict[str, Any],
         connection_id: UUID | None,
+        adopt_claim: bool = False,
     ) -> tuple[ToolCall | None, GatewayOutcome | None]:
         row, replay = await super()._claim_direct_call(
             definition,
@@ -167,6 +170,7 @@ class _CrashAfterDirectClaimGateway(ToolGateway):
             sanitized_input=sanitized_input,
             dumped=dumped,
             connection_id=connection_id,
+            adopt_claim=adopt_claim,
         )
         if row is not None and replay is None:
             raise asyncio.CancelledError
@@ -658,7 +662,7 @@ async def test_interrupted_auto_invocation_is_unknown_and_never_reexecutes(
         assert effect_count == claim_count == execution_attempts == 1
 
 
-async def test_crash_after_direct_claim_before_dispatch_is_unknown_without_effect(
+async def test_crash_after_direct_claim_before_dispatch_rechecks_and_executes_once(
     authorization_database: PgDatabase,
 ) -> None:
     tool_name = "test.phase9.claimed_before_dispatch"
@@ -705,19 +709,21 @@ async def test_crash_after_direct_claim_before_dispatch_is_unknown_without_effec
             provider_call_id="provider-after-worker-loss",
             invocation_id=invocation_id,
         )
-        assert retry.status == "execution_unknown"
-        assert retry.error_code == "execution_outcome_unknown"
+        # A claim is not evidence of dispatch. Fresh authorization may adopt
+        # it because the durable executor-entry marker is still absent.
+        assert retry.status == "executed"
+        assert retry.error_code is None
         assert retry.replayed is False
 
         row = await retry_session.get(ToolCall, invocation_id)
         assert row is not None
-        assert row.status == ToolCallStatus.EXECUTION_UNKNOWN.value
+        assert row.status == ToolCallStatus.COMPLETED.value
         assert row.completed_at is not None
         assert (
             await retry_session.scalar(
                 select(func.count(AuditEvent.id)).where(AuditEvent.action == effect_action)
             )
-            == 0
+            == 1
         )
         assert (
             await retry_session.scalar(
@@ -726,7 +732,7 @@ async def test_crash_after_direct_claim_before_dispatch_is_unknown_without_effec
                     AuditEvent.target_id == invocation_id,
                 )
             )
-            == 1
+            == 2
         )
         assert (
             await retry_session.scalar(
@@ -735,10 +741,19 @@ async def test_crash_after_direct_claim_before_dispatch_is_unknown_without_effec
                     AuditEvent.target_id == invocation_id,
                 )
             )
-            == 1
+            == 0
         )
-    assert execution_attempts == [0]
-    assert executor_started.is_set() is False
+        terminal = await ToolGateway(
+            _runtime_context(authorization_database, retry_session, identity), catalog
+        ).request(
+            tool_name,
+            '{"label":"must-not-dispatch"}',
+            invocation_id=invocation_id,
+        )
+        assert terminal.status == "executed"
+        assert terminal.replayed is True
+    assert execution_attempts == [1]
+    assert executor_started.is_set() is True
 
 
 async def test_approved_invocation_race_executes_once_and_replays(
@@ -1024,7 +1039,7 @@ def _request_meta() -> RequestMeta:
     return {"request_id": new_uuid7(), "ip_hash": "phase9-authorization-race"}
 
 
-async def test_exact_duplicate_scoped_grant_race_returns_one_conflict(
+async def test_exact_duplicate_scoped_grant_race_returns_one_idempotent_row(
     authorization_database: PgDatabase,
 ) -> None:
     identity, ctx = await _seed_runtime(
@@ -1076,16 +1091,11 @@ async def test_exact_duplicate_scoped_grant_race_returns_one_conflict(
         await second_session.rollback()
 
     successes = [result for result in results if isinstance(result, AgentCapabilityGrant)]
-    conflicts = [
-        result
-        for result in results
-        if isinstance(result, HTTPException) and result.status_code == 409
-    ]
     for result in results:
-        if isinstance(result, BaseException) and not isinstance(result, HTTPException):
+        if isinstance(result, BaseException):
             raise result
-    assert len(successes) == 1
-    assert len(conflicts) == 1
+    assert len(successes) == 2
+    assert successes[0].id == successes[1].id
 
     async with authorization_database.sessions() as verification:
         grants = list(
@@ -1098,8 +1108,23 @@ async def test_exact_duplicate_scoped_grant_race_returns_one_conflict(
                 )
             )
         )
+        audits = list(
+            await verification.scalars(
+                select(AuditEvent).where(
+                    AuditEvent.workspace_id == identity.workspace_id,
+                    AuditEvent.target_id == identity.agent_id,
+                    AuditEvent.action == "agent.permission.granted",
+                )
+            )
+        )
     assert len(grants) == 1
+    assert grants[0].id == successes[0].id
     assert grants[0].scope_json == scope
+    matching_audits = [
+        audit for audit in audits if audit.metadata_json.get("capability") == capability
+    ]
+    assert len(matching_audits) == 1
+    assert matching_audits[0].metadata_json["grant_id"] == str(grants[0].id)
 
 
 async def test_approval_decision_race_has_one_durable_winner_and_signal(

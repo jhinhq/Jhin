@@ -37,13 +37,30 @@ _READ_RETRY = RetryPolicy(
     maximum_interval=timedelta(seconds=15),
     maximum_attempts=5,
 )
+# Every activity in this module runs on the tool worker's queue, so every
+# policy here answers to the drain: a redeploy refuses instantly and asks to
+# be tried again in ten seconds (``jhin_tool_worker.drain``). Three attempts
+# could all land inside one restart, which is a compatibility workflow failing
+# for a deploy that went perfectly. See ``_TOOL_STEP_RETRY`` in
+# ``jhin_workflows.agent_task`` for the full argument.
 _EFFECT_RETRY = RetryPolicy(
+    initial_interval=timedelta(seconds=2),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(seconds=30),
+    maximum_attempts=5,
+)
+# The cleanup used to get exactly one attempt, which a draining worker could
+# spend without running anything at all. Deleting a run's workspace volume is
+# idempotent — the runner answers the same for a volume it removed and one
+# that was never there — so retrying it costs nothing and is the difference
+# between a volume cleaned up and a volume left for the age sweep. Still
+# short: this is the compatibility path, and cleanup is best effort.
+_CLEANUP_RETRY = RetryPolicy(
     initial_interval=timedelta(seconds=2),
     backoff_coefficient=2.0,
     maximum_interval=timedelta(seconds=30),
     maximum_attempts=3,
 )
-_CLEANUP_RETRY = RetryPolicy(maximum_attempts=1)
 
 
 @workflow.defn(name="AdvertisedToolsCompatibilityWorkflow")

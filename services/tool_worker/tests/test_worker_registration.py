@@ -15,22 +15,27 @@ import jhin_agent_worker.main as agent_main
 import jhin_tool_worker.main as tool_main
 from jhin_agent_worker.activities import AgentActivities
 from jhin_agent_worker.compatibility import AgentCompatibilityActivities
+from jhin_agent_worker.coordination_activities import CoordinationActivities
 from jhin_agent_worker.projections import _cancel_pending_run_approvals
 from jhin_agent_worker.resources import Resources as AgentResources
 from jhin_agent_worker.trigger_activities import TriggerCompatibilityActivities
 from jhin_tool_worker.activities import ToolActivities
+from jhin_tool_worker.blog_corpus_activities import BlogCorpusActivities
 from jhin_tool_worker.cleanup_activities import CleanupActivities
+from jhin_tool_worker.drain import RUNTIME_SHUTDOWN_BUDGET_SECONDS
 from jhin_tool_worker.resources import ToolWorkerResources
 from jhin_tool_worker.settings import ToolWorkerSettings
 from jhin_tool_worker.trigger_activities import TriggerToolActivities
 from jhin_tools import ToolCatalog
 from jhin_workflows.agent_task import AgentTaskWorkflow
 from jhin_workflows.avatar_generation import AvatarGenerationWorkflow
+from jhin_workflows.blog_corpus import BlogCorpusSyncWorkflow
 from jhin_workflows.delegated_task import DelegatedTaskWorkflow
 from jhin_workflows.engineering_ticket import EngineeringTicketWorkflow
 from jhin_workflows.memory_maintenance import MemoryMaintenanceWorkflow
 from jhin_workflows.oauth_refresh import OAuthRefreshWorkflow
 from jhin_workflows.periodic_review import PeriodicReviewWorkflow
+from jhin_workflows.schedules.workflows import AgentScheduleWorkflow
 from jhin_workflows.tool_compat import (
     AdvertisedToolsCompatibilityWorkflow,
     ApprovalCompatibilityWorkflow,
@@ -41,6 +46,23 @@ from jhin_workflows.tool_compat import (
 from jhin_workflows.triggered_task import TriggeredTaskWorkflow
 from jhin_workflows.work_request_task import WorkRequestTaskWorkflow
 
+#: What each worker gives its telemetry runtime to flush on the way out.
+#:
+#: They differ, and the difference is the point. The tool worker's shutdown
+#: spends Docker's stop grace on three consecutive budgets — the drain, the
+#: per-job cancellation cleanup, and this — and the three used to sum to
+#: exactly the ten seconds after which SIGKILL arrives, which is not a budget
+#: but a coincidence. ``jhin_tool_worker.drain`` owns that arithmetic now and
+#: this is the share it leaves the flush. The agent worker holds no sandbox
+#: jobs and has no such sum to fit inside, so it is unchanged.
+AGENT_SHUTDOWN_MILLIS = 5_000
+TOOL_SHUTDOWN_MILLIS = int(RUNTIME_SHUTDOWN_BUDGET_SECONDS * 1_000)
+
+
+def shutdown_millis(kind: str) -> int:
+    return AGENT_SHUTDOWN_MILLIS if kind == "agent" else TOOL_SHUTDOWN_MILLIS
+
+
 TOOL_ACTIVITY_NAMES = {
     "resolve_advertised_tools",
     "execute_bound_tool",
@@ -48,6 +70,7 @@ TOOL_ACTIVITY_NAMES = {
     "resolve_bound_tool_review",
     "sync_external_tool",
     "cleanup_run_workspace",
+    "advance_blog_corpus_sync",
 }
 TOOL_ACTIVITY_ORDER = [
     "resolve_advertised_tools",
@@ -56,6 +79,7 @@ TOOL_ACTIVITY_ORDER = [
     "resolve_bound_tool_review",
     "sync_external_tool",
     "cleanup_run_workspace",
+    "advance_blog_corpus_sync",
 ]
 
 AGENT_ACTIVITY_NAMES = {
@@ -81,11 +105,14 @@ AGENT_ACTIVITY_NAMES = {
     "generate_avatar",
     "fail_avatar_generation",
     "finalize_work_request",
+    "prepare_work_request_continuation",
     "note_work_request_unanswered",
     "mark_task_paused",
     "load_periodic_review_policy",
     "open_periodic_review",
     "refresh_due_oauth_connections",
+    "claim_schedule_occurrence",
+    "finish_schedule_occurrence",
 }
 AGENT_ACTIVITY_ORDER = [
     "resolve_snapshot",
@@ -110,11 +137,14 @@ AGENT_ACTIVITY_ORDER = [
     "generate_avatar",
     "fail_avatar_generation",
     "finalize_work_request",
+    "prepare_work_request_continuation",
     "note_work_request_unanswered",
     "mark_task_paused",
     "load_periodic_review_policy",
     "open_periodic_review",
     "refresh_due_oauth_connections",
+    "claim_schedule_occurrence",
+    "finish_schedule_occurrence",
 ]
 
 
@@ -122,14 +152,33 @@ class _Resources:
     def __init__(self, runtime: object) -> None:
         self.runtime = runtime
         self.close_count = 0
+        # The tool worker hands this to its sandbox-reconcile sweep. The stub
+        # never runs the sweep (it is replaced below), but the attribute has
+        # to exist for the same reason ``runtime`` does: registration reads it.
+        self.session_factory = None
 
     async def close(self) -> None:
         self.close_count += 1
 
 
+async def _no_sweep(*_args: object, **_kwargs: object) -> None:
+    return None
+
+
+@pytest.fixture(autouse=True)
+def _isolate_schedule_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These registration/shutdown fakes have no database. Actual scheduling
+    # and restart recovery are exercised by Temporal and PostgreSQL tests.
+    monkeypatch.setattr(agent_main, "schedule_reconciliation_loop", _no_sweep)
+    monkeypatch.setattr(agent_main, "continuation_reconciliation_loop", _no_sweep)
+
+
 class _ImmediateEvent:
     def set(self) -> None:
         return None
+
+    def is_set(self) -> bool:
+        return True
 
     async def wait(self) -> None:
         return None
@@ -322,6 +371,9 @@ async def _capture_tool_registration(
         lambda config: captured.update(config=config) or runtime,
     )
     monkeypatch.setattr(tool_main, "build_temporal_worker", build_temporal_worker)
+    # Registration is what this captures; the background sandbox sweep has its
+    # own tests and no business touching a database from inside them.
+    monkeypatch.setattr(tool_main, "sandbox_reconcile_loop", _no_sweep)
     monkeypatch.setattr(asyncio, "Event", _ImmediateEvent)
     monkeypatch.setattr(asyncio, "get_running_loop", _SignalLoop)
 
@@ -347,6 +399,8 @@ async def test_agent_worker_registration_uses_only_agent_and_legacy_coordinators
         # One durable refresher per workspace keeps OAuth connections alive
         # without a tool call to trigger it (docs/architecture/oauth.md).
         OAuthRefreshWorkflow,
+        AgentScheduleWorkflow,
+        BlogCorpusSyncWorkflow,
     ]
     assert cast(Any, captured["worker"]).workflows is captured["workflows"]
     assert cast(Any, captured["worker"]).activities is captured["activities"]
@@ -354,6 +408,9 @@ async def test_agent_worker_registration_uses_only_agent_and_legacy_coordinators
     assert set(registered) == AGENT_ACTIVITY_NAMES
     assert list(registered) == AGENT_ACTIVITY_ORDER
     assert set(registered).isdisjoint(TOOL_ACTIVITY_NAMES)
+    assert isinstance(
+        registered["prepare_work_request_continuation"].__self__, CoordinationActivities
+    )
     for name in ("run_agent_step", "resolve_approval", "finalize_run"):
         assert isinstance(registered[name].__self__, AgentCompatibilityActivities)
     assert isinstance(
@@ -367,7 +424,7 @@ async def test_agent_worker_registration_uses_only_agent_and_legacy_coordinators
     assert captured["config"].service_name == "agent-worker"
     assert captured["config"].environment == "dev"
     assert captured["config"].extra_log_processors == (agent_main.redact_event_dict,)
-    assert captured["shutdowns"] == [5_000]
+    assert captured["shutdowns"] == [AGENT_SHUTDOWN_MILLIS]
 
 
 def test_agent_activity_class_no_longer_defines_legacy_effect_handlers() -> None:
@@ -403,12 +460,13 @@ async def test_tool_worker_registration_is_exactly_the_effect_boundary(
     assert isinstance(registered["resolve_bound_tool_review"].__self__, ToolActivities)
     assert isinstance(registered["sync_external_tool"].__self__, TriggerToolActivities)
     assert isinstance(registered["cleanup_run_workspace"].__self__, CleanupActivities)
+    assert isinstance(registered["advance_blog_corpus_sync"].__self__, BlogCorpusActivities)
     assert resources.close_count == 1
     _assert_resource_runtime_identity(resources, captured["runtime"])
     assert captured["config"].service_name == "tool-worker"
     assert captured["config"].environment == "dev"
     assert captured["config"].extra_log_processors == (tool_main.redact_event_dict,)
-    assert captured["shutdowns"] == [5_000]
+    assert captured["shutdowns"] == [TOOL_SHUTDOWN_MILLIS]
 
 
 def test_tool_worker_settings_default_to_closed_environment() -> None:
@@ -536,6 +594,7 @@ async def test_worker_cleanup_is_reawaited_through_repeated_cancellation(
     else:
         monkeypatch.setattr(module, "ToolWorkerSettings", lambda: settings)
         monkeypatch.setattr(module, "build_default_catalog", ToolCatalog)
+        monkeypatch.setattr(module, "sandbox_reconcile_loop", _no_sweep)
 
     task = asyncio.create_task(module.main(), name=f"{kind}-main-test")
     await _wait_for_event_or_early_task_failure(worker_entered, task)
@@ -551,7 +610,7 @@ async def test_worker_cleanup_is_reawaited_through_repeated_cancellation(
     _assert_resource_runtime_identity(acquired_resources, runtime)
     assert len(cleanup_task_names) == 1
     assert cleanup_task_names[0].endswith("worker-cleanup")
-    assert shutdowns == [5_000]
+    assert shutdowns == [shutdown_millis(kind)]
     assert not [
         candidate
         for candidate in asyncio.all_tasks()
@@ -641,6 +700,7 @@ async def test_worker_enter_failure_never_calls_exit_and_still_cleans_up(
     else:
         monkeypatch.setattr(module, "ToolWorkerSettings", lambda: settings)
         monkeypatch.setattr(module, "build_default_catalog", ToolCatalog)
+        monkeypatch.setattr(module, "sandbox_reconcile_loop", _no_sweep)
 
     caught: BaseException | None = None
     try:
@@ -652,7 +712,7 @@ async def test_worker_enter_failure_never_calls_exit_and_still_cleans_up(
     assert exit_count == 0
     assert resources.close_count == 1
     _assert_resource_runtime_identity(resources, runtime)
-    assert shutdowns == [5_000]
+    assert shutdowns == [shutdown_millis(kind)]
 
 
 @pytest.mark.asyncio
@@ -720,6 +780,7 @@ async def test_cleanup_wait_cancellation_outranks_active_business_error(
     else:
         monkeypatch.setattr(module, "ToolWorkerSettings", lambda: settings)
         monkeypatch.setattr(module, "build_default_catalog", ToolCatalog)
+        monkeypatch.setattr(module, "sandbox_reconcile_loop", _no_sweep)
 
     task = asyncio.create_task(module.main(), name=f"{kind}-business-cleanup-test")
     await _wait_for_event_or_early_task_failure(worker_entered, task)
@@ -732,7 +793,7 @@ async def test_cleanup_wait_cancellation_outranks_active_business_error(
     assert raised.value.args == ("cleanup-cancellation",)
     assert resources.close_count == 1
     _assert_resource_runtime_identity(resources, runtime)
-    assert shutdowns == [5_000]
+    assert shutdowns == [shutdown_millis(kind)]
 
 
 @pytest.mark.asyncio
@@ -821,7 +882,7 @@ async def test_process_cleanup_cancellation_outranks_earlier_errors_and_runs_eve
         "signal:first",
         "worker.exit",
         "resources.close",
-        "runtime.shutdown:5000",
+        f"runtime.shutdown:{shutdown_millis(kind)}",
     ]
 
 
@@ -869,7 +930,7 @@ async def test_agent_heartbeat_cancel_failure_cannot_skip_later_cleanup(
         "heartbeat.await",
         "heartbeat.clear",
         "resources.close",
-        "runtime.shutdown:5000",
+        f"runtime.shutdown:{AGENT_SHUTDOWN_MILLIS}",
     ]
 
 
@@ -916,6 +977,7 @@ async def test_active_business_error_outranks_inner_cleanup_cancellation(
     class Resources:
         def __init__(self, received_runtime: object) -> None:
             self.runtime = received_runtime
+            self.session_factory = None
 
         async def close(self) -> None:
             raise cleanup_cancellation
@@ -948,6 +1010,7 @@ async def test_active_business_error_outranks_inner_cleanup_cancellation(
     else:
         monkeypatch.setattr(module, "ToolWorkerSettings", lambda: settings)
         monkeypatch.setattr(module, "build_default_catalog", ToolCatalog)
+        monkeypatch.setattr(module, "sandbox_reconcile_loop", _no_sweep)
 
     caught: BaseException | None = None
     try:
@@ -960,7 +1023,7 @@ async def test_active_business_error_outranks_inner_cleanup_cancellation(
     while traceback is not None and traceback.tb_next is not None:
         traceback = traceback.tb_next
     assert traceback is business_origin[0]
-    assert shutdowns == [5_000]
+    assert shutdowns == [shutdown_millis(kind)]
 
 
 @pytest.mark.asyncio
@@ -1009,7 +1072,7 @@ async def test_worker_failure_matrix_attempts_every_owned_cleanup_step(
 
         def shutdown(self, *, timeout_millis: int) -> None:
             nonlocal shutdown_count
-            assert timeout_millis == 5_000
+            assert timeout_millis == shutdown_millis(kind)
             shutdown_count += 1
             events.append("runtime.shutdown")
             if failure_stage == "runtime_shutdown":
@@ -1020,6 +1083,7 @@ async def test_worker_failure_matrix_attempts_every_owned_cleanup_step(
     class Resources:
         def __init__(self, received_runtime: object) -> None:
             self.runtime = received_runtime
+            self.session_factory = None
 
         async def close(self) -> None:
             events.append("resources.close")
@@ -1103,6 +1167,7 @@ async def test_worker_failure_matrix_attempts_every_owned_cleanup_step(
     else:
         monkeypatch.setattr(module, "ToolWorkerSettings", lambda: settings)
         monkeypatch.setattr(module, "build_default_catalog", ToolCatalog)
+        monkeypatch.setattr(module, "sandbox_reconcile_loop", _no_sweep)
 
     caught: BaseException | None = None
     try:
@@ -1174,7 +1239,7 @@ async def test_runtime_initialization_is_first_effect_after_settings(
     with pytest.raises(RuntimeError) as raised:
         await module.main()
     assert raised.value is failure
-    assert events == ["settings", "runtime", "connect", "shutdown:5000"]
+    assert events == ["settings", "runtime", "connect", f"shutdown:{shutdown_millis(kind)}"]
 
 
 async def _wait_forever() -> None:

@@ -1,4 +1,5 @@
 "use client";
+import { MemorySummary } from "@/components/agents/memory-summary";
 
 /** Agent profile "Memory" tab: what the agent remembers, at which scope, and
  * the human controls over it (pin, edit, contest, forget, approve/reject,
@@ -64,6 +65,7 @@ export function MemoryItemCard({
   const pinned = Boolean(memory.pinned_at);
   const status = STATUS_LABELS[memory.status];
   const proposed = memory.status === "proposed";
+  const unsupported = memory.evidence_status === "unsupported";
   const editable = canWrite && (memory.status === "active" || memory.status === "contested");
 
   return (
@@ -79,7 +81,7 @@ export function MemoryItemCard({
               onSubmit={(event) => {
                 event.preventDefault();
                 const next = draft.trim();
-                if (!next || next === memory.content) {
+                if (!next || (!unsupported && next === memory.content)) {
                   setEditing(false);
                   return;
                 }
@@ -95,9 +97,10 @@ export function MemoryItemCard({
                 onChange={(event) => setDraft(event.target.value)}
               />
               <p className="text-xs text-faint">Saving creates a new version; the old wording is kept as history.</p>
+              {unsupported ? <p className="text-xs text-dim">Verify this note against its source before saving. Your reviewed version becomes eligible for recall.</p> : null}
               <div className="flex gap-2">
                 <Button size="sm" variant="primary" type="submit" disabled={busy}>
-                  Save
+                  {unsupported ? "Save reviewed memory" : "Save"}
                 </Button>
                 <Button size="sm" variant="ghost" type="button" onClick={() => setEditing(false)}>
                   Cancel
@@ -115,12 +118,14 @@ export function MemoryItemCard({
             <span aria-hidden>·</span>
             <span>{importanceWord(memory.importance)}</span>
             {memory.sensitivity === "redacted" ? <Badge tone="warn">Secret removed</Badge> : null}
+            {unsupported ? <Badge tone="warn">Source unverified</Badge> : null}
             {memory.tags_json.map((tag) => (
               <span key={tag} className="text-faint">
                 #{tag}
               </span>
             ))}
           </div>
+          {unsupported ? <p className="mt-2 text-xs text-dim">Excluded from automatic recall and summaries until a person reviews and saves it. Pinning does not change this.</p> : null}
           <p className="mt-1.5 flex flex-wrap items-center gap-x-2 text-xs text-faint">
             <span>
               {memory.created_by_type === "user" ? "Added by a person" : memory.created_by_type === "agent" ? "Learned by the agent" : "Added automatically"}{" "}
@@ -140,7 +145,7 @@ export function MemoryItemCard({
             type="button"
             aria-label={pinned ? "Unpin" : "Pin"}
             aria-pressed={pinned}
-            title={pinned ? "Unpin" : "Pin so it's always recalled"}
+            title={pinned ? "Unpin" : unsupported ? "Pin for review" : "Pin so it's always recalled"}
             disabled={busy}
             onClick={() => onAction(memory, { type: "pin", pinned: !pinned })}
             className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-colors hover:bg-hover md:h-9 md:w-9 ${pinned ? "text-accent-strong" : "text-faint"}`}
@@ -165,7 +170,7 @@ export function MemoryItemCard({
           {editable ? (
             <>
               <Button size="sm" variant="ghost" disabled={busy} onClick={() => { setDraft(memory.content); setEditing(true); }}>
-                Edit
+                {unsupported ? "Review and save" : "Edit"}
               </Button>
               {memory.status === "active" ? (
                 <Button size="sm" variant="ghost" disabled={busy} onClick={() => { setReason(""); setConfirm("contest"); }}>
@@ -358,6 +363,7 @@ export function MemoryPanel({
         <Segmented label="Who shares this memory" options={scopeOptions} value={scope} onChange={setScope} />
         <Segmented label="Status" options={STATUS_FILTERS} value={filter} onChange={setFilter} />
       </div>
+      <MemorySummary key={scope} workspaceId={workspaceId} scope={scope} scopeId={scope === "agent" ? agent.id : scope === "team" ? agent.team_id! : workspaceId} canRebuild={scope === "agent" ? canWrite : isAdmin} />
       <ErrorNote message={error} />
       {notice ? (
         <p role="status" className="mb-3 text-xs text-dim">

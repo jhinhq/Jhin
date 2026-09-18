@@ -152,6 +152,8 @@ async def test_create_with_first_turn_links_task_and_seed_message(
     assert result.task.metadata_json == {
         "origin": "conversation",
         "conversation_id": str(conversation.id),
+        "execution_mode": "act",
+        "delivery": "auto",
     }
     assert result.message.conversation_id == conversation.id
     assert result.message.task_id == result.task.id
@@ -201,7 +203,8 @@ async def test_seed_message_carries_the_request_verbatim(
 
     # Exact, not `.strip()`-equal: a normalizer applied to only one side is the
     # failure this guards, so neither side may be normalized at all.
-    assert first.message.content_json == {"text": text}
+    assert first.message.content_json["text"] == text
+    assert set(first.message.content_json) == {"text", "_human_authority"}
     assert first.task.description == text
     # The title is the one derived field; it must not leak back into either.
     assert conversation.title == "Plan the Q4 roadmap"
@@ -216,7 +219,9 @@ async def test_seed_message_carries_the_request_verbatim(
         session, admin_ctx, temporal, conversation.id, follow_up, client_turn_id="c-9"
     )
     assert second.mode == "new_task"
-    assert second.message.content_json == {"text": follow_up, "client_turn_id": "c-9"}
+    assert second.message.content_json["text"] == follow_up
+    assert second.message.content_json["client_turn_id"] == "c-9"
+    assert set(second.message.content_json) == {"text", "client_turn_id", "_human_authority"}
     assert second.task.description == follow_up
 
     # And the instruction the workflow is started with, which is where the

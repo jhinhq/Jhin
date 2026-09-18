@@ -94,10 +94,31 @@ in order:
    blocks, DSNs with credentials, and `api_key=…` assignments → **reject**.
    `password: …` assignments → **redact** to `[REDACTED]`, stored with
    `sensitivity=redacted`. Model-proposed candidates (not explicit human
-   "remember this") are additionally rejected when they state the agent's
-   own identity (`self_reference` — "the AI teammate's name is …",
-   "<agent name> is an AI teammate") or carry fewer than two informative
-   tokens (`low_information`).
+   "remember this", and not platform-authored) are additionally rejected when
+   they:
+   - state the agent's own identity (`self_reference` — "the AI teammate's
+     name is …", "<agent name> is an AI teammate");
+   - pass a **verdict on a person** (`personal_judgement` — "the user
+     attempted a second prompt-injection", "the operator was testing my
+     limits"). Not a quality rule: such a record is filed under a person's
+     name, retrieved into later prompts, and read back in the next
+     conversation with that same person, who has no way to see or correct
+     it. What somebody decided, prefers, or is working on is memory; what an
+     agent concluded they were up to is not. The person must be the
+     *subject* of the verdict, so "the user reported a prompt-injection bug"
+     is untouched;
+   - narrate the conversation instead of stating a fact
+     (`conversation_record` — "earlier in this conversation the user asked
+     …", "on 2026-09-06 the user asked me to …");
+   - carry fewer than two informative tokens (`low_information`).
+
+   The last three exist because the extraction pass writes through
+   `apply_candidates` and never calls `memory.propose`, so the "save the
+   fact, not the conversation" rule in the platform preamble does not reach
+   it: it filed three near-duplicate records describing a tester's probes
+   under subject `user.injection.attempts`. `EXTRACTION_SYSTEM_PROMPT` now
+   carries the same rule in its own words, and these screens are the
+   deterministic backstop for the model that ignores it.
 2. **Hidden sources**: `SourceFacts.internal` (INTERNAL messages) → reject.
 3. **Non-amplification**: `requested_scope` above `SourceFacts.visibility`
    → reject (`non_amplification`). Only an explicit human "remember this"
@@ -254,7 +275,14 @@ parses the reply with `parse_candidates` — exactly `{"candidates": [...]}`,
 The system prompt explicitly excludes facts about the agent itself (its
 name, role, that it is an AI/teammate), platform mechanics, greetings and
 small talk, requires facts about the user/team/external systems/decisions/
-preferences, and prefers one consolidated fact over wording variants. The
+preferences, and prefers one consolidated fact over wording variants. It
+also carries the two rules the screening layer enforces: **save the fact, not
+the conversation** (never what was asked, tried, answered or done here, or on
+what date — only the durable fact it establishes), and **never characterise a
+person** (their intent, whether they were testing, probing or misleading the
+teammate, or any other verdict on their motives). Maintenance never calls
+`memory.propose`, so anything said only in the platform preamble does not
+reach this path. The
 worker passes the scope's newest active/contested memory contents
 (`load_known_memories`, bounded to 30) as `existing_memories`; they render
 as a `<known_memories>` block with the instruction to propose only NEW or
@@ -378,6 +406,35 @@ Run / audit event names: `memory.retrieved` (run event), `memory.maintained`
 
 Capability constants: `jhin_policy.MEMORY_READ_CAPABILITY`,
 `MEMORY_PROPOSE_CAPABILITY`, `MEMORY_CAPABILITIES`.
+
+`MemoryProposeOutput.detail` turns the reason codes into a sentence the model
+can relay and act on — including `self_reference`, which points at
+`organization.identity.set_name` (a name is a row, not a memory),
+`personal_judgement` and `conversation_record`.
+
+### The one record the platform writes: `self.name`
+
+`organization.identity.set_name` changes `agent.name` — the row, because
+memory renders at the bottom of the prompt, ranked and capped, and a record
+saying "I am Bisby" would argue with the preamble and the roster above it and
+lose. Alongside the row it writes one **provenance** note, subject
+`self.name`, at `agent` scope: *"I go by Bisby because Ada Lovelace asked me
+to on 2026-09-06. Before that I was Senior Software Engineer. The name itself
+lives on my agent record, not in this note: forgetting this removes the
+explanation, not the name."*
+
+Two things about it:
+
+- it is written with `ActorFacts(authored_by_platform=True)`, so it is exempt
+  from the quality screens **by writer**, not by content pattern. The words
+  are Jhin's, not a model's; `is_self_referential` still rejects an agent
+  that decides on its own to memorise "the assistant is called X", which is
+  the shape that is worthless;
+- a later rename replaces it as the next **version** (`create_version`)
+  rather than proposing a second record beside it. Two live records on one
+  subject would be marked `contested` — two true answers to "why am I called
+  this" is not a contradiction — and the ordinary near-duplicate path would
+  as happily have kept the stale one.
 
 ## API (`/api/v1/workspaces/{workspace_id}/memories`)
 

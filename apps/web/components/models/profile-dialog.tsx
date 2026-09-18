@@ -34,6 +34,7 @@ import {
   observedRateSummary,
   priceSourceBadge,
   priceSourceLabel,
+  PROVIDER_EXAMPLES,
   selfHostedPriceNote,
   webSearchSupport,
   type ProfilePrefill,
@@ -115,6 +116,7 @@ export function ProfileDialog({
   const providerModels = useProviderModels(workspaceId, providerId || null);
   const provider = providers.find((p) => p.id === providerId);
   const providerType: ModelProviderType = provider?.type ?? "openai_compatible";
+  const examples = PROVIDER_EXAMPLES[providerType];
   // A prefill carries a real price ($0 for a local model), and the note under
   // the pricing fields must say so rather than stay silent about it.
   const prefillNote = prefill
@@ -305,7 +307,7 @@ export function ProfileDialog({
             maxLength={200}
             value={displayName}
             onChange={(e) => setDisplayName(e.target.value)}
-            placeholder="GPT-5 mini (cheap default)"
+            placeholder={examples.profileName}
           />
         </Field>
         <Field
@@ -329,7 +331,7 @@ export function ProfileDialog({
               setModelName(e.target.value);
               applyAutofill(e.target.value, entries);
             }}
-            placeholder="gpt-5-mini"
+            placeholder={examples.modelName}
           />
           <datalist id="profile-model-options">
             {(entries ?? []).map((model) => (

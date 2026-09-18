@@ -91,6 +91,12 @@ MetricName = Literal[
     "temporal_activity_failures",
     "connector_health",
     "connector_connections",
+    "conversation_event_delivery_seconds",
+    "conversation_recovery_seconds",
+    "conversation_reconnects_total",
+    "artifact_publications_total",
+    "runtime_stuck_sessions",
+    "runtime_session_cleanup_total",
 ]
 
 DB_TABLE_VALUES = frozenset(

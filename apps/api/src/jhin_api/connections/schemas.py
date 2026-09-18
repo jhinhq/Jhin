@@ -57,6 +57,8 @@ class ConnectorOut(BaseModel):
     webhook_signature_algorithm: str = ""
     webhook_setup_help: str = ""
     docs_url: str = ""
+    managed_auth: dict[str, Any] | None = None
+    oauth_provider: str | None = None
 
 
 class ConnectionCreate(BaseModel):
@@ -93,6 +95,7 @@ class ConnectionAuthorizedByOut(BaseModel):
 
 
 class ConnectionOut(BaseModel):
+    auth_provider: Literal["local", "composio"] = "local"
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
@@ -240,6 +243,7 @@ class ToolRiskOverridesWrite(BaseModel):
 
 
 class CatalogAppOut(BaseModel):
+    composio_toolkit: str | None = None
     """One Apps-library entry (public identity only; no secrets, no state)."""
 
     slug: str

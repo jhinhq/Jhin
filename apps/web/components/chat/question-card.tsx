@@ -22,6 +22,7 @@ import { Timestamp } from "@/components/chat/timestamp";
 import { Button, focusRing } from "@/components/ui";
 import { ApiError } from "@/lib/api";
 import { readUserQuestion } from "@/lib/chat";
+import { mayContainSecret } from "@/lib/private-input";
 import { avatarProps } from "@/lib/media";
 import type {
   AgentAvatar,
@@ -91,6 +92,7 @@ export function QuestionCard({
 
   const question = readUserQuestion(message);
   if (question === null) return null;
+  const showFreeText = otherOpen || question.options.length === 0;
 
   const agentName = question.asked_by_agent_name || message.sender_name || "Your agent";
   const serverAnswered = question.status === "answered";
@@ -107,16 +109,20 @@ export function QuestionCard({
     if (locked) return;
     setError(null);
     setStoppedWaiting(false);
-    setChoice(picked);
+    const privateAnswer = "other_text" in body && mayContainSecret(body.other_text);
+    setChoice({label:"",optionValue:picked.optionValue});
+    if (privateAnswer) setOtherText("");
     setSubmitting(true);
     try {
       const result = await onAnswer?.(question.question_id, body);
+      setChoice({label:result?.question.answer_text ?? ("option_value" in body ? picked.label : "Answer submitted"),optionValue:picked.optionValue});
+      setOtherText("");
       if (result && result.resumed === false) setStoppedWaiting(true);
     } catch (failure) {
       // Put the controls back rather than leave a card claiming an answer the
       // agent never received.
       setChoice(null);
-      setError(describeError(failure));
+      setError(privateAnswer ? "Couldn't confirm the answer. Refresh the question before retrying." : describeError(failure));
     } finally {
       setSubmitting(false);
     }
@@ -187,6 +193,12 @@ export function QuestionCard({
             {answerText}
           </span>
         </p>
+        {question.input_key?.startsWith("schedule_activate_") && question.context ? (
+          <details className="mt-2 text-[13px] leading-relaxed text-dim">
+            <summary className={`cursor-pointer rounded ${focusRing}`}>Reviewed schedule</summary>
+            <p className="mt-1 whitespace-pre-wrap break-words">{question.context}</p>
+          </details>
+        ) : null}
         {stoppedWaiting ? (
           <p data-testid="question-not-resumed" className="mt-1.5 text-[13px] text-dim">
             Sent — {agentName} had already stopped waiting. Send it as a message and it will pick
@@ -226,8 +238,9 @@ export function QuestionCard({
       <p id={headingId} className="mt-1 text-[15px] leading-relaxed text-ink">
         {question.question}
       </p>
+      {question.required ? <p className="mt-1 text-xs font-medium text-accent-strong">Required before work continues. The agent will wait for your answer.</p> : null}
       {question.context ? (
-        <p className="mt-1 text-[13px] leading-relaxed text-dim">{question.context}</p>
+        <p className="mt-1 whitespace-pre-wrap break-words text-[13px] leading-relaxed text-dim">{question.context}</p>
       ) : null}
 
       {question.options.length > 0 ? (
@@ -283,7 +296,7 @@ export function QuestionCard({
         </ul>
       ) : null}
 
-      {question.allow_other && !otherOpen ? (
+      {question.allow_other && !showFreeText ? (
         <button
           type="button"
           data-testid="question-other"
@@ -297,7 +310,7 @@ export function QuestionCard({
         </button>
       ) : null}
 
-      {question.allow_other && otherOpen ? (
+      {question.allow_other && showFreeText ? (
         <div className="mt-1.5 rounded-xl border border-line-strong bg-surface p-2.5">
           <label htmlFor={otherId} className="text-xs font-medium text-dim">
             {question.other_label}

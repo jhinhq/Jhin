@@ -43,6 +43,7 @@ from jhin_db.models import (
     Agent,
     AgentRun,
     AuditEvent,
+    EditorialAssignment,
     Message,
     RunEvent,
     Task,
@@ -119,7 +120,8 @@ _ASK_WAIT_MINUTES = int(PERSON_ANSWER_WAIT.total_seconds() // 60)
 
 _DETAIL_QUESTION_TIMED_OUT = (
     f"Nobody answered within {_ASK_WAIT_MINUTES} minutes. Say plainly that you asked and "
-    "did not hear back, state the assumption you are going with, and carry on. "
+    "did not hear back. Missing required inputs remain blocked; "
+    "continue only work independent of that answer. "
     "Do not ask this again in this run."
 )
 _DETAIL_GRANT_FREE_TEXT = (
@@ -247,12 +249,14 @@ class AgentActivities(AgentReasoningActivities, AgentProjectionActivities):
             # agent, consistent order) serialize concurrent admissions on
             # Postgres; SQLite ignores FOR UPDATE, which is fine for tests.
             workspace = await session.scalar(
-                select(Workspace).where(Workspace.id == workspace_id).with_for_update()
+                select(Workspace)
+                .where(Workspace.id == workspace_id)
+                .with_for_update(key_share=True)
             )
             agent = await session.scalar(
                 select(Agent)
                 .where(Agent.id == agent_id, Agent.workspace_id == workspace_id)
-                .with_for_update()
+                .with_for_update(key_share=True)
             )
             queue_reason = ""
             if agent is not None:
@@ -314,6 +318,49 @@ class AgentActivities(AgentReasoningActivities, AgentProjectionActivities):
             task = await session.scalar(
                 select(Task).where(Task.id == task_id, Task.workspace_id == workspace_id)
             )
+            if task is not None:
+                assignment_id = task.metadata_json.get("editorial_assignment_id")
+                if assignment_id:
+                    try:
+                        assignment_uuid = UUID(str(assignment_id))
+                    except ValueError:
+                        assignment_uuid = None
+                    assignment = await session.scalar(
+                        select(EditorialAssignment).where(
+                            EditorialAssignment.id == assignment_uuid,
+                            EditorialAssignment.workspace_id == workspace_id,
+                        )
+                    )
+                    if assignment is None or assignment.phase == "cancelled":
+                        return SnapshotResult(
+                            run_id="",
+                            snapshot_json="",
+                            snapshot_hash="",
+                            max_steps=0,
+                            denied_code="turn_cancelled",
+                            denied_message="This editorial assignment is no longer active",
+                        )
+                if (
+                    task.metadata_json.get("stop_requested_at")
+                    or task.state == TaskState.CANCELLED.value
+                ):
+                    return SnapshotResult(
+                        run_id="",
+                        snapshot_json="",
+                        snapshot_hash="",
+                        max_steps=0,
+                        denied_code="turn_cancelled",
+                        denied_message="This queued turn was cancelled",
+                    )
+                predecessor = task.metadata_json.get("queue_after_task_id")
+                if predecessor:
+                    prior_state = await session.scalar(
+                        select(Task.state).where(
+                            Task.id == UUID(predecessor), Task.workspace_id == workspace_id
+                        )
+                    )
+                    if prior_state in ("queued", "running", "paused"):
+                        queue_reason = "conversation_previous_turn"
             if queue_reason:
                 if task is not None:
                     # Audit only the first transition into queued — the
@@ -370,7 +417,13 @@ class AgentActivities(AgentReasoningActivities, AgentProjectionActivities):
                 )
 
             try:
-                snapshot = await resolve_snapshot(session, workspace_id, agent_id)
+                override = task.metadata_json.get("model_profile_id") if task is not None else None
+                snapshot = await resolve_snapshot(
+                    session,
+                    workspace_id,
+                    agent_id,
+                    **({"model_profile_id": UUID(override)} if override else {}),
+                )
             except SnapshotError as exc:
                 raise ApplicationError(str(exc), type=exc.code, non_retryable=True) from exc
 
@@ -822,7 +875,7 @@ class AgentActivities(AgentReasoningActivities, AgentProjectionActivities):
             # answered, and Postgres is the authority. Only a still-pending row
             # becomes expired.
             pending = question.status == UserQuestionStatus.PENDING.value
-            if params.outcome == "timed_out" and pending:
+            if params.outcome == "timed_out" and pending and not question.required:
                 question.status = UserQuestionStatus.EXPIRED.value
 
             who = "They"

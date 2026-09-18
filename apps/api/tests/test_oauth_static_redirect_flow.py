@@ -144,6 +144,7 @@ async def test_continue_authorize_connected(
     assert connection.oauth_issuer == "https://github.com"
     assert connection.oauth_client_registration_id == registration.id
     assert connection.oauth_authorized_by_user_id == callback.admin.id
+    assert connection.last_verified_at is not None
 
     body = fake.recorded_bodies()[-1]
     assert body["grant_type"] == "authorization_code"

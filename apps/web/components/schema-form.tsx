@@ -13,6 +13,7 @@
  */
 
 import { Field, Input, Select, Textarea } from "@/components/ui";
+import { GhostPublisherSelect } from "@/components/connect/ghost-publisher-select";
 import type { ConfigSchema, ConfigSchemaField, ConfigValue } from "@/lib/config-schema";
 
 /** A secret is never rendered with a value in it, so this is the only thing
@@ -128,11 +129,13 @@ function SchemaControl({
 
 export function SchemaForm({
   schema,
+  workspaceId,
   values,
   onChange,
   disabled = false,
 }: {
   schema: ConfigSchema;
+  workspaceId?: string;
   values: Record<string, ConfigValue>;
   onChange: (name: string, value: ConfigValue) => void;
   disabled?: boolean;
@@ -142,15 +145,15 @@ export function SchemaForm({
       {schema.fields.map((field) => (
         <Field
           key={field.name}
-          label={field.label}
+          label={workspaceId && schema.connector_type === "ghost" && field.name === "publisher_agent_id" ? "Publishing director" : field.label}
           hint={field.secret ? SECRET_HINT : field.help || undefined}
         >
-          <SchemaControl
+          {workspaceId && schema.connector_type === "ghost" && field.name === "publisher_agent_id" ? <GhostPublisherSelect workspaceId={workspaceId} value={asText(values[field.name])} onChange={value=>onChange(field.name,value)} disabled={disabled}/> : <SchemaControl
             field={field}
             value={values[field.name]}
             disabled={disabled}
             onChange={onChange}
-          />
+          />}
         </Field>
       ))}
     </div>

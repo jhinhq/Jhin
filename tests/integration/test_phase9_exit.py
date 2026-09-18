@@ -167,7 +167,8 @@ async def _create_agent(
         client,
         f"/api/v1/workspaces/{workspace_id}/agents",
         {
-            "name": f"P9 {label} {tag}",
+            "name": f"Tester {tag}",
+            "role_title": f"P9 {label}",
             "system_prompt": "Use each explicitly requested tool exactly once.",
             "model_profile_id": profile["id"],
         },

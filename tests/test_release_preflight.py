@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml  # type: ignore[import-untyped]
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -121,9 +122,10 @@ def test_cli_changelog_excerpt_matches_version_file() -> None:
         [sys.executable, "scripts/release_preflight.py", "changelog-excerpt", "--version", version],
         check=True,
         capture_output=True,
+        text=True,
         cwd=ROOT,
     )
-    assert result.stdout.decode().strip()
+    assert result.stdout.strip()
 
 
 def _lock(tmp_path: Path) -> Path:
@@ -167,9 +169,43 @@ def test_render_bundle_pins_every_first_party_image_and_writes_manifest(tmp_path
         "VERIFY.md",
         "config/nats.conf",
         "docs/deployment.md",
+        "docs/operations/local-app-sign-in.md",
+        "docs/operations/composio-setup.md",
+        "docs/operations/agentic-workspace.md",
+        "docs/architecture/app-connections.md",
         "LICENSE",
     } <= listed
     assert all(len(line.split("  ", 1)[0]) == 64 for line in manifest)
+
+
+def test_release_workspace_storage_and_gateway_preserve_authority_boundaries(
+    tmp_path: Path,
+) -> None:
+    output = renderer.render_bundle(
+        ROOT, tmp_path / "bundle", "0.1.0", _lock(tmp_path), "jhinhq/Jhin", allow_unpinned=False
+    )
+    document = yaml.safe_load((output / "compose.yaml").read_text(encoding="utf-8"))
+    services = document["services"]
+    gateway = services["runtime-gateway"]
+    assert gateway["image"] == services["tool-worker"]["image"]
+    assert gateway["command"] == ["jhin-runtime-gateway"]
+    assert "@sha256:" in gateway["image"]
+    assert "ports" not in gateway and "secrets" not in gateway
+    assert "healthcheck" in gateway
+    assert "MASTER_KEY_FILE" not in gateway["environment"]
+    assert "COMPOSIO_API_KEY" not in gateway["environment"]
+    assert "managed_files" in document["volumes"]
+    for service in ("api", "tool-worker", "agent-worker", "runtime-gateway"):
+        assert services[service]["environment"]["JHIN_FILES_ROOT"] == "/data/files"
+        suffix = ":ro" if service in ("agent-worker", "runtime-gateway") else ""
+        assert services[service]["volumes"] == [f"managed_files:/data/files{suffix}"]
+        assert "sandbox" not in services[service]["networks"]
+    assert (
+        services["web"]["environment"]["JHIN_RUNTIME_GATEWAY_URL"] == "http://runtime-gateway:8086"
+    )
+    assert (
+        services["api"]["environment"]["JHIN_AGENTIC_WORKSPACE"] == "${JHIN_AGENTIC_WORKSPACE:-1}"
+    )
 
 
 def test_render_bundle_refuses_tag_only_images_without_override(tmp_path: Path) -> None:

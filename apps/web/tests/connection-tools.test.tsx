@@ -47,6 +47,11 @@ const DATA: ConnectionToolsOut = {
   ],
 };
 
+it("does not recommend a wildcard grant for static connectors with required per-tool scopes", () => {
+  renderTools({ data: { ...DATA, connector_type: "supabase", dynamic: false, capability_pattern: "supabase.*" } });
+  expect(screen.queryByText(/for everything here/)).toBeNull();
+});
+
 function renderTools(props: Partial<React.ComponentProps<typeof ConnectionTools>> = {}) {
   const onChanged = vi.fn();
   render(

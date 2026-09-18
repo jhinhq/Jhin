@@ -27,6 +27,13 @@ from jhin_sandbox_runner.rootless_transport import (
 
 PING = b"GET /_ping HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n"
 RESPONSE = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
+#: The version this service's lines are supposed to carry, written out rather
+#: than imported. Asserting a record against ``LOG_SCHEMA_VERSION`` compares
+#: the constant with itself: it passes for whatever the constant happens to
+#: say, which is exactly the change it exists to catch. Every consumer of
+#: these logs pins a number, so this test pins one too, and a deliberate bump
+#: is a deliberate edit here.
+EXPECTED_SCHEMA_VERSION = 2
 
 
 @pytest.fixture
@@ -607,7 +614,7 @@ async def test_transport_logs_never_contain_payload_or_socket_path(
     rendered = capsys.readouterr().out
     records = [json.loads(line) for line in rendered.splitlines()]
     ready = next(record for record in records if record["event"] == "rootless_transport.ready")
-    assert ready["schema_version"] == 1
+    assert ready["schema_version"] == EXPECTED_SCHEMA_VERSION
     assert ready["service"] == "rootless-docker-transport"
     assert ready["environment"] == "test"
     assert "SECRET-CANARY" not in rendered
@@ -638,7 +645,7 @@ def test_rootless_main_emits_closed_json_failure_before_exit(
 
     rendered = capsys.readouterr().out
     record = json.loads(rendered)
-    assert record["schema_version"] == 1
+    assert record["schema_version"] == EXPECTED_SCHEMA_VERSION
     assert record["service"] == "rootless-docker-transport"
     assert record["environment"] == "test"
     assert record["event"] == "rootless_transport.failed"
@@ -673,7 +680,7 @@ def test_rootless_main_maps_generic_runtime_failure_to_closed_json(
 
     captured = capsys.readouterr()
     record = json.loads(captured.out)
-    assert record["schema_version"] == 1
+    assert record["schema_version"] == EXPECTED_SCHEMA_VERSION
     assert record["service"] == "rootless-docker-transport"
     assert record["environment"] == "test"
     assert record["event"] == "rootless_transport.failed"

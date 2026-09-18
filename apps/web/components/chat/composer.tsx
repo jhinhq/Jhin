@@ -47,6 +47,14 @@ export const Composer = forwardRef<
     stopping?: boolean;
     /** Accessible name for the Stop button, e.g. "Stop Scout". */
     stopLabel?: string;
+    /** Per-agent controls (model, mode, tools, cost) shown on the controls
+     * row, ahead of Stop and Send. Passed in as a slot so the composer stays
+     * free of data hooks. */
+    controls?: React.ReactNode;
+    attachments?: React.ReactNode;
+    onFiles?: (files: FileList | File[]) => void;
+    hasAttachments?: boolean;
+    uploading?: boolean;
   }
 >(function Composer(
   {
@@ -64,6 +72,11 @@ export const Composer = forwardRef<
     onStop,
     stopping = false,
     stopLabel = "Stop",
+    controls = null,
+    attachments = null,
+    onFiles,
+    hasAttachments = false,
+    uploading = false,
   },
   ref,
 ) {
@@ -99,7 +112,7 @@ export const Composer = forwardRef<
     return () => observer.disconnect();
   }, [resize]);
 
-  const canSend = !disabled && !sending && value.trim().length > 0;
+  const canSend = !disabled && !sending && !uploading && (value.trim().length > 0 || hasAttachments);
 
   const submit = () => {
     if (!canSend) return;
@@ -127,6 +140,8 @@ export const Composer = forwardRef<
         submit();
       }}
       className="space-y-2"
+      onDragOver={(event) => { if (onFiles && !disabled && event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
+      onDrop={(event) => { if (onFiles && !disabled && event.dataTransfer.files.length) { event.preventDefault(); onFiles(event.dataTransfer.files); } }}
     >
       <div
         data-testid="composer-shell"
@@ -134,6 +149,7 @@ export const Composer = forwardRef<
           disabled ? "border-line opacity-70" : "border-line-strong"
         }`}
       >
+        {attachments}
         <label className="block min-w-0">
           <span className="sr-only">Message</span>
           <textarea
@@ -147,42 +163,48 @@ export const Composer = forwardRef<
             placeholder={disabled && disabledReason ? disabledReason : placeholder}
             onChange={(event) => onChange(event.target.value)}
             onKeyDown={onKeyDown}
+            onPaste={(event) => { if (!onFiles || disabled) return; const files = Array.from(event.clipboardData.items).filter((item) => item.kind === "file").map((item) => item.getAsFile()).filter((file): file is File => !!file); if (files.length) { event.preventDefault(); onFiles(files); } }}
             className={`block w-full resize-none bg-transparent text-base leading-relaxed text-ink placeholder:text-faint outline-none disabled:cursor-not-allowed md:text-[15px] ${fieldPad}`}
           />
         </label>
         <div
           data-testid="composer-controls"
-          className={`flex shrink-0 items-center justify-end gap-2 ${controlsPad}`}
+          className={`flex shrink-0 items-center gap-2 ${controlsPad}`}
         >
-          {canStop ? (
-            <button
-              type="button"
-              data-testid="composer-stop"
-              aria-label={stopLabel}
-              title={stopLabel}
-              disabled={stopping}
-              onClick={onStop}
-              className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-xl border border-line-strong px-3 text-xs font-medium text-dim transition-colors hover:border-danger/40 hover:bg-danger/10 hover:text-danger disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              <Square size={13} aria-hidden fill="currentColor" />
-              Stop
-            </button>
+          {controls ? (
+            <div className="flex min-w-0 flex-1 items-center">{controls}</div>
           ) : null}
-          <button
-            type="submit"
-            aria-label={sending ? "Sending…" : "Send message"}
-            disabled={!canSend}
-            className={`btn-gradient inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl disabled:cursor-not-allowed disabled:opacity-40 ${focusRing}`}
-          >
-            {sending ? (
-              <span
-                aria-hidden
-                className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white"
-              />
-            ) : (
-              <SendHorizontal size={18} />
-            )}
-          </button>
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+            {canStop ? (
+              <button
+                type="button"
+                data-testid="composer-stop"
+                aria-label={stopLabel}
+                title={stopLabel}
+                disabled={stopping}
+                onClick={onStop}
+                className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-xl border border-line-strong px-3 text-xs font-medium text-dim transition-colors hover:border-danger/40 hover:bg-danger/10 hover:text-danger disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <Square size={13} aria-hidden fill="currentColor" />
+                Stop
+              </button>
+            ) : null}
+            <button
+              type="submit"
+              aria-label={uploading ? "Processing attachments…" : sending ? "Sending…" : "Send message"}
+              disabled={!canSend}
+              className={`btn-gradient inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl disabled:cursor-not-allowed disabled:opacity-40 ${focusRing}`}
+            >
+              {sending ? (
+                <span
+                  aria-hidden
+                  className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white"
+                />
+              ) : (
+                <SendHorizontal size={18} />
+              )}
+            </button>
+          </div>
         </div>
       </div>
       {disabled && disabledReason ? (

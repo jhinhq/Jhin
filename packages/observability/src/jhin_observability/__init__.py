@@ -45,7 +45,11 @@ from jhin_observability.metrics import (
     instrument_contracts,
     noop_metrics,
 )
-from jhin_observability.redaction import is_sensitive_key_name, structural_redaction
+from jhin_observability.redaction import (
+    LOG_SCHEMA_VERSION,
+    is_sensitive_key_name,
+    structural_redaction,
+)
 from jhin_observability.registry import (
     DB_TABLE_VALUES,
     SPAN_ATTRIBUTE_VALUES,
@@ -125,6 +129,7 @@ __all__ = [
     "DB_TABLE_VALUES",
     "EVENT_FIELD_RULES",
     "FORBIDDEN_IDENTIFIER_LABELS",
+    "LOG_SCHEMA_VERSION",
     "MAX_EXPORT_TIMEOUT_MILLIS",
     "MAX_METRIC_EXPORT_INTERVAL_MILLIS",
     "MAX_SPAN_EXPORT_BATCH_SIZE",

@@ -28,7 +28,17 @@ describe("statusLabelFor with a live activity", () => {
         active_run_status: null,
         active_activity: SAVING,
       }),
-    ).toEqual({ label: SAVING, tone: "accent", kind: "working", specific: true });
+    ).toEqual({
+      label: SAVING,
+      tone: "accent",
+      kind: "working",
+      specific: true,
+      // No working clock in this conversation at all, which is the shape an
+      // api older than the field sends. Absent, not a measured null — see
+      // `LiveStatus.since`.
+      since: undefined,
+      worked: 0,
+    });
   });
 
   it("keeps the tone and kind, so everything keyed off them behaves the same", () => {

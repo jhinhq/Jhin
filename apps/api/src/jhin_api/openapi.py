@@ -131,6 +131,18 @@ without parsing this document.
 #: of the rendered reference; an undescribed tag is a bare slug on the page,
 #: so ``test_openapi_metadata`` fails when a router introduces a new one.
 TAG_DESCRIPTIONS: dict[str, str] = {
+    "variables": (
+        "Scoped settings and write-only sensitive values for agents, teams, and the company."
+    ),
+    "editorial-reviews": (
+        "Read-only immutable Ghost draft evidence and designated publisher decisions."
+    ),
+    "automations": "Durable timezone-aware recurring work and retained execution history.",
+    "chat files": (
+        "Persistent chat files, immutable versions, downloads, annotations and revision review."
+    ),
+    "chat projects": "Reusable project context and retained source snapshots for chat workspaces.",
+    "chat runtime": "Workspace ownership, interactive terminals and isolated application previews.",
     "health": (
         "Liveness, readiness, and the app and API versions this install is running. "
         "The only routes that need no credential at all."

@@ -52,6 +52,12 @@ METRIC_SPECS: Mapping[MetricName, MetricSpec] = MappingProxyType(
         ),
         "connector_health": _spec("gauge", "1", "connector_type"),
         "connector_connections": _spec("gauge", "{connection}", "connector_type", "outcome"),
+        "conversation_event_delivery_seconds": _spec("histogram", "s"),
+        "conversation_recovery_seconds": _spec("histogram", "s", "outcome"),
+        "conversation_reconnects_total": _spec("counter", "{connection}", "outcome"),
+        "artifact_publications_total": _spec("counter", "{file}", "outcome"),
+        "runtime_stuck_sessions": _spec("gauge", "{session}"),
+        "runtime_session_cleanup_total": _spec("counter", "{session}", "outcome"),
     }
 )
 

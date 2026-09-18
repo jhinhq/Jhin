@@ -47,6 +47,7 @@ EXPECTED_ROOTFUL_SERVICES = {
     "fake-websearch",
     "nats",
     "postgres",
+    "runtime-gateway",
     "sandbox-runner",
     "temporal",
     "temporal-ui",
@@ -571,8 +572,11 @@ LIVE_SCENARIOS = {
             "tests/integration/test_nats_durability.py",
             "tests/integration/test_company_topology_concurrency.py",
             "tests/integration/test_conversation_turns.py",
+            "tests/integration/test_marketing_editorial.py",
+            "tests/integration/test_marketing_research.py",
+            "tests/integration/test_marketing_images.py",
         ),
-        expected_tests=55,
+        expected_tests=69,
     ),
     "socket-rootful": LiveScenario(
         nodes=(

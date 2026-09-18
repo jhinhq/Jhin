@@ -38,6 +38,7 @@ function conversation(overrides: Partial<Conversation> = {}): Conversation {
     active_task_id: null,
     active_task_state: null,
     active_run_status: null,
+    active_run_started_at: null,
     active_activity: null,
     last_message_preview: "Here is what happened",
     last_message_sender_type: "agent",
@@ -211,7 +212,7 @@ describe("Transcript markdown", () => {
       />,
     );
     const bubble = screen.getByTestId("agent-message");
-    expect(bubble.querySelector("h3")?.textContent).toBe("Team");
+    expect(bubble.querySelector("h2")?.textContent).toBe("Team");
     expect(bubble.querySelectorAll("li")).toHaveLength(2);
     expect(bubble.querySelectorAll("code")).toHaveLength(2);
   });
@@ -588,6 +589,26 @@ describe("Composer text field centring", () => {
     render(<Composer variant="large" value="" onChange={() => {}} onSend={() => {}} />);
     expect(horizontalPadding(field())).toEqual(["px-5"]);
     expect(COMPOSER_FIELD_PAD.large.split(" ")).toContain("px-5");
+  });
+
+  it("puts the settings slot on the controls row, ahead of Stop and Send", () => {
+    render(
+      <Composer
+        value="hi"
+        onChange={() => {}}
+        onSend={() => {}}
+        canStop
+        onStop={() => {}}
+        controls={<button type="button">Model</button>}
+      />,
+    );
+    const controls = screen.getByTestId("composer-controls");
+    const slot = screen.getByRole("button", { name: "Model" });
+    const send = screen.getByRole("button", { name: "Send message" });
+    expect(controls.contains(slot)).toBe(true);
+    expect(slot.compareDocumentPosition(send) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The slot must not clip: its chips open popovers that overflow upward.
+    expect(slot.parentElement!.className).not.toContain("overflow-hidden");
   });
 
   it("keeps the trailing controls out of the text field's row", () => {

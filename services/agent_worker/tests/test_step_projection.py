@@ -49,7 +49,9 @@ from jhin_domain import (
     new_uuid7,
 )
 from jhin_observability import noop_metrics, noop_tracer
+from jhin_secrets import get_redactor
 from jhin_tools import stable_tool_invocation_id
+from jhin_tools.sanitize import invalid_tool_arguments_json
 from jhin_workflows import AGENT_TASK_QUEUE, TOOL_TASK_QUEUE
 from jhin_workflows.agent_task import AgentTaskInput, AgentTaskWorkflow
 from jhin_workflows.agent_task.shared import (
@@ -408,6 +410,258 @@ async def test_projection_is_idempotent_and_unknown_is_durable(
         serialized = str([event.payload_json for event in public_events])
         assert "private-provider-request" not in serialized
         assert "private-provider-call" not in serialized
+
+
+async def _seed_invalid_input_projection(
+    world: ProjectionWorld, arguments_json: str, *, sanitized_raw: str | None = None
+) -> dict[str, Any]:
+    await world.seed_step(statuses=[ToolCallStatus.DENIED.value])
+    audit = {"_raw_arguments": arguments_json[:2_000] if sanitized_raw is None else sanitized_raw}
+    async with world.sessions() as session:
+        event = await session.scalar(
+            select(RunEvent).where(
+                RunEvent.run_id == world.run_id,
+                RunEvent.event_type == "agent.step.tool_manifest",
+            )
+        )
+        assert event is not None
+        payload = deepcopy(event.payload_json)
+        payload["manifest"]["calls"][0]["arguments_json"] = arguments_json
+        event.payload_json = payload
+        row = await session.get(ToolCall, stable_tool_invocation_id(world.run_id, 0, 0))
+        assert row is not None
+        row.error_code = "invalid_input"
+        row.sanitized_input_json = audit
+        row.sanitized_output_json = {
+            "error": "invalid_input",
+            "reason": "arguments do not match the tool schema",
+        }
+        await session.commit()
+    return audit
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["x" * 4_001, 'quotes="hello"\n' * 300, "界" * 4_001],
+    ids=["long", "escaped", "unicode"],
+)
+async def test_schema_denied_projection_omits_truncated_arguments_and_keeps_audit(
+    world: ProjectionWorld, command: str
+) -> None:
+    arguments = {"command": command, "connection_id": str(new_uuid7())}
+    canonical = json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    assert len(canonical) <= 8_192
+    audit = await _seed_invalid_input_projection(world, canonical)
+    first = await world.projections.commit_agent_step_activity(world.commit_params())
+    replay = await world.projections.commit_agent_step_activity(world.commit_params())
+    assert first == replay
+    assert await world.count_events("agent.step.committed") == 1
+    assert await world.count_projection_messages() == 2
+    async with world.sessions() as session:
+        message = await session.scalar(
+            select(Message).where(
+                Message.run_id == world.run_id, Message.message_type == "tool_call"
+            )
+        )
+        assert message is not None
+        projected = message.content_json["arguments_json"]
+        assert projected == "{}"
+        assert "_raw_arguments" not in json.loads(projected)
+        result = await session.scalar(
+            select(Message).where(
+                Message.run_id == world.run_id, Message.message_type == "tool_result"
+            )
+        )
+        assert result is not None
+        assert "rejected arguments were omitted" in result.content_json["result"]
+        assert "declared schema" in result.content_json["result"]
+        row = await session.get(ToolCall, stable_tool_invocation_id(world.run_id, 0, 0))
+        assert row is not None and row.sanitized_input_json == audit
+
+
+async def test_schema_denied_projection_omits_internal_malformed_json_placeholder(
+    world: ProjectionWorld,
+) -> None:
+    canonical = invalid_tool_arguments_json(
+        reason="arguments_not_strict_json", detail="line 1 column 8"
+    )
+    audit = await _seed_invalid_input_projection(world, canonical)
+    await world.projections.commit_agent_step_activity(world.commit_params())
+    async with world.sessions() as session:
+        message = await session.scalar(
+            select(Message).where(
+                Message.run_id == world.run_id, Message.message_type == "tool_call"
+            )
+        )
+        assert message is not None and message.content_json["arguments_json"] == "{}"
+        row = await session.get(ToolCall, stable_tool_invocation_id(world.run_id, 0, 0))
+        assert row is not None and row.sanitized_input_json == audit
+
+
+@pytest.mark.parametrize("redacted", [False, True])
+async def test_schema_denied_projection_unwraps_only_complete_sanitized_arguments(
+    world: ProjectionWorld, redacted: bool
+) -> None:
+    canary = "known-only-to-tool-worker-secret"
+    original = {"value": canary if redacted else 123, "extra": 'quoted "text"\n界'}
+    sanitized = {**original, "value": "[REDACTED]"} if redacted else original
+    canonical = json.dumps(original, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    safe_raw = json.dumps(sanitized, ensure_ascii=False, separators=(",", ":"))
+    audit = await _seed_invalid_input_projection(world, canonical, sanitized_raw=safe_raw)
+    await world.projections.commit_agent_step_activity(world.commit_params())
+    async with world.sessions() as session:
+        message = await session.scalar(
+            select(Message).where(
+                Message.run_id == world.run_id, Message.message_type == "tool_call"
+            )
+        )
+        assert message is not None
+        encoded = message.content_json["arguments_json"]
+        assert json.loads(encoded) == sanitized
+        assert canary not in encoded
+        row = await session.get(ToolCall, stable_tool_invocation_id(world.run_id, 0, 0))
+        assert row is not None and row.sanitized_input_json == audit
+
+
+async def test_schema_denied_projection_keeps_normalized_arguments_with_wrapper_named_field(
+    world: ProjectionWorld,
+) -> None:
+    canonical = '{"value":"safe"}'
+    await _seed_invalid_input_projection(world, canonical)
+    audit = {"_raw_arguments": '{"nested":"not-an-envelope"}', "value": "normalized"}
+    async with world.sessions() as session:
+        row = await session.get(ToolCall, stable_tool_invocation_id(world.run_id, 0, 0))
+        assert row is not None
+        row.sanitized_input_json = audit
+        await session.commit()
+
+    await world.projections.commit_agent_step_activity(world.commit_params())
+    async with world.sessions() as session:
+        message = await session.scalar(
+            select(Message).where(
+                Message.run_id == world.run_id, Message.message_type == "tool_call"
+            )
+        )
+        assert message is not None
+        assert json.loads(message.content_json["arguments_json"]) == audit
+
+
+async def test_schema_denied_projection_does_not_recursively_unwrap_model_supplied_field(
+    world: ProjectionWorld,
+) -> None:
+    original = {"_raw_arguments": '{"value":"model-supplied"}'}
+    canonical = json.dumps(original, separators=(",", ":"))
+    await _seed_invalid_input_projection(world, canonical)
+    await world.projections.commit_agent_step_activity(world.commit_params())
+    async with world.sessions() as session:
+        message = await session.scalar(
+            select(Message).where(
+                Message.run_id == world.run_id, Message.message_type == "tool_call"
+            )
+        )
+        assert message is not None
+        assert json.loads(message.content_json["arguments_json"]) == original
+
+
+@pytest.mark.parametrize(
+    "sanitized_raw",
+    [
+        '{"value":',
+        '{"value":1,"value":2}',
+        '{"value":NaN}',
+        "[]",
+        '{"value":"' + "x" * 8_192 + '"}',
+    ],
+    ids=["truncated", "duplicate_keys", "nonfinite", "array", "over_message_limit"],
+)
+async def test_schema_denied_projection_does_not_repair_unusable_audit_arguments(
+    world: ProjectionWorld, sanitized_raw: str
+) -> None:
+    canonical = '{"value":"safe-original"}'
+    audit = await _seed_invalid_input_projection(world, canonical, sanitized_raw=sanitized_raw)
+    await world.projections.commit_agent_step_activity(world.commit_params())
+    async with world.sessions() as session:
+        messages = list(
+            await session.scalars(select(Message).where(Message.run_id == world.run_id))
+        )
+        call = next(m for m in messages if m.message_type == "tool_call")
+        result = next(m for m in messages if m.message_type == "tool_result")
+        assert call.content_json["arguments_json"] == "{}"
+        assert "safe-original" not in call.content_json["arguments_json"]
+        assert "rejected arguments were omitted" in result.content_json["result"]
+        row = await session.get(ToolCall, stable_tool_invocation_id(world.run_id, 0, 0))
+        assert row is not None and row.sanitized_input_json == audit
+
+
+async def test_schema_denied_projection_never_restores_secret_beyond_audit_prefix(
+    world: ProjectionWorld,
+) -> None:
+    canary = "known-only-to-tool-worker-secret"
+    canonical = json.dumps({"value": "x" * 3_000 + canary}, separators=(",", ":"))
+    audit = await _seed_invalid_input_projection(world, canonical)
+    assert canary not in audit["_raw_arguments"]
+    await world.projections.commit_agent_step_activity(world.commit_params())
+    async with world.sessions() as session:
+        messages = list(
+            await session.scalars(select(Message).where(Message.run_id == world.run_id))
+        )
+        assert canary not in json.dumps([m.content_json for m in messages])
+        call = next(m for m in messages if m.message_type == "tool_call")
+        assert call.content_json["arguments_json"] == "{}"
+
+
+@pytest.mark.parametrize("failure", ["registered_secret", "too_long", "malformed", "not_lossless"])
+async def test_schema_denied_projection_refuses_unsafe_manifest_arguments(
+    world: ProjectionWorld, failure: str
+) -> None:
+    canary = "private-manifest-secret-acceptance"
+    canonical = json.dumps({"value": canary}, separators=(",", ":"))
+    if failure == "too_long":
+        canonical = json.dumps({"value": "x" * 8_192}, separators=(",", ":"))
+    elif failure == "malformed":
+        canonical = '{"value":'
+    await _seed_invalid_input_projection(world, canonical)
+    if failure == "not_lossless":
+        async with world.sessions() as session:
+            event = await session.scalar(
+                select(RunEvent).where(
+                    RunEvent.run_id == world.run_id,
+                    RunEvent.event_type == "agent.step.tool_manifest",
+                )
+            )
+            assert event is not None
+            payload = deepcopy(event.payload_json)
+            payload["manifest"]["calls"][0]["lossless"] = False
+            event.payload_json = payload
+            await session.commit()
+    redactor = get_redactor()
+    if failure == "registered_secret":
+        redactor.register(canary)
+    try:
+        with pytest.raises(ApplicationError) as error:
+            await world.projections.commit_agent_step_activity(world.commit_params())
+        assert error.value.type == "tool_step_manifest_invalid"
+        assert canary not in str(error.value)
+        assert await world.count_events("agent.step.committed") == 0
+        assert await world.count_projection_messages() == 0
+    finally:
+        if failure == "registered_secret":
+            redactor.clear()
+
+
+async def test_completed_projection_keeps_normalized_sanitized_arguments(
+    world: ProjectionWorld,
+) -> None:
+    await world.seed_step(statuses=[ToolCallStatus.COMPLETED.value])
+    await world.projections.commit_agent_step_activity(world.commit_params())
+    async with world.sessions() as session:
+        message = await session.scalar(
+            select(Message).where(
+                Message.run_id == world.run_id, Message.message_type == "tool_call"
+            )
+        )
+        assert message is not None
+        assert json.loads(message.content_json["arguments_json"]) == {"value": "call-0"}
 
 
 async def test_generic_finalization_preserves_execution_unknown_diagnosis(
@@ -897,6 +1151,30 @@ async def test_concurrent_finalize_projection_serializes_one_terminal_event() ->
 # --- coordination and memory wiring ---
 
 
+async def test_archive_start_is_lifted_and_replayed_from_executed_tool(
+    world: ProjectionWorld,
+) -> None:
+    from jhin_workflows.blog_corpus import BlogCorpusSyncInput
+
+    sync_id = str(new_uuid7())
+    await world.seed_step(
+        statuses=[ToolCallStatus.COMPLETED.value, ToolCallStatus.COMPLETED.value],
+        tool_names=["ghost.archive.sync", "ghost.archive.sync"],
+        outputs=[
+            {"corpus_sync_id": sync_id, "status": "queued"},
+            {"corpus_sync_id": str(new_uuid7()), "status": "complete"},
+        ],
+    )
+    ids = [str(stable_tool_invocation_id(world.run_id, 0, ordinal)) for ordinal in range(2)]
+    first = await world.projections.commit_agent_step_activity(world.commit_params(ids=ids))
+    replay = await world.projections.commit_agent_step_activity(world.commit_params(ids=ids))
+    expected = [BlogCorpusSyncInput(workspace_id=str(world.workspace_id), sync_id=sync_id)]
+    assert first.corpus_sync_starts == replay.corpus_sync_starts == expected
+    payload = await world.load_commit_payload()
+    assert payload["result"]["corpus_sync_starts"] == [asdict(expected[0])]
+    assert await world.count_events("agent.step.committed") == 1
+
+
 async def test_accepted_work_request_is_lifted_and_replayed_from_the_commit(
     world: ProjectionWorld,
 ) -> None:
@@ -938,8 +1216,10 @@ async def test_accepted_work_request_is_lifted_and_replayed_from_the_commit(
     assert await world.count_events("agent.step.committed") == 1
 
 
+@pytest.mark.parametrize("tool_name", ["organization.request_work", "ghost.review.request"])
 async def test_auto_activated_request_is_lifted_from_the_requester_step(
     world: ProjectionWorld,
+    tool_name: str,
 ) -> None:
     """``organization.request_work`` now activates its target, so the
     *requester's* step carries the colleague's task into the workflow — the
@@ -949,7 +1229,7 @@ async def test_auto_activated_request_is_lifted_from_the_requester_step(
     target_agent_id = str(new_uuid7())
     await world.seed_step(
         statuses=[ToolCallStatus.COMPLETED.value, ToolCallStatus.COMPLETED.value],
-        tool_names=["organization.request_work", "organization.request_work"],
+        tool_names=[tool_name, tool_name],
         outputs=[
             {
                 "work_request_id": request_id,
@@ -1283,6 +1563,86 @@ async def test_the_empty_completion_note_carries_a_reported_summary(
         "Projector could not complete this request and did not leave a reply. "
         "Its reported result: Looked up Connie's record."
     )
+
+
+@pytest.mark.parametrize("error_message", [None, ""])
+async def test_a_failed_run_gets_its_card_even_with_no_reason_to_give(
+    world: ProjectionWorld,
+    error_message: str | None,
+) -> None:
+    """The condition on the card used to be the error message alone, which
+    reads as "say something when there is something to say" and is in fact
+    "say nothing when there is nothing to say".
+
+    A run that fails without a sentence is exactly the failure a person cannot
+    work out for themselves: the chat stopped mid-turn, there is no card, no
+    error and no way forward, and nothing will ever happen on that run again.
+    Every path that ends a run failed is supposed to carry a reason, so an
+    empty one is a bug somewhere upstream — and the transcript is the worst
+    possible place to discover that.
+    """
+    await world.projections.finalize_run_projection_activity(
+        FinalizeInput(
+            workspace_id=str(world.workspace_id),
+            task_id=str(world.task_id),
+            run_id=str(world.run_id),
+            status=RunStatus.FAILED.value,
+            steps_used=1,
+            error_code=None,
+            error_message=error_message,
+        )
+    )
+
+    messages = await _final_messages(world)
+    assert [(m.sender_type, m.message_type) for m in messages] == [
+        (SenderType.SYSTEM.value, "error")
+    ]
+    assert messages[0].visibility == MessageVisibility.VISIBLE.value
+    assert messages[0].content_json["text"] == (
+        "This run stopped without reporting a reason. Nothing further will "
+        "happen on it; send a new message to try again."
+    )
+
+
+async def test_a_failed_run_with_a_reason_still_says_the_reason(
+    world: ProjectionWorld,
+) -> None:
+    await world.projections.finalize_run_projection_activity(
+        FinalizeInput(
+            workspace_id=str(world.workspace_id),
+            task_id=str(world.task_id),
+            run_id=str(world.run_id),
+            status=RunStatus.FAILED.value,
+            steps_used=1,
+            error_code="step_failed",
+            error_message="the model provider refused the request",
+        )
+    )
+
+    [message] = await _final_messages(world)
+    assert message.content_json["text"] == ("Run failed: the model provider refused the request")
+    assert message.content_json["error_code"] == "step_failed"
+
+
+@pytest.mark.parametrize("status", [RunStatus.COMPLETED.value, RunStatus.CANCELLED.value])
+async def test_only_failure_speaks_when_there_is_nothing_to_say(
+    world: ProjectionWorld,
+    status: str,
+) -> None:
+    """A completed run has the agent's own last message and a cancelled one is
+    something a person just did. Neither is left unexplained by an empty
+    error, so neither gets a card it has no content for."""
+    await world.projections.finalize_run_projection_activity(
+        FinalizeInput(
+            workspace_id=str(world.workspace_id),
+            task_id=str(world.task_id),
+            run_id=str(world.run_id),
+            status=status,
+            steps_used=1,
+        )
+    )
+
+    assert await _final_messages(world) == []
 
 
 async def test_a_tools_offered_event_does_not_disturb_the_pair_lookup(

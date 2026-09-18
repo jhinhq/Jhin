@@ -46,6 +46,7 @@ CATALOG_ICONS: tuple[str, ...] = (
     "flame",
     "flask",
     "folder",
+    "ghost",
     "github",
     "globe",
     "hard-drive",

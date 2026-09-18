@@ -7,7 +7,11 @@ from collections.abc import Mapping
 from jhin_connectors.base import ConnectionHealth, Connector, VerifyContext
 from jhin_connectors.cli.manifest import CLI_MANIFEST
 from jhin_connectors.cli.tools import CLI_TOOLS
-from jhin_connectors.cli.validators import repository_allow_list_validator
+from jhin_connectors.cli.validators import (
+    command_network_validator,
+    repository_allow_list_validator,
+    workspace_repository_validator,
+)
 from jhin_policy import ToolDefinition
 from jhin_tools.builtin import ToolExecutor, ToolValidator
 
@@ -49,8 +53,24 @@ class CliConnector(Connector):
     def tool_validators(self) -> Mapping[str, ToolValidator]:
         """The repository allow-list is a per-call veto, not a grant scope:
         it must hold for every agent in the workspace, and it must re-run when
-        a parked approval resumes."""
+        a parked approval resumes.
+
+        Two shapes of the same rule. Checkout and push *name* a repository, so
+        the name is what is checked. Every other sandbox tool names none — and
+        with a durable workspace they read whatever the last checkout left in
+        ``/workspace/repo``, which is how a repository removed from the list
+        stayed readable for as long as the disk did. Those are checked against
+        what the workspace actually holds.
+        """
         return {
             "cli.repository.checkout": repository_allow_list_validator,
             "cli.repository.push": repository_allow_list_validator,
+            "cli.command.execute": command_network_validator,
+            "cli.test.run": workspace_repository_validator,
+            "cli.file.read": workspace_repository_validator,
+            "cli.file.publish": workspace_repository_validator,
+            "cli.file.write": workspace_repository_validator,
+            "cli.file.edit": workspace_repository_validator,
+            "cli.file.list": workspace_repository_validator,
+            "cli.file.search": workspace_repository_validator,
         }

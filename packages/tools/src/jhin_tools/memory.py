@@ -17,7 +17,7 @@ company-wide that landed on one agent. See :func:`_write_memory_card`.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import cast
+from typing import Any, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -45,8 +45,9 @@ from jhin_memory import (
     build_memory_context,
     derive_source_facts,
 )
-from jhin_memory.types import MAX_CANDIDATE_CHARS
+from jhin_memory.types import MAX_CANDIDATE_CHARS, CaptureClass
 from jhin_policy import MEMORY_PROPOSE_CAPABILITY, MEMORY_READ_CAPABILITY, RiskLevel, ToolDefinition
+from jhin_secrets.intake import redact_legacy_payload
 from jhin_tools.builtin import ToolExecutionContext, ToolExecutor, ToolValidator
 from jhin_tools.errors import ToolExecutionError
 
@@ -75,9 +76,12 @@ class MemorySearchOutput(BaseModel):
     mode: str
     degraded: bool
     context_hash: str
+    capture_policies: list[dict[str, Any]] = Field(default_factory=list)
 
 
 async def _memory_search(ctx: ToolExecutionContext, payload: BaseModel) -> BaseModel:
+    from jhin_memory.capture import available_capture_policies
+
     data = cast(MemorySearchInput, payload)
     context = await build_memory_context(
         ctx.session,
@@ -103,6 +107,9 @@ async def _memory_search(ctx: ToolExecutionContext, payload: BaseModel) -> BaseM
         mode=context.provenance.mode,
         degraded=context.provenance.degraded,
         context_hash=context.provenance.context_hash,
+        capture_policies=await available_capture_policies(
+            ctx.session, workspace_id=ctx.workspace_id, agent_id=ctx.agent_id
+        ),
     )
 
 
@@ -116,10 +123,20 @@ class MemoryProposeInput(BaseModel):
     confidence: float = Field(default=0.7, ge=0.0, le=1.0)
     importance: float = Field(default=0.5, ge=0.0, le=1.0)
     requested_scope: MemoryScope = MemoryScope.AGENT
+    scope_id: UUID | None = None
+    source_message_id: UUID | None = None
+    source_review_id: UUID | None = None
+    capture_class: CaptureClass | None = None
     # The id of an answered organization.ask_person question whose answer
     # authorises a scope wider than this chat could reach on its own. It is
     # only a pointer: every fact that matters is re-read from the row.
     authorized_by_question_id: str | None = Field(default=None, max_length=64)
+
+
+class SupportedMemoryProposal(BaseModel):
+    source_tool_call_id: str = ""
+    source_message_id: str = ""
+    arguments: MemoryProposeInput
 
 
 class MemoryProposeOutput(BaseModel):
@@ -131,12 +148,22 @@ class MemoryProposeOutput(BaseModel):
     # repeat words like "non_amplification" back to the person who asked. This
     # says what happened and what would work instead.
     detail: str = ""
+    suggested_proposals: list[SupportedMemoryProposal] = Field(default_factory=list)
 
 
 # Plain language for the outcomes an agent can actually do something about.
 # Anything unlisted falls back to the generic line below, which is still a
 # sentence rather than a code.
 _REASON_DETAIL: dict[str, str] = {
+    "capture_not_authorized": (
+        "Not saved: no current standing authority covers this source, information class "
+        "and exact destination. Keep private material private. Ask for scope confirmation "
+        "only if no existing eligible policy covers the fact."
+    ),
+    "destination_not_authorized": (
+        "Not saved: this exact destination is not authorized by the source "
+        "or standing capture policy."
+    ),
     "non_amplification": (
         "Not saved at that scope. A chat is between you and one person, so it "
         "can become your own memory on its own. To remember it for the team or "
@@ -158,7 +185,32 @@ _REASON_DETAIL: dict[str, str] = {
         "Not saved: too vague to be useful later. Only propose something a "
         "colleague could act on months from now without this conversation."
     ),
-    "self_reference": ("Not saved: it describes this conversation rather than a durable fact."),
+    "conversation_record": (
+        "Not saved: that describes this conversation rather than a fact. If "
+        "something said here will still be true next week, save that — the "
+        "decision, the preference, the plan — not the exchange it came from."
+    ),
+    "personal_judgement": (
+        "Not saved: memory does not hold conclusions about what a person was "
+        "trying to do. They cannot see or correct it, and you would read it "
+        "back the next time you talk to them. What they decided, prefer or "
+        "are working on is fine to save."
+    ),
+    # The old wording — "it describes this conversation rather than a durable
+    # fact" — was backwards for the case that produces it most: a person
+    # conferring a name. That is durable, and it is a row rather than a
+    # memory. The model is told to relay this sentence, so it has to point at
+    # the thing that actually works.
+    "self_reference": (
+        "Not saved: your own identity is not memory. If someone just told you "
+        "what to call yourself, set it with organization.identity.set_name "
+        "instead — that changes your name everywhere, and this would not have. "
+        "Facts about anything other than you are fine to save."
+    ),
+    "unsupported_claim": "Not remembered: no supporting human statement or verified "
+    "native-tool fact was found. Use a concise exact excerpt from the "
+    "stated preference or standing brief; never infer successful "
+    "setup from failed actions.",
     "source_internal": ("Not saved: it came from hidden reasoning, which never becomes memory."),
     "duplicate": "Already remembered; nothing new was stored.",
     "near_duplicate": "Already remembered in nearly these words; nothing new was stored.",
@@ -401,19 +453,21 @@ async def _write_memory_card(
             recipient_type=RecipientType.USER.value,
             recipient_id=recipient_id,
             message_type=MessageType.STATUS.value,
-            content_json=structured_content(
-                # The summary is the remembered words themselves, so a
-                # renderer that does not know this card yet still shows what
-                # was stored rather than an empty row.
-                record.content,
-                kind="memory_saved",
-                memory_id=str(record.id),
-                action="updated" if record.supersedes_id is not None else "saved",
-                scope=record.scope,
-                scope_label=await _scope_label(ctx, record),
-                content=record.content,
-                superseded=superseded,
-                still_standing=still_standing,
+            content_json=redact_legacy_payload(
+                structured_content(
+                    # The summary is the remembered words themselves, so a
+                    # renderer that does not know this card yet still shows what
+                    # was stored rather than an empty row.
+                    record.content,
+                    kind="memory_saved",
+                    memory_id=str(record.id),
+                    action="updated" if record.supersedes_id is not None else "saved",
+                    scope=record.scope,
+                    scope_label=await _scope_label(ctx, record),
+                    content=record.content,
+                    superseded=superseded,
+                    still_standing=still_standing,
+                )
             ),
             visibility=MessageVisibility.VISIBLE.value,
         )
@@ -447,12 +501,17 @@ async def _memory_propose(ctx: ToolExecutionContext, payload: BaseModel) -> Base
         confidence=data.confidence,
         importance=data.importance,
         requested_scope=data.requested_scope,
+        scope_id=data.scope_id,
+        source_message_id=data.source_message_id,
+        source_review_id=data.source_review_id,
+        capture_class=data.capture_class,
     )
     result = await apply_candidates(
         ctx.session,
         candidates=[candidate],
         source=source,
         actor=actor,
+        require_evidence=True,
     )
     decision = result.decisions[0]
     record_id = ""
@@ -464,12 +523,73 @@ async def _memory_propose(ctx: ToolExecutionContext, payload: BaseModel) -> Base
     elif decision.duplicate_of is not None:
         record_id = str(decision.duplicate_of)
         status = "duplicate"
+    detail = _propose_detail(decision.outcome, status, decision.reasons)
+    suggestions: list[SupportedMemoryProposal] = []
+    if "unsupported_claim" in decision.reasons:
+        from jhin_memory.evidence import human_statement_excerpts, verified_tool_facts
+        from jhin_memory.policy import evaluate_candidate
+
+        for excerpt in await human_statement_excerpts(ctx.session, source):
+            exact = MemoryCandidate(content=excerpt.content, kind=data.kind)
+            screened = evaluate_candidate(
+                exact,
+                source,
+                ActorFacts(actor_type=ActorType.AGENT, actor_id=ctx.agent_id),
+                [],
+                agent_name=ctx.agent_name,
+            )
+            # A redacted candidate must not return the original secret in a
+            # suggestion. Recovery does not rewrite or shorten human wording.
+            if screened.outcome == "reject" or screened.content != exact.content:
+                continue
+            suggestions.append(
+                SupportedMemoryProposal(
+                    source_message_id=excerpt.message_id,
+                    arguments=MemoryProposeInput(content=exact.content, kind=data.kind),
+                )
+            )
+        for fact in await verified_tool_facts(ctx.session, source):
+            if len(suggestions) == 4:
+                break
+            exact = MemoryCandidate(content=fact.content, kind=MemoryKind.FACT)
+            # Recovery stays private and passes the same quality/scope screens.
+            # Nothing is saved and an answered scope grant is not spent here.
+            screened = evaluate_candidate(
+                exact, source, ActorFacts(actor_type=ActorType.AGENT, actor_id=ctx.agent_id), []
+            )
+            if screened.outcome == "reject":
+                continue
+            suggestions.append(
+                SupportedMemoryProposal(
+                    source_tool_call_id=fact.tool_call_id,
+                    arguments=MemoryProposeInput(
+                        content=fact.content, requested_scope=MemoryScope.AGENT
+                    ),
+                )
+            )
+        if suggestions:
+            if any(item.source_message_id for item in suggestions):
+                detail = (
+                    "That claim was not saved. Suggested proposals contain exact human wording "
+                    "or verified facts with source references. Save a relevant entry by calling "
+                    "memory.propose with its arguments unchanged. Do not add inferred workflow, "
+                    "timezone conversions, or publishing authority. Remembering a posting "
+                    "preference does not create or authorize recurring work."
+                )
+            else:
+                detail = (
+                    "That combined claim was not saved. The verified facts in suggested_proposals "
+                    "can be saved individually: call memory.propose with one entry's arguments "
+                    "unchanged. Do not append inferred publishing authority or combine facts. "
+                    "A rejected memory proposal does not mean the app setup failed."
+                )
     return MemoryProposeOutput(
         outcome=decision.outcome,
         status=status,
         memory_id=record_id,
         reasons=list(decision.reasons),
-        detail=_propose_detail(decision.outcome, status, decision.reasons),
+        detail=detail,
+        suggested_proposals=suggestions,
     )
 
 
@@ -494,16 +614,43 @@ MEMORY_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor, ToolValidator | None], .
         ToolDefinition(
             name="memory.propose",
             description=(
-                "Propose one concise, durable memory from the current task. "
-                "**When a person corrects something you have remembered, or "
-                "tells you a stored fact has changed, call this** with the new "
-                'wording -- saying "got it, I\'ll use that from now on" '
-                "records nothing, and you will state the old value again in the "
-                "next conversation. A correction supersedes the memory it "
+                "Remember one thing a person told you, so you still know it "
+                "next week. **Call this in the turn it is said, whenever "
+                "somebody tells you something that will still be true after "
+                "this conversation** -- what they are working on, how they "
+                "like things done, a decision and why it was made, how this "
+                "workspace works, who owns what. **And whenever a person "
+                "corrects something you have remembered, or tells you a "
+                "stored fact has changed**, call it with the new wording -- "
+                'saying "got it, I\'ll use that from now on" records nothing, '
+                "and you will state the old value again in the next "
+                "conversation. A correction supersedes the memory it "
                 "replaces; propose it the same way you proposed the original. "
+                "Use a concise exact excerpt of the person's statement, preserving its "
+                "conditions. Do not paraphrase it, expand a timezone abbreviation, or add "
+                "workflow or permission assumptions. Save the fact, not the conversation: "
+                "one sentence a "
+                "colleague could act on months from now without reading this "
+                "chat. Do not save what you just did or are about to do, "
+                "pleasantries, anything a tool of yours could look up again, "
+                "or your own name and identity (to be called something else, "
+                "use organization.identity.set_name). If you are unsure it "
+                "will matter next week, leave it. "
+                "Verified native-tool setup facts may be saved using one exact "
+                "verified_memory_facts entry at a time; never add inferred permissions "
+                "or publishing authority. "
                 "Use requested_scope 'agent' by default: an ordinary chat is "
                 "between you and one person, and what is said there is your "
-                "memory unless they say otherwise. When the fact is about a "
+                "memory unless they say otherwise. When standing capture authority exists, "
+                "supply capture_class, exact scope_id, and supporting source_message_id. "
+                "Eligible future facts are remembered without another scope question. "
+                "For editorial_lesson, use source_review_id of a current approved review "
+                "instead of source_message_id and an exact feedback excerpt. The policy "
+                "must authorize that reviewer; lessons stay in the assignment's team. "
+                "Company means requested_scope 'workspace'; use the exact team ID for team "
+                "memory, including a permitted non-primary team. Older private facts and "
+                "personal feedback are excluded from prospective authority. "
+                "When no standing authority covers the fact and the fact is about a "
                 "team or the whole company, first ask them with "
                 "organization.ask_person (kind 'memory_scope'), then propose "
                 "once with requested_scope set to the scope they chose and "
@@ -514,7 +661,10 @@ MEMORY_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor, ToolValidator | None], .
                 "scope than the one they picked; both are refused and the "
                 "memory is lost. A rejected "
                 "proposal comes back with a `detail` sentence saying what would "
-                "work instead -- relay that, not the reason codes. Never "
+                "work instead. If suggested_proposals are present, use one entry's "
+                "arguments unchanged to save its supported statement before concluding "
+                "that memory cannot be saved. Otherwise relay the detail, not the "
+                "reason codes. Never "
                 "include secrets or credentials."
             ),
             risk=RiskLevel.WRITE,

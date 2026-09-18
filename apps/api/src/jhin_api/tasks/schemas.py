@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
 from jhin_api.public_payloads import public_run_event_payload, public_tool_payload
 from jhin_domain import TaskPriority
+from jhin_secrets.intake import redact_legacy_payload, redact_legacy_text
 
 
 class TaskCreate(BaseModel):
@@ -57,6 +58,14 @@ class TaskOut(BaseModel):
     metadata_json: dict[str, Any] = {}
     created_at: datetime
     updated_at: datetime
+
+    @field_serializer("title", "description")
+    def serialize_legacy_text(self, value: str) -> str:
+        return redact_legacy_text(value)
+
+    @field_serializer("metadata_json")
+    def serialize_legacy_metadata(self, value: dict[str, Any]) -> dict[str, Any]:
+        return cast(dict[str, Any], redact_legacy_payload(value))
 
 
 class RunOut(BaseModel):
@@ -107,6 +116,26 @@ class MessageOut(BaseModel):
     content_json: dict[str, Any]
     created_at: datetime
 
+    @field_serializer("content_json")
+    def serialize_content(self, value: dict[str, Any]) -> dict[str, Any]:
+        return cast(dict[str, Any], redact_legacy_payload(value))
+
+
+class SandboxJobOut(BaseModel):
+    """A bounded durable output snapshot, never a connection to the runner."""
+
+    job_id: UUID
+    status: str
+    network_policy: str
+    stdout: str
+    stderr: str
+    # Stored logs are tails even when they fit this response's cap.
+    output_is_tail: bool = True
+    exit_code: int | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    duration_ms: int | None
+
 
 class ToolCallOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -124,8 +153,9 @@ class ToolCallOut(BaseModel):
     duration_ms: int | None
     error_code: str | None
     created_at: datetime
+    sandbox_job: SandboxJobOut | None = None
 
-    @field_serializer("sanitized_input_json")
+    @field_serializer("sanitized_input_json", "sanitized_output_json")
     def serialize_sanitized_input(self, value: dict[str, Any]) -> dict[str, Any]:
         return public_tool_payload(self.tool_name, value)
 

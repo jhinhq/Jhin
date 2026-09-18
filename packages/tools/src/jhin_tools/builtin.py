@@ -30,6 +30,7 @@ from jhin_policy import (
     RiskLevel,
     ToolDefinition,
     capability_matches,
+    scope_matches,
 )
 from jhin_secrets import SecretCrypto
 from jhin_tools.test_barriers import CrashBarrier
@@ -140,6 +141,8 @@ class ToolCatalog:
         executor: ToolExecutor,
         validator: ToolValidator | None = None,
     ) -> None:
+        if definition.defers_scope and validator is None:
+            raise ValueError(f"Deferred-scope tool '{definition.name}' requires a validator")
         self.registry.register(definition)
         self._executors[definition.name] = executor
         if validator is not None:
@@ -358,12 +361,15 @@ def builtin_tool_definitions() -> tuple[ToolDefinition, ...]:
     """Built-in definitions without importing any executor into the caller."""
     from jhin_tools.ask_person import ASK_PERSON_TOOLS
     from jhin_tools.directory import DIRECTORY_TOOLS
+    from jhin_tools.identity import IDENTITY_TOOLS
     from jhin_tools.memory import MEMORY_TOOLS
     from jhin_tools.organization import ORGANIZATION_TOOLS
     from jhin_tools.organization_admin import ORGANIZATION_ADMIN_TOOLS
     from jhin_tools.personas import PERSONA_TOOLS
     from jhin_tools.reviews import REVIEW_TOOLS
+    from jhin_tools.schedule_tools import SCHEDULE_TOOLS
     from jhin_tools.skills_tools import SKILL_TOOLS
+    from jhin_tools.variables import VARIABLE_TOOLS
     from jhin_tools.work_requests import WORK_REQUEST_TOOLS
 
     return tuple(definition for definition, _executor in BUILTIN_TOOLS) + tuple(
@@ -374,10 +380,13 @@ def builtin_tool_definitions() -> tuple[ToolDefinition, ...]:
             *DIRECTORY_TOOLS,
             *WORK_REQUEST_TOOLS,
             *REVIEW_TOOLS,
+            *SCHEDULE_TOOLS,
             *MEMORY_TOOLS,
             *ASK_PERSON_TOOLS,
             *SKILL_TOOLS,
             *PERSONA_TOOLS,
+            *IDENTITY_TOOLS,
+            *VARIABLE_TOOLS,
         )
     )
 
@@ -391,12 +400,15 @@ def build_builtin_catalog() -> ToolCatalog:
     # from this module.
     from jhin_tools.ask_person import ASK_PERSON_TOOLS
     from jhin_tools.directory import DIRECTORY_TOOLS
+    from jhin_tools.identity import IDENTITY_TOOLS
     from jhin_tools.memory import MEMORY_TOOLS
     from jhin_tools.organization import ORGANIZATION_TOOLS
     from jhin_tools.organization_admin import ORGANIZATION_ADMIN_TOOLS
     from jhin_tools.personas import PERSONA_TOOLS
     from jhin_tools.reviews import REVIEW_TOOLS
+    from jhin_tools.schedule_tools import SCHEDULE_TOOLS
     from jhin_tools.skills_tools import SKILL_TOOLS
+    from jhin_tools.variables import VARIABLE_TOOLS
     from jhin_tools.work_requests import WORK_REQUEST_TOOLS
 
     catalog = ToolCatalog()
@@ -410,10 +422,13 @@ def build_builtin_catalog() -> ToolCatalog:
         *DIRECTORY_TOOLS,
         *WORK_REQUEST_TOOLS,
         *REVIEW_TOOLS,
+        *SCHEDULE_TOOLS,
         *MEMORY_TOOLS,
         *ASK_PERSON_TOOLS,
         *SKILL_TOOLS,
         *PERSONA_TOOLS,
+        *IDENTITY_TOOLS,
+        *VARIABLE_TOOLS,
     ):
         catalog.register(definition, org_executor, validator)
     return catalog
@@ -424,6 +439,7 @@ def allowed_tool_definitions(
     grants: Sequence[Grant],
     *,
     live_connection_ids: Collection[str] | None = None,
+    connection_tool_names: Mapping[str, Collection[str]] | None = None,
 ) -> tuple[ToolDefinition, ...]:
     """Tools worth advertising to the model: those with any matching allow
     grant. Advertisement is prompt economy, not authorization — the gateway
@@ -434,7 +450,9 @@ def allowed_tool_definitions(
     reconnected) is ignored here: a tool the agent could only ever be denied
     is not worth offering, and offering it is what taught agents to report
     blocks they never observed. Unpinned grants and deny grants are
-    unaffected, and the gateway still decides every call from live rows.
+    unaffected by that filter. Per-connection tool metadata, when supplied,
+    additionally withholds connector tools with no compatible, grant-admitted
+    connection. The gateway still decides every call from live rows.
     """
     allow_patterns: list[str] = []
     for grant in grants:
@@ -443,8 +461,11 @@ def allowed_tool_definitions(
         pinned = grant.scope.get("connection_id")
         if (
             live_connection_ids is not None
-            and isinstance(pinned, str)
-            and pinned not in live_connection_ids
+            and "connection_id" in grant.scope
+            and not any(
+                scope_matches({"connection_id": pinned}, {"connection_id": connection_id})
+                for connection_id in live_connection_ids
+            )
         ):
             continue
         allow_patterns.append(grant.capability)
@@ -454,6 +475,16 @@ def allowed_tool_definitions(
         if any(
             capability_matches(pattern, definition.required_capability)
             for pattern in allow_patterns
+        )
+        and (
+            connection_tool_names is None
+            or "connection_id" not in definition.scope_keys
+            or connection_hints(
+                definition,
+                grants,
+                dict.fromkeys(connection_tool_names, ""),
+                connection_tool_names=connection_tool_names,
+            )
         )
     )
 
@@ -526,6 +557,14 @@ def task_scoped_tool_definitions(
 ) -> tuple[ToolDefinition, ...]:
     """Narrow advertised definitions to those meaningful for ``task``."""
     withheld: set[str] = set()
+    if task is not None:
+        from jhin_tools.turn_modes import mode_denial
+
+        withheld |= {
+            definition.name
+            for definition in definitions
+            if mode_denial(definition, task.metadata_json)
+        }
     if not task_expects_a_reported_result(task):
         withheld |= DELEGATION_REPORTING_TOOLS
     if not task_has_a_person_watching(task):
@@ -535,21 +574,50 @@ def task_scoped_tool_definitions(
     return tuple(definition for definition in definitions if definition.name not in withheld)
 
 
+def _scope_value_covers(denied: object, allowed: object) -> bool:
+    """Prove a deny covers an allow value without guessing glob inclusion."""
+    if isinstance(allowed, list):
+        return all(_scope_value_covers(denied, item) for item in allowed)
+    if isinstance(denied, list):
+        return any(_scope_value_covers(item, allowed) for item in denied)
+    if isinstance(allowed, str) and any(char in allowed for char in "*?["):
+        return denied == allowed or denied == "*"
+    return scope_matches({"value": denied}, {"value": allowed})
+
+
 def connection_hints(
     definition: ToolDefinition,
     grants: Sequence[Grant],
     connection_labels: Mapping[str, str],
+    *,
+    connection_tool_names: Mapping[str, Collection[str]] | None = None,
 ) -> str:
     """Describe, for the model, which connections a connector tool may use.
 
     Connector tools take a ``connection_id`` the model cannot know on its
-    own (it is a workspace UUID), so every allow grant for this tool that
-    pins a *known* connection is rendered as ``label — connection_id=…`` plus
-    the other scope values the grant fixes (e.g. ``repository=octo/alpha``).
+    own (it is a workspace UUID). With per-connection tool metadata, valid
+    unpinned grants can name every compatible live connection. Without it,
+    only explicit pins are safe to describe. Required grant dimensions and
+    connection denies still apply; other scope values are shown with the ID.
     This is prompt context only: the gateway still decides every call.
     """
     if "connection_id" not in definition.scope_keys:
         return ""
+    # Dynamic tools fix scope fields such as tool/server_slug/toolkit with
+    # Literals. A grant for a different literal cannot authorize any valid
+    # input, while a deny matching it covers every call to this definition.
+    properties = definition.input_json_schema().get("properties", {})
+    if not isinstance(properties, dict):
+        properties = {}
+    fixed_scope: dict[str, object] = {}
+    for key in definition.scope_keys:
+        field = properties.get(key, {})
+        if not isinstance(field, dict):
+            continue
+        if "const" in field:
+            fixed_scope[key] = field["const"]
+        elif isinstance(field.get("enum"), list) and len(field["enum"]) == 1:
+            fixed_scope[key] = field["enum"][0]
     lines: list[str] = []
     seen: set[str] = set()
     for grant in grants:
@@ -557,20 +625,77 @@ def connection_hints(
             continue
         if not capability_matches(grant.capability, definition.required_capability):
             continue
-        connection_id = str(grant.scope.get("connection_id", ""))
-        label = connection_labels.get(connection_id)
-        if label is None:
+        if not set(definition.required_grant_scope_keys).issubset(grant.scope):
             continue
+        if not definition.defers_scope and not set(grant.scope).issubset(
+            (*definition.scope_keys, *definition.result_scope_keys)
+        ):
+            continue
+        candidates = (
+            connection_labels
+            if connection_tool_names is not None
+            else {str(grant.scope.get("connection_id", "")): ""}
+        )
         extras = ", ".join(
             f"{key}={grant.scope[key]}"
             for key in definition.scope_keys
             if key != "connection_id" and key in grant.scope
         )
-        line = f"{label} — connection_id={connection_id}" + (f" ({extras})" if extras else "")
-        if line in seen:
-            continue
-        seen.add(line)
-        lines.append(line)
+        for connection_id in candidates:
+            label = connection_labels.get(connection_id)
+            if label is None or (
+                connection_tool_names is not None
+                and definition.name not in connection_tool_names.get(connection_id, ())
+            ):
+                continue
+            requested = {**fixed_scope, "connection_id": connection_id}
+            if not scope_matches(
+                {key: value for key, value in grant.scope.items() if key in requested}, requested
+            ):
+                continue
+            matching_denies = [
+                deny
+                for deny in grants
+                if (
+                    deny.effect is GrantEffect.DENY
+                    and capability_matches(deny.capability, definition.required_capability)
+                    and scope_matches(
+                        {key: value for key, value in deny.scope.items() if key in requested},
+                        requested,
+                    )
+                )
+            ]
+            # Only a deny covering the whole allow scope removes the candidate.
+            # A private/* deny must not hide public files on the same app. The
+            # gateway decides the actual command/path; spell out the remaining
+            # deny scopes so the model can choose a permitted call.
+            denied_dimensions = [
+                {
+                    key: value
+                    for key, value in deny.scope.items()
+                    if key not in requested and key not in definition.result_scope_keys
+                }
+                for deny in matching_denies
+            ]
+            if any(
+                all(
+                    key in grant.scope and _scope_value_covers(value, grant.scope[key])
+                    for key, value in dimensions.items()
+                )
+                for dimensions in denied_dimensions
+            ):
+                continue
+            exclusions = "; ".join(
+                ", ".join(f"{key}={value}" for key, value in dimensions.items())
+                for dimensions in denied_dimensions
+            )
+            line = f"{label} — connection_id={connection_id}" + (f" ({extras})" if extras else "")
+            if exclusions:
+                line += f" [denied scopes: {exclusions}]"
+            if line in seen:
+                continue
+            seen.add(line)
+            lines.append(line)
     if not lines:
         return ""
     return "Connections you may use (pass the connection_id exactly as given): " + "; ".join(lines)
@@ -580,7 +705,11 @@ def advertised_description(
     definition: ToolDefinition,
     grants: Sequence[Grant],
     connection_labels: Mapping[str, str],
+    *,
+    connection_tool_names: Mapping[str, Collection[str]] | None = None,
 ) -> str:
     """Tool description for the model: the registry text plus connection hints."""
-    hints = connection_hints(definition, grants, connection_labels)
+    hints = connection_hints(
+        definition, grants, connection_labels, connection_tool_names=connection_tool_names
+    )
     return f"{definition.description} {hints}".strip() if hints else definition.description

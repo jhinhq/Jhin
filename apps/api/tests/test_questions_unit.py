@@ -379,6 +379,75 @@ async def test_typing_an_option_word_for_word_is_still_a_typed_answer(
     assert answered["grant_denied_reason"] == "free_text_answer"
 
 
+@pytest.mark.parametrize("role", [WorkspaceRole.ADMIN, WorkspaceRole.MEMBER])
+async def test_optional_schedule_activation_records_authenticated_authority(harness, role):
+    harness.act_as(role)
+    task_id = harness.task.id
+    question = await harness.ask(
+        kind="open",
+        options=[
+            {"label": "Activate recurring work", "value": "activate", "detail": "Ready"},
+            {"label": "Keep paused", "value": "keep_paused", "detail": "Incomplete"},
+        ],
+    )
+    input_key = "schedule_activate_" + new_uuid7().hex + "_1_test"
+    question.input_key = input_key
+    question.required = False
+    await harness.session.commit()
+    response = await _answer(harness, question, {"option_value": "activate"})
+    assert response.status_code == 200, response.text
+    stored = await _reread(harness, UserQuestion, question.id)
+    assert stored.granted_authority == ("workspace" if role == WorkspaceRole.ADMIN else "")
+    task = await _reread(harness, Task, task_id)
+    proof = task.metadata_json["resolved_input_authority"][input_key]["_human_authority"]
+    assert proof["role"] == role.value and proof["source"] == "browser"
+
+
+@pytest.mark.parametrize(
+    "value_type,value",
+    [
+        ("timezone", "America/Los_Angeles"),
+        ("time", "09:00"),
+        ("url", "https://blog.example"),
+    ],
+)
+async def test_typed_choice_resolves_actual_value_and_keeps_human_label(harness, value_type, value):
+    task_id = harness.task.id
+    label = "The selected setting with explanatory text"
+    question = await harness.ask(
+        kind="open",
+        options=[
+            {"label": label, "value": value, "detail": ""},
+            {"label": "Other setting", "value": "unused", "detail": ""},
+        ],
+    )
+    question.required = True
+    question.input_key = "typed_setting"
+    question.value_type = value_type
+    await harness.session.commit()
+    response = await _answer(harness, question, {"option_value": value})
+    assert response.status_code == 200, response.text
+    assert response.json()["question"]["answer_text"] == label
+    task = await _reread(harness, Task, task_id)
+    assert task.metadata_json["resolved_inputs"]["typed_setting"] == value
+
+
+async def test_legacy_timezone_alias_is_not_inferred_from_its_label(harness):
+    question = await harness.ask(
+        kind="open",
+        options=[
+            {"label": "America/Los_Angeles", "value": "pst_fixed", "detail": ""},
+            {"label": "UTC", "value": "utc_time", "detail": ""},
+        ],
+    )
+    question.required = True
+    question.input_key = "typed_timezone"
+    question.value_type = "timezone"
+    await harness.session.commit()
+    response = await _answer(harness, question, {"option_value": "pst_fixed"})
+    assert response.status_code == 422
+
+
 # --------------------------------------------------------------------------
 # The grant matrix
 # --------------------------------------------------------------------------
@@ -485,7 +554,7 @@ async def test_an_option_nobody_offered_is_refused(harness: Harness) -> None:
     response = await _answer(harness, question, {"option_value": "everyone"})
 
     assert response.status_code == 422
-    assert "everyone" in response.json()["detail"]
+    assert response.json()["detail"] == "Unknown option"
 
 
 async def test_a_question_that_takes_no_typed_answer_refuses_one(harness: Harness) -> None:
@@ -665,6 +734,9 @@ async def test_the_projection_never_leaks_how_the_grant_is_decided(harness: Harn
         "agent_id",
         "agent_name",
         "kind",
+        "required",
+        "input_key",
+        "value_type",
         "question",
         "context",
         "options",

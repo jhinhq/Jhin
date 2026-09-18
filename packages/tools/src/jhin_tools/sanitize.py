@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from typing import Any
 
 from jhin_secrets.redaction import SecretRedactor, get_redactor
@@ -25,6 +26,7 @@ MAX_DOCUMENT_BYTES = 32_768
 
 TRUNCATION_MARKER = "…[truncated]"
 _MIN_KEY_CAP_CHARS = len(TRUNCATION_MARKER) + 8
+_POSTGRES_UNSAFE_TEXT = re.compile("[\x00\ud800-\udfff]")
 
 
 class StrictJSONError(ValueError):
@@ -118,14 +120,14 @@ def _unique_bounded_key(
 
 def _sanitize_value(value: Any, redactor: SecretRedactor, max_string_chars: int) -> Any:
     if isinstance(value, str):
-        return _truncate_string(redactor.redact_text(value), max_string_chars)
+        return _truncate_string(_safe_text(value, redactor), max_string_chars)
     if isinstance(value, dict):
         sanitized: dict[str, Any] = {}
         for key, item in value.items():
             # Keys are provider-controlled strings too. Redact the complete
             # key before applying the cap so truncation cannot strand a
             # recognizable prefix of a credential.
-            bounded_key = _truncate_string(redactor.redact_text(str(key)), max_string_chars)
+            bounded_key = _truncate_string(_safe_text(str(key), redactor), max_string_chars)
             safe_key = _unique_bounded_key(
                 bounded_key,
                 sanitized,
@@ -138,7 +140,18 @@ def _sanitize_value(value: Any, redactor: SecretRedactor, max_string_chars: int)
     if isinstance(value, (int, float, bool)) or value is None:
         return value
     # Unknown types (should not appear in JSON payloads) become redacted text.
-    return _truncate_string(redactor.redact_text(str(value)), max_string_chars)
+    return _truncate_string(_safe_text(str(value), redactor), max_string_chars)
+
+
+def _safe_text(value: str, redactor: SecretRedactor) -> str:
+    # JSONB cannot store U+0000, and UTF-8 cannot encode lone surrogates.
+    # Replace visibly rather than deleting bytes that could join secret pieces.
+    # Scrub both representations: original secrets may contain those characters,
+    # while normalization may also produce a separately registered secret.
+    original = redactor.redact_text(value)
+    normalized = _POSTGRES_UNSAFE_TEXT.sub("\ufffd", original)
+    safe: str = redactor.redact_text(normalized)
+    return safe
 
 
 def sanitize_payload(

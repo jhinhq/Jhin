@@ -130,7 +130,11 @@ async def _connections(
                 "name": f"P8 CLI {tag}",
                 "auth_type": "none",
                 "credentials": {},
-                "config": {"default_network": "none", "git_connection_id": github["id"]},
+                "config": {
+                    "default_network": "none",
+                    "git_connection_id": github["id"],
+                    "allowed_repositories": ["octo/alpha"],
+                },
             },
         )
     )["connection"]
@@ -187,10 +191,18 @@ def _swe_grants(cli_id: str, github_id: str) -> dict[str, dict[str, str]]:
     return {
         "cli.repository.checkout": {"connection_id": cli_id, "repository": "octo/alpha"},
         "cli.file.read": {"connection_id": cli_id, "path": "*"},
-        "cli.file.write": {"connection_id": cli_id, "path": "*"},
+        "cli.file.edit": {"connection_id": cli_id, "path": "*"},
         "cli.test.run": {"connection_id": cli_id, "command": "bash *"},
-        "cli.command.execute": {"connection_id": cli_id, "command": "git *"},
-        "github.pull_request.create": {"connection_id": github_id, "repository": "octo/alpha"},
+        "cli.repository.push": {
+            "connection_id": cli_id,
+            "repository": "octo/alpha",
+            "branch": "agent/*",
+        },
+        "github.pull_request.create": {
+            "connection_id": github_id,
+            "repository": "octo/alpha",
+            "base": "main",
+        },
     }
 
 
@@ -218,6 +230,39 @@ async def _task(client: httpx.AsyncClient, ws: str, task_id: str) -> dict[str, A
     return detail
 
 
+async def _approve_fixture_pushes(
+    client: httpx.AsyncClient, ws: str, task_id: str, cli_id: str, branch: str
+) -> None:
+    """Approve only this fixture's exact native pushes, including fix children.
+
+    Keep the real elevated-action gate: do not change workspace autonomy or
+    approve unrelated pending work in this shared disposable installation.
+    """
+    tree = await _get(client, f"/api/v1/workspaces/{ws}/tasks/{task_id}/tree")
+    owned_tasks: set[str] = set()
+
+    def collect(node: dict[str, Any]) -> None:
+        owned_tasks.add(str(node["task"]["id"]))
+        for child in node["children"]:
+            collect(child)
+
+    collect(tree["root"])
+    pending = await _get(client, f"/api/v1/workspaces/{ws}/approvals", status="pending")
+    for approval in pending["items"]:
+        if (
+            approval["task_id"] not in owned_tasks
+            or approval["action_type"] != "cli.repository.push"
+        ):
+            continue
+        payload = approval["action_payload_sanitized"]["input"]
+        assert payload["connection_id"] == cli_id, approval
+        assert payload["repository"] == "octo/alpha", approval
+        assert payload["branch"] == branch, approval
+        await _post(
+            client, f"/api/v1/workspaces/{ws}/approvals/{approval['id']}/approve", {}, expect=200
+        )
+
+
 async def _wait_task_finished(
     client: httpx.AsyncClient,
     ws: str,
@@ -225,6 +270,7 @@ async def _wait_task_finished(
     *,
     budget: float = TASK_TIMEOUT_SECONDS,
     observe: set[str] | None = None,
+    approve_push: tuple[str, str] | None = None,
 ) -> dict[str, Any]:
     """Poll until terminal; optionally collect run statuses seen on the way."""
     deadline = time.monotonic() + budget
@@ -236,12 +282,19 @@ async def _wait_task_finished(
                 observe.add(run["status"])
         if detail["task"]["state"] in ("completed", "failed", "cancelled"):
             return detail
+        if approve_push is not None:
+            await _approve_fixture_pushes(client, ws, task_id, *approve_push)
         await asyncio.sleep(1.0)
     pytest.fail(f"task {task_id} did not finish in {budget}s: {detail['task']}")
 
 
 async def _wait_engineering_result(
-    client: httpx.AsyncClient, ws: str, task_id: str, *, budget: float = TASK_TIMEOUT_SECONDS
+    client: httpx.AsyncClient,
+    ws: str,
+    task_id: str,
+    *,
+    budget: float = TASK_TIMEOUT_SECONDS,
+    approve_push: tuple[str, str] | None = None,
 ) -> dict[str, Any]:
     """Wait until the template's finalize activity recorded the outcome."""
     deadline = time.monotonic() + budget
@@ -250,6 +303,8 @@ async def _wait_engineering_result(
         detail = await _task(client, ws, task_id)
         if detail["task"]["metadata_json"].get("engineering_result"):
             return detail
+        if approve_push is not None:
+            await _approve_fixture_pushes(client, ws, task_id, *approve_push)
         await asyncio.sleep(1.0)
     pytest.fail(f"task {task_id}: no engineering_result in {budget}s: {detail['task']}")
 
@@ -408,19 +463,21 @@ async def _template_task_id(
 
 
 def _implement_markers(cli_id: str, github_id: str, branch: str, tag: str, *, value: int) -> str:
-    """checkout → write app.py (VALUE=<value>) → test → push → PR.
+    """checkout → read/edit app.py (VALUE=<value>) → test → native push → PR.
     value=2 is the correct fix (tests green); anything else leaves them red."""
-    push = f"git add -A && git commit -m fix-value && git push origin {branch}"
     return " ".join(
         [
             f'[[tool:cli.repository.checkout {{"connection_id": "{cli_id}", '
             f'"repository": "octo/alpha", "branch": "{branch}"}}]]',
-            f'[[tool:cli.file.write {{"connection_id": "{cli_id}", "path": "app.py", '
-            f'"content": "VALUE = {value}\\n"}}]]',
+            f'[[tool:cli.file.read {{"connection_id": "{cli_id}", "path": "app.py"}}]]',
+            f'[[tool:cli.file.edit {{"connection_id": "{cli_id}", "path": "app.py", '
+            f'"old_string": "VALUE = 1", "new_string": "VALUE = {value}", '
+            f'"expected_count": 1}}]]',
             f'[[tool:cli.test.run {{"connection_id": "{cli_id}", '
             f'"command": "bash ./run_tests.sh"}}]]',
-            f'[[tool:cli.command.execute {{"connection_id": "{cli_id}", '
-            f'"command": "{push}", "network": "internet"}}]]',
+            f'[[tool:cli.repository.push {{"connection_id": "{cli_id}", '
+            f'"repository": "octo/alpha", "branch": "{branch}", '
+            f'"commit_message": "Fix VALUE {tag}"}}]]',
             f'[[tool:github.pull_request.create {{"connection_id": "{github_id}", '
             f'"repository": "octo/alpha", "title": "Fix VALUE {tag}", '
             f'"head": "{branch}", "base": "main", "body": "Automated by Jhin."}}]]',
@@ -445,17 +502,18 @@ def _qa_review_markers(cli_id: str, branch: str, work_branch: str, summary: str)
 
 def _fix_markers(cli_id: str, branch: str, tag: str) -> str:
     """Clone the PR branch, apply the correct fix, prove green, push back."""
-    push = f"git add -A && git commit -m qa-fix && git push origin HEAD:{branch}"
     return " ".join(
         [
             f'[[tool:cli.repository.checkout {{"connection_id": "{cli_id}", '
-            f'"repository": "octo/alpha", "ref": "{branch}", "branch": "fix/{tag}"}}]]',
-            f'[[tool:cli.file.write {{"connection_id": "{cli_id}", "path": "app.py", '
-            f'"content": "VALUE = 2\\n"}}]]',
+            f'"repository": "octo/alpha", "ref": "main", "branch": "{branch}"}}]]',
+            f'[[tool:cli.file.read {{"connection_id": "{cli_id}", "path": "app.py"}}]]',
+            f'[[tool:cli.file.edit {{"connection_id": "{cli_id}", "path": "app.py", '
+            f'"old_string": "VALUE = 3", "new_string": "VALUE = 2", "expected_count": 1}}]]',
             f'[[tool:cli.test.run {{"connection_id": "{cli_id}", '
             f'"command": "bash ./run_tests.sh"}}]]',
-            f'[[tool:cli.command.execute {{"connection_id": "{cli_id}", '
-            f'"command": "{push}", "network": "internet"}}]]',
+            f'[[tool:cli.repository.push {{"connection_id": "{cli_id}", '
+            f'"repository": "octo/alpha", "branch": "{branch}", '
+            f'"commit_message": "QA fix VALUE {tag}"}}]]',
         ]
     )
 
@@ -502,6 +560,7 @@ async def test_blocking_qa_delegation_pass_resumes_parent(
             f'"title": "QA review {tag}", '
             f'"instructions": "Review the PR branch {branch}. {qa_blob}", '
             f'"expected_output": "pass/fail verdict with test evidence", '
+            f'"cross_team_reason": "QA independently verifies the implementation", '
             f'"blocking": true, "kind": "review_request", '
             f'"artifacts": [{{"type": "branch", "id": "{branch}"}}]}}]]',
         ]
@@ -509,7 +568,9 @@ async def test_blocking_qa_delegation_pass_resumes_parent(
 
     parent = await _assign(client, ws, swe["id"], f"P8a implement+review {tag}", description)
     observed: set[str] = set()
-    detail = await _wait_task_finished(client, ws, parent["id"], observe=observed)
+    detail = await _wait_task_finished(
+        client, ws, parent["id"], observe=observed, approve_push=(cli["id"], branch)
+    )
     assert detail["task"]["state"] == "completed", detail["task"]
     assert "waiting_delegation" in observed, (
         f"parent run must park durably while the child works; saw {observed}"
@@ -553,14 +614,15 @@ async def test_blocking_qa_delegation_pass_resumes_parent(
     calls = await _tool_calls(client, ws, parent_run["id"])
     assert [c["tool_name"] for c in calls] == [
         "cli.repository.checkout",
-        "cli.file.write",
+        "cli.file.read",
+        "cli.file.edit",
         "cli.test.run",
-        "cli.command.execute",
+        "cli.repository.push",
         "github.pull_request.create",
         "organization.delegate_task",
     ], calls
     assert all(c["status"] == "completed" for c in calls), calls
-    assert calls[5]["sanitized_output_json"]["child_task_id"] == child["task"]["id"]
+    assert calls[6]["sanitized_output_json"]["child_task_id"] == child["task"]["id"]
 
     # Child transcript: checkout the PR branch, run the suite (green),
     # report the structured result.
@@ -596,21 +658,26 @@ async def test_engineering_template_failure_fix_retest_loop(
     # unwraps one layer, the reported summary carries an inert blob that the
     # fix child task (whose instructions embed the failure context) decodes.
     fix_blob = encode_marker_payload(encode_marker_payload(_fix_markers(cli["id"], branch, tag)))
-    qa_prompt = "You are QA. For any review task, do exactly this: " + _qa_review_markers(
-        cli["id"], branch, f"qa/p8b-{tag}", f"Suite verdict for {branch} from exit code. {fix_blob}"
+    qa_prompt = (
+        "You are QA. [[system_tools_only]] For any review task, do exactly this: "
+        + _qa_review_markers(
+            cli["id"],
+            branch,
+            "",
+            f"Suite verdict for {branch} from exit code. {fix_blob}",
+        )
     )
-    # The retest instructions echo the cycle-1 failure summary, so in cycle 2
-    # the scripted provider also replays the smuggled fix script after QA's
-    # own verdict. Since the Phase 10 tool-worker boundary a denied call stops
-    # the run, hence QA additionally holds the implementer grants: the replayed
-    # script then re-applies an already-pushed fix (a no-op) instead of
-    # failing the passing review with `no_grant`.
+    # The retest includes the earlier failure context for a real reviewer.
+    # This deterministic reviewer follows only its system tool script; it
+    # must not execute the fix script intended for the SWE in that context.
+    # An empty checkout branch uses the review task's unique branch, so each
+    # cycle starts at the current PR tip instead of resuming the last review.
     qa = await _make_agent(
         client,
         ws,
         f"P8b QA {tag}",
         system_prompt=qa_prompt,
-        grants={**_swe_grants(cli["id"], github["id"]), **_qa_grants(cli["id"])},
+        grants=_qa_grants(cli["id"]),
     )
     swe = await _make_agent(
         client, ws, f"P8b SWE {tag}", grants=_swe_grants(cli["id"], github["id"])
@@ -637,7 +704,9 @@ async def test_engineering_template_failure_fix_retest_loop(
         _implement_markers(cli["id"], github["id"], branch, tag, value=3),
     )
     task_id = await _template_task_id(client, ws, trigger["id"], identifier)
-    detail = await _wait_engineering_result(client, ws, task_id, budget=480.0)
+    detail = await _wait_engineering_result(
+        client, ws, task_id, budget=480.0, approve_push=(cli["id"], branch)
+    )
 
     outcome = detail["task"]["metadata_json"]["engineering_result"]
     assert outcome == {"status": "completed", "verdict": "pass", "cycles_used": 2}, outcome
@@ -674,14 +743,19 @@ async def test_engineering_template_failure_fix_retest_loop(
     fx_calls = await _tool_calls(client, ws, fx["runs"][0]["id"])
     assert [c["tool_name"] for c in fx_calls] == [
         "cli.repository.checkout",
-        "cli.file.write",
+        "cli.file.read",
+        "cli.file.edit",
         "cli.test.run",
-        "cli.command.execute",
+        "cli.repository.push",
     ]
-    assert fx_calls[2]["sanitized_output_json"]["passed"] is True
+    assert fx_calls[3]["sanitized_output_json"]["passed"] is True
     # cycle 2 review — retest on the updated branch, evidence-based pass.
     r2 = await _task(client, ws, review2["task"]["id"])
     r2_calls = await _tool_calls(client, ws, r2["runs"][0]["id"])
+    assert (
+        r2_calls[0]["sanitized_output_json"]["head_sha"]
+        == (fx_calls[4]["sanitized_output_json"]["pushed_sha"])
+    )
     assert r2_calls[1]["sanitized_output_json"]["passed"] is True
     assert r2_calls[2]["sanitized_output_json"]["status"] == "pass"
 
@@ -755,7 +829,7 @@ async def test_engineering_template_coordinator_mode_routes_via_cto(
     )
     identifier = await _new_issue(f"P8c coordinator {tag}", description)
     task_id = await _template_task_id(client, ws, trigger["id"], identifier)
-    detail = await _wait_engineering_result(client, ws, task_id)
+    detail = await _wait_engineering_result(client, ws, task_id, approve_push=(cli["id"], branch))
 
     outcome = detail["task"]["metadata_json"]["engineering_result"]
     assert outcome == {"status": "completed", "verdict": "pass", "cycles_used": 1}, outcome
@@ -808,7 +882,9 @@ async def test_delegation_denied_without_grant_and_outside_policy(
     def delegate_marker(target_id: str) -> str:
         return (
             f'[[tool:organization.delegate_task {{"target_agent_id": "{target_id}", '
-            f'"title": "probe {tag}", "instructions": "do something", "blocking": false}}]]'
+            f'"title": "probe {tag}", "instructions": "do something", '
+            f'"cross_team_reason": "Exercise the authorized delegation depth", '
+            f'"blocking": false}}]]'
         )
 
     # 1) No organization.delegate grant at all → deny (no_grant).
@@ -860,6 +936,7 @@ async def test_delegation_denied_without_grant_and_outside_policy(
             f"P8d depth {tag}",
             f'[[tool:organization.delegate_task {{"target_agent_id": "{mid["id"]}", '
             f'"title": "hop 1 {tag}", "instructions": "Go deeper. {onward}", '
+            f'"cross_team_reason": "Exercise the authorized delegation depth", '
             f'"blocking": true}}]]',
         )
         await _wait_task_finished(client, ws, task["id"], budget=180.0)

@@ -17,10 +17,12 @@ from jhin_db.base import Base
 from jhin_db.models import (
     Agent,
     AgentCapabilityGrant,
+    AgentRun,
     MemoryRecord,
     Message,
     Task,
     Team,
+    ToolCall,
     User,
     UserQuestion,
     Workspace,
@@ -126,7 +128,7 @@ async def seed(
         content_hash=new_uuid7().hex,
         visibility=scope.value,
         status=MemoryStatus.ACTIVE.value,
-        created_by_type="agent",
+        created_by_type="user",
     )
     session.add(record)
     await session.flush()
@@ -148,12 +150,93 @@ async def propose(
     **body: Any,
 ) -> GatewayOutcome:
     payload = {"content": "We deploy on Tuesdays.", **body}
+    # These tests exercise scope/duplicates/cards for a fact the human stated.
+    # Unsupported model-only claims have a separate regression below.
+    source_task = task or org.task
+    session.add(
+        Message(
+            workspace_id=org.workspace.id,
+            task_id=source_task.id,
+            conversation_id=source_task.conversation_id,
+            sender_type="user",
+            recipient_type="task",
+            recipient_id=source_task.id,
+            message_type="text",
+            visibility="visible",
+            content_json={"text": payload["content"]},
+        )
+    )
+    await session.flush()
     return await org.gateway(session, agent, task, run_id).request(
         "memory.propose", json.dumps(payload)
     )
 
 
 class TestSearch:
+    async def test_standing_capture_saves_without_question_and_reports_exact_team(
+        self, session, org
+    ):
+        from jhin_db.models import WorkspaceMembership
+        from jhin_db.models.memory_capture import MemoryCapturePolicy
+
+        await grant(session, org, org.me, "memory.propose")
+        await grant(session, org, org.me, "memory.read")
+        now = datetime.now(UTC)
+        owner = User(
+            email=f"{new_uuid7()}@example.test", display_name="Owner", password_hash="unused"
+        )
+        session.add(owner)
+        await session.flush()
+        source = Message(
+            workspace_id=org.workspace.id,
+            task_id=org.task.id,
+            sender_type="user",
+            sender_id=owner.id,
+            recipient_type="agent",
+            recipient_id=org.me.id,
+            message_type="text",
+            visibility="visible",
+            created_at=now,
+            content_json={"text": "Our blog uses friendly, practical language."},
+        )
+        session.add_all(
+            [
+                source,
+                WorkspaceMembership(workspace_id=org.workspace.id, user_id=owner.id, role="owner"),
+                MemoryCapturePolicy(
+                    workspace_id=org.workspace.id,
+                    scope="team",
+                    scope_id=org.team.id,
+                    granted_by_user_id=owner.id,
+                    source_user_id=owner.id,
+                    actor_ids_json=[str(org.me.id)],
+                    allowed_classes_json=["editorial_style"],
+                    effective_from=now - timedelta(seconds=5),
+                ),
+            ]
+        )
+        await session.flush()
+        available = await search(session, org, org.me, "blog")
+        assert available.sanitized_output["capture_policies"][0]["scope_id"] == str(org.team.id)
+        result = await org.gateway(session, org.me).request(
+            "memory.propose",
+            json.dumps(
+                {
+                    "content": source.content_json["text"],
+                    "requested_scope": "team",
+                    "scope_id": str(org.team.id),
+                    "source_message_id": str(source.id),
+                    "capture_class": "editorial_style",
+                }
+            ),
+        )
+        assert result.status == "executed"
+        assert result.sanitized_output["status"] == "active"
+        record = await session.get(MemoryRecord, UUID(result.sanitized_output["memory_id"]))
+        assert record.scope_id == org.team.id
+        assert record.source_message_id == source.id
+        assert await session.scalar(select(UserQuestion)) is None
+
     async def test_denied_without_grant(self, session: AsyncSession, org: Org) -> None:
         outcome = await search(session, org, org.me, "deploy")
         assert outcome.status == "denied"
@@ -185,6 +268,336 @@ class TestSearch:
 
 
 class TestPropose:
+    @pytest.mark.parametrize(
+        "unsupported",
+        [
+            "Blog articles go live Mondays at 9:00 AM Pacific Time (America/Los_Angeles) "
+            "and Ashley approves the exact draft before publication.",
+            "Marketing team posts blog articles on Mondays at 9am PST (America/Los_Angeles).",
+        ],
+    )
+    async def test_posting_preference_recovery_keeps_exact_human_words(
+        self, session, org, unsupported
+    ):
+        await grant(session, org, org.me, "memory.propose")
+        stated = "We post blogs on 9am PST on Mondays"
+        message = Message(
+            workspace_id=org.workspace.id,
+            task_id=org.task.id,
+            sender_type="user",
+            recipient_type="task",
+            recipient_id=org.task.id,
+            message_type="text",
+            visibility="visible",
+            content_json={"text": stated},
+        )
+        session.add(message)
+        await session.flush()
+        gateway = org.gateway(session, org.me)
+        result = await gateway.request("memory.propose", json.dumps({"content": unsupported}))
+        output = result.sanitized_output
+        assert output["reasons"] == ["unsupported_claim"]
+        assert await session.scalar(select(MemoryRecord)) is None
+        suggestions = output["suggested_proposals"]
+        assert len(suggestions) == 1
+        assert suggestions[0]["source_message_id"] == str(message.id)
+        assert not suggestions[0]["source_tool_call_id"]
+        assert suggestions[0]["arguments"]["content"] == stated
+        assert suggestions[0]["arguments"]["requested_scope"] == "agent"
+        assert "Ashley" not in json.dumps(suggestions)
+        saved = await gateway.request("memory.propose", json.dumps(suggestions[0]["arguments"]))
+        assert saved.sanitized_output["outcome"] == "activate"
+        record = await session.get(MemoryRecord, UUID(saved.sanitized_output["memory_id"]))
+        assert record.content == stated and record.scope == "agent"
+        assert record.policy_json["evidence"]["kind"] == "human_statement"
+        assert record.policy_json["evidence"]["message_id"] == str(message.id)
+
+    @pytest.mark.parametrize(
+        "excluded",
+        [
+            "assistant",
+            "internal",
+            "other_task",
+            "other_workspace",
+            "secret",
+            "password",
+            "identity",
+            "large",
+        ],
+    )
+    async def test_human_recovery_excludes_foreign_hidden_secret_or_oversized_messages(
+        self, session, org, excluded
+    ):
+        await grant(session, org, org.me, "memory.propose")
+        text = "We post blogs on 9am PST on Mondays"
+        if excluded == "secret":
+            text += "; Ghost API key: " + "a" * 24 + ":" + "b" * 64
+        if excluded == "password":
+            text += "; password: do-not-return-this"
+        if excluded == "identity":
+            text = "Your name is Mindy and you belong to Marketing"
+        if excluded == "large":
+            text += "; exact conditions " + "x" * 2000
+        session.add(
+            Message(
+                workspace_id=new_uuid7() if excluded == "other_workspace" else org.workspace.id,
+                task_id=org.team_task.id if excluded == "other_task" else org.task.id,
+                sender_type="agent" if excluded == "assistant" else "user",
+                recipient_type="task",
+                recipient_id=org.task.id,
+                message_type="text",
+                visibility="internal" if excluded == "internal" else "visible",
+                content_json={"text": text},
+            )
+        )
+        await session.flush()
+        result = await org.gateway(session, org.me).request(
+            "memory.propose", json.dumps({"content": "Blog publishing is ready every Monday."})
+        )
+        assert result.sanitized_output["suggested_proposals"] == []
+        assert text not in json.dumps(result.sanitized_output)
+
+    async def test_human_recovery_respects_snapshot_and_output_bounds(self, session, org):
+        from jhin_memory.evidence import human_statement_excerpts
+        from jhin_memory.types import SourceFacts, SourceRef
+
+        cutoff = datetime(2031, 1, 1, tzinfo=UTC)
+        messages = [
+            Message(
+                workspace_id=org.workspace.id,
+                task_id=org.task.id,
+                sender_type="user",
+                recipient_type="task",
+                recipient_id=org.task.id,
+                message_type="text",
+                visibility="visible",
+                content_json={"text": f"Our weekly report uses format {index}."},
+                created_at=cutoff - timedelta(minutes=index),
+            )
+            for index in range(6)
+        ]
+        session.add_all(messages)
+        session.add(
+            Message(
+                workspace_id=org.workspace.id,
+                task_id=org.task.id,
+                sender_type="user",
+                recipient_type="task",
+                recipient_id=org.task.id,
+                message_type="text",
+                visibility="visible",
+                content_json={"text": "Later input must not leak into an earlier snapshot."},
+                created_at=cutoff + timedelta(minutes=1),
+            )
+        )
+        await session.flush()
+        source = SourceFacts(
+            workspace_id=org.workspace.id,
+            agent_id=org.me.id,
+            ref=SourceRef(task_id=org.task.id, message_id=messages[0].id),
+        )
+        excerpts = await human_statement_excerpts(session, source, limit=100)
+        assert [item.message_id for item in excerpts] == [str(row.id) for row in messages[:4]]
+        assert await human_statement_excerpts(session, source, limit=0) == []
+        assert (
+            await human_statement_excerpts(session, source.model_copy(update={"internal": True}))
+            == []
+        )
+        assert (
+            await human_statement_excerpts(
+                session, source.model_copy(update={"workspace_id": new_uuid7()})
+            )
+            == []
+        )
+
+    async def test_verified_recovery_facts_respect_snapshot_cutoff_and_bounds(self, session, org):
+        from jhin_memory.evidence import verified_tool_facts
+        from jhin_memory.types import SourceFacts, SourceRef
+
+        cutoff = datetime(2031, 1, 1, tzinfo=UTC)
+        message = Message(
+            workspace_id=org.workspace.id,
+            task_id=org.task.id,
+            sender_type="user",
+            recipient_type="task",
+            recipient_id=org.task.id,
+            content_json={"text": "Save the verified setup details."},
+            created_at=cutoff,
+        )
+        run = AgentRun(workspace_id=org.workspace.id, agent_id=org.me.id, task_id=org.task.id)
+        session.add_all([message, run])
+        await session.flush()
+        facts = [
+            f"Verified Ghost installation URL: https://site-{index}.example" for index in range(10)
+        ]
+        for future in (False, True):
+            session.add(
+                ToolCall(
+                    workspace_id=org.workspace.id,
+                    run_id=run.id,
+                    agent_id=org.me.id,
+                    tool_name="ghost.connection.bind",
+                    status="completed",
+                    created_at=cutoff - timedelta(minutes=2),
+                    completed_at=cutoff + timedelta(minutes=1)
+                    if future
+                    else cutoff - timedelta(minutes=1),
+                    sanitized_output_json={
+                        "verified_memory_facts": ["Future Ghost URL: https://future.example"]
+                        if future
+                        else ["Oversized " + "x" * 2000, "secure_input:" + str(new_uuid7()), *facts]
+                    },
+                )
+            )
+        await session.flush()
+        source = SourceFacts(
+            workspace_id=org.workspace.id,
+            agent_id=org.me.id,
+            ref=SourceRef(task_id=org.task.id, message_id=message.id),
+        )
+        result = await verified_tool_facts(session, source)
+        assert [fact.content for fact in result] == facts[:8]
+        assert (
+            await verified_tool_facts(session, source.model_copy(update={"internal": True})) == []
+        )
+        assert (
+            await verified_tool_facts(
+                session, source.model_copy(update={"workspace_id": new_uuid7()})
+            )
+            == []
+        )
+
+    async def test_unsupported_compound_can_recover_with_exact_verified_fact(self, session, org):
+        await grant(session, org, org.me, "memory.propose")
+        run = AgentRun(workspace_id=org.workspace.id, agent_id=org.me.id, task_id=org.task.id)
+        session.add(run)
+        await session.flush()
+        facts = [
+            "Ghost Admin URL: https://confirmed.example/blog",
+            f"Ghost connection: {new_uuid7()}",
+        ]
+        call = ToolCall(
+            workspace_id=org.workspace.id,
+            run_id=run.id,
+            agent_id=org.me.id,
+            tool_name="ghost.connection.bind",
+            status="completed",
+            sanitized_output_json={"verified_memory_facts": facts, "publisher_agent_id": None},
+        )
+        session.add(call)
+        await session.flush()
+        gateway = org.gateway(session, org.me, run_id=run.id)
+        result = await gateway.request(
+            "memory.propose",
+            json.dumps({"content": "Ghost CMS is connected and the director can publish drafts."}),
+        )
+        output = result.sanitized_output
+        assert output["outcome"] == "reject" and output["reasons"] == ["unsupported_claim"]
+        assert await session.scalar(select(MemoryRecord)) is None
+        suggestions = output["suggested_proposals"]
+        assert [item["arguments"]["content"] for item in suggestions] == facts
+        assert all(item["source_tool_call_id"] == str(call.id) for item in suggestions)
+        assert "one" in output["detail"] and "verified" in output["detail"]
+        saved = await gateway.request("memory.propose", json.dumps(suggestions[0]["arguments"]))
+        assert saved.sanitized_output["outcome"] == "activate"
+        record = await session.get(MemoryRecord, UUID(saved.sanitized_output["memory_id"]))
+        assert record.content == facts[0] and record.scope == "agent"
+        assert record.policy_json["evidence"]["kind"] == "verified_tool_fact"
+        assert record.policy_json["evidence"]["tool_call_id"] == str(call.id)
+        assert "publish" not in json.dumps(suggestions)
+
+    @pytest.mark.parametrize("excluded", ["failed", "executing", "cli", "other_task", "secret"])
+    async def test_recovery_never_suggests_unverified_foreign_or_secret_facts(
+        self, session, org, excluded
+    ):
+        await grant(session, org, org.me, "memory.propose")
+        run = AgentRun(
+            workspace_id=org.workspace.id,
+            agent_id=org.me.id,
+            task_id=org.team_task.id if excluded == "other_task" else org.task.id,
+        )
+        session.add(run)
+        await session.flush()
+        fact = (
+            "Ghost Admin key: " + "a" * 24 + ":" + "b" * 64
+            if excluded == "secret"
+            else "Ghost Admin URL: https://unsupported.example"
+        )
+        session.add(
+            ToolCall(
+                workspace_id=org.workspace.id,
+                run_id=run.id,
+                agent_id=org.me.id,
+                tool_name="cli.command.execute" if excluded == "cli" else "ghost.connection.bind",
+                status=excluded if excluded in {"failed", "executing"} else "completed",
+                sanitized_output_json={"verified_memory_facts": [fact]},
+            )
+        )
+        await session.flush()
+        result = await org.gateway(session, org.me).request(
+            "memory.propose", json.dumps({"content": "Ghost CMS is configured for publication."})
+        )
+        assert result.sanitized_output["suggested_proposals"] == []
+        assert fact not in json.dumps(result.sanitized_output)
+
+    @pytest.mark.parametrize(
+        "tool_status,tool_name,expected",
+        [
+            ("completed", "ghost.connection.bind", "activate"),
+            ("failed", "ghost.connection.bind", "reject"),
+            ("completed", "cli.command.execute", "reject"),
+        ],
+    )
+    async def test_native_fact_requires_completed_supported_tool(
+        self, session, org, tool_status, tool_name, expected
+    ):
+        await grant(session, org, org.me, "memory.propose")
+        run = AgentRun(workspace_id=org.workspace.id, agent_id=org.me.id, task_id=org.task.id)
+        session.add(run)
+        await session.flush()
+        text = "Ghost Admin origin is https://confirmed.example"
+        call = ToolCall(
+            workspace_id=org.workspace.id,
+            run_id=run.id,
+            agent_id=org.me.id,
+            tool_name=tool_name,
+            status=tool_status,
+            sanitized_output_json={"verified_memory_facts": [text]},
+        )
+        session.add(call)
+        await session.flush()
+        outcome = await org.gateway(session, org.me, run_id=run.id).request(
+            "memory.propose", json.dumps({"content": text, "kind": "fact"})
+        )
+        assert outcome.sanitized_output["outcome"] == expected, outcome
+        if expected == "activate":
+            row = await session.get(MemoryRecord, UUID(outcome.sanitized_output["memory_id"]))
+            assert row.policy_json["evidence"]["tool_call_id"] == str(call.id)
+
+    async def test_assistant_claim_cannot_establish_successful_setup(self, session, org):
+        await grant(session, org, org.me, "memory.propose")
+        text = "Ghost is connected and automatically publishing daily."
+        session.add(
+            Message(
+                workspace_id=org.workspace.id,
+                task_id=org.task.id,
+                sender_type="agent",
+                sender_id=org.me.id,
+                recipient_type="task",
+                recipient_id=org.task.id,
+                message_type="text",
+                visibility="visible",
+                content_json={"text": text},
+            )
+        )
+        await session.flush()
+        outcome = await org.gateway(session, org.me).request(
+            "memory.propose", json.dumps({"content": text})
+        )
+        assert outcome.sanitized_output["outcome"] == "reject"
+        assert outcome.sanitized_output["reasons"] == ["unsupported_claim"]
+        assert await session.scalar(select(MemoryRecord)) is None
+
     async def test_denied_without_grant(self, session: AsyncSession, org: Org) -> None:
         outcome = await propose(session, org, org.me)
         assert outcome.status == "denied"
@@ -481,6 +894,48 @@ async def cards(session: AsyncSession) -> list[Message]:
 
 
 class TestMemorySavedCard:
+    @pytest.mark.parametrize("supersedes", [False, True])
+    async def test_new_card_does_not_copy_raw_legacy_credential(
+        self, session: AsyncSession, org: Org, supersedes: bool
+    ) -> None:
+        from jhin_memory import SourceFacts
+        from jhin_tools.memory import _write_memory_card
+
+        key = "a" * 24 + ":" + "b" * 64
+        original = f"Ghost setup used {key}; drafts need review."
+        previous = await seed(session, org, original, scope=MemoryScope.AGENT, scope_id=org.me.id)
+        current = await seed(
+            session,
+            org,
+            "Ghost drafts need director review.",
+            scope=MemoryScope.AGENT,
+            scope_id=org.me.id,
+        )
+        current.subject = previous.subject = "ghost.review"
+        if supersedes:
+            previous.status = "superseded"
+            current.supersedes_id = previous.id
+        await session.flush()
+        ctx = ToolExecutionContext(
+            session=session,
+            workspace_id=org.workspace.id,
+            task_id=org.task.id,
+            run_id=new_uuid7(),
+            agent_id=org.me.id,
+            agent_name=org.me.name,
+        )
+        await _write_memory_card(
+            ctx, current, SourceFacts(workspace_id=org.workspace.id, agent_id=org.me.id)
+        )
+        card = (await cards(session))[0]
+        payload = json.dumps(card.content_json)
+        assert key not in payload and "b" * 64 not in payload
+        assert "REDACTED legacy credential" in payload
+        assert card.content_json["memory_id"] == str(current.id)
+        assert card.content_json["content"] == current.content
+        await session.refresh(previous)
+        assert previous.content == original
+
     """The chat has to show that a memory was written, because the agent
     saying so is a claim and the two bugs that produced this feature were
     both a false one."""

@@ -100,6 +100,7 @@ class CatalogEntryOut(BaseModel):
     # How a person connects this entry, when the entry says so. Only a curated
     # one ever does: a synced row is always "auto" (see ``_entry_out``).
     sign_in: str = "auto"
+    composio_toolkit: str | None = None
     mcp_url: str | None = None
     url_unverified: bool = True
     transport: TransportHint = "unknown"

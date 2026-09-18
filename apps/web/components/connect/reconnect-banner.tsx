@@ -18,9 +18,49 @@ import { AlertTriangle, RefreshCw } from "lucide-react";
 import { useState } from "react";
 import { Button } from "@/components/ui";
 import { ApiError } from "@/lib/api";
-import { useReauthorizeConnection } from "@/lib/hooks";
+import { useOAuthStart, useReauthorizeConnection } from "@/lib/hooks";
+import { configFieldsForAuth } from "@/lib/connectors";
 import { navigateToProvider, needsReauth, saveReturnRoute } from "@/lib/oauth";
-import type { ConnectionInfo } from "@/lib/types";
+import type { ConnectionInfo, ConnectorInfo } from "@/lib/types";
+
+/** Explicitly switch a local connection to managed sign-in in place. The
+ * old credential remains usable until the API verifies the callback. */
+export function BrowserSignInButton({ workspaceId, connection, connector }: {
+  workspaceId: string;
+  connection: ConnectionInfo;
+  connector: ConnectorInfo | undefined;
+}) {
+  const start = useOAuthStart(workspaceId);
+  const [leaving, setLeaving] = useState(false);
+  if (!connector?.managed_auth?.configured || connection.auth_provider === "composio" ||
+      connection.auth_type === "postgres" || connection.connector_type === "composio") return null;
+  return (
+    <span className="inline-flex flex-col items-start gap-1">
+      <Button size="sm" variant="primary" disabled={start.isPending || leaving} onClick={() => {
+        const fields = configFieldsForAuth(connector, connector.managed_auth!.auth_type);
+        const config = Object.fromEntries(fields.filter((field) =>
+          Object.hasOwn(connection.config_json, field.name),
+        ).map((field) => [field.name, connection.config_json[field.name]]));
+        start.mutate({
+          connector_type: connection.connector_type,
+          connection_id: connection.id,
+          name: connection.name,
+          provider_key: "composio",
+          config,
+        }, { onSuccess: (started) => {
+          setLeaving(true);
+          saveReturnRoute();
+          navigateToProvider(started.authorization_url);
+        } });
+      }}>
+        {start.isPending || leaving ? "Starting…" : "Use Composio sign-in"}
+      </Button>
+      {start.error ? <span role="alert" className="text-xs text-danger">
+        {start.error instanceof ApiError ? start.error.detail : "Starting browser sign-in failed. Try again."}
+      </span> : null}
+    </span>
+  );
+}
 
 /** Start a re-authorization and hand the browser to the provider. The URL is
  * built by our API from settings; nothing in the request influences it. */

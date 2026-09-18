@@ -88,6 +88,13 @@ class RepositoryListEntry(BaseModel):
 
 
 class RepositoryListOutput(BaseModel):
+    returned_count: int = Field(
+        ge=0,
+        description=(
+            "Number of visible repositories returned in this response, after grant and "
+            "query filtering and size limits. Not the provider's total inventory."
+        ),
+    )
     repositories: list[RepositoryListEntry]
     #: True when matches were left out — the limit was reached, the walk
     #: stopped at its page cap before the provider ran out, or the answer
@@ -96,7 +103,7 @@ class RepositoryListOutput(BaseModel):
     #: True when this agent's own grants narrowed the listing. What came
     #: back is what the agent may see, not everything the connection can
     #: reach — said plainly so a reply can be honest about which it is.
-    #: No count: how much was withheld is outside what the agent may know.
+    #: No withheld count: how much was withheld is outside what the agent may know.
     limited_by_grant: bool = False
 
 

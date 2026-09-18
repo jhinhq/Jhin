@@ -19,6 +19,7 @@ import {
   Flame,
   FlaskConical,
   Folder,
+  Ghost,
   GitBranch,
   Globe,
   HardDrive,
@@ -45,6 +46,7 @@ import { useState } from "react";
 
 /** Icon names the curated catalog uses, mapped to their Lucide glyphs. */
 const ICONS: Record<string, LucideIcon> = {
+  ghost: Ghost,
   github: GitBranch,
   linear: Kanban,
   vercel: Cloud,

@@ -53,6 +53,7 @@ from jhin_observability import noop_metrics, noop_tracer
 from jhin_secrets import SecretCrypto
 
 REQ = {"request_id": new_uuid7(), "ip_hash": "test"}
+pytestmark = pytest.mark.usefixtures("skip_remote_initial_connection_checks")
 MAX_WEBHOOK_BODY_BYTES = 1_048_576
 
 ISSUE_PAYLOAD = {

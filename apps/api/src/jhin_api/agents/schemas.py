@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from jhin_api.media.urls import avatar_url_for
 from jhin_api.personas.schemas import AgentPersonaSummary
 from jhin_domain import AVATAR_COLORS, AVATAR_SHAPES, AgentStatus, AutonomyLevel, AvatarKind
+from jhin_policy import agent_name_problem, normalize_agent_name
 
 Discoverability = Literal["discoverable", "hidden"]
 Availability = Literal["available", "unavailable"]
@@ -53,6 +54,22 @@ class AgentRelationshipOut(BaseModel):
     updated_at: datetime
 
 
+def _validated_name(value: str) -> str:
+    """The one name rule, applied on the human path too.
+
+    An agent's name is asserted unhedged in layer 1 of its own system prompt
+    and read back by every colleague through the roster, and until now the
+    HTTP schema checked only that it was 1 to 200 characters — so the
+    admin-gated PATCH could write something the agent's own tool would
+    refuse. ``jhin_policy.agent_name_problem`` is that one rule; see its
+    module for why it is an allow-list.
+    """
+    problem = agent_name_problem(value)
+    if problem is not None:
+        raise ValueError(problem)
+    return normalize_agent_name(value)
+
+
 class AgentCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     role_title: str = Field(default="", max_length=200)
@@ -84,6 +101,11 @@ class AgentCreate(BaseModel):
     # agent starts with ``avatar_kind == "shape"`` instead of initials.
     avatar_shape: str | None = None
     avatar_color: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def name_is_a_name(cls, value: str) -> str:
+        return _validated_name(value)
 
     @field_validator("expertise_json")
     @classmethod
@@ -143,6 +165,14 @@ class AgentUpdate(BaseModel):
     max_concurrent_runs: int | None = Field(default=None, ge=1, le=50)
     monthly_budget_cents: int | None = Field(default=None, ge=0)
     metadata_json: dict[str, Any] | None = None
+
+    @field_validator("name")
+    @classmethod
+    def name_is_a_name(cls, value: str | None) -> str | None:
+        # None is "omitted" here, not "clear it": PATCH semantics reach this
+        # validator only for a value the caller actually sent, and a nameless
+        # agent is not a thing this API can store.
+        return None if value is None else _validated_name(value)
 
     @field_validator("expertise_json")
     @classmethod

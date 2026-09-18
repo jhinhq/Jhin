@@ -26,8 +26,14 @@ from jhin_observability import (
     service_version,
 )
 from jhin_sandbox_runner.docker_socket import DockerSocketConfigurationError
-from jhin_sandbox_runner.jobs import JobManager, JobValidationError
+from jhin_sandbox_runner.jobs import (
+    InvocationOutcomeUnknownError,
+    JobManager,
+    JobValidationError,
+)
 from jhin_sandbox_runner.schemas import (
+    WORKSPACE_KEY_RE,
+    RunnerMemoryResponse,
     SandboxJobRequest,
     SandboxJobStatusResponse,
     SandboxLogsResponse,
@@ -53,6 +59,15 @@ def install_existing_runner_routes(
                 status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid runner token"
             )
 
+    from jhin_sandbox_runner.sessions import install_session_routes
+    from jhin_sandbox_runner.workspace_operations import install_workspace_routes
+
+    app.state.sessions = install_session_routes(app, manager, active_settings, require_token)
+    from jhin_sandbox_runner.preview_transport import install_runner_preview_routes
+
+    install_runner_preview_routes(app, app.state.sessions, require_token)
+    install_workspace_routes(app, manager, active_settings, require_token)
+
     @app.get("/health")
     async def health() -> JSONResponse:
         docker_ok = await manager.ping()
@@ -73,11 +88,38 @@ def install_existing_runner_routes(
     async def submit_job(request: SandboxJobRequest) -> SandboxJobStatusResponse:
         try:
             record = await manager.submit(request)
+        except InvocationOutcomeUnknownError as exc:
+            # 409 rather than 422, and the difference is not cosmetic. 422 is
+            # "your request is malformed", which this one is not: it is
+            # well-formed, and the state of the world is what makes it
+            # unanswerable. The caller distinguishes the two, because one is a
+            # bug to fix and the other is a call that ran nothing and must be
+            # reported to a person as such.
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         except JobValidationError as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
             ) from exc
+        # The record may be the one an *earlier* dispatch of this invocation
+        # got, in which case the answer carries a job_id the caller did not
+        # send. That is the contract: poll what you are given, not what you
+        # asked for.
         return record.to_response()
+
+    @app.get("/v1/runner/memory", dependencies=[Depends(require_token)])
+    async def runner_memory() -> RunnerMemoryResponse:
+        """What this process can still be asked about — see
+        :class:`RunnerMemoryResponse`.
+
+        Deliberately not part of ``/health``: that endpoint carries no token
+        and answers a liveness question, and this is a statement about the
+        runner's memory that another service reasons with before it writes a
+        job's outcome down.
+        """
+        return RunnerMemoryResponse(
+            serving_since=manager.serving_since.isoformat(),
+            job_record_retention_seconds=manager.record_retention_seconds,
+        )
 
     @app.get("/v1/jobs/{job_id}", dependencies=[Depends(require_token)])
     async def job_status(job_id: str) -> SandboxJobStatusResponse:
@@ -115,7 +157,29 @@ def install_existing_runner_routes(
         dependencies=[Depends(require_token)],
     )
     async def delete_workspace(workspace_key: str) -> None:
-        await manager.delete_workspace(workspace_key)
+        # The same shape the job schema requires of the field. This used to be
+        # Jhin's own string on every call; a durable workspace gives an
+        # operator's reset a route to it, and a name that reaches
+        # ``volumes.get()`` unvalidated is not a shape to leave lying around.
+        if not WORKSPACE_KEY_RE.match(workspace_key):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="workspace_key must be a short [a-zA-Z0-9_.-] token",
+            )
+        # The boolean is the whole point of the call and used to be discarded:
+        # Docker refuses to remove a volume a container still has mounted, the
+        # manager turns that refusal into False, and answering 204 anyway told
+        # the control plane that a disk which is still there and still full had
+        # been destroyed. Every promise downstream rested on that answer -- an
+        # operator's reset was cleared, the audit trail's ``deleted`` field was
+        # untrue, and the volume came back into service recorded as empty and
+        # therefore invisible to the cap and to every future sweep. A refusal
+        # is a conflict, and it is now spelled as one.
+        if not await manager.delete_workspace(workspace_key):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="workspace volume could not be removed",
+            )
 
 
 async def _close_manager_and_runtime(
@@ -183,7 +247,6 @@ def create_app(
 
         @asynccontextmanager
         async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-            del app
             active_error: BaseException | None = None
             active_traceback: TracebackType | None = None
             try:
@@ -209,6 +272,7 @@ def create_app(
             except BaseException as error:
                 active_error = error
                 active_traceback = error.__traceback__
+            await app.state.sessions.close()
             cleanup_task = asyncio.create_task(
                 _close_manager_and_runtime(
                     manager,

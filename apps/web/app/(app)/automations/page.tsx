@@ -11,6 +11,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { PageBody, PageHeader } from "@/components/app-shell";
 import { AutomationBuilder } from "@/components/automations/builder";
+import { SchedulesPanel } from "@/components/automations/schedules-panel";
 import { Avatar } from "@/components/avatar";
 import { triggerWhen } from "@/components/company/agent-helpers";
 import { Chip, LoadError, StatusPill } from "@/components/company/bits";
@@ -81,10 +82,12 @@ export default function AutomationsPage() {
     <>
       <PageHeader
         title="Automations"
-        description="Automations watch your apps and hand work to an agent"
+        description="Schedule recurring work or respond to events in your apps"
         actions={isAdmin ? newAutomation : undefined}
       />
       <PageBody className="space-y-5">
+        <SchedulesPanel workspaceId={workspaceId} agents={agents.data ?? []} canWrite={isAdmin} />
+        <h2 className="font-display text-lg font-semibold">App events</h2>
         {triggers.isPending ? (
           <Spinner label="Loading automations…" />
         ) : triggers.isError || !triggers.data ? (

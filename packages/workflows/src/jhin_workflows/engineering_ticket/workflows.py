@@ -69,11 +69,15 @@ _ACTIVITY_RETRY = RetryPolicy(
     maximum_interval=timedelta(seconds=15),
     maximum_attempts=5,
 )
+# Under ``PHASE10_ENGINEERING_SYNC_PATCH`` this dispatches onto the tool
+# worker's queue, where a redeploy refuses instantly and asks to be retried in
+# ten seconds. Same budget as every other tool-queue activity, for the reason
+# spelled out at ``_TOOL_STEP_RETRY`` in ``jhin_workflows.agent_task``.
 _SYNC_RETRY = RetryPolicy(
     initial_interval=timedelta(seconds=2),
     backoff_coefficient=2.0,
     maximum_interval=timedelta(seconds=30),
-    maximum_attempts=3,
+    maximum_attempts=5,
 )
 
 

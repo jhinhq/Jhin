@@ -5,7 +5,14 @@ description = "Capability registry, risk levels, and the pure policy evaluator (
 requires-python = ">=3.13"
 dependencies = [
     "pydantic>=2.10",
+    # The content rules a persona card clears. An agent name is composed
+    # into the system prompt *above* the persona block, so it clears the
+    # same bar; jhin-personas is a pure, pydantic-only leaf like this one.
+    "jhin-personas",
 ]
+
+[tool.uv.sources]
+jhin-personas = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

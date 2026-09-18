@@ -6,13 +6,21 @@
  * already there. */
 
 import { ArrowDown, ChevronDown, ChevronRight } from "lucide-react";
-import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApprovalCard } from "@/components/approval-card";
 import { Avatar } from "@/components/avatar";
+import { FailureCard } from "@/components/chat/failure-card";
 import { MemoryCard } from "@/components/chat/memory-card";
 import { QuestionCard, type AnswerQuestion } from "@/components/chat/question-card";
+import { RenameCard } from "@/components/chat/rename-card";
 import { Timestamp } from "@/components/chat/timestamp";
+import { SecureInputReceipt } from "@/components/chat/secure-input";
+import { ActionCard } from "@/components/chat/action-card";
+import { ArtifactCard } from "@/components/chat/artifact-card";
+import { SessionActivityCard } from "@/components/chat/session-activity-card";
+import type { ManagedFile } from "@/lib/workspace-files";
+import type { ActivityDetail } from "@/lib/agentic-chat";
+import { TranscriptWorkingTime } from "@/components/chat/working-time";
 import { Markdown } from "@/components/markdown";
 import { MessageTypeBadge, StructuredMessageBody } from "@/components/task-bits";
 import { Spinner } from "@/components/ui";
@@ -21,7 +29,9 @@ import {
   exchangeSuffix,
   friendlyMessageLabel,
   instructionDeliveryState,
+  isAgentRenamedMessage,
   isMemorySavedMessage,
+  isRunFailureMessage,
   isUserQuestionMessage,
   isWorkCard,
   messageText,
@@ -35,8 +45,13 @@ import {
 } from "@/lib/chat";
 import { isWorkRequestMessage } from "@/lib/coordination";
 import { avatarProps } from "@/lib/media";
-import { isInsufficientFunds, isModelIncompatibleRequest } from "@/lib/models";
-import type { ActivityCard, AgentAvatar, Approval, ConversationMessage } from "@/lib/types";
+import type {
+  ActivityCard,
+  AgentAvatar,
+  Approval,
+  ConversationMessage,
+  ConversationResume,
+} from "@/lib/types";
 
 function UserBubble({
   message,
@@ -57,7 +72,7 @@ function UserBubble({
   return (
     <div data-testid="user-message" className="flex justify-end">
       <div className="max-w-[min(85%,40rem)]">
-        {/* Verbatim, deliberately. Markdown is rendered where an agent is
+        {/* The authoritative, sanitized user text stays literal. Markdown is rendered where an agent is
          * speaking to the reader in prose, not everywhere a string appears:
          * what a person typed is the message, and formatting it would eat the
          * characters they meant — `**not bold**`, a `snake_case` name, a path
@@ -66,6 +81,7 @@ function UserBubble({
          * clamped, truncated field values, and half a fence is not markdown. */}
         <div className="rounded-2xl rounded-br-md bg-accent-soft px-4 py-2.5 text-[15px] leading-relaxed text-ink">
           <p className="whitespace-pre-wrap break-words">{text}</p>
+          <SecureInputReceipt content={message.content_json} />
         </div>
         {instruction && deliveryState === "queued" ? (
           <p className="mt-1 flex justify-end">
@@ -99,6 +115,12 @@ function UserBubble({
       </div>
     </div>
   );
+}
+
+function MessageActions({ message, onEdit, onBranch }: { message: ConversationMessage; onEdit?: (message: ConversationMessage) => void; onBranch?: (message: ConversationMessage) => void }) {
+  const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
+  return <div className="ml-10 mt-1 flex gap-1 text-[11px] text-faint"><button type="button" className="min-h-8 rounded px-2 hover:bg-hover" onClick={() => { if (!navigator.clipboard) { setCopyFailed(true); return; } void navigator.clipboard.writeText(messageText(message)).then(() => setCopied(true)).catch(() => setCopyFailed(true)); }}>{copied ? "Copied" : copyFailed ? "Select text to copy" : "Copy"}</button>{onEdit ? <button type="button" className="min-h-8 rounded px-2 hover:bg-hover" onClick={() => onEdit(message)}>{message.sender_type === "user" ? "Edit and resend" : "Use in new message"}</button> : null}{onBranch ? <button type="button" className="min-h-8 rounded px-2 hover:bg-hover" onClick={() => onBranch(message)}>Branch from here</button> : null}</div>;
 }
 
 function AgentBubble({
@@ -216,58 +238,14 @@ function ActivityChip({ card }: { card: ActivityCard }) {
 function SystemChip({ message }: { message: ConversationMessage }) {
   const text = messageText(message);
   if (!text) return null;
-  if (isInsufficientFunds(message.content_json)) {
-    // Out-of-credit failures get a readable card with a way to fix it.
-    const friendly = text.replace(/^Run failed:\s*/i, "");
-    return (
-      <div data-testid="insufficient-funds" className="flex justify-center">
-        <div className="max-w-[min(90%,36rem)] rounded-2xl border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-ink">
-          <p className="font-medium text-danger">Out of credit</p>
-          <p className="mt-1 break-words text-dim">{friendly}</p>
-          <p className="mt-2 text-xs">
-            <Link href="/models" className="font-medium text-accent-strong underline-offset-2 hover:underline">
-              Open Models
-            </Link>
-            <span className="text-faint"> to check the balance, then retry.</span>
-            <Timestamp iso={message.created_at} className="ml-2" />
-          </p>
-        </div>
-      </div>
-    );
-  }
-  if (isModelIncompatibleRequest(message.content_json)) {
-    // The message names the setting to change, so it must be readable in
-    // full rather than truncated into the one-line chip.
-    const friendly = text.replace(/^Run failed:\s*/i, "");
-    return (
-      <div data-testid="model-incompatible-request" className="flex justify-center">
-        <div className="max-w-[min(90%,36rem)] rounded-2xl border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-ink">
-          <p className="font-medium text-danger">Model setting needs a change</p>
-          <p className="mt-1 break-words text-dim">{friendly}</p>
-          <p className="mt-2 text-xs">
-            <Link href="/models" className="font-medium text-accent-strong underline-offset-2 hover:underline">
-              Open Models
-            </Link>
-            <span className="text-faint"> to edit the model profile, then retry.</span>
-            <Timestamp iso={message.created_at} className="ml-2" />
-          </p>
-        </div>
-      </div>
-    );
-  }
-  // Failures and long notices get the wrapping card treatment the credit and
-  // model cards use: the one-line chip would truncate exactly the part that
-  // says what went wrong or what to do next.
-  const failed =
-    typeof message.content_json.error_code === "string" || /^run failed/i.test(text);
-  if (failed || text.length > 120) {
+  // A long notice gets the wrapping card treatment rather than the one-line
+  // chip, which would truncate exactly the part worth reading. Failures are
+  // not here at all any more: they have their own card, with the way out on
+  // it (see `FailureCard`).
+  if (text.length > 120) {
     return (
       <div data-testid="system-card" className="flex justify-center">
-        <div
-          className={`max-w-[min(90%,36rem)] rounded-2xl border px-4 py-3 text-sm ${
-            failed ? "border-danger/30 bg-danger/10 text-ink" : "border-line bg-raised text-dim"
-          }`}
-        >
+        <div className="max-w-[min(90%,36rem)] rounded-2xl border border-line bg-raised px-4 py-3 text-sm text-dim">
           <p className="break-words">{text}</p>
           <p className="mt-1 text-xs">
             <Timestamp iso={message.created_at} />
@@ -364,35 +342,69 @@ function WorkingIndicator({
         data-testid="working-indicator"
         data-specific={status.specific ? "true" : undefined}
         aria-live="off"
-        className="flex items-center gap-2.5 text-sm text-dim"
+        className="flex items-end gap-2.5 text-sm text-dim"
       >
-        <Avatar name={name} size="sm" {...avatarProps(avatar)} />
-        <span className="inline-flex min-w-0 items-center gap-2 rounded-2xl rounded-bl-md border border-line bg-surface px-4 py-2.5">
-          <span aria-hidden className="flex shrink-0 items-center gap-1">
-            {[0, 1, 2].map((index) => (
-              <span
-                key={index}
-                className="h-1.5 w-1.5 rounded-full bg-accent motion-safe:animate-bounce"
-                style={{ animationDelay: `${index * 150}ms` }}
-              />
-            ))}
-          </span>
-          {/* The API's sentence stands on its own next to the avatar, the way
-           * the header pill shows it. Only the generic state keeps the "…is
-           * working" phrasing, so nothing shifts when there is nothing more
-           * specific to say. */}
-          {status.specific ? (
-            <span className="min-w-0 break-words">
-              <span className="sr-only">{name}: </span>
-              {status.label}
+        <Avatar name={name} size="sm" className="mb-5" {...avatarProps(avatar)} />
+        {/* The elapsed line is a sibling of the bubble, not a passenger inside
+         * it, and that placement is the point. Set against the sentence the
+         * way the header pill has to set it — "Making a change in GitHub ·
+         * 1h 12m" — the number reads as that one step's duration; on its own
+         * line under the bubble, in the same position a message's timestamp
+         * takes, it reads as what it is. */}
+        <div className="min-w-0">
+          <span className="inline-flex min-w-0 items-center gap-2 rounded-2xl rounded-bl-md border border-line bg-surface px-4 py-2.5">
+            <span aria-hidden className="flex shrink-0 items-center gap-1">
+              {[0, 1, 2].map((index) => (
+                <span
+                  key={index}
+                  className="h-1.5 w-1.5 rounded-full bg-accent motion-safe:animate-bounce"
+                  style={{ animationDelay: `${index * 150}ms` }}
+                />
+              ))}
             </span>
-          ) : (
-            <span className="min-w-0 break-words">{name} is working…</span>
-          )}
-        </span>
+            {/* The API's sentence stands on its own next to the avatar, the way
+             * the header pill shows it. Only the generic state keeps the "…is
+             * working" phrasing, so nothing shifts when there is nothing more
+             * specific to say. */}
+            {status.specific ? (
+              <span className="min-w-0 break-words">
+                <span className="sr-only">{name}: </span>
+                {status.label}
+              </span>
+            ) : (
+              <span className="min-w-0 break-words">{name} is working…</span>
+            )}
+          </span>
+          {/* Absent `since` is a status carrying no clock at all: an API that
+           * predates the working clock never sent the field, so nothing was
+           * measured and there is nothing to say — no line, no note, no
+           * tooltip, which is exactly the "less detail, never a wrong answer"
+           * an out-of-order rollout is allowed to cost (`docs/deployment.md`
+           * step 6).
+           *
+           * A `since` of `null` is the opposite fact: the API measured and no
+           * instant came out of it, because the turn is parked on an
+           * approval, question or review that was opened and never closed.
+           * That one is worth a line — with the seconds it banked before it
+           * stalled, when it banked any — since the alternative is the
+           * feature vanishing without a word.
+           *
+           * `statusLabelFor` is what keeps the two apart; it reads the field
+           * straight rather than through a `??`, which had collapsed the
+           * first case onto the second and told every reader on an older API
+           * that their agent was stuck behind an approval. */}
+          {status.since !== undefined ? (
+            <TranscriptWorkingTime since={status.since} worked={status.worked ?? 0} />
+          ) : null}
+        </div>
       </div>
     );
   }
+  // Every wait says who it is on. Delegation is the one where that is not the
+  // reader and not this agent either: a colleague has the work, nothing is
+  // asked of anybody here, and the honest line names them when the API sent
+  // their name and stays vague when it did not. No clock on any of these —
+  // see `statusLabelFor`.
   const text =
     status.kind === "queued"
       ? `${name} is waiting for a free slot and will start shortly.`
@@ -400,7 +412,13 @@ function WorkingIndicator({
         ? "Waiting for your review — see the request above."
         : status.kind === "question"
           ? "Waiting for your answer — see the question above."
-          : `${name} is paused. Resume from Details when you're ready.`;
+          : status.kind === "waiting_review"
+            ? "Waiting for a review of this work."
+            : status.kind === "waiting_delegation"
+              ? status.specific
+                ? `${status.label} — ${name} picks this up again when they reply.`
+                : `${name} is waiting for a colleague and picks this up again when they reply.`
+              : `${name} is paused. Resume from Details when you're ready.`;
   return (
     <div data-testid="working-indicator" className="flex justify-center">
       <span className="rounded-full border border-line bg-raised px-3 py-1 text-xs text-dim">{text}</span>
@@ -417,12 +435,12 @@ function collectDeliveryEvidence(items: readonly TranscriptItem[]): DeliveryEvid
   const consider = (entry: TimelineItem) => {
     if (entry.kind === "activity") {
       evidence.push({ created_at: entry.card.created_at, task_id: entry.card.task_id });
-    } else if (entry.message.sender_type === "agent") {
+    } else if (entry.kind === "message" && entry.message.sender_type === "agent") {
       evidence.push({ created_at: entry.message.created_at, task_id: entry.message.task_id });
     }
   };
   for (const item of items) {
-    if (item.kind === "day") continue;
+    if (item.kind === "day" || item.kind === "file" || item.kind === "runtime" || item.kind === "generation") continue;
     if (item.kind === "exchange") {
       for (const sub of item.items) consider(sub);
       continue;
@@ -449,6 +467,22 @@ export function Transcript({
   agentAvatars,
   agentAvatar,
   expandExchanges = false,
+  resume = null,
+  canRetry = false,
+  retrying = false,
+  onRetry,
+  onReuse,
+  terminalNotice,
+  activityDetail = "standard",
+  logsBase,
+  onEditMessage,
+  onBranchMessage,
+  beforeItems,
+  afterItems,
+  liveRevision = "",
+  runtimeBase,
+  onOpenFile,
+  onUseFile,
 }: {
   items: TranscriptItem[];
   agentName: string;
@@ -470,11 +504,33 @@ export function Transcript({
   agentAvatar?: AgentAvatar | null;
   /** True (the "detailed" toggle) expands collapsed exchanges by default. */
   expandExchanges?: boolean;
+  /** The offer for the newest failed turn, when this chat has one. */
+  resume?: ConversationResume | null;
+  /** Member or above: a viewer reads a failure but cannot act on it. */
+  canRetry?: boolean;
+  retrying?: boolean;
+  onRetry?: () => void;
+  /** Put a failed turn's words back in the composer without sending them. */
+  onReuse?: (text: string) => void;
+  terminalNotice?: string;
+  activityDetail?: ActivityDetail;
+  logsBase?: string;
+  onEditMessage?: (message: ConversationMessage) => void;
+  onBranchMessage?: (message: ConversationMessage) => void;
+  beforeItems?: React.ReactNode;
+  afterItems?: React.ReactNode;
+  liveRevision?: string;
+  runtimeBase?: string;
+  onOpenFile?: (file: ManagedFile) => void;
+  onUseFile?: (file: ManagedFile) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const atBottomRef = useRef(true);
   const [hasNew, setHasNew] = useState(false);
-  const contentKey = `${items.length}:${pendingApprovals.length}:${liveStatus?.kind ?? ""}`;
+  const terminalRevision = JSON.stringify(items.filter((item) => item.kind === "tool").map((item) => [
+    item.id, item.call.status, item.call.sandbox_job, item.call.sanitized_output_json,
+  ]));
+  const contentKey = `${items.length}:${pendingApprovals.length}:${liveStatus?.kind ?? ""}:${terminalRevision}:${liveRevision}`;
   const previousKey = useRef<string | null>(null);
 
   const scrollToBottom = useCallback((smooth: boolean) => {
@@ -515,23 +571,39 @@ export function Transcript({
 
   const renderTimelineItem = (item: TimelineItem) => {
     if (item.kind === "activity") return <ActivityChip key={item.id} card={item.card} />;
+    if (item.kind === "tool") return <ActionCard key={item.id} call={item.call} detail={activityDetail} logsUrl={logsBase ? `${logsBase}/${item.call.id}/logs` : undefined} />;
     const message = item.message;
     if (message.sender_type === "user") {
       const deliveryState =
         message.message_type === "instruction"
           ? instructionDeliveryState(message, deliveryEvidence)
           : undefined;
-      return (
+      return (<div key={item.id}>
         <UserBubble
-          key={item.id}
           message={message}
           name={userName}
           agentName={agentName}
           deliveryState={deliveryState}
-        />
-      );
+        /><MessageActions message={message} onEdit={onEditMessage} onBranch={onBranchMessage} />
+      </div>);
     }
     if (message.sender_type === "system") {
+      // Before the generic chip: a failure is the one system row a person may
+      // need to *do* something about, and the chip has nowhere to put that.
+      if (isRunFailureMessage(message)) {
+        return (
+          <FailureCard
+            key={item.id}
+            message={message}
+            agentName={agentName}
+            resume={resume}
+            canAct={canRetry}
+            retrying={retrying}
+            onRetry={onRetry}
+            onReuse={onReuse}
+          />
+        );
+      }
       return <SystemChip key={item.id} message={message} />;
     }
     const name = message.sender_name ?? agentName;
@@ -558,6 +630,11 @@ export function Transcript({
     if (isMemorySavedMessage(message)) {
       return <MemoryCard key={item.id} message={message} name={name} avatar={avatar} />;
     }
+    // Same reason as the memory receipt: a rename is a `status` message, and
+    // the generic card would file "Now called Bisby" under "Shared an update".
+    if (isAgentRenamedMessage(message)) {
+      return <RenameCard key={item.id} message={message} name={name} avatar={avatar} />;
+    }
     if (isWorkCard(message)) {
       return <WorkCard key={item.id} message={message} name={name} avatar={avatar} />;
     }
@@ -565,7 +642,7 @@ export function Transcript({
     // than an empty bubble. The backend no longer writes these, but rows
     // saved before that fix still exist in transcripts.
     if (!messageText(message).trim()) return null;
-    return <AgentBubble key={item.id} message={message} name={name} avatar={avatar} />;
+    return <div key={item.id}><AgentBubble message={message} name={name} avatar={avatar} /><MessageActions message={message} onEdit={onEditMessage} onBranch={onBranchMessage} /></div>;
   };
 
   return (
@@ -580,8 +657,22 @@ export function Transcript({
         className="h-full overflow-y-auto px-4 py-6 sm:px-8"
       >
         <div className="mx-auto flex max-w-3xl flex-col gap-4">
+          {terminalNotice ? <p className="text-center text-xs text-dim">{terminalNotice}</p> : null}
+          {beforeItems}
           {items.map((item) => {
             if (item.kind === "day") return <DaySeparator key={item.id} item={item} />;
+            if (item.kind === "generation") return (
+              <div
+                key={item.id}
+                className="min-w-0 rounded-2xl border border-line bg-surface p-4 text-sm"
+                aria-label={item.item.status === "completed" ? "Agent response" : "Agent response in progress"}
+              >
+                <Markdown source={String(item.item.data.text)} variant="chat" />
+                {item.item.status !== "completed" ? <span className="text-xs text-faint">Responding…</span> : null}
+              </div>
+            );
+            if (item.kind === "runtime") return <SessionActivityCard key={item.id} item={item.item} base={runtimeBase} detail={activityDetail} />;
+            if (item.kind === "file") return onOpenFile && onUseFile ? <ArtifactCard key={item.id} file={item.file} onOpen={onOpenFile} onUse={onUseFile} /> : null;
             if (item.kind === "exchange") {
               return (
                 <ExchangeRow
@@ -595,6 +686,7 @@ export function Transcript({
             }
             return renderTimelineItem(item);
           })}
+          {afterItems}
 
           {pendingApprovals.length > 0 ? (
             <ul className="space-y-3" aria-label="Waiting for your review">

@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -135,10 +135,21 @@ async def parse_sensitive_json[SensitivePayloadT: BaseModel](
 
 
 @catalog_router.get("")
-async def list_connectors(_auth: CurrentAuth) -> list[ConnectorOut]:
+async def list_connectors(_auth: CurrentAuth, settings: OAuthSettingsDep) -> list[ConnectorOut]:
     """Manifests of every installed connector (gallery data, plan 17.9)."""
+    from jhin_api.oauth.composio import connector_info
+    from jhin_connectors.oauth_providers import STATIC_PROVIDERS
+
+    providers = {provider.connector_type: provider.key for provider in STATIC_PROVIDERS.values()}
+
     return [
-        ConnectorOut.model_validate(connector.manifest.model_dump())
+        ConnectorOut.model_validate(
+            {
+                **connector.manifest.model_dump(),
+                "managed_auth": connector_info(connector.manifest.connector_type, settings),
+                "oauth_provider": providers.get(connector.manifest.connector_type),
+            }
+        )
         for connector in default_registry()
     ]
 
@@ -170,6 +181,9 @@ def _out(
             "webhook_secret_configured": connection.webhook_secret_id is not None,
             "authorized_by": authorized_by,
             "needs_reauth": connection.status == ConnectionStatus.NEEDS_REAUTH.value,
+            "auth_provider": "composio"
+            if connection.oauth_issuer == "https://composio.dev"
+            else "local",
         }
     )
 
@@ -379,6 +393,7 @@ async def verify_connection(
 async def reauthorize_connection(
     connection_id: UUID,
     request: Request,
+    response: Response,
     ctx: AdminCtx,
     db: DbSession,
     crypto: SecretCryptoDep,
@@ -403,7 +418,7 @@ async def reauthorize_connection(
     connection row itself, not from the draft.
     """
     connection = await service.get_connection(db, ctx.workspace_id, connection_id)
-    return await oauth_service.start_authorization(
+    result = await oauth_service.start_authorization(
         db,
         crypto,
         ctx,
@@ -419,6 +434,10 @@ async def reauthorize_connection(
         request_id=req_id(request),
         ip_hash=ip_hash(request),
     )
+    from jhin_api.oauth.composio import set_callback_cookie
+
+    set_callback_cookie(response, result, settings)
+    return result
 
 
 @router.post(
@@ -537,4 +556,5 @@ async def delete_connection(
         request_id=req_id(request),
         ip_hash=ip_hash(request),
         tokens=ConnectionTokenService(db, crypto, http_client),
+        crypto=crypto,
     )

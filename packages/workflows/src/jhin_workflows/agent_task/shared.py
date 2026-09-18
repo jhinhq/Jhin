@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID, uuid5
 
+from jhin_workflows.blog_corpus.shared import BlogCorpusSyncInput
+
 ACTIVITY_RESOLVE_SNAPSHOT = "resolve_snapshot"
 ACTIVITY_RUN_AGENT_STEP = "run_agent_step"
 ACTIVITY_RESOLVE_APPROVAL = "resolve_approval"
@@ -191,6 +193,7 @@ class PersonQuestionAsk:
     """
 
     question_id: str
+    required: bool = False
     # The model's tool-call id, so the answer can be stitched back into the
     # transcript as this call's observation.
     provider_call_id: str = ""
@@ -348,6 +351,7 @@ class StepResult:
     # Work requests this agent accepted during the step (coordination
     # release): each starts one abandoned WorkRequestTaskWorkflow child.
     work_request_starts: list[WorkRequestStart] = field(default_factory=list)
+    corpus_sync_starts: list[BlogCorpusSyncInput] = field(default_factory=list)
     # Reviews this agent decided during the step as the assigned AI
     # reviewer: the workflow signals each source task workflow.
     review_decisions: list[ReviewDecisionSignal] = field(default_factory=list)

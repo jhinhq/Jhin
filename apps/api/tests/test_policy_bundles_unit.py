@@ -15,6 +15,7 @@ from jhin_api.deps import WorkspaceContext
 from jhin_api.policy import bundles
 from jhin_api.policy import service as grants_service
 from jhin_api.policy.schemas import BundleApply, BundleApplyOut, SandboxCreate
+from jhin_connectors.testing.fake_github import FakeGitHubServer
 from jhin_db.models import Agent, AgentCapabilityGrant, AuditEvent, Connection
 from jhin_domain import ActorType, new_uuid7
 from jhin_secrets import SecretCrypto
@@ -40,17 +41,21 @@ async def _agent(
 async def _github(
     session: AsyncSession, crypto: SecretCrypto, ctx: WorkspaceContext, *, name: str = "GitHub"
 ) -> Connection:
-    connection, _ = await connections_service.create_connection(
-        session,
-        crypto,
-        ctx,
-        connector_type="github",
-        name=name,
-        auth_type="pat",
-        credentials={"token": "github-pat-for-tests"},
-        config={},
-        **REQ,
-    )
+    # Creation now verifies credentials. Keep bundle tests on a real local
+    # fake provider rather than relying on an untested token being active.
+    with FakeGitHubServer() as server, pytest.MonkeyPatch.context() as patch:
+        patch.setenv("JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS", server.base_url)
+        connection, _ = await connections_service.create_connection(
+            session,
+            crypto,
+            ctx,
+            connector_type="github",
+            name=name,
+            auth_type="pat",
+            credentials={"token": "fake-github-pat"},
+            config={"base_url": server.base_url},
+            **REQ,
+        )
     return connection
 
 
@@ -202,6 +207,7 @@ async def test_code_editing_creates_the_sandbox_and_writes_twelve_grants_and_one
     result = await _apply(session, crypto, admin_ctx, agent, **_sandbox_request(github))
 
     assert result.created_connection is not None
+    assert result.created_connection.last_verified_at is not None
     sandbox = await session.get(Connection, result.created_connection.id)
     assert sandbox is not None
     assert sandbox.connector_type == "cli"

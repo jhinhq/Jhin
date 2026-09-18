@@ -47,6 +47,7 @@ from jhin_workflows.agent_task.shared import (
     StepResult,
     bound_tool_call_id,
 )
+from jhin_workflows.agent_task.workflows import _CLEANUP_SCHEDULE_TO_CLOSE_TIMEOUT
 
 _APPROVAL_ID = "018f4d52-8b93-7d41-8ac7-7f190f092222"
 _TOOL_CALL_ID = "018f4d52-8b93-7d41-8ac7-7f190f093333"
@@ -430,7 +431,11 @@ class TwoQueueWorld:
                     await asyncio.sleep(0.01)
                 else:
                     raise AssertionError("cleanup activity was not scheduled")
-                await environment.sleep(timedelta(seconds=31))
+                # Read from the workflow rather than written down here: this
+                # window is sized to survive a redeploy, and a copy of the
+                # number in the test is a copy that stops testing the moment
+                # somebody widens it.
+                await environment.sleep(_CLEANUP_SCHEDULE_TO_CLOSE_TIMEOUT + timedelta(seconds=1))
                 return await asyncio.wait_for(result_task, timeout=5)
         finally:
             stop_tool_worker.set()

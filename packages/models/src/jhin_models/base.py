@@ -61,6 +61,16 @@ class ModelToolCall(BaseModel):
     arguments_json: str
 
 
+class ModelContent(BaseModel):
+    """Local, verified multimodal content; adapters never fetch arbitrary URLs."""
+
+    model_config = ConfigDict(frozen=True)
+    type: Literal["text", "image"]
+    text: str = ""
+    mime_type: Literal["image/png", "image/jpeg", "image/gif", "image/webp"] = "image/png"
+    data_base64: str = Field(default="", max_length=28_000_000)
+
+
 class ModelMessage(BaseModel):
     """One conversation turn.
 
@@ -72,6 +82,7 @@ class ModelMessage(BaseModel):
 
     role: Role
     content: str
+    content_parts: tuple[ModelContent, ...] = ()
     tool_calls: tuple[ModelToolCall, ...] = ()
     tool_call_id: str | None = None
 
@@ -129,6 +140,20 @@ class ModelResponse(BaseModel):
     latency_ms: int = 0
     provider_request_id: str | None = None
     tool_calls: tuple[ModelToolCall, ...] = ()
+
+
+class ModelStreamEvent(BaseModel):
+    """Public provider facts. Reasoning/thinking blocks are deliberately absent."""
+
+    model_config = ConfigDict(frozen=True)
+    type: Literal["text_delta", "tool_delta", "citation", "usage", "completed"]
+    text: str = ""
+    index: int = 0
+    tool_call_id: str = ""
+    tool_name: str = ""
+    arguments_delta: str = ""
+    data: dict[str, Any] = Field(default_factory=dict)
+    response: ModelResponse | None = None
 
 
 class ModelListing(BaseModel):
@@ -354,6 +379,13 @@ class ModelClient(ABC):
     @abstractmethod
     async def generate(self, request: ModelRequest) -> ModelResponse:
         """Single non-streaming completion."""
+
+    async def stream_events(self, request: ModelRequest) -> AsyncIterator[ModelStreamEvent]:
+        """Lossless fallback for older adapters: exactly one generate call."""
+        response = await self.generate(request)
+        if response.text:
+            yield ModelStreamEvent(type="text_delta", text=response.text)
+        yield ModelStreamEvent(type="completed", response=response)
 
     @abstractmethod
     def stream(self, request: ModelRequest) -> AsyncIterator[str]:

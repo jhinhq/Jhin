@@ -153,11 +153,15 @@ async def test_two_resolvers_cannot_execute_one_approval_twice(
         first_commit_count = 0
         allow_third_return = asyncio.Event()
 
+        # Four durable commits for the winner: the claim, the dispatch
+        # compare-and-set that moves it from ``claimed`` to ``executing``, the
+        # executor's terminal result, and the outer resolution commit. The
+        # third resolver is only released once all four are durable.
         async def observed_first_commit() -> None:
             nonlocal first_commit_count
             await original_first_commit()
             first_commit_count += 1
-            if first_commit_count == 3:
+            if first_commit_count == 4:
                 allow_third_return.set()
 
         monkeypatch.setattr(first_session, "commit", observed_first_commit)
@@ -221,7 +225,7 @@ async def test_two_resolvers_cannot_execute_one_approval_twice(
         release_executor.set()
         results = await asyncio.gather(first_task, second_task, third_task)
 
-    assert first_commit_count == 3
+    assert first_commit_count == 4
     assert all(isinstance(result, GatewayOutcome) for result in results)
 
     async with sessions() as verification:

@@ -275,6 +275,7 @@ def test_documented_socket_commands_are_executable_and_mutually_exclusive() -> N
         assert unsafe not in command_text
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Executes Linux Bash socket setup; verified on Linux")
 @pytest.mark.parametrize(
     ("heading", "mode", "socket_url"),
     (
@@ -404,7 +405,7 @@ def test_boundary_document_records_the_exact_crash_outcome_matrix() -> None:
         "phase10.agent.before_manifest_bind.v1": "reruns the model; no tool effect",
         "phase9.agent.after_manifest.before_effect.v1": "reuses the committed pair",
         "phase10.tool.before_claim.v1": "executes once after recovery",
-        "phase10.tool.after_claim.before_effect.v1": "execution_unknown",
+        "phase10.tool.after_claim.before_effect.v1": "executes once after recovery",
         "phase10.tool.after_effect.before_terminal_commit.v1": "execution_unknown",
     }
     for barrier, outcome in expected_rows.items():

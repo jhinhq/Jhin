@@ -52,6 +52,26 @@ const NOTION_CONNECTION: ConnectionInfo = {
 };
 
 describe("AppLibrary", () => {
+  it("enables a stdio-only app only after its optional Composio method is selected", () => {
+    const app = { ...ENTRIES[3], composio_toolkit: "airtable" };
+    const onConnect = vi.fn();
+    render(<AppLibrary entries={[app]} connections={[]} canManage onConnect={onConnect} onOpenConnection={() => {}} />);
+    expect(screen.queryByRole("button", { name: "Connect" })).toBeNull();
+    fireEvent.change(screen.getByLabelText("Connection method for Filesystem"), { target: { value: "composio" } });
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    expect(onConnect).toHaveBeenCalledWith(app, "composio");
+  });
+  it("keeps Composio an explicit method on the same app card", () => {
+    const onConnect = vi.fn();
+    const app = { ...ENTRIES[1], composio_toolkit: "notion", auth_hint: "oauth" as const };
+    render(<AppLibrary entries={[app]} connections={[]} canManage onConnect={onConnect} onOpenConnection={() => {}} />);
+    expect(screen.getAllByTestId("app-notion")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    expect(onConnect).toHaveBeenLastCalledWith(app, "default");
+    fireEvent.change(screen.getByLabelText("Connection method for Notion"), { target: { value: "composio" } });
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    expect(onConnect).toHaveBeenLastCalledWith(app, "composio");
+  });
   it("filters by search text and category", () => {
     render(
       <AppLibrary entries={ENTRIES} connections={[]} canManage onConnect={() => {}} onOpenConnection={() => {}} />,
@@ -90,12 +110,12 @@ describe("AppLibrary", () => {
     fireEvent.click(notion.getByRole("button", { name: "Manage" }));
     expect(onOpen).toHaveBeenCalledWith(NOTION_CONNECTION);
     fireEvent.click(notion.getByRole("button", { name: "Connect another" }));
-    expect(onConnect).toHaveBeenCalledWith(ENTRIES[1]);
+    expect(onConnect).toHaveBeenCalledWith(ENTRIES[1], "default");
 
     const github = within(screen.getByTestId("app-github"));
     expect(github.getByText(/Built-in connector/)).toBeDefined();
     fireEvent.click(github.getByRole("button", { name: "Connect" }));
-    expect(onConnect).toHaveBeenLastCalledWith(ENTRIES[0]);
+    expect(onConnect).toHaveBeenLastCalledWith(ENTRIES[0], "default");
 
     const slack = within(screen.getByTestId("app-slack"));
     expect(slack.getByText(/enter its URL/)).toBeDefined();

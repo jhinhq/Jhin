@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
 from typing import Any, ClassVar, cast
 
 import pytest
@@ -35,8 +41,9 @@ class _BlockingDeleteContainer:
     async def kill(self) -> None:
         self.killed = True
 
-    async def log(self, **_kwargs: bool) -> list[str]:
-        return []
+    async def log(self, **_kwargs: bool):
+        for item in ():
+            yield item
 
     async def delete(self, *, force: bool, v: bool) -> None:
         self.delete_started.set()
@@ -112,7 +119,12 @@ async def test_workspace_volume_is_nocopy_and_initialized_by_trusted_root() -> N
     assert docker.volumes.created == [
         {
             "Name": "jhin-sandbox-ws-run-abc",
-            "Labels": {"jhin.sandbox.workspace": "run-abc"},
+            "Labels": {
+                "jhin.sandbox.workspace": "run-abc",
+                # The kind label is what keeps the startup age sweep away from
+                # an agent's durable disk; a run volume still says so out loud.
+                "jhin.sandbox.workspace.kind": "run",
+            },
         }
     ]
     assert len(docker.containers.created) == 1
@@ -129,7 +141,9 @@ async def test_workspace_volume_is_nocopy_and_initialized_by_trusted_root() -> N
     assert host["ReadonlyRootfs"] is True
     assert host["Privileged"] is False
     assert host["CapDrop"] == ["ALL"]
-    assert host["CapAdd"] == ["CHOWN", "FOWNER"]
+    # The first job on a key measures, and the walk needs to read a directory
+    # this same script has just handed to uid 1000 at mode 0700.
+    assert host["CapAdd"] == ["CHOWN", "FOWNER", "DAC_READ_SEARCH"]
     assert host["SecurityOpt"] == ["no-new-privileges:true"]
     assert host["Mounts"] == [
         {
@@ -141,8 +155,72 @@ async def test_workspace_volume_is_nocopy_and_initialized_by_trusted_root() -> N
         }
     ]
     assert container.started is True
-    assert container.wait_timeout == jobs_module.DOCKER_CHECK_TIMEOUT_SECONDS
+    assert container.wait_timeout == jobs_module.DOCKER_CHECK_TIMEOUT_SECONDS + 60
     assert container.deleted == (True, True)
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="the walk measures allocated blocks, which only a POSIX stat carries",
+)
+def test_measurement_reads_a_directory_owned_by_the_sandbox_user() -> None:
+    """The init script's own walk, run for real against a 0700 tree.
+
+    Not a stand-in for the capability — it is the *reason* for it. The walk
+    reads a directory owned by somebody else at mode 0700, which is what a
+    root process with no capabilities cannot do, and what
+    ``DAC_READ_SEARCH`` restores.
+    """
+    root = Path(tempfile.mkdtemp())
+    try:
+        (root / "repo").mkdir()
+        (root / "repo" / "pack").write_bytes(b"x" * 4096)
+        (root / "cache").mkdir()
+        (root / "cache" / "wheel").write_bytes(b"y" * 2048)
+        script = jobs_module._WORKSPACE_INIT_SCRIPT.replace(
+            '"/jhin-workspace-init"', repr(str(root))
+        )
+        # The chown/chmod half needs privileges this test does not have, and is
+        # not what is under test; the walk is.
+        script = script.replace("os.chown(path, 1000, 1000)", "pass")
+        script = script.replace("if actual != expected:\n    raise SystemExit(3)", "")
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "JHIN_WS_MEASURE": "1", "JHIN_WS_BUDGET": "30"},
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+        size, partial = jobs_module.JobManager._parse_measurement(completed.stdout)
+        # The root and everything under it, directories included, counted in
+        # *allocated blocks* — exactly what ``du`` counts, which is what an
+        # operator will compare the number against. Counting only regular
+        # files measured a real workspace at a third of its size, and would
+        # measure a tree of a million empty directories as nothing at all;
+        # counting apparent size measured a 2 GiB ``fallocate -n`` pad at
+        # 8 KiB, which is the same cap not biting for a different reason.
+        expected = (root.stat().st_blocks * 512) + sum(
+            entry.stat().st_blocks * 512 for entry in root.rglob("*")
+        )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    assert partial is False
+    assert size is not None and size >= 6144
+    assert size == expected
+
+
+def test_the_measurement_budget_is_the_one_the_settings_name() -> None:
+    """The walk's ceiling reaches the container, and the runner waits for it.
+
+    A budget the runner does not wait out is a job killed mid-walk rather than
+    a walk that reports a floor, and the number that decides whether an
+    agent's next call is served would then depend on which of two timeouts
+    fired first.
+    """
+    settings = runner_settings(sandbox_default_image="jhin-sandbox:test")
+    assert settings.sandbox_workspace_measure_budget_seconds == 60
 
 
 @pytest.mark.asyncio
@@ -304,9 +382,9 @@ def startup_docker(monkeypatch: pytest.MonkeyPatch) -> type[_StartupDocker]:
     _StartupDocker.security_options = ["name=rootless"]
     _StartupDocker.operating_system = _UNSET
     monkeypatch.setattr(jobs_module.aiodocker, "Docker", _StartupDocker)
-    monkeypatch.setattr(jobs_module.os, "geteuid", lambda: 10001)
-    monkeypatch.setattr(jobs_module.os, "getegid", lambda: 10001)
-    monkeypatch.setattr(jobs_module.os, "getgroups", lambda: [10001])
+    monkeypatch.setattr(jobs_module.os, "geteuid", lambda: 10001, raising=False)
+    monkeypatch.setattr(jobs_module.os, "getegid", lambda: 10001, raising=False)
+    monkeypatch.setattr(jobs_module.os, "getgroups", lambda: [10001], raising=False)
     return _StartupDocker
 
 

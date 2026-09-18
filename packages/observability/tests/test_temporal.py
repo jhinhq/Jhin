@@ -3532,6 +3532,13 @@ class _TracerSite:
 
 
 _ENGINE_TRACER_SITES = {
+    "services/tool_worker/src/jhin_tool_worker/runtime_gateway.py": _TracerSite(
+        ("name", "tracer"),
+        "tracer",
+        "parameter",
+        (),
+        ("create_app",),
+    ),
     # jhin-admin bootstraps no observability runtime, so it passes the same
     # no-op the dev seed does rather than a tracer nothing would collect from.
     "apps/api/src/jhin_api/cli/main.py": _TracerSite(
@@ -3575,6 +3582,18 @@ _ENGINE_TRACER_SITES = {
         "parameter",
         ("ToolWorkerResources",),
         ("create",),
+    ),
+    # ``jhin-sandbox-reconcile`` and ``jhin-tool-calls-rollback`` are one-shot
+    # operator commands with no observability runtime behind them, so they pass
+    # the same no-op ``jhin-admin`` and the dev seed pass. They share one
+    # engine helper rather than opening one each, which is why this stays a
+    # single site however many commands the module grows.
+    "services/tool_worker/src/jhin_tool_worker/cli.py": _TracerSite(
+        ("Call",),
+        None,
+        None,
+        (),
+        ("_operator_session_factory",),
     ),
 }
 
@@ -3801,11 +3820,13 @@ def test_temporal_wiring_and_long_lived_tracer_authority_are_exact() -> None:
         ]
     )
     assert _inventory(engines) == {
+        "services/tool_worker/src/jhin_tool_worker/runtime_gateway.py": 1,
         "apps/api/src/jhin_api/cli/main.py": 1,
         "apps/api/src/jhin_api/main.py": 1,
         "apps/api/src/jhin_api/seed.py": 1,
         "services/agent_worker/src/jhin_agent_worker/resources.py": 1,
         "services/event_worker/src/jhin_event_worker/main.py": 1,
+        "services/tool_worker/src/jhin_tool_worker/cli.py": 1,
         "services/tool_worker/src/jhin_tool_worker/resources.py": 1,
     }
     assert _inventory(publishers) == {

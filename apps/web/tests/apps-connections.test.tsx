@@ -165,7 +165,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-function installServer({ deferWebhookRefetch = false } = {}) {
+function installServer({ deferWebhookRefetch = false, createdStatus = "active" as ConnectionInfo["status"] } = {}) {
   const connections: ConnectionInfo[] = [];
   const writes: { path: string; body: Record<string, unknown> }[] = [];
   const webhookRefetch = deferred();
@@ -191,6 +191,8 @@ function installServer({ deferWebhookRefetch = false } = {}) {
       const connectorType = String(body.connector_type);
       const connection = connectionFor(`conn-${connections.length + 1}`, connectorType, String(body.name));
       connection.auth_type = String(body.auth_type);
+      connection.status = createdStatus;
+      connection.last_error = createdStatus === "active" ? null : "Credentials could not be verified.";
       connection.config_json = body.config as Record<string, unknown>;
       connections.push(connection);
       const connector = CONNECTORS.find((entry) => entry.connector_type === connectorType)!;
@@ -239,6 +241,26 @@ function installServer({ deferWebhookRefetch = false } = {}) {
   };
 }
 
+it.each(["active", "error"] as const)("opens a newly created %s app on Overview with accurate verification status", async (createdStatus) => {
+  installServer({ createdStatus });
+  renderPage();
+  await showServiceTypes();
+  await screen.findByTestId("connector-supabase");
+  fireEvent.click(connectButton("supabase"));
+  const create = await screen.findByRole("dialog", { name: "Connect Supabase" });
+  fireEvent.change(within(create).getByPlaceholderText("Supabase (production)"), { target: { value: "Supabase production" } });
+  fireEvent.change(within(create).getByPlaceholderText("Supabase access token"), { target: { value: "test-token" } });
+  fireEvent.change(within(create).getByPlaceholderText("project"), { target: { value: "project-one" } });
+  fireEvent.click(within(create).getByRole("button", { name: "Create connection" }));
+  const detail = await screen.findByRole("dialog", { name: createdStatus === "active" ? "Supabase production is connected" : "Supabase production needs attention" });
+  expect(within(detail).getByRole("tab", { name: "Overview" }).getAttribute("aria-selected")).toBe("true");
+  expect(within(detail).getByRole("button", { name: "Give to an agent…" })).toBeDefined();
+  if (createdStatus === "error") {
+    expect(within(detail).getByText(/initial connection check did not succeed/)).toBeDefined();
+    expect(within(detail).queryByText(/^Connected\. Who/)).toBeNull();
+  }
+});
+
 function renderPage() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -265,6 +287,17 @@ function connectButton(type: string): HTMLButtonElement {
 }
 
 describe("Apps: connections", () => {
+  it("offers reconnect for an active managed app without manual credential rotation", async () => {
+    const server = installServer();
+    server.connections.push({ ...connectionFor("conn-1", "vercel", "Managed Vercel"), auth_provider: "composio" });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Manage" }));
+    const detail = await screen.findByRole("dialog", { name: "Managed Vercel" });
+    expect(within(detail).getByText("Connected through Composio")).toBeTruthy();
+    expect(within(detail).getByRole("button", { name: "Reconnect" })).toBeTruthy();
+    fireEvent.click(within(detail).getByRole("button", { name: "Advanced settings" }));
+    expect(within(detail).queryByRole("button", { name: "Rotate credential" })).toBeNull();
+  });
   it("updates provider-secret status before the background refetch completes", async () => {
     const server = installServer({ deferWebhookRefetch: true });
     renderPage();

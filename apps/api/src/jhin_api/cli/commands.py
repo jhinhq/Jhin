@@ -9,6 +9,7 @@ only rows written by hand are the ones no service knows how to write.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -19,6 +20,7 @@ from sqlalchemy import func, select
 from sqlalchemy.engine import Connection as SyncConnection
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from jhin_api.access import api_keys as key_service
 from jhin_api.access import invitations
 from jhin_api.audit import service as audit
 from jhin_api.auth.service import (
@@ -59,16 +61,31 @@ from jhin_api.security.passwords import hash_password
 from jhin_api.settings import get_settings
 from jhin_api.workspaces import service as workspaces
 from jhin_connectors import build_default_definition_catalog, default_registry
+from jhin_connectors.cli.workspace import (
+    AUDIT_RESET_REQUESTED,
+    KIND_AGENT,
+    agent_workspace_key,
+)
 from jhin_db.migrate import alembic_config
 from jhin_db.models import (
     Agent,
     AgentCapabilityGrant,
+    AgentRun,
+    ApiKey,
+    AuditEvent,
     Connection,
+    SandboxWorkspace,
     User,
     Workspace,
     WorkspaceMembership,
 )
-from jhin_domain import ActorType, ConnectionStatus, UserStatus, WorkspaceRole
+from jhin_domain import (
+    ActorType,
+    ConnectionStatus,
+    UserStatus,
+    WorkspaceRole,
+    is_known_scope,
+)
 from jhin_policy import Grant, GrantEffect, bundle_by_id, capability_matches
 from jhin_policy.bundles import (
     BUNDLE_IDS,
@@ -1290,6 +1307,514 @@ async def agent_revoke(rt: Runtime) -> Result:
     )
 
 
+# --- agent workspace ---
+#
+# Everything printed here is database truth. That is not a shortcut, it is the
+# only option: `jhin-admin` runs in the API container, which is deliberately not
+# on the compose ``runner`` network and holds no runner token, so it can never
+# ask Docker anything. Which is also why `reset` is deferred -- see its
+# docstring.
+
+_SIZE_UNITS = (("TB", 1024**4), ("GB", 1024**3), ("MB", 1024**2), ("KB", 1024))
+
+
+def _human_bytes(value: int | None) -> str:
+    size = int(value or 0)
+    for label, unit in _SIZE_UNITS:
+        if size >= unit:
+            return f"{size / unit:.1f} {label}"
+    return f"{size} B"
+
+
+def _ago(value: datetime | None, *, now: datetime) -> str:
+    """How long ago, in the largest unit that is still honest."""
+    if value is None:
+        return "never"
+    moment = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    seconds = int((now - moment).total_seconds())
+    if seconds < 0:
+        return "just now"
+    for label, unit in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= unit:
+            return f"{seconds // unit}{label} ago"
+    return f"{seconds}s ago"
+
+
+def _holder_text(holder_id: UUID | None, status: str | None) -> str:
+    """Who holds the lease, and whether that run is still going.
+
+    A holder whose run has finished is *stale*: the row still names it, and the
+    next bind for that agent will take the lease from it without waiting,
+    because liveness is read from the run's own status. Saying which is which
+    is the difference between "somebody is using this" and "nothing is".
+    """
+    if holder_id is None:
+        return "-"
+    label = str(holder_id)[:8]
+    if status is None:
+        return f"run {label} (gone)"
+    live = status not in ("completed", "failed", "cancelled")
+    return f"run {label} ({'live' if live else 'stale'})"
+
+
+async def _workspace_rows(
+    db: AsyncSession, workspace: Workspace, agent: Agent | None = None
+) -> list[tuple[SandboxWorkspace, Agent, str | None]]:
+    query = (
+        select(SandboxWorkspace, Agent, AgentRun.status)
+        .join(Agent, Agent.id == SandboxWorkspace.agent_id)
+        .outerjoin(AgentRun, AgentRun.id == SandboxWorkspace.holder_run_id)
+        .where(SandboxWorkspace.workspace_id == workspace.id)
+        .order_by(Agent.created_at, SandboxWorkspace.kind)
+    )
+    if agent is not None:
+        query = query.where(SandboxWorkspace.agent_id == agent.id)
+    return [(row[0], row[1], row[2]) for row in (await db.execute(query)).all()]
+
+
+def _workspace_out_row(
+    row: SandboxWorkspace, agent: Agent, holder_status: str | None, *, now: datetime
+) -> dict[str, Any]:
+    return {
+        "id": str(row.id),
+        "agent": agent.name,
+        "agent_id": str(agent.id),
+        "key": row.workspace_key,
+        "kind": row.kind,
+        "state": row.state,
+        "holder_run_id": str(row.holder_run_id) if row.holder_run_id else None,
+        "holder_status": holder_status,
+        "holder": _holder_text(row.holder_run_id, holder_status),
+        "last_used_at": row.last_used_at.isoformat() if row.last_used_at else None,
+        "last_used": _ago(row.last_used_at, now=now),
+        "size_bytes": int(row.size_bytes or 0),
+        "size": _human_bytes(row.size_bytes),
+        "size_measured_at": row.size_measured_at.isoformat() if row.size_measured_at else None,
+        "reset_requested_at": (
+            row.reset_requested_at.isoformat() if row.reset_requested_at else None
+        ),
+    }
+
+
+# What is worth reading back out of a workspace audit row. The rest of the
+# metadata (ids, keys) is already on the lines above it.
+_HISTORY_KEYS = ("reason", "contended", "deleted", "recycled", "kind")
+
+
+def _history_line(event: AuditEvent, *, now: datetime) -> str:
+    metadata = event.metadata_json or {}
+    detail = {key: value for key, value in metadata.items() if key in _HISTORY_KEYS}
+    return f"  {event.action:<32} {_ago(event.created_at, now=now):>9}  {_scope_text(detail)}"
+
+
+async def agent_workspace_list(rt: Runtime) -> Result:
+    workspace = await _resolve_workspace_or_only(rt.db, rt.args.workspace)
+    now = datetime.now(UTC)
+    rows = [
+        _workspace_out_row(row, agent, status, now=now)
+        for row, agent, status in await _workspace_rows(rt.db, workspace)
+    ]
+    data = {"workspace": _workspace_out(workspace), "workspaces": rows}
+    if not rows:
+        return Result(
+            data=data,
+            lines=[
+                f"No agent in {workspace.name} has a sandbox workspace yet. One is created "
+                "the first time an agent runs a cli.* tool."
+            ],
+        )
+    return Result(
+        data=data,
+        lines=table(
+            ["AGENT", "KEY", "KIND", "STATE", "HELD BY", "LAST USED", "SIZE", "RESET"],
+            [
+                [
+                    str(row["agent"]),
+                    str(row["key"]),
+                    str(row["kind"]),
+                    str(row["state"]),
+                    str(row["holder"]),
+                    str(row["last_used"]),
+                    str(row["size"]),
+                    "pending" if row["reset_requested_at"] else "-",
+                ]
+                for row in rows
+            ],
+        ),
+    )
+
+
+async def agent_workspace_show(rt: Runtime) -> Result:
+    workspace = await _resolve_workspace_or_only(rt.db, rt.args.workspace)
+    agent = await _resolve_agent(rt.db, workspace, rt.args.agent)
+    now = datetime.now(UTC)
+    rows = await _workspace_rows(rt.db, workspace, agent)
+    base = {"workspace": _workspace_out(workspace), "agent": _agent_out(agent)}
+    if not rows:
+        return Result(
+            data={**base, "workspaces": [], "checkout": None, "recent": []},
+            lines=[
+                f"{agent.name} has no sandbox workspace yet. The key it will get is "
+                f"{agent_workspace_key(workspace.id, agent.id)}."
+            ],
+        )
+
+    listed = [_workspace_out_row(row, owner, status, now=now) for row, owner, status in rows]
+    durable = next((row for row, _, _ in rows if row.kind == KIND_AGENT), rows[0][0])
+    checkout = await rt.db.scalar(
+        select(AuditEvent)
+        .where(
+            AuditEvent.workspace_id == workspace.id,
+            AuditEvent.action == "sandbox.checkout.recorded",
+            AuditEvent.target_type == "sandbox_workspace",
+            AuditEvent.target_id == durable.id,
+        )
+        .order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+        .limit(1)
+    )
+    history = list(
+        await rt.db.scalars(
+            select(AuditEvent)
+            .where(
+                AuditEvent.workspace_id == workspace.id,
+                AuditEvent.action.like("sandbox.workspace.%"),
+                AuditEvent.target_id.in_([row.id for row, _, _ in rows]),
+            )
+            .order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+            .limit(10)
+        )
+    )
+    record = (checkout.metadata_json or {}) if checkout else {}
+    head = str(record.get("head_sha") or "")
+    primary = listed[0]
+    reported = [
+        ("key", str(primary["key"])),
+        ("kind", str(primary["kind"])),
+        ("state", str(primary["state"])),
+        ("holder", str(primary["holder"])),
+        ("last used", str(primary["last_used_at"] or "never")),
+        (
+            "size",
+            f"{primary['size']} (measured {_ago(durable.size_measured_at, now=now)})",
+        ),
+        (
+            "reset",
+            "pending, applied at the next sandbox call" if primary["reset_requested_at"] else "-",
+        ),
+    ]
+    if record:
+        reported.append(
+            (
+                "last checkout",
+                f"{record.get('repository') or '?'}  branch {record.get('branch') or '?'}  "
+                f"base {record.get('base_ref') or '?'}  head {head[:12] or '?'}",
+            )
+        )
+    lines = fields(reported)
+    if len(listed) > 1:
+        lines += [
+            "",
+            "Also holding private run workspaces (a concurrent run of this agent):",
+            *(f"  {row['key']}  {row['holder']}" for row in listed[1:]),
+        ]
+    if history:
+        lines += ["", "recent", *(_history_line(event, now=now) for event in history)]
+    return Result(
+        data={
+            **base,
+            "workspaces": listed,
+            "checkout": dict(record) or None,
+            "recent": [
+                {
+                    "action": event.action,
+                    "at": event.created_at.isoformat(),
+                    "metadata": event.metadata_json or {},
+                }
+                for event in history
+            ],
+        },
+        lines=lines,
+    )
+
+
+async def agent_workspace_reset(rt: Runtime) -> Result:
+    """Record that an agent's workspace should start empty next time.
+
+    Deliberately deferred rather than immediate. The API container is not on
+    the ``runner`` network and holds no ``SANDBOX_RUNNER_TOKEN``, so this
+    process cannot delete a Docker volume and must not pretend it can. The
+    request is written here and applied by the next bind for that agent --
+    before any container of the next run starts, which is the one moment the
+    disk is provably idle. If a live run is holding it, that is said plainly
+    rather than yanking a disk out from under a running container.
+    """
+    args = rt.args
+    workspace = await _resolve_workspace_or_only(rt.db, args.workspace)
+    agent = await _resolve_agent(rt.db, workspace, args.agent)
+    actor = await _acting_admin(rt.db, workspace, args.actor_email)
+    rows = await _workspace_rows(rt.db, workspace, agent)
+    durable = next(((row, status) for row, _, status in rows if row.kind == KIND_AGENT), None)
+    if durable is None:
+        return Result(
+            data={"agent": _agent_out(agent), "reset": False},
+            lines=[
+                f"{agent.name} has no sandbox workspace, so there is nothing to reset. Its "
+                "next sandbox call starts from an empty one anyway."
+            ],
+        )
+    row, holder_status = durable
+    live = row.holder_run_id is not None and holder_status not in (
+        None,
+        "completed",
+        "failed",
+        "cancelled",
+    )
+    question = f"Empty {agent.name}'s sandbox workspace ({_human_bytes(row.size_bytes)})?"
+    if args.force and live:
+        question += (
+            " A run is using it right now: --force takes the lease from that run, so its "
+            "uncommitted work in the sandbox is lost and its next sandbox call fails with "
+            "workspace_lease_lost."
+        )
+    elif args.force:
+        question += " --force also releases the lease, so another run may take the workspace."
+    if not confirm(question, assume_yes=args.yes):
+        raise CommandError("Cancelled. Nothing was changed.")
+
+    # Read before it is cleared: the whole record of a forced release is who it
+    # was taken from, and both the audit event and the answer below used to
+    # report the value they had just overwritten with ``None``.
+    held_by = row.holder_run_id
+    row.reset_requested_at = datetime.now(UTC)
+    row.reset_requested_by = actor.id
+    if args.force:
+        # ``last_holder_run_id`` is what makes the promise in the message below
+        # true. Without it the displaced run's next bind finds a free lease,
+        # takes its own workspace back, recycles it because the reset is
+        # pending, and carries on with an empty tree and no idea -- the exact
+        # silent drift ``workspace_lease_lost`` exists to prevent.
+        if held_by is not None:
+            row.last_holder_run_id = held_by
+        row.holder_run_id = None
+        row.lease_expires_at = None
+    audit.record(
+        rt.db,
+        action=AUDIT_RESET_REQUESTED,
+        target_type="sandbox_workspace",
+        target_id=row.id,
+        workspace_id=workspace.id,
+        actor_type=ActorType.SYSTEM,
+        actor_id=actor.id,
+        request_id=rt.request_id,
+        ip_hash=NO_CLIENT_ADDRESS,
+        metadata={
+            "agent_id": str(agent.id),
+            "workspace_key": row.workspace_key,
+            "forced": bool(args.force),
+            "held_by": str(held_by) if held_by else None,
+            **_provenance("agent workspace reset"),
+        },
+    )
+    await rt.db.commit()
+
+    lines = []
+    if live and not args.force:
+        lines.append(
+            "A run is using this workspace right now; the reset applies when that run finishes."
+        )
+    elif live and args.force:
+        lines.append(
+            "The lease was released. If that run is still alive its next sandbox call "
+            "fails with workspace_lease_lost and it will check out again."
+        )
+    lines.append("Recorded. The next sandbox call for this agent starts from an empty workspace.")
+    return Result(
+        data={
+            "agent": _agent_out(agent),
+            "workspace_key": row.workspace_key,
+            "reset": True,
+            "forced": bool(args.force),
+            "held_by": str(held_by) if held_by else None,
+        },
+        lines=lines,
+    )
+
+
+# --- api-key ---
+#
+# The web app has an API keys page; a console has had nothing, so an operator
+# with a shell could administer everything except the credential that lets them
+# automate any of it. These two commands close that, through the same service
+# the HTTP route calls -- the same ceiling rule, the same scope taxonomy, the
+# same ``api_key.created`` audit row -- so a key minted here is
+# indistinguishable from one minted in the browser.
+
+
+async def _key_actor(
+    db: AsyncSession, workspace: Workspace, email: str | None
+) -> tuple[User, WorkspaceRole]:
+    """Who the key is created as, and the role that becomes its ceiling.
+
+    Not ``_console_context``'s fabricated owner. A key's ``role_ceiling`` is a
+    real security property -- effective permission is the intersection of its
+    scopes with what that role may hold -- so it has to be the acting account's
+    actual role in this workspace, or the key would outrank the person who
+    asked for it.
+    """
+    if not email:
+        return await _workspace_owner(db, workspace), WorkspaceRole.OWNER
+    user = await _resolve_user(db, email)
+    membership = await db.scalar(
+        select(WorkspaceMembership).where(
+            WorkspaceMembership.workspace_id == workspace.id,
+            WorkspaceMembership.user_id == user.id,
+        )
+    )
+    if membership is None or membership.role not in (
+        WorkspaceRole.ADMIN.value,
+        WorkspaceRole.OWNER.value,
+    ):
+        raise CommandError(
+            f"{user.email} is not an admin or owner of {workspace.name}, so they cannot "
+            "create an API key there."
+        )
+    return user, WorkspaceRole(membership.role)
+
+
+def _parse_scopes(raw: list[str]) -> list[str]:
+    """Repeated flags or comma-separated lists, trimmed and de-duplicated.
+
+    An unknown scope is refused *by name* rather than dropped. The service
+    would silently cap it away (stored keys must keep working when a scope is
+    retired), which is right for a stored key and wrong for a typo at a
+    prompt -- a key that quietly does less than asked is worse than one that
+    was not made.
+    """
+    scopes: list[str] = []
+    for entry in raw:
+        for part in entry.split(","):
+            value = part.strip()
+            if value and value not in scopes:
+                scopes.append(value)
+    if not scopes:
+        raise CommandError("Name at least one scope with --scope.")
+    unknown = sorted({scope for scope in scopes if not is_known_scope(scope)})
+    if unknown:
+        raise CommandError(
+            f"No such scope: {', '.join(unknown)}. A scope is <category>:<action>, or "
+            "<category>:* for a whole category."
+        )
+    return scopes
+
+
+def _key_row(record: ApiKey) -> dict[str, Any]:
+    return {
+        "id": str(record.id),
+        "name": record.name,
+        "prefix": record.prefix,
+        "scopes": list(record.scopes_json or []),
+        "role_ceiling": record.role_ceiling,
+        "expires_at": record.expires_at.isoformat() if record.expires_at else None,
+        "status": key_service.key_status(record),
+    }
+
+
+async def api_key_create(rt: Runtime) -> Result:
+    args = rt.args
+    workspace = await _resolve_workspace_or_only(rt.db, args.workspace)
+    actor, role = await _key_actor(rt.db, workspace, args.actor_email)
+    scopes = _parse_scopes(args.scope)
+    name = _clean_name(args.name, what="key name")
+    if not confirm(
+        f"Create an API key '{name}' in {workspace.name} as {actor.email} ({role.value}) "
+        f"with {len(scopes)} scope(s)? The secret is printed once and never again.",
+        assume_yes=args.yes,
+    ):
+        raise CommandError("Cancelled. No key was created.")
+
+    minted = await key_service.create_key(
+        rt.db,
+        WorkspaceContext(user=actor, workspace_id=workspace.id, role=role),
+        name=name,
+        scopes=scopes,
+        expires_in=args.expires_in,
+        expires_unit=args.expires_unit,
+        request_id=rt.request_id,
+        ip_hash=NO_CLIENT_ADDRESS,
+    )
+    record = minted.record
+    granted = list(record.scopes_json or [])
+    dropped = sorted(set(scopes) - set(granted) - {s for s in scopes if s.endswith(":*")})
+    expiry = record.expires_at.isoformat() if record.expires_at else "never"
+    lines = [
+        f"Created API key '{record.name}' in {workspace.name}, as {actor.email}.",
+        "",
+        f"  {minted.plaintext}",
+        "",
+        "That is the only time the key is shown: only its hash is stored. Send it in "
+        "an Authorization: Bearer header.",
+        "",
+        *fields(
+            [
+                ("id", str(record.id)),
+                ("prefix", record.prefix),
+                ("ceiling", record.role_ceiling),
+                ("expires", expiry),
+                ("scopes", ", ".join(granted) or "(none)"),
+            ]
+        ),
+    ]
+    if dropped:
+        # The ceiling silently caps; saying so is the difference between a key
+        # that does less than asked and one an operator knows does less.
+        lines += [
+            "",
+            f"Capped by the {record.role_ceiling} ceiling, so NOT granted: {', '.join(dropped)}.",
+        ]
+    return Result(
+        data={
+            "workspace": _workspace_out(workspace),
+            "api_key": _key_row(record),
+            "created_by": actor.email,
+            "key": minted.plaintext,
+            "not_granted": dropped,
+        },
+        lines=lines,
+    )
+
+
+async def api_key_list(rt: Runtime) -> Result:
+    workspace = await _resolve_workspace_or_only(rt.db, rt.args.workspace)
+    rows = await key_service.list_keys(rt.db, workspace.id)
+    listed = [
+        {**_key_row(record), "created_by": creator.email if creator else None}
+        for record, creator in rows
+    ]
+    data = {"workspace": _workspace_out(workspace), "api_keys": listed}
+    if not listed:
+        return Result(
+            data=data,
+            lines=[f"{workspace.name} has no API keys. `{PROGRAM} api-key create` mints one."],
+        )
+    return Result(
+        data=data,
+        lines=table(
+            ["NAME", "PREFIX", "STATUS", "CEILING", "EXPIRES", "SCOPES"],
+            [
+                [
+                    str(row["name"]),
+                    str(row["prefix"]),
+                    str(row["status"]),
+                    str(row["role_ceiling"]),
+                    str(row["expires_at"] or "never"),
+                    str(len(row["scopes"])),
+                ]
+                for row in listed
+            ],
+        ),
+    )
+
+
 COMMANDS: dict[str, Callable[[Runtime], Awaitable[Result]]] = {
     "doctor": doctor,
     "owner create": owner_create,
@@ -1304,4 +1829,9 @@ COMMANDS: dict[str, Callable[[Runtime], Awaitable[Result]]] = {
     "agent access": agent_access,
     "agent grant": agent_grant,
     "agent revoke": agent_revoke,
+    "agent workspace list": agent_workspace_list,
+    "agent workspace show": agent_workspace_show,
+    "agent workspace reset": agent_workspace_reset,
+    "api-key create": api_key_create,
+    "api-key list": api_key_list,
 }

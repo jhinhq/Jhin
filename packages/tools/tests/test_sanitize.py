@@ -83,6 +83,27 @@ def test_small_clean_payload_passes_through() -> None:
     assert sanitize_payload(payload, redactor=SecretRedactor()) == payload
 
 
+def test_postgres_unsafe_unicode_is_replaced_after_secret_redaction() -> None:
+    redactor = SecretRedactor()
+    redactor.register("private\x00credential")
+    clean = sanitize_payload(
+        {
+            "key\x00": ["PK\x03\x04\x00docx", "lone\ud800", "private\x00credential"],
+            "key\ufffd": "collision",
+        },
+        redactor=redactor,
+    )
+    assert clean["key\ufffd"] == ["PK\x03\x04\ufffddocx", "lone\ufffd", "[REDACTED]"]
+    assert clean["key\ufffd#2"] == "collision"
+    encoded = json.dumps(clean, ensure_ascii=False).encode("utf-8")
+    assert b"\\u0000" not in encoded and "\x00" not in str(clean)
+    normalized_redactor = SecretRedactor()
+    normalized_redactor.register("normalized\ufffdcredential")
+    assert sanitize_payload({"text": "normalized\x00credential"}, redactor=normalized_redactor) == {
+        "text": "[REDACTED]"
+    }
+
+
 def test_non_json_types_become_redacted_strings() -> None:
     class Weird:
         def __str__(self) -> str:

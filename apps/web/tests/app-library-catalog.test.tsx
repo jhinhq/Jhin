@@ -376,7 +376,7 @@ describe("AppLibrary in catalog mode", () => {
     expect(card.getByText("Connected")).toBeDefined();
     expect(card.getByText("Pages and databases.")).toBeDefined();
     fireEvent.click(card.getByRole("button", { name: "Connect another" }));
-    expect(onConnect).toHaveBeenCalledWith(CURATED[1]);
+    expect(onConnect).toHaveBeenCalledWith(CURATED[1], "default");
     fireEvent.click(card.getByRole("button", { name: "Details for Notion" }));
     expect(onOpenDetail).toHaveBeenCalledWith("notion");
   });

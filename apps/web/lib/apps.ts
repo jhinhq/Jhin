@@ -42,19 +42,26 @@ export function filterCatalog(entries: CatalogApp[], query: string, category: st
  * two fields it reads rather than a whole `CatalogApp`, so a synced
  * `CatalogEntry` answers the same question without being converted first. */
 export function connectionsForApp(
-  entry: Pick<CatalogApp, "slug" | "connector_type">,
+  entry: Pick<CatalogApp, "slug" | "connector_type" | "composio_toolkit">,
   connections: ConnectionInfo[],
 ): ConnectionInfo[] {
   return connections.filter((connection) => {
+    if (connection.connector_type === "composio") {
+      return connection.config_json.server_slug === entry.slug &&
+        (!entry.composio_toolkit || connection.config_json.toolkit === entry.composio_toolkit);
+    }
     if (entry.connector_type && connection.connector_type === entry.connector_type) return true;
     return connection.connector_type === "mcp" && connection.config_json.server_slug === entry.slug;
   });
 }
 
+export type AppConnectMethod = "default" | "native" | "composio";
+
 export interface NativeTarget {
   kind: "native";
   connector: ConnectorInfo;
   prefill: NativePrefill;
+  providerKey?: "composio";
 }
 
 export type ConnectTarget =
@@ -146,11 +153,32 @@ export function nativeTarget(entry: CatalogApp, connectors: ConnectorInfo[]): Na
 /** What pressing Connect on a catalog card should open. An entry that signs in
  * at the provider's own MCP server takes that path even when Jhin has a native
  * connector for it; otherwise a native connector wins, and failing both the
- * generic MCP connector is pre-filled from the entry. */
-export function connectTarget(entry: CatalogApp, connectors: ConnectorInfo[]): ConnectTarget {
-  if (entry.sign_in !== "remote_mcp") {
-    const native = nativeTarget(entry, connectors);
-    if (native) return native;
+ * generic MCP connector is pre-filled from the entry. An explicit `method`
+ * picks one of the deliberate second paths instead of the front door. */
+export function connectTarget(
+  entry: CatalogApp,
+  connectors: ConnectorInfo[],
+  method: AppConnectMethod = "default",
+): ConnectTarget {
+  const native = connectors.find((connector) => connector.connector_type === entry.connector_type);
+  if (method === "composio" && native?.managed_auth && native.connector_type !== "composio") {
+    return { kind: "native", connector: native, providerKey: "composio", prefill: { name: entry.name, config: { ...entry.connector_config }, hint: null } };
+  }
+  if (method === "composio" && entry.composio_toolkit) {
+    const managed = connectors.find((connector) => connector.connector_type === "composio");
+    if (managed) return {
+      kind: "native", connector: managed,
+      prefill: { name: entry.name, config: { ...(entry.connector_config ?? {}), toolkit: entry.composio_toolkit, server_slug: entry.slug }, hint: null },
+    };
+  }
+  if (method === "composio") return { kind: "unsupported", reason: "Composio is not available for this app." };
+  const officialOAuth = Boolean(entry.mcp_url) && !entry.url_unverified && entry.auth_hint === "oauth";
+  // The entry says how it is connected; the browser does not infer it. Only a
+  // "remote_mcp" entry gives up the native connector, and an explicit "native"
+  // choice takes it back -- that is what nativeTarget stays exported for.
+  if (method === "native" || entry.sign_in !== "remote_mcp") {
+    const chosen = nativeTarget(entry, connectors);
+    if (chosen && chosen.connector.connector_type !== "composio") return chosen;
   }
   if (entry.stdio_only) {
     return {
@@ -170,6 +198,7 @@ export function connectTarget(entry: CatalogApp, connectors: ConnectorInfo[]): C
   if (!urlKnown) hints.push("Enter the server URL from the provider's docs.");
   if (entry.auth_note) hints.push(entry.auth_note);
   if (entry.setup_note) hints.push(entry.setup_note);
+  if (officialOAuth) hints.push("Browser sign-in uses the provider's MCP tools. Existing native tools and grants remain separate.");
   return {
     kind: "mcp",
     connector: mcp,
@@ -180,6 +209,15 @@ export function connectTarget(entry: CatalogApp, connectors: ConnectorInfo[]): C
       hint: hints.length > 0 ? hints.join(" ") : null,
     },
   };
+}
+
+export function appConnectionMethods(entry: CatalogApp, connectors: ConnectorInfo[]): { value: AppConnectMethod; label: string }[] {
+  const target = connectTarget(entry, connectors);
+  const native = connectors.find((connector) => connector.connector_type === entry.connector_type);
+  const options: { value: AppConnectMethod; label: string }[] = [{ value: "default", label: target.kind === "mcp" && entry.auth_hint === "oauth" ? "Browser sign-in · provider MCP tools" : native?.oauth_provider || native?.connector_type === "github" ? "Browser sign-in · native tools" : "Default connection" }];
+  if (native && native.connector_type !== "composio" && target.kind === "mcp") options.push({ value: "native", label: "Native connection · existing tools" });
+  if (native?.managed_auth || entry.composio_toolkit) options.push({ value: "composio", label: "Composio · optional hosted service" });
+  return options;
 }
 
 /**
@@ -240,6 +278,7 @@ export function describeRisk(risk: RiskLevel): string {
  */
 export function catalogEntryToApp(entry: CatalogEntryDetail): CatalogApp {
   return {
+    composio_toolkit: entry.composio_toolkit,
     slug: entry.slug,
     name: entry.name,
     category: entry.category,

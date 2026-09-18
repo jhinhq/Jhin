@@ -25,6 +25,7 @@ workflow and the agent worker (``ASK_PERSON_WAIT_PATCH``,
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
@@ -88,19 +89,19 @@ OTHER_LABEL = "Something else"
 OTHER_PLACEHOLDER = "Tell me in your own words…"
 
 _DETAIL_ASKED = (
-    "Asked. Your turn stays open until they answer or 30 minutes pass, and "
+    "Asked. Required questions wait until answered or the task is "
+    "stopped. Optional questions wait 30 minutes, and "
     "their answer comes back as this call's result. Do not ask again, do not "
     "answer on their behalf, and do not tell them to watch for a follow-up."
 )
 _DETAIL_RUN_BUDGET = (
     "Not asked: you have already put three questions to this person in this "
     "run, which is the limit. Decide it yourself, say plainly what you "
-    "assumed, and carry on."
+    "assumed only for optional preferences. Required inputs remain blocked; report what is missing."
 )
 _DETAIL_CONVERSATION_BUDGET = (
     "Not asked: this conversation has had six questions in the last hour, "
-    "which is the limit. Decide it yourself, say plainly what you assumed, "
-    "and carry on."
+    "which is the limit. Required inputs remain blocked; report what is missing."
 )
 _DETAIL_ALREADY_ASKED = (
     "Not asked again: this exact question is already on their screen waiting "
@@ -108,7 +109,7 @@ _DETAIL_ALREADY_ASKED = (
 )
 _DETAIL_CLOSED = (
     "Not asked: this question was already closed without an answer. Decide "
-    "it yourself, say plainly what you assumed, and carry on."
+    "only if it is optional. Required inputs remain blocked; report what is missing."
 )
 _DETAIL_ALREADY_ANSWERED = (
     "Not asked again: you already asked this here and they answered: {answer}. Use that answer."
@@ -116,7 +117,9 @@ _DETAIL_ALREADY_ANSWERED = (
 
 _DENY_NO_PERSON_WATCHING = (
     "this work is not a chat with a person, so there is nobody to ask; "
-    "decide it yourself and say in your result what you assumed"
+    "return the missing required inputs to your requester with "
+    "organization.report_result; do not guess or perform dependent "
+    "work"
 )
 _DENY_NO_TEAM_FOR_SCOPE = (
     "you are not on a team, so there is no team memory to offer; ask about "
@@ -128,24 +131,132 @@ class AskPersonOption(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     label: str = Field(min_length=1, max_length=80)
-    value: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9_]+$")
+    value: str = Field(
+        min_length=1,
+        max_length=64,
+        description="Text choice ID, or the actual timezone, HH:MM time, or URL.",
+    )
     detail: str = Field(default="", max_length=140)
 
 
 class AskPersonInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    question: str = Field(min_length=1, max_length=200)
-    context: str = Field(default="", max_length=300)
-    options: list[AskPersonOption] = Field(min_length=2, max_length=4)
+    question: str = Field(
+        min_length=1,
+        max_length=1000,
+        description="A concise question including the setup details you need.",
+    )
+    context: str = Field(
+        default="",
+        max_length=2000,
+        description="Supplementary context explaining why the answer is needed.",
+    )
+    options: list[AskPersonOption] = Field(default_factory=list, max_length=4)
+    required: bool = True
+    input_key: str = Field(default="", max_length=100, pattern=r"^[a-z0-9_]*$")
+    value_type: Literal["text", "url", "timezone", "time"] = "text"
     kind: Literal["open", "memory_scope"] = "open"
     allow_other: bool = True
 
+    @model_validator(mode="before")
+    @classmethod
+    def _reserved_schedule_review(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or not str(value.get("input_key", "")).startswith(
+            "schedule_activate_"
+        ):
+            return value
+        # None of these model-authored words will be shown. Normalize before
+        # field validation so copied long briefs and invented options cannot
+        # cause a pointless retry. The executor separately validates the key
+        # and builds the full review from the locked, persisted schedule.
+        return {
+            **value,
+            "question": "Activate this recurring work?",
+            "context": "",
+            "options": [],
+            "required": False,
+            "value_type": "text",
+            "kind": "open",
+            "allow_other": True,
+        }
+
+    @model_validator(mode="before")
+    @classmethod
+    def _typed_choices(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or value.get("value_type", "text") == "text":
+            return value
+        value_type = value.get("value_type")
+        options = value.get("options", [])
+        if value_type not in {"timezone", "time", "url"} or not isinstance(options, list):
+            return value
+        if len(options) > 4:
+            return value  # Preserve the explicit choice-count validation.
+        from jhin_tools.readiness import validate_answer
+
+        canonical = []
+        seen = set()
+        for option in options:
+            raw = option.model_dump() if isinstance(option, AskPersonOption) else option
+            if not isinstance(raw, dict) or not isinstance(raw.get("value"), str):
+                continue
+            try:
+                actual = validate_answer(raw["value"], value_type)
+            except ValueError:
+                continue
+            if len(actual) > 64 or actual in seen:
+                continue
+            # Display exactly the value that will be stored; never interpret
+            # an alias or let an explanatory label misrepresent that value.
+            canonical.append({"label": actual, "value": actual, "detail": ""})
+            seen.add(actual)
+        return {
+            **value,
+            "options": canonical if len(canonical) >= 2 else [],
+            "allow_other": True,
+        }
+
+    @model_validator(mode="after")
+    def _canonical_setup_question(self) -> AskPersonInput:
+        # These answers authorize connector setup. The platform must own the
+        # wording so a model cannot ask which destination to avoid, then bind it.
+        if self.input_key == "ghost_admin_url":
+            self.question = "What is the actual Ghost Admin URL to connect?"
+            self.value_type = "url"
+        elif self.input_key == "ghost_publisher_agent_id":
+            self.question = "Which agent may review and publish Ghost drafts?"
+            self.value_type = "text"
+        elif self.input_key in ("unsplash_connection_setup", "unsplash_setup"):
+            # The answer to this one binds a stored Access Key to a live
+            # connection, so it belongs with the two above: the person reads
+            # the platform's question, not one the asking agent composed.
+            self.question = (
+                "Do you want to connect Unsplash with the stored access key? "
+                "Type 'connect unsplash' to confirm."
+            )
+            self.value_type = "text"
+        else:
+            return self
+        self.context = ""
+        self.required = True
+        self.kind = "open"
+        self.options = []
+        self.allow_other = True
+        return self
+
     @model_validator(mode="after")
     def _distinct_options(self) -> AskPersonInput:
+        if not self.options and not self.allow_other:
+            raise ValueError("A free-text question must allow a typed answer")
+        if len(self.options) == 1:
+            raise ValueError("Offer at least two options, or use free text")
         values = [option.value for option in self.options]
         if len(set(values)) != len(values):
             raise ValueError("option values must be unique")
+        if self.value_type == "text" and any(
+            re.fullmatch(r"[a-z0-9_]+", value) is None for value in values
+        ):
+            raise ValueError("Text option values must use lowercase letters, digits or underscores")
         return self
 
     @model_validator(mode="after")
@@ -163,6 +274,8 @@ class AskPersonInput(BaseModel):
         """
         if self.kind != "memory_scope":
             return self
+        if len(self.options) < 2:
+            raise ValueError("A memory scope question must offer at least two scopes")
         canonical: list[AskPersonOption] = []
         for option in self.options:
             if option.value not in _MEMORY_SCOPE_VALUES:
@@ -194,6 +307,7 @@ _SCOPE_WORDS: dict[str, tuple[str, str]] = {
 
 
 class AskPersonOutput(BaseModel):
+    required: bool = False
     status: str  # "asked" | "already_answered" | "already_asked" | "not_asked"
     question_id: str = ""
     answer_kind: str = ""  # "" | "option" | "other"
@@ -309,7 +423,7 @@ async def _questions_this_hour(ctx: ToolExecutionContext, conversation_id: UUID)
 
 
 async def _newest_twin(
-    ctx: ToolExecutionContext, conversation_id: UUID | None, dedupe_hash: str
+    ctx: ToolExecutionContext, conversation_id: UUID | None, dedupe_hash: str, data: AskPersonInput
 ) -> UserQuestion | None:
     twin: UserQuestion | None = await ctx.session.scalar(
         select(UserQuestion)
@@ -318,6 +432,9 @@ async def _newest_twin(
             UserQuestion.conversation_id == conversation_id,
             UserQuestion.agent_id == ctx.agent_id,
             UserQuestion.dedupe_hash == dedupe_hash,
+            UserQuestion.input_key == data.input_key,
+            UserQuestion.value_type == data.value_type,
+            UserQuestion.required == data.required,
         )
         .order_by(UserQuestion.asked_at.desc(), UserQuestion.id.desc())
         .limit(1)
@@ -382,6 +499,9 @@ def _question_content(
         question=question.question,
         context=question.context,
         question_kind=question.kind,
+        required=question.required,
+        input_key=question.input_key,
+        value_type=question.value_type,
         options=[option.model_dump() for option in options],
         allow_other=question.allow_other,
         other_label=OTHER_LABEL,
@@ -396,8 +516,46 @@ def _question_content(
 
 async def _ask_person(ctx: ToolExecutionContext, payload: BaseModel) -> BaseModel:
     data = cast(AskPersonInput, payload)
+    from jhin_tools.schedule_confirmation import canonicalize_schedule_question
+
+    asked_at = _now()
+    await canonicalize_schedule_question(ctx, data, now=asked_at)
     task = await ctx.session.get(Task, ctx.task_id)
     conversation_id = task.conversation_id if task is not None else None
+    if data.required:
+        from jhin_tools.readiness import record_required_input
+
+        if not data.input_key:
+            data.input_key = "question_" + question_dedupe_hash(data.question, [])[:16]
+        await record_required_input(ctx, data.input_key, data.question, data.value_type)
+
+    dedupe_hash = question_dedupe_hash(data.question, [option.value for option in data.options])
+    twin = await _newest_twin(ctx, conversation_id, dedupe_hash, data)
+    if twin is not None and twin.status == UserQuestionStatus.ANSWERED.value:
+        if data.required and task is not None:
+            from jhin_tools.readiness import validate_answer
+
+            value = validate_answer(
+                twin.answer_option_value
+                if twin.answer_kind == "option" and data.value_type != "text"
+                else twin.answer_text,
+                data.value_type,
+            )
+            metadata = dict(task.metadata_json or {})
+            task.metadata_json = {
+                **metadata,
+                "required_inputs": [
+                    item
+                    for item in metadata.get("required_inputs", [])
+                    if isinstance(item, dict) and item.get("key") != data.input_key
+                ],
+                "resolved_inputs": {**metadata.get("resolved_inputs", {}), data.input_key: value},
+            }
+        return _answered_output(twin, run_id=ctx.run_id)
+    if twin is not None and twin.status == UserQuestionStatus.PENDING.value:
+        return AskPersonOutput(
+            status="already_asked", question_id=str(twin.id), detail=_DETAIL_ALREADY_ASKED
+        )
 
     if await _questions_this_run(ctx) >= MAX_QUESTIONS_PER_RUN:
         return AskPersonOutput(status="not_asked", detail=_DETAIL_RUN_BUDGET)
@@ -410,22 +568,12 @@ async def _ask_person(ctx: ToolExecutionContext, payload: BaseModel) -> BaseMode
     ):
         return AskPersonOutput(status="not_asked", detail=_DETAIL_CONVERSATION_BUDGET)
 
-    dedupe_hash = question_dedupe_hash(data.question, [option.value for option in data.options])
-    twin = await _newest_twin(ctx, conversation_id, dedupe_hash)
-    if twin is not None and twin.status == UserQuestionStatus.ANSWERED.value:
-        return _answered_output(twin, run_id=ctx.run_id)
-    if twin is not None and twin.status == UserQuestionStatus.PENDING.value:
-        return AskPersonOutput(
-            status="already_asked", question_id=str(twin.id), detail=_DETAIL_ALREADY_ASKED
-        )
-
     # Name the team on the scope option, where the asking agent has one. "The
     # Platform team" is a decision somebody can make; "this agent's team" is a
     # riddle. The platform still owns the words -- only the team's real name is
     # substituted, never anything the model wrote.
     options = await _name_the_team(ctx, data.options)
 
-    asked_at = _now()
     question = UserQuestion(
         id=new_uuid7(),
         workspace_id=ctx.workspace_id,
@@ -434,6 +582,9 @@ async def _ask_person(ctx: ToolExecutionContext, payload: BaseModel) -> BaseMode
         run_id=ctx.run_id,
         agent_id=ctx.agent_id,
         kind=data.kind,
+        required=data.required,
+        input_key=data.input_key,
+        value_type=data.value_type,
         question=data.question,
         context=data.context,
         options_json=[option.model_dump() for option in options],
@@ -465,7 +616,12 @@ async def _ask_person(ctx: ToolExecutionContext, payload: BaseModel) -> BaseMode
         if replay.status == UserQuestionStatus.ANSWERED.value:
             return _answered_output(replay, run_id=ctx.run_id)
         if replay.status == UserQuestionStatus.PENDING.value:
-            return AskPersonOutput(status="asked", question_id=str(replay.id), detail=_DETAIL_ASKED)
+            return AskPersonOutput(
+                status="asked",
+                question_id=str(replay.id),
+                required=replay.required,
+                detail=_DETAIL_ASKED,
+            )
         return AskPersonOutput(
             status="not_asked", question_id=str(replay.id), detail=_DETAIL_CLOSED
         )
@@ -515,7 +671,12 @@ async def _ask_person(ctx: ToolExecutionContext, payload: BaseModel) -> BaseMode
         )
     )
     await ctx.session.flush()
-    return AskPersonOutput(status="asked", question_id=str(question.id), detail=_DETAIL_ASKED)
+    return AskPersonOutput(
+        status="asked",
+        question_id=str(question.id),
+        required=question.required,
+        detail=_DETAIL_ASKED,
+    )
 
 
 ASK_PERSON_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor, ToolValidator | None], ...] = (
@@ -524,15 +685,17 @@ ASK_PERSON_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor, ToolValidator | None
             name="organization.ask_person",
             description=(
                 "Ask the person you are talking to one short question, with "
-                "two to four answers they can pick from and room to type "
-                "their own. Use it when what they asked for turns on a "
+                "options=[] for free text, or two to four choices with room to type "
+                "their own. Set required=true for prerequisites. Use it when work needs a "
                 "detail you do not have and guessing would be worse than "
                 "asking -- and in particular before you remember a fact for "
                 "anyone but yourself: send kind 'memory_scope' with the "
                 "options 'team' and 'workspace' (labelled in their words, "
                 "e.g. 'Only the Engineering team' and 'Company wide') and "
                 "their answer is what authorises the wider memory. Your turn "
-                "stays open until they answer or thirty minutes pass, and "
+                "stays open until required input is answered or the task is stopped; "
+                "optional questions wait thirty minutes. Reserved setup keys "
+                "ghost_admin_url and ghost_publisher_agent_id use platform-owned wording. "
                 "the answer comes back as this call's result, so ask once "
                 "and then use what they said. Do not use it to check in, to "
                 "confirm something you were already told, or to ask "

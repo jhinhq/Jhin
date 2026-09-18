@@ -90,8 +90,10 @@ def test_phase9_http_origins_extend_existing_dev_allowlist_only() -> None:
             == DEV_HTTP_ORIGINS
         )
         assert (
-            "JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS"
-            not in production["services"][service_name]["environment"]
+            production["services"][service_name]["environment"][
+                "JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS"
+            ]
+            == ""
         )
     assert (
         "JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS"

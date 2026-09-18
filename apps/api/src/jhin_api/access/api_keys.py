@@ -93,7 +93,10 @@ async def create_key(
     expires_in: int | None,
     expires_unit: ExpiryUnit,
     request_id: UUID,
-    ip_hash: str,
+    # Nullable because a console has no remote caller to hash. The audit column
+    # is nullable for exactly that reason, and recording the hash of a fiction
+    # would be worse than recording nothing.
+    ip_hash: str | None,
 ) -> MintedKey:
     if ctx.api_key is not None:
         # A key may read the key list, but minting is a human act: otherwise a

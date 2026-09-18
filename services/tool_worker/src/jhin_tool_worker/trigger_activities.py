@@ -38,6 +38,7 @@ from jhin_domain import (
 )
 from jhin_events import EventEnvelope, EventSource
 from jhin_observability import get_logger, normalize_event_family
+from jhin_tool_worker.drain import WorkerDrain
 from jhin_tool_worker.resources import ToolWorkerResources
 from jhin_tools import (
     ToolCatalog,
@@ -145,9 +146,18 @@ def _mismatch_error(message: str) -> ApplicationError:
 
 
 class TriggerToolActivities:
-    def __init__(self, resources: ToolWorkerResources, catalog: ToolCatalog) -> None:
+    def __init__(
+        self,
+        resources: ToolWorkerResources,
+        catalog: ToolCatalog,
+        *,
+        drain: WorkerDrain | None = None,
+    ) -> None:
         self._resources = resources
         self._catalog = catalog
+        # A worker with no drain (unit tests, direct callers) behaves exactly
+        # as it did: a fresh drain is never draining.
+        self._drain = drain if drain is not None else WorkerDrain()
 
     async def _publish(
         self,
@@ -716,27 +726,35 @@ class TriggerToolActivities:
         self,
         params: SyncExternalToolInput,
     ) -> SyncExternalResult:
-        workspace_id = _uuid(params.workspace_id, field="workspace_id")
-        task_id = _uuid(params.task_id, field="task_id")
-        run_id = _uuid(params.run_id, field="run_id")
-        invocation_id = stable_sync_invocation_id(run_id)
-        async with self._lifecycle_session(invocation_id) as session:
-            replayed = await self._existing_result(
-                session,
-                workspace_id=workspace_id,
-                task_id=task_id,
-                run_id=run_id,
-                invocation_id=invocation_id,
-            )
-            if replayed is not None:
-                return replayed
-            authority = await self._load_authority(
-                session,
-                workspace_id=workspace_id,
-                task_id=task_id,
-                run_id=run_id,
-            )
-            return await self._execute_claim(session, authority, invocation_id)
+        # This is the activity the drain was written for, and it was the one
+        # activity the drain did not cover. It claims a ``tool_call``, commits
+        # the claim, and then runs an executor that posts a comment on
+        # somebody else's system — a claim in ``executing`` that nothing can
+        # vouch for, which ``jhin_tool_worker.drain`` calls the worst outcome
+        # available, with an external effect on the end of it. Refusing before
+        # the claim is a clean no-op; Temporal redelivers it to a live worker.
+        with self._drain.hold():
+            workspace_id = _uuid(params.workspace_id, field="workspace_id")
+            task_id = _uuid(params.task_id, field="task_id")
+            run_id = _uuid(params.run_id, field="run_id")
+            invocation_id = stable_sync_invocation_id(run_id)
+            async with self._lifecycle_session(invocation_id) as session:
+                replayed = await self._existing_result(
+                    session,
+                    workspace_id=workspace_id,
+                    task_id=task_id,
+                    run_id=run_id,
+                    invocation_id=invocation_id,
+                )
+                if replayed is not None:
+                    return replayed
+                authority = await self._load_authority(
+                    session,
+                    workspace_id=workspace_id,
+                    task_id=task_id,
+                    run_id=run_id,
+                )
+                return await self._execute_claim(session, authority, invocation_id)
 
 
 __all__ = ["TriggerToolActivities"]

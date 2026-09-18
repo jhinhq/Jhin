@@ -241,9 +241,26 @@ def test_the_cli_allowed_repositories_backfill_follows_0037() -> None:
     assert backfill.down_revision == "0037"
 
 
-def test_the_required_grant_scope_backfill_follows_0038_and_is_the_head() -> None:
+def test_the_required_grant_scope_backfill_follows_0038() -> None:
+    """0039 sits on 0038. It is no longer the head: later releases chain on
+    top of it."""
     scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
     backfill = scripts.get_revision("0039")
     assert backfill is not None
     assert backfill.down_revision == "0038"
-    assert list(scripts.get_heads()) == ["0039"], "the migration graph must stay linear"
+
+
+def test_the_identity_self_grant_follows_0040_and_the_graph_stays_linear() -> None:
+    """0041 backfills ``organization.identity.self`` onto the agents that
+    predate it.
+
+    The head is asserted by *count* rather than by name: two tracks adding a
+    migration in one release renamed this constant on every merge, while the
+    invariant it is here to protect — one head, no branch — is exactly what
+    the count says.
+    """
+    scripts = ScriptDirectory.from_config(alembic_config("sqlite://"))
+    identity = scripts.get_revision("0041")
+    assert identity is not None
+    assert identity.down_revision == "0040"
+    assert len(scripts.get_heads()) == 1, "the migration graph must stay linear"

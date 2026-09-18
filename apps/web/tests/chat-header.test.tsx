@@ -24,6 +24,7 @@ function conversation(overrides: Partial<Conversation> = {}): Conversation {
     active_task_id: null,
     active_task_state: null,
     active_run_status: null,
+    active_run_started_at: null,
     active_activity: null,
     last_message_preview: null,
     last_message_sender_type: null,
@@ -260,14 +261,6 @@ describe("ChatHeader view toggles", () => {
     expect(toggle.getAttribute("aria-pressed")).toBe("true");
     fireEvent.click(toggle);
     expect(onToggleDetailed).toHaveBeenCalledTimes(1);
-  });
-
-  it("renders the quick-controls slot before the header's own buttons", () => {
-    renderHeader({ quickControls: <button type="button">Model</button> });
-    const quick = screen.getByRole("button", { name: "Model" });
-    const details = screen.getByLabelText("Show details");
-    expect(quick.parentElement).toBe(details.parentElement);
-    expect(quick.compareDocumentPosition(details) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });
 

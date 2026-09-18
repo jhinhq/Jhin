@@ -11,6 +11,8 @@
 import { focusRing } from "@/components/ui";
 import { isExternalHref, parseMarkdown } from "@/lib/markdown";
 import type { Block, Inline } from "@/lib/markdown";
+import { RichMarkdown } from "@/components/chat/rich-markdown";
+import { AGENTIC_WORKSPACE_ENABLED } from "@/lib/agentic-features";
 
 export type MarkdownVariant = "docs" | "chat";
 
@@ -104,6 +106,7 @@ export function Markdown({
   className?: string;
   variant?: MarkdownVariant;
 }) {
+  if (variant === "chat" && AGENTIC_WORKSPACE_ENABLED) return <RichMarkdown source={source} className={className} />;
   const skin = SKINS[variant];
   const blocks: Block[] = parseMarkdown(source);
   return (

@@ -37,6 +37,10 @@ _EXACT: dict[str, str] = {
     "organization.persona.create": "Writing a persona",
     "organization.persona.assign_self": "Choosing a persona",
     "organization.persona.assign": "Choosing a persona",
+    # Like the persona entries, and for the same reason: ``organization`` has
+    # no family fallback, so without this line the chat said "Working…" while
+    # an agent changed what everyone calls it.
+    "organization.identity.set_name": "Changing its name",
     "organization.request_work": "Asking a colleague",
     "organization.respond_work_request": "Answering a colleague",
     "organization.colleague_status": "Checking what a colleague is working on",

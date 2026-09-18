@@ -35,13 +35,17 @@ from jhin_api.connections import service as connections_service
 from jhin_api.deps import WorkspaceContext
 from jhin_api.security.passwords import verify_password
 from jhin_api.security.tokens import hash_token
+from jhin_connectors.cli.workspace import KIND_AGENT, agent_workspace_key
 from jhin_db.base import Base
 from jhin_db.migrate import alembic_config
 from jhin_db.models import (
     Agent,
     AgentCapabilityGrant,
+    AgentRun,
+    ApiKey,
     AuditEvent,
     Connection,
+    SandboxWorkspace,
     Skill,
     User,
     UserSession,
@@ -57,6 +61,8 @@ from jhin_secrets.crypto import (
     generate_master_key_material,
 )
 from jhin_skills import load_builtin_skills
+
+pytestmark = pytest.mark.usefixtures("skip_remote_initial_connection_checks")
 
 # Obviously fake and local to this module: long enough for the account policy,
 # used nowhere but here.
@@ -518,13 +524,13 @@ ENGINEER = "Senior Software Engineer"
 GRANT_ARGV = ("agent", "grant", "--agent", ENGINEER, "--bundle", "code-editing")
 
 
-async def _seed_agent(console: Console, name: str = ENGINEER) -> Agent:
+async def _seed_agent(console: Console, name: str = ENGINEER, slug: str | None = None) -> Agent:
     workspace = await console.session.scalar(select(Workspace))
     assert workspace is not None
     agent = Agent(
         workspace_id=workspace.id,
         name=name,
-        slug=f"{name.lower().replace(' ', '-')}-{new_uuid7().hex[-6:]}",
+        slug=slug or f"{name.lower().replace(' ', '-')}-{new_uuid7().hex[-6:]}",
     )
     console.session.add(agent)
     await console.session.commit()
@@ -751,8 +757,12 @@ async def test_agent_grant_refusals_are_sentences(
         f"A CLI Sandbox connection '{sandbox.name}' already uses 'GitHub'"
     )
 
+    # One reference, two agents: `_resolve_agent` matches by handle *or* by
+    # name, so "twin" is this agent's name and that agent's handle. Two rows
+    # with the same name is no longer constructible -- one name per workspace
+    # is a unique index now -- and this is the ambiguity that remains.
     await _seed_agent(console, name="Twin")
-    await _seed_agent(console, name="Twin")
+    await _seed_agent(console, name="Other", slug="twin")
     with pytest.raises(CommandError) as twins:
         await console.run("agent", "access", "--agent", "twin")
     assert str(twins.value).startswith("Two agents in Acme HQ are called 'twin':")
@@ -973,3 +983,400 @@ async def test_agent_grant_repositories_absent_is_everything_but_empty_is_refuse
     )
     rows = result.data["grants_created"]
     assert rows and all(row["scope_json"].get("repository") == "*" for row in rows), rows
+
+
+# --- api-key: the credential a console-only operator could not mint ----------
+
+
+async def test_api_key_create_prints_the_secret_once_and_stores_only_its_hash(
+    console: Console,
+) -> None:
+    """The whole point of the command: an operator with a shell can now
+    automate against their own install without opening a browser."""
+    await console.bootstrap()
+
+    result = await console.run(
+        "api-key",
+        "create",
+        "--name",
+        "Live check",
+        "--scope",
+        "agents:read",
+        "--scope",
+        "tasks:read,runs:read",
+        "--yes",
+    )
+
+    record = await console.session.scalar(select(ApiKey))
+    assert record is not None
+    secret = result.data["key"]
+    # Printed exactly once in the human output, and present in --json because a
+    # script has to be able to read it. Never on the row: only its hash.
+    assert secret and sum(line.count(secret) for line in result.lines) == 1
+    assert secret != record.key_hash
+    assert secret not in record.key_hash
+    # The prefix is how a key is recognised in a usage log without holding it.
+    assert record.prefix in secret
+    assert sorted(record.scopes_json) == ["agents:read", "runs:read", "tasks:read"]
+    assert record.expires_at is None
+    assert any("only time the key is shown" in line for line in result.lines)
+
+
+async def test_api_key_create_refuses_an_unknown_scope_by_name(console: Console) -> None:
+    """The service would silently cap an unknown scope away -- right for a
+    stored key whose scope was retired, wrong for a typo at a prompt. A key
+    that quietly does less than asked is worse than one that was not made."""
+    await console.bootstrap()
+
+    with pytest.raises(CommandError) as refused:
+        await console.run(
+            "api-key",
+            "create",
+            "--name",
+            "Typo",
+            "--scope",
+            "agents:read",
+            "--scope",
+            "agents:reed",
+            "--yes",
+        )
+
+    assert "agents:reed" in str(refused.value)
+    assert await console.count(ApiKey) == 0
+
+
+async def test_api_key_create_records_the_real_role_as_the_ceiling(console: Console) -> None:
+    """``role_ceiling`` is a security property, not a formality: effective
+    permission is the intersection of the key's scopes with what that role may
+    hold. A console context that always claimed OWNER would mint keys that
+    outrank the person who asked for one."""
+    await console.bootstrap()
+    workspace = await console.session.scalar(select(Workspace))
+    assert workspace is not None
+    await console.run(
+        "user",
+        "create",
+        "--email",
+        "admin@example.com",
+        "--name",
+        "Admin",
+        "--workspace",
+        workspace.slug,
+        "--role",
+        "admin",
+        "--password-stdin",
+        "--yes",
+        stdin=REPLACEMENT_PASSWORD,
+    )
+
+    result = await console.run(
+        "api-key",
+        "create",
+        "--name",
+        "Admin key",
+        "--scope",
+        "agents:read",
+        "--as",
+        "admin@example.com",
+        "--yes",
+    )
+
+    assert result.data["api_key"]["role_ceiling"] == WorkspaceRole.ADMIN.value
+    assert result.data["created_by"] == "admin@example.com"
+
+
+async def test_api_key_create_refuses_a_non_admin_actor(console: Console) -> None:
+    await console.bootstrap()
+    workspace = await console.session.scalar(select(Workspace))
+    assert workspace is not None
+    await console.run(
+        "user",
+        "create",
+        "--email",
+        "member@example.com",
+        "--name",
+        "Member",
+        "--workspace",
+        workspace.slug,
+        "--role",
+        "member",
+        "--password-stdin",
+        "--yes",
+        stdin=REPLACEMENT_PASSWORD,
+    )
+
+    with pytest.raises(CommandError) as refused:
+        await console.run(
+            "api-key",
+            "create",
+            "--name",
+            "Member key",
+            "--scope",
+            "agents:read",
+            "--as",
+            "member@example.com",
+            "--yes",
+        )
+
+    assert "not an admin or owner" in str(refused.value)
+    assert await console.count(ApiKey) == 0
+
+
+async def test_api_key_create_audits_the_mint_without_the_secret(console: Console) -> None:
+    await console.bootstrap()
+    result = await console.run(
+        "api-key", "create", "--name", "Audited", "--scope", "audit:read", "--yes"
+    )
+
+    event = await console.session.scalar(
+        select(AuditEvent).where(AuditEvent.action == "api_key.created")
+    )
+    assert event is not None
+    assert event.metadata_json["scopes"] == ["audit:read"]
+    assert result.data["key"] not in json.dumps(event.metadata_json)
+
+
+async def test_api_key_create_honours_an_expiry(console: Console) -> None:
+    await console.bootstrap()
+    before = datetime.now(UTC)
+
+    result = await console.run(
+        "api-key",
+        "create",
+        "--name",
+        "Short lived",
+        "--scope",
+        "agents:read",
+        "--expires-in",
+        "2",
+        "--expires-unit",
+        "hours",
+        "--yes",
+    )
+
+    record = await console.session.scalar(select(ApiKey))
+    assert record is not None
+    expires = record.expires_at
+    assert expires is not None
+    stamped = expires if expires.tzinfo else expires.replace(tzinfo=UTC)
+    assert timedelta(hours=1, minutes=59) < stamped - before < timedelta(hours=2, minutes=1)
+    assert result.data["api_key"]["expires_at"] is not None
+
+
+async def test_api_key_list_never_shows_a_secret(console: Console) -> None:
+    await console.bootstrap()
+    created = await console.run(
+        "api-key", "create", "--name", "Listed", "--scope", "agents:read", "--yes"
+    )
+    secret = created.data["key"]
+
+    listed = await console.run("api-key", "list")
+
+    assert secret not in json.dumps(listed.data)
+    assert all(secret not in line for line in listed.lines)
+    assert listed.data["api_keys"][0]["name"] == "Listed"
+    assert listed.data["api_keys"][0]["status"] == "active"
+
+
+# --- agent workspace: seeing and resetting an agent's sandbox disk -----------
+
+
+async def _seed_run(console: Console, agent: Agent, *, status: str) -> AgentRun:
+    run = AgentRun(workspace_id=agent.workspace_id, agent_id=agent.id, status=status)
+    console.session.add(run)
+    await console.session.commit()
+    return run
+
+
+async def _seed_workspace_row(console: Console, agent: Agent, **values: object) -> SandboxWorkspace:
+    row = SandboxWorkspace(
+        workspace_id=agent.workspace_id,
+        agent_id=agent.id,
+        kind=KIND_AGENT,
+        workspace_key=agent_workspace_key(agent.workspace_id, agent.id),
+        last_used_at=datetime.now(UTC),
+        **values,  # type: ignore[arg-type]
+    )
+    console.session.add(row)
+    await console.session.commit()
+    return row
+
+
+async def test_agent_workspace_list_reports_nothing_before_an_agent_has_run(
+    console: Console,
+) -> None:
+    await console.bootstrap()
+    await _seed_agent(console)
+
+    result = await console.run("agent", "workspace", "list")
+
+    assert result.data["workspaces"] == []
+    assert "No agent" in result.lines[0]
+
+
+async def test_agent_workspace_list_shows_size_holder_and_last_use(console: Console) -> None:
+    await console.bootstrap()
+    agent = await _seed_agent(console)
+    await _seed_workspace_row(console, agent, size_bytes=412 * 1024 * 1024)
+
+    result = await console.run("agent", "workspace", "list")
+
+    row = result.data["workspaces"][0]
+    assert row["agent"] == ENGINEER
+    assert row["kind"] == KIND_AGENT
+    assert row["state"] == "active"
+    assert row["size"] == "412.0 MB"
+    assert row["holder"] == "-"
+    assert any("412.0 MB" in line for line in result.lines)
+
+
+async def test_agent_workspace_list_separates_a_live_holder_from_a_stale_one(
+    console: Console,
+) -> None:
+    """A holder whose run has finished is stale: the next bind takes the lease
+    from it without waiting, because liveness is the run's own status. Saying
+    which is which is the difference between "somebody is using this" and
+    "nothing is"."""
+    await console.bootstrap()
+    live_agent = await _seed_agent(console, name="Live")
+    stale_agent = await _seed_agent(console, name="Stale")
+    live_run = await _seed_run(console, live_agent, status="waiting_approval")
+    stale_run = await _seed_run(console, stale_agent, status="completed")
+    await _seed_workspace_row(console, live_agent, holder_run_id=live_run.id)
+    await _seed_workspace_row(console, stale_agent, holder_run_id=stale_run.id)
+
+    result = await console.run("agent", "workspace", "list")
+
+    holders = {row["agent"]: row["holder"] for row in result.data["workspaces"]}
+    assert holders["Live"].endswith("(live)")
+    assert holders["Stale"].endswith("(stale)")
+
+
+async def test_agent_workspace_show_reports_the_last_checkout_and_history(
+    console: Console,
+) -> None:
+    await console.bootstrap()
+    agent = await _seed_agent(console)
+    row = await _seed_workspace_row(console, agent, size_bytes=1024)
+    console.session.add(
+        AuditEvent(
+            workspace_id=agent.workspace_id,
+            actor_type="agent",
+            actor_id=agent.id,
+            action="sandbox.checkout.recorded",
+            target_type="sandbox_workspace",
+            target_id=row.id,
+            metadata_json={
+                "repository": "octo/alpha",
+                "branch": "agent/fix",
+                "base_ref": "main",
+                "head_sha": "8f3c" + "0" * 36,
+            },
+        )
+    )
+    console.session.add(
+        AuditEvent(
+            workspace_id=agent.workspace_id,
+            actor_type="agent",
+            actor_id=agent.id,
+            action="sandbox.workspace.bound",
+            target_type="sandbox_workspace",
+            target_id=row.id,
+            metadata_json={"contended": False, "kind": KIND_AGENT},
+        )
+    )
+    await console.session.commit()
+
+    result = await console.run("agent", "workspace", "show", "--agent", ENGINEER)
+
+    assert result.data["checkout"]["repository"] == "octo/alpha"
+    assert [event["action"] for event in result.data["recent"]] == ["sandbox.workspace.bound"]
+    assert any("octo/alpha" in line for line in result.lines)
+
+
+async def test_agent_workspace_show_names_the_key_an_agent_will_get(console: Console) -> None:
+    await console.bootstrap()
+    agent = await _seed_agent(console)
+
+    result = await console.run("agent", "workspace", "show", "--agent", ENGINEER)
+
+    assert agent_workspace_key(agent.workspace_id, agent.id) in result.lines[0]
+
+
+async def test_agent_workspace_reset_records_a_request_rather_than_calling_a_runner(
+    console: Console,
+) -> None:
+    """Deferred by design. The API container is not on the runner network and
+    holds no runner token, so this process cannot delete a volume and must not
+    pretend it can -- the next bind applies the request, before any container
+    of the next run starts."""
+    await console.bootstrap()
+    agent = await _seed_agent(console)
+    row = await _seed_workspace_row(console, agent, size_bytes=4096)
+
+    result = await console.run("agent", "workspace", "reset", "--agent", ENGINEER, "--yes")
+
+    await console.session.refresh(row)
+    assert row.reset_requested_at is not None
+    assert row.reset_requested_by is not None
+    assert result.data["reset"] is True
+    assert any("starts from an empty workspace" in line for line in result.lines)
+    event = await console.session.scalar(
+        select(AuditEvent).where(AuditEvent.action == "sandbox.workspace.reset_requested")
+    )
+    assert event is not None
+    assert event.metadata_json["forced"] is False
+
+
+async def test_agent_workspace_reset_says_when_a_live_run_is_holding_it(
+    console: Console,
+) -> None:
+    await console.bootstrap()
+    agent = await _seed_agent(console)
+    run = await _seed_run(console, agent, status="running")
+    await _seed_workspace_row(console, agent, holder_run_id=run.id)
+
+    result = await console.run("agent", "workspace", "reset", "--agent", ENGINEER, "--yes")
+
+    assert any("applies when that run finishes" in line for line in result.lines)
+
+
+async def test_agent_workspace_reset_force_releases_a_crashed_runs_lease(
+    console: Console,
+) -> None:
+    await console.bootstrap()
+    agent = await _seed_agent(console)
+    run = await _seed_run(console, agent, status="running")
+    row = await _seed_workspace_row(console, agent, holder_run_id=run.id)
+
+    await console.run("agent", "workspace", "reset", "--agent", ENGINEER, "--force", "--yes")
+
+    await console.session.refresh(row)
+    assert row.holder_run_id is None
+    assert row.reset_requested_at is not None
+    # The promise this command prints is that the displaced run's next sandbox
+    # call fails with ``workspace_lease_lost``, and this column is the only
+    # thing that makes it true: without it the run finds a free lease, takes
+    # its own workspace back, recycles it because the reset is pending, and
+    # carries on with an empty tree and no idea.
+    assert row.last_holder_run_id == run.id
+    event = await console.session.scalar(
+        select(AuditEvent).where(AuditEvent.action == "sandbox.workspace.reset_requested")
+    )
+    assert event is not None
+    assert event.metadata_json["forced"] is True
+    # Read before the clear, not after: the audit row used to name the value
+    # the command had just overwritten with ``None``.
+    assert event.metadata_json["held_by"] == str(run.id)
+
+
+async def test_agent_workspace_reset_is_honest_when_there_is_nothing_to_reset(
+    console: Console,
+) -> None:
+    await console.bootstrap()
+    await _seed_agent(console)
+
+    result = await console.run("agent", "workspace", "reset", "--agent", ENGINEER, "--yes")
+
+    assert result.data["reset"] is False
+    assert "nothing to reset" in result.lines[0]

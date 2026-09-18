@@ -109,6 +109,7 @@ function renderPage(
   keys: ApiKeyInfo[],
   role: WorkspaceRole = "member",
   usageItems: ApiKeyUsageEntry[] = [],
+  catalog: ScopeCatalog = CATALOG,
 ) {
   vi.mocked(useApiKeys).mockReturnValue({
     data: keys,
@@ -116,7 +117,7 @@ function renderPage(
     refetch: () => undefined,
   } as unknown as ReturnType<typeof useApiKeys>);
   vi.mocked(useScopeCatalog).mockReturnValue({
-    data: { ...CATALOG, your_role: role },
+    data: { ...catalog, your_role: role },
     isPending: false,
   } as unknown as ReturnType<typeof useScopeCatalog>);
   vi.mocked(useApiKeyUsage).mockReturnValue({
@@ -147,6 +148,78 @@ function renderPage(
 }
 
 describe("ApiKeysPage", () => {
+  const presetCatalog: ScopeCatalog = {
+    ...CATALOG,
+    categories: [
+      {
+        ...CATALOG.categories[0],
+        scopes: [
+          ...CATALOG.categories[0].scopes,
+          {
+            key: "chats:write", category: "chats", action: "write",
+            label: "Write chats", description: "Send messages.",
+            min_role: "member", available: true,
+          },
+        ],
+      },
+      CATALOG.categories[1],
+    ],
+  };
+
+  it("selects full access within the catalog's role limits without submitting or changing expiry", async () => {
+    vi.mocked(api).mockResolvedValue({ api_key: key(), key: "jhin_abcd1234_the-secret" });
+    renderPage([], "member", [], presetCatalog);
+    fireEvent.click(screen.getAllByRole("button", { name: /New key/ })[0]);
+    fireEvent.change(screen.getByRole("textbox", { name: /What is this key for/ }), {
+      target: { value: "Full access script" },
+    });
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Expiry amount" }), {
+      target: { value: "12" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "Expiry unit" }), {
+      target: { value: "hours" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Full access" }));
+    expect(api).not.toHaveBeenCalled();
+    expect(screen.getByTestId("scope-count").textContent).toContain("2 permissions selected");
+    expect(screen.getByRole("button", { name: "Full access" }).getAttribute("aria-pressed")).toBe("true");
+    expect((screen.getByRole("checkbox", { name: /Audit log/ }) as HTMLInputElement).checked).toBe(false);
+
+    const submit = screen.getByRole("button", { name: "Create key" });
+    submit.focus();
+    fireEvent.click(submit);
+    await waitFor(() => expect(screen.getByTestId("api-key-reveal")).toBeDefined());
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Copy" }));
+    expect(vi.mocked(api).mock.calls[0][1]).toMatchObject({
+      method: "POST",
+      body: {
+        name: "Full access script", scopes: ["chats:read", "chats:write"],
+        expires_unit: "hours", expires_in: 12,
+      },
+    });
+  });
+
+  it("allows individual changes after full access, a read-only preset, and clearing all permissions", () => {
+    renderPage([], "member", [], presetCatalog);
+    fireEvent.click(screen.getAllByRole("button", { name: /New key/ })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Full access" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show Chats permissions" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /Read chats/ }));
+    expect(screen.getByRole("button", { name: "Full access" }).getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByTestId("scope-count").textContent).toContain("1 permission selected");
+
+    fireEvent.click(screen.getByRole("button", { name: "Read only" }));
+    expect((screen.getByRole("checkbox", { name: /Read chats/ }) as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByRole("checkbox", { name: /Write chats/ }) as HTMLInputElement).checked).toBe(false);
+    expect(screen.getByRole("button", { name: "Read only" }).getAttribute("aria-pressed")).toBe("true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    expect(screen.getByTestId("scope-count").textContent).toContain("Choose at least one");
+    expect((screen.getByRole("checkbox", { name: /Read chats/ }) as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByRole("button", { name: "Create key" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(api).not.toHaveBeenCalled();
+  });
+
   it("lists keys by prefix and scope, never by secret", () => {
     renderPage([key({ scopes: ["chats:read", "tasks:write"] })]);
     expect(screen.getByText("jhin_abcd1234_…")).toBeDefined();

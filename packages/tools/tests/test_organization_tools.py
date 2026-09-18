@@ -190,6 +190,16 @@ async def test_delegation_creates_child_task_and_structured_message(
 
 
 async def test_review_request_kind_and_artifacts(session: AsyncSession, org: Org) -> None:
+    from datetime import UTC, datetime
+
+    from jhin_db.models import Conversation
+
+    chat = Conversation(
+        workspace_id=org.workspace.id, title="Team work", last_activity_at=datetime.now(UTC)
+    )
+    session.add(chat)
+    await session.flush()
+    org.task.conversation_id = chat.id
     await grant(session, org, org.swe, "organization.delegate", {"targets": "team"})
     outcome = await delegate(
         session,
@@ -212,6 +222,7 @@ async def test_review_request_kind_and_artifacts(session: AsyncSession, org: Org
     )
     assert child is not None
     assert child.metadata_json["delegation"]["kind"] == "review_request"
+    assert child.conversation_id == chat.id
 
 
 # --- denials (all recorded through the gateway) ---
@@ -378,6 +389,120 @@ async def test_scoped_deny_grant_blocks_specific_target(session: AsyncSession, o
 
 
 # --- report_result ---
+
+
+async def test_cross_team_delegation_requires_reason_without_broadening_grant(
+    session: AsyncSession, org: Org
+) -> None:
+    await grant(session, org, org.cto, "organization.delegate", {"targets": "any"})
+    denied = await delegate(session, org, org.cto, org.blogger)
+    assert denied.decision_code == "cross_team_reason_required"
+    allowed = await delegate(
+        session,
+        org,
+        org.cto,
+        org.blogger,
+        cross_team_reason="Marketing owns the release announcement.",
+    )
+    assert allowed.status == "executed"
+    child = await session.get(Task, UUID(allowed.sanitized_output["child_task_id"]))
+    assert child.metadata_json["delegation"]["cross_team_reason"]
+
+
+async def test_schedules_use_actual_gateway_grants_and_cannot_change_another_agent(
+    session: AsyncSession, org: Org
+) -> None:
+    body = {
+        "name": "Daily draft",
+        "brief": "Draft only; director publishes.",
+        "local_time": "09:00",
+        "timezone": "America/Los_Angeles",
+        "idempotency_key": "daily",
+    }
+    denied = await org.gateway(session, org.cto).request("schedules.create", json.dumps(body))
+    assert denied.status == "denied"
+    await grant(session, org, org.cto, "schedules.manage")
+    created = await org.gateway(session, org.cto).request("schedules.create", json.dumps(body))
+    assert created.status == "executed", created
+    row = created.sanitized_output["schedule"]
+    assert row["agent_id"] == str(org.cto.id)
+    assert row["enabled"] is False and row["next_run_at"] is None
+    assert created.sanitized_output["confirmation_input_key"]
+    await grant(session, org, org.swe, "schedules.manage")
+    other = await org.gateway(session, org.swe).request(
+        "schedules.update",
+        json.dumps(
+            {
+                "schedule_id": row["id"],
+                "expected_version": 1,
+                "enabled": False,
+            }
+        ),
+    )
+    assert other.status == "failed" and other.error_code == "schedule_invalid"
+    bad_time = await org.gateway(session, org.cto).request(
+        "schedules.update",
+        json.dumps(
+            {
+                "schedule_id": row["id"],
+                "expected_version": 1,
+                "local_time": "guess",
+            }
+        ),
+    )
+    assert bad_time.status == "failed" and bad_time.error_code == "schedule_invalid"
+    await grant(session, org, org.cto, "schedules.manage", effect="deny")
+    refused = await org.gateway(session, org.cto).request(
+        "schedules.update",
+        json.dumps(
+            {
+                "schedule_id": row["id"],
+                "expected_version": 1,
+                "enabled": False,
+            }
+        ),
+    )
+    assert refused.status == "denied"
+
+
+async def test_blocked_child_returns_inputs_and_cannot_report_completed(
+    session: AsyncSession, org: Org
+) -> None:
+    await grant(session, org, org.cto, "organization.delegate")
+    outcome = await delegate(session, org, org.cto, org.swe)
+    child = await session.get(Task, UUID(outcome.sanitized_output["child_task_id"]))
+    missing = {"key": "ghost_admin_url", "label": "Ghost Admin URL", "value_type": "url"}
+    child.metadata_json = {**child.metadata_json, "required_inputs": [missing]}
+    await session.flush()
+    await grant(session, org, org.swe, "organization.report_result")
+    gateway = org.gateway(session, org.swe, child)
+    denied = await gateway.request("organization.report_result", json.dumps({"summary": "Done"}))
+    assert denied.decision_code == "required_input_missing"
+    reported = await gateway.request(
+        "organization.report_result", json.dumps({"status": "blocked", "summary": "Need Admin URL"})
+    )
+    assert reported.status == "executed"
+    assert child.metadata_json["reported_result"]["missing_inputs"] == [missing]
+    assert org.task.metadata_json["required_inputs"] == [missing]
+
+
+async def test_unchanged_failed_delegation_cannot_switch_colleague_to_repeat(session, org):
+    await grant(session, org, org.cto, "organization.delegate")
+    for target in (org.swe, org.qa):
+        outcome = await delegate(session, org, org.cto, target)
+        child = await session.get(Task, UUID(outcome.sanitized_output["child_task_id"]))
+        child.state = "failed"
+        await session.flush()
+    blocked = await delegate(session, org, org.cto, org.swe)
+    assert blocked.status == "denied" and blocked.decision_code == "unchanged_delegation_limit"
+    changed = await delegate(
+        session,
+        org,
+        org.cto,
+        org.swe,
+        instructions="Now inspect the provided correct source file before fixing it.",
+    )
+    assert changed.status == "executed"
 
 
 async def test_report_result_on_delegated_task(session: AsyncSession, org: Org) -> None:

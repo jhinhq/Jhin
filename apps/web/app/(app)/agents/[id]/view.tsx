@@ -13,6 +13,8 @@ import { ActivityFeed } from "@/components/activity/activity-feed";
 import { AvatarDialog } from "@/components/agents/avatar-dialog";
 import { HelpDirectory } from "@/components/agents/help-directory";
 import { MemoryPanel } from "@/components/agents/memory-panel";
+import { VariablesPanel } from "@/components/variables/variables-panel";
+import { SchedulesPanel } from "@/components/automations/schedules-panel";
 import { PersonaPanel } from "@/components/agents/persona-panel";
 import { SkillsPanel } from "@/components/agents/skills-panel";
 import { TeamStatus } from "@/components/agents/team-status";
@@ -62,6 +64,8 @@ type TabId =
   | "colleagues"
   | "team"
   | "memory"
+  | "variables"
+  | "schedules"
   | "skills"
   | "persona"
   | "access"
@@ -73,6 +77,8 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "colleagues", label: "Colleagues" },
   { id: "team", label: "Team status" },
   { id: "memory", label: "Memory" },
+  { id: "variables", label: "Variables" },
+  { id: "schedules", label: "Schedules" },
   { id: "skills", label: "Skills" },
   { id: "persona", label: "Persona" },
   { id: "access", label: "What it can use" },
@@ -427,6 +433,9 @@ function AgentProfileView() {
         {effectiveTab === "skills" ? (
           <SkillsPanel workspaceId={workspaceId} agentId={agent.id} isAdmin={isAdmin} />
         ) : null}
+
+        {effectiveTab === "variables" ? <VariablesPanel key={agent.id} workspaceId={workspaceId} scope="agent" scopeId={agent.id} scopeName={agent.name} canWrite={isAdmin} /> : null}
+        {effectiveTab === "schedules" ? <div className="space-y-4"><ButtonLink href="/editorial-reviews">Director reviews</ButtonLink><SchedulesPanel workspaceId={workspaceId} agentId={agent.id} agents={[agent]} canWrite={isAdmin} /></div> : null}
 
         {effectiveTab === "persona" ? (
           <PersonaPanel workspaceId={workspaceId} agent={agent} isAdmin={isAdmin} />

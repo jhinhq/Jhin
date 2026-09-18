@@ -19,7 +19,16 @@
   --text-dim: #5f5a85;
   --text-faint: #8f89b3;
   --accent: #7371fc;
-  --accent-strong: #5a58e8;
+  /* Text weight, not decoration: this is the ink for 11–13px labels on
+   * `--accent-soft` chips (the live status pill, the queued-instruction
+   * chip) and for links on `--bg`. `--accent-soft` is 12% ink over whatever
+   * is behind it, so the pill has no background of its own and the old
+   * #5a58e8 measured 4.53:1 in the chat header, 4.34:1 on the app background
+   * and 3.85:1 on a *selected* rail row — where the chip's 12% lands on a row
+   * already tinted 12% — against the 4.5:1 floor small text needs. Darkened
+   * until the worst of those composites clears the floor: 4.80:1 selected,
+   * 4.90:1 hovered, 5.41:1 on the app background, 5.65:1 in the header. */
+  --accent-strong: #4c4ad2;
   --accent-2: #a594f9;
   --accent-soft: rgba(115, 113, 252, 0.12);
   --glow: rgba(165, 148, 249, 0.35);

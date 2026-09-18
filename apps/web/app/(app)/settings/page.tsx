@@ -11,6 +11,7 @@ import { useState } from "react";
 import { PageBody, PageHeader } from "@/components/app-shell";
 import { DangerZone } from "@/components/settings/danger-zone";
 import { PasswordCard } from "@/components/settings/password-card";
+import { MemoryCaptureSettings } from "@/components/settings/memory-capture";
 import { Button, Card, ErrorNote, Field, Input, Spinner, focusRing } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import { useWorkspaceSpend } from "@/lib/hooks";
@@ -99,6 +100,7 @@ export default function SettingsPage() {
         </Card>
 
         <BudgetCard workspaceId={workspaceId} isAdmin={isAdmin} />
+        <MemoryCaptureSettings />
 
         <Card as="section">
           <h2 className="mb-1 font-display text-base font-semibold">People</h2>

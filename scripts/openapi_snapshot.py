@@ -467,7 +467,17 @@ def _compare_fields(
     for name, field in sorted(new.items()):
         if not name or name in old:
             continue
-        if field.required and direction == "request":
+        # Children of a newly added optional object/array are conditional on
+        # the caller opting into that new field. Existing containers still
+        # detect newly required children as breaking.
+        optional_new_parent = any(
+            parent
+            and parent not in old
+            and not descriptor.required
+            and any(name.startswith(parent + separator) for separator in (".", "[]", "{}"))
+            for parent, descriptor in new.items()
+        )
+        if field.required and direction == "request" and not optional_new_parent:
             changes.append(Change(True, where, f"new required {kind} {name!r}"))
         else:
             changes.append(Change(False, where, f"new {kind} {name!r}"))

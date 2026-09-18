@@ -308,6 +308,103 @@ async def test_directory_tool_requires_grant_and_is_scoped(session: AsyncSession
     assert "system_prompt" not in json.dumps(output)
 
 
+async def test_directory_tool_accepts_team_name_and_api_page_size(
+    session: AsyncSession, org: Org
+) -> None:
+    """The natural model call that failed in Marketing must return the team."""
+    await grant(session, org, org.swe, "organization.directory.read")
+    org.hidden.team_id = org.marketing.id
+    outside = Workspace(name="Other", slug=f"other-{new_uuid7().hex[:8]}")
+    session.add(outside)
+    await session.flush()
+    outside_team = Team(workspace_id=outside.id, name="Marketing")
+    session.add(outside_team)
+    await session.flush()
+    session.add(
+        Agent(
+            workspace_id=outside.id,
+            team_id=outside_team.id,
+            name="Outside marketer",
+            slug="outside-marketer",
+        )
+    )
+    await session.flush()
+
+    for reference in ("Marketing", "  mArKeTiNg  ", str(org.marketing.id)):
+        outcome = await org.gateway(session, org.swe).request(
+            "organization.directory.search", json.dumps({"limit": 25, "team_id": reference})
+        )
+        assert outcome.status == "executed", outcome.decision_reason
+        assert {entry["name"] for entry in outcome.sanitized_output["entries"]} == {
+            "Blogger",
+            "SWE",
+        }
+        assert outcome.sanitized_output["has_more"] is False
+
+
+async def test_directory_tool_unknown_team_does_not_claim_empty_roster(
+    session: AsyncSession, org: Org
+) -> None:
+    await grant(session, org, org.swe, "organization.directory.read")
+    outside = Workspace(name="Other", slug=f"other-{new_uuid7().hex[:8]}")
+    session.add(outside)
+    await session.flush()
+    outside_team = Team(workspace_id=outside.id, name="Outside confidential team")
+    session.add(outside_team)
+    await session.flush()
+    for reference in ("Does not exist", str(outside_team.id)):
+        outcome = await org.gateway(session, org.swe).request(
+            "organization.directory.search", json.dumps({"team_id": reference})
+        )
+        assert outcome.decision_code == "team_not_found"
+        assert "Outside confidential team" not in json.dumps(outcome.sanitized_output)
+        assert "Marketing" in json.dumps(outcome.sanitized_output)
+
+
+async def test_directory_tool_duplicate_team_names_require_an_id(
+    session: AsyncSession, org: Org
+) -> None:
+    await grant(session, org, org.swe, "organization.directory.read")
+    duplicate = Team(workspace_id=org.workspace.id, name="marketing")
+    session.add(duplicate)
+    await session.flush()
+    outcome = await org.gateway(session, org.swe).request(
+        "organization.directory.search", json.dumps({"team_id": "Marketing"})
+    )
+    assert outcome.decision_code == "team_name_ambiguous"
+    details = json.dumps(outcome.sanitized_output)
+    assert str(duplicate.id) in details and str(org.marketing.id) in details
+
+    exact = await org.gateway(session, org.swe).request(
+        "organization.directory.search", json.dumps({"team_id": str(duplicate.id)})
+    )
+    assert exact.status == "executed"
+    assert exact.sanitized_output["entries"] == []
+
+
+async def test_directory_tool_pages_remain_bounded(session: AsyncSession, org: Org) -> None:
+    await grant(session, org, org.swe, "organization.directory.read")
+    session.add_all(
+        Agent(workspace_id=org.workspace.id, name=f"Writer {i}", slug=f"writer-{i}")
+        for i in range(30)
+    )
+    await session.flush()
+    for arguments, expected_count in (
+        ({"query": "Writer"}, 10),
+        ({"query": "Writer", "limit": 25}, 25),
+    ):
+        outcome = await org.gateway(session, org.swe).request(
+            "organization.directory.search", json.dumps(arguments)
+        )
+        assert outcome.status == "executed", outcome.decision_reason
+        assert len(outcome.sanitized_output["entries"]) == expected_count
+        assert outcome.sanitized_output["has_more"] is True
+    oversized = await org.gateway(session, org.swe).request(
+        "organization.directory.search", json.dumps({"limit": 26})
+    )
+    assert oversized.decision_code == "invalid_input"
+
+
 async def test_roster_is_bounded_and_rendered(session: AsyncSession, org: Org) -> None:
     roster = await build_roster(session, org.swe)
     assert roster.manager is not None and roster.manager.name == "CTO"
@@ -433,6 +530,30 @@ async def test_solo_agent_says_so_instead_of_rendering_an_empty_roster(
 # --- work requests ---
 
 
+async def test_unchanged_failed_work_request_cannot_switch_colleague_to_repeat(session, org):
+    await human_in_the_loop(session, org)
+    await grant(session, org, org.swe, "organization.work.request")
+    for index, target in enumerate((org.qa, org.blogger)):
+        outcome = await request_work(
+            session, org, org.swe, target, idempotency_key=f"failed-{index}"
+        )
+        assert outcome.status == "executed", outcome
+        row = await session.get(WorkRequest, UUID(outcome.sanitized_output["work_request_id"]))
+        row.status = "failed"
+        await session.flush()
+    blocked = await request_work(session, org, org.swe, org.qa, idempotency_key="repeat-again")
+    assert blocked.status == "denied" and blocked.decision_code == "unchanged_work_request_limit"
+    changed = await request_work(
+        session,
+        org,
+        org.swe,
+        org.qa,
+        idempotency_key="corrected",
+        description="Review the newly supplied release diff, which resolves the missing source.",
+    )
+    assert changed.status == "executed"
+
+
 async def test_request_work_denied_without_grant_and_cross_team_default(
     session: AsyncSession, org: Org
 ) -> None:
@@ -440,9 +561,8 @@ async def test_request_work_denied_without_grant_and_cross_team_default(
     assert denied.status == "denied" and denied.decision_code == "no_grant"
     await grant(session, org, org.swe, "organization.work.request")  # default: team
     cross = await request_work(session, org, org.swe, org.blogger)
-    assert cross.status == "denied"
-    assert cross.decision_code == "request_target_not_permitted"
-    assert await session.scalar(select(WorkRequest)) is None
+    assert cross.status == "executed"  # SWE is an active secondary Marketing member
+    assert await session.scalar(select(WorkRequest)) is not None
     self_request = await request_work(session, org, org.swe, org.swe)
     assert self_request.decision_code == "self_request"
 
@@ -549,7 +669,12 @@ async def test_request_accept_is_idempotent_and_creates_one_task(
 
     # Depth: a request opened from the created task sits at depth 2.
     forward = await org.gateway(session, org.blogger, created).request(
-        "organization.request_work", request_args(org.qa, idempotency_key="forward")
+        "organization.request_work",
+        request_args(
+            org.qa,
+            idempotency_key="forward",
+            cross_team_reason="QA expertise is needed for this test",
+        ),
     )
     assert forward.status == "executed", forward.decision_reason
     second = await session.scalar(

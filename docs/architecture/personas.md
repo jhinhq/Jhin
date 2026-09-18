@@ -160,6 +160,32 @@ authority: choosing a persona changes how the agent sounds, and proposing
 one is approved by a person first. See
 [coordination](coordination.md#default-collaboration-grants-safe-by-default).
 
+### Its twin: `organization.identity.self`
+
+A persona is how an agent sounds; its **name** is what it is called, and the
+same platform default carries `organization.identity.self`
+(`jhin_policy.identity_grant_specs`, migration `0041`) for the one tool that
+writes it, `organization.identity.set_name`
+(`packages/tools/src/jhin_tools/identity.py`). Separate capabilities on
+purpose: an admin can answer "may this agent decide what it is called"
+with one deny grant without also taking away its voice.
+
+The name is held to a stricter bar than a facet, because it is asserted
+unhedged in **layer 1** of the prompt and read back by every colleague
+through the roster: `jhin_policy.agent_name_problem` is an allow-list (letters,
+digits, spaces, hyphens, apostrophes, full stops; one line; at most 48
+characters and three words; no character in Unicode category C; and then the
+persona content rules above, whole, because the name sits *over* the persona
+block). One rule for every writer — the tool, `organization.create_agent`,
+and `POST`/`PATCH /agents` — plus a `(workspace_id, lower(name))` unique index
+(migration `0043`) so one name per workspace survives a race.
+
+**A name is conferred by a person.** The input names no target, so renaming a
+colleague is not expressible; the executor additionally refuses a run with no
+human counterpart, so *ordering* a colleague to rename itself — the same
+outcome one hop out — fails too. See
+[coordination](coordination.md#a-name-is-conferred-by-a-person).
+
 ## Web
 
 The `/personas` library shows the cast and the workspace's own cards as a

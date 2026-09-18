@@ -124,6 +124,7 @@ const GITHUB_APP_FAILED =
   "GitHub did not finish creating the app. If it did create one, open it on github.com, generate a client secret, and paste both under Apps → Connect GitHub; otherwise start again from Connect GitHub.";
 
 interface CreateTarget {
+  providerKey?: "composio";
   connector: ConnectorInfo;
   prefill?: ConnectionPrefill;
 }
@@ -373,14 +374,15 @@ export default function AppsPage() {
     setDetailId(connection.id);
   };
 
-  const onConnect = (entry: CatalogApp) => {
-    const resolved: ConnectTarget = connectTarget(entry, connectorList);
+  const onConnect = (entry: CatalogApp, method?: import("@/lib/apps").AppConnectMethod) => {
+    const resolved: ConnectTarget = connectTarget(entry, connectorList, method);
     if (resolved.kind === "unsupported") {
       setUnsupported(resolved.reason);
       return;
     }
     setUnsupported(null);
     setCreateFor({
+      providerKey: resolved.kind === "native" ? resolved.providerKey : undefined,
       connector: resolved.connector,
       prefill:
         resolved.kind === "mcp"
@@ -549,6 +551,7 @@ export default function AppsPage() {
                 <LoadError what="the app library" onRetry={() => void catalog.refetch()} />
               ) : (
                 <AppLibrary
+                  connectors={connectorList}
                   entries={catalog.data}
                   connections={connectionList}
                   canManage={isAdmin}
@@ -608,6 +611,7 @@ export default function AppsPage() {
       {connectTargetOpen ? (
         <ConnectPanel
           workspaceId={workspaceId}
+          providerKey={connectTargetOpen.providerKey}
           connector={connectTargetOpen.connector}
           prefill={connectTargetOpen.prefill}
           onClose={closeConnect}
@@ -651,13 +655,15 @@ export default function AppsPage() {
           connection={detail}
           connector={connectorFor(detail.connector_type)}
           canManage={isAdmin}
-          title={justConnected ? `${detail.name} is connected` : undefined}
+          title={justConnected ? `${detail.name} ${detail.status === "active" ? "is connected" : "needs attention"}` : undefined}
           intro={
             justConnected
-              ? "Connected. Who may use it? Give it to an agent below and Jhin writes their permissions."
+              ? detail.status === "active"
+                ? "Connected. Who may use it? Give it to an agent below and Jhin writes their permissions."
+                : "Saved, but the initial connection check did not succeed. Review the error, correct the connection, and use Verify in Advanced settings to check again."
               : undefined
           }
-          initialTab={justConnected ? "tools" : "overview"}
+          initialTab="overview"
           onClose={closeDetail}
           onChanged={() => invalidate()}
           onRemoved={() => {

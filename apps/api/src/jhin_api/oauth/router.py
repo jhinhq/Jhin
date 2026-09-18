@@ -169,7 +169,15 @@ async def get_redirect_uri(_auth: CurrentAuth, settings: SettingsDep) -> OAuthRe
     exactly do I paste?" is the one question that stalls a self-hosted OAuth
     setup.
     """
+    from jhin_api.oauth import composio
+    from jhin_connectors.composio import NATIVE_TOOLKITS
+
     return OAuthRedirectOut(
+        composio={
+            "configured": composio.configured(settings),
+            "callback_url": composio.callback_url(settings),
+            "toolkits": sorted(NATIVE_TOOLKITS),
+        },
         redirect_uri=redirect_module.redirect_uri(settings),
         github_app_redirect_uri=redirect_module.github_app_redirect_uri(settings),
         is_https=redirect_module.is_https_redirect(settings),
@@ -179,6 +187,55 @@ async def get_redirect_uri(_auth: CurrentAuth, settings: SettingsDep) -> OAuthRe
         github_app_permissions=service.github_app_permissions(),
         preferred_sign_in="device_code" if settings.oauth_prefer_device_code else "redirect",
     )
+
+
+@oauth_public_router.get(
+    "/composio/callback", response_model=None, status_code=status.HTTP_303_SEE_OTHER
+)
+async def composio_callback(
+    request: Request,
+    db: DbSession,
+    crypto: SecretCryptoDep,
+    http_client: OAuthHttpClientDep,
+    settings: SettingsDep,
+    auth: OptionalAuth,
+    session_uri: str | None = None,
+) -> Response:
+    from jhin_api.oauth import composio
+
+    if not _is_navigation(request):
+        return Response(status_code=204, headers={"Cache-Control": "no-store"})
+    result = service.CallbackResult(connection=None, error="expired")
+    handle = _bounded(request.cookies.get(composio.CALLBACK_COOKIE), MAX_STATE_LENGTH)
+    verifier = _bounded(session_uri, MAX_CALLBACK_PARAM_LENGTH)
+    if auth is None:
+        result = service.CallbackResult(connection=None, error="signed_out")
+    elif handle and verifier:
+        try:
+            result = await composio.complete(
+                db,
+                crypto,
+                http_client,
+                settings,
+                user_id=auth.user.id,
+                state=handle,
+                session_uri=verifier,
+                request_id=req_id(request),
+                ip_hash=ip_hash(request),
+            )
+        except Exception:
+            with contextlib.suppress(Exception):
+                await db.rollback()
+    response = _no_store(
+        redirect_module.app_return_url(
+            settings,
+            public_id=result.public_id,
+            error=result.error,
+            connector_type=result.connector_type,
+        )
+    )
+    response.delete_cookie(composio.CALLBACK_COOKIE, path=composio.CALLBACK_PATH)
+    return response
 
 
 @oauth_public_router.get("/callback", status_code=status.HTTP_303_SEE_OTHER)
@@ -403,6 +460,7 @@ async def probe_connector(
 )
 async def start_authorization(
     request: Request,
+    response: Response,
     ctx: AdminCtx,
     db: DbSession,
     crypto: SecretCryptoDep,
@@ -425,7 +483,7 @@ async def start_authorization(
         invalid_detail="Authorization payload is invalid",
         too_large_detail="Authorization payload is too large",
     )
-    return await service.start_authorization(
+    result = await service.start_authorization(
         db,
         crypto,
         ctx,
@@ -435,6 +493,10 @@ async def start_authorization(
         request_id=req_id(request),
         ip_hash=ip_hash(request),
     )
+    from jhin_api.oauth.composio import set_callback_cookie
+
+    set_callback_cookie(response, result, settings)
+    return result
 
 
 @oauth_router.post("/device/start", status_code=status.HTTP_201_CREATED)

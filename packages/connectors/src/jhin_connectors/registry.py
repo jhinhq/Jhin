@@ -78,6 +78,12 @@ def _mcp() -> Connector:
     return McpConnector()
 
 
+def _composio() -> Connector:
+    from jhin_connectors.composio.connector import ComposioConnector
+
+    return ComposioConnector()
+
+
 def _http() -> Connector:
     from jhin_connectors.http.connector import HttpConnector
 
@@ -90,6 +96,18 @@ def _web() -> Connector:
     return WebConnector()
 
 
+def _ghost() -> Connector:
+    from jhin_connectors.ghost.connector import GhostConnector
+
+    return GhostConnector()
+
+
+def _unsplash() -> Connector:
+    from jhin_connectors.unsplash.connector import UnsplashConnector
+
+    return UnsplashConnector()
+
+
 # One factory per shipped connector. Factories keep import cost lazy and are
 # the single line a contributor adds for a new connector (plan 36.5).
 DEFAULT_CONNECTORS: tuple[Callable[[], Connector], ...] = (
@@ -99,8 +117,11 @@ DEFAULT_CONNECTORS: tuple[Callable[[], Connector], ...] = (
     _vercel,
     _supabase,
     _mcp,
+    _composio,
     _http,
     _web,
+    _ghost,
+    _unsplash,
 )
 
 
@@ -128,6 +149,10 @@ def build_default_catalog(registry: ConnectorRegistry | None = None) -> ToolCata
         from jhin_connectors.mcp.source import McpToolSource
 
         catalog.add_dynamic_source(McpToolSource())
+    if active.get("composio") is not None:
+        from jhin_connectors.composio.source import ComposioToolSource
+
+        catalog.add_dynamic_source(ComposioToolSource())
     return catalog
 
 

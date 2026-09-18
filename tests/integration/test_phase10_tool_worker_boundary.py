@@ -224,7 +224,7 @@ def test_compose_ps_parser_accepts_array_object_and_ndjson() -> None:
         {"api"},
     )
     assert set(parsed_one) == {"api"}
-    assert len(EXPECTED_ROOTFUL_SERVICES) == 19  # fake-mcp + fake-websearch joined the overlay
+    assert len(EXPECTED_ROOTFUL_SERVICES) == 20  # Includes runtime-gateway and the fake providers.
     assert EXPECTED_ROOTFUL_SERVICES | {"rootless-docker-transport"} == EXPECTED_ROOTLESS_SERVICES
 
 
@@ -9947,7 +9947,10 @@ async def test_advertised_tools_filter_before_reasoning() -> None:
             # (jhin_models.base.wire_tool_name): the one connector capability
             # this helper grants, plus the baseline every new agent is created
             # with (jhin_policy.agent_defaults.default_agent_grant_specs):
-            # collaboration, memory, and choosing its own persona.
+            # collaboration, memory, choosing its own persona, and setting its
+            # own name (organization.identity.set_name, whose capability
+            # organization.identity.self the baseline carries and which has no
+            # validator, so it is offered on an assigned task too).
             # organization.ask_person is granted too but withheld here because
             # an assigned task has nobody watching it; organization.persona.assign
             # needs manage_agents, which the baseline never carries.
@@ -9962,6 +9965,7 @@ async def test_advertised_tools_filter_before_reasoning() -> None:
                 "organization__persona__list",
                 "organization__persona__assign_self",
                 "organization__persona__create",
+                "organization__identity__set_name",
             }
             assert await _calls(client, workspace_id, str(detail["runs"][0]["id"])) == []
     finally:
@@ -10244,7 +10248,10 @@ async def test_agent_crash_matrix_retries_without_tool_effect_duplication(
     ("failpoint", "expected_effects", "expected_status"),
     [
         (TOOL_BEFORE_CLAIM, 1, "completed"),
-        (TOOL_AFTER_CLAIM, 0, "execution_unknown"),
+        # The claim is durable but the dispatch compare-and-set never
+        # committed, so recovery can prove no executor ran and finishes the
+        # call once rather than abandoning the run.
+        (TOOL_AFTER_CLAIM, 1, "completed"),
         (TOOL_AFTER_EFFECT, 1, "execution_unknown"),
     ],
 )
@@ -10282,7 +10289,12 @@ async def test_tool_crash_matrix_preserves_claim_and_ambiguity_contract(
                 assert calls == []
                 assert await _comment_count(marker) == 0
             elif failpoint == TOOL_AFTER_CLAIM:
-                assert len(calls) == 1 and calls[0]["status"] == "executing"
+                # The barrier sits between the durable claim and the
+                # dispatch compare-and-set, which is exactly the window the
+                # two-step claim exists to make visible: the row reads
+                # ``claimed``, and that is the proof the executor was never
+                # entered.
+                assert len(calls) == 1 and calls[0]["status"] == "claimed"
                 assert str(calls[0]["id"]) == invocation_id
                 assert await _comment_count(marker) == 0
             else:

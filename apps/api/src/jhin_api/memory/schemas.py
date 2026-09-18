@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
 from jhin_domain import MemoryKind, MemoryScope, MemoryStatus
 from jhin_memory import DEFAULT_BACKFILL_LIMIT, MAX_BACKFILL_LIMIT
+from jhin_memory.screening import unsafe_metadata
 from jhin_memory.types import MAX_CANDIDATE_CHARS, MAX_TAGS
+from jhin_secrets.intake import redact_legacy_payload, redact_legacy_text
 
 
 class MemoryOut(BaseModel):
@@ -40,12 +42,27 @@ class MemoryOut(BaseModel):
     version: int
     supersedes_id: UUID | None
     has_embedding: bool = False
+    evidence_status: str = "unsupported"
     embedding_model: str | None
     created_by_type: str
     created_by_id: UUID | None
     policy_json: dict[str, Any]
     created_at: datetime
     updated_at: datetime
+
+    # Pre-intake human memories remain valid evidence. Redact only the public
+    # projection, preserving their stored content, version, and source links.
+    @field_serializer("subject", "content")
+    def serialize_legacy_text(self, value: str | None) -> str | None:
+        return None if value is None else redact_legacy_text(value)
+
+    @field_serializer("tags_json")
+    def serialize_legacy_tags(self, value: list[str]) -> list[str]:
+        return cast(list[str], redact_legacy_payload(value))
+
+    @field_serializer("policy_json")
+    def serialize_legacy_policy(self, value: dict[str, Any]) -> dict[str, Any]:
+        return cast(dict[str, Any], redact_legacy_payload(value))
 
 
 class MemoryListOut(BaseModel):
@@ -56,6 +73,8 @@ class MemoryListOut(BaseModel):
 def _clean_tags(value: list[str]) -> list[str]:
     if len(value) > MAX_TAGS:
         raise ValueError(f"at most {MAX_TAGS} tags")
+    if unsafe_metadata(None, value):
+        raise ValueError("Keep credentials out of memory tags")
     cleaned = [tag.strip().lower()[:50] for tag in value if tag.strip()]
     return list(dict.fromkeys(cleaned))
 

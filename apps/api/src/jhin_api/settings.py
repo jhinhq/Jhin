@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from functools import cached_property, lru_cache
 from ipaddress import IPv4Network, IPv6Network, ip_network
+from typing import Annotated, Any
 from urllib.parse import urlsplit
 
-from pydantic import model_validator
-from pydantic_settings import SettingsConfigDict
+from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic_settings import NoDecode, SettingsConfigDict
 
 from jhin_observability import ObservabilitySettings
 
@@ -84,6 +86,18 @@ class Settings(ObservabilitySettings):
     # API share an origin through the Next.js proxy. Set it only when the
     # browser reaches Jhin at a different origin than APP_URL.
     oauth_redirect_base_url: str = ""
+    # Composio project credentials stay server-side. Native connection grants
+    # remain in Jhin; Composio owns the provider tokens and their refresh.
+    composio_api_key: SecretStr = Field(default=SecretStr(""), repr=False)
+    composio_auth_configs: Annotated[dict[str, str], NoDecode] = Field(default_factory=dict)
+
+    @field_validator("composio_auth_configs", mode="before")
+    @classmethod
+    def _parse_composio_configs(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return json.loads(value) if value.strip() else {}
+        return value
+
     # How long a pending authorization stays claimable. Thirty minutes, not
     # ten: a single round trip can contain an SSO login at the edge (a Jhin
     # behind Cloudflare Access adds one, and it can include an emailed
@@ -130,10 +144,10 @@ class Settings(ObservabilitySettings):
 
     # --- Request limits ---
     # Global ceiling on any request body, enforced by middleware. Set above the
-    # largest legitimate upload (8 MiB media, 5 MiB skill bundles) so per-route
+    # largest legitimate upload (25 MiB files, 8 MiB media, 5 MiB skills) so per-route
     # limits keep producing their own specific errors; this only catches the
     # endpoints that have no limit of their own.
-    max_request_body_bytes: int = 16 * 1024 * 1024
+    max_request_body_bytes: int = 32 * 1024 * 1024
 
     # --- Proxy awareness ---
     # Comma-separated CIDRs whose X-Forwarded-For header may be believed. The

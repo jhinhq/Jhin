@@ -124,3 +124,21 @@ class TestGrantPatterns:
         assert grant_pattern_problem("agent.permission.*") == sentence
         assert grant_pattern_problem("secret") == sentence
         assert grant_pattern_problem("policy.*") == sentence
+
+    def test_a_subtree_above_a_forbidden_namespace_is_refused(self) -> None:
+        """``agent`` is not itself forbidden — it is a proper ancestor of
+        ``agent.permission`` — so ``agent.*`` was a writable pattern matching
+        every capability an agent must never hold. Nothing was registered
+        under those names, but a grant list is what a human reads to decide
+        whether an agent is safe."""
+        sentence = "this subtree contains capabilities that can never be granted to agents"
+        assert grant_pattern_problem("agent.*") == sentence
+        assert grant_pattern_problem("workspace.*") == sentence
+        # The exact capability ``agent`` is still not a forbidden namespace,
+        # and neither is a sibling subtree.
+        assert grant_pattern_problem("agent") is None
+        assert grant_pattern_problem("organization.*") is None
+        assert grant_pattern_problem("organization.identity.self") is None
+        # "everything" keeps its documented meaning; it is a pattern form,
+        # not an accident of hierarchy.
+        assert grant_pattern_problem("*") is None

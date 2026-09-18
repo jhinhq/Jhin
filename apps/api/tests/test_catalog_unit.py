@@ -280,6 +280,34 @@ async def test_a_curated_entry_publishes_how_it_is_connected(
     assert detail.json()["sign_in"] == published["supabase"] == "remote_mcp"
 
 
+async def test_identity_scan_is_shared_by_search_and_facets_until_generation_changes(
+    catalog_routes: CatalogRoutes, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jhin_api.catalog import service
+
+    scan = service.duplicate_app_keys
+    calls = 0
+
+    def counted(*args: Any, **kwargs: Any) -> tuple[str, ...]:
+        nonlocal calls
+        calls += 1
+        return scan(*args, **kwargs)
+
+    monkeypatch.setattr(service, "duplicate_app_keys", counted)
+    previous = await _publish(session, {"slug": "notion_copy", "name": "Notion"})
+    assert (await _get(catalog_routes, ENTRIES, q="notion"))["total"] == 1
+    assert (await _get(catalog_routes, FACETS, q="notion"))["total"] == 1
+    await _get(catalog_routes, ENTRIES, q="github")
+    assert calls == 1
+
+    previous.status = "superseded"
+    await session.commit()
+    await _publish(session, {"slug": "new_product", "name": "New Product"}, tag="2026.09.08")
+    assert (await _get(catalog_routes, ENTRIES, q="new_product"))["total"] == 1
+    await _get(catalog_routes, FACETS)
+    assert calls == 2
+
+
 # --------------------------------------------------------------------------
 # ranking and curated precedence
 # --------------------------------------------------------------------------
@@ -308,21 +336,219 @@ async def test_search_ranks_an_exact_name_above_a_prefix_above_a_description_hit
     )
 
 
-async def test_a_curated_entry_precedes_a_synced_one_that_scores_higher(
+async def test_a_curated_entry_replaces_a_synced_equivalent(
     catalog_routes: CatalogRoutes, session: AsyncSession
 ) -> None:
-    """Ranking decides the order *within* each half. Between the halves the
-    rule is simply that a reviewed integration is what somebody is offered
-    first — a crawled exact-name match does not get to jump it."""
+    """A different import slug must not create a second card for the same app."""
     await _publish(session, {"slug": "notion_clone", "name": "Notion"})
 
     payload = await _get(catalog_routes, ENTRIES, q="notion")
 
     assert payload["items"][0]["source"] == "builtin"
     assert payload["items"][0]["slug"] == "notion"
-    assert [item["source"] for item in payload["items"]][-1] == "synced"
-    # The synced row scored the exact-name 100 and still came second.
-    assert _slugs(payload) == ["notion", "notion_clone"]
+    assert _slugs(payload) == ["notion"]
+    assert payload["total"] == 1
+
+
+async def test_imported_builtin_duplicates_are_hidden_before_filters_and_paging(
+    catalog_routes: CatalogRoutes, session: AsyncSession
+) -> None:
+    from jhin_catalog_sync.wire import safe_slug
+
+    key = "mcp:registry:io.github.github/github-mcp-server"
+    renamed = safe_slug("github", key, builtin_slugs())
+    await _publish(
+        session,
+        {"slug": renamed, "name": "Remote code service", "canonical_key": key},
+        {"slug": "gh_by_name", "name": "GitHub MCP Server"},
+        {
+            "slug": "gh_by_endpoint",
+            "name": "Code assistant",
+            "mcp_url": "https://API.GITHUBCOPILOT.COM:443/mcp/",
+        },
+        {
+            "slug": "gh_by_repo",
+            "name": "Repository service",
+            "mcp_json": {
+                "repo": {
+                    "host": "github.com",
+                    "owner": "GitHub",
+                    "repo": "github-mcp-server.git",
+                    "subpath": "",
+                }
+            },
+        },
+        {"slug": "github_analytics", "name": "GitHub Analytics"},
+        {
+            "slug": "github_skill",
+            "name": "GitHub MCP Server",
+            "kind": "skill",
+            "canonical_key": "skill:github:acme/github",
+        },
+    )
+
+    page = await _get(catalog_routes, ENTRIES, limit=100, include_indexed=True)
+    assert page["total"] == BUILTIN_COUNT + 2
+    assert set(_slugs(page)) == builtin_slugs() | {"github_analytics", "github_skill"}
+    tail = await _get(catalog_routes, ENTRIES, offset=BUILTIN_COUNT, limit=1)
+    assert _slugs(tail) == ["github_analytics"]
+    searched = await _get(catalog_routes, ENTRIES, q="github", kind="mcp")
+    assert _slugs(searched) == ["github", "deepwiki", "github_analytics"]
+    community = await _get(catalog_routes, ENTRIES, trust_tier="registry_verified", kind="mcp")
+    assert _slugs(community) == ["github_analytics"]
+    assert (await _get(catalog_routes, FACETS, kind="mcp"))["total"] == BUILTIN_COUNT + 1
+    assert (await _get(catalog_routes, ENTRIES, q="gh_by_name"))["total"] == 0
+
+
+async def test_community_equivalents_have_one_stable_winner_before_filters(
+    catalog_routes: CatalogRoutes, session: AsyncSession
+) -> None:
+    repo = {"host": "github.com", "owner": "acme", "repo": "kestrel", "subpath": ""}
+    await _publish(
+        session,
+        {"slug": "kestrel_best", "name": "Kestrel", "mcp_json": {"repo": repo}, "popularity": 0.8},
+        {
+            "slug": "kestrel_copy",
+            "name": "Kestrel MCP Server",
+            "mcp_json": {"repo": repo},
+            "trust_tier": "indexed",
+            "trust_rank": 4,
+            "popularity": 100,
+        },
+        {
+            "slug": "kestrel_alias",
+            "name": "Kestrel Cloud",
+            "mcp_url": "https://mcp.example.com/kestrel_best/",
+        },
+        {
+            "slug": "kestrel_extension",
+            "name": "Kestrel Analytics",
+            "mcp_json": {"repo": {**repo, "subpath": "packages/analytics"}},
+        },
+        {
+            "slug": "kestrel_unrelated",
+            "name": "Kestrel",
+            "mcp_json": {"repo": {**repo, "owner": "another", "repo": "different"}},
+        },
+    )
+    payload = await _get(catalog_routes, ENTRIES, q="kestrel", include_indexed=True)
+    assert _slugs(payload) == ["kestrel_best", "kestrel_unrelated", "kestrel_extension"]
+    assert payload["total"] == 3
+    assert (await _get(catalog_routes, ENTRIES, trust_tier="indexed", include_indexed=True))[
+        "total"
+    ] == 0
+    counts = await _get(catalog_routes, FACETS, q="kestrel", include_indexed=True)
+    assert counts["total"] == 3
+    assert all(
+        sum(bucket["count"] for bucket in counts[dimension]) == 3
+        for dimension in ("kind", "category", "trust_tier", "transport", "auth_hint")
+    )
+
+
+async def test_published_package_wrappers_and_smithery_aliases_deduplicate_before_pagination(
+    catalog_routes: CatalogRoutes, session: AsyncSession
+) -> None:
+    await _publish(
+        session,
+        {"slug": "github_mcp_server_1ad4", "name": "@0xshariq/github-mcp-server"},
+        {"slug": "servers_05a9", "name": "GitHub API MCP Server"},
+        {
+            "slug": "pinion05_supabase_mcp_lite",
+            "name": "pinion05-supabase-mcp-lite",
+            "mcp_json": {
+                "remotes": [{"url": "https://server.smithery.ai/@pinion05/supabase-mcp-lite/mcp"}]
+            },
+        },
+        {
+            "slug": "supabase_mcp_lite",
+            "name": "supabase-mcp-lite",
+            "trust_tier": "indexed",
+            "trust_rank": 4,
+            "mcp_json": {"smithery_qualified_name": "pinion05/supabase-mcp-lite"},
+        },
+        {
+            "slug": "blockscout_registry",
+            "name": "Blockscout",
+            "mcp_json": {
+                "remotes": [{"url": "https://server.smithery.ai/@blockscout/mcp-server/mcp"}]
+            },
+        },
+        {
+            "slug": "blockscout_smithery",
+            "name": "Blockscout MCP Server",
+            "trust_tier": "indexed",
+            "trust_rank": 4,
+            "mcp_json": {"smithery_qualified_name": "blockscout/mcp-server"},
+        },
+        {"slug": "github_security", "name": "@acme/github-security-mcp-server"},
+    )
+    listing = await _get(catalog_routes, ENTRIES, include_indexed=True, limit=100)
+    assert listing["total"] == BUILTIN_COUNT + 2
+    assert set(_slugs(listing)) == builtin_slugs() | {"blockscout_registry", "github_security"}
+    page = await _get(catalog_routes, ENTRIES, include_indexed=True, offset=BUILTIN_COUNT, limit=1)
+    assert len(page["items"]) == 1
+    assert page["total"] == listing["total"]
+    assert (await _get(catalog_routes, FACETS, include_indexed=True))["total"] == listing["total"]
+    assert (await _get(catalog_routes, ENTRIES, q="0xshariq", include_indexed=True))["total"] == 0
+    assert (await _get(catalog_routes, ENTRIES, trust_tier="indexed", include_indexed=True))[
+        "total"
+    ] == 0
+
+
+async def test_reviewed_supabase_wrappers_do_not_hide_distinct_supabase_backed_apps(
+    catalog_routes: CatalogRoutes, session: AsyncSession
+) -> None:
+    await _publish(
+        session,
+        {"slug": "supabase_admin", "name": "Supabase Admin Self-Hosted"},
+        {"slug": "supabase_cloud", "name": "supabase-mcp-cloud-and-selfhosted"},
+        {"slug": "supabase_godmode", "name": "@mseep/supabase-godmode"},
+        {"slug": "health", "name": "Health Data (your own Supabase)"},
+        {"slug": "supabase_ticketing_system", "name": "supabase-ticketing-system"},
+    )
+    page = await _get(catalog_routes, ENTRIES, include_indexed=True, limit=100)
+    assert page["total"] == BUILTIN_COUNT + 2
+    assert set(_slugs(page)) == builtin_slugs() | {"health", "supabase_ticketing_system"}
+    assert (await _get(catalog_routes, FACETS, include_indexed=True))["total"] == page["total"]
+    assert (await _get(catalog_routes, ENTRIES, trust_tier="registry_verified"))["total"] == 2
+    detail = await _get(catalog_routes, f"{ENTRIES}/supabase_godmode")
+    assert detail["source"] == "synced"
+    assert detail["connector_type"] is None
+
+
+async def test_hidden_duplicate_keeps_original_detail_and_risk_floor(
+    catalog_routes: CatalogRoutes, session: AsyncSession
+) -> None:
+    await _publish(
+        session,
+        {
+            "slug": "notion_legacy",
+            "name": "Notion",
+            "trust_tier": "indexed",
+            "trust_rank": 4,
+            "default_risk": "elevated",
+        },
+    )
+    connection = await _connection(
+        session,
+        catalog_routes.workspace_id,
+        server_slug="notion_legacy",
+        mcp_tools=[_tool("read", "read")],
+    )
+    assert (await _get(catalog_routes, ENTRIES, q="notion", include_indexed=True))["total"] == 1
+    detail = await _get(catalog_routes, f"{ENTRIES}/notion_legacy")
+    assert detail["source"] == "synced"
+    assert detail["default_risk"] == "elevated"
+    assert detail["connector_type"] is None
+    response = await catalog_routes.client.post(
+        _floor_url(catalog_routes.workspace_id),
+        headers=CSRF_HEADERS,
+        json={"connection_id": str(connection.id), "slug": "notion_legacy"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["floor"] == "elevated"
+    await session.refresh(connection)
+    assert connection.config_json["server_slug"] == "notion_legacy"
 
 
 async def test_a_synced_row_may_not_take_a_curated_slug(
@@ -1062,6 +1288,29 @@ async def test_hostile_detail_text_arrives_bounded_and_inert(
 # --------------------------------------------------------------------------
 # apply-risk-floor
 # --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("slug", ["supabase", "linear", "vercel", "notion"])
+async def test_browser_sign_in_detail_uses_official_mcp_schema(
+    catalog_routes: CatalogRoutes, slug: str
+) -> None:
+    response = await catalog_routes.client.get(f"{ENTRIES}/{slug}")
+    assert response.status_code == 200
+    detail = response.json()
+    schema = detail["config_schema"]
+    assert schema["connector_type"] == "mcp"
+    fields = {field["name"]: field for field in schema["fields"]}
+    assert fields["server_url"]["default"] == detail["mcp_url"]
+    assert fields["server_slug"]["default"] == slug
+    assert "toolkit" not in fields
+    assert "management_token" not in fields
+    assert "composio" not in detail["auth_note"].lower()
+
+
+async def test_native_browser_sign_in_keeps_native_schema(catalog_routes: CatalogRoutes) -> None:
+    response = await catalog_routes.client.get(f"{ENTRIES}/github")
+    assert response.status_code == 200
+    assert response.json()["config_schema"]["connector_type"] == "github"
 
 
 def _tool(slug: str, risk: str) -> dict[str, Any]:

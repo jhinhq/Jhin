@@ -74,6 +74,8 @@ class SecretType(StrEnum):
     # JSON object of connector credential fields (plan 6.9), e.g. a GitHub
     # PAT or app id + private key + installation id.
     CONNECTION_CREDENTIALS = "connection_credentials"
+    # Broker account identity plus a public toolkit slug; the latter is metadata.
+    COMPOSIO_BINDING = "composio_binding"
     # Per-connection webhook signing secret (plan 19); shown once at creation.
     WEBHOOK_SECRET = "webhook_secret"
     # The PKCE code verifier (or device code) of one pending OAuth
@@ -351,12 +353,51 @@ class ToolCallStatus(StrEnum):
     # Parked on a pending work review (``tool_call.review_id``); resumes
     # through the normal approval/claim/effect path once decided.
     PENDING_REVIEW = "pending_review"
+    # The durable claim, taken before anything can happen: this attempt owns
+    # the invocation, and its executor has *not* been entered. The gateway
+    # advances it to ``executing`` in one compare-and-set immediately before
+    # dispatch, so a row still sitting here is proof that no external effect
+    # can have occurred and the call may be dispatched again.
+    CLAIMED = "claimed"
+    # The executor was entered. Whether it reached the outside world, and
+    # what happened if it did, is not knowable from this row alone.
     EXECUTING = "executing"
     EXECUTION_UNKNOWN = "execution_unknown"
     COMPLETED = "completed"
     FAILED = "failed"
     DENIED = "denied"
     REJECTED = "rejected"
+
+
+# Statuses in which a *finished* run leaves a call nobody can vouch for. Both
+# are the far side of the dispatch compare-and-set described above:
+# ``executing`` is a call whose executor was entered and never came back, and
+# ``execution_unknown`` is that same call once recovery has said so out loud.
+# Neither can be shown to have missed the outside world.
+#
+# Read this from the ends of the system that have to *decide* something about
+# a dead run — whether a turn may be offered back to the person who asked for
+# it, what to tell them while they wait. It is the row's own record of a
+# decision already taken, not a second opinion about the same call:
+#
+# * ``claimed`` is absent because the gateway proves nothing was dispatched
+#   there and re-executes such a call itself.
+# * A call whose *tool* declares a repeat safe (``redispatch_is_safe`` on the
+#   tool definition) is re-dispatched by recovery, so it ends terminal and
+#   never reaches this set either.
+#
+# What is left is the residue: a call the platform itself declined to repeat.
+# Downstream code should read the conclusion here rather than re-deriving it
+# from those inputs, so there is one classification and it moves in one place.
+#
+# One caveat, and it matters for anything deciding about a row rather than
+# about a live call: the second bullet is a statement about what recovery does
+# *now*. A row written before ``redispatch_is_safe`` existed — or one whose run
+# died before anything reconciled it — sits in this set whatever its tool says,
+# so a reader looking at history (was this turn safe to send again?) must ask
+# the tool's own declaration as well. That is still one classification: the
+# tool definition is where it lives, and this set is the row's side of it.
+UNRECONCILED_TOOL_STATUSES = frozenset({ToolCallStatus.EXECUTING, ToolCallStatus.EXECUTION_UNKNOWN})
 
 
 class AvatarKind(StrEnum):

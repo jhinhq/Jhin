@@ -28,6 +28,10 @@ components: `web`, `api`, `workflow-worker`, `agent-worker`, `tool-worker`,
 
 ## Installation paths
 
+Private installations can use direct app sign-in without a public domain.
+See [local app sign-in](operations/local-app-sign-in.md) for localhost access,
+private NAS forwarding, and provider-specific setup requirements.
+
 ### Release bundle (recommended)
 
 Each GitHub Release attaches `jhin-<version>-compose.tar.gz`, `image-lock.json`,
@@ -282,18 +286,97 @@ describes the evidence the release approval expects.
 5. Apply: `docker compose run --rm --no-deps api jhin-db-migrate`. Migrations
    are forward-only; a release that declares a forward-only migration
    promises no database downgrade.
-6. Roll out in order: `api`, then `workflow-worker`, `tool-worker`,
-   `agent-worker`, `event-worker`, then `web`:
-   `docker compose up -d --wait --wait-timeout 300`.
+6. Roll out in order: `sandbox-runner`, then `api`, then `workflow-worker`,
+   `tool-worker`, `agent-worker`, `event-worker`, then `web`. Compose cannot
+   enforce the first step for you — `tool-worker` reaches `sandbox-runner`
+   over HTTP and has no `depends_on` edge to it — so take that one on its
+   own and let the rest follow:
+
+   ```bash
+   docker compose up -d --wait --wait-timeout 300 sandbox-runner
+   docker compose up -d --wait --wait-timeout 300
+   ```
+
+   **`sandbox-runner` goes first, and that one is a hard interlock.** A
+   `tool-worker` at this version sends every sandbox job the invocation it
+   belongs to, which is what lets a re-dispatched tool call attach to the
+   container its first dispatch started instead of running a second one. The
+   runner's job request rejects fields it does not know, so a new
+   `tool-worker` against an older `sandbox-runner` does not degrade — every
+   sandbox job is refused `422` and every CLI tool call fails until the
+   runner catches up. The reverse pairing is safe: an older `tool-worker`
+   sends no invocation, and a newer runner simply skips the ledger for it.
+
+   **`web` goes last, and the order is not a preference.** The web app renders
+   what the API tells it; a newer `web` against an older `api` is simply
+   missing fields, and it is built to degrade rather than guess — a failure
+   card falls back to "The run stopped before it finished." instead of the
+   run's internal note, and the chat's "how long has this been thinking"
+   timer shows nothing at all rather than count from the wrong clock. So the
+   cost of getting this wrong is temporarily less detail, never a wrong answer
+   or an internal sentence in front of a customer. Finish the rollout and the
+   detail comes back; nothing needs clearing or restarting.
+
+   *Nothing at all* is the exact claim, and it is worth stating because the
+   near miss is a wrong answer rather than less detail. `active_run_working_since`
+   is absent from an older `api` and `null` from a current one that measured a
+   run parked on an approval nobody closed, and the chat says different things
+   about those: silence for the first, "Working time unavailable" (or the
+   seconds the turn banked before it stalled) plus a tooltip for the second —
+   one that says only that nothing here has an instant to count from, and
+   offers a pause nobody closed as one possibility among several rather than
+   naming it as the cause, because the same `null` arrives for a finished run
+   and for a turn with no start recorded. A `web` that treated a missing field
+   as a measured one would tell every reader mid-rollout that their agents'
+   work could not be timed — a sentence about *their* workspace, not about
+   the deploy. `apps/web/lib/chat.ts` (`statusLabelFor`) is where the two are
+   kept apart, and `apps/web/tests/chat-status-timer.test.tsx` is the gate.
 7. Verify health (below) and watch in-flight workflows complete. Workflow
    code is versioned so Phase 9 histories replay on Phase 10 workers; CI
    proves this with `make test-tool-worker-live-upgrade`.
 
-Rollback boundary: before step 5 you can revert images freely. After a
-migration, roll back application images only if the release notes state the
-schema is backward compatible; otherwise restore from the backup taken in
-step 2. Release tags are immutable; a bad release is superseded by the next
-patch version.
+## Rolling back
+
+Before step 5 you can revert images freely. After a migration, roll back
+application images only if the release notes state the schema is backward
+compatible; otherwise restore from the backup taken in step 2. Release tags
+are immutable; a bad release is superseded by the next patch version.
+
+**Do the release notes' rollback steps first, before you change a single
+image.** A release that adds a state the previous version has never heard of
+ships a one-shot command that clears it, and that command exists *only in the
+image you are leaving* — the version you are going back to has no such module
+and no such entry point. Run it while `tool-worker` still resolves to the new
+image and the step is one line; revert first and the same line is
+`error: unrecognized command`.
+
+This release has exactly one such step (`tool_call.status` gained `claimed`;
+see **Upgrade notes** in `CHANGELOG.md`):
+
+```bash
+# 1. still on the release you are leaving:
+docker compose run --rm --no-deps tool-worker jhin-tool-calls-rollback
+
+# 2. then revert the images and bring the stack back up
+```
+
+It is idempotent, guarded, and safe to run with the workers up, so there is no
+harm in running it twice or in running it when there is nothing to close —
+`--dry-run` lists what it would do.
+
+**If you have already reverted**, the command has not become impossible, only
+harder to name: run it out of the release you left, for that one call.
+
+| How you deploy | Run |
+|---|---|
+| tags (`deploy/compose.release.yaml`, `JHIN_VERSION` in `.env`) | `JHIN_VERSION=<release you left> docker compose run --rm --no-deps tool-worker jhin-tool-calls-rollback` |
+| a digest-pinned release bundle | the same `docker compose run` from *that release's* bundle directory, whose `compose.release.yaml` still names its own digests |
+| built from source (`compose.yaml`) | the same `docker compose run` from a checkout of the release you left |
+
+Each of these starts one short-lived container from the newer image against
+the same database; nothing else in the stack is touched, and the older
+workers keep running while it does. The rows it closes are read by the old
+release as ordinary failed tool calls.
 
 ## Health and operations
 

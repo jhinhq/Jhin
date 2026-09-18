@@ -18,6 +18,21 @@ from jhin_memory import (
 from jhin_models import ModelClient, ModelProviderError, ModelRequest, ModelResponse, ModelUsage
 
 
+def test_extraction_projects_credentials_before_each_source_bound():
+    from jhin_memory.extraction import MAX_EXISTING_MEMORY_CHARS, MAX_SOURCE_CHARS
+
+    key = "a" * 24 + ":" + "b" * 64
+    source = "x" * (MAX_SOURCE_CHARS - 40) + " " + key
+    known = "x" * (MAX_EXISTING_MEMORY_CHARS - 40) + " " + key
+    request = build_extraction_request(
+        model="test", source_text=source, agent_name=f"Writer {key}", existing_memories=[known]
+    )
+    text = request.messages[-1].content
+    assert "a" * 24 not in text and "b" * 64 not in text
+    assert "REDACTED" in text
+    assert source.endswith(key) and known.endswith(key)
+
+
 class StubClient(ModelClient):
     def __init__(self, text: str | None = None, *, error: Exception | None = None) -> None:
         self.text = text or ""
@@ -117,6 +132,25 @@ class TestExtraction:
         assert "ONE consolidated fact" in prompt
         assert "only NEW or CHANGED facts" in prompt
 
+    def test_prompt_carries_the_save_the_fact_rule_the_agents_are_given(self) -> None:
+        """Maintenance writes without ever calling ``memory.propose``, so a
+        rule added to the platform preamble does not reach it: this path went
+        on recording the conversation, and filed three near-duplicate records
+        about a tester's probes."""
+        prompt = EXTRACTION_SYSTEM_PROMPT
+        assert "Save the fact, not the conversation" in prompt
+        assert "without reading this transcript" in prompt
+        assert "Never record what happened in this chat" in prompt
+
+    def test_prompt_forbids_a_verdict_on_a_person(self) -> None:
+        """The half that is not about clutter: those records characterised a
+        person's intent, under their name, to be read back in the next
+        conversation with them."""
+        prompt = EXTRACTION_SYSTEM_PROMPT
+        assert "Never characterise a person" in prompt
+        assert "testing, probing" in prompt
+        assert "your opinion of them is not" in prompt
+
     def test_existing_memories_are_listed_and_bounded(self) -> None:
         request = build_extraction_request(
             model="fake-mini",
@@ -164,3 +198,45 @@ class TestExtraction:
         )
         assert not result.ok
         assert result.error == "RuntimeError"
+
+
+class TestServingWindow:
+    """Extraction builds its own client from the *agent's* model profile, so it
+    runs against the same Ollama instance the agent steps do. Ollama treats a
+    changed effective ``num_ctx`` as a reload of the model runner: a request
+    that pinned nothing would reload that instance at the host's own default,
+    and the next agent step would measure 32,768 through ``/api/ps`` and clamp
+    its budget back to exactly the ceiling the profile window exists to
+    escape."""
+
+    async def test_extraction_asks_for_the_window_the_agent_step_asks_for(self) -> None:
+        client = StubClient(json.dumps(VALID))
+        await extract_candidates(
+            client,
+            model="qwen3.8:latest",
+            source_text="t",
+            agent_name="Ava",
+            provider_type="ollama",
+            context_window=131_072,
+        )
+        assert client.requests[0].extra == {"options": {"num_ctx": 131_072}}
+
+    def test_an_unconfigured_profile_pins_nothing(self) -> None:
+        request = build_extraction_request(
+            model="qwen3.8:latest",
+            source_text="t",
+            agent_name="Ava",
+            provider_type="ollama",
+            context_window=None,
+        )
+        assert request.extra == {}
+
+    def test_a_provider_whose_window_jhin_cannot_set_is_asked_for_nothing(self) -> None:
+        request = build_extraction_request(
+            model="gpt-4o-mini",
+            source_text="t",
+            agent_name="Ava",
+            provider_type="openai_compatible",
+            context_window=128_000,
+        )
+        assert request.extra == {}

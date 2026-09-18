@@ -21,6 +21,7 @@ from jhin_models.base import (
     ModelListing,
     ModelRequest,
     ModelResponse,
+    ModelStreamEvent,
 )
 from jhin_models.embeddings import EmbeddingClient, EmbeddingResult
 from jhin_models.images import ImageGenerationClient
@@ -241,7 +242,7 @@ def _safe_latency(value: object) -> int | float | None:
 
 
 async def _cleanup_iterator(
-    iterator: AsyncIterator[str],
+    iterator: AsyncIterator[Any],
 ) -> tuple[BaseException | None, TracebackType | None]:
     try:
         close = getattr(iterator, "aclose", None)
@@ -370,6 +371,30 @@ class InstrumentedModelClient(ModelClient):
                 outcome="ok",
             )
             return response
+
+    async def stream_events(self, request: ModelRequest) -> AsyncIterator[ModelStreamEvent]:
+        iterator = self._wrapped.stream_events(request)
+        with _attempt_span(
+            self._tracer, provider_type=self._provider_type, operation="stream"
+        ) as span:
+            outcome = "cancelled"
+            error = None
+            try:
+                async for event in iterator:
+                    yield event
+                outcome = "ok"
+            except Exception as exc:
+                outcome, error = "failed", exc
+                raise
+            finally:
+                await _cleanup_iterator(iterator)
+                _finish_attempt(
+                    self._metrics,
+                    span,
+                    provider_type=self._provider_type,
+                    outcome=outcome,
+                    error=error,
+                )
 
     def stream(self, request: ModelRequest) -> AsyncIterator[str]:
         async def iterate() -> AsyncIterator[str]:

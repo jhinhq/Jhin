@@ -697,6 +697,18 @@ async def signal_review_workflow(
         ) from exc
 
 
+#: Every status in which the review's decision is still the thing a run is
+#: waiting on. ``claimed`` belongs here as much as ``pending_review`` does: the
+#: resume path moves the row to ``claimed`` and commits *before* it dispatches,
+#: so a worker that died in that window leaves a call which is still waiting to
+#: run and whose only route back is this signal. Reading it as "no longer
+#: parked" swallowed the 409 and told the operator the decision had landed
+#: everywhere it needed to.
+_PARKED_TOOL_STATUSES = frozenset(
+    {ToolCallStatus.PENDING_REVIEW.value, ToolCallStatus.CLAIMED.value}
+)
+
+
 async def _review_parks_a_tool_call(db: AsyncSession, review: WorkReview) -> bool:
     """False once the review's tool call has a recorded terminal outcome
     (e.g. an explicit before-close request whose run already finished);
@@ -708,7 +720,7 @@ async def _review_parks_a_tool_call(db: AsyncSession, review: WorkReview) -> boo
             ToolCall.workspace_id == review.workspace_id,
         )
     )
-    return status_value is None or status_value == ToolCallStatus.PENDING_REVIEW.value
+    return status_value is None or status_value in _PARKED_TOOL_STATUSES
 
 
 # --- rollups ---

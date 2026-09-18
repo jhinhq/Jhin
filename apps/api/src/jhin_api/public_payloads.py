@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
-from typing import Any
+from typing import Any, cast
+
+from jhin_secrets.intake import redact_legacy_payload
 
 _SOURCE_BEARING_TOOLS = frozenset({"supabase.function.deploy"})
 _DATABASE_TOOLS = frozenset(
@@ -27,7 +28,7 @@ def public_tool_payload(tool_name: str, payload: dict[str, Any]) -> dict[str, An
     projection is applied only while serializing API response models.
     """
 
-    projected = deepcopy(payload)
+    projected = cast(dict[str, Any], redact_legacy_payload(payload))
     if tool_name not in _SOURCE_BEARING_TOOLS | _DATABASE_TOOLS:
         return projected
 
@@ -67,6 +68,7 @@ def public_run_event_payload(event_type: str, payload: dict[str, Any]) -> dict[s
     lossless arguments.
     """
 
+    payload = redact_legacy_payload(payload)
     if event_type == _AGENT_ONLY_REASONING_EVENT:
         return {}
 
@@ -74,7 +76,7 @@ def public_run_event_payload(event_type: str, payload: dict[str, Any]) -> dict[s
         return _public_tools_offered(payload)
 
     if event_type != _LOSSLESS_MANIFEST_EVENT:
-        return deepcopy(payload)
+        return payload
 
     manifest = payload.get("manifest")
     if not isinstance(manifest, dict):

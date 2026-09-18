@@ -168,6 +168,7 @@ def _construct_runtime(config: ObservabilityConfig) -> ObservabilityRuntime:
     configure_json_logging(
         config.service_name,
         config.environment,
+        level=config.log_level,
         extra_processors=config.extra_log_processors,
     )
     if config.otlp_endpoint is None:

@@ -49,6 +49,20 @@ from jhin_workflows.agent_task.workflows import _PERSON_ANSWER_WAIT
 QUESTION_ID = "0192aaaa-0000-7000-8000-000000000001"
 
 
+async def test_required_answer_waits_beyond_optional_timeout():
+    stubs = AskingStubs(ask=PersonQuestionAsk(question_id=QUESTION_ID, required=True))
+    result = await run_asking(stubs, answer_after=31 * 60)
+    assert result.status == "completed"
+    assert stubs.events.index("deliver-answered") < stubs.events.index("step-1")
+    assert "deliver-timed_out" not in stubs.events
+
+
+async def test_required_wait_remains_cancel_releasable():
+    stubs = AskingStubs(ask=PersonQuestionAsk(question_id=QUESTION_ID, required=True))
+    result = await run_asking(stubs, cancel_after=31 * 60)
+    assert result.status == "cancelled" and "step-1" not in stubs.events
+
+
 def test_the_row_expires_exactly_when_the_run_stops_waiting() -> None:
     """Two sides of one promise. If the row outlived the wait, a person could
     answer a live-looking box whose run had already moved on."""

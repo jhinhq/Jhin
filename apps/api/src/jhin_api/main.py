@@ -24,6 +24,8 @@ from jhin_api.audit.router import router as audit_router
 from jhin_api.auth.router import router as auth_router
 from jhin_api.catalog.router import catalog_router as catalog_search_router
 from jhin_api.catalog.router import router as catalog_workspace_router
+from jhin_api.chat_files.router import router as chat_files_router
+from jhin_api.connections.editorial import router as editorial_router
 from jhin_api.connections.router import catalog_router as connectors_catalog_router
 from jhin_api.connections.router import router as connections_router
 from jhin_api.conversations.router import conversations_router, workspace_feed_router
@@ -32,6 +34,8 @@ from jhin_api.directory.router import router as directory_router
 from jhin_api.health.router import router as health_router
 from jhin_api.media.router import router as media_router
 from jhin_api.memory.router import router as memory_router
+from jhin_api.memory.summary_router import router as memory_summary_router
+from jhin_api.memory_capture import router as memory_capture_router
 from jhin_api.models.router import profiles_router, providers_router, spend_router
 from jhin_api.oauth.router import oauth_public_router, oauth_router
 from jhin_api.onboarding.router import router as onboarding_router
@@ -48,6 +52,9 @@ from jhin_api.org.router import router as org_router
 from jhin_api.personas.router import personas_router
 from jhin_api.policy.router import router as policy_router
 from jhin_api.questions.router import router as questions_router
+from jhin_api.runtime.router import project_source_router
+from jhin_api.runtime.router import router as runtime_router
+from jhin_api.schedules.router import router as schedules_router
 from jhin_api.secrets.router import router as secrets_router
 from jhin_api.security.headers import SecurityHeadersMiddleware
 from jhin_api.security.limits import RequestSizeLimitMiddleware
@@ -59,6 +66,7 @@ from jhin_api.tasks.router import agent_actions_router, runs_router, tasks_route
 from jhin_api.teams.router import router as teams_router
 from jhin_api.temporal import TemporalClientProvider
 from jhin_api.triggers.router import router as triggers_router
+from jhin_api.variables.router import router as variables_router
 from jhin_api.webhooks.router import router as webhooks_router
 from jhin_api.workspaces.router import router as workspaces_router
 from jhin_db import create_engine, create_session_factory
@@ -441,10 +449,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(runs_router)
     app.include_router(agent_actions_router)
     app.include_router(conversations_router)
+    app.include_router(chat_files_router)
+    app.include_router(runtime_router)
+    app.include_router(project_source_router)
     app.include_router(workspace_feed_router)
     app.include_router(directory_router)
     app.include_router(coordination_router)
+    app.include_router(memory_summary_router)
     app.include_router(memory_router)
+    app.include_router(memory_capture_router)
     app.include_router(skill_sources_router)
     app.include_router(skills_router)
     app.include_router(agent_skills_router)
@@ -454,11 +467,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(questions_router)
     app.include_router(connectors_catalog_router)
     app.include_router(connections_router)
+    app.include_router(editorial_router)
     app.include_router(oauth_public_router)
     app.include_router(oauth_router)
     app.include_router(catalog_search_router)
     app.include_router(catalog_workspace_router)
     app.include_router(triggers_router)
+    app.include_router(schedules_router)
+    app.include_router(variables_router)
     app.include_router(webhooks_router)
     app.include_router(media_router)
     return app

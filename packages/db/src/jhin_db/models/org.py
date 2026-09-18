@@ -116,6 +116,17 @@ class Agent(Base, UuidPkMixin, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("workspace_id", "slug"),
         UniqueConstraint("workspace_id", "id", name="uq_agent_workspace_id_id"),
+        # One name per workspace, case-insensitively (migration 0043). Two
+        # agents called "QA Engineer" make every roster line and every "ask
+        # QA Engineer to…" ambiguous, and the read-then-write checks in the
+        # tool and the API can both be won by a concurrent write. The slug
+        # unique constraint above already covers the handle half.
+        Index(
+            "uq_agent_workspace_lower_name",
+            "workspace_id",
+            func.lower(text("name")),
+            unique=True,
+        ),
     )
 
     workspace_id: Mapped[UUID] = mapped_column(

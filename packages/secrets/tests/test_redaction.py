@@ -49,6 +49,45 @@ def test_short_values_are_not_registered() -> None:
     assert redactor.redact_text("ab is fine") == "ab is fine"
 
 
+def test_partial_stream_snapshot_hides_split_secret_edges() -> None:
+    redactor = SecretRedactor()
+    redactor.register("secret-canary-token")
+    assert redactor.redact_partial_text("ready\nsecret-canary-") == f"ready\n{REDACTED}"
+    assert (
+        redactor.redact_partial_text("canary-token\nready", clipped_start=True)
+        == f"{REDACTED}\nready"
+    )
+    assert (
+        redactor.redact_partial_text("ready\nsecret-canary-token\ndone")
+        == f"ready\n{REDACTED}\ndone"
+    )
+    assert redactor.max_secret_length == len("secret-canary-token")
+
+
+def test_every_partial_secret_split_is_hidden() -> None:
+    redactor = SecretRedactor()
+    secret = "stream-界-secret-token"
+    redactor.register(secret)
+    for offset in range(1, len(secret)):
+        assert redactor.redact_partial_text("prefix\n" + secret[:offset]) == f"prefix\n{REDACTED}"
+        assert (
+            redactor.redact_partial_text(secret[offset:] + "\nsuffix", clipped_start=True)
+            == f"{REDACTED}\nsuffix"
+        )
+
+
+def test_partial_redaction_preserves_original_overlapping_secret_spans() -> None:
+    redactor = SecretRedactor()
+    redactor.register("token-secret")
+    redactor.register("token-secret-extended")
+    assert redactor.redact_partial_text("safe\ntoken-secret-ext") == f"safe\n{REDACTED}"
+    # Trimming an edge that overlaps a complete secret cannot expose the rest.
+    redactor.register("secret-other")
+    assert redactor.redact_partial_text("safe\ntoken-secret") == f"safe\n{REDACTED}"
+    redactor.register("abcabc")
+    assert redactor.redact_partial_text("safe\nabcabc") == f"safe\n{REDACTED}"
+
+
 def test_redact_value_recurses_containers() -> None:
     redactor = SecretRedactor()
     redactor.register("tok-secret-value")

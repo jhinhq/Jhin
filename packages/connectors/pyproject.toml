@@ -19,6 +19,7 @@ dependencies = [
     "jhin-policy",
     "jhin-secrets",
     "jhin-tools",
+    "jhin-media",
 ]
 
 [tool.uv.sources]
@@ -27,6 +28,7 @@ jhin-domain = { workspace = true }
 jhin-policy = { workspace = true }
 jhin-secrets = { workspace = true }
 jhin-tools = { workspace = true }
+jhin-media = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

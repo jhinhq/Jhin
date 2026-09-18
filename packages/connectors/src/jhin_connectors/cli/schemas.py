@@ -115,9 +115,16 @@ class CommandExecuteInput(_JobOptions):
 
 class RepositoryCheckoutInput(_JobOptions):
     repository: str = Field(min_length=3, max_length=200, pattern=REPOSITORY_PATTERN)
-    # Branch to create for the agent's work; empty = agent/<task-id>-<repo>.
+    # The agent's working branch; empty = agent/<repo>-<task id>. A branch that
+    # already exists — on the remote, or on this workspace — is continued
+    # rather than cut again, so a second run builds on the first instead of
+    # rewinding it. The whole task id is in the default name because eight
+    # characters of a uuid7 are a timestamp prefix, and two tasks a minute
+    # apart shared a branch.
     branch: str = Field(default="", max_length=200, pattern=r"^[\w./-]*$")
-    # Existing ref to clone from; empty = the remote default branch.
+    # Existing ref to *start a new branch* from; empty = the remote default
+    # branch. It has no say over a branch that already exists: the base is
+    # where work begins, not somewhere a resumed branch is dragged back to.
     ref: str = Field(default="", max_length=200, pattern=r"^[\w./-]*$")
 
 
@@ -231,6 +238,7 @@ class SandboxJobOutput(BaseModel):
 
     sandbox_job_id: str
     status: str
+    network_policy: Literal["none", "internet"] = "none"
     exit_code: int | None
     duration_ms: int | None
     stdout: str
@@ -260,6 +268,24 @@ class RepositoryCheckoutOutput(SandboxJobOutput):
     base_ref: str = ""
     # One directory level, so the agent can start navigating immediately.
     top_level: list[str] = []
+    # True when the workspace already held this repository and the checkout
+    # refreshed it in place rather than cloning from scratch. Worth telling the
+    # model: a reused tree still carries the dependency install and build
+    # output of an earlier turn, so it need not redo them — and a fresh clone
+    # means it must.
+    reused: bool = False
+    # Where the working branch started, which is a different question from
+    # whether the disk was reused: a branch is resumed from the remote even on
+    # a disk that was purged and cloned again. One of three words:
+    #
+    # * ``base`` — the branch did not exist anywhere, so it was cut from
+    #   ``base_ref``. The ordinary first checkout of a task.
+    # * ``remote_branch`` — the remote already had this branch, and the
+    #   checkout continued it. ``head_sha`` is what an earlier run pushed, so
+    #   the work of that run is *here*, not to be done again.
+    # * ``workspace_branch`` — only this workspace had it, carrying commits an
+    #   earlier run made and never pushed.
+    started_from: str = ""
 
 
 class RepositoryPushOutput(SandboxJobOutput):

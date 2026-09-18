@@ -45,6 +45,11 @@ Phase 8 extensions for multi-agent scripts:
   matching transcript order). Template-created review tasks compose their own
   instructions, so a scripted reviewer carries its behavior on the agent's
   system prompt instead.
+- A literal ``[[system_tools_only]]`` directive in a system message restricts
+  tool-marker extraction to system messages. Scripted reviewers can inspect
+  user-provided failure context without replaying a fix script intended for
+  the author. This fixture directive does not alter gateway authorization,
+  evidence-based verdicts, ordinary text replies, or default marker handling.
 """
 
 from __future__ import annotations
@@ -59,6 +64,7 @@ import struct
 import threading
 import time
 import zlib
+from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -243,14 +249,33 @@ def _evidence_verdict(messages: list[dict[str, Any]]) -> str:
 def _pending_tool_marker(messages: list[dict[str, Any]]) -> tuple[int, str, str] | None:
     """The next (index, tool_name, arguments_json) marker without a result.
 
-    Markers are collected from user messages in order; each existing
-    tool-role message consumes one marker. Returns None when every marker has
-    been answered.
+    Markers are collected from system and user messages in order, unless the
+    fixture's system-only directive is set. Each existing tool-role message
+    consumes one marker. Returns None when every marker has been answered.
     """
+    system_tools_only = any(
+        message.get("role") == "system"
+        and "[[system_tools_only]]" in str(message.get("content", ""))
+        for message in messages
+    )
+    marker_roles = ("system",) if system_tools_only else ("system", "user")
     markers: list[tuple[str, str]] = []
-    for message in messages:
-        if message.get("role") in ("system", "user"):
-            content = _expand_b64(str(message.get("content", "")))
+    for index, message in enumerate(messages):
+        if message.get("role") in marker_roles:
+            raw = str(message.get("content", ""))
+            # Assigned work includes both a framed task brief and the API's
+            # immediately following persisted seed (title + newline + brief).
+            # These are one instruction, not two scripted executions. Do not
+            # deduplicate markers themselves: a script may request repeats.
+            previous = messages[index - 1] if index else {}
+            previous_text = str(previous.get("content", ""))
+            if (
+                message.get("role") == previous.get("role") == "user"
+                and previous_text.startswith("Task: ")
+                and raw == previous_text.removeprefix("Task: ").replace("\n\n", "\n", 1)
+            ):
+                continue
+            content = _expand_b64(raw)
             markers.extend(TOOL_MARKER_RE.findall(content))
     results = sum(1 for m in messages if m.get("role") == "tool")
     if results < len(markers):
@@ -469,9 +494,22 @@ def build_completion(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         )
     else:
         last_user = ""
+        # Opt-in prompt-order oracle for chat integration fixtures. The worker
+        # adds one evidence-review user turn before releasing a no-tool reply;
+        # this scripted provider continues the original request on that retry.
+        echo_latest_user = any(
+            m.get("role") == "system" and "[[echo_latest_user]]" in str(m.get("content", ""))
+            for m in messages
+        )
         for message in reversed(messages):
             if message.get("role") == "user":
-                last_user = str(message.get("content", ""))
+                content = str(message.get("content", ""))
+                if echo_latest_user and content.startswith(
+                    "You have not received a tool result for the latest request. Re-evaluate "
+                    "the person's original request before publishing the draft below."
+                ):
+                    continue
+                last_user = content
                 break
         reply = f"[{model}] Completed: {last_user[:200].strip() or 'no instruction given'}"
 
@@ -609,6 +647,78 @@ def completion_latency_seconds() -> float:
         return 0.0
 
 
+def completion_stream_chunks(
+    payload: dict[str, Any], *, include_usage: bool
+) -> Iterator[dict[str, Any]]:
+    """Emit real OpenAI SSE deltas, with bounded content/argument fragments."""
+    base = {"id": payload["id"], "model": payload["model"], "object": "chat.completion.chunk"}
+    for choice in payload["choices"]:
+        index = choice["index"]
+        message = choice["message"]
+        yield {
+            **base,
+            "choices": [{"index": index, "delta": {"role": "assistant"}, "finish_reason": None}],
+        }
+        content = message.get("content") or ""
+        for offset in range(0, len(content), 128):
+            yield {
+                **base,
+                "choices": [
+                    {
+                        "index": index,
+                        "delta": {"content": content[offset : offset + 128]},
+                        "finish_reason": None,
+                    }
+                ],
+            }
+        for tool_index, tool in enumerate(message.get("tool_calls") or []):
+            function = tool["function"]
+            yield {
+                **base,
+                "choices": [
+                    {
+                        "index": index,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": tool_index,
+                                    "id": tool["id"],
+                                    "type": "function",
+                                    "function": {"name": function["name"], "arguments": ""},
+                                }
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ],
+            }
+            arguments = function["arguments"]
+            for offset in range(0, len(arguments), 128):
+                yield {
+                    **base,
+                    "choices": [
+                        {
+                            "index": index,
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": tool_index,
+                                        "function": {"arguments": arguments[offset : offset + 128]},
+                                    }
+                                ]
+                            },
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+        yield {
+            **base,
+            "choices": [{"index": index, "delta": {}, "finish_reason": choice["finish_reason"]}],
+        }
+    if include_usage:
+        yield {**base, "choices": [], "usage": payload["usage"]}
+
+
 class _Handler(BaseHTTPRequestHandler):
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
         data = json.dumps(payload).encode()
@@ -617,6 +727,22 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def _send_stream(self, payload: dict[str, Any], *, include_usage: bool) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        try:
+            for chunk in completion_stream_chunks(payload, include_usage=include_usage):
+                self.wfile.write(("data: " + json.dumps(chunk) + "\n\n").encode())
+                self.wfile.flush()
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # A stopped generation closes its response before the final frame.
 
     def do_GET(self) -> None:
         path = self.path.split("?", 1)[0].rstrip("/")
@@ -655,6 +781,14 @@ class _Handler(BaseHTTPRequestHandler):
         else:
             time.sleep(completion_latency_seconds())
             status, payload = build_completion(body)
+            if status == 200 and body.get("stream") is True:
+                options = body.get("stream_options")
+                self._send_stream(
+                    payload,
+                    include_usage=isinstance(options, dict)
+                    and options.get("include_usage") is True,
+                )
+                return
         self._send_json(status, payload)
 
     def log_message(self, format: str, *args: Any) -> None:

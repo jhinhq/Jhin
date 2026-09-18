@@ -23,6 +23,7 @@ from jhin_models.base import (
     ModelProviderError,
     ModelRequest,
     ModelResponse,
+    ModelStreamEvent,
     ModelToolCall,
     ModelUsage,
     classify_retryable,
@@ -40,6 +41,22 @@ WEB_SEARCH_TOOL_TYPE = "web_search_20250305"
 ANTHROPIC_VERSION = "2023-06-01"
 _DEFAULT_MAX_TOKENS = 4096
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0)
+# The Messages API calls the output limit ``max_tokens``; the rest of Jhin
+# reads the OpenAI spelling, and the worker refuses a truncated completion by
+# that name. One vocabulary leaves this adapter, or an answer cut off
+# mid-sentence is committed as a finished one.
+_OUTPUT_LIMIT_STOP_REASON = "max_tokens"
+OUTPUT_LIMIT_FINISH_REASON = "length"
+
+
+def normalize_finish_reason(stop_reason: object) -> str:
+    """Anthropic's ``stop_reason`` as a Jhin ``finish_reason``.
+
+    Only the output limit is renamed; ``end_turn``, ``tool_use`` and the rest
+    stay in Anthropic's own words.
+    """
+    reason = stop_reason if isinstance(stop_reason, str) else ""
+    return OUTPUT_LIMIT_FINISH_REASON if reason == _OUTPUT_LIMIT_STOP_REASON else reason
 
 
 def _web_citations(content: list[Any]) -> list[WebCitation]:
@@ -117,7 +134,56 @@ class AnthropicClient(ModelClient):
                     }
                 )
             return {"role": "assistant", "content": blocks}
+        if message.content_parts:
+            blocks = [{"type": "text", "text": message.content}] if message.content else []
+            for part in message.content_parts:
+                if part.type == "text":
+                    blocks.append({"type": "text", "text": part.text})
+                else:
+                    blocks.append(
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": part.mime_type,
+                                "data": part.data_base64,
+                            },
+                        }
+                    )
+            return {"role": message.role, "content": blocks}
         return {"role": message.role, "content": message.content}
+
+    async def stream_events(self, request: ModelRequest) -> AsyncIterator[ModelStreamEvent]:
+        from jhin_models.streaming import StreamAccumulator
+
+        started = time.monotonic()
+        accumulator = StreamAccumulator(request.model, [tool.name for tool in request.tools])
+        try:
+            async with self._client.stream(
+                "POST", "/messages", json=self._payload(request, stream=True)
+            ) as response:
+                if response.status_code >= 400:
+                    detail = describe_error_body((await response.aread()).decode(errors="replace"))
+                    raise ModelProviderError(
+                        f"anthropic: HTTP {response.status_code}: {detail}",
+                        status_code=response.status_code,
+                        retryable=classify_retryable(response.status_code),
+                    )
+                async for line in response.aiter_lines():
+                    if line.startswith("data:"):
+                        data = line.removeprefix("data:").strip()
+                        if data:
+                            for event in accumulator.anthropic(json.loads(data)):
+                                yield event
+        except httpx.HTTPError as exc:
+            raise ModelProviderError("anthropic: stream transport failed", retryable=True) from exc
+        completed = accumulator.response(int((time.monotonic() - started) * 1000))
+        yield ModelStreamEvent(
+            type="completed",
+            response=completed.model_copy(
+                update={"finish_reason": normalize_finish_reason(completed.finish_reason)}
+            ),
+        )
 
     def _payload(self, request: ModelRequest, *, stream: bool) -> dict[str, Any]:
         if request.reasoning is not None and request.reasoning.effort is not None:
@@ -203,7 +269,7 @@ class AnthropicClient(ModelClient):
         usage = body.get("usage") or {}
         return ModelResponse(
             text=text,
-            finish_reason=body.get("stop_reason") or "",
+            finish_reason=normalize_finish_reason(body.get("stop_reason")),
             model=body.get("model") or request.model,
             usage=ModelUsage(
                 input_tokens=int(usage.get("input_tokens") or 0),

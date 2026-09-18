@@ -36,6 +36,7 @@ from sqlalchemy.sql import ColumnElement
 
 from jhin_db.models import MemoryRecord, RunEvent
 from jhin_domain import MemoryKind, MemoryScope, MemoryStatus
+from jhin_memory.evidence import supported_record_filter
 from jhin_memory.persistence import agent_team_ids
 from jhin_memory.types import (
     MemoryContext,
@@ -44,6 +45,7 @@ from jhin_memory.types import (
     RetrievalMode,
 )
 from jhin_memory.vector import nearest_record_ids
+from jhin_secrets.intake import redact_legacy_text
 
 MEMORY_RETRIEVED_EVENT = "memory.retrieved"
 DEFAULT_MAX_RECORDS = 12
@@ -150,6 +152,7 @@ def authorization_filter(
         MemoryRecord.workspace_id == workspace_id,
         MemoryRecord.status.in_(_RETRIEVABLE),
         MemoryRecord.forgotten_at.is_(None),
+        supported_record_filter(),
         or_(MemoryRecord.valid_from.is_(None), MemoryRecord.valid_from <= now),
         or_(MemoryRecord.expires_at.is_(None), MemoryRecord.expires_at > now),
         or_(*scope_clauses),
@@ -378,7 +381,9 @@ async def build_memory_context(
     for score, _used, record in scored:
         if len(items) >= max_records or budget < _MIN_ITEM_CHARS:
             break
-        content = record.content
+        # Detect full credential spans before a budget can split them. This
+        # projection also feeds memory.search; retained rows stay unchanged.
+        content = redact_legacy_text(record.content)
         if len(content) > budget:
             content = content[: budget - 1].rstrip() + "…"
             truncated += 1

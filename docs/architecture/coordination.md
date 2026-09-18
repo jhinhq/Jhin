@@ -62,14 +62,65 @@ person approves it first), so the grant adds no authority. Putting a persona
 on a *colleague* stays behind `organization.manage_agents` and the manager
 chain. See [Personas](personas.md).
 
+It also carries `organization.identity.self`
+(`jhin_policy.identity_grant_specs`; migration `0041` backfills existing
+agents, respecting an explicit deny), for the one tool that writes
+`agent.name`: `organization.identity.set_name`. Knowing what you are called
+is not a privilege — told "your name is Bisby", an agent with no such tool
+can only agree to it for one conversation, which was the reported failure.
+The grant adds no authority either: the input names no target, the name
+clears `jhin_policy.agent_name_problem` before it reaches a prompt, the slug
+never moves, and every rename leaves a visible receipt and an `agent.renamed`
+audit row. See [Personas](personas.md#its-twin-organizationidentityself).
+
 This is a *platform* default, not a capability an agent chooses: the calling
 agent cannot pick these grants, `organization.create_agent` is still
 elevated → human approval, and no higher-authority capability (delegation,
 connectors, sandbox, agent management) is ever auto-granted. Existing
-workspaces are **not** mass-granted by migration (that would silently change
-authority and surprise admins); an admin adds the baseline per agent through
-the normal grants API, or toggles the "Collaboration" preset on the agent's
-Tools tab.
+workspaces are **not** mass-granted by migration for the collaboration
+baseline (that would silently change authority and surprise admins); an admin
+adds it per agent through the normal grants API, or toggles the
+"Collaboration" preset on the agent's Tools tab.
+
+### A name is conferred by a person
+
+Self-only is not enough. It removes "rename a colleague" and leaves "order a
+colleague to rename itself", which is the same outcome one hop further out —
+and that is how two live runs did it: a CTO agent delegated the rename, the
+target called the tool on its first step without asking anybody, and the
+audit row credited the human at the top of the thread, who had never asked
+for it. The second run stripped every trace of human authority from the
+request in its own words and the rename still happened, because the only
+thing in the way was the model's judgement. A model declining is not a
+control.
+
+So the executor decides, from the run's own rows
+(`jhin_tools.naming_authority.resolve_name_giver`), **who is on the other
+side** — the same question, read from the same rows, that
+`interlocutor_block` renders into the prompt:
+
+| run shape | may a name be conferred? |
+| --- | --- |
+| a chat turn, or any task where a person of this workspace has spoken | **yes** — attributed to whoever spoke last, not to whoever opened the thread |
+| a delegated child task | **no** — the counterpart is the delegating agent |
+| an accepted work request | **no**, and this is the sharper case: the child task carries the *requester's* `conversation_id`, so the person in that thread is one join away and is exactly the person the audit must not credit |
+| a trigger, a schedule, or assigned work nobody has spoken on | **no** — a name conferred with nobody in the room cannot be undone by the person who never saw it |
+| any of those, where a human **approved this tool call** | **yes** — an approval is a person deciding this call, and the row credits the approver |
+
+An agent counterpart wins over a human one, as it does for the prompt block.
+The refusal (`name_needs_a_person`) names the colleague who asked and tells
+the agent what actually works: have the person ask directly, or an admin
+change it in the agent's settings. A refused rename is not silent either — it
+writes an `agent.rename_refused` audit row carrying the delegation chain, so
+"a colleague ordered a rename and the platform stopped it" is a query rather
+than an inference.
+
+Every `agent.renamed` row (from the tool, from the API, and from migration
+`0043`'s duplicate fix-up) carries `requested_by_user_id`,
+`requested_by_name`, `requested_via` (`chat`, `approval`, `api`, `migration`)
+and `requested_by_chain` — the colleagues that asked, nearest first, with
+their task ids. A rename can therefore never be attributed to a person who
+did not ask for it.
 
 ## Data model (migration `0018`, down revision `0017`; parking in `0019`)
 

@@ -235,3 +235,40 @@ search is the separate opt-in path 2. Both are described in
   endpoint/token, and executable catalogs stay out of the agent-worker
   distribution. Agent-side projections consume only durable IDs and sanitized
   rows after the tool-worker transaction commits.
+
+## Unsplash: who may choose a cover photo
+
+By default a cover photo is chosen only by a person: `unsplash.photos.select`
+accepts a photo id solely from a recorded answer to an `unsplash_photo`
+question, because Unsplash's guidance asks integrations to keep image
+selection a non-automated experience. An operator can hand that choice to the
+writing agent, and doing so is an approval on the record rather than a flag.
+
+- Enable with `PATCH /connections/{id}/config`, body
+  `{"config": {"autonomous_selection": true}}`, as a workspace owner or admin
+  (an API key needs `apps:write`). Send `false` to revoke.
+- Two server-written rows have to agree before the mode is in force: the
+  setting itself, and the newest `connection.config_updated` audit row for
+  that connection whose `changes.autonomous_selection.to` is `true`, written
+  with `actor_type: "user"`. The audit row is what names the approver and the
+  time; an agent can write neither. The approver must still be an owner or
+  admin, so a demotion withdraws the approval without anyone editing config.
+- Checking it took needs two different scopes: `apps:read` for the connection
+  and `audit:read` for the audit row. `GET /audit-events` filters by `action`,
+  not by target, so filter on `connection.config_updated` and match the
+  connection in the returned rows. The recorded `changes.autonomous_selection`
+  reads `{"from": null, "to": true}` when the raw settings column had no such
+  key yet, and `{"from": false, "to": true}` once it does — only `to` matters.
+- Re-approving a setting that is already `true` records nothing, because the
+  config route writes a change entry only for keys whose value actually
+  changed. A connection left switched on with no current approver therefore
+  refuses selection as `unsplash_autonomous_selection_unattested`, separately
+  from the never-approved `unsplash_autonomous_selection_unapproved`; the
+  remedy is to switch it off and on again as a current owner or admin.
+- Approval moves only *who picks among photos already retrieved*. The agent
+  must still pass a photo id that appears in the sanitized output of a
+  completed `unsplash.photos.search` call for that assignment and question, so
+  an id it never retrieved is refused; a person must still have asked for
+  images through the `unsplash_search` question; and every asset row records
+  `selection_mode` (`human` or `autonomous`) with the authority behind it, so
+  an evidence reader cannot mistake one for the other.

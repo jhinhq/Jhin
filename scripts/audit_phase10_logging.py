@@ -466,8 +466,12 @@ def _is_reviewed_non_logger_call(
             and receiver == "container"
             and method == "log"
         ):
+            # ``_read_measurement`` reads the workspace-size lines off the root
+            # init container. Recognized on the same terms as ``_collect_logs``
+            # -- an ``Any``-annotated ``container`` parameter, i.e. the
+            # aiodocker container API -- rather than by name alone.
             return (
-                function.name == "_collect_logs"
+                function.name in {"_collect_logs", "_read_measurement", "_capture_stream"}
                 and _has_parameter(function, name="container", annotation="Any")
             ) or (function.name == "current_logs" and _assigns_container_lookup(function))
         if (
@@ -553,6 +557,69 @@ def _is_closed_poller_print(
         and isinstance(argument.orelse, ast.Name)
         and argument.orelse.id == "_UNAVAILABLE_OUTPUT"
     )
+
+
+def _is_reviewed_ipc_print(path: Path, node: ast.Call, parents: Mapping[ast.AST, ast.AST]) -> bool:
+    """Exact subprocess JSON replies are IPC, not application log messages.
+
+    Keep the exception tied to the reviewed serializer, envelope and entrypoint;
+    a changed payload or an ordinary print still requires review.
+    """
+    relative = path.as_posix()
+    function = _enclosing_function(node, parents)
+    if relative.endswith("packages/media/src/jhin_media/file_extract.py"):
+        if function is None or function.name != "main":
+            return False
+        expressions = (
+            'print(json.dumps({"result": asdict(result)}, ensure_ascii=True))',
+            'print(json.dumps({"error": "File could not be extracted '
+            'within its supported limits"}))',
+        )
+    elif relative.endswith("services/sandbox_runner/src/jhin_sandbox_runner/workspace_script.py"):
+        if function is not None:
+            return False
+        ancestor: ast.AST | None = node
+        guard = ast.dump(ast.parse('__name__ == "__main__"', mode="eval").body)
+        while ancestor is not None and not (
+            isinstance(ancestor, ast.If) and ast.dump(ancestor.test) == guard
+        ):
+            ancestor = parents.get(ancestor)
+        if ancestor is None:
+            return False
+        expressions = (
+            'print(json.dumps({"ok": True, "data": execute(request)}, separators=(",", ":")))',
+            'print(json.dumps({"ok": False, "error": str(error)[:200]}))',
+        )
+    else:
+        return False
+    root = _module_scope(node, parents)
+    if root is None:
+        return False
+    json_bindings = [item for item in ast.walk(root) if _bound_name(item) == "json"]
+    if len(json_bindings) != 1:
+        return False
+    imported = json_bindings[0]
+    if not (
+        isinstance(imported, ast.alias)
+        and imported.name == "json"
+        and imported.asname is None
+        and isinstance(parents.get(imported), ast.Import)
+        and parents.get(parents[imported]) is root
+    ):
+        return False
+    if any(_bound_name(item) == "print" for item in ast.walk(root)):
+        return False
+    if any(
+        isinstance(item, ast.Attribute)
+        and isinstance(item.ctx, (ast.Store, ast.Del))
+        and isinstance(item.value, ast.Name)
+        and item.value.id == "json"
+        for item in ast.walk(root)
+    ):
+        return False
+    return ast.dump(node) in {
+        ast.dump(ast.parse(expression, mode="eval").body) for expression in expressions
+    }
 
 
 def collect_logging_method_calls(paths: Sequence[Path]) -> tuple[LoggingCall, ...]:
@@ -673,7 +740,10 @@ def audit_paths(paths: Sequence[Path]) -> list[AuditFailure]:
                 continue
             qualified = _qualified_name(node.func, aliases)
             if qualified == "print" or qualified.startswith("traceback.print_"):
-                if qualified == "print" and _is_closed_poller_print(path, node, parents):
+                if qualified == "print" and (
+                    _is_closed_poller_print(path, node, parents)
+                    or _is_reviewed_ipc_print(path, node, parents)
+                ):
                     continue
                 failures.append(AuditFailure(path, node.lineno, "direct_print"))
                 continue

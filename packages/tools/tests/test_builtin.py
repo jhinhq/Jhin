@@ -1,7 +1,10 @@
 """Registry lookups, advertisement filtering, and the plan 21.7 assertion
 that no self-modifying / capability-granting tool exists."""
 
+from typing import Literal
+
 import pytest
+from pydantic import BaseModel
 
 from jhin_db.models import Task
 from jhin_domain import new_uuid7
@@ -119,7 +122,6 @@ def test_connection_hints_spell_out_pinned_connections() -> None:
             scope={"connection_id": "11111111-1111-7111-8111-111111111111"},
             effect=GrantEffect.ALLOW,
         ),
-        Grant(capability="github.*", scope={"connection_id": conn}, effect=GrantEffect.DENY),
     ]
     labels = {conn: "GitHub (dev fake) (github)"}
     hints = connection_hints(definition, grants, labels)
@@ -130,6 +132,160 @@ def test_connection_hints_spell_out_pinned_connections() -> None:
     assert advertised_description(definition, grants, labels).startswith(
         "Read repository metadata. Connections you may use"
     )
+    grants.append(
+        Grant(capability="github.*", scope={"connection_id": conn}, effect=GrantEffect.DENY)
+    )
+    assert connection_hints(definition, grants, labels) == ""
+
+
+def test_unpinned_hints_need_compatible_connection_metadata() -> None:
+    definition = _connector_definition().model_copy(update={"required_grant_scope_keys": ()})
+    grants = [Grant(capability="github.*", scope={"repository": "octo/alpha"})]
+    labels = {"github-id": "GitHub", "cli-id": "Sandbox"}
+    # Labels alone do not say which connector can execute the tool.
+    assert connection_hints(definition, grants, labels) == ""
+    hints = connection_hints(
+        definition,
+        grants,
+        labels,
+        connection_tool_names={"github-id": {definition.name}, "cli-id": {"cli.test.run"}},
+    )
+    assert "connection_id=github-id (repository=octo/alpha)" in hints
+    assert "cli-id" not in hints
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [{}, {"repository": "octo/alpha"}, {"connection_id": "github-id", "unknown_dimension": "x"}],
+)
+def test_connection_hints_do_not_repair_unusable_grant_scopes(scope: dict[str, object]) -> None:
+    definition = _connector_definition()
+    assert (
+        connection_hints(
+            definition,
+            [Grant(capability=definition.name, scope=scope)],
+            {"github-id": "GitHub"},
+            connection_tool_names={"github-id": {definition.name}},
+        )
+        == ""
+    )
+
+
+def test_connection_hints_withhold_connection_wide_denies() -> None:
+    definition = _connector_definition()
+    assert (
+        connection_hints(
+            definition,
+            [
+                Grant(capability=definition.name, scope={"connection_id": "github-id"}),
+                Grant(capability="github.*", scope={}, effect=GrantEffect.DENY),
+            ],
+            {"github-id": "GitHub"},
+            connection_tool_names={"github-id": {definition.name}},
+        )
+        == ""
+    )
+
+
+@pytest.mark.parametrize("allowed_path", [None, "public/readme.txt", "public/*", "private/?*"])
+def test_narrow_path_deny_keeps_connections_with_remaining_allowed_calls(
+    allowed_path: str | None,
+) -> None:
+    definition = _connector_definition().model_copy(
+        update={
+            "name": "cli.file.read",
+            "required_capability": "cli.file.read",
+            "scope_keys": ("connection_id", "path"),
+        }
+    )
+    scope = {"connection_id": "cli-id"}
+    if allowed_path is not None:
+        scope["path"] = allowed_path
+    hints = connection_hints(
+        definition,
+        [
+            Grant(capability=definition.name, scope=scope),
+            Grant(capability=definition.name, scope={"path": "private/*"}, effect=GrantEffect.DENY),
+        ],
+        {"cli-id": "Sandbox"},
+        connection_tool_names={"cli-id": {definition.name}},
+    )
+    assert "connection_id=cli-id" in hints
+    assert "denied scopes: path=private/*" in hints
+
+
+@pytest.mark.parametrize(
+    "allowed_path", ["private/readme.txt", "private/*", ["private/a", "private/b"]]
+)
+def test_narrow_path_deny_withholds_a_fully_covered_allow_scope(allowed_path: object) -> None:
+    definition = _connector_definition().model_copy(
+        update={
+            "name": "cli.file.read",
+            "required_capability": "cli.file.read",
+            "scope_keys": ("connection_id", "path"),
+        }
+    )
+    assert (
+        connection_hints(
+            definition,
+            [
+                Grant(
+                    capability=definition.name,
+                    scope={"connection_id": "cli-id", "path": allowed_path},
+                ),
+                Grant(
+                    capability=definition.name, scope={"path": "private/*"}, effect=GrantEffect.DENY
+                ),
+            ],
+            {"cli-id": "Sandbox"},
+            connection_tool_names={"cli-id": {definition.name}},
+        )
+        == ""
+    )
+
+
+@pytest.mark.parametrize("dimension", ["tool", "server_slug", "toolkit"])
+@pytest.mark.parametrize(
+    ("effect", "value", "visible"),
+    [
+        ("allow", "fixed", True),
+        ("allow", "other", False),
+        ("deny", "fixed", False),
+        ("deny", "other", True),
+    ],
+)
+def test_connection_hints_respect_fixed_input_scope_values(
+    dimension: str, effect: str, value: str, visible: bool
+) -> None:
+    class DynamicInput(BaseModel):
+        connection_id: str
+        tool: Literal["echo"] = "echo"
+        server_slug: Literal["demo"] = "demo"
+        toolkit: Literal["example"] = "example"
+
+    definition = _connector_definition().model_copy(
+        update={
+            "name": "mcp.demo.echo",
+            "required_capability": "mcp.demo.echo",
+            "input_model": DynamicInput,
+            "scope_keys": ("connection_id", "tool", "server_slug", "toolkit"),
+            "required_grant_scope_keys": (),
+        }
+    )
+    fixed = {"tool": "echo", "server_slug": "demo", "toolkit": "example"}
+    grant = Grant(
+        capability="mcp.demo.*",
+        scope={dimension: fixed[dimension] if value == "fixed" else value},
+        effect=GrantEffect(effect),
+    )
+    grants = [grant] if effect == "allow" else [Grant(capability="mcp.demo.*"), grant]
+    hints = connection_hints(
+        definition,
+        grants,
+        {"mcp-id": "Demo"},
+        connection_tool_names={"mcp-id": {definition.name}},
+    )
+    assert ("connection_id=mcp-id" in hints) is visible
 
 
 def test_connection_hints_are_empty_without_connection_scope() -> None:

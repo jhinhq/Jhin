@@ -51,6 +51,79 @@ class SecretRedactor:
                 text = text.replace(value, REDACTED)
         return text
 
+    def stream_chunk(self, text: str, *, final: bool = False) -> tuple[str, str]:
+        """Return safe append-only output and an undecided secret prefix.
+
+        Callers prepend the returned pending suffix to the next raw chunk.
+        A prefix is withheld, not exposed and later erased from a transcript.
+        """
+        with self._lock:
+            values = sorted(self._values, key=len, reverse=True)
+        pieces: list[str] = []
+        index = 0
+        while index < len(text):
+            remaining = text[index:]
+            complete = next((v for v in values if remaining.startswith(v)), None)
+            partial = any(v.startswith(remaining) and len(v) > len(remaining) for v in values)
+            if partial and not final:
+                return "".join(pieces), remaining
+            if complete:
+                pieces.append(REDACTED)
+                index += len(complete)
+            elif partial:
+                pieces.append(REDACTED)
+                break
+            else:
+                pieces.append(text[index])
+                index += 1
+        return "".join(pieces), ""
+
+    @property
+    def max_secret_length(self) -> int:
+        """Overlap needed when a bounded stream buffer drops its oldest text."""
+        with self._lock:
+            return max((len(value) for value in self._values), default=0)
+
+    def redact_partial_text(self, text: str, *, clipped_start: bool = False) -> str:
+        """Scrub a live snapshot, including incomplete secrets at its edges.
+
+        Snapshot consumers replace prior text; they must never append these
+        strings as deltas. A later snapshot can resolve a withheld prefix.
+        """
+        with self._lock:
+            values = tuple(self._values)
+        spans: list[tuple[int, int]] = []
+        for value in values:
+            offset = text.find(value)
+            while offset >= 0:
+                spans.append((offset, offset + len(value)))
+                offset = text.find(value, offset + 1)
+            for size in range(min(len(text), len(value) - 1), 0, -1):
+                if text.endswith(value[:size]):
+                    spans.append((len(text) - size, len(text)))
+                    break
+            if clipped_start:
+                for size in range(min(len(text), len(value) - 1), 0, -1):
+                    if text.startswith(value[-size:]):
+                        spans.append((0, size))
+                        break
+        # Match against the original string: replacing a shorter secret first
+        # can destroy the unfinished prefix of a longer overlapping secret.
+        # Union also prevents an edge span cutting a complete secret in half.
+        merged: list[tuple[int, int]] = []
+        for start, end in sorted(spans):
+            if merged and start < merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+            else:
+                merged.append((start, end))
+        parts: list[str] = []
+        offset = 0
+        for start, end in merged:
+            parts.extend((text[offset:start], REDACTED))
+            offset = end
+        parts.append(text[offset:])
+        return "".join(parts)
+
     def redact_value(self, value: Any) -> Any:
         """Recursively scrub strings inside common container types."""
         if isinstance(value, str):

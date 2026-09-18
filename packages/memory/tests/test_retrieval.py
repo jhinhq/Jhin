@@ -84,7 +84,11 @@ async def seed(
         status=status.value,
         created_by_type="agent",
         created_by_id=w.me.id,
-        **{"valid_from": created_at, **overrides},
+        **{
+            "valid_from": created_at,
+            "policy_json": {"evidence": {"kind": "human_statement"}},
+            **overrides,
+        },
     )
     session.add(record)
     await session.flush()
@@ -101,6 +105,50 @@ async def context_ids(session: AsyncSession, w: World, query: str, **kw: Any) ->
 
 
 class TestAuthorization:
+    @pytest.mark.parametrize("max_chars", [120, 4000])
+    async def test_legacy_credential_is_redacted_before_memory_budget(
+        self, session: AsyncSession, w: World, max_chars: int
+    ) -> None:
+        key = "a" * 24 + ":" + "b" * 64
+        original = "Ghost setup notes. " * 4 + f"{key}; drafts need director review."
+        row = await seed(session, w, original)
+        row.created_by_type = "user"
+        await session.flush()
+        context = await build_memory_context(
+            session,
+            workspace_id=w.workspace.id,
+            agent_id=w.me.id,
+            query="Ghost",
+            now=NOW,
+            max_chars=max_chars,
+        )
+        assert context.items[0].id == row.id and context.items[0].version == row.version
+        assert "a" * 24 not in context.text
+        assert "a" * 24 not in context.items[0].content
+        assert "REDACTED" in context.items[0].content
+        assert len(context.items[0].content) <= max_chars
+        await session.refresh(row)
+        assert row.content == original
+
+    async def test_unsupported_legacy_agent_memory_is_retained_but_not_recalled(
+        self, session: AsyncSession, w: World
+    ) -> None:
+        unsupported = await seed(session, w, "Ghost setup completed", policy_json={})
+        confirmed = await seed(session, w, "Ghost drafts require director review")
+        human = await seed(session, w, "My publication policy", policy_json={})
+        human.created_by_type = "user"
+        approved = await seed(
+            session,
+            w,
+            "Approved company policy",
+            policy_json={"approved_by_user": str(new_uuid7())},
+        )
+        await session.flush()
+        ids = await context_ids(session, w, "Ghost publication policy")
+        assert unsupported.id not in ids
+        assert {confirmed.id, human.id, approved.id} <= set(ids)
+        assert await session.get(MemoryRecord, unsupported.id) is unsupported
+
     async def test_own_team_and_workspace_scopes_are_visible(
         self, session: AsyncSession, w: World
     ) -> None:
@@ -166,6 +214,28 @@ class TestAuthorization:
     async def test_explicit_team_ids_override(self, session: AsyncSession, w: World) -> None:
         team = await seed(session, w, "Our team deploys on Tuesday", scope=MemoryScope.TEAM)
         assert team.id not in await context_ids(session, w, "deploys", team_ids=[])
+
+    async def test_departed_membership_never_retains_team_memory(
+        self, session: AsyncSession, w: World
+    ) -> None:
+        from datetime import UTC, datetime
+
+        row = AgentTeamMembership(
+            workspace_id=w.workspace.id,
+            agent_id=w.me.id,
+            team_id=w.other_team.id,
+            left_at=datetime.now(UTC),
+        )
+        session.add(row)
+        await session.flush()
+        secret = await seed(
+            session,
+            w,
+            "Former team pipeline details",
+            scope=MemoryScope.TEAM,
+            scope_id=w.other_team.id,
+        )
+        assert secret.id not in await context_ids(session, w, "pipeline")
 
     async def test_other_workspace_is_invisible(self, session: AsyncSession, w: World) -> None:
         other_ws = Workspace(name="X", slug=f"x-{new_uuid7().hex[:8]}")
@@ -411,7 +481,7 @@ class TestCapsAndProvenance:
             session,
             candidates=[MemoryCandidate(content="Prefers espresso", kind="preference")],  # type: ignore[arg-type]
             source=source,
-            actor=ActorFacts(actor_type=ActorType.AGENT, actor_id=w.me.id),
+            actor=ActorFacts(actor_type=ActorType.USER, actor_id=w.me.id, explicit=True),
             now=NOW,
         )
         ctx = await build_memory_context(

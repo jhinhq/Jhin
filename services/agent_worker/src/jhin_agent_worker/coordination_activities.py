@@ -32,6 +32,7 @@ Integration points for ``AgentActivities`` (documented in
 
 from __future__ import annotations
 
+from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -40,10 +41,11 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio import activity
 from temporalio.client import Client as TemporalClient
-from temporalio.exceptions import ApplicationError
+from temporalio.common import WorkflowIDReusePolicy
+from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
 
 from jhin_agent_worker.resources import Resources
-from jhin_db.models import Agent, AgentCapabilityGrant, ReviewPolicy, Task
+from jhin_db.models import Agent, AgentCapabilityGrant, ReviewPolicy, Task, WorkRequest
 from jhin_domain import ReviewMode, TaskState
 from jhin_observability import get_logger
 from jhin_policy import GrantEffect
@@ -51,16 +53,22 @@ from jhin_tools.ask_person import asked_question_id
 from jhin_tools.directory import build_roster, render_roster
 from jhin_tools.reviews import open_periodic_review
 from jhin_tools.rollups import build_manager_rollup, render_manager_rollup
-from jhin_tools.work_requests import finalize_work_request, note_unanswered_work_request
+from jhin_tools.work_requests import (
+    finalize_work_request,
+    note_unanswered_work_request,
+    prepare_work_request_continuation,
+)
 from jhin_workflows.agent_task.shared import (
     ACTIVITY_MARK_TASK_PAUSED,
     WORK_REQUEST_SIDE_REQUESTER,
     WORK_REQUEST_SIDE_RESPONDER,
+    AgentTaskInput,
     MarkTaskPausedInput,
     PersonQuestionAsk,
     ReviewDecisionSignal,
     WorkRequestStart,
 )
+from jhin_workflows.blog_corpus.shared import BlogCorpusSyncInput, blog_corpus_workflow_id
 from jhin_workflows.memory_maintenance import (
     SOURCE_KIND_MESSAGE,
     MemoryMaintenanceInput,
@@ -74,15 +82,34 @@ from jhin_workflows.periodic_review import (
     PeriodicReviewInput,
     PeriodicReviewPolicyState,
 )
+from jhin_workflows.task_queues import AGENT_TASK_QUEUE
 from jhin_workflows.work_request_task import (
     ACTIVITY_FINALIZE_WORK_REQUEST,
     ACTIVITY_NOTE_WORK_REQUEST_UNANSWERED,
     FinalizeWorkRequestInput,
     NoteWorkRequestUnansweredInput,
 )
+from jhin_workflows.work_request_task.shared import (
+    ACTIVITY_PREPARE_WORK_REQUEST_CONTINUATION,
+    PrepareWorkRequestContinuationInput,
+)
 
 logger = get_logger(__name__)
 _WINDOW_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def corpus_sync_start_from_output(
+    output: dict[str, Any] | None,
+    *,
+    tool_name: str,
+    workspace_id: str,
+) -> BlogCorpusSyncInput | None:
+    if tool_name != "ghost.archive.sync" or not output:
+        return None
+    sync_id = output.get("corpus_sync_id")
+    if not isinstance(sync_id, str) or output.get("status") not in {"queued", "running"}:
+        return None
+    return BlogCorpusSyncInput(workspace_id=workspace_id, sync_id=sync_id)
 
 
 # Which side of the ask each tool speaks for. This is the authority for
@@ -91,6 +118,7 @@ _WINDOW_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 # ``organization.respond_work_request`` is limited by its validator to the
 # request's target. Only the requester may then park on the answer.
 _WORK_REQUEST_SIDE_BY_TOOL = {
+    "ghost.review.request": WORK_REQUEST_SIDE_REQUESTER,
     "organization.request_work": WORK_REQUEST_SIDE_REQUESTER,
     "organization.respond_work_request": WORK_REQUEST_SIDE_RESPONDER,
 }
@@ -131,7 +159,9 @@ def person_question_ask_from_output(
     question_id = asked_question_id(output, tool_name=tool_name)
     if not question_id:
         return None
-    return PersonQuestionAsk(question_id=question_id)
+    return PersonQuestionAsk(
+        question_id=question_id, required=bool(output and output.get("required") is True)
+    )
 
 
 def review_decision_from_output(output: dict[str, Any] | None) -> ReviewDecisionSignal | None:
@@ -204,6 +234,128 @@ class CoordinationActivities:
         self._resources = resources
         self._temporal_client = temporal_client
 
+    async def dispatch_blog_corpus_syncs(self, *, limit: int = 100) -> int:
+        """Recover sync requests committed before the requesting step could start them."""
+        from jhin_db.models.blog_corpus import BlogCorpusSync
+
+        if self._temporal_client is None:
+            return 0
+        async with self._resources.session_factory() as session:
+            records = list(
+                await session.scalars(
+                    select(BlogCorpusSync)
+                    .where(BlogCorpusSync.status.in_(("queued", "running")))
+                    .order_by(BlogCorpusSync.created_at, BlogCorpusSync.id)
+                    .limit(limit)
+                )
+            )
+        started = 0
+        for sync in records:
+            try:
+                await self._temporal_client.start_workflow(
+                    "BlogCorpusSyncWorkflow",
+                    BlogCorpusSyncInput(str(sync.workspace_id), str(sync.id)),
+                    id=blog_corpus_workflow_id(str(sync.id)),
+                    task_queue=AGENT_TASK_QUEUE,
+                    id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+                )
+                started += 1
+            except WorkflowAlreadyStartedError:
+                continue
+        return started
+
+    @activity.defn(name=ACTIVITY_PREPARE_WORK_REQUEST_CONTINUATION)
+    async def prepare_work_request_continuation_activity(
+        self,
+        params: PrepareWorkRequestContinuationInput,
+    ) -> str:
+        async with self._resources.session_factory() as session:
+            request = await prepare_work_request_continuation(
+                session,
+                workspace_id=UUID(params.workspace_id),
+                request_id=UUID(params.work_request_id),
+                requester_task_id=UUID(params.requester_task_id),
+                requester_agent_id=UUID(params.requester_agent_id),
+            )
+            await session.commit()
+            status = request.continuation_suppressed_reason or "prepared"
+        await self.dispatch_work_request_continuations(request_id=UUID(params.work_request_id))
+        return status
+
+    async def dispatch_work_request_continuations(
+        self,
+        *,
+        request_id: UUID | None = None,
+        limit: int = 100,
+    ) -> int:
+        """Recover the transactional outbox; safe on startup and every worker tick.
+
+        Temporal rejects the same workflow id even after it has closed. Thus
+        a worker lost after start but before acknowledgement cannot execute a
+        second episode. An unavailable server leaves delivery pending.
+        """
+        if self._temporal_client is None:
+            return 0
+        async with self._resources.session_factory() as session:
+            query = (
+                select(WorkRequest)
+                .where(
+                    WorkRequest.continuation_task_id.is_not(None),
+                    WorkRequest.continuation_dispatched_at.is_(None),
+                    WorkRequest.continuation_suppressed_reason.is_(None),
+                )
+                .order_by(WorkRequest.created_at, WorkRequest.id)
+                .limit(limit)
+            )
+            if request_id is not None:
+                query = query.where(WorkRequest.id == request_id)
+            records = list((await session.scalars(query)).all())
+        dispatched = 0
+        for record in records:
+            async with self._resources.session_factory() as session:
+                request = await session.scalar(
+                    select(WorkRequest).where(WorkRequest.id == record.id).with_for_update()
+                )
+                if request is None or request.continuation_dispatched_at is not None:
+                    continue
+                task = await session.get(Task, request.continuation_task_id)
+                source = await session.get(Task, request.requester_task_id)
+                cancelled = (
+                    task is None
+                    or source is None
+                    or source.state == "cancelled"
+                    or bool(source.metadata_json.get("stop_requested_at"))
+                )
+                assignment_id = request.metadata_json.get("editorial_assignment_id")
+                if assignment_id:
+                    from jhin_db.models.editorial import EditorialAssignment
+
+                    assignment = await session.get(EditorialAssignment, UUID(str(assignment_id)))
+                    cancelled = cancelled or assignment is None or assignment.phase == "cancelled"
+                if cancelled:
+                    request.continuation_suppressed_reason = "cancelled_before_dispatch"
+                    if task is not None:
+                        task.state = TaskState.CANCELLED.value
+                    await session.commit()
+                    continue
+                assert task is not None
+                with suppress(WorkflowAlreadyStartedError):
+                    await self._temporal_client.start_workflow(
+                        "AgentTaskWorkflow",
+                        AgentTaskInput(
+                            workspace_id=str(request.workspace_id),
+                            task_id=str(task.id),
+                            agent_id=str(request.requester_agent_id),
+                        ),
+                        id=f"task-{task.id}",
+                        task_queue=AGENT_TASK_QUEUE,
+                        id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+                    )
+                request.continuation_dispatched_at = datetime.now(UTC)
+                await session.commit()
+                dispatched += 1
+        return dispatched
+
     @activity.defn(name=ACTIVITY_FINALIZE_WORK_REQUEST)
     async def finalize_work_request_activity(self, params: FinalizeWorkRequestInput) -> str:
         """Terminal projection for WorkRequestTaskWorkflow. Idempotent."""
@@ -234,6 +386,9 @@ class CoordinationActivities:
             run_status=params.run_status,
             request_status=status,
         )
+        # This is deliberately retrying, not best effort: the outbox was
+        # committed above, so retries recover commit-before-start failures.
+        await self.dispatch_work_request_continuations(request_id=UUID(params.work_request_id))
         # The REQUESTER agent learns from the reported result (detached,
         # best-effort, idempotent on the result message id).
         if self._temporal_client is not None and requester_agent_id and result_message_id:

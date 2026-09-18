@@ -391,7 +391,9 @@ async def test_tools_changed_notice_names_what_was_added_and_removed(chat: ChatW
         current = await _turn(chat, session, seconds=100, text="Can you try now?", reply=None)
         await session.commit()
 
-    chat.model.responses.append(_reply("Trying now."))
+    # These checks inspect the first composed prompt; provide the separate
+    # evidence-review response too when this step has tools but no observation.
+    chat.model.responses.extend((_reply("Trying now."), _reply("Trying now.")))
     sequence = await chat.run_step(
         current, tools=("memory.recall", "github.repository.read", "github.branch.list")
     )
@@ -410,7 +412,7 @@ async def test_no_notice_on_a_first_turn_or_when_the_set_is_unchanged(chat: Chat
     async with chat.sessions() as session:
         first = await _turn(chat, session, seconds=0, text="Hello?", reply=None)
         await session.commit()
-    chat.model.responses.append(_reply("Hi."))
+    chat.model.responses.extend((_reply("Hi."), _reply("Hi.")))
     assert NOTICE not in (await chat.run_step(first, tools=("memory.recall",)))[0][1]
 
     async with chat.sessions() as session:
@@ -418,7 +420,7 @@ async def test_no_notice_on_a_first_turn_or_when_the_set_is_unchanged(chat: Chat
         await _previous_run_offered(chat, session, previous, ["memory.recall"])
         current = await _turn(chat, session, seconds=200, text="Same tools?", reply=None)
         await session.commit()
-    chat.model.responses.append(_reply("Same."))
+    chat.model.responses.extend((_reply("Same."), _reply("Same.")))
     assert NOTICE not in (await chat.run_step(current, tools=("memory.recall",)))[0][1]
 
 
@@ -440,7 +442,7 @@ async def test_no_notice_on_assigned_work(chat: ChatWorld) -> None:
         session.add(task)
         await session.commit()
 
-    chat.model.responses.append(_reply("Audited."))
+    chat.model.responses.extend((_reply("Audited."), _reply("Audited.")))
     system = (await chat.run_step(task, tools=("memory.recall",)))[0][1]
 
     assert NOTICE not in system

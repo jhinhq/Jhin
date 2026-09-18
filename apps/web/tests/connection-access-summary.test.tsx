@@ -32,6 +32,8 @@ describe("ConnectionAccessSummary", () => {
     render(<ConnectionAccessSummary summary={summary} />);
     expect(screen.getByText("Release Engineer")).toBeDefined();
     expect(screen.getByText("Authorized")).toBeDefined();
+    expect(screen.getByText("1 tool authorized on this app.")).toBeDefined();
+    expect(screen.getByText("vercel.deployment.read").closest("details")?.open).toBe(false);
     expect(screen.getByText("vercel.deployment.read")).toBeDefined();
     expect(screen.getByText(/connection_id=conn-1/)).toBeDefined();
     expect(screen.getByText(/project_id=prj_1/)).toBeDefined();

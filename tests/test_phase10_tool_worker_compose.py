@@ -193,6 +193,118 @@ def test_shared_contract_accepts_every_supported_render(
     )
 
 
+@pytest.mark.parametrize(
+    ("service", "change"),
+    [
+        ("agent-worker", {"read_only": False}),
+        ("runtime-gateway", {"read_only": False}),
+        ("api", {"source": "other_volume"}),
+        ("tool-worker", {"target": "/other"}),
+        ("api", {"volume": {"nocopy": True}}),
+    ],
+)
+def test_managed_file_mount_authority_is_exact(service: str, change: dict[str, Any]) -> None:
+    contract = _load_contract()
+    rendered = contract.render_compose(
+        "rootless", env={"PHASE10_ROOTLESS_DOCKER_SOCKET": ROOTLESS_SOCKET}
+    )
+    rendered["services"][service]["volumes"][0].update(change)
+    with pytest.raises(ValueError, match="managed files"):
+        contract.assert_rendered_contract(
+            rendered,
+            mode="rootless",
+            dev=False,
+            expected_app_env="production",
+            expected_sandbox_network=DEFAULT_SANDBOX_NETWORK,
+            expected_socket_source=ROOTLESS_SOCKET,
+        )
+
+
+@pytest.mark.parametrize("kind", ["HTTP_ORIGINS", "DB_HOSTS"])
+def test_production_default_contract_rejects_enabled_connector_allowlist(kind: str) -> None:
+    contract = _load_contract()
+    rendered = contract.render_compose(
+        "rootless", env={"PHASE10_ROOTLESS_DOCKER_SOCKET": ROOTLESS_SOCKET}
+    )
+    rendered["services"]["api"]["environment"][f"JHIN_CONNECTOR_ALLOWED_{kind}"] = (
+        "http://private.example.test:8080"
+        if kind == "HTTP_ORIGINS"
+        else "private.example.test:5432"
+    )
+    with pytest.raises(ValueError, match="allowlist must be empty by default"):
+        contract.assert_rendered_contract(
+            rendered,
+            mode="rootless",
+            dev=False,
+            expected_app_env="production",
+            expected_sandbox_network=DEFAULT_SANDBOX_NETWORK,
+            expected_socket_source=ROOTLESS_SOCKET,
+        )
+
+
+@pytest.mark.parametrize("mode", ["rootful", "rootless", "desktop"])
+@pytest.mark.parametrize(
+    ("bind", "accepted"),
+    [
+        ({}, True),
+        ({"create_host_path": False}, True),
+        ({"create_host_path": True}, False),
+        ({"create_host_path": 0}, False),
+        ({"create_host_path": "false"}, False),
+        ({"propagation": "rshared"}, False),
+    ],
+)
+def test_rendered_socket_bind_accepts_only_equivalent_false_defaults(
+    mode: str, bind: dict[str, Any], accepted: bool
+) -> None:
+    contract = _load_contract()
+    source = "/run/fixture/docker.sock"
+    rendered = contract.render_compose(
+        mode,
+        env={
+            "PHASE10_ROOTLESS_DOCKER_SOCKET": source,
+            "SANDBOX_DOCKER_SOCKET_HOST": source,
+            "SANDBOX_DOCKER_GID": "10001",
+        },
+    )
+    service = "rootless-docker-transport" if mode == "rootless" else "sandbox-runner"
+    # Normalize the test input source on Windows too; socket probing is tested
+    # separately. This test targets Compose's JSON rendering of false defaults.
+    mount = rendered["services"][service]["volumes"][0]
+    mount.update(source=source, bind=bind)
+    kwargs: dict[str, Any] = {
+        "mode": mode,
+        "dev": False,
+        "expected_app_env": "production",
+        "expected_sandbox_network": DEFAULT_SANDBOX_NETWORK,
+        "expected_socket_source": source,
+        "expected_rootful_gid": 10001 if mode == "rootful" else None,
+    }
+    if accepted:
+        contract.assert_rendered_contract(rendered, **kwargs)
+    else:
+        with pytest.raises(ValueError, match=r"socket.*bind"):
+            contract.assert_rendered_contract(rendered, **kwargs)
+
+
+@pytest.mark.parametrize("network", ["control", "engine", "sandbox"])
+def test_runtime_gateway_cannot_gain_other_network_authority(network: str) -> None:
+    contract = _load_contract()
+    source = "/run/fixture/docker.sock"
+    rendered = contract.render_compose("rootless", env={"PHASE10_ROOTLESS_DOCKER_SOCKET": source})
+    rendered["services"]["rootless-docker-transport"]["volumes"][0]["source"] = source
+    rendered["services"]["runtime-gateway"]["networks"][network] = None
+    with pytest.raises(ValueError, match=r"network|sandbox"):
+        contract.assert_rendered_contract(
+            rendered,
+            mode="rootless",
+            dev=False,
+            expected_app_env="production",
+            expected_sandbox_network=DEFAULT_SANDBOX_NETWORK,
+            expected_socket_source=source,
+        )
+
+
 def test_dev_defaults_to_dev_but_explicit_test_app_env_wins() -> None:
     contract = _load_contract()
     defaulted = contract.render_compose(
@@ -1276,6 +1388,7 @@ def test_environment_example_has_no_active_app_env_or_mode_authority() -> None:
                 "fake-websearch",
                 "postgres",
                 "nats",
+                "runtime-gateway",
                 "sandbox-runner",
                 "temporal",
                 "temporal-ui",
@@ -1301,6 +1414,7 @@ def test_environment_example_has_no_active_app_env_or_mode_authority() -> None:
                 "postgres",
                 "nats",
                 "rootless-docker-transport",
+                "runtime-gateway",
                 "sandbox-runner",
                 "temporal",
                 "temporal-ui",

@@ -71,6 +71,7 @@ class CatalogApp(BaseModel):
     icon_url: str = ""
     # Native Jhin connector type when one exists (GitHub, Linear, …).
     connector_type: str | None = None
+    composio_toolkit: str | None = None
     # Official remote MCP endpoint when known.
     mcp_url: str | None = None
     url_unverified: bool = False
@@ -148,13 +149,25 @@ class CatalogApp(BaseModel):
     @property
     def connectable(self) -> bool:
         """Whether the Connect button can do something today."""
-        return self.connector_type is not None or not self.stdio_only
+        return bool(self.connector_type or self.composio_toolkit or not self.stdio_only)
 
 
 @cache
 def load_catalog() -> tuple[CatalogApp, ...]:
+    from jhin_connectors.composio.catalog import CATALOG_TOOLKITS
+
     raw = resources.files("jhin_connectors").joinpath("catalog.json").read_text(encoding="utf-8")
-    entries = tuple(CatalogApp.model_validate(item) for item in json.loads(raw))
+    entries = tuple(
+        CatalogApp.model_validate(
+            {
+                **item,
+                "composio_toolkit": CATALOG_TOOLKITS.get(item["slug"])
+                if not item.get("connector_type")
+                else None,
+            }
+        )
+        for item in json.loads(raw)
+    )
     slugs = [entry.slug for entry in entries]
     if len(slugs) != len(set(slugs)):
         raise ValueError("catalog slugs must be unique")

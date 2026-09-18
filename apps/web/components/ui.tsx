@@ -369,6 +369,7 @@ export function Dialog({
   children,
   wide = false,
   description,
+  footer,
 }: {
   title: string;
   open: boolean;
@@ -376,11 +377,18 @@ export function Dialog({
   children: React.ReactNode;
   wide?: boolean;
   description?: string;
+  /** Keeps actions visible while a long form scrolls inside the dialog. */
+  footer?: React.ReactNode;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef(onClose);
   const titleId = useId();
   const descId = useId();
+
+  useEffect(() => {
+    closeRef.current = onClose;
+  }, [onClose]);
 
   useEffect(() => {
     if (!open) return;
@@ -393,9 +401,13 @@ export function Dialog({
     (first ?? panel)?.focus();
 
     const onKey = (event: KeyboardEvent) => {
+      // A child form may be open over a resource dialog. Only the top dialog
+      // owns Escape and Tab; closing both would discard the parent's context.
+      const dialogs = document.querySelectorAll('[role="dialog"][aria-modal="true"]');
+      if (dialogs.item(dialogs.length - 1) !== panel) return;
       if (event.key === "Escape") {
         event.stopPropagation();
-        onClose();
+        closeRef.current();
         return;
       }
       if (event.key !== "Tab" || !panel) return;
@@ -424,13 +436,15 @@ export function Dialog({
     return () => {
       window.removeEventListener("keydown", onKey);
       document.body.style.overflow = overflow;
-      previouslyFocused?.focus?.();
+      previouslyFocused?.focus?.({ preventScroll: true });
     };
-  }, [open, onClose]);
+    // A form render changes inline callbacks, but must not re-run autofocus
+    // or restore focus. Only opening/closing owns that lifecycle.
+  }, [open]);
 
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-[#221e38]/40 p-4 pt-[10vh] backdrop-blur-sm dark:bg-black/60">
+    <div className={`fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-[#221e38]/40 p-4 ${footer ? "sm:pt-[10vh]" : "pt-[10vh]"} backdrop-blur-sm dark:bg-black/60`}>
       <button
         type="button"
         aria-label="Close dialog"
@@ -446,9 +460,9 @@ export function Dialog({
         aria-labelledby={titleId}
         aria-describedby={description ? descId : undefined}
         tabIndex={-1}
-        className={`relative w-full outline-none ${wide ? "max-w-2xl" : "max-w-md"} rounded-2xl border border-line bg-surface shadow-card`}
+        className={`relative w-full outline-none ${wide ? "max-w-2xl" : "max-w-md"} ${footer ? "flex max-h-[calc(100dvh-2rem)] flex-col overflow-hidden sm:max-h-[80dvh]" : ""} rounded-2xl border border-line bg-surface shadow-card`}
       >
-        <header className="flex items-start justify-between gap-4 border-b border-line px-6 py-4">
+        <header className="flex shrink-0 items-start justify-between gap-4 border-b border-line px-6 py-4">
           <div className="min-w-0">
             <h2 id={titleId} className="font-display text-base font-semibold tracking-tight">
               {title}
@@ -463,9 +477,10 @@ export function Dialog({
             <X size={16} />
           </IconButton>
         </header>
-        <div ref={bodyRef} className="p-6">
+        <div ref={bodyRef} className={`p-6 ${footer ? "min-h-0 overflow-y-auto overscroll-contain" : ""}`}>
           {children}
         </div>
+        {footer ? <footer className="shrink-0 border-t border-line px-6 py-4">{footer}</footer> : null}
       </div>
     </div>
   );

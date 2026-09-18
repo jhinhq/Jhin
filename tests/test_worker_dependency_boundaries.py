@@ -88,6 +88,14 @@ def test_distribution_dependencies_and_imports_are_one_way() -> None:
     assert workflows["tool"]["uv"]["sources"]["jhin-observability"] == {"workspace": True}
 
 
+def test_isolated_runner_declares_a_websocket_server_backend() -> None:
+    dependencies = _project("services/sandbox_runner/pyproject.toml")["project"]["dependencies"]
+    assert any(
+        dependency.startswith(("websockets", "wsproto", "uvicorn[standard]"))
+        for dependency in dependencies
+    ), "Preview WebSocket transport must work in the runner's production-only image"
+
+
 def test_no_intermediary_carries_connectors_back_into_the_agent_worker() -> None:
     """The boundary is the transitive closure, not the direct dependency list.
 
@@ -109,6 +117,7 @@ def test_no_intermediary_carries_connectors_back_into_the_agent_worker() -> None
 
 def test_worker_settings_store_closed_environment_defaults(
     monkeypatch: Any,
+    tmp_path: Path,
 ) -> None:
     from jhin_agent_worker.settings import Settings as AgentSettings
     from jhin_event_worker.settings import Settings as EventSettings
@@ -123,7 +132,7 @@ def test_worker_settings_store_closed_environment_defaults(
     assert WorkflowSettings().app_env == "dev"
     sandbox = SandboxSettings(
         sandbox_docker_mode="rootful",
-        sandbox_docker_socket=Path("/run/docker.sock"),
+        sandbox_docker_socket=tmp_path / "docker.sock",
         sandbox_docker_gid=1,
     )
     assert sandbox.app_env == "dev"
@@ -167,7 +176,20 @@ def test_worker_console_scripts_and_docker_metadata_are_installed() -> None:
     workflows = _project("packages/workflows/pyproject.toml")
     dockerfile = (REPO_ROOT / "docker/python.Dockerfile").read_text(encoding="utf-8")
 
-    assert tool["project"]["scripts"] == {"jhin-tool-worker": "jhin_tool_worker.main:run"}
+    # A closed set on purpose: every console script this image installs is
+    # reviewed here. ``jhin-sandbox-reconcile`` runs one sweep of the
+    # ``sandbox_job`` rows whose runner is demonstrably gone, and it lives in
+    # this service because the runner is reachable only from the ``runner``
+    # network the API container is deliberately not on.
+    # ``jhin-tool-calls-rollback`` is the one manual step in rolling the
+    # two-step claim back: it closes every ``tool_call`` left in ``claimed``,
+    # a status the previous release refuses outright.
+    assert tool["project"]["scripts"] == {
+        "jhin-tool-worker": "jhin_tool_worker.main:run",
+        "jhin-runtime-gateway": "jhin_tool_worker.runtime_gateway:main",
+        "jhin-sandbox-reconcile": "jhin_tool_worker.cli:run_reconcile_sandbox_jobs",
+        "jhin-tool-calls-rollback": "jhin_tool_worker.cli:run_rollback_claimed_tool_calls",
+    }
     assert workflows["project"]["scripts"] == {
         "jhin-temporal-poller-check": "jhin_workflows.poller_health:run"
     }

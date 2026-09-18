@@ -234,6 +234,8 @@ describe("AppsPage", () => {
     expect(
       screen.getByText("Connected. Who may use it? Give it to an agent below and Jhin writes their permissions."),
     ).toBeDefined();
+    expect(screen.getByRole("button", { name: "Give to an agent…" })).toBeDefined();
+    fireEvent.click(screen.getByRole("tab", { name: /^Tools/ }));
     const tool = await screen.findByTestId("connection-tool-mcp.fake.echo");
     expect(within(tool).getAllByText("read").some((el) => el.tagName === "SPAN")).toBe(true);
     expect(within(tool).getByText("Reads information only")).toBeDefined();

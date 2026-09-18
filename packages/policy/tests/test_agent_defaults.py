@@ -6,12 +6,14 @@ still re-decides every call against the agent's live grants.
 
 from jhin_policy import (
     ASK_PERSON_CAPABILITY,
+    IDENTITY_SELF_CAPABILITY,
     MEMORY_PROPOSE_CAPABILITY,
     MEMORY_READ_CAPABILITY,
     PERSONA_SELF_CAPABILITY,
     ask_person_grant_specs,
     collaboration_grant_specs,
     default_agent_grant_specs,
+    identity_grant_specs,
     memory_grant_specs,
     persona_grant_specs,
 )
@@ -36,12 +38,50 @@ def test_a_new_agent_can_choose_a_persona() -> None:
     assert persona_grant_specs() == ((PERSONA_SELF_CAPABILITY, {}),)
 
 
+def test_a_new_agent_can_set_its_own_name() -> None:
+    """Told "your name is Bisby", the live agent agreed to answer to it for
+    one chat because nothing could write the row. Knowing what you are
+    called is not a privilege, and it is deliberately not in the ``agent.``
+    namespace — see ``covers_forbidden_capability``."""
+    capabilities = [capability for capability, _scope in default_agent_grant_specs()]
+    assert IDENTITY_SELF_CAPABILITY in capabilities
+    assert IDENTITY_SELF_CAPABILITY == "organization.identity.self"
+    assert not IDENTITY_SELF_CAPABILITY.startswith("agent.")
+    assert identity_grant_specs() == ((IDENTITY_SELF_CAPABILITY, {}),)
+
+
 def test_the_defaults_are_the_collaboration_baseline_plus_memory_asking_and_persona() -> None:
     assert default_agent_grant_specs() == (
         *collaboration_grant_specs(),
         *memory_grant_specs(),
         *ask_person_grant_specs(),
         *persona_grant_specs(),
+        *identity_grant_specs(),
+        ("variables.read", {}),
+        ("variables.write", {}),
+        ("schedules.read", {}),
+        ("schedules.manage", {}),
+        ("ghost.connection.bind", {}),
+        ("unsplash.connection.bind", {}),
+        ("ghost.post.list", {"variable_audience": True}),
+        ("ghost.post.read", {"variable_audience": True}),
+        ("ghost.draft.create", {"variable_audience": True}),
+        ("ghost.draft.update", {"variable_audience": True}),
+        ("ghost.review.request", {"variable_audience": True}),
+        ("ghost.review.read", {"variable_audience": True}),
+        ("ghost.review.decide", {"variable_audience": True}),
+        ("ghost.post.publish", {"variable_audience": True}),
+        ("ghost.assignment.create", {"variable_audience": True}),
+        ("ghost.assignment.read", {"variable_audience": True}),
+        ("ghost.assignment.revise", {"variable_audience": True}),
+        ("ghost.assignment.cancel", {"variable_audience": True}),
+        ("ghost.assignment.attach_evidence", {"variable_audience": True}),
+        ("ghost.archive.sync", {"variable_audience": True}),
+        ("ghost.archive.status", {"variable_audience": True}),
+        ("ghost.archive.search", {"variable_audience": True}),
+        ("ghost.archive.read", {"variable_audience": True}),
+        ("unsplash.photos.search", {"variable_audience": True}),
+        ("unsplash.photos.select", {"variable_audience": True}),
     )
 
 
@@ -56,6 +96,32 @@ def test_the_default_set_is_exactly_these_capabilities() -> None:
         "memory.propose",
         "organization.ask_person",
         "organization.persona.self",
+        "organization.identity.self",
+        "variables.read",
+        "variables.write",
+        "schedules.read",
+        "schedules.manage",
+        "ghost.connection.bind",
+        "unsplash.connection.bind",
+        "ghost.post.list",
+        "ghost.post.read",
+        "ghost.draft.create",
+        "ghost.draft.update",
+        "ghost.review.request",
+        "ghost.review.read",
+        "ghost.review.decide",
+        "ghost.post.publish",
+        "ghost.assignment.create",
+        "ghost.assignment.read",
+        "ghost.assignment.revise",
+        "ghost.assignment.cancel",
+        "ghost.assignment.attach_evidence",
+        "ghost.archive.sync",
+        "ghost.archive.status",
+        "ghost.archive.search",
+        "ghost.archive.read",
+        "unsplash.photos.search",
+        "unsplash.photos.select",
     ]
 
 
@@ -80,6 +146,7 @@ def test_no_default_grant_carries_a_scope_that_would_widen_it() -> None:
             *memory_grant_specs(),
             *ask_person_grant_specs(),
             *persona_grant_specs(),
+            *identity_grant_specs(),
         )
         if scope
     }

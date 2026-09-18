@@ -18,6 +18,10 @@ from jhin_domain import ALL_SCOPE_KEYS, SCOPE_BY_KEY, WorkspaceRole
 
 # Credential surfaces that must stay browser-session-only, forever.
 SEALED_SIGNATURES = {
+    ("variables", "secrets"),
+    ("variables", "secret"),
+    ("conversations", "terminals", "ticket"),
+    ("conversations", "previews", "ticket"),
     ("secrets",),
     ("secrets", "rotate"),
     ("connections", "rotate"),

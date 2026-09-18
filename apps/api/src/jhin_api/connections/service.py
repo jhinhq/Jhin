@@ -9,10 +9,12 @@ tool executors at execution time — plaintext is never returned by any route.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import math
 import secrets as stdlib_secrets
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from fnmatch import fnmatchcase
@@ -44,6 +46,7 @@ from jhin_connectors.mcp import (
     stored_tools,
     tool_name_for,
 )
+from jhin_connectors.mcp.discovery import DiscoveredTool
 from jhin_connectors.mcp.discovery import discovered_at as mcp_discovered_at
 from jhin_connectors.mcp.oauth import OAUTH_CONFIG_KEYS as MCP_OAUTH_CONFIG_KEYS
 from jhin_db.models import (
@@ -53,6 +56,7 @@ from jhin_db.models import (
     ToolCall,
     Trigger,
     TriggerInvocation,
+    Workspace,
 )
 from jhin_db.models.connection import new_public_id
 from jhin_domain import ActorType, ConnectionStatus, SecretType
@@ -125,6 +129,21 @@ def _decode_stored_credentials(plaintext: str) -> dict[str, str]:
         return decode_string_secret_map(plaintext)
     except SecretMaterialError:
         raise _bad_request("Stored connection credential is malformed") from None
+
+
+async def _resolve_credentials(
+    db: AsyncSession, connection: Connection, plaintext: str
+) -> dict[str, str]:
+    from jhin_connectors.composio import ComposioError, resolve_managed_credentials
+
+    try:
+        return await resolve_managed_credentials(connection, _decode_stored_credentials(plaintext))
+    except ComposioError as exc:
+        if exc.needs_reauth and connection.status != ConnectionStatus.DISABLED.value:
+            connection.status = ConnectionStatus.NEEDS_REAUTH.value
+            connection.last_error = str(exc)
+            await db.commit()
+        raise HTTPException(409 if exc.needs_reauth else 502, str(exc)) from None
 
 
 def _safe_provider_text(value: str) -> str:
@@ -349,6 +368,18 @@ def _connection_tools(connection: Connection) -> tuple[ToolDefinition, ...]:
     per-connection discovery (MCP) derive them from the stored discovery."""
     connector = get_connector(connection.connector_type)
     definitions = connector.connection_tool_definitions(connection.config_json)
+    if connection.connector_type == "supabase":
+        # The two native credential types reach different APIs. Use the same
+        # registered tool groups as their executors, rather than offering
+        # database grants for a Management API token (or the reverse).
+        from jhin_connectors.supabase.database_tools import SUPABASE_DATABASE_TOOLS
+        from jhin_connectors.supabase.management_tools import SUPABASE_MANAGEMENT_TOOLS
+
+        applicable = {
+            "management_token": SUPABASE_MANAGEMENT_TOOLS,
+            "postgres": SUPABASE_DATABASE_TOOLS,
+        }.get(connection.auth_type, ())
+        definitions = tuple(tool for tool, _executor in applicable)
     return tuple(sorted(definitions, key=lambda tool: tool.name))
 
 
@@ -578,6 +609,14 @@ async def connection_access_summary(
     or approval-policy JSON.
     """
     connection = await get_connection(db, workspace_id, connection_id)
+    if connection.connector_type == "ghost":
+        from jhin_api.connections.ghost_access import ghost_agent_access
+
+        return {
+            "connection_id": connection.id,
+            "agents": await ghost_agent_access(db, connection),
+            "delete_impact": await delete_impact(db, workspace_id, connection.id),
+        }
     tools = _connection_tools(connection)
     target_connection_id = str(connection.id)
     capability_candidates = _capability_pattern_candidates(tools)
@@ -733,6 +772,7 @@ async def _existing_server_slug_owner(
     server_slug: str,
     *,
     exclude_id: UUID | None = None,
+    connector_type: str = MCP_CONNECTOR_TYPE,
 ) -> Connection | None:
     """The MCP connection already claiming this short name, if there is one.
 
@@ -741,7 +781,7 @@ async def _existing_server_slug_owner(
     Python. A workspace holds a handful of connections, not a table scan."""
     query = select(Connection).where(
         Connection.workspace_id == workspace_id,
-        Connection.connector_type == MCP_CONNECTOR_TYPE,
+        Connection.connector_type == connector_type,
     )
     if exclude_id is not None:
         query = query.where(Connection.id != exclude_id)
@@ -766,13 +806,17 @@ async def ensure_server_slug_is_free(
     tool can end up running without the approval its own connection demands.
     The database index added in migration 0030 enforces the same rule; this
     check exists so the caller gets an explanation instead of a constraint."""
-    if connector_type != MCP_CONNECTOR_TYPE:
+    if connector_type not in {MCP_CONNECTOR_TYPE, "composio"}:
         return
     server_slug = config.get("server_slug")
     if not isinstance(server_slug, str) or not server_slug:
         return
+    if connector_type == "composio":
+        # Serialize managed namespace claims across callbacks and settings
+        # edits; the lock lives until the caller commits the connection.
+        await db.execute(select(Workspace.id).where(Workspace.id == workspace_id).with_for_update())
     existing = await _existing_server_slug_owner(
-        db, workspace_id, server_slug, exclude_id=exclude_id
+        db, workspace_id, server_slug, exclude_id=exclude_id, connector_type=connector_type
     )
     if existing is not None:
         raise _duplicate_server_slug(server_slug, existing.name)
@@ -829,6 +873,8 @@ async def _create_connection(
     bundle creates the sandbox its grants point at) can make both one
     transaction."""
     connector = get_connector(connector_type)
+    if connector_type == "composio":
+        raise _bad_request("Use app sign-in to create a managed connection.")
     _validate_credentials(connector, auth_type, credentials)
     try:
         normalized_config = normalize_config(connector.manifest, auth_type, config)
@@ -910,6 +956,7 @@ async def _create_connection(
             **(extra_audit_metadata or {}),
         },
     )
+    await check_initial_connection(db, crypto, connection)
     return connection, webhook_plaintext
 
 
@@ -1089,13 +1136,99 @@ async def verify_connection(
     """Run the connector's live health check and persist the outcome
     (status, last_verified_at, last_error — plan 6.9)."""
     connection = await get_connection(db, ctx.workspace_id, connection_id)
+    health = await _check_connection(db, crypto, connection)
+    audit.record(
+        db,
+        action="connection.verified",
+        target_type="connection",
+        target_id=connection.id,
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user.id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        metadata={"ok": health.ok, "status": connection.status},
+    )
+    await db.commit()
+    return connection, health
+
+
+async def check_initial_connection(
+    db: AsyncSession, crypto: SecretCrypto, connection: Connection
+) -> None:
+    """Check a newly saved credential and discover its tools before returning.
+
+    A provider outage must not discard an OAuth grant or force someone to
+    re-enter a secret. Keep the connection with an honest failed check so the
+    existing Test/Reconnect controls can recover it. The caller commits.
+    """
+    try:
+        health = await _check_connection(db, crypto, connection, timeout_seconds=20)
+        if (
+            health.ok
+            and connection.connector_type == MCP_CONNECTOR_TYPE
+            and DISCOVERY_KEY not in connection.config_json
+        ):
+            raise HTTPException(502, "Initial tool discovery failed")
+    except (HTTPException, TimeoutError):
+        connection.last_verified_at = datetime.now(UTC)
+        if connection.status != ConnectionStatus.DISABLED.value:
+            connection.status = ConnectionStatus.ERROR.value
+        connection.last_error = "The initial connection check failed. Test the connection to retry."
+
+
+async def _check_connection(
+    db: AsyncSession,
+    crypto: SecretCrypto,
+    connection: Connection,
+    *,
+    timeout_seconds: float | None = None,
+) -> ConnectionHealth:
+    """Run the shared provider check without committing its caller's transaction."""
     connector = get_connector(connection.connector_type)
+    credentials = await _stored_credentials(db, crypto, connection)
+    # Bound provider I/O only: cancelling a database read can invalidate the
+    # transaction that must retain the connection and its retryable error.
+    async with asyncio.timeout(timeout_seconds):
+        return await _check_provider_connection(connection, connector, credentials)
+
+
+async def _stored_credentials(
+    db: AsyncSession, crypto: SecretCrypto, connection: Connection
+) -> dict[str, str]:
+    """Provider-only credential resolution, including scope-bound variables."""
+    if connection.connector_type == "ghost" and connection.config_json.get("admin_key_variable_id"):
+        from jhin_connectors.ghost.client import GhostApiError, admin_origin
+        from jhin_secrets.variables import VariableActor, VariableError, VariableStore
+
+        try:
+            key = await VariableStore(db, crypto).resolve_bound(
+                VariableActor(
+                    connection.workspace_id,
+                    "agent",
+                    UUID(str(connection.config_json.get("configured_by_agent_id", ""))),
+                ),
+                UUID(str(connection.config_json["admin_key_variable_id"])),
+                connection.id,
+                credential_field="admin_key",
+                approved_origin=admin_origin(str(connection.config_json.get("admin_url", ""))),
+                allow_disabled=True,
+            )
+        except (ValueError, VariableError, GhostApiError):
+            raise _bad_request(
+                "The bound Ghost variable is unavailable or its approved origin changed"
+            ) from None
+        return {"admin_key": key}
     if connection.encrypted_secret_id is None:
         raise _bad_request("Connection has no stored credential")
+    plaintext = await SecretStore(db, crypto).reveal(
+        connection.workspace_id, connection.encrypted_secret_id
+    )
+    return await _resolve_credentials(db, connection, plaintext)
 
-    store = SecretStore(db, crypto)
-    plaintext = await store.reveal(ctx.workspace_id, connection.encrypted_secret_id)
-    credentials = _decode_stored_credentials(plaintext)
+
+async def _check_provider_connection(
+    connection: Connection, connector: Connector, credentials: dict[str, str]
+) -> ConnectionHealth:
     try:
         provider_health = await connector.verify_connection(
             VerifyContext(
@@ -1171,19 +1304,7 @@ async def verify_connection(
             message=f"{health.message.rstrip()} {_STILL_DISABLED_NOTE}".strip(),
             details=health.details,
         )
-    audit.record(
-        db,
-        action="connection.verified",
-        target_type="connection",
-        target_id=connection.id,
-        workspace_id=ctx.workspace_id,
-        actor_id=ctx.user.id,
-        request_id=request_id,
-        ip_hash=ip_hash,
-        metadata={"ok": health.ok, "status": connection.status},
-    )
-    await db.commit()
-    return connection, health
+    return health
 
 
 async def fetch_metadata(
@@ -1195,11 +1316,7 @@ async def fetch_metadata(
     """Connector-provided, display-safe metadata for UI pickers (plan 17.10)."""
     connection = await get_connection(db, ctx.workspace_id, connection_id)
     connector = get_connector(connection.connector_type)
-    if connection.encrypted_secret_id is None:
-        raise _bad_request("Connection has no stored credential")
-    store = SecretStore(db, crypto)
-    plaintext = await store.reveal(ctx.workspace_id, connection.encrypted_secret_id)
-    credentials = _decode_stored_credentials(plaintext)
+    credentials = await _stored_credentials(db, crypto, connection)
     try:
         provider_metadata = await connector.fetch_metadata(
             VerifyContext(
@@ -1235,6 +1352,8 @@ async def rotate_credentials(
     connection = await get_connection(db, ctx.workspace_id, connection_id)
     connector = get_connector(connection.connector_type)
     _validate_credentials(connector, connection.auth_type, credentials)
+    if connection.oauth_issuer == "https://composio.dev":
+        raise _bad_request("Reconnect this managed app to update its authentication.")
     if connection.encrypted_secret_id is None:
         raise _bad_request("Connection has no stored credential to rotate")
     store = SecretStore(db, crypto)
@@ -1356,6 +1475,24 @@ async def update_config(
                 raise _bad_request(
                     f"'{git_connection_id}' is not a GitHub connection in this workspace."
                 )
+    if connection.oauth_issuer == "https://composio.dev":
+        from jhin_connectors.composio import ComposioError, validate_native_target
+
+        if connection.connector_type == "composio":
+            if normalized.get("toolkit") != connection.config_json.get("toolkit"):
+                raise _bad_request("Connect a new app to change its toolkit.")
+            await ensure_server_slug_is_free(
+                db,
+                ctx.workspace_id,
+                connection.connector_type,
+                normalized,
+                exclude_id=connection.id,
+            )
+        else:
+            try:
+                validate_native_target(connection.connector_type, connection.auth_type, normalized)
+            except ComposioError as exc:
+                raise _bad_request(str(exc)) from None
     declared = {field.name for field in connector.manifest.config_fields}
     previous = dict(connection.config_json)
     kept = {key: value for key, value in previous.items() if key not in declared}
@@ -1394,6 +1531,7 @@ async def delete_connection(
     request_id: UUID,
     ip_hash: str,
     tokens: ConnectionTokenService | None = None,
+    crypto: SecretCrypto | None = None,
 ) -> None:
     """Remove a connection, and hand any OAuth grant back to the provider first.
 
@@ -1406,7 +1544,20 @@ async def delete_connection(
     who is trying to disconnect an app — but the local erasure below is not.
     """
     connection = await get_connection(db, ctx.workspace_id, connection_id)
-    if tokens is not None and connection.auth_type == OAUTH_AUTH_TYPE:
+    managed = connection.oauth_issuer == "https://composio.dev"
+    if managed and crypto is not None and connection.encrypted_secret_id is not None:
+        from jhin_connectors.composio import ComposioClient
+
+        with contextlib.suppress(Exception):
+            raw = await SecretStore(db, crypto).reveal(
+                ctx.workspace_id, connection.encrypted_secret_id
+            )
+            binding = _decode_stored_credentials(raw)
+            client = ComposioClient()
+            with contextlib.suppress(Exception):
+                await client.revoke_account(binding["composio_account_id"])
+            await client.delete_account(binding["composio_account_id"])
+    if tokens is not None and connection.auth_type == OAUTH_AUTH_TYPE and not managed:
         with contextlib.suppress(Exception):
             await tokens.revoke_and_clear(connection)
     store_ids = [connection.encrypted_secret_id, connection.webhook_secret_id]
@@ -1490,7 +1641,15 @@ def _safe_tool_document(value: object) -> object:
 
 
 def _is_dynamic(connection: Connection) -> bool:
-    return connection.connector_type == MCP_CONNECTOR_TYPE
+    return connection.connector_type in {MCP_CONNECTOR_TYPE, "composio"}
+
+
+def _stored_connection_tools(connection: Connection) -> Sequence[DiscoveredTool]:
+    if connection.connector_type == "composio":
+        from jhin_connectors.composio.tools import stored_tools as managed_tools
+
+        return managed_tools(connection.config_json)
+    return stored_tools(connection.config_json)
 
 
 def _tools_listing(connection: Connection) -> dict[str, object]:
@@ -1499,12 +1658,14 @@ def _tools_listing(connection: Connection) -> dict[str, object]:
         server_slug = str(config.get("server_slug", ""))
         overrides = stored_overrides(config)
         tools: list[dict[str, object]] = []
-        for tool in stored_tools(config):
+        for tool in _stored_connection_tools(connection):
             risk = effective_risk(tool, overrides)
             override = overrides.get(tool.slug)
             tools.append(
                 {
-                    "name": tool_name_for(server_slug, tool.slug),
+                    "name": f"composio.{server_slug}.{tool.slug}"
+                    if connection.connector_type == "composio"
+                    else tool_name_for(server_slug, tool.slug),
                     "provider_name": tool.name,
                     "description": tool.description,
                     "risk": risk.value,
@@ -1514,15 +1675,25 @@ def _tools_listing(connection: Connection) -> dict[str, object]:
                     "input_schema": tool.input_schema,
                     "schema_truncated": tool.schema_truncated,
                     "supports_approval": True,
-                    "scope_keys": ["connection_id", "tool"],
+                    "scope_keys": ["connection_id", "server_slug", "toolkit", "tool"]
+                    if connection.connector_type == "composio"
+                    else ["connection_id", "tool"],
                 }
             )
         listing: dict[str, object] = {
             "connection_id": connection.id,
             "connector_type": connection.connector_type,
             "dynamic": True,
-            "capability_pattern": capability_pattern_for(server_slug) if server_slug else None,
-            "discovered_at": mcp_discovered_at(config),
+            "capability_pattern": (
+                f"composio.{server_slug}.*"
+                if connection.connector_type == "composio"
+                else capability_pattern_for(server_slug)
+            )
+            if server_slug
+            else None,
+            "discovered_at": config.get("composio_discovered_at")
+            if connection.connector_type == "composio"
+            else mcp_discovered_at(config),
             "tools": _safe_tool_document(tools),
         }
         return listing
@@ -1571,7 +1742,9 @@ async def list_connection_tools(
     connection = await get_connection(db, ctx.workspace_id, connection_id)
     connector = get_connector(connection.connector_type)
     needs_discovery = _is_dynamic(connection) and (
-        refresh or DISCOVERY_KEY not in connection.config_json
+        refresh
+        or ("composio_tools" if connection.connector_type == "composio" else DISCOVERY_KEY)
+        not in connection.config_json
     )
     if needs_discovery:
         if connection.encrypted_secret_id is None:
@@ -1580,7 +1753,7 @@ async def list_connection_tools(
             raise _bad_request("Connection is disabled")
         store = SecretStore(db, crypto)
         plaintext = await store.reveal(ctx.workspace_id, connection.encrypted_secret_id)
-        credentials = _decode_stored_credentials(plaintext)
+        credentials = await _resolve_credentials(db, connection, plaintext)
         try:
             discovery = await connector.refresh_discovery(
                 VerifyContext(
@@ -1605,7 +1778,7 @@ async def list_connection_tools(
                 actor_id=ctx.user.id,
                 request_id=request_id,
                 ip_hash=ip_hash,
-                metadata={"tool_count": len(stored_tools(connection.config_json))},
+                metadata={"tool_count": len(_stored_connection_tools(connection))},
             )
             await db.commit()
     return _tools_listing(connection)
@@ -1629,7 +1802,7 @@ async def update_tool_risk_overrides(
     connection = await get_connection(db, ctx.workspace_id, connection_id)
     if not _is_dynamic(connection):
         raise _bad_request("Connector has no per-tool risk overrides")
-    known = {tool.slug for tool in stored_tools(connection.config_json)}
+    known = {tool.slug for tool in _stored_connection_tools(connection)}
     current = {slug: risk.value for slug, risk in stored_overrides(connection.config_json).items()}
     changed: list[str] = []
     for slug, risk in overrides.items():

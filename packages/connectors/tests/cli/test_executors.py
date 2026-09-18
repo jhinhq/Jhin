@@ -9,11 +9,12 @@ secret env. What the sandbox then does with that script is proven for real in
 
 import base64
 import re
+from dataclasses import replace
 from typing import Any
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from jhin_connectors.base import VerifyContext
 from jhin_connectors.cli import tools as cli_tools
@@ -41,8 +42,10 @@ from jhin_connectors.cli.schemas import (
 from jhin_connectors.cli.validators import (
     repository_allow_list_validator,
     repository_matches,
+    workspace_repository_validator,
 )
 from jhin_connectors.github.client import GitHubApiError
+from jhin_db.base import Base
 from jhin_db.models import AuditEvent, SandboxJob, Workspace
 from jhin_domain import new_uuid7
 from jhin_policy import DecisionType, Grant
@@ -141,8 +144,6 @@ def hits(*entries: tuple[str, int, str]) -> str:
 @pytest.fixture
 def linked_context(context: ToolExecutionContext) -> ToolExecutionContext:
     """Context as the gateway builds it just before execution."""
-    from dataclasses import replace
-
     return replace(context, tool_call_id=new_uuid7())
 
 
@@ -178,8 +179,11 @@ async def _wired(make_connection, workspace: Workspace, monkeypatch, **overrides
 
 
 def _every_cli_call(connection_id: str) -> dict[str, Any]:
-    """One valid call per registered CLI tool, keyed by tool name, so a test
-    can assert something about *every* job the connector can submit."""
+    """One valid call per job-submitting CLI tool.
+
+    cli.file.publish uses the contained file transport, covered separately in
+    test_managed_files; it cannot attach a secret environment to a sandbox job.
+    """
     return {
         "cli.command.execute": CommandExecuteInput(connection_id=connection_id, command="echo hi"),
         "cli.repository.checkout": RepositoryCheckoutInput(
@@ -205,6 +209,33 @@ def _every_cli_call(connection_id: str) -> dict[str, Any]:
 
 
 class TestCommandExecute:
+    async def test_final_tails_do_not_restore_partial_worker_only_secrets(
+        self, session, workspace, linked_context, make_connection, monkeypatch
+    ) -> None:
+        from jhin_secrets import get_redactor
+
+        connection = await _cli_connection(make_connection, workspace)
+        stub = RunnerStub(stdout="before\nworker-only-canary-", stderr="canary-secret\nafter")
+        monkeypatch.setattr(cli_tools, "run_sandbox_job", stub)
+        redactor = get_redactor()
+        redactor.clear()
+        redactor.register("worker-only-canary-secret")
+        try:
+            output = await cli_tools._command_execute(
+                linked_context,
+                CommandExecuteInput(connection_id=str(connection.id), command="echo safe"),
+            )
+            assert output.stdout == "before\n[REDACTED]"
+            assert output.stderr == "[REDACTED]\nafter"
+            row = await session.scalar(select(SandboxJob))
+            assert (
+                row is not None
+                and row.stdout_tail == output.stdout
+                and row.stderr_tail == output.stderr
+            )
+        finally:
+            redactor.clear()
+
     async def test_persists_sandbox_job_linked_to_tool_call(
         self,
         session: AsyncSession,
@@ -225,6 +256,7 @@ class TestCommandExecute:
         assert isinstance(output, CommandExecuteOutput)
         assert output.exit_code == 0
         assert output.stdout == "hello\n"
+        assert output.network_policy == "none"
 
         row = await session.scalar(select(SandboxJob))
         assert row is not None
@@ -248,7 +280,7 @@ class TestCommandExecute:
         ]
         assert actions == ["sandbox.job.started", "sandbox.job.completed"]
 
-    async def test_runner_failure_marks_row_failed_and_audits(
+    async def test_runner_failure_keeps_job_unconfirmed_and_audits(
         self,
         session: AsyncSession,
         workspace: Workspace,
@@ -269,14 +301,15 @@ class TestCommandExecute:
             )
         row = await session.scalar(select(SandboxJob))
         assert row is not None
-        assert row.status == "failed"
+        assert row.status == "running"
+        assert row.completed_at is None
         assert row.error_code == "runner_error"
         actions = [
             event.action
             for event in (await session.scalars(select(AuditEvent))).all()
             if event.action.startswith("sandbox.")
         ]
-        assert actions == ["sandbox.job.started", "sandbox.job.failed"]
+        assert actions == ["sandbox.job.started", "sandbox.job.outcome_uncertain"]
 
     async def test_timeout_status_recorded(
         self,
@@ -341,7 +374,9 @@ class TestCheckoutAndGitCredentials:
         """Hole 2: the credential is bound to the cloned remote by git's own
         URL matcher, and no askpass file is ever written."""
         _, cli = await _wired(make_connection, workspace, monkeypatch)
-        stub = RunnerStub(stdout=meta("", head=HEAD_SHA, base="main", config=SHA_ONE))
+        stub = RunnerStub(
+            stdout=meta("", head=HEAD_SHA, base="main", config=SHA_ONE, started="base")
+        )
         monkeypatch.setattr(cli_tools, "run_sandbox_job", stub)
 
         output = await cli_tools._repository_checkout(
@@ -353,9 +388,8 @@ class TestCheckoutAndGitCredentials:
         assert output.head_sha == HEAD_SHA
         assert output.base_ref == "main"
         assert output.path == "/workspace/repo"
-        # Default branch naming: agent/<task-prefix>-<repo-slug> (plan 14.5).
-        assert output.branch.startswith("agent/")
-        assert output.branch.endswith("-alpha")
+        # Default branch naming: agent/<repo-slug>-<whole task id>.
+        assert output.branch == f"agent/alpha-{linked_context.task_id}"
 
         payload = stub.payloads[0]
         assert payload["network_policy"] == "internet"
@@ -405,6 +439,7 @@ class TestCheckoutAndGitCredentials:
                 head=HEAD_SHA,
                 base="main",
                 config=SHA_ONE,
+                started="base",
                 previous="a",
                 pushed="b",
                 total="1",
@@ -417,9 +452,13 @@ class TestCheckoutAndGitCredentials:
         )
         monkeypatch.setattr(cli_tools, "run_sandbox_job", stub)
         calls = _every_cli_call(str(cli.id))
-        assert set(calls) == {definition.name for definition, _ in cli_tools.CLI_TOOLS}
+        assert set(calls) == {definition.name for definition, _ in cli_tools.CLI_TOOLS} - {
+            "cli.file.publish"
+        }
 
         for definition, executor in cli_tools.CLI_TOOLS:
+            if definition.name == "cli.file.publish":
+                continue
             await executor(linked_context, calls[definition.name])
 
         credentialed = []
@@ -535,7 +574,7 @@ class TestCheckoutAndGitCredentials:
         monkeypatch.setattr(
             cli_tools,
             "run_sandbox_job",
-            RunnerStub(stdout=meta("", head=HEAD_SHA, base="main", config=SHA_ONE)),
+            RunnerStub(stdout=meta("", head=HEAD_SHA, base="main", config=SHA_ONE, started="base")),
         )
         await cli_tools._repository_checkout(
             linked_context,
@@ -564,7 +603,9 @@ class TestCheckoutAndGitCredentials:
         no sandbox job can reach it: the ref the branch was cut from, and the
         repository config as Jhin left it."""
         _, cli = await _wired(make_connection, workspace, monkeypatch)
-        stub = RunnerStub(stdout=meta("", head=HEAD_SHA, base="release", config="d" * 64))
+        stub = RunnerStub(
+            stdout=meta("", head=HEAD_SHA, base="release", config="d" * 64, started="base")
+        )
         monkeypatch.setattr(cli_tools, "run_sandbox_job", stub)
         await cli_tools._repository_checkout(
             linked_context,
@@ -594,7 +635,9 @@ class TestCheckoutAndGitCredentials:
         process redactor scrubs the token before the row persists (48.9)."""
         _, cli = await _wired(make_connection, workspace, monkeypatch)
         stub = RunnerStub(
-            stdout=meta(f"leaked: {TOKEN}", head=HEAD_SHA, base="main", config=SHA_ONE)
+            stdout=meta(
+                f"leaked: {TOKEN}", head=HEAD_SHA, base="main", config=SHA_ONE, started="base"
+            )
         )
         monkeypatch.setattr(cli_tools, "run_sandbox_job", stub)
 
@@ -610,6 +653,279 @@ class TestCheckoutAndGitCredentials:
         assert TOKEN not in row.command
 
 
+class TestTheCheckoutReusesTheWorkspaceItAlreadyHas:
+    """A durable workspace turns "clone the repository" into "make the
+    repository on this disk be the one asked for". These pin the parts of that
+    script whose absence would be silent: the tree would still be correct, and
+    every promise of a persistent coding environment would be gone."""
+
+    async def _script(
+        self, ctx, cli, monkeypatch, *, stdout: str | None = None
+    ) -> tuple[str, RepositoryCheckoutOutput]:
+        stub = RunnerStub(
+            stdout=stdout
+            if stdout is not None
+            else meta("", head=HEAD_SHA, base="main", config=SHA_ONE, reused="0", started="base")
+        )
+        monkeypatch.setattr(cli_tools, "run_sandbox_job", stub)
+        output = await cli_tools._repository_checkout(
+            ctx, RepositoryCheckoutInput(connection_id=str(cli.id), repository="octo/alpha")
+        )
+        return stub.payloads[0]["command"][2], output
+
+    async def test_clean_keeps_ignored_build_output(
+        self,
+        workspace: Workspace,
+        linked_context: ToolExecutionContext,
+        make_connection,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``-x`` is the one flag that must not be here. Ignored files are the
+        .venv, node_modules and build output an agent paid minutes for, and
+        deleting them is deleting the entire point of a workspace that
+        persists. Untracked strays still go."""
+        _, cli = await _wired(make_connection, workspace, monkeypatch)
+        script, _ = await self._script(linked_context, cli, monkeypatch)
+
+        assert "clean -ffd " in script or "clean -ffd\n" in script
+        assert "clean -ffdx" not in script
+        assert "-x" not in script.split("clean -ffd")[1].split("\n")[0]
+
+    async def test_the_reuse_path_empties_git_hooks_first(
+        self,
+        workspace: Workspace,
+        linked_context: ToolExecutionContext,
+        make_connection,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Persistence is exactly what lets a hook planted by one run survive
+        into the next, so the tree that survives arrives with no hooks — and
+        every git command Jhin issues points hooksPath at nothing anyway."""
+        _, cli = await _wired(make_connection, workspace, monkeypatch)
+        script, _ = await self._script(linked_context, cli, monkeypatch)
+
+        hooks = script.index("rm -rf .git/hooks")
+        assert hooks < script.index("reset --hard")
+        assert script.count("core.hooksPath=/nonexistent") >= 4
+
+    async def test_the_base_ref_comes_from_the_remote_not_from_the_tree(
+        self,
+        workspace: Workspace,
+        linked_context: ToolExecutionContext,
+        make_connection,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """On a reused checkout the local HEAD is the *agent's own branch*, so
+        asking the tree what it was cut from would record the wrong base — and
+        the push refuses to trust in-repository refs for the same reason."""
+        _, cli = await _wired(make_connection, workspace, monkeypatch)
+        script, _ = await self._script(linked_context, cli, monkeypatch)
+
+        assert "ls-remote --symref" in script
+        assert "rev-parse --abbrev-ref HEAD" not in script
+
+    async def test_a_repository_with_no_commits_is_a_named_refusal(
+        self,
+        session: AsyncSession,
+        workspace: Workspace,
+        linked_context: ToolExecutionContext,
+        make_connection,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _, cli = await _wired(make_connection, workspace, monkeypatch)
+        stub = RunnerStub(exit_code=65, stderr="JHIN_ERR=repository_empty\n")
+        monkeypatch.setattr(cli_tools, "run_sandbox_job", stub)
+
+        with pytest.raises(ToolExecutionError) as raised:
+            await cli_tools._repository_checkout(
+                linked_context,
+                RepositoryCheckoutInput(connection_id=str(cli.id), repository="octo/alpha"),
+            )
+        assert raised.value.code == "repository_empty"
+        assert raised.value.side_effect_possible is False
+
+    async def test_a_tree_that_fails_validation_is_discarded_not_repaired(
+        self,
+        workspace: Workspace,
+        linked_context: ToolExecutionContext,
+        make_connection,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Every rejection branch ends in a fresh clone. Repairing a tampered
+        checkout would leave the attacker their state; discarding it costs Jhin
+        one clone and costs them all of it."""
+        _, cli = await _wired(make_connection, workspace, monkeypatch)
+        script, _ = await self._script(linked_context, cli, monkeypatch)
+
+        for reason in (
+            "remote_rewritten",
+            "different_repository",
+            "config_unexpected",
+            "refresh_failed",
+        ):
+            assert f"jhin_reclone={reason}" in script
+        # The allow-list the push audits against is the same one deciding
+        # whether a cached tree may be kept.
+        assert cli_tools._ALLOWED_REPO_CONFIG in script
+        assert 'if [ "$jhin_reused" != "1" ]; then' in script
+        assert "rm -rf /workspace/repo" in script
+
+    async def test_reuse_is_reported_to_the_model_and_the_record(
+        self,
+        session: AsyncSession,
+        workspace: Workspace,
+        linked_context: ToolExecutionContext,
+        make_connection,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``reused`` is the model's signal that its caches are warm — and the
+        signal that they are not, so it reinstalls rather than assuming."""
+        _, cli = await _wired(make_connection, workspace, monkeypatch)
+        _, output = await self._script(
+            linked_context,
+            cli,
+            monkeypatch,
+            stdout=meta(
+                "",
+                head=HEAD_SHA,
+                base="main",
+                config=SHA_ONE,
+                reused="1",
+                recloned="",
+                discarded="b" * 40,
+                started="workspace_branch",
+            ),
+        )
+
+        assert output.reused is True
+        event = await session.scalar(
+            select(AuditEvent).where(AuditEvent.action == "sandbox.checkout.recorded")
+        )
+        assert event is not None
+        assert event.metadata_json["reused"] is True
+        assert event.metadata_json["discarded_head"] == "b" * 40
+        assert event.metadata_json["reclone_reason"] == ""
+
+    async def test_a_fresh_clone_says_so(
+        self,
+        workspace: Workspace,
+        linked_context: ToolExecutionContext,
+        make_connection,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _, cli = await _wired(make_connection, workspace, monkeypatch)
+        _, output = await self._script(linked_context, cli, monkeypatch)
+        assert output.reused is False
+
+
+class _ReplayingRunner(RunnerStub):
+    """The runner as it answers a re-dispatch.
+
+    A second dispatch of one invocation is handed the *first* dispatch's job,
+    so what comes back is the first dispatch's stdout — sentinel included —
+    with a ``polled_job_id`` that is not the id this dispatch submitted. That
+    is the whole shape of the problem: the caller must be able to read an
+    answer its own script did not print.
+    """
+
+    def __init__(self, **overrides: Any) -> None:
+        super().__init__(**overrides)
+        self.answers: list[dict[str, Any]] = []
+        self.replayed = 0
+
+    async def __call__(
+        self, payload: dict[str, Any], *, job_timeout_seconds: int
+    ) -> dict[str, Any]:
+        answer = await super().__call__(payload, job_timeout_seconds=job_timeout_seconds)
+        if not self.answers:
+            self.answers.append(answer)
+            return answer
+        self.replayed += 1
+        return {**self.answers[0], "polled_job_id": self.payloads[0]["job_id"]}
+
+
+def _sentinel_of(payload: dict[str, Any]) -> str:
+    """The sentinel this job's own script would print."""
+    found = EMITTED.search(" ".join(payload["command"]))
+    assert found is not None
+    return found.group(1)
+
+
+class TestARedispatchCanReadTheAnswerItIsGiven:
+    """The runner's idempotency is worth nothing if the caller cannot parse
+    what it hands back.
+
+    A re-dispatch attaches to the first dispatch's job and receives its output.
+    While the sentinel was drawn per *dispatch*, that output carried dispatch
+    one's nonce and dispatch two looked for its own: no trailer, every value at
+    its default, and a checkout that refused itself as unrecordable — for a
+    checkout that had actually completed.
+    """
+
+    @staticmethod
+    def _checkout(cli_id: str) -> RepositoryCheckoutInput:
+        return RepositoryCheckoutInput(connection_id=cli_id, repository="octo/alpha")
+
+    async def test_a_replayed_checkout_is_read_exactly_like_a_first_one(
+        self,
+        workspace: Workspace,
+        linked_context: ToolExecutionContext,
+        make_connection,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("SANDBOX_RUNNER_TOKEN", "runner-token")
+        _, cli = await _wired(make_connection, workspace, monkeypatch)
+        stub = _ReplayingRunner(
+            stdout=meta("", head=HEAD_SHA, base="main", config=SHA_ONE, started="base")
+        )
+        monkeypatch.setattr(cli_tools, "run_sandbox_job", stub)
+
+        first = await cli_tools._repository_checkout(linked_context, self._checkout(str(cli.id)))
+        second = await cli_tools._repository_checkout(linked_context, self._checkout(str(cli.id)))
+
+        assert isinstance(first, RepositoryCheckoutOutput)
+        assert isinstance(second, RepositoryCheckoutOutput)
+        assert stub.replayed == 1
+        # The second dispatch's container never ran, and its answer still
+        # carries every value the first one printed.
+        assert (second.head_sha, second.base_ref) == (HEAD_SHA, "main")
+        assert second.started_from == "base"
+        # Because both scripts asked for the same sentinel: one call, one
+        # trailer, however many attempts it takes.
+        assert _sentinel_of(stub.payloads[0]) == _sentinel_of(stub.payloads[1])
+        assert stub.payloads[0]["job_id"] != stub.payloads[1]["job_id"]
+        assert stub.payloads[0]["invocation_id"] == stub.payloads[1]["invocation_id"]
+
+    async def test_a_sentinel_that_moves_between_attempts_loses_the_answer(
+        self,
+        workspace: Workspace,
+        linked_context: ToolExecutionContext,
+        make_connection,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The failure this replaced, reproduced by removing the one thing
+        that makes the sentinel stable.
+
+        Without a runner token there is no key to derive from, so the nonce is
+        drawn per dispatch exactly as it used to be — and the replay comes back
+        unreadable. (No such worker can dispatch anything in production: the
+        submit itself refuses without that token.)
+        """
+        monkeypatch.delenv("SANDBOX_RUNNER_TOKEN", raising=False)
+        _, cli = await _wired(make_connection, workspace, monkeypatch)
+        stub = _ReplayingRunner(
+            stdout=meta("", head=HEAD_SHA, base="main", config=SHA_ONE, started="base")
+        )
+        monkeypatch.setattr(cli_tools, "run_sandbox_job", stub)
+
+        await cli_tools._repository_checkout(linked_context, self._checkout(str(cli.id)))
+        with pytest.raises(ToolExecutionError) as raised:
+            await cli_tools._repository_checkout(linked_context, self._checkout(str(cli.id)))
+
+        assert raised.value.code == "checkout_unrecordable"
+        assert _sentinel_of(stub.payloads[0]) != _sentinel_of(stub.payloads[1])
+
+
 class TestTheTrailerCannotBeForgedByRepositoryContent:
     """The checkout's own trailer is the record ``cli.repository.push``
     compares a repository against, so whoever can write it can choose what the
@@ -623,12 +939,38 @@ class TestTheTrailerCannotBeForgedByRepositoryContent:
     and no content-derived byte inside the region at all.
     """
 
-    def test_the_sentinel_is_drawn_per_job_and_is_not_guessable(self) -> None:
+    def test_a_call_with_no_invocation_identity_draws_its_sentinel(self) -> None:
+        """Nothing keys idempotency on such a call, so no dispatch of it is
+        ever answered with another's output and there is nothing to be stable
+        for."""
         one = cli_tools._new_trailer()
         two = cli_tools._new_trailer()
         assert re.fullmatch(r"[0-9a-f]{32}", one.nonce)
         assert one.nonce != two.nonce
         assert one.nonce in one.echo and one.nonce not in two.echo
+
+    def test_the_sentinel_belongs_to_the_call_and_not_to_the_attempt(
+        self,
+        linked_context: ToolExecutionContext,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Same call, same sentinel — which is what makes a replayed answer
+        readable — and a different call cannot be told from noise without the
+        key, which is what keeps it unforgeable."""
+        monkeypatch.setenv("SANDBOX_RUNNER_TOKEN", "runner-token")
+        other = replace(linked_context, tool_call_id=new_uuid7())
+
+        first = cli_tools._new_trailer(linked_context)
+        second = cli_tools._new_trailer(linked_context)
+
+        assert re.fullmatch(r"[0-9a-f]{32}", first.nonce)
+        assert first.nonce == second.nonce
+        assert first.nonce != cli_tools._new_trailer(other).nonce
+        # Keyed, not merely derived: the same call under a different runner
+        # token is a different sentinel, so knowing a tool call id is not
+        # knowing its sentinel.
+        monkeypatch.setenv("SANDBOX_RUNNER_TOKEN", "another-token")
+        assert first.nonce != cli_tools._new_trailer(linked_context).nonce
 
     def test_a_trailer_the_content_wrote_is_not_the_one_that_is_read(self) -> None:
         """The nonce alone settles it: the forgery is payload, not trailer."""
@@ -656,7 +998,9 @@ class TestTheTrailerCannotBeForgedByRepositoryContent:
         ``find -printf '%f'`` prints a name verbatim, newline included."""
         _, cli = await _wired(make_connection, workspace, monkeypatch)
         listing = top("f:README.md", "f:z\nJHIN_META", "d:src")
-        stub = RunnerStub(stdout=meta("", head=HEAD_SHA, base="main", config=SHA_ONE, top=listing))
+        stub = RunnerStub(
+            stdout=meta("", head=HEAD_SHA, base="main", config=SHA_ONE, top=listing, started="base")
+        )
         monkeypatch.setattr(cli_tools, "run_sandbox_job", stub)
 
         output = await cli_tools._repository_checkout(
@@ -823,6 +1167,7 @@ class TestTheTrailerCannotBeForgedByRepositoryContent:
                 head=HEAD_SHA,
                 base="main",
                 config=SHA_ONE,
+                started="base",
                 sha=SHA_ONE,
                 previous="a",
                 pushed="b",
@@ -951,9 +1296,14 @@ async def _record_checkout(
     ``cli.repository.push`` reads it back instead of asking the container what
     it was cloned from, so every push test needs one — which is the contract,
     not test scaffolding: a push with no recorded checkout is refused.
+
+    Keyed on the binding the product would have derived for this context, not
+    on a shape invented here: the record has to land where the push will look
+    for it, and the push looks wherever ``_binding`` says this run's disk is.
     """
     cli_tools._record_checkout(
         ctx,
+        await cli_tools._binding(ctx),
         {
             "repository": repository,
             "branch": "agent/fix",
@@ -1360,6 +1710,265 @@ class TestRepositoryPush:
             await self._push(linked_context, cli, monkeypatch, stub)
         assert exc_info.value.code == "push_failed"
         assert exc_info.value.side_effect_possible is True
+        # An unknown outcome is the one an operator reconciles by hand, so it
+        # is the last one that should arrive empty.
+        assert "exit_code=1" in exc_info.value.detail
+        assert "unable to access" in exc_info.value.detail
+
+    async def test_the_push_asks_the_remote_before_it_calls_a_failure_unknown(
+        self,
+        workspace: Workspace,
+        linked_context: ToolExecutionContext,
+        make_connection,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The script's own proof, read off the script.
+
+        ``push_rejected`` is only reachable through a branch that asks
+        ``ls-remote`` what the remote holds and compares it with this
+        workspace's HEAD, which is why exit 70 may claim to be side-effect
+        free at all.
+        """
+        _, cli = await _wired(make_connection, workspace, monkeypatch)
+        stub = RunnerStub(stdout=meta("", previous="a", pushed="b"))
+        await self._push(linked_context, cli, monkeypatch, stub)
+        script = stub.payloads[0]["command"][2]
+        assert "ls-remote" in script
+        assert 'if [ "$jhin_remote" != "$jhin_local" ]; then' in script
+        assert "JHIN_ERR=push_rejected" in script
+        assert 'exit "$jhin_code"' in script
+
+    async def test_a_403_push_is_a_readable_failure_that_leaves_the_run_alive(
+        self,
+        workspace: Workspace,
+        linked_context: ToolExecutionContext,
+        make_connection,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The live failure, in the shape the live stack produced it.
+
+        The installation had no write permission, git printed GitHub's own
+        sentence, and the branch is not on the remote — so this is a finished
+        failure the agent can read, not an unknown outcome that ends the run.
+        """
+        _, cli = await _wired(make_connection, workspace, monkeypatch)
+        stub = RunnerStub(
+            exit_code=70,
+            stderr=(
+                "remote: Permission to octo/alpha.git denied to jhin-app[bot].\n"
+                "fatal: unable to access 'https://github.com/octo/alpha.git/': "
+                "The requested URL returned error: 403\n"
+                "JHIN_ERR=push_rejected\n"
+            ),
+        )
+        with pytest.raises(ToolExecutionError) as exc_info:
+            await self._push(linked_context, cli, monkeypatch, stub)
+
+        error = exc_info.value
+        assert error.code == "push_rejected"
+        assert error.side_effect_possible is False
+        assert "Permission to octo/alpha.git denied" in error.detail
+        assert "error: 403" in error.detail
+        assert error.hint
+
+
+class TestJobEvidenceOutlivesTheTransaction:
+    """A job that ran is a fact the tool call does not get to take back.
+
+    The gateway rolls its session back on the way to recording a failure or an
+    unknown outcome. While the ``sandbox_job`` row lived in that session, the
+    rollback took it: two real pushes with a real exit code and a real stderr
+    left an operator with the words "outcome unknown" and nothing else.
+    """
+
+    async def test_a_finished_job_survives_a_rolled_back_tool_call(self, tmp_path, crypto) -> None:
+        from dataclasses import replace as replace_dataclass
+
+        url = f"sqlite+aiosqlite:///{(tmp_path / 'evidence.db').as_posix()}"
+        engine = create_async_engine(url)
+        try:
+            async with engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            async with factory() as setup:
+                space = Workspace(name="Evidence", slug=f"ev-{new_uuid7().hex[:8]}")
+                setup.add(space)
+                await setup.commit()
+                workspace_id = space.id
+
+            stub = RunnerStub(exit_code=128, stderr="fatal: unable to access\n", status="failed")
+            async with factory() as outer:
+                ctx = ToolExecutionContext(
+                    session=outer,
+                    workspace_id=workspace_id,
+                    task_id=new_uuid7(),
+                    run_id=new_uuid7(),
+                    agent_id=new_uuid7(),
+                    agent_name="Scout",
+                    crypto=crypto,
+                    session_factory=factory,
+                )
+                ctx = replace_dataclass(ctx, tool_call_id=None)
+                with pytest.MonkeyPatch.context() as patch:
+                    patch.setattr(cli_tools, "run_sandbox_job", stub)
+                    await cli_tools._run_job(
+                        ctx,
+                        command_display="git push",
+                        argv=["bash", "-c", "true"],
+                        image="jhin-sandbox:latest",
+                        network="internet",
+                        timeout_seconds=60,
+                    )
+                # Exactly what the gateway does before it persists an outcome.
+                await outer.rollback()
+
+            async with factory() as reader:
+                jobs = (await reader.scalars(select(SandboxJob))).all()
+                assert len(jobs) == 1
+                assert jobs[0].exit_code == 128
+                assert jobs[0].status == "failed"
+                assert "unable to access" in (jobs[0].stderr_tail or "")
+                actions = {
+                    event.action
+                    for event in (await reader.scalars(select(AuditEvent))).all()
+                    if event.target_id == jobs[0].id
+                }
+                assert actions == {"sandbox.job.started", "sandbox.job.failed"}
+        finally:
+            await engine.dispose()
+
+
+class TestSandboxFailuresKeepTheRunAlive:
+    """Every finished sandbox failure the live run turned into a dead run."""
+
+    async def test_a_failing_test_run_is_a_result_not_an_exception(
+        self,
+        workspace: Workspace,
+        linked_context: ToolExecutionContext,
+        make_connection,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _, cli = await _wired(make_connection, workspace, monkeypatch)
+        stub = RunnerStub(exit_code=1, stdout="2 failed, 11 passed\n")
+        monkeypatch.setattr(cli_tools, "run_sandbox_job", stub)
+        output = await cli_tools._test_run(
+            linked_context, TestRunInput(connection_id=str(cli.id), command="pytest -q")
+        )
+        assert isinstance(output, TestRunOutput)
+        assert output.passed is False
+        assert output.exit_code == 1
+
+    async def test_a_runner_that_drops_a_networkless_writer_has_uncertain_effects(
+        self,
+        workspace: Workspace,
+        linked_context: ToolExecutionContext,
+        make_connection,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Networkless tests can still mutate the persistent working tree."""
+        _, cli = await _wired(make_connection, workspace, monkeypatch)
+
+        async def _drop(payload: dict[str, Any], *, job_timeout_seconds: int) -> dict[str, Any]:
+            raise cli_tools.SandboxRunnerError("runner is unavailable")
+
+        monkeypatch.setattr(cli_tools, "run_sandbox_job", _drop)
+        with pytest.raises(ToolExecutionError) as exc_info:
+            await cli_tools._test_run(
+                linked_context, TestRunInput(connection_id=str(cli.id), command="pytest -q")
+            )
+        assert exc_info.value.code == "sandbox_runner_error"
+        assert exc_info.value.side_effect_possible is True
+        assert "runner is unavailable" in exc_info.value.detail
+
+    async def test_a_runner_that_drops_a_job_with_egress_stays_unknown(
+        self,
+        workspace: Workspace,
+        linked_context: ToolExecutionContext,
+        make_connection,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The other half of the same rule. A command with internet access may
+        have reached the world before the runner stopped answering, and no
+        amount of wanting the run to survive makes that knowable."""
+        _, cli = await _wired(make_connection, workspace, monkeypatch)
+
+        async def _drop(payload: dict[str, Any], *, job_timeout_seconds: int) -> dict[str, Any]:
+            raise cli_tools.SandboxRunnerError("runner is unavailable")
+
+        monkeypatch.setattr(cli_tools, "run_sandbox_job", _drop)
+        with pytest.raises(ToolExecutionError) as exc_info:
+            await cli_tools._command_execute(
+                linked_context,
+                CommandExecuteInput(
+                    connection_id=str(cli.id),
+                    command="curl https://example.test",
+                    network="internet",
+                ),
+            )
+        assert exc_info.value.code == "sandbox_runner_error"
+        assert exc_info.value.side_effect_possible is True
+
+    async def test_a_checkout_of_a_missing_branch_is_a_recorded_failure(
+        self,
+        workspace: Workspace,
+        linked_context: ToolExecutionContext,
+        make_connection,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _, cli = await _wired(make_connection, workspace, monkeypatch)
+        stub = RunnerStub(
+            exit_code=128,
+            stderr="fatal: Remote branch no-such-branch not found in upstream origin\n",
+        )
+        monkeypatch.setattr(cli_tools, "run_sandbox_job", stub)
+        with pytest.raises(ToolExecutionError) as exc_info:
+            await cli_tools._repository_checkout(
+                linked_context,
+                RepositoryCheckoutInput(
+                    connection_id=str(cli.id), repository="octo/alpha", ref="no-such-branch"
+                ),
+            )
+        assert exc_info.value.code == "checkout_failed"
+        # A clone, a fetch and an ls-remote are reads: the remote is exactly as
+        # it was, so this is a failure and not an unknown.
+        assert exc_info.value.side_effect_possible is False
+        assert "no-such-branch" in exc_info.value.detail
+
+    async def test_a_missing_github_connection_is_typed_before_anything_runs(
+        self,
+        workspace: Workspace,
+        linked_context: ToolExecutionContext,
+        make_connection,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _, cli = await _wired(make_connection, workspace, monkeypatch, git_connection_id="")
+        with pytest.raises(ToolExecutionError) as exc_info:
+            await cli_tools._repository_checkout(
+                linked_context,
+                RepositoryCheckoutInput(connection_id=str(cli.id), repository="octo/alpha"),
+            )
+        assert exc_info.value.code == "git_connection_missing"
+        assert exc_info.value.side_effect_possible is False
+
+    async def test_an_unusable_connection_is_typed_at_the_executor_boundary(
+        self,
+        workspace: Workspace,
+        linked_context: ToolExecutionContext,
+        make_connection,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """As registered, not as a private function: the wrapper is part of
+        the tool, and an unknown connection is the first thing every one of
+        them can hit."""
+        executor = {definition.name: registered for definition, registered in cli_tools.CLI_TOOLS}[
+            "cli.test.run"
+        ]
+        with pytest.raises(ToolExecutionError) as exc_info:
+            await executor(
+                linked_context, TestRunInput(connection_id=str(new_uuid7()), command="pytest")
+            )
+        assert exc_info.value.code == "connection_unavailable"
+        assert exc_info.value.side_effect_possible is False
 
 
 class TestRepositoryAllowList:
@@ -1566,12 +2175,64 @@ class TestRepositoryAllowList:
         assert decision.decision is DecisionType.DENY
         assert decision.code == "sandbox_connection_unavailable"
 
-    async def test_the_validator_is_registered_for_both_repository_tools(self) -> None:
+    async def test_every_sandbox_tool_is_covered_by_one_of_the_two_validators(self) -> None:
+        """A durable workspace makes an uncovered sandbox tool a way round the
+        allow-list, so there is no such thing: the tools that name a repository
+        are checked on the name, and every other one on what its workspace
+        holds."""
         validators = CliConnector().tool_validators()
-        assert set(validators) == {"cli.repository.checkout", "cli.repository.push"}
+        assert set(validators) == set(_every_cli_call("x")) | {"cli.file.publish"}
+        assert validators["cli.file.publish"] is workspace_repository_validator
+        assert {
+            name for name, check in validators.items() if check is repository_allow_list_validator
+        } == {"cli.repository.checkout", "cli.repository.push"}
 
 
 class TestFileAndTestTools:
+    @pytest.mark.parametrize("refused", [False, True])
+    async def test_binary_file_read_returns_guidance_instead_of_raw_bytes(
+        self, workspace, linked_context, make_connection, monkeypatch, refused
+    ):
+        stub = RunnerStub(
+            stdout="" if refused else meta("PK\x03\x04\x00archive", total="1", sha=SHA_ONE),
+            stderr="JHIN_ERR=binary_file\n" if refused else "",
+            exit_code=65 if refused else 0,
+            status="failed" if refused else "completed",
+        )
+        monkeypatch.setattr(cli_tools, "run_sandbox_job", stub)
+        cli = await _cli_connection(make_connection, workspace)
+        with pytest.raises(ToolExecutionError) as caught:
+            await cli_tools._file_read(
+                linked_context, FileReadInput(connection_id=str(cli.id), path="report.docx")
+            )
+        assert caught.value.code == "binary_file"
+        assert "python-docx" in str(caught.value.hint)
+        assert "PK" not in str(caught.value)
+
+    def test_binary_guard_rejects_docx_before_emitting_bytes_and_accepts_utf8(self, tmp_path):
+        import subprocess
+        import sys
+        from zipfile import ZipFile
+
+        docx = tmp_path / "report.docx"
+        with ZipFile(docx, "w") as archive:
+            archive.writestr("word/document.xml", "<document>Report</document>")
+        refused = subprocess.run(
+            [sys.executable, "-c", cli_tools._TEXT_FILE_CHECK, str(docx)],
+            capture_output=True,
+            timeout=5,
+        )
+        assert refused.returncode == 65 and refused.stdout == b""
+        assert refused.stderr.decode().strip() == "JHIN_ERR=binary_file"
+        source = tmp_path / "unicode.txt"
+        source.write_text("x" * 65535 + "😀\n", encoding="utf-8")
+        accepted = subprocess.run(
+            [sys.executable, "-c", cli_tools._TEXT_FILE_CHECK, str(source)],
+            capture_output=True,
+            timeout=5,
+        )
+        assert accepted.returncode == 0 and not accepted.stdout and not accepted.stderr
+
     async def test_file_read_reports_total_lines_and_has_more(
         self,
         workspace: Workspace,

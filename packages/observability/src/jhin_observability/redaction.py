@@ -8,7 +8,13 @@ from urllib.parse import urlsplit, urlunsplit
 
 from structlog.typing import EventDict, WrappedLogger
 
-LOG_SCHEMA_VERSION = 1
+# v2 admits exactly one free-text value into the contract: ``message`` on
+# ``stdlib.message``, the text of a log record written by a library outside
+# this codebase. v1 destroyed that text, which made every warning and error
+# from Temporal, httpx, uvicorn and SQLAlchemy unreadable in production. The
+# version moves because a consumer of v1 could rely on every value in a line
+# being a typed, closed-vocabulary value, and that is no longer true.
+LOG_SCHEMA_VERSION = 2
 REDACTED = "[REDACTED]"
 MAX_LOG_DEPTH = 8
 MAX_LOG_ITEMS = 64
@@ -82,14 +88,30 @@ def is_sensitive_key_name(value: object) -> bool:
 
 
 def sanitize_url(value: str) -> str:
+    """Scheme, host, port and path. Userinfo, query and fragment are dropped.
+
+    Every scheme with an authority, not only ``http`` and ``https``. The
+    restriction to those two was the whole of the hole: ``postgresql+asyncpg``,
+    ``postgres``, ``redis``, ``nats`` and ``amqp`` all put the password in the
+    userinfo, all of them fell straight through to "return the value", and
+    those are the exact shapes of this system's own ``DATABASE_URL`` and
+    ``NATS_URL`` -- neither of which any site registers with the process secret
+    redactor, because a connection string is configuration rather than a
+    credential anybody chose to declare. A value that is not a URL at all
+    (no scheme, or no ``//`` authority to hold a password) is bounded and
+    otherwise left alone.
+    """
     parsed = urlsplit(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+    if not parsed.scheme or not parsed.netloc:
         return value[:MAX_LOG_STRING]
-    host = parsed.hostname
+    host = parsed.hostname or ""
     try:
         port = parsed.port
     except ValueError:
-        port = None
+        # A netloc whose port will not parse is a netloc this function cannot
+        # take apart, and the half it cannot read is the half the password is
+        # in. Keep the scheme and nothing else.
+        return f"{parsed.scheme}://"[:MAX_LOG_STRING]
     if port is not None:
         host = f"{host}:{port}"
     return urlunsplit((parsed.scheme, host, parsed.path, "", ""))[:MAX_LOG_STRING]

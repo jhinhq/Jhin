@@ -9,12 +9,16 @@ dependencies = [
     "jhin-db",
     "jhin-models",
     "jhin-personas",
+    # render_safe_agent_name: the name in layer 1 of the prompt is held to
+    # the same identity rules the tool that writes it applies.
+    "jhin-policy",
 ]
 
 [tool.uv.sources]
 jhin-db = { workspace = true }
 jhin-models = { workspace = true }
 jhin-personas = { workspace = true }
+jhin-policy = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

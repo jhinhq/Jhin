@@ -15,7 +15,7 @@ from typing import Any, cast
 from pydantic import BaseModel
 
 from jhin_connectors.execution import resolve_connection
-from jhin_connectors.linear.client import DEFAULT_BASE_URL, linear_graphql
+from jhin_connectors.linear.client import DEFAULT_BASE_URL, linear_authorization, linear_graphql
 from jhin_connectors.linear.schemas import (
     CommentCreateInput,
     CommentCreateOutput,
@@ -93,9 +93,7 @@ async def _api(ctx: ToolExecutionContext, connection_id: str) -> tuple[str, str]
     """(base_url, api_key) for one call — the credential resolution path."""
     resolved = await resolve_connection(ctx, connection_id, connector_type="linear")
     base_url = str(resolved.config.get("base_url") or DEFAULT_BASE_URL)
-    api_key = resolved.credentials.get("api_key", "")
-    if not api_key:
-        raise ValueError("this Linear connection stores no API key credential")
+    api_key = linear_authorization(resolved.connection.auth_type, resolved.credentials)
     return base_url, api_key
 
 

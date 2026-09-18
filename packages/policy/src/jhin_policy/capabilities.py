@@ -70,6 +70,25 @@ def is_forbidden_capability(capability: str) -> bool:
     )
 
 
+def covers_forbidden_capability(prefix: str) -> bool:
+    """True when the subtree ``prefix.*`` would reach into a forbidden
+    namespace.
+
+    ``is_forbidden_capability`` looks *down* — is this capability inside a
+    forbidden namespace — and answers "no" for ``agent``, which is a proper
+    ancestor of ``agent.permission`` rather than a member of it. So
+    ``agent.*`` was a grantable pattern: one grant matching every capability
+    an agent must never hold. Nothing was registered under those names, so
+    nothing was callable through it, but a grant list is also what a human
+    reads to decide whether an agent is safe, and "agent.*" reading as
+    ordinary is exactly how that decision goes wrong.
+
+    ``*`` is not covered here: "everything" is a documented pattern form with
+    its own meaning, not an accident of hierarchy.
+    """
+    return any(forbidden.startswith(prefix + ".") for forbidden in FORBIDDEN_CAPABILITY_PREFIXES)
+
+
 def grant_pattern_problem(pattern: str) -> str | None:
     """Why ``pattern`` can never be a grant's capability, or ``None``.
 
@@ -79,11 +98,14 @@ def grant_pattern_problem(pattern: str) -> str | None:
     the HTTP schema and the service the console drives — asks this one
     function, so all of them refuse in the same words.
     """
-    base = pattern.removesuffix(".*") if pattern.endswith(".*") else pattern
+    subtree = pattern.endswith(".*")
+    base = pattern.removesuffix(".*") if subtree else pattern
     if pattern != "*" and not is_valid_capability(base):
         return "not a valid dotted capability name or pattern"
     if is_forbidden_capability(base):
         return "capabilities in this namespace can never be granted to agents"
+    if subtree and covers_forbidden_capability(base):
+        return "this subtree contains capabilities that can never be granted to agents"
     return None
 
 
@@ -123,6 +145,28 @@ class ToolDefinition(BaseModel):
     # that authorized this very call — drops the rows outside them. This
     # narrows a READ result; it never decides a call.
     result_scope_keys: tuple[str, ...] = ()
+    # The answer to one question, asked only by recovery: if this call was
+    # dispatched to its executor and nobody can say what the executor did,
+    # is running it again safe?
+    #
+    # It is True for a tool whose every effect is confined to Jhin's own
+    # sandbox or is a pure read of somebody else's system, because a second
+    # execution of such a call cannot produce an effect the first may already
+    # have produced. It is False — the default, and the answer for anything
+    # that can change the outside world — because at-most-once is the promise
+    # Jhin makes about external effects, and a promise that is relaxed when
+    # keeping it is inconvenient is not one.
+    #
+    # It is *not* derivable from ``risk``. ``cli.repository.checkout`` is a
+    # WRITE that only ever writes to a disk Jhin owns, and re-running it is
+    # safe; ``cli.command.execute`` is a WRITE that may hold the internet
+    # open, and re-running it is not. Every registration answers this
+    # deliberately, per tool, in the same place it declares its scope.
+    #
+    # False is the conservative answer in the exact sense that matters: it
+    # keeps a call in the state that stops a run and asks a person, which is
+    # what every tool did before this field existed.
+    redispatch_is_safe: bool = False
 
     @field_validator("name", "required_capability")
     @classmethod

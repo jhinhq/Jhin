@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
@@ -108,6 +109,10 @@ async def test_job_endpoints_reject_bad_auth(
             ("GET", "/v1/jobs/abc/logs"),
             ("POST", "/v1/jobs/abc/cancel"),
             ("DELETE", "/v1/workspaces/abc"),
+            # What this runner remembers is a statement another service closes
+            # job rows on the strength of. It carries no job data, and it is
+            # still behind the token: /health is the only open door here.
+            ("GET", "/v1/runner/memory"),
         ]:
             response = await client.request(method, path, headers=headers)
             assert response.status_code == 401, (method, path, response.status_code)
@@ -127,6 +132,27 @@ async def test_valid_token_reaches_handler(caller_runtime: ObservabilityRuntime)
             "/v1/jobs/missing", headers={"Authorization": "Bearer correct-token"}
         )
         assert response.status_code == 404  # authorized, job simply absent
+
+
+async def test_the_runner_says_what_its_memory_covers(
+    caller_runtime: ObservabilityRuntime,
+) -> None:
+    """The two facts the tool worker's sweep cannot get anywhere else: when
+    this process began serving, and how long it keeps a finished job's record.
+    Without them a 404 for a job is two different stories in one answer."""
+    app = app_for("correct-token", caller_runtime)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://runner") as client:
+        response = await client.get(
+            "/v1/runner/memory", headers={"Authorization": "Bearer correct-token"}
+        )
+
+    assert response.status_code == 200
+    document = response.json()
+    assert document["job_record_retention_seconds"] == 3600.0
+    assert datetime.fromisoformat(
+        document["serving_since"]
+    ) == app.state.manager.serving_since.astimezone(UTC)
 
 
 @pytest.mark.parametrize(("daemon_ok", "status_code"), [(True, 200), (False, 503)])

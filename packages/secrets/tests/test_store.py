@@ -26,6 +26,44 @@ from jhin_secrets import (
 )
 
 
+async def test_typed_composio_binding_preserves_public_slug_and_scrubs_account(session):
+    from jhin_domain import SecretType
+
+    redactor = get_redactor()
+    redactor.clear()
+    store = SecretStore(session, SecretCrypto(MasterKey(key=stdlib_secrets.token_bytes(32))))
+    binding = json.dumps(
+        {
+            "composio_account_id": "ca_private_account",
+            "composio_user_id": "private-owner-identity",
+            "composio_auth_config_id": "ac_private_config",
+            "composio_toolkit": "supabase",
+        }
+    )
+    try:
+        workspace = new_uuid7()
+        row = await store.create(
+            workspace_id=workspace,
+            name="binding",
+            plaintext=binding,
+            secret_type=SecretType.COMPOSIO_BINDING,
+        )
+        assert redactor.redact_text("mcp.supabase.echo ca_private_account") == (
+            "mcp.supabase.echo [REDACTED]"
+        )
+        redactor.clear()
+        assert await store.reveal(workspace, row.id) == binding
+        assert redactor.redact_text("supabase ca_private_account") == "supabase [REDACTED]"
+        assert redactor.redact_text(binding) == "[REDACTED]"
+        await store.rotate(workspace, row.id, binding)
+        assert redactor.redact_text("supabase") == "supabase"
+        # Generic secrets with the same shape retain the full registration policy.
+        await store.create(workspace_id=workspace, name="generic", plaintext=binding)
+        assert redactor.redact_text("supabase") == "[REDACTED]"
+    finally:
+        redactor.clear()
+
+
 @pytest.fixture
 async def session() -> AsyncIterator[AsyncSession]:
     engine = create_async_engine("sqlite+aiosqlite://")
@@ -49,6 +87,26 @@ def _credential_blob(token: str, password: str, query_secret: str, nested: str) 
             "nested_json": json.dumps({"inner_token": nested}),
         }
     )
+
+
+async def test_read_only_reveal_still_registers_redaction_without_timestamp_write(session):
+    redactor = get_redactor()
+    store = SecretStore(session, SecretCrypto(MasterKey(key=stdlib_secrets.token_bytes(32))))
+    workspace = new_uuid7()
+    material = "read-only-synthetic-credential"
+    try:
+        row = await store.create(workspace_id=workspace, name="fixture", plaintext=material)
+        await session.commit()
+        redactor.clear()
+        assert await store.reveal(workspace, row.id, record_use=False) == material
+        assert redactor.redact_text(material) == "[REDACTED]"
+        assert row.last_used_at is None
+        assert not session.dirty
+        assert await store.reveal(workspace, row.id) == material
+        assert row.last_used_at is not None
+        assert row in session.dirty
+    finally:
+        redactor.clear()
 
 
 def test_decode_secret_mapping_is_strict_and_does_not_echo_material() -> None:
@@ -176,6 +234,7 @@ def test_secret_material_exact_fragment_and_depth_bounds_are_accepted() -> None:
             "query-field limit",
         ),
     ],
+    ids=["bytes", "fragments", "query-fields"],
 )
 def test_secret_material_boundaries_fail_closed(material: str, error_fragment: str) -> None:
     get_redactor().clear()

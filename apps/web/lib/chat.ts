@@ -5,11 +5,17 @@
  */
 
 import { isWorkRequestMessage, reviewVerdictLabel, workRequestMessageLabel } from "@/lib/coordination";
+import { mayContainSecret } from "@/lib/private-input";
+import type { ConversationItem } from "@/lib/agentic-chat";
+import type { ManagedFile } from "@/lib/workspace-files";
 import type {
   ActivityCard,
   ActivityKind,
+  AgentRenamedContent,
   Conversation,
   ConversationMessage,
+  ConversationToolCall,
+  FailureNotice,
   MemoryScope,
   MemorySavedContent,
   UserQuestionContent,
@@ -56,11 +62,52 @@ type LiveStatusTone = "accent" | "neutral" | "warn";
 export interface LiveStatus {
   label: string;
   tone: LiveStatusTone;
-  kind: "working" | "queued" | "review" | "waiting_review" | "question" | "paused";
+  kind:
+    | "working"
+    | "queued"
+    | "review"
+    | "waiting_review"
+    | "waiting_delegation"
+    | "question"
+    | "paused";
   /** True when `label` is the agent's actual current step rather than the
    * generic state text, so a surface can show it in place of "… is working"
    * instead of alongside it. */
   specific?: boolean;
+  /**
+   * When the agent's current stretch of thinking began, for a surface that
+   * wants to say how long this has been going. Set only while the agent is
+   * genuinely working: the other states are waits — two of them waits on the
+   * reader — and a clock on one of those reads as pressure rather than
+   * progress.
+   *
+   * **Three states, and they mean three different things.** A timestamp is a
+   * stretch to count from. `null` is the API saying it measured and there is
+   * no instant — a turn parked on an approval, question or review that was
+   * opened and never closed, a run that has already finished, or a run with
+   * no usable start stamp, all of which arrive as the same null, so a surface
+   * says *that there is no instant* rather than picking one of them to blame.
+   * Worth a word either way, because a number vanishing without one looks
+   * like the feature never shipped. Absent (`undefined`) is an API that predates
+   * the working clock and never sent the field at all: nothing was measured,
+   * so there is nothing to report and a surface says nothing. Collapsing the
+   * last two onto each other makes an old API's silence read as a stuck
+   * approval, which is a sentence about this workspace that is not true.
+   *
+   * Note *stretch*, not run: a turn that stopped to ask a question resumes
+   * with a new `since`, and the thinking it did before the question is in
+   * `worked` rather than counted twice or thrown away.
+   */
+  since?: string | null;
+  /**
+   * Whole seconds of thinking already banked before `since`. Add the two: a
+   * surface shows `worked + (now - since)` and only the second half ticks.
+   *
+   * It stands on its own when `since` is `null`: the API measured a real
+   * figure for everything the turn did before it parked, and "at least 16s"
+   * is both true and more use than refusing to say anything.
+   */
+  worked?: number;
 }
 
 /**
@@ -70,7 +117,12 @@ export interface LiveStatus {
  * actually watching says what the agent is doing.
  */
 export type LiveStatusSource = Pick<Conversation, "active_task_state" | "active_run_status"> &
-  Partial<Pick<Conversation, "active_activity">>;
+  Partial<
+    Pick<
+      Conversation,
+      "active_activity" | "active_run_working_since" | "active_run_working_seconds"
+    >
+  >;
 
 /** Small live status for a conversation, or null when nothing is happening. */
 export function statusLabelFor(conversation: LiveStatusSource): LiveStatus | null {
@@ -87,16 +139,60 @@ export function statusLabelFor(conversation: LiveStatusSource): LiveStatus | nul
     // Parked on a work review (a manager/AI reviewer or a person decides).
     return { label: "Waiting for a review", tone: "neutral", kind: "waiting_review" };
   }
+  if (conversation.active_run_status === "waiting_delegation") {
+    // Parked on a colleague. The run handed the work to another agent and
+    // resumes when that agent's summary arrives, so this agent is not
+    // thinking — and the clock below counts thinking. Without this branch the
+    // status falls through to `running` and the turn says "Working…" with a
+    // number ticking beside it, which is the same lie an approval wait would
+    // tell, told about a colleague instead of a person.
+    //
+    // No clock, for the reason every other wait has none: there is no stretch
+    // of *this* agent's work in progress to count. The colleague's stretch is
+    // still work on this reply, and it stays inside the banked total the turn
+    // shows once it resumes — see `WORKING_TIME_TITLE`, which promises the
+    // whole reply's work minus only the time it spent waiting on *you*.
+    //
+    // The API already writes the sentence that names who ("Waiting for
+    // Linus", `jhin_domain.activity.waiting_for_colleague_phrase`), so use it
+    // when the detail endpoint sent one and fall back to the anonymous
+    // version on the rail, which does not pay for activity per row.
+    const colleague = conversation.active_activity?.trim() ?? "";
+    if (colleague) {
+      return { label: colleague, tone: "neutral", kind: "waiting_delegation", specific: true };
+    }
+    return { label: "Waiting for a colleague", tone: "neutral", kind: "waiting_delegation" };
+  }
   switch (conversation.active_task_state) {
     case "running": {
       // "Working…" says only that the agent has not stopped. When the API can
       // say which step it is on, say that instead — same tone and kind, so
       // every surface that keys off `kind` (the pill's dot, the composer hint)
-      // behaves exactly as before. The three waits above still win: they are
-      // things the person has to act on, not progress to watch.
+      // behaves exactly as before. The four waits above still win: two are
+      // things the person has to act on and two are somebody else's move —
+      // none of them is this agent's progress to watch.
+      //
+      // `since` rides along here and nowhere else, which is the whole rule
+      // about where an elapsed timer may appear.
+      //
+      // It is the API's *working* clock, never the run's `started_at`. A run
+      // keeps one `started_at` across the whole turn, including the hours it
+      // spent parked on a person's approval, so counting from it prints the
+      // reader's own deliberation back at them as the agent's thinking.
+      //
+      // Read straight through, with no `??`. The field has three states and
+      // `?? null` had two: it turned "this API never sent the field" into
+      // "the API measured and found no instant", so a conversation served by
+      // an API that predates the working clock rendered "Working time
+      // unavailable" under a tooltip blaming an approval nobody had opened.
+      // See `LiveStatus.since`.
+      const since = conversation.active_run_working_since;
+      const worked = conversation.active_run_working_seconds ?? 0;
       const activity = conversation.active_activity?.trim() ?? "";
-      if (activity) return { label: activity, tone: "accent", kind: "working", specific: true };
-      return { label: "Working…", tone: "accent", kind: "working" };
+      if (activity) {
+        return { label: activity, tone: "accent", kind: "working", specific: true, since, worked };
+      }
+      return { label: "Working…", tone: "accent", kind: "working", since, worked };
     }
     case "queued":
       return { label: "Waiting for a free slot", tone: "neutral", kind: "queued" };
@@ -105,6 +201,125 @@ export function statusLabelFor(conversation: LiveStatusSource): LiveStatus | nul
     default:
       return null;
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* How long the agent has been at it                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Whole seconds between a server timestamp and now, or null when there is
+ * nothing to count.
+ *
+ * `now` is passed in rather than read here, so the caller decides which clock
+ * this is measured against and this stays a pure function two lines of test
+ * can pin down.
+ *
+ * Negative is clamped to zero rather than shown. The timestamp comes from the
+ * server and the clock from the browser, and those are two different clocks:
+ * a machine a few seconds ahead would otherwise open every timer at "-4s".
+ * Zero is the honest reading of "this started about when you asked". Nothing
+ * here can correct a badly skewed clock in the other direction — no more than
+ * "4m ago" anywhere else in the app can — but it can refuse to print
+ * nonsense.
+ */
+export function elapsedSeconds(
+  startedAt: string | null | undefined,
+  now: number = Date.now(),
+): number | null {
+  if (!startedAt) return null;
+  const started = Date.parse(startedAt);
+  if (Number.isNaN(started)) return null;
+  return Math.max(0, Math.floor((now - started) / 1000));
+}
+
+/**
+ * Compact duration for a pill in a tight row: `4s`, `1m 12s`, `14m`, `2h 5m`,
+ * `3d 4h`.
+ *
+ * One rule, applied at every scale: the smaller unit is dropped past ten of
+ * the larger one, and the larger unit rolls over at its own boundary. So
+ * seconds go at ten minutes, minutes at ten hours, hours at ten days — by
+ * then the reader is asking "is this still going and roughly how long" rather
+ * than timing it, and a digit that changes every second in the corner of the
+ * eye costs more attention than it returns.
+ *
+ * A day is a day and not twenty-four more hours, because `relativeTime` and
+ * `timeAgo` roll over to days everywhere else in the app and a pill that
+ * alone says "72h" reads as a stuck counter rather than as three days.
+ *
+ * Never more than six characters, which is what the pill has room for at
+ * 320px beside its own label.
+ */
+export function elapsedLabel(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds));
+  if (total < 60) return `${total}s`;
+  const minutes = Math.floor(total / 60);
+  if (minutes < 10) {
+    const rest = total % 60;
+    return rest === 0 ? `${minutes}m` : `${minutes}m ${rest}s`;
+  }
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    const rest = minutes % 60;
+    if (hours >= 10 || rest === 0) return `${hours}h`;
+    return `${hours}h ${rest}m`;
+  }
+  const days = Math.floor(hours / 24);
+  const rest = hours % 24;
+  if (days >= 10 || rest === 0) return `${days}d`;
+  return `${days}d ${rest}h`;
+}
+
+/**
+ * The same duration in words, coarse enough to say out loud.
+ *
+ * `elapsedLabel` is written for the corner of an eye and changes every second
+ * under ten minutes; read aloud it is a machine reciting "four s, five s, six
+ * s" over the conversation. This is the version a screen reader gets: it
+ * changes at most once a minute, so a reader who lands on the indicator hears
+ * a useful answer and a reader who is elsewhere hears nothing.
+ *
+ * **It floors, because the number beside it floors.** A low-vision reader
+ * running magnification with a screen reader gets both at once, and they are
+ * one fact: rounding here printed "Working 1h 12m" while saying "about 1 hour
+ * 13 minutes", and at the top of the scale "23h" against "about 23 hours 59
+ * minutes" — a disagreement big enough to look like two different clocks. So
+ * this walks the same units `elapsedLabel` does and drops the same ones (the
+ * minutes past ten hours, the hours past ten days), and the two now name the
+ * same quantity in different words.
+ *
+ * The one deliberate gap is seconds, which are never spoken: under a minute
+ * the digits say "44s" and this says "under a minute", which contains the
+ * visible number rather than contradicting it. Speaking the seconds is the
+ * thing this function exists to avoid.
+ *
+ * "About" is honest as well as coarse — the number is a live count from a
+ * server timestamp against the browser's own clock, and the second it lands
+ * on was never the point.
+ */
+export function coarseElapsedLabel(seconds: number): string {
+  const plural = (count: number, unit: string) => `${count} ${unit}${count === 1 ? "" : "s"}`;
+  const total = Math.max(0, Math.floor(seconds));
+  if (total < 60) return "under a minute";
+  const minutes = Math.floor(total / 60);
+  if (minutes === 1) return "about a minute";
+  if (minutes < 60) return `about ${plural(minutes, "minute")}`;
+  const hours = Math.floor(minutes / 60);
+  const restMinutes = minutes % 60;
+  if (hours < 24) {
+    if (hours >= 10 || restMinutes === 0) {
+      return hours === 1 ? "about an hour" : `about ${plural(hours, "hour")}`;
+    }
+    return `about ${plural(hours, "hour")} ${plural(restMinutes, "minute")}`;
+  }
+  const days = Math.floor(hours / 24);
+  const restHours = hours % 24;
+  if (days >= 10 || restHours === 0) {
+    return days === 1 ? "about a day" : `about ${plural(days, "day")}`;
+  }
+  return `about ${plural(days, "day")} ${plural(restHours, "hour")}`;
 }
 
 function str(value: unknown): string {
@@ -164,6 +379,9 @@ export function readUserQuestion(
     question: str(content.question),
     context: str(content.context),
     question_kind: str(content.question_kind) === "memory_scope" ? "memory_scope" : "open",
+    required: content.required === true,
+    input_key: str(content.input_key),
+    value_type: ["url", "timezone", "time"].includes(str(content.value_type)) ? content.value_type as "url" | "timezone" | "time" : "text",
     options: questionOptions(content.options),
     allow_other: content.allow_other !== false,
     other_label: str(content.other_label) || "Something else",
@@ -240,6 +458,100 @@ export function readMemorySaved(
   };
 }
 
+/* ------------------------------------------------------------------ */
+/* Runs that failed                                                     */
+/* ------------------------------------------------------------------ */
+
+/** The system row a failed run leaves in the transcript. */
+export function isRunFailureMessage(
+  message: Pick<ConversationMessage, "sender_type" | "message_type">,
+): boolean {
+  return message.sender_type === "system" && message.message_type === "error";
+}
+
+/**
+ * What the card says when the API sent no notice at all: the same generic
+ * sentence `jhin_domain.failures` falls back to, so the two ends agree.
+ */
+const NO_NOTICE_SUMMARY = "The run stopped before it finished.";
+
+/**
+ * The failure a person reads, or null when this row is not one.
+ *
+ * The notice is written by the API (`jhin_domain.failures`) so that the chat,
+ * the activity feed and the inbox describe the same failure in the same
+ * words.
+ *
+ * **A missing notice never falls back to the row's own text.** That text is
+ * the run's note to whoever owns the incident — "Run failed: tool call
+ * a34dd1dc-… execution outcome is unknown; manual reconciliation is
+ * required" — and rendering it is the exact regression this card was built to
+ * end. There are two ways to meet a row without a notice and neither is worth
+ * that: a message cached from before the deploy, which revalidation replaces
+ * within the minute, and a new web served by an API that predates the field,
+ * which is a deploy done in the wrong order (`docs/deployment.md` step 6:
+ * `api` before `web`). Both get the generic sentence, which says the true
+ * thing and says nothing internal — so the ordering requirement cannot cost a
+ * person a screenful of vocabulary written for somebody else, only some
+ * detail for as long as it takes to finish the rollout.
+ *
+ * `code` is still read off the row, because that is a fixed vocabulary rather
+ * than prose and it is what keeps the "out of credit → Models" link working
+ * on a stale card.
+ */
+export function readFailure(
+  message: Pick<
+    ConversationMessage,
+    "failure" | "sender_type" | "message_type" | "content_json"
+  >,
+): FailureNotice | null {
+  if (!isRunFailureMessage(message)) return null;
+  const notice = message.failure;
+  if (notice && notice.summary.trim()) return notice;
+  return {
+    code: str(message.content_json.error_code),
+    summary: NO_NOTICE_SUMMARY,
+    detail: "",
+    reference: "",
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* The name an agent gave itself                                        */
+/* ------------------------------------------------------------------ */
+
+/** A `status` message `organization.identity.set_name` wrote because the
+ * agent row actually changed. Sender and type are checked as well as the key,
+ * for the same reason the memory receipt checks them: this card is evidence,
+ * so it must not render for anything a person could have written. */
+export function isAgentRenamedMessage(
+  message: Pick<ConversationMessage, "content_json" | "sender_type" | "message_type">,
+): boolean {
+  return (
+    message.content_json.kind === "agent_renamed" &&
+    message.sender_type === "agent" &&
+    message.message_type === "status"
+  );
+}
+
+/** Normalize an `agent_renamed` receipt. Returns null when the message is not
+ * one, or when it carries no new name — a rename card that cannot say what
+ * the agent is called now is not evidence of anything. */
+export function readAgentRenamed(
+  message: Pick<ConversationMessage, "content_json" | "sender_type" | "message_type">,
+): AgentRenamedContent | null {
+  if (!isAgentRenamedMessage(message)) return null;
+  const content = message.content_json;
+  const name = str(content.name);
+  if (!name.trim()) return null;
+  return {
+    kind: "agent_renamed",
+    previous_name: str(content.previous_name),
+    name,
+    slug: str(content.slug),
+  };
+}
+
 /** Who a structured message was aimed at, when the backend recorded it. */
 function messageTarget(message: Pick<ConversationMessage, "content_json">): string {
   const content = message.content_json;
@@ -258,6 +570,8 @@ export function friendlyMessageLabel(
   if (memory !== null) {
     return memory.action === "updated" ? "Updated a memory" : "Remembered something";
   }
+  const renamed = readAgentRenamed(message);
+  if (renamed !== null) return `Now called ${renamed.name}`;
   const question = readUserQuestion(message);
   if (question !== null) {
     const agent = question.asked_by_agent_name || "Your agent";
@@ -327,6 +641,10 @@ export function isWorkCard(
   // generic work card would render it as "Shared an update" with the
   // remembered words clamped into a preview. It has its own card.
   if (isMemorySavedMessage(message)) return false;
+  // And a rename receipt, for the same reason: "Now called Bisby" is not
+  // an update to share, it is a change to how this agent is identified
+  // everywhere.
+  if (isAgentRenamedMessage(message)) return false;
   return message.sender_type === "agent" && WORK_CARD_TYPES.has(message.message_type);
 }
 
@@ -344,7 +662,8 @@ const TRANSCRIPT_ACTIVITY_KINDS: ReadonlySet<ActivityKind> = new Set<ActivityKin
 
 export type TimelineItem =
   | { kind: "message"; id: string; at: string; message: ConversationMessage }
-  | { kind: "activity"; id: string; at: string; card: ActivityCard };
+  | { kind: "activity"; id: string; at: string; card: ActivityCard }
+  | { kind: "tool"; id: string; at: string; call: ConversationToolCall };
 
 /** Merge messages and activity cards into one ascending timeline. Cards that
  * project a message already in the transcript (`msg:<id>`) and cards of
@@ -366,7 +685,7 @@ export const CHAT_DETAILED_STORAGE_KEY = "jhin-chat-detailed";
 export function mergeTimeline(
   messages: readonly ConversationMessage[],
   activity: readonly ActivityCard[],
-  options: { detailed?: boolean } = {},
+  options: { detailed?: boolean; toolCalls?: readonly ConversationToolCall[] } = {},
 ): TimelineItem[] {
   const detailed = options.detailed ?? true;
   const seen = new Set<string>();
@@ -390,12 +709,20 @@ export function mergeTimeline(
     items.push({ kind: "activity", id, at: card.created_at, card });
   }
 
+  for (const call of options.toolCalls ?? []) {
+    const id = `tool:${call.id}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    items.push({ kind: "tool", id, at: call.created_at, call });
+  }
+
   return items
     .map((item, index) => ({ item, index }))
     .sort((a, b) => {
       const delta = new Date(a.item.at).getTime() - new Date(b.item.at).getTime();
       if (delta !== 0) return delta;
-      if (a.item.kind !== b.item.kind) return a.item.kind === "message" ? -1 : 1;
+      const priority = { message: 0, tool: 1, activity: 2 };
+      if (a.item.kind !== b.item.kind) return priority[a.item.kind] - priority[b.item.kind];
       return a.index - b.index;
     })
     .map(({ item }) => item);
@@ -430,7 +757,10 @@ export interface DaySeparatorItem {
   time: string;
 }
 
-export type TranscriptItem = TimelineItem | ExchangeItem | DaySeparatorItem;
+export type TranscriptItem = TimelineItem | ExchangeItem | DaySeparatorItem
+  | { kind: "runtime"; id: string; at: string; item: ConversationItem }
+  | { kind: "generation"; id: string; at: string; item: ConversationItem }
+  | { kind: "file"; id: string; at: string; file: ManagedFile };
 
 /** Progress chips that may be folded into a surrounding exchange. Chips the
  * reader must act on (needs_review, paused, stopped) always stay visible. */
@@ -514,6 +844,7 @@ function messageExchangeInfo(
 function exchangeOutcome(items: readonly TimelineItem[]): ExchangeItem["outcome"] {
   const last = items[items.length - 1];
   if (last.kind === "activity") return last.card.kind === "failed" ? "problem" : "ok";
+  if (last.kind === "tool") return last.call.status === "failed" ? "problem" : "ok";
   const message = last.message;
   const content = message.content_json;
   if (message.message_type === "escalation" || str(content.status) === "failed") return "problem";
@@ -532,6 +863,7 @@ function exchangeOutcome(items: readonly TimelineItem[]): ExchangeItem["outcome"
 export function exchangeLabel(exchange: ExchangeItem): string {
   if (exchange.count === 1) {
     const only = exchange.items[0];
+    if (only.kind === "tool") return "Terminal";
     return only.kind === "message" ? friendlyMessageLabel(only.message) : only.card.label;
   }
   return `${exchange.count} updates with ${exchange.withName}`;
@@ -589,6 +921,13 @@ export function groupExchanges(
   };
 
   for (const item of items) {
+    if (item.kind === "tool") {
+      // Actual execution evidence stays visible, including a colleague's
+      // commands; a quiet exchange must not hide the running terminal.
+      flush();
+      result.push(item);
+      continue;
+    }
     if (item.kind === "message") {
       const info = messageExchangeInfo(item.message, primary);
       if (info === null) {
@@ -726,6 +1065,11 @@ export function composerHintFor(liveStatus: LiveStatus | null, agentName: string
   if (liveStatus.kind === "queued") {
     return `${agentName} hasn't started yet — this will steer it once it does.`;
   }
+  if (liveStatus.kind === "waiting_delegation") {
+    // Live, but not this agent's move. The turn still picks a queued
+    // instruction up at its next step, which is after the colleague replies.
+    return `${agentName} is waiting on a colleague — this will steer it once they reply.`;
+  }
   return null;
 }
 
@@ -754,9 +1098,13 @@ export interface DeliveryEvidence {
  * treated as proof a step ran and included it. Pure and unit-tested.
  */
 export function instructionDeliveryState(
-  message: Pick<ConversationMessage, "created_at" | "task_id">,
+  message: Pick<ConversationMessage, "created_at" | "task_id"> & Partial<Pick<ConversationMessage, "content_json">>,
   laterItems: readonly DeliveryEvidence[],
 ): "queued" | "delivered" {
+  // New runs persist the exact step that consumed an instruction. Legacy
+  // records retain the existing activity-based fallback below.
+  if (message.content_json?.delivery === "consumed") return "delivered";
+  if (message.content_json?.delivery === "queued" || message.content_json?.delivery === "pending") return "queued";
   const sentAt = new Date(message.created_at).getTime();
   if (Number.isNaN(sentAt)) return "queued";
   const delivered = laterItems.some((item) => {
@@ -773,12 +1121,15 @@ export function instructionDeliveryState(
 /* ------------------------------------------------------------------ */
 
 const CARRIED_DRAFT_PREFIX = "jhin-chat-carry:";
+const privateCarriedDrafts = new Map<string, string>();
 
 /** Hand a draft to the conversation page the first turn is redirecting to.
  * Starting a chat navigates from /chats to /chats/{id}, and anything typed
  * in that window would otherwise die with the unmounted page. */
 export function stashCarriedDraft(conversationId: string, text: string): void {
   if (typeof window === "undefined" || text.trim() === "") return;
+  if (mayContainSecret(text)) { privateCarriedDrafts.set(conversationId, text); window.sessionStorage.removeItem(`${CARRIED_DRAFT_PREFIX}${conversationId}`); return; }
+  privateCarriedDrafts.delete(conversationId);
   try {
     window.sessionStorage.setItem(`${CARRIED_DRAFT_PREFIX}${conversationId}`, text);
   } catch {
@@ -789,11 +1140,13 @@ export function stashCarriedDraft(conversationId: string, text: string): void {
 /** Read and clear a draft handed over by the new-chat page. */
 export function takeCarriedDraft(conversationId: string): string {
   if (typeof window === "undefined") return "";
+  const privateText = privateCarriedDrafts.get(conversationId);
+  if (privateText !== undefined) { privateCarriedDrafts.delete(conversationId); return privateText; }
   const key = `${CARRIED_DRAFT_PREFIX}${conversationId}`;
   try {
     const value = window.sessionStorage.getItem(key) ?? "";
     if (value) window.sessionStorage.removeItem(key);
-    return value;
+    return mayContainSecret(value) ? "" : value;
   } catch {
     return "";
   }

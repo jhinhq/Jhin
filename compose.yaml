@@ -13,9 +13,12 @@ services:
     build:
       context: .
       dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_AGENTIC_WORKSPACE: ${NEXT_PUBLIC_AGENTIC_WORKSPACE:-1}
     environment:
       APP_NAME: ${APP_NAME:-Jhin}
       API_INTERNAL_URL: http://api:8000
+      JHIN_RUNTIME_GATEWAY_URL: http://runtime-gateway:8086
     ports:
       - "${WEB_PORT:-3000}:3000"
     depends_on:
@@ -43,6 +46,9 @@ services:
       # Required once APP_URL is an https origin: the API refuses to start
       # rather than serve session cookies without the Secure flag.
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      # Managed app authentication belongs only to the API and tool worker.
+      COMPOSIO_API_KEY: ${COMPOSIO_API_KEY:-}
+      COMPOSIO_AUTH_CONFIGS: ${COMPOSIO_AUTH_CONFIGS:-}
       # The web container proxies /api/* to this service, so without this every
       # request would look like it came from one address and the per-IP login
       # lockout would be useless (or lock out everyone at once).
@@ -53,6 +59,14 @@ services:
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
       MASTER_KEY_FILE: /run/secrets/jhin_master_key
+      JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS: ${JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS:-}
+      JHIN_CONNECTOR_ALLOWED_DB_HOSTS: ${JHIN_CONNECTOR_ALLOWED_DB_HOSTS:-}
+      JHIN_AGENTIC_WORKSPACE: ${JHIN_AGENTIC_WORKSPACE:-1}
+      JHIN_RUNTIME_GATEWAY_URL: http://runtime-gateway:8086
+      JHIN_FILES_ROOT: /data/files
+      JHIN_FILES_WORKSPACE_QUOTA_BYTES: ${JHIN_FILES_WORKSPACE_QUOTA_BYTES:-10737418240}
+    volumes:
+      - managed_files:/data/files
     secrets:
       - jhin_master_key
     ports:
@@ -116,6 +130,10 @@ services:
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
       MASTER_KEY_FILE: /run/secrets/jhin_master_key
+      JHIN_FILES_ROOT: /data/files
+      JHIN_FILES_WORKSPACE_QUOTA_BYTES: ${JHIN_FILES_WORKSPACE_QUOTA_BYTES:-10737418240}
+    volumes:
+      - managed_files:/data/files:ro
     secrets:
       - jhin_master_key
     depends_on:
@@ -149,8 +167,15 @@ services:
       TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
       MASTER_KEY_FILE: /run/secrets/jhin_master_key
       SANDBOX_RUNNER_URL: http://sandbox-runner:8085
+      JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS: ${JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS:-}
+      JHIN_CONNECTOR_ALLOWED_DB_HOSTS: ${JHIN_CONNECTOR_ALLOWED_DB_HOSTS:-}
+      COMPOSIO_API_KEY: ${COMPOSIO_API_KEY:-}
       SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:-dev-sandbox-runner-token}
       SANDBOX_DEFAULT_IMAGE: ${SANDBOX_DEFAULT_IMAGE:-jhin-sandbox:latest}
+      JHIN_FILES_ROOT: /data/files
+      JHIN_FILES_WORKSPACE_QUOTA_BYTES: ${JHIN_FILES_WORKSPACE_QUOTA_BYTES:-10737418240}
+    volumes:
+      - managed_files:/data/files
     secrets:
       - jhin_master_key
     depends_on:
@@ -167,6 +192,33 @@ services:
       retries: 3
       start_period: 30s
     networks: [control, data, runner]
+    restart: unless-stopped
+
+  runtime-gateway:
+    build:
+      <<: *python-build
+      args:
+        SERVICE_PACKAGE: jhin-tool-worker
+    command: ["jhin-runtime-gateway"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-jhin}:${POSTGRES_PASSWORD:-jhin}@postgres:5432/${POSTGRES_DB:-jhin}
+      SANDBOX_RUNNER_URL: http://sandbox-runner:8085
+      SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:-dev-sandbox-runner-token}
+      JHIN_FILES_ROOT: /data/files
+      JHIN_FILES_WORKSPACE_QUOTA_BYTES: ${JHIN_FILES_WORKSPACE_QUOTA_BYTES:-10737418240}
+    volumes:
+      - managed_files:/data/files:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      sandbox-runner:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8086/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [edge, data, runner]
     restart: unless-stopped
 
   # The only service allowed to create sandbox jobs. Docker authority is
@@ -386,6 +438,7 @@ networks:
     external: false
 
 volumes:
+  managed_files:
   postgres_data:
   nats_data:
 

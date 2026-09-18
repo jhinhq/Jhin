@@ -31,6 +31,7 @@ class _RequestAuditArgs(TypedDict):
 
 
 REQ: _RequestAuditArgs = {"request_id": new_uuid7(), "ip_hash": "test"}
+pytestmark = pytest.mark.usefixtures("skip_remote_initial_connection_checks")
 
 
 @pytest.fixture
@@ -110,7 +111,8 @@ async def test_verify_persists_discovery_and_public_config_hides_it(
     fake_mcp: FakeMcpServer,
 ) -> None:
     connection = await _create(session, crypto, admin_ctx, fake_mcp)
-    assert DISCOVERY_KEY not in connection.config_json
+    assert DISCOVERY_KEY in connection.config_json
+    assert connection.last_verified_at is not None
     updated, health = await service.verify_connection(
         session, crypto, admin_ctx, connection.id, **REQ
     )
@@ -146,6 +148,11 @@ async def test_tools_listing_discovers_once_then_serves_stored_tools(
     fake_mcp: FakeMcpServer,
 ) -> None:
     connection = await _create(session, crypto, admin_ctx, fake_mcp)
+    # A connection saved by older versions still discovers on first open.
+    connection.config_json = {
+        key: value for key, value in connection.config_json.items() if key != DISCOVERY_KEY
+    }
+    await session.commit()
     listing = ConnectionToolsOut.model_validate(
         await service.list_connection_tools(session, crypto, admin_ctx, connection.id, **REQ)
     )

@@ -24,6 +24,12 @@ from jhin_observability.metrics import JhinMetrics, Observation
 from jhin_observability.registry import MetricName as RegistryMetricName
 
 EXPECTED = {
+    "conversation_event_delivery_seconds": ("histogram", "s", set()),
+    "conversation_recovery_seconds": ("histogram", "s", {"outcome"}),
+    "conversation_reconnects_total": ("counter", "{connection}", {"outcome"}),
+    "artifact_publications_total": ("counter", "{file}", {"outcome"}),
+    "runtime_stuck_sessions": ("gauge", "{session}", set()),
+    "runtime_session_cleanup_total": ("counter", "{session}", {"outcome"}),
     "agent_runs_total": ("counter", "{run}", {"service", "outcome"}),
     "agent_run_duration_seconds": ("histogram", "s", {"outcome"}),
     "agent_run_failures_total": ("counter", "{failure}", {"failure_class"}),

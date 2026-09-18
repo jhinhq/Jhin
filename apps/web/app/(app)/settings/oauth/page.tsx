@@ -130,6 +130,27 @@ export default function OAuthSettingsPage() {
         description="The callback URL this instance uses, and the apps it has registered."
       />
       <PageBody className="max-w-3xl space-y-8">
+        {redirect.data?.composio ? (
+          <Card as="section" data-testid="composio-settings">
+            <h2 className="mb-2 font-display text-base font-semibold">Managed app connections</h2>
+            <Badge tone={redirect.data.composio.configured ? "ok" : "neutral"}>
+              {redirect.data.composio.configured ? "Configured" : "Setup required"}
+            </Badge>
+            <p className="my-3 text-sm text-dim">
+              {redirect.data.composio.configured
+                ? "Composio handles sign-in for supported apps. Connect an app from Apps to authorize access."
+                : "An administrator must configure the Composio project key for this Jhin instance to enable managed sign-in."}
+            </p>
+            <p className="mb-3 text-sm text-dim">Supported apps: {redirect.data.composio.toolkits.join(", ") || "None configured"}</p>
+            <CopyRow label="Composio callback" value={redirect.data.composio.callback_url} />
+            <p className="mt-3 text-sm text-dim">
+              Required: in your Composio Dashboard, open Settings → General → Configuration and
+              configure the callback identity verifier with the callback URL above. This must be
+              a public HTTPS URL that Composio can reach. Jhin requires the project verifier to
+              confirm each connection; a callback containing only state is not accepted.
+            </p>
+          </Card>
+        ) : null}
         <Card as="section">
           <h2 className="mb-1 flex items-center gap-2 font-display text-base font-semibold">
             <Link2 size={16} aria-hidden /> Redirect URL

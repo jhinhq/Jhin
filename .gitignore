@@ -38,7 +38,10 @@ out/
 .worktrees/
 
 # Test artifacts
+# Local acceptance credentials, database backups, and disposable fixtures.
+.tmp/
 .test-artifacts/
+.test-tmp-*/
 playwright-report/
 test-results/
 blob-report/

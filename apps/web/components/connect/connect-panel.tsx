@@ -62,11 +62,13 @@ import type {
   OAuthProbeOut,
 } from "@/lib/types";
 import { useWorkspace } from "@/lib/workspace-context";
+import { coerceConnectorConfig, configFieldsForAuth } from "@/lib/connectors";
 
 export type ConnectState =
   | { kind: "probing" }
   | { kind: "choose"; probe: OAuthProbeOut }
   | { kind: "needs_client"; probe: OAuthProbeOut }
+  | { kind: "managed_setup"; reason: string }
   | { kind: "consent"; probe: OAuthProbeOut }
   | { kind: "redirecting"; url: string }
   | { kind: "device"; device: OAuthDeviceStartOut }
@@ -100,6 +102,9 @@ function flowAvailable(flow?: OAuthProbeFlow): boolean {
 /** Where a probe result sends the panel. Anything not clearly OAuth lands on
  * the API-key form, which is always reachable and always works. */
 function nextStateFor(result: OAuthProbeOut): ConnectState {
+  if (result.method === "composio") {
+    return result.client_configured ? { kind: "consent", probe: result } : { kind: "managed_setup", reason: result.reason };
+  }
   if (result.method === "oauth_discovery" || result.method === "oauth_static") {
     return result.client_configured || result.supports_dcr
       ? { kind: "consent", probe: result }
@@ -214,6 +219,7 @@ export function ConnectPanel({
   workspaceId,
   connector,
   prefill,
+  providerKey,
   onClose,
   onConnected,
   onCreated,
@@ -221,6 +227,7 @@ export function ConnectPanel({
   workspaceId: string;
   connector: ConnectorInfo;
   prefill?: ConnectionPrefill;
+  providerKey?: "composio";
   onClose: () => void;
   onConnected: (connection: ConnectionInfo) => void;
   /**
@@ -235,6 +242,13 @@ export function ConnectPanel({
   const appName = prefill?.name?.trim() || connector.display_name;
   const serverUrl =
     typeof prefill?.config?.server_url === "string" ? prefill.config.server_url.trim() : "";
+  const managedFields = connector.managed_auth
+    ? configFieldsForAuth(connector, connector.managed_auth.auth_type).filter((field) => field.required)
+    : [];
+  const [managedConfig, setManagedConfig] = useState<Record<string, string | boolean>>(() =>
+    Object.fromEntries(managedFields.map((field) => [field.name, prefill?.config?.[field.name] ?? (field.default === null ? "" : String(field.default))])),
+  );
+  const [configError, setConfigError] = useState<string | null>(null);
   /**
    * Whether there is anything to ask the server about.
    *
@@ -302,6 +316,7 @@ export function ConnectPanel({
       {
         connector_type: connector.connector_type,
         server_url: serverUrl || undefined,
+        ...(providerKey ? { provider_key: providerKey } : {}),
       },
       {
         onSuccess: (result) => {
@@ -317,7 +332,9 @@ export function ConnectPanel({
           if (!live()) return;
           settle();
           setState(
-            hasCredentialForm
+            (providerKey === "composio" || connector.connector_type === "composio")
+              ? { kind: "failed", message: "Jhin could not check managed sign-in. Close this dialog and try connecting again." }
+              : hasCredentialForm
               ? { kind: "api_key" }
               : {
                   kind: "failed",
@@ -328,7 +345,7 @@ export function ConnectPanel({
         },
       },
     );
-  }, [connector.connector_type, hasCredentialForm, probeMutate, serverUrl]);
+  }, [connector.connector_type, hasCredentialForm, probeMutate, serverUrl, providerKey]);
 
   useEffect(() => {
     if (!canProbe || probeStarted.current) return;
@@ -344,11 +361,21 @@ export function ConnectPanel({
   };
 
   const continueToProvider = () => {
+    const managed = probeResult?.method === "composio";
+    if (managed) {
+      const missing = managedFields.filter((field) => String(managedConfig[field.name] ?? "").trim() === "");
+      if (missing.length) {
+        setConfigError(`Enter ${missing.map((field) => field.label.toLowerCase()).join(", ")}.`);
+        return;
+      }
+    }
+    setConfigError(null);
     start.mutate(
       {
         connector_type: connector.connector_type,
         name: appName,
-        config: prefill?.config ?? {},
+        config: managed ? { ...(prefill?.config ?? {}), ...coerceConnectorConfig(managedFields, managedConfig) } : prefill?.config ?? {},
+        ...(managed ? { provider_key: "composio" } : {}),
       },
       {
         onSuccess: (started) => {
@@ -445,7 +472,31 @@ export function ConnectPanel({
           </div>
         ) : null}
 
+        {state.kind === "managed_setup" ? (
+          <div className="space-y-4">
+            <p className="text-sm text-dim">
+              {state.reason === "composio_auth_config_required"
+                ? `An administrator must add a custom OAuth auth configuration for ${appName} in Composio and configure its auth config ID in Jhin before you can sign in.`
+                : `An administrator must configure the Composio project key for this Jhin instance before you can sign in to ${appName}.`}
+            </p>
+            <a href="/settings/oauth" className={QUIET_LINK}>View connection setup</a>
+            {quietLinks(apiKeyLink)}
+          </div>
+        ) : null}
+
         {state.kind === "consent" ? (
+          <>
+          {prefill?.hint ? <p className="text-sm text-dim">{prefill.hint}</p> : null}
+          {state.probe.method === "composio" ? managedFields.filter((field) =>
+            !(connector.connector_type === "composio" && ["toolkit", "server_slug"].includes(field.name) && prefill?.config?.[field.name]),
+          ).map((field) => (
+            <Field key={field.name} label={field.label} hint={field.help}>
+              <Input aria-label={field.label} required placeholder={field.placeholder}
+                value={String(managedConfig[field.name] ?? "")}
+                onChange={(event) => setManagedConfig((current) => ({ ...current, [field.name]: event.target.value }))} />
+            </Field>
+          )) : null}
+          <ErrorNote message={configError} />
           <OAuthConsentStep
             appName={appName}
             probe={state.probe}
@@ -471,6 +522,7 @@ export function ConnectPanel({
             onUseApiKey={hasCredentialForm ? showApiKeyLink : undefined}
             onCancel={onClose}
           />
+          </>
         ) : null}
 
         {state.kind === "choose" && deviceCard ? (

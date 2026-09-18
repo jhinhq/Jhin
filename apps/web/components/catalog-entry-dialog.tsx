@@ -19,6 +19,8 @@
 import { useState } from "react";
 import { LogoTile } from "@/components/catalog/logo-tile";
 import { ConnectPanel } from "@/components/connect/connect-panel";
+import { ConnectionMethodSelect } from "@/components/connect/method-select";
+import type { AppConnectMethod } from "@/lib/apps";
 import { CreateConnectionDialog, type ConnectionPrefill } from "@/components/connection-create-dialog";
 import { Badge, Button, Dialog, ErrorNote, Spinner } from "@/components/ui";
 import {
@@ -268,13 +270,14 @@ export function CatalogEntryDialog({
   /** Which Connect path is open: the entry's own, the self-hosted URL one, or
    * the native connector kept alongside a remote sign-in. */
   const [connecting, setConnecting] = useState<"entry" | "manual" | "native" | null>(null);
+  const [method, setMethod] = useState<AppConnectMethod>("default");
 
   const detail = entry.data ?? null;
   const app = detail ? catalogEntryToApp(detail) : null;
   // `connectTarget` is the same resolver the curated library uses, reached
   // through a projection rather than a second implementation, so a synced
   // entry and a built-in one connect down exactly one code path.
-  const target = app ? connectTarget(app, connectors) : null;
+  const target = app ? connectTarget(app, connectors, method) : null;
   // A stdio-only entry cannot be dialled, but somebody already hosting it can
   // still point the generic MCP connector at their own URL.
   const manual = app && detail?.stdio_only ? selfHostedTarget(app, connectors) : null;
@@ -308,6 +311,8 @@ export function CatalogEntryDialog({
         {entry.isPending ? <Spinner label="Loading the entry…" /> : null}
         {entry.isError ? <ErrorNote message="This entry could not be loaded." /> : null}
         {detail ? (
+          <>
+          {app ? <ConnectionMethodSelect entry={app} connectors={connectors} value={method} onChange={setMethod} /> : null}
           <EntryBody
             entry={detail}
             target={target}
@@ -319,19 +324,21 @@ export function CatalogEntryDialog({
             onNativeConnect={() => setConnecting("native")}
             onClose={onClose}
           />
+          </>
         ) : null}
       </Dialog>
 
       {connecting !== null && detail && activeTarget && activeTarget.kind !== "unsupported" ? (
         connecting === "entry" &&
-        activeTarget.kind === "native" &&
-        connectorSignsIn(activeTarget.connector) ? (
+        connectorSignsIn(activeTarget.connector) &&
+        (activeTarget.kind === "native" || Boolean(activeTarget.prefill.config.server_url)) ? (
           // A native app that signs in (GitHub) connects the way the library
           // card does: the panel asks the server how, and an API key is the
           // demoted fallback. MCP entries keep the schema-driven form.
           <ConnectPanel
             workspaceId={workspaceId}
             connector={activeTarget.connector}
+            providerKey={activeTarget.kind === "native" ? activeTarget.providerKey : undefined}
             prefill={prefill}
             onClose={() => setConnecting(null)}
             onConnected={(connection) => onCreated({ connection, webhook: null })}
@@ -342,7 +349,7 @@ export function CatalogEntryDialog({
             workspaceId={workspaceId}
             connector={activeTarget.connector}
             prefill={prefill}
-            schema={connecting === "entry" ? schema : null}
+            schema={connecting === "entry" && method === "default" && schema?.connector_type === activeTarget.connector.connector_type ? schema : null}
             onClose={() => setConnecting(null)}
             onCreated={onCreated}
           />

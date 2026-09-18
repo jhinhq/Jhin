@@ -156,6 +156,57 @@ def build_parser() -> argparse.ArgumentParser:
     )
     invite_create.set_defaults(command="invite create")
 
+    api_key = groups.add_parser(
+        "api-key", help="programmatic keys: what a script signs in with"
+    ).add_subparsers(dest="action", metavar="<action>", required=True)
+    api_key_create = api_key.add_parser(
+        "create",
+        parents=[common, confirmation],
+        help="mint an API key for a workspace and print the secret once",
+    )
+    api_key_create.add_argument("--name", required=True, help="what this key is for")
+    api_key_create.add_argument(
+        "--workspace", default=None, help="workspace slug or id (optional when there is one)"
+    )
+    api_key_create.add_argument(
+        "--scope",
+        action="append",
+        default=[],
+        metavar="SCOPE",
+        required=True,
+        help=(
+            "what the key may do, e.g. agents:read or tasks:* — repeat the flag or "
+            "separate with commas; an unknown scope is refused by name"
+        ),
+    )
+    api_key_create.add_argument(
+        "--expires-in",
+        dest="expires_in",
+        type=int,
+        default=None,
+        metavar="N",
+        help="how long the key lasts, with --expires-unit; omit for a key that never expires",
+    )
+    api_key_create.add_argument(
+        "--expires-unit",
+        dest="expires_unit",
+        choices=("minutes", "hours", "days", "never"),
+        default="never",
+        help="the unit for --expires-in (default: never)",
+    )
+    api_key_create.add_argument(
+        "--as", dest="actor_email", help="the admin or owner the key is created as, and audited to"
+    )
+    api_key_create.set_defaults(command="api-key create")
+
+    api_key_list = api_key.add_parser(
+        "list", parents=[common], help="list a workspace's keys (never their secrets)"
+    )
+    api_key_list.add_argument(
+        "--workspace", default=None, help="workspace slug or id (optional when there is one)"
+    )
+    api_key_list.set_defaults(command="api-key list")
+
     agent = groups.add_parser(
         "agent", help="what an agent may use, and giving it an app"
     ).add_subparsers(dest="action", metavar="<action>", required=True)
@@ -241,5 +292,50 @@ def build_parser() -> argparse.ArgumentParser:
     which.add_argument("--bundle", help="the bundle to turn off")
     which.add_argument("--grant", help="the id of one grant to revoke")
     agent_revoke.set_defaults(command="agent revoke")
+
+    agent_workspace = agent.add_parser(
+        "workspace", help="the sandbox disk an agent's code work lives on"
+    ).add_subparsers(dest="sub_action", metavar="<action>", required=True)
+
+    agent_workspace_list = agent_workspace.add_parser(
+        "list", parents=[common], help="every agent's sandbox workspace: size, holder, last use"
+    )
+    agent_workspace_list.add_argument(
+        "--workspace", default=None, help="workspace slug or id (optional when there is one)"
+    )
+    agent_workspace_list.set_defaults(command="agent workspace list")
+
+    agent_workspace_show = agent_workspace.add_parser(
+        "show",
+        parents=[common],
+        help="one agent's workspace, its last checkout, and its recent history",
+    )
+    agent_workspace_show.add_argument("--agent", required=True, help="agent name, slug or id")
+    agent_workspace_show.add_argument(
+        "--workspace", default=None, help="workspace slug or id (optional when there is one)"
+    )
+    agent_workspace_show.set_defaults(command="agent workspace show")
+
+    agent_workspace_reset = agent_workspace.add_parser(
+        "reset",
+        parents=[common, confirmation],
+        help="empty an agent's sandbox workspace before its next run",
+    )
+    agent_workspace_reset.add_argument("--agent", required=True, help="agent name, slug or id")
+    agent_workspace_reset.add_argument(
+        "--workspace", default=None, help="workspace slug or id (optional when there is one)"
+    )
+    agent_workspace_reset.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "also release the lease. For a run that crashed without finalizing and is "
+            "still holding the workspace it will never use again."
+        ),
+    )
+    agent_workspace_reset.add_argument(
+        "--as", dest="actor_email", help="the admin or owner the audit trail records as acting"
+    )
+    agent_workspace_reset.set_defaults(command="agent workspace reset")
 
     return parser

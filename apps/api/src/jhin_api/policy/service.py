@@ -54,6 +54,9 @@ async def workspace_catalog(db: AsyncSession, workspace_id: UUID) -> list[ToolDe
     the same view ``GET /tools`` serves."""
     definitions = list(build_default_definition_catalog().definitions())
     definitions.extend(await workspace_mcp_tool_definitions(db, workspace_id))
+    from jhin_connectors.composio.source import workspace_composio_tool_definitions
+
+    definitions.extend(await workspace_composio_tool_definitions(db, workspace_id))
     return definitions
 
 

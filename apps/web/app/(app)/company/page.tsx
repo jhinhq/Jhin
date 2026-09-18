@@ -42,6 +42,7 @@ import {
 import { buildOrgTree, countTeamAgents, type AgentTreeNode, type TeamTreeNode } from "@/lib/org-tree";
 import type { OrgAgentNode, OrgGraph, OrgTeamNode } from "@/lib/types";
 import { useWorkspace } from "@/lib/workspace-context";
+import { CompanyResources } from "@/components/company/company-resources";
 
 /** Monotonic token per move. Module scope, not a ref, so the callbacks that
  * read it stay safe to call while rendering. */
@@ -445,6 +446,7 @@ export default function CompanyPage() {
       <PageHeader title="Company" description="Teams, who leads them, and who reports to whom" actions={actions} />
       <PageBody className="space-y-5">
         <ErrorNote message={pageError} />
+        <CompanyResources workspaceId={workspaceId} teams={teams} canWrite={isAdmin} />
         {graph.isPending ? (
           <Spinner label="Loading your company…" />
         ) : graph.isError || !graph.data || !tree ? (

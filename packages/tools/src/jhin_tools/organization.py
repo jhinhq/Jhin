@@ -72,6 +72,7 @@ class DelegateTaskInput(BaseModel):
     title: str = Field(min_length=1, max_length=500)
     instructions: str = Field(min_length=1, max_length=20_000)
     expected_output: str = Field(default="", max_length=4_000)
+    cross_team_reason: str = Field(default="", max_length=1000)
     blocking: bool = True
     # "review_request" marks QA/review handoffs (plan 29); the child's
     # reported verdict then comes back as a review_result.
@@ -89,6 +90,14 @@ class DelegateTaskOutput(BaseModel):
     detail: str = ""
 
 
+class MissingInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str = Field(min_length=1, max_length=100, pattern=r"^[a-z0-9_]+$")
+    label: str = Field(min_length=1, max_length=200)
+    value_type: Literal["text", "url", "timezone", "time"] = "text"
+
+
 class ReportResultInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -97,6 +106,7 @@ class ReportResultInput(BaseModel):
     artifacts: list[ArtifactRef] = Field(default_factory=list, max_length=20)
     risks: list[str] = Field(default_factory=list, max_length=20)
     recommended_next_action: str = Field(default="", max_length=500)
+    missing_inputs: list[MissingInput] = Field(default_factory=list, max_length=8)
 
 
 class ReportResultOutput(BaseModel):
@@ -177,14 +187,13 @@ async def load_delegation_facts(
             delegator_agent_id=str(delegator_agent_id), target_agent_id=str(target_uuid)
         )
 
-    delegator = await session.scalar(
-        select(Agent).where(Agent.id == delegator_agent_id, Agent.workspace_id == workspace_id)
+    from jhin_db.memberships import active_team_ids
+
+    same_team = bool(
+        set(await active_team_ids(session, workspace_id, delegator_agent_id))
+        & set(await active_team_ids(session, workspace_id, target_uuid))
     )
-    same_team = (
-        delegator is not None
-        and delegator.team_id is not None
-        and delegator.team_id == target.team_id
-    )
+
     depth, ancestors = await _lineage(session, workspace_id, task_id)
     return DelegationFacts(
         delegator_agent_id=str(delegator_agent_id),
@@ -218,9 +227,58 @@ async def validate_delegate_task(
     workspace = await ctx.session.get(Workspace, ctx.workspace_id)
     settings = delegation_settings(workspace.settings_json if workspace is not None else None)
     decision = evaluate_delegation(grants, facts, max_task_depth=settings.max_task_depth)
-    if decision.allowed:
-        return None
-    return PolicyDecision(decision=DecisionType.DENY, code=decision.code, reason=decision.reason)
+    if not decision.allowed:
+        return PolicyDecision(
+            decision=DecisionType.DENY, code=decision.code, reason=decision.reason
+        )
+    if not facts.target_in_same_team and not data.cross_team_reason.strip():
+        return PolicyDecision(
+            decision=DecisionType.DENY,
+            code="cross_team_reason_required",
+            reason="Prefer relevant teammates. Explain the need for company-wide expertise "
+            "in cross_team_reason before delegating outside your current teams.",
+        )
+    previous = await ctx.session.scalars(
+        select(Task)
+        .where(
+            Task.workspace_id == ctx.workspace_id,
+            Task.parent_task_id == ctx.task_id,
+        )
+        .order_by(Task.created_at.desc())
+        .limit(30)
+    )
+
+    def unchanged(task: Task) -> bool:
+        result = task.metadata_json.get("reported_result", {})
+        failed = task.state == "failed" or result.get("status") in {"fail", "blocked"}
+        original = task.description.partition("\n\nExpected output:")[0]
+        return failed and " ".join(original.split()) == " ".join(data.instructions.split())
+
+    if sum(unchanged(task) for task in previous) >= 2:
+        return PolicyDecision(
+            decision=DecisionType.DENY,
+            code="unchanged_delegation_limit",
+            reason="This unchanged delegated work already failed twice. Resolve its missing "
+            "inputs or failure before sending it to another colleague.",
+        )
+    return None
+
+
+async def validate_report_result(
+    ctx: ToolExecutionContext, payload: BaseModel, grants: Sequence[Grant]
+) -> PolicyDecision | None:
+    data = cast(ReportResultInput, payload)
+    task = await ctx.session.get(Task, ctx.task_id)
+    if data.status != "blocked" and (
+        data.missing_inputs or (task is not None and task.metadata_json.get("required_inputs"))
+    ):
+        return PolicyDecision(
+            decision=DecisionType.DENY,
+            code="required_input_missing",
+            reason="Required inputs are unresolved. Report status='blocked' with missing_inputs "
+            "so your requester can obtain them; do not report completion.",
+        )
+    return None
 
 
 # --- executors ---
@@ -268,9 +326,15 @@ async def create_delegated_task(
         priority=parent.priority,
         assigned_agent_id=target.id,
         parent_task_id=parent.id,
+        conversation_id=parent.conversation_id,
         correlation_id=parent.correlation_id,
         metadata_json={
             "origin": origin,
+            **{
+                key: parent.metadata_json[key]
+                for key in ("execution_mode", "context_refs")
+                if key in parent.metadata_json
+            },
             "delegation": {
                 "kind": kind,
                 "blocking": blocking,
@@ -369,6 +433,14 @@ async def _delegate_task(ctx: ToolExecutionContext, payload: BaseModel) -> BaseM
         kind=data.kind,
         artifacts=_artifact_dicts(data.artifacts),
     )
+    child.metadata_json = {
+        **child.metadata_json,
+        "delegation": {
+            **child.metadata_json["delegation"],
+            "cross_team_reason": data.cross_team_reason,
+        },
+    }
+    await ctx.session.flush()
     return DelegateTaskOutput(
         child_task_id=str(child.id),
         target_agent_id=str(target_id),
@@ -392,6 +464,38 @@ async def _report_result(ctx: ToolExecutionContext, payload: BaseModel) -> BaseM
     if task is None:
         raise ValueError("task disappeared before the result could be reported")
 
+    missing = {item.key: item.model_dump() for item in data.missing_inputs}
+    for item in task.metadata_json.get("required_inputs", []):
+        if isinstance(item, dict) and item.get("key"):
+            missing.setdefault(item["key"], item)
+    if data.status == "blocked" and missing:
+        work_request = task.metadata_json.get("work_request", {})
+        raw_parent = task.parent_task_id or work_request.get("requester_task_id")
+        try:
+            parent_id = UUID(str(raw_parent)) if raw_parent else None
+        except ValueError:
+            parent_id = None
+        if parent_id is not None:
+            parent = await ctx.session.scalar(
+                select(Task)
+                .where(
+                    Task.workspace_id == ctx.workspace_id,
+                    Task.id == parent_id,
+                )
+                .with_for_update()
+            )
+            if parent is not None:
+                existing = {
+                    item["key"]: item
+                    for item in parent.metadata_json.get("required_inputs", [])
+                    if isinstance(item, dict) and item.get("key")
+                }
+                existing.update(missing)
+                parent.metadata_json = {
+                    **parent.metadata_json,
+                    "required_inputs": list(existing.values()),
+                }
+
     delegation = task.metadata_json.get("delegation", {})
     is_review = isinstance(delegation, dict) and delegation.get("kind") == "review_request"
     message_type = MessageType.REVIEW_RESULT if is_review else MessageType.RESULT
@@ -411,6 +515,7 @@ async def _report_result(ctx: ToolExecutionContext, payload: BaseModel) -> BaseM
         recommended_next_action=data.recommended_next_action,
         task_id=str(task.id),
         status=data.status,
+        missing_inputs=list(missing.values()),
         from_agent_id=str(ctx.agent_id),
         from_agent_name=ctx.agent_name,
     )
@@ -462,7 +567,8 @@ ORGANIZATION_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor, ToolValidator | No
                 "standardized summary; blocking=false runs it in the "
                 "background and delivers the result as a message. Use "
                 "kind='review_request' when asking for a QA/code review with "
-                "a pass/fail verdict."
+                "a pass/fail verdict. Prefer relevant teammates; explain any cross-team "
+                "handoff in cross_team_reason."
             ),
             risk=RiskLevel.WRITE,
             input_model=DelegateTaskInput,
@@ -484,7 +590,8 @@ ORGANIZATION_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor, ToolValidator | No
                 "status='pass' or 'fail'. Call this once, when the assigned "
                 "work is finished. This is not how you end a conversation: "
                 "when a person asks you something, answer them in your reply "
-                "instead — never call this in place of replying."
+                "instead — never call this in place of replying. If required inputs are "
+                "missing, report status='blocked' with missing_inputs (key, label, value_type)."
             ),
             risk=RiskLevel.WRITE,
             input_model=ReportResultInput,
@@ -493,6 +600,6 @@ ORGANIZATION_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor, ToolValidator | No
             supports_approval=True,
         ),
         _report_result,
-        None,
+        validate_report_result,
     ),
 )

@@ -30,6 +30,7 @@ from jhin_workflows.triggered_task import (
     TriggeredTaskWorkflow,
 )
 from jhin_workflows.triggered_task.shared import ACTIVITY_SYNC_EXTERNAL_TOOL
+from jhin_workflows.triggered_task.workflows import _SYNC_RETRY
 
 
 @workflow.defn(name="AgentTaskWorkflow")
@@ -156,4 +157,8 @@ async def test_sync_failure_does_not_fail_the_workflow() -> None:
     result = await run_workflow(stubs, make_input(comment_back=True))
     assert result.run_status == "completed"
     assert result.synced_external is False
-    assert len(stubs.sync_calls) == 3  # retry policy exhausted (3 attempts)
+    # The retry policy exhausted. Five attempts, not three, because this
+    # activity runs on the tool worker's queue: a redeploy refuses instantly
+    # and asks to be tried again in ten seconds, so three attempts could all
+    # be spent inside one restart without the sync ever being attempted.
+    assert len(stubs.sync_calls) == _SYNC_RETRY.maximum_attempts == 5

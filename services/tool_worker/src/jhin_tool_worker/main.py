@@ -21,9 +21,12 @@ from jhin_observability import (
 )
 from jhin_secrets.redaction import redact_event_dict
 from jhin_tool_worker.activities import ToolActivities
+from jhin_tool_worker.blog_corpus_activities import BlogCorpusActivities
 from jhin_tool_worker.cleanup_activities import CleanupActivities
+from jhin_tool_worker.drain import RUNTIME_SHUTDOWN_BUDGET_SECONDS, WorkerDrain
 from jhin_tool_worker.oauth_refresh import install_refresh_on_use
 from jhin_tool_worker.resources import ToolWorkerResources
+from jhin_tool_worker.sandbox_reconcile import sandbox_reconcile_loop
 from jhin_tool_worker.settings import ToolWorkerSettings
 from jhin_tool_worker.trigger_activities import TriggerToolActivities
 from jhin_workflows import TOOL_TASK_QUEUE
@@ -117,7 +120,9 @@ async def _cleanup_process(
         except BaseException as error:
             remember(error)
     try:
-        runtime.shutdown(timeout_millis=5_000)
+        # The last of the three shutdown budgets; ``jhin_tool_worker.drain``
+        # owns the arithmetic that says why it is this and not five.
+        runtime.shutdown(timeout_millis=int(RUNTIME_SHUTDOWN_BUDGET_SECONDS * 1_000))
     except BaseException as error:
         remember(error)
     return first_cancellation or first_error
@@ -143,6 +148,7 @@ async def main() -> None:
     worker: Any | None = None
     worker_exit_needed = False
     loop: asyncio.AbstractEventLoop | None = None
+    sweeper: asyncio.Task[None] | None = None
     registered_signals: list[signal.Signals] = []
     active_error: BaseException | None = None
     active_traceback: TracebackType | None = None
@@ -157,9 +163,16 @@ async def main() -> None:
         client = await connect_with_retry(settings, runtime)
         resources = await resources_with_retry(settings, runtime)
         catalog = build_default_catalog()
-        tools = ToolActivities(resources, catalog)
-        triggers = TriggerToolActivities(resources, catalog)
-        cleanup = CleanupActivities(resources)
+        drain = WorkerDrain()
+        # One drain for the whole process, held by every activity registered
+        # on this queue below. A drain that covered some of them was worse
+        # than none: it stopped the calls it knew about and left the trigger
+        # sync — a claim, a commit, and a comment on somebody else's system —
+        # being accepted one second before SIGKILL.
+        tools = ToolActivities(resources, catalog, drain=drain)
+        triggers = TriggerToolActivities(resources, catalog, drain=drain)
+        cleanup = CleanupActivities(resources, drain=drain)
+        corpus = BlogCorpusActivities(resources)
         # This process runs the connector tools and holds a master key, so a
         # tool call reaching a nearly-stale OAuth token can renew it in the
         # moment rather than waiting for the next sweep.
@@ -185,6 +198,7 @@ async def main() -> None:
             tools.resolve_bound_tool_review_activity,
             triggers.sync_external_tool_activity,
             cleanup.cleanup_run_workspace_activity,
+            corpus.advance,
         ]
         worker = build_temporal_worker(
             client,
@@ -195,13 +209,47 @@ async def main() -> None:
         )
         await worker.__aenter__()
         worker_exit_needed = True
+        # Started here rather than before the worker, because the first thing
+        # it does is reconcile the jobs a *previous* instance of this process
+        # abandoned — which is to say, the ones its own last shutdown could
+        # not finish. A restart is when orphans are made and is therefore the
+        # right moment to look for them.
+        sweeper = asyncio.create_task(
+            sandbox_reconcile_loop(
+                resources.session_factory,
+                stop=stop,
+                interval_seconds=settings.tool_worker_sandbox_sweep_seconds,
+            ),
+            name="tool-worker-sandbox-reconcile",
+        )
         logger.info("worker.started", task_queue=TOOL_TASK_QUEUE)
         await stop.wait()
+        sweeper.cancel()
+        # Between the signal and the shutdown, the one window this process
+        # gets to behave well. Temporal's own graceful window is zero — its
+        # shutdown cancels every running activity immediately — so a tool call
+        # that was halfway through a sandbox job used to be cut off here, and
+        # the gateway, with nothing left to ask, recorded an outcome nobody
+        # could prove. New work is refused from this line on, and what is
+        # already running gets the rest of the stop grace to finish.
+        #
+        # Nothing is logged between the two lines below on purpose: the log
+        # contract's event vocabulary is a closed allow-list owned by
+        # ``jhin_observability.events``, and a drain event is not in it. What
+        # a drained job did is already visible where it belongs — the runner
+        # writes ``sandbox.job.finished`` for each one, and the gateway writes
+        # the tool call's own outcome.
+        drain.begin()
+        await drain.wait_idle(settings.tool_worker_drain_timeout_seconds)
         logger.info("worker.stopping")
     except BaseException as error:
         active_error = error
         active_traceback = error.__traceback__
 
+    if sweeper is not None and not sweeper.done():
+        # The sweep holds nothing anyone is waiting on, and a shutdown is
+        # not the moment to start reconciling rows.
+        sweeper.cancel()
     cleanup_task = asyncio.create_task(
         _cleanup_process(
             loop=loop,

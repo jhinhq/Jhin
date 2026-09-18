@@ -36,17 +36,10 @@ LINEAR_MANIFEST = ConnectorManifest(
                 SecretFieldSpec(name="api_key", label="API key", placeholder="lin_api_…"),
             ),
         ),
-        # OAuth 2.0 is declared for forward compatibility but NOT implemented
-        # yet (plan 11.3 prefers OAuth for multi-user installs; the API-key
-        # path covers self-hosted setups). Selecting it fails verification
-        # with a clear message rather than silently misbehaving.
         AuthSchemeSpec(
             type="oauth",
-            label="OAuth 2.0 (not yet implemented)",
-            description=(
-                "Planned: workspace OAuth app with Bearer access tokens. "
-                "Use a personal API key until this ships."
-            ),
+            label="OAuth 2.0",
+            description="Connect a Linear account with browser sign-in.",
             secret_fields=(
                 SecretFieldSpec(
                     name="access_token", label="Access token", placeholder="lin_oauth_…"

@@ -11,11 +11,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.client import Client as TemporalClient
 
@@ -32,6 +33,10 @@ from jhin_api.conversations.schemas import (
     ConversationDetailOut,
     ConversationMessageOut,
     ConversationOut,
+    ConversationResumeOut,
+    ConversationToolCallListOut,
+    ConversationToolCallOut,
+    FailureNoticeOut,
 )
 from jhin_api.coordination import service as coordination
 from jhin_api.deps import WorkspaceContext
@@ -40,30 +45,37 @@ from jhin_api.personas.schemas import AgentPersonaSummary
 from jhin_api.public_payloads import public_tool_payload
 from jhin_api.tasks import service as tasks_service
 from jhin_api.tasks.schemas import TaskOut
+from jhin_api.tasks.tool_call_projection import project_tool_calls
+from jhin_connectors import build_default_definition_catalog
 from jhin_db.budget import month_spend_micros, workspace_budget_settings
 from jhin_db.models import (
     Agent,
     AgentRun,
     AgentTeamMembership,
     Approval,
+    AuditEvent,
     Conversation,
     Message,
     Task,
     ToolCall,
     User,
+    UserQuestion,
     WorkRequest,
     WorkReview,
     Workspace,
 )
+from jhin_db.models.editorial import EditorialAssignment, GhostEditorialReview
 from jhin_domain import (
     ACTIVITY_LABELS,
     AGENT_MESSAGE_TYPES,
     RUN_ACTIVE_STATUSES,
+    UNRECONCILED_TOOL_STATUSES,
     WORK_REQUEST_ACTIVE_STATUSES,
     ActivityKind,
     AgentStatus,
     ApprovalStatus,
     ConversationStatus,
+    FailureNotice,
     MessageType,
     MessageVisibility,
     RecipientType,
@@ -72,16 +84,24 @@ from jhin_domain import (
     SenderType,
     TaskState,
     ToolCallStatus,
+    UserQuestionStatus,
+    Wait,
+    WorkingTime,
     WorkRequestStatus,
     WorkReviewStatus,
     WorkspaceRole,
     activity_phrase,
+    failure_notice,
     new_uuid7,
     role_satisfies,
     waiting_for_colleague_phrase,
+    working_time,
 )
 from jhin_events import EventEnvelope, EventPublisher, EventSource
 from jhin_observability import get_logger, normalize_event_family
+from jhin_secrets import SecretCrypto
+from jhin_secrets.intake import capture_input, merge_capture_metadata, safe_input_text, secret_spans
+from jhin_secrets.variables import VariableError
 
 logger = get_logger(__name__)
 
@@ -126,6 +146,33 @@ class TurnResult:
     message: Message
     task: Task
     mode: TurnMode
+
+
+@dataclass(frozen=True)
+class ResumeResult:
+    conversation: Conversation
+    #: The work episode now carrying the turn.
+    task: Task
+    #: The failed turn it took over from.
+    resumed_task: Task
+    #: False when an earlier press already started this one.
+    created: bool
+
+
+# ``metadata_json`` keys that tie a resumed turn to the failure it picks up.
+# The forward link is the idempotency handle: it is written in the same
+# transaction as the new task, so a second press finds the successor instead
+# of starting a parallel one.
+RESUMED_BY_KEY = "resumed_by_task_id"
+RESUME_OF_KEY = "resume_of_task_id"
+
+# Task ``origin`` values that mean "this task is a person's turn in the chat".
+# Mirrors jhin_agent_worker.reasoning._CONVERSATION_ORIGINS and
+# jhin_tools.builtin._CONVERSATION_ORIGINS: a colleague's task carries the
+# requester's ``conversation_id`` so its answer lands in the thread, which is
+# not the same as being a turn somebody typed — and only a typed turn is a
+# thing to offer back.
+_CONVERSATION_ORIGINS = frozenset({"conversation", "message"})
 
 
 def _not_found() -> HTTPException:
@@ -233,8 +280,329 @@ async def _conversation_tasks(
 
 
 def _active_task(tasks: list[Task]) -> Task | None:
-    """Most recent queued/running/paused task (``tasks`` is newest first)."""
-    return next((t for t in tasks if t.state in tasks_service.ACTIVE_TASK_STATES), None)
+    """Current work first, then the newest waiting turn when nothing runs."""
+    tasks = [
+        task
+        for task in tasks
+        if task.parent_task_id is None and task.metadata_json.get("origin") != "work_request"
+    ]
+    return next((t for t in tasks if t.state in ("running", "paused")), None) or next(
+        (t for t in tasks if t.state == "queued"), None
+    )
+
+
+# --- Carrying an editorial assignment into the next work episode ---
+
+# Phases a later turn may still be working on. The list is an allow-list so an
+# unrecognised phase -- a newer one this version does not know -- never reopens
+# an assignment by accident.
+_CONTINUABLE_ASSIGNMENT_PHASES = frozenset(
+    {"brief", "draft", "blocked", "awaiting_review", "changes_requested"}
+)
+# Once a review reaches one of these the article's fate is the director's, not
+# the next thing somebody types into the chat.
+_SETTLED_REVIEW_STATUSES = frozenset({"approved", "publishing", "published", "uncertain"})
+
+
+def _predecessor_turn(tasks: list[Task]) -> Task | None:
+    """The newest episode this conversation ran, whatever state it ended in."""
+    return next(
+        (
+            task
+            for task in tasks
+            if task.parent_task_id is None and task.metadata_json.get("origin") != "work_request"
+        ),
+        None,
+    )
+
+
+async def _continued_assignment_id(
+    db: AsyncSession,
+    workspace_id: UUID,
+    conversation: Conversation,
+    agent: Agent,
+    predecessor: Task | None,
+) -> str | None:
+    """The editorial assignment a successor episode is still working on.
+
+    A second turn about the same article is the same assignment, so its research
+    and image receipts have to bind to it -- without this the evidence check in
+    the Ghost connector rejects everything a later turn retrieved.
+
+    The link is re-derived from the assignment row every time instead of being
+    copied forward from task metadata. A task therefore cannot talk its way into
+    someone else's editorial work by carrying the key, and a predecessor that
+    disagrees with the row is treated as untrustworthy rather than merged.
+    """
+    if predecessor is None:
+        return None
+    if predecessor.metadata_json.get("stop_requested_at"):
+        return None  # the person stopped this work; do not quietly resume it
+    rows = list(
+        await db.scalars(
+            select(EditorialAssignment).where(
+                EditorialAssignment.workspace_id == workspace_id,
+                EditorialAssignment.conversation_id == conversation.id,
+                EditorialAssignment.phase.in_(_CONTINUABLE_ASSIGNMENT_PHASES),
+            )
+        )
+    )
+    if len(rows) != 1:
+        return None  # nothing open, or ambiguous -- the agent can say which one
+    assignment = rows[0]
+    if agent.id != assignment.writer_agent_id:
+        return None
+    if predecessor.assigned_agent_id != assignment.writer_agent_id:
+        return None
+    declared = {
+        predecessor.metadata_json.get("editorial_assignment_id"),
+        predecessor.metadata_json.get("work_request", {}).get("editorial_assignment_id"),
+    } - {None}
+    if declared - {str(assignment.id)}:
+        return None  # the predecessor names a different assignment
+    if predecessor.id != assignment.task_id and str(assignment.id) not in declared:
+        return None  # no trusted chain back to the episode that opened it
+    settled = await db.scalar(
+        select(GhostEditorialReview.id).where(
+            GhostEditorialReview.workspace_id == workspace_id,
+            GhostEditorialReview.assignment_id == assignment.id,
+            GhostEditorialReview.status.in_(_SETTLED_REVIEW_STATUSES),
+        )
+    )
+    return None if settled else str(assignment.id)
+
+
+# --- Picking a failed turn back up ---
+
+
+def _is_turn_task(task: Task) -> bool:
+    """Whether this task is a turn somebody typed into the chat."""
+    return task.parent_task_id is None and task.metadata_json.get("origin") in _CONVERSATION_ORIGINS
+
+
+def _resumable_task(tasks: list[Task]) -> Task | None:
+    """The failed turn to offer back, or None.
+
+    Only the *newest* turn is ever offered, and only when it failed. A failure
+    further up the thread has been overtaken — the person asked something else
+    afterwards and got an answer — and re-running it now would be the agent
+    replying to a question two exchanges old.
+    """
+    newest = next((task for task in tasks if _is_turn_task(task)), None)
+    if newest is None or newest.state != TaskState.FAILED.value:
+        return None
+    return newest
+
+
+async def _latest_run(db: AsyncSession, workspace_id: UUID, task_id: UUID) -> AgentRun | None:
+    run: AgentRun | None = await db.scalar(
+        select(AgentRun)
+        .where(AgentRun.workspace_id == workspace_id, AgentRun.task_id == task_id)
+        .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
+        .limit(1)
+    )
+    return run
+
+
+@lru_cache(maxsize=1)
+def _repeatable_tool_names() -> frozenset[str]:
+    """Tools whose own definition says running the call again is safe.
+
+    Read straight off ``ToolDefinition.redispatch_is_safe`` — the declaration
+    the tool layer already makes and recovery already acts on — rather than
+    restated here as a list of names this module maintains. There is one
+    answer to "may this be repeated?", it is written next to the tool's scope
+    and risk, and this is that answer being read.
+
+    A name the catalog does not know answers *no* by omission, which is the
+    same conservative default the gateway takes: recovery never guesses, and
+    neither does the offer a person is shown.
+    """
+    return frozenset(
+        definition.name
+        for definition in build_default_definition_catalog().definitions()
+        if definition.redispatch_is_safe
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _UnreconciledCalls:
+    """The calls on a failed turn that nobody can account for, split by whether
+    running them again is safe.
+
+    Both halves are worth having. ``blocking`` decides whether the turn may be
+    offered back at all; ``repeatable`` is why pressing the button is safe
+    when it is offered, and a card that raises the doubt ("no record of
+    whether it finished") and then never answers it leaves a person hovering
+    over a control that is fine.
+    """
+
+    #: Newest call whose tool does not declare a repeat safe: (id, tool name).
+    blocking: tuple[UUID, str] | None
+    #: Newest call that does, when there is one.
+    repeatable: tuple[UUID, str] | None
+
+
+async def _unreconciled_calls(
+    db: AsyncSession, workspace_id: UUID, task_id: UUID
+) -> _UnreconciledCalls:
+    """The calls on this task that nobody can account for, if any.
+
+    Two things have to be true for a call to stop a turn being offered back,
+    and both are somebody else's conclusion read from this end rather than a
+    classification invented here:
+
+    * the row is in :data:`jhin_domain.UNRECONCILED_TOOL_STATUSES` — its
+      executor was entered and nothing can say what it then did; and
+    * its tool does not declare a repeat safe.
+
+    The status alone is not enough. It is a sound proxy only for rows the
+    current recovery path wrote, because that path re-dispatches a
+    ``redispatch_is_safe`` call and ends it terminal. A row from before the
+    field existed, or one whose worker died before anything reconciled it,
+    sits in the set regardless — which is exactly the incident this change
+    exists for: ``cli.repository.checkout`` left ``execution_unknown`` by a
+    redeploy, every byte of it a read, and a chat refusing to try again
+    because "it may already have gone through".
+
+    The split is done here rather than in SQL because both answers come from
+    one pass: the rows are the unaccounted-for calls of a single failed turn,
+    which is a handful at the very most.
+    """
+    rows = (
+        await db.execute(
+            select(ToolCall.id, ToolCall.tool_name)
+            .join(AgentRun, AgentRun.id == ToolCall.run_id)
+            .where(
+                ToolCall.workspace_id == workspace_id,
+                AgentRun.workspace_id == workspace_id,
+                AgentRun.task_id == task_id,
+                ToolCall.status.in_(sorted(s.value for s in UNRECONCILED_TOOL_STATUSES)),
+            )
+            .order_by(ToolCall.created_at.desc(), ToolCall.id.desc())
+        )
+    ).all()
+    repeatable = _repeatable_tool_names()
+    return _UnreconciledCalls(
+        blocking=next(((r[0], r[1]) for r in rows if r[1] not in repeatable), None),
+        repeatable=next(((r[0], r[1]) for r in rows if r[1] in repeatable), None),
+    )
+
+
+def _unreconciled_reason(tool_name: str, agent_name: str) -> str:
+    """Why a turn cannot simply be run again, said to the person waiting.
+
+    The tool reaches this sentence as a *phrase* and never as its own name,
+    for the reason :mod:`jhin_domain.activity` gives: a denied row keeps
+    whatever name the model asked for, and a name a model invented must not
+    become a sentence on somebody's screen.
+    """
+    phrase = activity_phrase(tool_name)
+    doing = f" that was {phrase[0].lower()}{phrase[1:]}" if phrase else ""
+    who = agent_name or "your agent"
+    return (
+        f"One step{doing} never reported back, so it may already have gone through. "
+        f"Trying again could repeat it. Check how it turned out, then tell {who} "
+        "what to do next."
+    )
+
+
+def _ready_reason(agent_name: str, repeatable_tool: str | None) -> str:
+    """Why pressing is safe, said before the press rather than assumed.
+
+    The failure this card most often sits under says a step "was cut short
+    before it could report back, so there is no record of whether it
+    finished". That is a doubt, and it is a real one — it is why the *other*
+    branch of this function refuses to offer the button at all. When the
+    button is offered anyway, the reason is never that the doubt was
+    imaginary: it is that the step in doubt declares a repeat safe, because
+    everything it touches is Jhin's own workspace or somebody else's system
+    read and not written (``ToolDefinition.redispatch_is_safe``). A card that
+    raises the doubt and then goes quiet leaves a careful person hovering over
+    a control that is fine, so the answer is said out loud.
+
+    The tool is named as a phrase and never by its own name, for the reason
+    :mod:`jhin_domain.activity` gives.
+    """
+    who = agent_name or "Your agent"
+    picks_up = f"{who} can pick this up from your message — there's nothing to retype."
+    if repeatable_tool is None:
+        return picks_up
+    phrase = activity_phrase(repeatable_tool)
+    doing = f" was {phrase[0].lower()}{phrase[1:]}, which is" if phrase else " is"
+    return (
+        f"The step that didn't report back{doing} safe to run again, so nothing "
+        f"can happen twice. {picks_up}"
+    )
+
+
+async def _resume_offer(
+    db: AsyncSession,
+    workspace_id: UUID,
+    conversation: Conversation,
+    tasks: list[Task],
+    agent: Agent | None,
+) -> ConversationResumeOut | None:
+    """What a person can do about a chat whose last turn failed.
+
+    ``None`` means there is nothing to offer — no failed turn, or something is
+    already running — which is a client's signal to show no control at all
+    rather than a dead one.
+    """
+    if _active_task(tasks) is not None:
+        return None
+    failed = _resumable_task(tasks)
+    if failed is None or not failed.description.strip():
+        # Nothing to send again is not a control with a sad face on it, it is
+        # no control. (``resume_conversation`` still falls back to the seed
+        # message for an API client; the button is only offered where the
+        # words are already in hand.)
+        return None
+    run = await _latest_run(db, workspace_id, failed.id)
+    common: dict[str, Any] = {
+        "task_id": failed.id,
+        "run_id": run.id if run is not None else None,
+        "instruction": failed.description,
+    }
+    name = agent.name if agent is not None else ""
+
+    unreconciled = await _unreconciled_calls(db, workspace_id, failed.id)
+    if unreconciled.blocking is not None:
+        call_id, tool_name = unreconciled.blocking
+        return ConversationResumeOut(
+            **common,
+            state="blocked",
+            reason=_unreconciled_reason(tool_name, name),
+            unreconciled_tool_call_id=call_id,
+        )
+
+    if conversation.status != ConversationStatus.ACTIVE.value:
+        return ConversationResumeOut(
+            **common,
+            state="unavailable",
+            reason="This chat is archived. Restore it to pick this back up.",
+        )
+    if agent is None:
+        return ConversationResumeOut(
+            **common,
+            state="unavailable",
+            reason="This agent is no longer in the workspace.",
+        )
+    if agent.status != AgentStatus.ACTIVE.value:
+        how = "paused by an admin" if agent.status == AgentStatus.PAUSED.value else "turned off"
+        return ConversationResumeOut(
+            **common,
+            state="unavailable",
+            reason=f"{name} is {how}, so this can't be picked up right now.",
+        )
+    return ConversationResumeOut(
+        **common,
+        state="ready",
+        reason=_ready_reason(
+            name,
+            unreconciled.repeatable[1] if unreconciled.repeatable is not None else None,
+        ),
+    )
 
 
 # A call whose name the registry recognized, or one still in flight. A
@@ -244,6 +612,10 @@ def _active_task(tasks: list[Task]) -> Task | None:
 _ACTIVITY_TOOL_STATUSES = (
     ToolCallStatus.PENDING_APPROVAL.value,
     ToolCallStatus.PENDING_REVIEW.value,
+    # Both halves of the durable claim: ``claimed`` is the moment between
+    # owning the call and dispatching it, and the agent is just as much
+    # "doing that thing" there as it is a statement later.
+    ToolCallStatus.CLAIMED.value,
     ToolCallStatus.EXECUTING.value,
     ToolCallStatus.COMPLETED.value,
 )
@@ -327,6 +699,116 @@ async def _active_activity(db: AsyncSession, workspace_id: UUID, task: Task) -> 
 # --- Projection ---
 
 
+async def _run_waits(
+    db: AsyncSession, workspace_id: UUID, run_ids: list[UUID]
+) -> dict[UUID, list[Wait]]:
+    """Every span these runs spent parked on somebody, from the rows that are
+    the waits.
+
+    Three tables, because a run can be stopped by three different people: an
+    approval (a person decides), a question (a person answers), a work review
+    (a person or a reviewing agent rules). Each already records when it opened
+    and when it closed, to the millisecond, and each is the authority on its
+    own wait — which is why this is read rather than accumulated into a column
+    a crashed worker could fail to write.
+
+    A row still ``pending`` has no end: it is open, and
+    :func:`jhin_domain.working_time` treats that as "parked right now". A row
+    that ended in any other way but never stamped its decision time (a
+    cancelled approval, an expired question) falls back to ``updated_at``,
+    which is when it stopped being a wait.
+
+    **A blocking delegation is deliberately not a fourth table.** A run in
+    ``waiting_delegation`` is parked, but it is parked on a colleague doing
+    this same reply, not on somebody's decision about it — and the number
+    these waits are subtracted from is what the product calls "how long this
+    reply has been working, not counting time it spent waiting on *you*". A
+    colleague's stretch is work on the reply, so it stays in the total; only
+    the reader's own deliberation comes out. What must not happen is the chat
+    calling that stretch *this* agent's thinking while it runs, and that is
+    handled where it belongs, on the surface: ``statusLabelFor``
+    (``apps/web/lib/chat.ts``) gives ``waiting_delegation`` its own label and
+    shows no ticking clock, exactly as it does for the three waits above.
+    """
+    waits: dict[UUID, list[Wait]] = {}
+    if not run_ids:
+        return waits
+
+    def add(run_id: UUID | None, started: datetime | None, ended: datetime | None) -> None:
+        if run_id is None or started is None:
+            return
+        waits.setdefault(run_id, []).append(Wait(started_at=started, ended_at=ended))
+
+    approvals = await db.execute(
+        select(
+            Approval.run_id,
+            Approval.requested_at,
+            Approval.decided_at,
+            Approval.updated_at,
+            Approval.status,
+        ).where(Approval.workspace_id == workspace_id, Approval.run_id.in_(run_ids))
+    )
+    for run_id, requested_at, decided_at, updated_at, status_value in approvals.all():
+        open_still = status_value == ApprovalStatus.PENDING.value
+        add(run_id, requested_at, None if open_still else (decided_at or updated_at))
+
+    questions = await db.execute(
+        select(
+            UserQuestion.run_id,
+            UserQuestion.asked_at,
+            UserQuestion.answered_at,
+            UserQuestion.updated_at,
+            UserQuestion.status,
+        ).where(UserQuestion.workspace_id == workspace_id, UserQuestion.run_id.in_(run_ids))
+    )
+    for run_id, asked_at, answered_at, updated_at, status_value in questions.all():
+        open_still = status_value == UserQuestionStatus.PENDING.value
+        add(run_id, asked_at, None if open_still else (answered_at or updated_at))
+
+    reviews = await db.execute(
+        select(
+            WorkReview.run_id,
+            WorkReview.requested_at,
+            WorkReview.decided_at,
+            WorkReview.updated_at,
+            WorkReview.status,
+        ).where(WorkReview.workspace_id == workspace_id, WorkReview.run_id.in_(run_ids))
+    )
+    for run_id, requested_at, decided_at, updated_at, status_value in reviews.all():
+        open_still = status_value == WorkReviewStatus.PENDING.value
+        add(run_id, requested_at, None if open_still else (decided_at or updated_at))
+
+    return waits
+
+
+async def _working_times(
+    db: AsyncSession, workspace_id: UUID, runs: list[tasks_service.LatestRun]
+) -> dict[UUID, WorkingTime]:
+    """How long each of these runs has actually been thinking.
+
+    ``started_at`` alone answers "how long since this turn began", which is
+    the number a person reads as "how long the agent has been thinking" and is
+    not that at all: a run waiting overnight on an approval keeps its original
+    stamp and re-enters ``running`` with it, so the morning shows hours of
+    thought that never happened. The waits come out here rather than being
+    re-stamped onto the run, so ``started_at`` keeps meaning what the metrics
+    and the audit already read it to mean, and every run already in the
+    database gets the right number rather than only the ones from here on.
+    """
+    started = [run for run in runs if run.started_at is not None]
+    if not started:
+        return {}
+    waits = await _run_waits(db, workspace_id, [run.id for run in started])
+    # ``completed_at`` bounds the answer. A wait row names a run without being
+    # bounded by it, and this workspace's database holds an approval requested
+    # 2h19m after the run it names had finished — without the bound that row
+    # reported 8361 seconds of thinking for a run that lived 58.
+    return {
+        run.id: working_time(run.started_at, waits.get(run.id, ()), ended_at=run.completed_at)
+        for run in started
+    }
+
+
 async def project_conversations(
     db: AsyncSession,
     workspace_id: UUID,
@@ -353,9 +835,10 @@ async def project_conversations(
         for cid, tasks in tasks_by_conversation.items()
         if (active := _active_task(tasks)) is not None
     }
-    run_status = await tasks_service.latest_run_status_by_task(
+    latest_runs = await tasks_service.latest_run_by_task(
         db, workspace_id, [t.id for t in active_tasks.values()]
     )
+    working = await _working_times(db, workspace_id, list(latest_runs.values()))
     agent_rows = await db.execute(
         select(Agent.id, Agent.name, Agent.role_title).where(
             Agent.workspace_id == workspace_id,
@@ -382,11 +865,17 @@ async def project_conversations(
             .limit(1)
         )
         active = active_tasks.get(conversation.id)
+        run = latest_runs.get(active.id) if active is not None else None
         name, role_title = (None, None)
         if conversation.primary_agent_id is not None:
             name, role_title = agents.get(conversation.primary_agent_id, (None, None))
         out.append(
             ConversationOut(
+                project_id=conversation.project_id,
+                workspace_version=conversation.workspace_version,
+                source_conversation_id=conversation.source_conversation_id,
+                source_message_id=conversation.source_message_id,
+                source_checkpoint_id=conversation.source_checkpoint_id,
                 id=conversation.id,
                 workspace_id=conversation.workspace_id,
                 title=conversation.title,
@@ -399,16 +888,21 @@ async def project_conversations(
                 updated_at=conversation.updated_at,
                 active_task_id=active.id if active else None,
                 active_task_state=active.state if active else None,
-                active_run_status=run_status.get(active.id) if active else None,
+                active_run_status=run.status if run is not None else None,
+                active_run_started_at=run.started_at if run is not None else None,
+                active_run_working_since=(
+                    working[run.id].working_since if run is not None and run.id in working else None
+                ),
+                active_run_working_seconds=(
+                    working[run.id].working_seconds if run is not None and run.id in working else 0
+                ),
                 active_activity=(
                     await _active_activity(db, workspace_id, active)
                     if with_activity and active is not None
                     else None
                 ),
                 last_message_preview=(
-                    _truncate(_message_text(last_message.content_json), PREVIEW_CHARS) or None
-                    if last_message is not None
-                    else None
+                    _preview_of(last_message) if last_message is not None else None
                 ),
                 last_message_sender_type=(
                     last_message.sender_type if last_message is not None else None
@@ -429,6 +923,94 @@ async def project_conversation(
     return (await project_conversations(db, workspace_id, [conversation], with_activity=True))[0]
 
 
+def _failure_of(message: Message, run_error: str | None = None) -> FailureNoticeOut | None:
+    """The readable half of a run failure, for the row that records one.
+
+    The stored ``content_json`` is left exactly as the worker wrote it — its
+    ``text`` is the record, and rewriting a persisted row from a projection
+    would make the transcript disagree with the database. This is that same
+    failure said again, in the vocabulary a person reads.
+
+    ``run_error`` is the run's own ``error_message``, and it is what the
+    notice is built from wherever the caller has it. The transcript row is not
+    the failure's own words: the worker writes it as ``f"Run {status}:
+    {message}"``, so building the notice from the row put the run's *status
+    line* into a card whose heading already says the agent could not finish —
+    "Run failed: openai: HTTP 429…" under "Bisby couldn't finish that". The
+    activity feed never had that problem because it reads ``error_message``
+    directly; this reads the same column. The row's text remains the fallback,
+    with that framing removed, for the failures that have no run at all — a
+    turn that never reached the agent leaves an ``error`` row and nothing
+    else.
+    """
+    if (
+        message.sender_type != SenderType.SYSTEM.value
+        or message.message_type != MessageType.ERROR.value
+    ):
+        return None
+    content = message.content_json if isinstance(message.content_json, dict) else {}
+    code = content.get("error_code")
+    text = run_error if run_error is not None and run_error.strip() else _message_text(content)
+    notice = failure_notice(code if isinstance(code, str) else None, text)
+    return FailureNoticeOut(
+        code=notice.code,
+        summary=notice.summary,
+        detail=notice.detail,
+        reference=notice.reference,
+    )
+
+
+def _preview_of(message: Message) -> str | None:
+    """The one line that stands for this conversation in a list.
+
+    A failure's raw ``text`` is a note to whoever owns the incident — "Run
+    failed: tool call a34dd1dc-… execution outcome is unknown; manual
+    reconciliation is required" — and the preview is the widest surface it
+    has: the chat rail, the agent page and the attention inbox all show this
+    string, so the sentence the failure card exists to replace was still the
+    first thing a person read all day. The row keeps its text; this is the
+    same failure in the same ``failure_notice`` vocabulary the card uses,
+    said once and read everywhere.
+
+    Only the summary. ``detail`` is a provider's sentence or a command's
+    stderr tail, which belongs on the card where there is room for it, and
+    ``reference`` is an identifier — the exact thing that made the original
+    unreadable at 160 characters.
+    """
+    notice = _failure_of(message)
+    text = notice.summary if notice is not None else _message_text(message.content_json)
+    from jhin_secrets.intake import redact_legacy_text
+
+    return _truncate(redact_legacy_text(text), PREVIEW_CHARS) or None
+
+
+async def _failure_texts(
+    db: AsyncSession, workspace_id: UUID, messages: list[Message]
+) -> dict[UUID, str]:
+    """What the failed runs behind these rows actually said, by run id.
+
+    One query for the whole page, and only when the page contains a failure —
+    which most do not.
+    """
+    run_ids = {
+        message.run_id
+        for message in messages
+        if message.run_id is not None
+        and message.sender_type == SenderType.SYSTEM.value
+        and message.message_type == MessageType.ERROR.value
+    }
+    if not run_ids:
+        return {}
+    rows = await db.execute(
+        select(AgentRun.id, AgentRun.error_message).where(
+            AgentRun.workspace_id == workspace_id,
+            AgentRun.id.in_(run_ids),
+            AgentRun.error_message.is_not(None),
+        )
+    )
+    return {row[0]: row[1] for row in rows.all()}
+
+
 async def project_messages(
     db: AsyncSession, workspace_id: UUID, messages: list[Message]
 ) -> list[ConversationMessageOut]:
@@ -443,6 +1025,7 @@ async def project_messages(
     if user_ids:
         rows = await db.execute(select(User.id, User.display_name).where(User.id.in_(user_ids)))
         user_names = {row[0]: row[1] for row in rows.all()}
+    run_errors = await _failure_texts(db, workspace_id, messages)
     out: list[ConversationMessageOut] = []
     for message in messages:
         sender_name: str | None
@@ -467,6 +1050,10 @@ async def project_messages(
                 conversation_id=message.conversation_id,
                 sender_name=sender_name,
                 agent_id=agent_id,
+                failure=_failure_of(
+                    message,
+                    run_errors.get(message.run_id) if message.run_id is not None else None,
+                ),
             )
         )
     return out
@@ -556,7 +1143,89 @@ async def get_detail(
         total_output_tokens=sum(r.output_tokens for r in runs),
         total_cost_micros=sum(r.estimated_cost_micros for r in runs),
         pending_approvals=[ApprovalOut.model_validate(a) for a in approvals],
+        resume=await _resume_offer(db, workspace_id, conversation, tasks, agent),
     )
+
+
+async def list_tool_calls(
+    db: AsyncSession,
+    workspace_id: UUID,
+    conversation_id: UUID,
+    *,
+    before: UUID | None = None,
+    limit: int = 100,
+) -> ConversationToolCallListOut:
+    """All gateway actions across every chat run, bounded and paginated."""
+    await get_conversation(db, workspace_id, conversation_id)
+    limit = max(1, min(100, limit))
+    conditions = []
+    if before is not None:
+        anchor = await get_tool_call(db, workspace_id, conversation_id, before)
+        conditions.append(
+            or_(
+                ToolCall.created_at < anchor.created_at,
+                and_(ToolCall.created_at == anchor.created_at, ToolCall.id < before),
+            )
+        )
+    rows = list(
+        await db.execute(
+            select(ToolCall, Task.id, Agent.name)
+            .join(
+                AgentRun,
+                and_(AgentRun.id == ToolCall.run_id, AgentRun.workspace_id == workspace_id),
+            )
+            .join(Task, and_(Task.id == AgentRun.task_id, Task.workspace_id == workspace_id))
+            .outerjoin(
+                Agent, and_(Agent.id == ToolCall.agent_id, Agent.workspace_id == workspace_id)
+            )
+            .where(
+                ToolCall.workspace_id == workspace_id,
+                Task.conversation_id == conversation_id,
+                *conditions,
+            )
+            .order_by(ToolCall.created_at.desc(), ToolCall.id.desc())
+            .limit(limit + 1)
+        )
+    )
+    recent = list(reversed(rows[:limit]))
+    projected = await project_tool_calls(db, workspace_id, [row[0] for row in recent])
+    return ConversationToolCallListOut(
+        items=[
+            ConversationToolCallOut(**call.model_dump(), task_id=row[1], agent_name=row[2])
+            for call, row in zip(projected, recent, strict=True)
+        ],
+        has_more=len(rows) > limit,
+        limit=limit,
+        next_before=recent[0][0].id if len(rows) > limit and recent else None,
+    )
+
+
+async def get_tool_call(
+    db: AsyncSession, workspace_id: UUID, conversation_id: UUID, tool_call_id: UUID
+) -> ConversationToolCallOut:
+    await get_conversation(db, workspace_id, conversation_id)
+    row = (
+        await db.execute(
+            select(ToolCall, Task.id, Agent.name)
+            .join(
+                AgentRun,
+                and_(AgentRun.id == ToolCall.run_id, AgentRun.workspace_id == workspace_id),
+            )
+            .join(Task, and_(Task.id == AgentRun.task_id, Task.workspace_id == workspace_id))
+            .outerjoin(
+                Agent, and_(Agent.id == ToolCall.agent_id, Agent.workspace_id == workspace_id)
+            )
+            .where(
+                ToolCall.id == tool_call_id,
+                ToolCall.workspace_id == workspace_id,
+                Task.conversation_id == conversation_id,
+            )
+        )
+    ).first()
+    if row is None:
+        raise HTTPException(404, "Tool call not found in this conversation")
+    call = (await project_tool_calls(db, workspace_id, [row[0]]))[0]
+    return ConversationToolCallOut(**call.model_dump(), task_id=row[1], agent_name=row[2])
 
 
 async def list_messages(
@@ -565,6 +1234,7 @@ async def list_messages(
     conversation_id: UUID,
     *,
     after: UUID | None = None,
+    limit: int | None = None,
 ) -> list[Message]:
     """Visible messages across every task in the conversation, oldest first."""
     await get_conversation(db, workspace_id, conversation_id)
@@ -587,7 +1257,10 @@ async def list_messages(
                     and_(Message.created_at == anchor.created_at, Message.id > anchor.id),
                 )
             )
-    rows = await db.scalars(query.order_by(Message.created_at, Message.id))
+    query = query.order_by(Message.created_at, Message.id)
+    if limit is not None:
+        query = query.limit(limit)
+    rows = await db.scalars(query)
     return list(rows)
 
 
@@ -606,14 +1279,52 @@ async def create_conversation(
     request_id: UUID,
     ip_hash: str,
     publisher: EventPublisher | None = None,
+    project_id: UUID | None = None,
+    execution_mode: str = "act",
+    model_profile_id: UUID | None = None,
+    crypto: SecretCrypto | None = None,
+    secure_inputs: list[dict[str, Any]] | None = None,
 ) -> tuple[Conversation, TurnResult | None]:
     agent = await _require_active_agent(db, ctx.workspace_id, agent_id)
+    # Serialize create retries before allocating a conversation or capture.
+    await db.scalar(
+        select(Workspace.id).where(Workspace.id == ctx.workspace_id).with_for_update(key_share=True)
+    )
+    if client_turn_id:
+        existing_chat = await db.scalar(
+            select(Conversation)
+            .join(Message, Message.conversation_id == Conversation.id)
+            .where(
+                Conversation.workspace_id == ctx.workspace_id,
+                Conversation.created_by_user_id == ctx.user.id,
+                Conversation.primary_agent_id == agent.id,
+                Message.sender_type == "user",
+                Message.content_json["client_turn_id"].as_string() == client_turn_id,
+            )
+            .limit(1)
+        )
+        if existing_chat is not None:
+            return existing_chat, await _existing_turn(db, existing_chat, client_turn_id)
+    title_inputs = [
+        {"value": (title or "")[start:end]} for start, end, _ in secret_spans(title or "")
+    ]
+    secure_inputs = [*(secure_inputs or []), *title_inputs]
+    if (secret_spans(text or "") or secure_inputs) and crypto is None:
+        raise HTTPException(
+            503, "Secure storage is unavailable; configure encryption before sending credentials"
+        )
+    if project_id is not None:
+        from jhin_api.chat_files.service import project
+
+        await project(db, ctx.workspace_id, project_id)
     conversation = Conversation(
         workspace_id=ctx.workspace_id,
-        title=(title or "").strip()[:200] or default_title(text, agent.name),
+        title=safe_input_text(title or "").strip()[:200]
+        or default_title(safe_input_text(text or ""), agent.name),
         primary_agent_id=agent.id,
         created_by_user_id=ctx.user.id,
         last_activity_at=_now(),
+        project_id=project_id,
     )
     db.add(conversation)
     await db.flush()
@@ -628,27 +1339,32 @@ async def create_conversation(
         ip_hash=ip_hash,
         metadata={"agent_id": str(agent.id), "title": conversation.title},
     )
-    await db.commit()
-    await _publish(
-        publisher,
-        ctx.workspace_id,
-        "conversation.created",
-        {"conversation_id": str(conversation.id), "agent_id": str(agent.id)},
-    )
     turn: TurnResult | None = None
-    if text is not None:
+    if text is not None or secure_inputs:
         turn = await _run_turn(
             db,
             ctx,
             temporal,
             conversation,
             agent,
-            text=text,
+            text=text or "",
             client_turn_id=client_turn_id,
             request_id=request_id,
             ip_hash=ip_hash,
             publisher=publisher,
+            execution_mode=execution_mode,
+            model_profile_id=model_profile_id,
+            crypto=crypto,
+            secure_inputs=secure_inputs,
         )
+    else:
+        await db.commit()
+    await _publish(
+        publisher,
+        ctx.workspace_id,
+        "conversation.created",
+        {"conversation_id": str(conversation.id), "agent_id": str(agent.id)},
+    )
     return conversation, turn
 
 
@@ -682,8 +1398,15 @@ async def update_conversation(
     conversation = await get_conversation(db, ctx.workspace_id, conversation_id)
     _require_chat_authority(ctx, conversation)
     changed: dict[str, Any] = {}
+    if "project_id" in values:
+        if values["project_id"] is not None:
+            from jhin_api.chat_files.service import project
+
+            await project(db, ctx.workspace_id, values["project_id"])
+        conversation.project_id = values["project_id"]
+        changed["project_id"] = str(conversation.project_id) if conversation.project_id else None
     if (title := values.get("title")) is not None:
-        conversation.title = title.strip()[:200] or conversation.title
+        conversation.title = safe_input_text(title).strip()[:200] or conversation.title
         changed["title"] = conversation.title
     if (pinned := values.get("pinned")) is not None:
         conversation.pinned = bool(pinned)
@@ -752,6 +1475,13 @@ async def send_turn(
     request_id: UUID,
     ip_hash: str,
     publisher: EventPublisher | None = None,
+    execution_mode: str | None = None,
+    delivery: str = "auto",
+    model_profile_id: UUID | None = None,
+    attachment_ids: list[UUID] | None = None,
+    context_refs: list[dict[str, Any]] | None = None,
+    crypto: SecretCrypto | None = None,
+    secure_inputs: list[dict[str, Any]] | None = None,
 ) -> TurnResult:
     conversation = await get_conversation(db, ctx.workspace_id, conversation_id)
     if conversation.status != ConversationStatus.ACTIVE.value:
@@ -770,7 +1500,250 @@ async def send_turn(
         request_id=request_id,
         ip_hash=ip_hash,
         publisher=publisher,
+        execution_mode=execution_mode,
+        delivery=delivery,
+        model_profile_id=model_profile_id,
+        attachment_ids=attachment_ids,
+        context_refs=context_refs,
+        crypto=crypto,
+        secure_inputs=secure_inputs,
     )
+
+
+async def branch(
+    db: AsyncSession,
+    ctx: WorkspaceContext,
+    conversation_id: UUID,
+    *,
+    message_id: UUID,
+    checkpoint_id: UUID | None,
+    title: str | None,
+) -> dict[str, Any]:
+    from jhin_api.chat_files.service import create_checkpoint, get_checkpoint
+    from jhin_db.models import FileCheckpoint
+    from jhin_media.managed_files import (
+        FileAccessError,
+        clone_attachment_references,
+        clone_checkpoint_files,
+    )
+
+    source = await get_conversation(db, ctx.workspace_id, conversation_id)
+    _require_chat_authority(ctx, source)
+    messages = await list_messages(db, ctx.workspace_id, source.id, limit=1001)
+    position = next((i for i, message in enumerate(messages) if message.id == message_id), None)
+    if position is None:
+        if len(messages) == 1001:
+            raise HTTPException(422, "A branch supports up to 1000 messages")
+        raise HTTPException(404, "Branch message not found in this conversation")
+    if position > 999:
+        raise HTTPException(422, "A branch supports up to 1000 messages")
+    anchor = messages[position]
+    checkpoint: FileCheckpoint | None
+    if checkpoint_id is not None:
+        checkpoint = await get_checkpoint(db, ctx.workspace_id, source.id, checkpoint_id)
+    elif position == len(messages) - 1:
+        if _active_task(await _conversation_tasks(db, ctx.workspace_id, source.id)) is not None:
+            raise HTTPException(
+                409, "Wait for the current turn to finish or select a saved checkpoint"
+            )
+        checkpoint = await create_checkpoint(db, ctx, source.id, "Branch checkpoint")
+    else:
+        checkpoint = await db.scalar(
+            select(FileCheckpoint)
+            .where(
+                FileCheckpoint.workspace_id == ctx.workspace_id,
+                FileCheckpoint.conversation_id == source.id,
+                FileCheckpoint.created_at <= anchor.created_at,
+            )
+            .order_by(FileCheckpoint.created_at.desc(), FileCheckpoint.id.desc())
+            .limit(1)
+        )
+        if checkpoint is None:
+            raise HTTPException(
+                409,
+                "No saved checkpoint exists at this message. Select a checkpoint "
+                "explicitly or branch from the latest message.",
+            )
+    target = Conversation(
+        workspace_id=ctx.workspace_id,
+        title=(title or f"Branch: {source.title}")[:200],
+        project_id=source.project_id,
+        primary_agent_id=source.primary_agent_id,
+        created_by_user_id=ctx.user.id,
+        last_activity_at=_now(),
+        source_conversation_id=source.id,
+        source_message_id=anchor.id,
+        source_checkpoint_id=checkpoint.id,
+    )
+    db.add(target)
+    await db.flush()
+    copied = await clone_checkpoint_files(db, ctx.workspace_id, source.id, target.id, checkpoint.id)
+    # A branch uses the selected checkpoint, even if its inherited project's
+    # starter revision differs or the original chat is subsequently removed.
+    db.add(
+        AuditEvent(
+            workspace_id=ctx.workspace_id,
+            actor_type="user",
+            actor_id=ctx.user.id,
+            action="chat.project.seeded",
+            target_type="conversation",
+            target_id=target.id,
+            metadata_json={"source_kind": "branch", "source_checkpoint_id": str(checkpoint.id)},
+        )
+    )
+    for original in messages[: position + 1]:
+        content = {**original.content_json, "branched_from_message_id": str(original.id)}
+        content.pop("_human_authority", None)
+        if references := content.get("attachments"):
+            try:
+                content["attachments"] = await clone_attachment_references(
+                    db, ctx.workspace_id, target.id, references
+                )
+            except FileAccessError as exc:
+                raise HTTPException(exc.status_code, str(exc)) from exc
+        db.add(
+            Message(
+                workspace_id=ctx.workspace_id,
+                conversation_id=target.id,
+                sender_type=original.sender_type,
+                sender_id=original.sender_id,
+                recipient_type=original.recipient_type,
+                recipient_id=original.recipient_id,
+                message_type=original.message_type,
+                content_json=content,
+                visibility="visible",
+                created_at=original.created_at,
+            )
+        )
+    await db.commit()
+    from jhin_api.runtime.service import seed_branch_workspace
+
+    await seed_branch_workspace(db, ctx, target.id, copied.manifest_json)
+    return {
+        "conversation_id": str(target.id),
+        "checkpoint_id": str(copied.id),
+        "source_message_id": str(anchor.id),
+    }
+
+
+async def control(
+    db: AsyncSession,
+    ctx: WorkspaceContext,
+    temporal: TemporalClient,
+    conversation_id: UUID,
+    *,
+    action: str,
+    request_id: UUID,
+    ip_hash: str,
+) -> dict[str, Any]:
+    chat = await get_conversation(db, ctx.workspace_id, conversation_id)
+    _require_chat_authority(ctx, chat)
+    tasks = await _conversation_tasks(db, ctx.workspace_id, conversation_id)
+    active = _active_task(tasks)
+    if active is None:
+        raise HTTPException(409, "This conversation has no active turn")
+    signal = {"stop": "cancel", "pause": "pause", "resume": "resume"}.get(action)
+    if signal is None:
+        raise HTTPException(422, "Unknown conversation control")
+    task = await tasks_service.signal_task(
+        db,
+        ctx,
+        temporal,
+        active.id,
+        signal=signal,
+        action=f"task.{action}_requested",
+        request_id=request_id,
+        ip_hash=ip_hash,
+    )
+    return {
+        "task_id": str(task.id),
+        "status": "stopping"
+        if action == "stop"
+        else ("pausing" if action == "pause" else "resuming"),
+    }
+
+
+async def change_queued(
+    db: AsyncSession,
+    ctx: WorkspaceContext,
+    conversation_id: UUID,
+    task_id: UUID,
+    *,
+    text: str | None,
+    crypto: SecretCrypto | None = None,
+    secure_inputs: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    chat = await get_conversation(db, ctx.workspace_id, conversation_id)
+    _require_chat_authority(ctx, chat)
+    await db.scalar(
+        select(Workspace).where(Workspace.id == ctx.workspace_id).with_for_update(key_share=True)
+    )
+    task = await db.scalar(
+        select(Task)
+        .where(
+            Task.id == task_id,
+            Task.workspace_id == ctx.workspace_id,
+            Task.conversation_id == conversation_id,
+        )
+        .with_for_update()
+    )
+    has_run = await db.scalar(
+        select(AgentRun.id)
+        .where(AgentRun.task_id == task_id, AgentRun.workspace_id == ctx.workspace_id)
+        .limit(1)
+    )
+    if task is None:
+        raise HTTPException(404, "Queued turn not found")
+    if task.state != "queued" or has_run is not None:
+        raise HTTPException(409, "This turn has already started")
+    message = await db.scalar(
+        select(Message)
+        .where(
+            Message.task_id == task.id,
+            Message.workspace_id == ctx.workspace_id,
+            Message.sender_type == "user",
+        )
+        .order_by(Message.created_at, Message.id)
+        .limit(1)
+    )
+    if text is None:
+        task.state = "cancelled"
+        task.metadata_json = {**task.metadata_json, "stop_requested_at": _now().isoformat()}
+        if message is not None:
+            message.content_json = {**message.content_json, "delivery": "cancelled"}
+    else:
+        capture_agent_id = task.assigned_agent_id or chat.primary_agent_id
+        if capture_agent_id is None:
+            raise HTTPException(409, "This queued turn has no assigned agent")
+        try:
+            captured = await capture_input(
+                db,
+                crypto,
+                workspace_id=ctx.workspace_id,
+                conversation_id=chat.id,
+                agent_id=capture_agent_id,
+                user_id=ctx.user.id,
+                text=text,
+                secure_inputs=secure_inputs,
+            )
+        except VariableError as exc:
+            raise HTTPException(exc.status_code, str(exc)) from None
+        text = captured.text
+        task.description = text
+        task.title = default_title(text, "Agent")[:500]
+        if message is not None:
+            from jhin_api.human_authority import human_content
+
+            message.sender_id = ctx.user.id
+            message.content_json = human_content(ctx, {**message.content_json, "text": text})
+            if captured.references:
+                message.content_json = {
+                    **message.content_json,
+                    "secure_inputs": captured.references,
+                }
+        task.metadata_json = merge_capture_metadata(task.metadata_json or {}, captured)
+    await db.commit()
+    return {"task_id": str(task.id), "status": task.state, "text": task.description}
 
 
 async def _existing_turn(
@@ -798,6 +1771,43 @@ async def _existing_turn(
     return TurnResult(conversation=conversation, message=message, task=task, mode=mode)
 
 
+async def _pin_named_context(
+    db: AsyncSession, workspace_id: UUID, references: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    from jhin_db.models import ChatProject, Connection
+
+    pinned = []
+    seen: set[tuple[str, UUID]] = set()
+    for ref in references:
+        kind = ref.get("type")
+        if kind in ("file", "artifact"):
+            continue
+        if kind not in ("agent", "app", "project"):
+            raise HTTPException(422, "Unknown context reference type")
+        try:
+            identity = UUID(str(ref["id"]))
+        except (ValueError, KeyError):
+            raise HTTPException(422, "Invalid context reference") from None
+        if (kind, identity) in seen:
+            continue
+        seen.add((kind, identity))
+        model: Any = {"agent": Agent, "app": Connection, "project": ChatProject}[kind]
+        row = await db.scalar(
+            select(model).where(model.id == identity, model.workspace_id == workspace_id)
+        )
+        if row is None or (kind == "project" and row.archived):
+            raise HTTPException(404, "Selected context not found")
+        context = (
+            row.context[:8_000]
+            if kind == "project"
+            else (row.role_title if kind == "agent" else row.connector_type)
+        )
+        pinned.append(
+            {"type": kind, "id": str(identity), "label": row.name[:200], "context": context}
+        )
+    return pinned
+
+
 async def _run_turn(
     db: AsyncSession,
     ctx: WorkspaceContext,
@@ -810,20 +1820,136 @@ async def _run_turn(
     request_id: UUID,
     ip_hash: str,
     publisher: EventPublisher | None,
+    execution_mode: str | None = None,
+    delivery: str = "auto",
+    model_profile_id: UUID | None = None,
+    attachment_ids: list[UUID] | None = None,
+    context_refs: list[dict[str, Any]] | None = None,
+    crypto: SecretCrypto | None = None,
+    secure_inputs: list[dict[str, Any]] | None = None,
 ) -> TurnResult:
+    # Serialize competing submissions before the idempotency check. Row lock
+    # persists through the message/task commit; UUID ordering is not a lock.
+    await db.scalar(
+        select(Conversation)
+        .where(Conversation.id == conversation.id, Conversation.workspace_id == ctx.workspace_id)
+        .with_for_update()
+    )
     if client_turn_id:
         existing = await _existing_turn(db, conversation, client_turn_id)
         if existing is not None:
             return existing
 
-    content: dict[str, Any] = {"text": text}
+    try:
+        captured = await capture_input(
+            db,
+            crypto,
+            workspace_id=ctx.workspace_id,
+            conversation_id=conversation.id,
+            agent_id=agent.id,
+            user_id=ctx.user.id,
+            text=text,
+            secure_inputs=secure_inputs,
+        )
+    except VariableError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from None
+    text = captured.text
+    from jhin_api.human_authority import human_content
+
+    content: dict[str, Any] = human_content(ctx, {"text": text})
+    if captured.references:
+        content["secure_inputs"] = captured.references
+    if attachment_ids or context_refs:
+        from jhin_media.managed_files import FileAccessError, pin_attachments
+
+        try:
+            content["attachments"] = await pin_attachments(
+                db,
+                ctx.workspace_id,
+                conversation.id,
+                attachment_ids or [],
+                context_refs=context_refs or [],
+            )
+        except FileAccessError as exc:
+            raise HTTPException(exc.status_code, str(exc)) from None
+    selected_context = list(context_refs or [])
+    if conversation.project_id and not any(
+        ref.get("type") == "project" and str(ref.get("id")) == str(conversation.project_id)
+        for ref in selected_context
+    ):
+        selected_context.append({"type": "project", "id": str(conversation.project_id)})
+    if selected_context:
+        content["context_refs"] = await _pin_named_context(db, ctx.workspace_id, selected_context)
+    if not text.strip():
+        text = "Please work with the attached files."
+        content["text"] = text
+    if execution_mode is not None and execution_mode not in ("ask", "plan", "act"):
+        raise HTTPException(422, "Invalid execution mode")
+    if delivery not in ("auto", "steer", "queue"):
+        raise HTTPException(422, "Invalid turn delivery")
+    if model_profile_id is not None:
+        from jhin_db.models import ModelProfile
+
+        if (
+            await db.scalar(
+                select(ModelProfile.id).where(
+                    ModelProfile.id == model_profile_id,
+                    ModelProfile.workspace_id == ctx.workspace_id,
+                )
+            )
+            is None
+        ):
+            raise HTTPException(404, "Model profile not found")
     if client_turn_id:
         content["client_turn_id"] = client_turn_id
     tasks = await _conversation_tasks(db, ctx.workspace_id, conversation.id)
     active = _active_task(tasks)
+    metadata: dict[str, Any] = {
+        "origin": "conversation",
+        "conversation_id": str(conversation.id),
+        "execution_mode": execution_mode or "act",
+        "delivery": delivery,
+    }
+    metadata = merge_capture_metadata(metadata, captured)
+    continued = await _continued_assignment_id(
+        db, ctx.workspace_id, conversation, agent, _predecessor_turn(tasks)
+    )
+    if continued is not None:
+        metadata["editorial_assignment_id"] = continued
+    if model_profile_id is not None:
+        metadata["model_profile_id"] = str(model_profile_id)
+    if content.get("attachments"):
+        metadata["attachments"] = content["attachments"]
+    if content.get("context_refs"):
+        metadata["context_refs"] = content["context_refs"]
+    if delivery == "queue" and active is not None:
+        predecessor = next(
+            (
+                t
+                for t in tasks
+                if t.state in tasks_service.ACTIVE_TASK_STATES
+                and t.parent_task_id is None
+                and t.metadata_json.get("origin") != "work_request"
+            ),
+            active,
+        )
+        metadata["queue_after_task_id"] = str(predecessor.id)
+        active = None
+    if active is not None and (
+        (
+            execution_mode is not None
+            and execution_mode != active.metadata_json.get("execution_mode", "act")
+        )
+        or model_profile_id is not None
+    ):
+        raise HTTPException(
+            409, "Queue a new turn to change the mode or model while work is active"
+        )
 
     mode: TurnMode = "instruction"
     if active is not None:
+        active.metadata_json = merge_capture_metadata(active.metadata_json or {}, captured)
+        content["delivery"] = "pending"
         message = Message(
             workspace_id=ctx.workspace_id,
             task_id=active.id,
@@ -850,6 +1976,14 @@ async def _run_turn(
                 request_id=request_id,
                 ip_hash=ip_hash,
             )
+            await db.execute(
+                update(Message)
+                .where(
+                    Message.id == message.id,
+                    Message.content_json["delivery"].as_string() == "pending",
+                )
+                .values(content_json={**message.content_json, "delivery": "delivered"})
+            )
         except HTTPException as exc:
             if exc.status_code != status.HTTP_409_CONFLICT:
                 raise
@@ -864,7 +1998,7 @@ async def _run_turn(
                 assigned_agent_id=agent.id,
                 conversation_id=conversation.id,
                 correlation_id=new_uuid7(),
-                metadata_json={"origin": "conversation", "conversation_id": str(conversation.id)},
+                metadata_json=metadata,
             )
             db.add(task)
             await db.flush()
@@ -882,7 +2016,7 @@ async def _run_turn(
             assigned_agent_id=agent.id,
             conversation_id=conversation.id,
             correlation_id=new_uuid7(),
-            metadata_json={"origin": "conversation", "conversation_id": str(conversation.id)},
+            metadata_json=metadata,
         )
         db.add(task)
         await db.flush()
@@ -929,6 +2063,273 @@ async def _run_turn(
         },
     )
     return TurnResult(conversation=conversation, message=message, task=task, mode=mode)
+
+
+async def _seed_message(db: AsyncSession, workspace_id: UUID, task: Task) -> Message | None:
+    """The person's own words that started this turn, if the row still exists."""
+    seed: Message | None = await db.scalar(
+        select(Message)
+        .where(
+            Message.workspace_id == workspace_id,
+            Message.task_id == task.id,
+            Message.sender_type == SenderType.USER.value,
+            Message.message_type.in_((MessageType.TEXT.value, MessageType.INSTRUCTION.value)),
+        )
+        .order_by(Message.created_at, Message.id)
+        .limit(1)
+    )
+    return seed
+
+
+async def _linked_task(
+    db: AsyncSession, workspace_id: UUID, conversation: Conversation, raw_id: Any
+) -> Task | None:
+    """The task one end of a resume link points at, if it is really there.
+
+    The id comes out of a task's own ``metadata_json``, which is the platform's
+    writing rather than anyone else's — the workspace and conversation are
+    checked anyway, because a link that survived a task being moved or a
+    conversation being deleted should read as a broken link and offer the turn
+    back, not as a successor that lives somewhere else.
+    """
+    task_id = _as_uuid(raw_id)
+    if task_id is None:
+        return None
+    linked: Task | None = await db.scalar(
+        select(Task).where(
+            Task.id == task_id,
+            Task.workspace_id == workspace_id,
+            Task.conversation_id == conversation.id,
+        )
+    )
+    return linked
+
+
+def _nothing_to_resume() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="There's nothing to pick up here — the last turn didn't fail.",
+    )
+
+
+async def resume_conversation(
+    db: AsyncSession,
+    ctx: WorkspaceContext,
+    temporal: TemporalClient,
+    conversation_id: UUID,
+    *,
+    request_id: UUID,
+    ip_hash: str,
+    publisher: EventPublisher | None = None,
+    crypto: SecretCrypto | None = None,
+) -> ResumeResult:
+    """Pick the conversation's failed turn back up, without retyping it.
+
+    A fresh work episode carries the same question, in the same thread. Not a
+    restart of the old one: the failure keeps its row, its activity card and
+    its place in the transcript, because a person who comes back tomorrow is
+    entitled to see that it happened. And not a parallel conversation either —
+    the thread is where the context is.
+
+    The person's own message is *moved* onto the new episode rather than
+    copied. It has to be one or the other, and copying is worse in both
+    directions: the transcript would show their words twice, and the agent
+    worker decides the prompt shape by checking that this task's first turn is
+    the person's message (``_is_chat_turn``) — a task without one gets the
+    question restated as a brief ahead of everything said earlier, which is
+    the shape that has agents answering the previous question.
+
+    Safe to press twice. The claim is the ``resumed_by_task_id`` stamp written
+    under a row lock in the same transaction as the new task, so a second
+    press finds the successor and returns it rather than starting another.
+    """
+    conversation = await get_conversation(db, ctx.workspace_id, conversation_id)
+    _require_chat_authority(ctx, conversation)
+    tasks = await _conversation_tasks(db, ctx.workspace_id, conversation_id)
+    newest = next((task for task in tasks if _is_turn_task(task)), None)
+    if newest is None:
+        raise _nothing_to_resume()
+
+    if newest.state != TaskState.FAILED.value:
+        # The newest turn is already a successor somebody started: this press
+        # is the second one (or a retry of a request whose response was lost),
+        # and its answer is that same task.
+        predecessor = await _linked_task(
+            db, ctx.workspace_id, conversation, newest.metadata_json.get(RESUME_OF_KEY)
+        )
+        if predecessor is None:
+            raise _nothing_to_resume()
+        return ResumeResult(
+            conversation=conversation, task=newest, resumed_task=predecessor, created=False
+        )
+
+    # Re-read under a row lock: everything decided from here on is decided
+    # against this row, and the stamp that closes it is written before commit.
+    #
+    # ``populate_existing`` is what makes that sentence true. This session
+    # already loaded the task above, so without it the ORM answers from its
+    # identity map and throws the locked row's columns away — the lock is
+    # taken in the database and its whole point discarded. Two overlapping
+    # presses would then both read a ``metadata_json`` from before the other
+    # committed, both miss ``resumed_by_task_id``, and both start a workflow:
+    # the one thing the endpoint promises cannot happen.
+    failed = await db.scalar(
+        select(Task)
+        .where(Task.id == newest.id, Task.workspace_id == ctx.workspace_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if failed is None:
+        raise _nothing_to_resume()
+    successor = await _linked_task(
+        db, ctx.workspace_id, conversation, failed.metadata_json.get(RESUMED_BY_KEY)
+    )
+    if successor is not None:
+        return ResumeResult(
+            conversation=conversation, task=successor, resumed_task=failed, created=False
+        )
+    if failed.state != TaskState.FAILED.value:
+        raise _nothing_to_resume()
+
+    blocking = (await _unreconciled_calls(db, ctx.workspace_id, failed.id)).blocking
+    if blocking is not None:
+        # The refusal a person reads is the same sentence the offer carried,
+        # so pressing a control that said "check first" cannot answer with
+        # different words than the control did.
+        agent_row = await _get_agent(db, ctx.workspace_id, conversation.primary_agent_id)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=_unreconciled_reason(
+                blocking[1], agent_row.name if agent_row is not None else ""
+            ),
+        )
+    if conversation.status != ConversationStatus.ACTIVE.value:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This chat is archived. Restore it to pick this back up.",
+        )
+    agent = await _require_active_agent(db, ctx.workspace_id, conversation.primary_agent_id)
+
+    seed = await _seed_message(db, ctx.workspace_id, failed)
+    instruction = failed.description.strip() or _message_text(
+        seed.content_json if seed is not None else {}
+    )
+    if not instruction:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This turn has no message left to send again. Type what you'd like instead.",
+        )
+
+    try:
+        captured = await capture_input(
+            db,
+            crypto,
+            workspace_id=ctx.workspace_id,
+            conversation_id=conversation.id,
+            agent_id=agent.id,
+            user_id=ctx.user.id,
+            text=instruction,
+        )
+    except VariableError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from None
+    instruction = captured.text
+
+    task = Task(
+        workspace_id=ctx.workspace_id,
+        title=safe_input_text(failed.title),
+        description=instruction,
+        assigned_agent_id=agent.id,
+        conversation_id=conversation.id,
+        correlation_id=new_uuid7(),
+        metadata_json={
+            "origin": "conversation",
+            "conversation_id": str(conversation.id),
+            RESUME_OF_KEY: str(failed.id),
+            **{
+                key: failed.metadata_json[key]
+                for key in (
+                    "execution_mode",
+                    "model_profile_id",
+                    "attachments",
+                    "context_refs",
+                    "secure_inputs",
+                    "required_inputs",
+                )
+                if key in failed.metadata_json
+            },
+        },
+    )
+    task.metadata_json = merge_capture_metadata(task.metadata_json or {}, captured)
+    continued = await _continued_assignment_id(db, ctx.workspace_id, conversation, agent, failed)
+    if continued is not None:
+        task.metadata_json = {**task.metadata_json, "editorial_assignment_id": continued}
+    db.add(task)
+    await db.flush()
+    if seed is not None:
+        seed.task_id = task.id
+        seed.content_json = {**seed.content_json, "text": instruction}
+        if captured.references:
+            seed.content_json = {**seed.content_json, "secure_inputs": captured.references}
+        # An instruction row is a mid-run steer, and the worker renders one as
+        # "Additional instruction: …". As the seed of its own episode it is
+        # the question, so it is filed as one -- the same promotion
+        # ``_run_turn`` makes when a turn arrives too late to steer anything.
+        seed.message_type = MessageType.TEXT.value
+    failed.metadata_json = {**failed.metadata_json, RESUMED_BY_KEY: str(task.id)}
+    db.add(
+        Message(
+            workspace_id=ctx.workspace_id,
+            # Deliberately attached to no task: it belongs to the thread, not
+            # to either episode. On the new task it would reach the model as a
+            # second user turn after the question; on the old one it would be
+            # a note on an episode that is over.
+            task_id=None,
+            conversation_id=conversation.id,
+            sender_type=SenderType.SYSTEM.value,
+            sender_id=None,
+            recipient_type=RecipientType.USER.value,
+            recipient_id=ctx.user.id,
+            message_type=MessageType.NOTE.value,
+            content_json={
+                "kind": "turn_resumed",
+                "text": f"Trying “{_truncate(safe_input_text(failed.title), 80)}” again.",
+                "resumed_task_id": str(failed.id),
+                # Not ``task_id``: the timeline reads that key on other
+                # message kinds to decide what belongs to which exchange, and
+                # this row belongs to no episode at all.
+                "into_task_id": str(task.id),
+            },
+            visibility=MessageVisibility.VISIBLE.value,
+        )
+    )
+    conversation.last_activity_at = _now()
+    audit.record(
+        db,
+        action="conversation.resumed",
+        target_type="conversation",
+        target_id=conversation.id,
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user.id,
+        request_id=request_id,
+        ip_hash=ip_hash,
+        metadata={"task_id": str(task.id), "resumed_task_id": str(failed.id)},
+    )
+    await db.commit()
+    # Commit before start so the worker's activities always find the row. A
+    # Temporal outage marks the new task failed and raises 503, which leaves
+    # the newest turn failed again -- offered back rather than stranded.
+    await tasks_service.start_workflow(db, temporal, task, agent.id, instruction)
+    await _publish(
+        publisher,
+        ctx.workspace_id,
+        "conversation.resumed",
+        {
+            "conversation_id": str(conversation.id),
+            "task_id": str(task.id),
+            "resumed_task_id": str(failed.id),
+        },
+    )
+    return ResumeResult(conversation=conversation, task=task, resumed_task=failed, created=True)
 
 
 # --- Activity feed ---
@@ -1167,25 +2568,34 @@ def _message_card(message: Message) -> _CardDraft:
     )
 
 
-async def _latest_run_errors(
+async def _latest_run_failures(
     db: AsyncSession, workspace_id: UUID, task_ids: list[UUID]
-) -> dict[UUID, str]:
-    """Latest non-empty run error per failed task (already redacted upstream)."""
+) -> dict[UUID, FailureNotice]:
+    """Latest run failure per failed task, as readable copy.
+
+    The stored ``error_message`` is written for whoever debugs the run and is
+    already redacted upstream; it is passed to :func:`failure_notice` and
+    never appended to a card as it stands. A run that recorded only a code
+    still produces a notice, because a code is enough to say a sentence and
+    silence is worse than a short answer.
+    """
     if not task_ids:
         return {}
     rows = await db.execute(
-        select(AgentRun.task_id, AgentRun.error_message)
+        select(AgentRun.task_id, AgentRun.error_code, AgentRun.error_message)
         .where(
             AgentRun.workspace_id == workspace_id,
             AgentRun.task_id.in_(task_ids),
-            AgentRun.error_message.is_not(None),
+            or_(AgentRun.error_message.is_not(None), AgentRun.error_code.is_not(None)),
         )
         .order_by(AgentRun.task_id, AgentRun.created_at)
     )
-    latest: dict[UUID, str] = {}
-    for task_id, message in rows.all():
-        if task_id is not None and message:
-            latest[task_id] = message  # later rows overwrite: last write wins
+    latest: dict[UUID, FailureNotice] = {}
+    for task_id, code, message in rows.all():
+        if task_id is None or not (code or message):
+            continue
+        # Later rows overwrite: last write wins.
+        latest[task_id] = failure_notice(code, message or "")
     return latest
 
 
@@ -1402,7 +2812,7 @@ async def list_activity(
             | {d.target_agent_id for d in drafts if d.target_agent_id}
         ),
     )
-    failure_reasons = await _latest_run_errors(
+    failure_notices = await _latest_run_failures(
         db,
         workspace_id,
         [d.task_id for d in drafts if d.kind is ActivityKind.FAILED and d.task_id is not None],
@@ -1421,14 +2831,25 @@ async def list_activity(
         if not summary and card_task is not None:
             template = _TASK_SUMMARY_TEMPLATES.get(draft.kind, "{agent}: “{title}”.")
             summary = template.format(agent=actor_name or "An agent", title=card_task.title)
-            reason = (
-                failure_reasons.get(card_task.id) if draft.kind is ActivityKind.FAILED else None
+            notice = (
+                failure_notices.get(card_task.id) if draft.kind is ActivityKind.FAILED else None
             )
-            if reason:
-                # Plain-language reason (e.g. the provider's own message) so the
-                # card explains what went wrong without opening Advanced.
-                summary = f"{summary} {reason}"
-                detail_json = {**detail_json, "error_message": reason}
+            if notice is not None:
+                # The card's first sentence names the agent and the work; this
+                # is the second one, saying what went wrong. The failure's own
+                # words win where it has any -- a provider saying "you
+                # exceeded your current quota" is the actual information, and
+                # Jhin restating it more vaguely would help nobody. Where it
+                # has none, the notice supplies the sentence, which is the
+                # whole point: those are the failures whose original text was
+                # internal vocabulary and an identifier.
+                summary = f"{summary} {notice.detail or notice.summary}"
+                detail_json = {
+                    **detail_json,
+                    "error_code": notice.code,
+                    "error_message": notice.detail,
+                    "error_reference": notice.reference,
+                }
             summary = _truncate(summary, SUMMARY_CHARS)
         elif not summary:
             summary = ACTIVITY_LABELS[draft.kind]

@@ -19,13 +19,18 @@ from jhin_domain import ActorType, MemoryKind, MemoryScope, MemorySensitivity, M
 MAX_CANDIDATE_CHARS = 2_000
 MAX_CANDIDATES_PER_EXTRACTION = 20
 MAX_TAGS = 10
+CaptureClass = Literal[
+    "editorial_style", "recurring_preference", "editorial_lesson", "company_fact"
+]
 
 
 class MemoryCandidate(BaseModel):
     """One proposed memory. Strict: unknown keys are rejected (model output is
     validated, never trusted)."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    # Validation errors can reach public tool responses. Pydantic's truncated
+    # input previews can expose credential fragments before redaction runs.
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
     content: str = Field(min_length=1, max_length=MAX_CANDIDATE_CHARS)
     kind: MemoryKind = MemoryKind.OTHER
@@ -35,13 +40,21 @@ class MemoryCandidate(BaseModel):
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     importance: float = Field(default=0.5, ge=0.0, le=1.0)
     requested_scope: MemoryScope = MemoryScope.AGENT
+    scope_id: UUID | None = None
+    source_message_id: UUID | None = None
+    source_review_id: UUID | None = None
+    capture_class: CaptureClass | None = None
     expires_in_days: int | None = Field(default=None, ge=1, le=3650)
 
     @field_validator("tags")
     @classmethod
     def _validate_tags(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        from jhin_memory.screening import unsafe_metadata
+
         if len(value) > MAX_TAGS:
             raise ValueError(f"at most {MAX_TAGS} tags")
+        if unsafe_metadata(None, value):
+            raise ValueError("Keep credentials out of memory tags")
         cleaned = tuple(tag.strip().lower()[:50] for tag in value if tag.strip())
         return tuple(dict.fromkeys(cleaned))
 
@@ -98,6 +111,35 @@ class ActorFacts(BaseModel):
     # but the quality screens stay on, because the person never vouched for
     # the wording.
     authored_by_model: bool = False
+    # True when platform code wrote the words itself, not the model: today
+    # only the rename executor, recording who conferred the agent's name.
+    # It turns off the *quality* screens (self-reference, low information)
+    # and nothing else — secrets are still screened, a hidden source is still
+    # never memory, and the scope ceiling still holds. The exemption is by
+    # writer rather than by content pattern on purpose: loosening
+    # ``is_self_referential`` enough to admit "I was named Bisby by Ada"
+    # would admit every spontaneous "the assistant is called X" with it,
+    # which is the worthless memory that screen exists to stop.
+    authored_by_platform: bool = False
+    # Server-resolved standing authority; never accepted from tool/model output.
+    capture_policy_id: UUID | None = None
+    capture_scope: MemoryScope | None = None
+    capture_scope_id: UUID | None = None
+
+
+class StorageDecision(BaseModel):
+    """Auditable storage choice; operational values remain in scoped variables."""
+
+    model_config = ConfigDict(frozen=True)
+    classification: CaptureClass | None = None
+    scope: MemoryScope
+    scope_id: UUID | None = None
+    reason: str
+    source_message_id: UUID | None = None
+    authority_id: UUID | None = None
+    sensitivity: MemorySensitivity = MemorySensitivity.NORMAL
+    confidence: float = 0.5
+    revalidation: str = "Current membership and authority checked on every write"
 
 
 class ScreeningResult(BaseModel):

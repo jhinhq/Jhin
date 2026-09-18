@@ -194,7 +194,7 @@ Every job container is created with this fixed security shape:
 | --- | --- |
 | User | exact `1000:1000` |
 | Root filesystem | read-only |
-| Writable storage | one named per-run workspace volume, plus bounded tmpfs |
+| Writable storage | exactly one named workspace volume, plus bounded tmpfs |
 | Capabilities | `CapDrop: ALL`, nothing added |
 | Privilege | non-privileged and `no-new-privileges:true` |
 | Groups | empty `GroupAdd` |
@@ -203,11 +203,446 @@ Every job container is created with this fixed security shape:
 | Host authority | no host bind, Docker socket, adapter URL, or control network |
 | Cleanup | force-removed in `finally`, with startup orphan reaping by exact label |
 
-One job gets one fresh container. A repository checkout persists only in the
-named volume `jhin-sandbox-ws-run-<run_id>`, mounted at `/workspace`. Tool-worker
-requests `DELETE /v1/workspaces/run-<id>` before the agent-side final projection;
-the deletion is idempotent and startup reaping removes old volumes as a
-backstop.
+One job gets one fresh container. What survives it is the named volume mounted
+at `/workspace`.
+
+### One dispatch per invocation
+
+A tool call whose worker dies is re-dispatched with a fresh `job_id`, so nothing
+on the wire relates the two attempts. The control plane cannot settle it — the
+fact it needs, what the first container did, is precisely the fact its dead
+worker failed to write down — and neither can the file the job edited, because a
+file's contents are an *effect* and the question is about an *event*. The runner
+is the only process that sees both attempts, so the answer lives there: a
+request carries `invocation_id` (Jhin's `tool_call.id`, stable across a
+re-dispatch and distinct for every genuinely new call), and a second dispatch of
+one invocation is **handed the first dispatch's job** — running, or finished with
+its outcome intact — instead of a container of its own. The caller polls the job
+it is given rather than the one it sent, and the audit trail records
+`attached_to_job_id` on the dispatch that ran nothing. This is what makes every
+sandbox tool safe to re-dispatch, and it is why no tool carries a guard of its
+own that inspects the file it wrote.
+
+Three things hold that up, and each is a way it failed:
+
+**It records what happened, not what was intended.** The ledger entry is written
+when the dispatch is accepted, which is what makes the claim atomic: two
+dispatches arriving together cannot both find the invocation absent. But a
+dispatch that gives up in the workspace queue below has started no init
+container, taken no measurement and run no container — and keeping it as the
+invocation's answer meant every later dispatch of that call was replayed onto a
+failure and the call was never run at all. That entry is taken back as such a
+job ends. Only that ending: past the queue, an init container has already
+touched the disk and the runner cannot prove nothing happened.
+
+**It is bounded, and it says what it has forgotten.** Nothing in the runner used
+to expire, so a job's captured output — two streams, capped at 64 KiB each — was
+held for the life of the process. Now the most recently finished
+`sandbox_job_output_retained_jobs` (32) keep what their container printed and
+the rest release it, reporting `…[output no longer retained by sandbox runner]`
+rather than an empty stream, because "printed nothing" and "no longer held" are
+different facts. The record itself — status, exit code, timings — is kept an
+hour past the later of its ending and its own deadline
+(`sandbox_job_record_retention_seconds`). That length keeps the ordinary case
+cheap for the reconciliation sweep in the tool worker, which asks about a job
+whose worker died — but it is not what makes the sweep's reading of a 404
+*sound*, and it cannot be: the window is measured against a sweep that runs,
+and a worker that is down for longer than it comes back to rows hours past
+their deadline, for jobs this runner finished and dropped. So the runner
+publishes what its memory covers instead of promising a number the other side
+has to trust — `GET /v1/runner/memory` gives `serving_since` (after the reap,
+so a job that started before it had its container force-removed) and the
+retention window itself, and the sweep closes a row on a 404 only where those
+two make it proof. Everything else it closes as `outcome_forgotten`: the job is
+over, and what it did is no longer recoverable from anybody. When a record does
+go, its ledger entry goes with it and the runner moves a watermark — because "I
+hold no record of that invocation" only means "it was never submitted here" for
+dispatches after the point from which the runner remembers everything.
+
+**It fails closed at both ends.** Inside one runner incarnation the ledger is
+exact. Across a restart it is empty by construction, and then the only interlock
+left is `prior_dispatch_at`: the moment the *earliest* dispatch of this call
+began, computed by the tool worker from its own `sandbox_job` rows. A dispatch
+stamped at or before the runner's watermark is one it cannot vouch for, and it
+is refused (`409`, surfacing as `redispatch_unprovable`) rather than run a second
+time on top of however far the first got. The worker holds the same line one
+step earlier: the three answers to "was there an earlier dispatch" are separate
+types, and the one that means *this could not be established* has no
+`prior_dispatch_at` field to put on the wire at all — so a lookup that fails
+refuses the call (`redispatch_uncheckable`, carrying the reason) instead of
+claiming to be a first dispatch. The same discipline covers the other half of
+that worker-side write: the `sandbox_job` row is committed on its own connection
+*before* the job is submitted, and an insert that fails **for any reason at
+all** refuses the dispatch too — a dispatch nothing recorded is a container the
+next re-dispatch would fail to see. A constraint refusal is no exception, and
+used to be: it was read as proof that the `tool_call` this row references is
+uncommitted, which `sandbox_job`'s four foreign keys and its primary key make
+unknowable from an `IntegrityError`, and which the gateway makes moot anyway by
+committing that row before any executor is entered.
+All of these refusals report nothing about *this* attempt, which certainly ran
+nothing, and everything about the earlier one: `side_effect_possible` follows
+whether a job of that shape could have changed the disk, so an unaccounted-for
+listing is a plain retry and an unaccounted-for edit stops for a person.
+
+Two dependencies hold that comparison up, and neither is left to be inferred by
+whoever calls this next.
+
+**Saying nothing is not an answer.** `prior_dispatch_at` is empty when there was
+no earlier dispatch, and empty is also what a client that has never heard of the
+field sends — so shape validation cannot tell "I established there was none"
+from "I was not asked". That distinction is the whole interlock, and it is safe
+today only because exactly one caller exists and it always answers. So a request
+that offers an `invocation_id` and omits `prior_dispatch_at` is refused (`422`),
+at the schema and again in `JobManager.submit` for anything reaching it in
+process. A caller that offers no invocation at all is unaffected: it gets no
+ledger entry and the field is never read for it, which is what keeps an older
+tool worker working against a newer runner.
+
+**The two clocks are assumed to be one clock.** The comparison is between the
+tool worker's clock, which stamps the row, and the runner's, which holds the
+watermark; `_INCARNATION_SKEW` (5s) is a margin for *ordering* — the caller
+stamps and then submits — not a synchronisation budget. The shipped topology
+makes that sound, because both are containers on one Docker host and read the
+host's clock. **If you split them across hosts, keep those hosts
+NTP-synchronised to well inside five seconds**, or widen the margin to cover the
+drift you actually have: a tool worker whose clock runs ahead stamps dispatches
+that look newer than the runner's memory, and that is the direction which
+produces a second container rather than a refusal. The detectable half of a
+violation is detected — a dispatch stamped in the runner's own future by more
+than the margin is refused, naming the clocks, since on one host it cannot
+happen — but a caller running *behind* only causes needless refusals and is not
+worth failing on.
+
+The runner's startup reap is the one place that does not distinguish whose job a
+container is: it force-removes everything labelled `jhin.sandbox.job` on the
+daemon. One runner per daemon is what the compose topology gives, and the same
+assumption is already load-bearing in the sweep that reads a 404 as proof. A
+second runner on one daemon means giving both a configured identity, labelling
+jobs with it, and filtering both sweeps on it.
+
+### The workspace an agent keeps
+
+Every job of one agent shares the volume `jhin-sandbox-ws-agent-<workspace
+id>-<agent id>`, and it **outlives the run that created it**. That is what makes
+an agent a software engineer rather than a first-day contractor: the checkout,
+the dependency install and the build cache are still there on its next turn, so
+"change it, test it, fix it, push it" does not pay for a cold clone at every
+step. `cli.repository.checkout` refreshes a tree it already has (validate the
+remote, empty `.git/hooks`, `reset --hard`, `clean -ffd` *without* `-x` so
+ignored build output survives, fetch) and reports `reused` so the model knows
+whether its caches are warm.
+
+**A checkout onto a branch that already exists continues it.** That is a
+separate question from whether the disk was reused, and it is what makes a
+second turn able to build on the first. The refresh used to end in
+`git checkout -B <branch> FETCH_HEAD`, which force-moved the working branch
+onto the base ref: run two rewound past the commit run one had already pushed,
+worked on top of the base, and had its push rejected as a non-fast-forward with
+nothing published. The starting point is now chosen from what exists, and
+reported as `started_from`:
+
+| `started_from` | When | What the agent gets |
+| --- | --- | --- |
+| `remote_branch` | `refs/heads/<branch>` is on the remote, and this disk's copy is not ahead of it | the published tip — the commit an earlier run pushed. Independent of the disk, so an evicted, purged or re-cloned workspace resumes the same branch |
+| `workspace_branch` | this disk has the branch and it already contains everything the published one does, or the remote has no such branch | its own unpushed commits, kept rather than discarded for being unpublished |
+| `base` | the branch exists nowhere yet | the base ref, as before |
+
+A local branch that has *diverged* from the published one cannot be pushed
+without rewriting somebody else's history, so the published tip wins and the
+abandoned local head is recorded as `discarded_head`. There is deliberately no
+"start this branch over from the base" flag: it would rewind the branch the
+push then has to fast-forward, which is the rejection above. Starting from the
+base is spelled by asking for a branch name that is not in use.
+
+The default name is `agent/<repo>-<task id>`, with the whole task id. It used
+to be the id's first eight characters, which are the top 32 bits of a uuid7's
+48-bit millisecond timestamp: they advance once every 65.536 seconds, so two
+different tasks on one repository started in the same minute took the same
+branch name and the second one resumed the first one's work.
+
+The key is derived from identity alone — `ctx.agent_id`, which the tool worker
+reads from the `agent_run` row and never from tool input. Two agents therefore
+derive two keys, two keys are two volumes, and a job is given exactly one mount
+and no Docker socket. That is the whole isolation argument, and none of it rests
+on a model behaving.
+
+**Two runs of one agent never share a tree.** A chat turn while a task runs
+(or a self-delegating sub-run, which carries the same agent id) is common.
+Exactly one run holds the agent's workspace, tracked by `holder_run_id` on the
+`sandbox_workspace` row and taken by a single conditional `UPDATE`; the other
+gets a private `jhin-sandbox-ws-run-<run_id>` volume with today's behaviour and
+today's guarantees. Nothing is shared and nothing waits. A lease is never taken
+from a run that is still alive — liveness is read from the holder's own
+`agent_run.status`, so a run parked on an approval for hours keeps its disk —
+and no clock ever overrides that: nothing in `agent_run` moves while a run is
+alive, so a run parked on a push approval for two days and a run that crashed
+without finalizing look identical, and the contender takes a private disk
+instead of deleting a tree somebody is about to push from. A workspace stranded
+by a run that never finalizes is freed by `jhin-admin agent workspace reset`,
+which is a deliberate act by somebody who can see the run. A run whose lease
+*was* taken that way is refused with `workspace_lease_lost` rather than silently
+continuing on a fresh disk with its checkout on the old one.
+
+**One job at a time on one disk.** The lease above decides which *run* holds a
+workspace; the runner decides how many containers are on it, and the answer is
+one. A job whose `workspace_key` is held waits for it — reported as `queued`,
+which is not a terminal status and which a poller treats exactly like
+`running` — and gives up, having started no container and no volume-init
+container, after `sandbox_workspace_queue_seconds` (30s).
+
+This queue is **not** what stops a re-dispatch, and it used to be described as
+though it were. It cannot be: waiting for the first dispatch's container and
+then running a second is exactly how an edit gets applied twice. That case is
+settled one wall up, at the invocation, where a second dispatch is handed the
+first one's job and never reaches this queue at all. What is left here is
+genuinely concurrent work — two calls that are not the same call and both want
+the same disk: a run's cleanup against a turn that is still going, or two runs
+of one agent. It lives in the runner because the runner is the only process that
+knows a container is still on that volume. Two containers on one tree is a
+data-loss bug for `cli.repository.checkout` above all, whose first act on a
+reused workspace is `reset --hard` and `clean -ffd`.
+
+**Finalize releases, it does not destroy.** The cleanup activity clears the
+holder on an agent workspace and calls the runner not at all; a private run
+workspace still gets `DELETE /v1/workspaces/run-<id>`, idempotently, as before.
+
+**Bounds.** There is no filesystem quota to fall back on, and the alternatives
+were tried against this daemon rather than argued about:
+
+| asked for | daemon's answer |
+| --- | --- |
+| `docker volume create --opt size=64m` | `quota size requested but no quota support` |
+| `--opt type=ext4 --opt device=<image file>` | `block device required` |
+| `--opt type=ext4 --opt device=<file> --opt o=loop` | `data: loop: invalid argument` |
+| `losetup` inside a container | `cannot find an unused loop device: No such device` |
+| `losetup` inside a **`--privileged`** container | `failed to set up loop device: Permission denied` |
+
+The first is the quota route: it means an xfs filesystem mounted with `pquota`,
+and the storage driver here is overlayfs. `type=tmpfs` does enforce a size, but
+that is RAM and so not a place to keep a clone, and `StorageOpt` bounds a
+container's writable layer rather than a mounted volume.
+
+The rest are the *fixed-size filesystem image* route — a 5 GiB ext4 file
+mounted per workspace, which would be a hard quota the kernel enforces and
+would make the measurement advisory. It does not work here, and the reason is
+not preference. Docker's `local` driver passes `device` straight to `mount(2)`
+and never attaches a loop device, so a file is refused as "not a block device"
+and `o=loop` is passed through as mount data and rejected; and no container on
+this daemon can attach one itself, `--privileged` included, so there is nothing
+to hand the driver either. Even where loop devices *are* available, the shape
+is wrong for this service: the attach and the mount need `CAP_SYS_ADMIN` and
+`/dev/loop-control`, and the resulting mount would have to reach the job
+container as a host path — a privileged container and a host mount, which are
+the two things the runner's isolation is built out of not having.
+
+So the cap is an accounting cap, and the accounting is the whole of the bound,
+which is why it has to be right in three ways: it has to measure disk usage,
+it has to measure what `du` measures, and it has to know when it has not
+measured at all. (An operator who wants a kernel-enforced bound has exactly one
+route: put the Docker data root on an xfs filesystem mounted with `pquota`, at
+which point the `local` driver's `size` option starts working. Jhin does not
+require it, and does not pretend to have it.)
+
+*It measures disk usage, not apparent size.* The walk sums allocated blocks
+(`st_blocks * 512`), which is what `du` counts and what an operator will compare
+the number against. Summing `st_size` instead reported a workspace holding a
+2 GiB `fallocate -n` pad at 8 KiB and 100k one-byte files at 2.4 MiB rather than
+393 MiB — the cap never fired, the volume was never recycled, and eviction never
+saw it.
+
+*It measures what `du` measures, by construction.* Two properties, and the
+target is agreement to the byte with `du -sB1` rather than agreement in the
+common case:
+
+- **It descends by directory file descriptor** (`openat`/`fstatat` on names,
+  never on assembled absolute paths), so `PATH_MAX` does not exist for it. A
+  walk that let `DirEntry.stat` fall back to `lstat(entry.path)` failed
+  `ENAMETOOLONG` below roughly 4 KiB of ancestry and dropped the whole subtree
+  silently: twenty 200-character directories holding one 6 GiB file measured
+  90,112 bytes and reported the walk complete, against a 5 GiB cap.
+- **A file with more than one link is counted once**, keyed on its inode,
+  which is exactly what `du` does. Summing every link read 200 links to a
+  50 MB file as 10.5 GB against du's 52 MB, and two `git clone --local` copies
+  of a 40 MB repository 49.9% high — and hardlinking from a store is ordinary
+  behaviour for pnpm, uv and pip, not an attack. Over-counting is **not** the
+  safe direction: this number is read by an eviction that destroys the volume,
+  so an over-count throws away an agent's unpushed work. Under-counting only
+  delays a cap.
+
+*A walk that did not finish is not a measurement.* Anything the walk skipped,
+for any reason — the budget ran out, an entry could not be stat'd, a directory
+could not be opened, another filesystem is mounted underneath — makes the
+result a **floor**: the disk holds at least that much, and nothing more is
+known. The row records it as `size_state = 'unknown'` next to the floor, and
+the platform **refuses** the workspace's next call (`workspace_unmeasured`)
+rather than enforcing a cap against a number that is not the disk's.
+
+That is not the cautious reading it looks like; it is the only honest one.
+3,000 directories of 1,000 empty files with a 6 GiB payload in the directory
+`scandir` returns last measured 12 to 21 MB through the deployed runner, six
+runs in a row, against a real `du -sB1` of 6,530,826,240 — 0.3% of the truth,
+which is under every cap in the product, so nothing was recycled and nothing
+was refused. A floor is only ever evidence in one direction, and the product
+uses it in exactly that direction: a floor **above** the cap proves the disk is
+over it and recycles as usual, while a floor below the cap proves nothing at
+all and refuses. Guessing small is the cap not existing; guessing large and
+emptying the disk destroys a day's uncommitted work on the strength of a
+measurement that failed. A refusal costs a run, and that is the only one of the
+three prices worth paying. The remedies are the ones the hint names — push the
+branch (the push is exempt), then `jhin-admin agent workspace reset` — plus
+idle eviction, which answers to age and needs no size at all.
+
+A measurement also always **replaces** what was stored. It used to ratchet: a
+floor was kept only when it exceeded the stored number, so that a partial walk
+could never undo a complete one. What that built was a paper size with no
+expiry — one complete measurement of 4.9 GB, then six walks that all timed out,
+and the row still said 4.9 GB days after the agent deleted the data. Since the
+budget sweep takes the largest first, that agent was first in line to have its
+live work destroyed to free space that had already been freed. The state flag
+is what makes replacing safe: a floor cannot be mistaken for a size, so it does
+not have to be inflated to be safe.
+
+*It measures often.* Every workspace is measured on **every** job by the root
+init container that already runs there, so an overrun is bounded by one job
+rather than by one measurement interval — for run-scoped workspaces too, which
+used to keep a ten-minute throttle on the grounds that they die with their run,
+while their bytes counted against the tenant budget the whole time they lived.
+Within that one job nothing stops a container filling the host's disk: the
+honest statement of the bound is "one job", not "5 GiB". The walk budget is
+`SANDBOX_WORKSPACE_MEASURE_BUDGET_SECONDS` (60), and it is a ceiling rather
+than a duration: an ordinary tree finishes in well under a second and stops,
+and three million entries — the tree above — finish in about sixteen. It was
+five, which could not finish a tree an agent can build in seventy seconds.
+
+A workspace is destroyed only at bind time, before any container of the new run
+starts — the one moment it is provably idle. It is emptied then if an operator
+asked for a reset, if it has been idle past `SANDBOX_WORKSPACE_IDLE_DAYS` (7),
+or if it is over `SANDBOX_WORKSPACE_MAX_MB` (5 GiB, and never more than the
+tenant total below — a per-agent cap above the tenant budget lets one agent put
+its tenant somewhere no sweep can rescue it from).
+
+If the **tenant** is over `SANDBOX_WORKSPACE_TOTAL_MAX_MB` (40 GiB), the budget
+sweep is **all-or-nothing**. Its candidates are the workspaces no live run
+holds, plus the binder's own — provably idle at that instant, and recycled
+rather than evicted because the run is about to use it. It takes the largest
+first, so the fewest agents lose a disk. But before it takes anything it asks
+whether those candidates add up to the overrun, and **if they do not it takes
+nothing** and the bind is refused with `workspace_tenant_full`, which names the
+real situation: the space is held by runs that have not finished. The refusal is
+recorded as `sandbox.workspace.budget_refused` with how far over the tenant
+was, because a decision to destroy nothing has to be as visible as a decision
+to destroy something. The refused run is left holding no lease, so the refusal
+repeats for as long as the situation lasts rather than being served by the very
+next call's renewal — and it ends by itself when the run holding the space
+finishes and that disk becomes reachable.
+
+The gate holds **inside** the loop as well as before it. A plan that added up
+when it started stops adding up when the runner refuses one of its deletes, and
+the loop notices at the next candidate and destroys nothing further — but the
+disks it already took are gone, so the bind is refused too. Treating a refused
+delete as a machine's bad moment and serving the bind anyway produced exactly
+the shape the gate exists to prevent: neighbours destroyed, tenant still over
+budget, and the call that paid for it served.
+
+**Every durable disk of the tenant is on the books, and "held" means one thing.**
+Two ways a real disk used to be invisible to the budget, both of them the sweep
+asking a question the rest of the module answers differently:
+
+- *Kind.* The scan selected `kind = 'agent'`, so the private run-scoped disk a
+  contended run takes was measured, stored, occupying disk and contributing
+  nothing. A 10 GiB run workspace sat inside a 52 MB budget with the total
+  reading zero and a third agent's bind served. Both kinds are counted now, and
+  both follow the same rule: a live run's disk is never taken, so the tenant is
+  refused while it runs and the disk becomes reclaimable when it stops.
+- *Holder.* The sweep read "held" as `holder_run_id IS NOT NULL` while the
+  acquire reads the holder's own `agent_run.status`. A run that finished without
+  finalizing leaves its id on the row — the state the acquire's own contract
+  acknowledges — and the two readings then disagree: the acquire would hand
+  that disk out, while the sweep excluded it from the idle pass, from the
+  budget pass, and from any hope of freeing the bytes it was still counting.
+  One stale id was enough to leave a tenant permanently over budget with
+  nothing any bind could free. Both now ask the holder's status.
+
+**A size Jhin does not have is not a small size, and not a licence either.** An
+unmeasurable disk is *charged* the larger of its floor and the per-agent cap,
+because a disk nobody counted must not be spent for free — and it is never a
+candidate for destruction, because destroying it would be acting on the number
+that is missing. The two halves are kept apart in the arithmetic: the sweep
+plans what to destroy against the bytes the table has actually seen, and
+decides what to refuse against the bytes it cannot rule out. So an unmeasurable
+disk can leave a tenant unable to prove it is under budget — and the answer to
+that is a bind that waits, never a neighbour's tree that disappears.
+
+That gate is the policy, not an optimisation: *destroying another agent's
+durable work is only justified when it achieves the thing it is destroying work
+for.* The overspender is usually neither the binder nor free — two runs of one
+agent overlap, and a run parked on an approval holds its lease for as long as
+the approval takes. Without the gate, a tenant 52 MB over budget because of one
+100 MB workspace held by a live run destroyed four unheld 4 KiB neighbours and
+the binder's own 4 KiB row, freed 20 KiB, stayed over budget, refused nothing,
+and never went near the disk that was spending the budget.
+
+Idle eviction is a separate pass and still least-recently-used first, because
+idleness is a question about age and the budget is a question about bytes; it
+takes what is past the horizon whether or not the tenant is over budget, and it
+answers to its own reason rather than to the overrun. The sweep never crosses a
+tenant boundary: it runs on one tenant's agent's bind, and one tenant's total is
+not a budget to be paid out of another tenant's work. A workspace that crosses
+its cap *while a run is using it* is never destroyed: the next call is refused
+with `workspace_full`, so the agent can still push what it has — and
+`cli.repository.push`, the one call that exemption exists for, is also the one
+call whose own workspace the budget sweep will not take and the one call the
+tenant refusal does not apply to, because destroying or blocking it there would
+strand the branch the push was about to send.
+
+An eviction is only recorded once the volume is actually gone. `DELETE
+/v1/workspaces/{key}` answers 204 for a volume it removed and for one that was
+never there, and **409** when Docker refuses because a container still has it
+mounted; a refusal leaves the row exactly as it was, keeps a pending reset
+outstanding, and the next bind tries again. Recording a refused delete as an
+eviction wrote `size_bytes = 0` for a disk that was still full and returned it
+to service invisible to the cap and to every future sweep.
+
+**The repository allow-list follows the disk.** `cli.repository.checkout` and
+`cli.repository.push` name a repository and are checked on the name. Every other
+sandbox tool names none, so those are checked against what the workspace
+actually holds: every repository recorded on that disk since the disk was last
+*emptied*, from Jhin's own `sandbox.checkout.recorded` rows keyed to the
+workspace. The disk rather than the last record, because a disk is not a path —
+a copy taken anywhere but `/workspace/repo` survives a later checkout (the reuse
+prologue removes that one path), `HOME` is `/workspace` so pip and npm leave a
+private repository's packages in `/workspace/.cache` with nobody meaning
+anything by it, and checking out an allowed repository used to move the record
+forward and turn the answer back to "allowed" with the forbidden tree still
+readable. Only two things end a disk's history: the volume being destroyed, and
+a checkout that purged the workspace. So the remedy the denial prints is real —
+a checkout onto a workspace whose history is no longer fully allowed empties the
+**whole** workspace before cloning and records that it did (`purged: true`), and
+`jhin-admin agent workspace reset` does the same by destroying the volume.
+
+Reuse of a clone is bound to the same records: a tree is adopted as a
+repository's cache only when the last checkout on that disk named this
+repository *and* `.git/config` still hashes to what that checkout wrote, which
+is the proof `cli.repository.push` already demands. A clone of something else
+with its remote rewritten does not qualify.
+
+**What the allow-list is not.** It is not an egress control. `cli.command.execute`
+granted `network: "internet"` can clone anything it likes and no record will name
+it; an allow-list over Jhin's own repository operations cannot bound what an
+arbitrary command does with a network, any more than it can stop that command
+reading a file and printing it. The controls for that are the connection's
+`default_network`, the `network` grant scope, and the sandbox bridge itself —
+which is why the setup guidance below says to leave `default_network` at `none`.
+
+Startup reaping still removes leftover job containers by label and workspace
+volumes older than 24 hours — **run-kind only**. Creation age is not use age, and
+reaping agent volumes by age would wipe a healthy agent's disk every day, which
+is the bug this design exists to fix.
+
+**Operator surface.** `jhin-admin agent workspace list` / `show` / `reset`. All
+three are database reads and writes: the API container is deliberately not on
+the `runner` network and holds no runner token, so `reset` records a request and
+the next bind applies it rather than pretending the console can reach Docker.
 
 Stdout and stderr have independent byte caps. The runner registers every
 job-scoped secret value, redacts it before returning output, and forgets it with
@@ -296,7 +731,7 @@ deny anyway.
 
    | Capability | Scope | Why |
    | --- | --- | --- |
-   | `cli.repository.checkout` | `connection_id`, `repository` | clone + create the `agent/<task>-<repo>` branch |
+   | `cli.repository.checkout` | `connection_id`, `repository` | clone + start (or resume) the `agent/<repo>-<task id>` branch |
    | `cli.file.list` | `connection_id`, `path` | see what is in the repository |
    | `cli.file.search` | `connection_id`, `path` | find a symbol before reading it |
    | `cli.file.read` | `connection_id`, `path` | read a page of a file, with a `read_token` |
@@ -469,8 +904,35 @@ it is a shell that can change any file in the checkout, and a grant scope is one
 and Balanced, which is deliberate; Restricted, which promises no unattended
 writes, now sees it. Containment is structural rather than risk-level:
 `cli.repository.push` trusts nothing this command could have touched.
-Operators who need networked
-tests grant `cli.command.execute` with a narrow command scope instead.
+Operators who need networked commands enable **Terminal Internet** in an
+agent's **Tools & Access** tab and choose its CLI Sandbox. This grants
+`cli.command.execute` with that `connection_id`, `network: "internet"`, and
+`command: "*"`; existing approval rules still apply. For narrower command
+permissions, use the advanced grant editor. The agent must select the
+Internet-capable command tool rather than `cli.test.run`.
+
+This works on a self-hosted Docker installation without a public domain or an
+external authentication service. Internet jobs use the runner's dedicated
+sandbox bridge, never host networking or the control-plane network. They can
+reach destinations allowed by the host's network; this is not a domain
+allow-list. Git checkout/push and app API permissions are separate.
+
+The admin API is `GET` / `PUT`
+`/api/v1/workspaces/{workspace_id}/agents/{agent_id}/terminal-internet`.
+Enable with `{"enabled":true,"connection_id":"<active CLI UUID>"}`; disable
+with `{"enabled":false}`. Both require `agents:admin`. API keys also need
+`apps:read` to see connection IDs and names in the response.
+
+Updates lock the agent and atomically replace only this control's grants,
+whose ownership is recorded in permission audit events. An identical existing
+grant is recognized without being duplicated or adopted. Switching sandboxes
+removes the previous managed allow. Turning access off writes an explicit
+`cli.command.execute` deny for `network: "internet"`, so broad wildcard allows
+cannot bypass the switch. Validation checks the resolved connection default
+as well as an explicit network selection, including after approval waits.
+Handmade grants and approval policies stay intact. A custom state or warning
+means advanced permissions can independently allow access or restrict
+individual commands; turning the control on does not override those denies.
 
 Images are pre-built on the Docker host and selected by the `image` scope key.
 **The runner never pulls**, so a grant's `image` value can never reach a
@@ -487,8 +949,14 @@ that has to be trustworthy, because repository content shares the stream:
 `z⏎JHIN_META` and print a second trailer through any listing of it. Four
 rules, all four needed:
 
-- the sentinel carries a **nonce Jhin draws per job**, which nothing in the
-  container can predict;
+- the sentinel carries a **nonce belonging to the tool call**, which nothing in
+  the container can predict: HMAC-SHA256 over the tool call id, keyed on the
+  runner token, which never enters a container. Per call rather than per
+  dispatch, because the runner answers a re-dispatch with the *first*
+  dispatch's job and its output — a nonce drawn per attempt made that answer
+  unreadable to the attempt receiving it, and every value in it silently
+  defaulted. A container can of course see the sentinel of the job it is, since
+  its own script prints it, and can predict no other call's;
 - it must appear **exactly once** — two sentinels mean the stream is ambiguous,
   and an ambiguous trailer is discarded rather than resolved in favour of
   whoever printed last;
@@ -538,6 +1006,30 @@ back, so reading part of a file and writing back what you read is refused
 rather than silently destroying the rest. The fake GitHub (like real GitHub)
 refuses a pull request whose head has no commits beyond the base, so a branch
 created through the refs API without a push cannot produce an empty PR.
+
+## Live terminal output
+
+The runner follows stdout and stderr independently while a container runs. Each
+capture keeps a bounded tail plus the longest registered secret's overlap;
+complete logs are never assembled in memory. Both live and final snapshots are
+redacted before leaving the runner. An unfinished secret prefix remains hidden
+even when the logging connection ends or fails.
+
+For `cli.command.execute` and `cli.test.run`, the tool worker's existing one-second
+status poll also writes changed output tails to `sandbox_job` on an independent
+connection. Its own redactor handles worker-only credentials, including partial
+secrets at clipped snapshot edges, before the 8,192-character persistence cap.
+Writes are bounded and best effort, match workspace/run/tool/job identity, and
+only update unfinished running rows. Progress never dispatches, cancels, retries,
+or completes a command. Final output follows the existing terminal commit path.
+
+The authorized conversation/run tool-call responses expose these tails for chat
+polling. Consumers replace snapshots rather than append them as deltas. Output
+may be buffered by the program itself; an empty snapshot does not prove it is
+idle. The saved `started_at` is dispatch evidence, not a measured process start.
+The actual `network_policy` is included in progress and command-style results;
+no current-directory value is inferred. File/repository tool evidence trailers
+are excluded from the live terminal view.
 
 ## Configuration ownership
 

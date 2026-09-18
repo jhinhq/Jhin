@@ -46,4 +46,9 @@ def test_connector_origin_allowlist_is_exact_and_dev_only() -> None:
             ]
             == DEV_CONNECTOR_ORIGINS
         )
-    assert "JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS" not in json.dumps(production)
+    for name, service in production["services"].items():
+        environment = service.get("environment", {})
+        if name in recipients:
+            assert environment["JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS"] == ""
+        else:
+            assert "JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS" not in environment

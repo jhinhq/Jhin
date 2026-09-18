@@ -198,7 +198,7 @@ def test_the_public_callbacks_declare_no_error_body() -> None:
         for route in oauth_public_router.routes
         if getattr(route, "path", "").endswith("callback")
     ]
-    assert len(callbacks) == 2
+    assert len(callbacks) == 3
     for route in callbacks:
         assert route.status_code == 303, route.path  # type: ignore[attr-defined]
         assert route.response_model is None, route.path  # type: ignore[attr-defined]

@@ -217,7 +217,9 @@ async def test_untyped_provider_failure_is_redacted_and_has_no_raw_cause(
         async def fail_request(*_args: Any, **_kwargs: Any) -> Any:
             raise RuntimeError(f"provider reflected {secret}")
 
-        monkeypatch.setattr(reasoning_module, "execute_step", fail_request)
+        # Fail the provider request used by both current generation and the
+        # legacy adapter path, rather than patching a removed runtime alias.
+        monkeypatch.setattr(phase9_world.client, "generate", fail_request)
 
     with pytest.raises(ApplicationError) as error:
         await phase9_world.reasoning.reason_agent_step_activity(phase9_world.params)
@@ -235,6 +237,9 @@ async def test_model_client_close_failure_is_redacted_and_does_not_replace_resul
 ) -> None:
     secret = "provider-close-secret"
     get_redactor().register(secret)
+    # This test isolates client close after a successful plain reply; evidence
+    # review of a tool-free answer has its own two-attempt coverage.
+    phase9_world.params.advertised_tools = []
     phase9_world.client.responses.append(
         _response().model_copy(update={"finish_reason": "stop", "tool_calls": ()})
     )

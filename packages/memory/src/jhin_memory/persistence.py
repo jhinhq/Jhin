@@ -16,8 +16,9 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from jhin_db.models import Agent, AgentTeamMembership, Conversation, MemoryRecord, Message, Task
+from jhin_db.models import Conversation, MemoryRecord, Message, Task
 from jhin_domain import (
+    ActorType,
     MemoryScope,
     MemorySensitivity,
     MemoryStatus,
@@ -29,6 +30,7 @@ from jhin_memory.adjudication import (
     PairAdjudicator,
 )
 from jhin_memory.policy import content_hash, evaluate_candidate, normalize_subject
+from jhin_memory.screening import screen_content, unsafe_metadata
 from jhin_memory.similarity import compare_contents
 from jhin_memory.types import (
     ActorFacts,
@@ -37,8 +39,10 @@ from jhin_memory.types import (
     MemoryDecision,
     SourceFacts,
     SourceRef,
+    StorageDecision,
 )
 from jhin_memory.vector import store_embedding_vector
+from jhin_secrets.intake import redact_legacy_text
 
 # Rows considered when deduplicating / detecting contradictions in one scope.
 _EXISTING_LIMIT = 500
@@ -93,23 +97,9 @@ class ApplyResult:
 
 
 async def agent_team_ids(session: AsyncSession, workspace_id: UUID, agent_id: UUID) -> list[UUID]:
-    """Every team the agent belongs to: primary team plus memberships."""
-    ids: list[UUID] = []
-    primary = await session.scalar(
-        select(Agent.team_id).where(Agent.id == agent_id, Agent.workspace_id == workspace_id)
-    )
-    if primary is not None:
-        ids.append(primary)
-    rows = await session.scalars(
-        select(AgentTeamMembership.team_id).where(
-            AgentTeamMembership.workspace_id == workspace_id,
-            AgentTeamMembership.agent_id == agent_id,
-        )
-    )
-    for team_id in rows:
-        if team_id not in ids:
-            ids.append(team_id)
-    return ids
+    from jhin_db.memberships import active_team_ids
+
+    return await active_team_ids(session, workspace_id, agent_id)
 
 
 async def derive_source_facts(
@@ -184,9 +174,9 @@ async def derive_source_facts(
         # Team-scoped proposals still need *a* team to land in; the agent's
         # primary team is the only deterministic choice. Non-amplification is
         # enforced separately through ``visibility``.
-        team_id = await session.scalar(
-            select(Agent.team_id).where(Agent.id == agent_id, Agent.workspace_id == workspace_id)
-        )
+        from jhin_db.memberships import primary_team_id
+
+        team_id = await primary_team_id(session, workspace_id, agent_id)
 
     return SourceFacts(
         workspace_id=workspace_id,
@@ -224,14 +214,11 @@ async def _shared_team_for_task(
         counterpart_id = UUID(counterpart_raw)
     except ValueError:
         return None
-    assigned_team = await session.scalar(
-        select(Agent.team_id).where(
-            Agent.id == task.assigned_agent_id, Agent.workspace_id == workspace_id
-        )
-    )
-    counterpart_team = await session.scalar(
-        select(Agent.team_id).where(Agent.id == counterpart_id, Agent.workspace_id == workspace_id)
-    )
+    from jhin_db.memberships import primary_team_id
+
+    assigned_team = await primary_team_id(session, workspace_id, task.assigned_agent_id)
+    counterpart_team = await primary_team_id(session, workspace_id, counterpart_id)
+
     if assigned_team is not None and assigned_team == counterpart_team:
         return assigned_team
     return None
@@ -284,6 +271,7 @@ async def apply_candidates(
     agent_name: str = "",
     adjudicator: PairAdjudicator | None = None,
     max_adjudicated_pairs: int = MAX_APPLY_ADJUDICATED_PAIRS,
+    require_evidence: bool = False,
 ) -> ApplyResult:
     """Run policy over ``candidates`` and persist the survivors.
 
@@ -306,6 +294,28 @@ async def apply_candidates(
     pair_budget = max_adjudicated_pairs if adjudicator is not None else 0
 
     for index, candidate in enumerate(candidates):
+        candidate_actor = actor
+        capture_evidence = None
+        if candidate.capture_class is not None:
+            from jhin_memory.capture import resolve_capture_actor
+            from jhin_memory.evidence import candidate_evidence
+
+            # Screen before any classifier, evidence expansion or external I/O.
+            screened = screen_content(candidate.content)
+            if not screened.rejected and not unsafe_metadata(candidate.subject, candidate.tags):
+                capture_evidence = await candidate_evidence(session, candidate, source)
+                candidate_actor = await resolve_capture_actor(
+                    session, candidate, source, actor, capture_evidence, now=now
+                )
+            # Naming a standing policy class is an explicit request to use that
+            # authority. Revocation must never fall back to ambient visibility.
+            if candidate_actor.capture_policy_id is None:
+                result.decisions.append(
+                    MemoryDecision(
+                        candidate=candidate, outcome="reject", reasons=("capture_not_authorized",)
+                    )
+                )
+                continue
         vector: Sequence[float] | None = None
         if candidate_embeddings is not None and index < len(candidate_embeddings):
             vector = candidate_embeddings[index]
@@ -313,7 +323,7 @@ async def apply_candidates(
         # Pre-resolve the target scope so the existing set can be loaded;
         # the policy re-derives it and may still reject.
         scope = candidate.requested_scope
-        scope_id = (
+        scope_id = candidate.scope_id or (
             source.agent_id
             if scope is MemoryScope.AGENT
             else source.team_id
@@ -330,12 +340,35 @@ async def apply_candidates(
         decision = evaluate_candidate(
             candidate,
             source,
-            actor,
+            candidate_actor,
             [_as_existing(r) for r in existing_rows],
             candidate_embedding=vector,
             embedding_model=embedding_model,
             agent_name=agent_name,
         )
+        evidence = capture_evidence or (
+            {"kind": "platform_derived"} if actor.authored_by_platform else None
+        )
+        if (
+            decision.outcome != "reject"
+            and require_evidence
+            and not (
+                actor.explicit
+                and actor.actor_type is ActorType.USER
+                and not actor.authored_by_model
+            )
+            and not actor.authored_by_platform
+        ):
+            from jhin_memory.evidence import candidate_evidence
+
+            evidence = await candidate_evidence(session, candidate, source)
+            if evidence is None:
+                result.decisions.append(
+                    MemoryDecision(
+                        candidate=candidate, outcome="reject", reasons=("unsupported_claim",)
+                    )
+                )
+                continue
         if (
             adjudicator is not None
             and pair_budget > 0
@@ -380,7 +413,7 @@ async def apply_candidates(
                     decision = evaluate_candidate(
                         candidate,
                         source,
-                        actor,
+                        candidate_actor,
                         [_as_existing(r) for r in existing_rows],
                         candidate_embedding=vector,
                         embedding_model=embedding_model,
@@ -422,7 +455,9 @@ async def apply_candidates(
 
         tags = list(candidate.tags)
         if previous is not None:
-            tags = list(dict.fromkeys([*previous.tags_json, *tags]))
+            tags = list(
+                dict.fromkeys([*(redact_legacy_text(tag) for tag in previous.tags_json), *tags])
+            )
 
         record = MemoryRecord(
             workspace_id=source.workspace_id,
@@ -430,11 +465,21 @@ async def apply_candidates(
             scope_id=decision.scope_id,
             kind=candidate.kind.value,
             subject=normalize_subject(candidate.subject)
-            or (previous.subject if previous is not None else None),
+            or (
+                redact_legacy_text(previous.subject)
+                if previous is not None and previous.subject
+                else None
+            ),
             content=decision.content,
             content_hash=decision.content_hash,
             source_conversation_id=source.ref.conversation_id,
-            source_message_id=source.ref.message_id,
+            source_message_id=(
+                UUID(evidence["message_id"])
+                if candidate.capture_class
+                and evidence
+                and evidence.get("kind") == "human_statement"
+                else source.ref.message_id
+            ),
             source_task_id=source.ref.task_id,
             source_event_id=source.ref.event_id,
             visibility=decision.visibility.value,
@@ -456,7 +501,24 @@ async def apply_candidates(
             supersedes_id=previous.id if previous is not None else None,
             created_by_type=actor.actor_type.value,
             created_by_id=actor.actor_id,
-            policy_json=decision.evidence(),
+            policy_json={
+                **decision.evidence(),
+                **({"evidence": evidence} if evidence else {}),
+                "storage_decision": StorageDecision(
+                    classification=candidate.capture_class,
+                    scope=decision.scope,
+                    scope_id=decision.scope_id,
+                    reason=decision.reasons[-1],
+                    source_message_id=(
+                        UUID(evidence["message_id"])
+                        if evidence and evidence.get("kind") == "human_statement"
+                        else None
+                    ),
+                    authority_id=candidate_actor.capture_policy_id,
+                    sensitivity=decision.sensitivity,
+                    confidence=candidate.confidence,
+                ).model_dump(mode="json"),
+            },
         )
         if previous is not None:
             previous.status = MemoryStatus.SUPERSEDED.value
@@ -506,13 +568,19 @@ async def create_version(
     now: datetime | None = None,
 ) -> MemoryRecord:
     """Edit = new immutable version; the previous one becomes superseded."""
+    screened = screen_content(content)
+    if screened.rejected or unsafe_metadata(subject, tags or ()):
+        raise ValueError("Keep credentials out of memory")
+    content = screened.content
     now = now or datetime.now(UTC)
     new = MemoryRecord(
         workspace_id=previous.workspace_id,
         scope=previous.scope,
         scope_id=previous.scope_id,
         kind=kind or previous.kind,
-        subject=normalize_subject(subject) if subject is not None else previous.subject,
+        subject=normalize_subject(subject)
+        if subject is not None
+        else (redact_legacy_text(previous.subject) if previous.subject else None),
         content=content,
         content_hash=content_hash(content),
         source_conversation_id=previous.source_conversation_id,
@@ -520,10 +588,12 @@ async def create_version(
         source_task_id=previous.source_task_id,
         source_event_id=previous.source_event_id,
         visibility=previous.visibility,
-        sensitivity=previous.sensitivity,
+        sensitivity=MemorySensitivity.REDACTED.value if screened.redacted else previous.sensitivity,
         confidence=previous.confidence if confidence is None else confidence,
         importance=previous.importance if importance is None else importance,
-        tags_json=list(tags) if tags is not None else list(previous.tags_json),
+        tags_json=list(tags)
+        if tags is not None
+        else [redact_legacy_text(tag) for tag in previous.tags_json],
         status=(
             MemoryStatus.PROPOSED.value
             if previous.status == MemoryStatus.PROPOSED.value

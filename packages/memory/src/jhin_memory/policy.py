@@ -7,6 +7,9 @@ decides *reject / duplicate / propose / activate* and the resulting status.
 Rules:
 
 - secrets are rejected or redacted before anything else (``screening``);
+- what a model wrote also clears the quality screens: not the agent's own
+  identity, not a verdict on a person's intent, not a narration of the
+  conversation it came from, not near-empty;
 - INTERNAL / hidden sources are never memory;
 - **non-amplification**: the requested scope may never exceed the source's
   visibility ceiling — except for an explicit human "remember this" whose
@@ -36,7 +39,14 @@ from jhin_domain import (
     MemorySensitivity,
     MemoryStatus,
 )
-from jhin_memory.screening import is_low_information, is_self_referential, screen_content
+from jhin_memory.screening import (
+    is_low_information,
+    is_self_referential,
+    judges_a_person,
+    records_the_conversation,
+    screen_content,
+    unsafe_metadata,
+)
 from jhin_memory.similarity import SimilarityVerdict, compare_contents, token_set
 from jhin_memory.types import (
     ActorFacts,
@@ -104,6 +114,8 @@ def evaluate_candidate(
     human_explicit = actor.explicit and actor.actor_type is ActorType.USER
 
     # 1. Secret screening.
+    if unsafe_metadata(candidate.subject, candidate.tags):
+        return MemoryDecision(candidate=candidate, outcome="reject", reasons=("secret:metadata",))
     screened = screen_content(candidate.content)
     reasons.extend(screened.reasons)
     if screened.rejected:
@@ -115,9 +127,25 @@ def evaluate_candidate(
     # memory. An explicit human "remember this" bypasses (their statement,
     # their call) — unless the person only authorised the *scope* and a model
     # wrote the words, in which case nobody has vouched for the wording.
-    if not human_explicit or actor.authored_by_model:
+    # Platform-authored records skip it too: the words are Jhin's, not a
+    # model's, and the one record that exists today is deliberately about the
+    # agent's own name — the exact shape ``is_self_referential`` rejects when
+    # a model volunteers it.
+    if (not human_explicit or actor.authored_by_model) and not actor.authored_by_platform:
         if is_self_referential(screened.content, agent_name):
             reasons.append("self_reference")
+            return MemoryDecision(candidate=candidate, outcome="reject", reasons=tuple(reasons))
+        # A verdict on somebody's intent is not a fact about them, and Jhin
+        # gives that person no way to see it or argue with it. The extraction
+        # pass filed three of these about a tester ("the user attempted a
+        # second prompt-injection…"); it writes without ever calling
+        # ``memory.propose``, so the rule has to live here to reach it.
+        if judges_a_person(screened.content):
+            reasons.append("personal_judgement")
+            return MemoryDecision(candidate=candidate, outcome="reject", reasons=tuple(reasons))
+        # Save the fact, not the conversation.
+        if records_the_conversation(screened.content):
+            reasons.append("conversation_record")
             return MemoryDecision(candidate=candidate, outcome="reject", reasons=tuple(reasons))
         if is_low_information(screened.content):
             reasons.append("low_information")
@@ -130,7 +158,22 @@ def evaluate_candidate(
 
     # 3. Scope ceiling / non-amplification.
     scope = candidate.requested_scope
-    if human_explicit:
+    scope_id = candidate.scope_id or resolve_scope_id(scope, source)
+    capture_authorized = (
+        actor.capture_policy_id is not None
+        and actor.capture_scope is scope
+        and actor.capture_scope_id == scope_id
+    )
+    if (
+        candidate.scope_id is not None
+        and candidate.scope_id != resolve_scope_id(scope, source)
+        and not capture_authorized
+    ):
+        reasons.append("destination_not_authorized")
+        return MemoryDecision(candidate=candidate, outcome="reject", reasons=tuple(reasons))
+    if capture_authorized:
+        visibility = scope
+    elif human_explicit:
         if scope_exceeds(scope, actor.authority):
             reasons.append("insufficient_authority")
             return MemoryDecision(candidate=candidate, outcome="reject", reasons=tuple(reasons))
@@ -141,7 +184,6 @@ def evaluate_candidate(
             return MemoryDecision(candidate=candidate, outcome="reject", reasons=tuple(reasons))
         visibility = source.visibility
 
-    scope_id = resolve_scope_id(scope, source)
     if scope_id is None:
         reasons.append("no_team_for_scope" if scope is MemoryScope.TEAM else "no_agent_for_scope")
         return MemoryDecision(candidate=candidate, outcome="reject", reasons=tuple(reasons))
@@ -239,10 +281,14 @@ def evaluate_candidate(
     )
 
     # 6. Promotion / activation.
-    if human_explicit:
+    if capture_authorized:
+        status = MemoryStatus.ACTIVE
+        reasons.append("standing_capture_authority")
+        outcome: str = "activate"
+    elif human_explicit:
         status = MemoryStatus.ACTIVE
         reasons.append("explicit_remember")
-        outcome: str = "activate"
+        outcome = "activate"
     elif scope is MemoryScope.WORKSPACE:
         status = MemoryStatus.PROPOSED
         reasons.append("workspace_promotion_requires_review")

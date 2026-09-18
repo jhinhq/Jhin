@@ -9,7 +9,7 @@ from collections.abc import Iterator
 import pytest
 import structlog
 
-from jhin_observability import configure_json_logging
+from jhin_observability import LOG_SCHEMA_VERSION, configure_json_logging
 from jhin_secrets.crypto import (
     EncryptedPayload,
     MasterKey,
@@ -128,9 +128,17 @@ def restore_logging_globals() -> Iterator[None]:
         structlog.configure(**original_structlog_config)
 
 
-def test_load_master_key_env_fallback_emits_safe_json_v1(
+def test_load_master_key_env_fallback_emits_safe_json(
     capsys: pytest.CaptureFixture[str], restore_logging_globals: None
 ) -> None:
+    """The whole line, and nothing in it that could carry the key.
+
+    The schema version is asserted through ``LOG_SCHEMA_VERSION`` rather than
+    written out: what this test is for is that the line is *exactly* these
+    fields and that none of them holds the material, and pinning the number
+    here only means this file fails the next time the log contract moves for
+    a reason that has nothing to do with master keys.
+    """
     material = base64.b64encode(stdlib_secrets.token_bytes(32)).decode()
     configure_json_logging(service="secrets-test", environment="test", level="WARNING")
 
@@ -144,7 +152,7 @@ def test_load_master_key_env_fallback_emits_safe_json_v1(
         "event": "security.master_key_env_source",
         "level": "warning",
         "logger": "jhin_secrets.crypto",
-        "schema_version": 1,
+        "schema_version": LOG_SCHEMA_VERSION,
         "service": "secrets-test",
         "timestamp": record["timestamp"],
     }

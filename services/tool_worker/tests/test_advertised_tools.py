@@ -22,6 +22,7 @@ from jhin_domain import ConnectionStatus, new_uuid7
 from jhin_observability import ObservabilityRuntime, noop_metrics, noop_tracer
 from jhin_policy import RiskLevel, ToolDefinition
 from jhin_tool_worker.activities import ToolActivities
+from jhin_tool_worker.drain import RUNTIME_SHUTDOWN_BUDGET_SECONDS
 from jhin_tool_worker.resources import ToolWorkerResources
 from jhin_tool_worker.settings import ToolWorkerSettings
 from jhin_tools import TOOL_AFTER_CLAIM, ToolCatalog, ToolExecutionContext
@@ -573,7 +574,7 @@ async def test_main_closes_resources_after_post_acquisition_construction_failure
     assert resources.runtime.metrics is metrics
     assert resources.runtime.tracer is tracer
     assert resources.close_count == 1
-    assert shutdowns == [5_000]
+    assert shutdowns == [int(RUNTIME_SHUTDOWN_BUDGET_SECONDS * 1_000)]
 
 
 @pytest.mark.asyncio
@@ -680,3 +681,234 @@ async def test_a_grant_pinned_to_a_missing_or_disabled_connection_is_not_adverti
             )
         )
     assert len(grants) == 3  # advertisement narrowed; nothing was revoked
+
+
+@pytest.mark.parametrize(
+    ("pin", "deny_first", "expected_names"),
+    [
+        (None, False, {"First sandbox", "Second sandbox"}),
+        ("first", False, {"First sandbox"}),
+        (None, True, {"Second sandbox"}),
+        (None, "narrow", {"First sandbox", "Second sandbox"}),
+        ("*", False, {"First sandbox", "Second sandbox"}),
+        (["first"], False, {"First sandbox"}),
+    ],
+)
+async def test_cli_hints_resolve_connections_admitted_by_live_grants(
+    advertised_world: _AdvertisedWorld,
+    pin: str | list[str] | None,
+    deny_first: bool | str,
+    expected_names: set[str],
+) -> None:
+    """A work-request child with an unpinned CLI grant can name its sandbox.
+
+    Other connector types, workspaces, and inactive connections are never
+    candidates, and a connection denied to this agent cannot be disclosed.
+    """
+    from jhin_connectors import build_default_catalog
+
+    world = advertised_world
+    world.activities._catalog = build_default_catalog()
+    async with world.sessions() as session:
+        foreign = Workspace(name="Other", slug=f"other-{new_uuid7().hex[:8]}")
+        session.add(foreign)
+        await session.flush()
+        connections = [
+            Connection(
+                workspace_id=foreign.id if name == "Foreign sandbox" else world.workspace.id,
+                connector_type=connector_type,
+                name=name,
+                auth_type="none" if connector_type == "cli" else "token",
+                status=status,
+                config_json={},
+            )
+            for name, connector_type, status in (
+                ("First sandbox", "cli", "active"),
+                ("Second sandbox", "cli", "active"),
+                ("Disabled sandbox", "cli", "disabled"),
+                ("Failed sandbox", "cli", "error"),
+                ("Expired sandbox", "cli", "needs_reauth"),
+                ("Foreign sandbox", "cli", "active"),
+                ("GitHub", "github", "active"),
+            )
+        ]
+        session.add_all(connections)
+        await session.flush()
+        first_id = str(connections[0].id)
+        scope: dict[str, Any] = {}
+        if pin is not None:
+            scope["connection_id"] = (
+                [first_id] if isinstance(pin, list) else first_id if pin == "first" else pin
+            )
+        for name in ("cli.test.run", "cli.file.read"):
+            session.add(
+                AgentCapabilityGrant(
+                    workspace_id=world.workspace.id,
+                    agent_id=world.agent.id,
+                    capability=name,
+                    scope_json=scope,
+                    effect="allow",
+                )
+            )
+            if deny_first:
+                denied_scope = {"connection_id": first_id}
+                if deny_first == "narrow":
+                    denied_scope = (
+                        {"path": "private/*"} if name == "cli.file.read" else {"command": "rm *"}
+                    )
+                session.add(
+                    AgentCapabilityGrant(
+                        workspace_id=world.workspace.id,
+                        agent_id=world.agent.id,
+                        capability=name,
+                        scope_json=denied_scope,
+                        effect="deny",
+                    )
+                )
+        # Checkout requires an explicit connection+repository scope. Merely
+        # finding an active sandbox must not make this malformed grant usable.
+        session.add(
+            AgentCapabilityGrant(
+                workspace_id=world.workspace.id,
+                agent_id=world.agent.id,
+                capability="cli.repository.checkout",
+                scope_json={},
+                effect="allow",
+            )
+        )
+        await session.commit()
+
+    task = await world.add_task(metadata_json={"work_request": {"request_id": str(new_uuid7())}})
+    advertised = await world.activities.resolve_advertised_tools_activity(
+        ResolveAdvertisedToolsInput(
+            workspace_id=str(world.workspace.id), agent_id=str(world.agent.id), task_id=str(task.id)
+        )
+    )
+    by_name = {tool.name: tool for tool in advertised}
+    assert "cli.repository.checkout" not in by_name
+    for tool_name in ("cli.test.run", "cli.file.read"):
+        description = by_name[tool_name].description
+        for connection in connections:
+            if connection.name in expected_names:
+                assert f"{connection.name} (cli)" in description
+                assert f"connection_id={connection.id}" in description
+            else:
+                assert str(connection.id) not in description
+    # Resolving prompt context never rewrites the grants.
+    async with world.sessions() as session:
+        grants = list(
+            await session.scalars(
+                select(AgentCapabilityGrant).where(
+                    AgentCapabilityGrant.agent_id == world.agent.id,
+                    AgentCapabilityGrant.capability == "cli.test.run",
+                    AgentCapabilityGrant.effect == "allow",
+                )
+            )
+        )
+    assert len(grants) == 1 and grants[0].scope_json == scope
+
+
+@pytest.mark.parametrize(
+    ("auth_type", "expected"),
+    [
+        ("management_token", {"supabase.project.read"}),
+        ("postgres", {"supabase.database.read"}),
+        ("unsupported", set()),
+    ],
+)
+async def test_connection_hints_only_offer_tools_supported_by_native_auth(
+    advertised_world: _AdvertisedWorld, auth_type: str, expected: set[str]
+) -> None:
+    from jhin_connectors import build_default_catalog
+
+    world = advertised_world
+    world.activities._catalog = build_default_catalog()
+    async with world.sessions() as session:
+        connection = Connection(
+            workspace_id=world.workspace.id,
+            connector_type="supabase",
+            name="Supabase",
+            auth_type=auth_type,
+            config_json={},
+        )
+        session.add(connection)
+        await session.flush()
+        for name in ("supabase.project.read", "supabase.database.read"):
+            scope = {"connection_id": str(connection.id), "project_ref": "test-project"}
+            if name == "supabase.database.read":
+                scope["schema"] = "public"
+            session.add(
+                AgentCapabilityGrant(
+                    workspace_id=world.workspace.id,
+                    agent_id=world.agent.id,
+                    capability=name,
+                    scope_json=scope,
+                    effect="allow",
+                )
+            )
+        await session.commit()
+    names = await world.advertised()
+    assert {name for name in names if name.startswith("supabase.")} == expected
+
+
+@pytest.mark.parametrize(
+    ("effect", "tool_scope", "expected"),
+    [
+        ("allow", "echo", {"mcp.demo.echo"}),
+        ("allow", "missing", set()),
+        ("deny", "echo", {"mcp.demo.list_projects"}),
+    ],
+)
+async def test_dynamic_advertisement_matches_fixed_tool_scope(
+    advertised_world: _AdvertisedWorld, effect: str, tool_scope: str, expected: set[str]
+) -> None:
+    from jhin_connectors import build_default_catalog
+    from jhin_connectors.mcp import DISCOVERY_KEY
+
+    world = advertised_world
+    world.activities._catalog = build_default_catalog()
+    async with world.sessions() as session:
+        session.add(
+            Connection(
+                workspace_id=world.workspace.id,
+                connector_type="mcp",
+                name="Demo",
+                auth_type="none",
+                config_json={
+                    "server_slug": "demo",
+                    "server_url": "https://mcp.example.invalid/mcp",
+                    DISCOVERY_KEY: [
+                        {
+                            "name": name,
+                            "slug": name,
+                            "description": name,
+                            "input_schema": {"type": "object"},
+                            "annotations": {"read_only_hint": True},
+                            "derived_risk": "read",
+                        }
+                        for name in ("echo", "list_projects")
+                    ],
+                },
+            )
+        )
+        session.add(
+            AgentCapabilityGrant(
+                workspace_id=world.workspace.id,
+                agent_id=world.agent.id,
+                capability="mcp.demo.*",
+                scope_json={"tool": tool_scope},
+                effect=effect,
+            )
+        )
+        if effect == "deny":
+            session.add(
+                AgentCapabilityGrant(
+                    workspace_id=world.workspace.id,
+                    agent_id=world.agent.id,
+                    capability="mcp.demo.*",
+                    scope_json={},
+                    effect="allow",
+                )
+            )
+        await session.commit()
+    assert {name for name in await world.advertised() if name.startswith("mcp.")} == expected

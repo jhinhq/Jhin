@@ -46,6 +46,20 @@ GIT_ADJACENT_PATHS = [
 
 
 class TestDeclarations:
+    def test_command_scope_cannot_register_without_its_validator(self) -> None:
+        from jhin_tools.builtin import ToolCatalog
+
+        definition, executor = next(
+            pair for pair in CLI_TOOLS if pair[0].name == "cli.command.execute"
+        )
+        assert definition.defers_scope
+        catalog = ToolCatalog()
+        with pytest.raises(ValueError, match="requires a validator"):
+            catalog.register(definition, executor)
+        assert catalog.get(definition.name) is None
+        default = build_default_catalog()
+        assert default.validator_for(definition.name) is not None
+
     def test_every_capability_is_registered_in_the_default_catalog(self) -> None:
         catalog = build_default_catalog()
         names = {definition.name for definition in catalog.definitions()}

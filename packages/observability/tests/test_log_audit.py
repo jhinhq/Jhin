@@ -138,6 +138,44 @@ def test_poller_health_allows_only_closed_protocol_prints(tmp_path: Path) -> Non
     assert audit.audit_paths((source,)) == []
 
 
+def test_subprocess_json_reply_exceptions_remain_exact(tmp_path: Path) -> None:
+    audit = _load_audit()
+    source = tmp_path / "packages/media/src/jhin_media/file_extract.py"
+    source.parent.mkdir(parents=True)
+    valid = (
+        "import json\nfrom dataclasses import asdict\n"
+        "def main():\n"
+        ' print(json.dumps({"result": asdict(result)}, ensure_ascii=True))\n'
+    )
+    source.write_text(valid)
+    assert audit.audit_paths((source,)) == []
+    for invalid in (
+        valid.replace('"result": asdict(result)', '"secret": secret'),
+        valid.replace("ensure_ascii=True)", "ensure_ascii=True), file=sys.stderr"),
+        valid.replace("def main", "def other"),
+        valid + "json = other\n",
+        valid + "json.dumps = other\n",
+        valid + "print = other\n",
+        valid + "print('diagnostic')\n",
+    ):
+        source.write_text(invalid)
+        assert "direct_print" in _failure_codes(audit.audit_paths((source,)))
+    unrelated = tmp_path / "unrelated.py"
+    unrelated.write_text(valid)
+    assert "direct_print" in _failure_codes(audit.audit_paths((unrelated,)))
+
+    source = tmp_path / "services/sandbox_runner/src/jhin_sandbox_runner/workspace_script.py"
+    source.parent.mkdir(parents=True)
+    valid = (
+        'import json\nif __name__ == "__main__":\n'
+        ' print(json.dumps({"ok": True, "data": execute(request)}, separators=(",", ":")))\n'
+    )
+    source.write_text(valid)
+    assert audit.audit_paths((source,)) == []
+    source.write_text(valid.replace('__name__ == "__main__"', "True"))
+    assert "direct_print" in _failure_codes(audit.audit_paths((source,)))
+
+
 def test_poller_health_rejects_print_near_misses(tmp_path: Path) -> None:
     audit = _load_audit()
     source = tmp_path / "packages/workflows/src/jhin_workflows/poller_health.py"
@@ -1154,6 +1192,7 @@ def test_every_entrypoint_uses_one_runtime_bootstrap_and_only_rootless_logs_dire
         "apps/api/src/jhin_api/main.py": ["api"],
         "services/agent_worker/src/jhin_agent_worker/main.py": ["agent-worker"],
         "services/tool_worker/src/jhin_tool_worker/main.py": ["tool-worker"],
+        "services/tool_worker/src/jhin_tool_worker/runtime_gateway.py": ["runtime-gateway"],
         "services/event_worker/src/jhin_event_worker/main.py": ["event-worker"],
         "services/workflow_worker/src/jhin_workflow_worker/main.py": ["workflow-worker"],
         "services/sandbox_runner/src/jhin_sandbox_runner/main.py": [

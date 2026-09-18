@@ -22,12 +22,13 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from jhin_api.connections.schemas import ConnectionOut
 
 #: How the connect panel should proceed for one connector.
 ConnectMethod = Literal[
+    "composio",
     "oauth_discovery",
     "oauth_static",
     "device_code",
@@ -35,7 +36,7 @@ ConnectMethod = Literal[
     "api_key",
 ]
 
-RegistrationSource = Literal["dcr", "manual", "static"]
+RegistrationSource = Literal["dcr", "manual", "static", "composio"]
 TokenEndpointAuthMethod = Literal["none", "client_secret_post", "client_secret_basic"]
 
 #: Why one sign-in flow cannot start, from Jhin's own vocabulary. Empty when
@@ -87,12 +88,15 @@ class OAuthRedirectOut(BaseModel):
     github_app_permissions: dict[str, str]
     #: Which flow Connect offers first for a native provider that can do both.
     preferred_sign_in: Literal["redirect", "device_code"]
+    composio: dict[str, Any] | None = None
 
 
 class OAuthProbeIn(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid", str_strip_whitespace=True)
 
     connector_type: str = Field(min_length=1, max_length=50)
+    #: Managed sign-in is selected explicitly; direct sign-in is the default.
+    provider_key: Literal["composio"] | None = None
     #: Required when ``connector_type`` is ``mcp``: the server to ask.
     server_url: str | None = Field(default=None, max_length=2000)
 
@@ -142,6 +146,7 @@ class OAuthStartIn(BaseModel):
 
 
 class OAuthStartOut(BaseModel):
+    _composio_state: str | None = PrivateAttr(default=None)
     """Everything the browser needs to leave, and nothing it should not have."""
 
     #: The provider URL to navigate to. Carries ``client_id``, ``state``, the

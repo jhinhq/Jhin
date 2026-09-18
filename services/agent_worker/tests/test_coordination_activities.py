@@ -76,8 +76,10 @@ def test_the_lifted_side_comes_from_the_tool_that_ran() -> None:
     responder's is limited by its validator to the request's target."""
     accepted = {"work_request_id": "r", "created_task_id": "t", "agent_id": "a"}
     asked = work_request_start_from_output(accepted, tool_name=_REQUEST)
+    editorial = work_request_start_from_output(accepted, tool_name="ghost.review.request")
     answered = work_request_start_from_output(accepted, tool_name=_RESPOND)
     assert asked is not None and asked.side == WORK_REQUEST_SIDE_REQUESTER
+    assert editorial == asked
     assert answered is not None and answered.side == WORK_REQUEST_SIDE_RESPONDER
 
 

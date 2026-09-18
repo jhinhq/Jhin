@@ -255,6 +255,50 @@ function renderPage(role: "owner" | "member" = "owner") {
 }
 
 describe("ModelsPage", () => {
+  it("updates provider examples on selection without overwriting the draft", async () => {
+    installServer();
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: /Add provider/ }));
+    const dialog = await screen.findByRole("dialog", { name: "Add model provider" });
+    const type = within(dialog).getByLabelText("Provider type");
+    const name = within(dialog).getByLabelText("Display name") as HTMLInputElement;
+    const url = within(dialog).getByLabelText(/^Base URL/) as HTMLInputElement;
+    const key = dialog.querySelector('input[type="password"]') as HTMLInputElement;
+    fireEvent.change(name, { target: { value: "My endpoint" } });
+    fireEvent.change(url, { target: { value: "https://models.example.test/v1" } });
+    fireEvent.change(key, { target: { value: "test-only-key" } });
+    fireEvent.change(type, { target: { value: "anthropic" } });
+    expect(name.placeholder).toContain("Anthropic");
+    expect(url.placeholder).toContain("api.anthropic.com");
+    expect(key.placeholder).toContain("sk-ant-");
+    fireEvent.change(type, { target: { value: "ollama" } });
+    expect(name.placeholder).toContain("Ollama");
+    expect(url.placeholder).toBe("http://localhost:11434/v1");
+    expect(key.placeholder).not.toContain("sk-");
+    expect(name.value).toBe("My endpoint");
+    expect(url.value).toBe("https://models.example.test/v1");
+    expect(key.value).toBe("test-only-key");
+  });
+
+  it("updates profile examples when switching providers without replacing entered names", async () => {
+    installServer({ ollama: true });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: /New profile/ }));
+    const dialog = await screen.findByRole("dialog", { name: "New model profile" });
+    const name = within(dialog).getByLabelText(/^Profile name/) as HTMLInputElement;
+    const model = within(dialog).getByRole("combobox", { name: /^Model\b/ }) as HTMLInputElement;
+    fireEvent.change(name, { target: { value: "My research model" } });
+    fireEvent.change(model, { target: { value: "my-custom-model" } });
+    fireEvent.change(within(dialog).getByLabelText("Provider"), { target: { value: "prov-ollama" } });
+    expect(name.placeholder).not.toContain("GPT");
+    expect(model.placeholder).not.toContain("gpt-");
+    expect(name.value).toBe("My research model");
+    expect(model.value).toBe("my-custom-model");
+    fireEvent.change(within(dialog).getByLabelText("Provider"), { target: { value: "prov-1" } });
+    expect(name.placeholder).toContain("GPT");
+    expect(model.placeholder).toContain("gpt-");
+  });
+
   it("keeps the pricing machinery behind the Advanced disclosure", async () => {
     installServer();
     renderPage();

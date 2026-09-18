@@ -49,6 +49,10 @@ from jhin_workflows.work_request_task import (
     WorkRequestTaskWorkflow,
     work_request_workflow_id,
 )
+from jhin_workflows.work_request_task.shared import (
+    ACTIVITY_PREPARE_WORK_REQUEST_CONTINUATION,
+    PrepareWorkRequestContinuationInput,
+)
 
 
 @workflow.defn(name="AgentTaskWorkflow")
@@ -287,6 +291,11 @@ class WaitingAgentStubs:
         self.notes: list[NoteWorkRequestUnansweredInput] = []
         self.elapsed = timedelta()
 
+    @activity.defn(name=ACTIVITY_PREPARE_WORK_REQUEST_CONTINUATION)
+    async def prepare(self, params: PrepareWorkRequestContinuationInput) -> str:
+        self.events.append("prepare")
+        return "prepared"
+
     @activity.defn(name=ACTIVITY_RESOLVE_SNAPSHOT)
     async def resolve(self, params: AgentTaskInput) -> SnapshotResult:
         return SnapshotResult(run_id="run-1", snapshot_json="{}", snapshot_hash="h", max_steps=5)
@@ -337,7 +346,7 @@ def requester_start(agent_id: str = "target") -> WorkRequestStart:
 
 
 async def run_requester(
-    stubs: WaitingAgentStubs, child: type, *, agent_id: str = "asker"
+    stubs: WaitingAgentStubs, child: type, *, agent_id: str = "asker", existing: bool = False
 ) -> AgentTaskResult:
     """Run one requester end to end, recording how long the run took on the
     environment's skippable clock — how long the wait actually held is half
@@ -356,6 +365,7 @@ async def run_requester(
                     stubs.note,
                     stubs.answered,
                     stubs.finalize,
+                    stubs.prepare,
                 ],
             ),
             Worker(
@@ -364,6 +374,18 @@ async def run_requester(
                 activities=[stubs.advertised, stubs.cleanup],
             ),
         ):
+            if existing:
+                await env.client.start_workflow(
+                    "WorkRequestTaskWorkflow",
+                    WorkRequestTaskInput(
+                        workspace_id="ws",
+                        work_request_id=stubs.start.work_request_id,
+                        task_id=stubs.start.task_id,
+                        agent_id=stubs.start.agent_id,
+                    ),
+                    id=work_request_workflow_id(stubs.start.work_request_id),
+                    task_queue=AGENT_TASK_QUEUE,
+                )
             handle = await env.client.start_workflow(
                 AgentTaskWorkflow.run,
                 AgentTaskInput(workspace_id="ws", task_id=str(uuid.uuid4()), agent_id=agent_id),
@@ -379,33 +401,31 @@ async def run_requester(
         await env.shutdown()
 
 
-async def test_the_requester_waits_for_the_colleagues_answer() -> None:
-    """The person asked their agent to ask somebody. Sending the request and
-    ending the turn left them with a promise; the requester must have the
-    answer in hand before it reasons again, so it can reply with it."""
+async def test_requester_arms_result_continuation_and_releases_capacity_before_colleague() -> None:
     stubs = WaitingAgentStubs(requester_start())
     result = await run_requester(stubs, SlowWorkRequestTaskWorkflow)
     assert result.status == "completed"
-    assert stubs.events == ["step-0", "child", "step-1"]
+    # The abandoned child may finish while the worker/environment shuts down
+    # after the parent result. Its event does not imply the parent waited.
+    assert stubs.events[:2] == ["step-0", "prepare"]
+    assert [event for event in stubs.events if event != "child"] == ["step-0", "prepare"]
+    assert stubs.events.count("child") <= 1
     assert stubs.notes == []
-    # It really held for the colleague rather than racing past them.
-    assert stubs.elapsed >= _CHILD_WORK
+    # Use the parent's persisted close time, not shutdown-side event timing.
+    assert stubs.elapsed < _CHILD_WORK
     assert stubs.elapsed < _WORK_REQUEST_ANSWER_WAIT
 
 
-async def test_a_colleague_who_does_not_answer_in_time_is_reported_not_invented() -> None:
-    """The wait is bounded, so a run can never park forever on a colleague.
-    When it elapses the run carries on — with a mark on the task, so the next
-    step tells the person the truth instead of promising an answer."""
+async def test_hanging_colleague_does_not_hold_requesters_run_open() -> None:
     start = requester_start()
     stubs = WaitingAgentStubs(start)
     result = await run_requester(stubs, HangingWorkRequestTaskWorkflow)
     assert result.status == "completed"
-    assert stubs.events == ["step-0", "note", "step-1"]
-    assert [note.work_request_id for note in stubs.notes] == [start.work_request_id]
+    assert stubs.events == ["step-0", "prepare"]
+    assert stubs.notes == []
     # Bounded: it gave up at the wait, not at the colleague's own six-hour
     # ceiling, and the colleague keeps running abandoned either way.
-    assert _WORK_REQUEST_ANSWER_WAIT <= stubs.elapsed < 2 * _WORK_REQUEST_ANSWER_WAIT
+    assert stubs.elapsed < _WORK_REQUEST_ANSWER_WAIT
 
 
 async def test_the_responder_never_waits_on_the_task_it_just_accepted() -> None:
@@ -444,26 +464,10 @@ async def test_a_requester_that_owns_the_created_task_does_not_wait_either() -> 
     assert stubs.elapsed < _WORK_REQUEST_ANSWER_WAIT
 
 
-async def test_stopping_the_run_releases_the_wait() -> None:
-    """A person clicking Stop must not have to wait out the colleague."""
-    stubs = WaitingAgentStubs(requester_start())
-    result = await run_requester(stubs, CancellingWorkRequestTaskWorkflow)
-    assert result.status == "cancelled"
-    # Released by the cancel and not by the timer, so the person is not made
-    # to sit through the rest of the wait for a run they already stopped.
-    assert stubs.elapsed < _WORK_REQUEST_ANSWER_WAIT
-    # A cancelled run has nothing left to tell anyone, and never reasons again.
-    assert stubs.events == ["step-0"]
-    assert stubs.notes == []
-
-
-async def test_a_repeated_start_cannot_attach_to_the_running_child() -> None:
-    """A retried tool call reports the same accepted request again. Temporal
-    has no way to await a child already running, so the second start stays
-    the no-op it always was — never a second wait, and never a hang."""
+async def test_repeated_start_attaches_durable_delivery_to_existing_child() -> None:
     start = requester_start()
     stubs = WaitingAgentStubs(start, repeat=True)
-    result = await run_requester(stubs, HangingWorkRequestTaskWorkflow)
+    result = await run_requester(stubs, HangingWorkRequestTaskWorkflow, existing=True)
     assert result.status == "completed"
-    assert stubs.events == ["step-0", "note", "step-1"]
-    assert len(stubs.notes) == 1
+    assert stubs.events == ["step-0", "prepare"]
+    assert stubs.notes == []

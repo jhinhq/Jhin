@@ -27,6 +27,7 @@ from jhin_api.memory.schemas import (
 from jhin_api.security.csrf import csrf_protect
 from jhin_db.models import MemoryRecord
 from jhin_domain import MemoryScope, MemoryStatus
+from jhin_memory.evidence import supported_record
 from jhin_observability import ObservabilityRuntime
 
 router = APIRouter(
@@ -49,7 +50,12 @@ def _embedding_deps(request: Request) -> service.EmbeddingDeps:
 
 def _out(record: MemoryRecord) -> MemoryOut:
     out = MemoryOut.model_validate(record)
-    return out.model_copy(update={"has_embedding": bool(record.embedding_json)})
+    return out.model_copy(
+        update={
+            "has_embedding": bool(record.embedding_json),
+            "evidence_status": "supported" if supported_record(record) else "unsupported",
+        }
+    )
 
 
 @router.get("")

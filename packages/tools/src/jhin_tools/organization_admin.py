@@ -63,6 +63,7 @@ from jhin_tools.directory import (
     resolve_agent_reference,
 )
 from jhin_tools.errors import ToolExecutionError
+from jhin_tools.identity import validated_agent_name
 from jhin_tools.organization import _is_subordinate
 
 ORGANIZATION_MANAGE_AGENTS_CAPABILITY = "organization.manage_agents"
@@ -238,12 +239,18 @@ async def _create_agent(ctx: ToolExecutionContext, payload: BaseModel) -> BaseMo
     data = cast(CreateAgentInput, payload)
     session = ctx.session
 
+    # The same rule the agent's own name has to clear
+    # (``jhin_policy.agent_name_problem``): this is the other place an agent
+    # writes a name that will be asserted in a system prompt and read off a
+    # roster, and one rule for both is the point of having one.
+    name = validated_agent_name(data.name)
+
     # Duplicate-name guard (also the idempotency backstop should a replayed
     # call ever reach the executor twice): one name, one agent.
     duplicate = await session.scalar(
         select(Agent).where(
             Agent.workspace_id == ctx.workspace_id,
-            func.lower(Agent.name) == data.name.strip().lower(),
+            func.lower(Agent.name) == name.lower(),
         )
     )
     if duplicate is not None:
@@ -267,7 +274,7 @@ async def _create_agent(ctx: ToolExecutionContext, payload: BaseModel) -> BaseMo
             role="manager",
         )
 
-    slug = _slugify(data.name)
+    slug = _slugify(name)
     taken = await session.scalar(
         select(Agent.id).where(Agent.workspace_id == ctx.workspace_id, Agent.slug == slug)
     )
@@ -277,7 +284,7 @@ async def _create_agent(ctx: ToolExecutionContext, payload: BaseModel) -> BaseMo
     shape, color = (
         (data.avatar_shape, cast(str, data.avatar_color).lower())
         if data.avatar_shape is not None
-        else default_shape_avatar(data.name)
+        else default_shape_avatar(name)
     )
 
     # Safe defaults everywhere else: ACTIVE status, workspace default model
@@ -285,7 +292,7 @@ async def _create_agent(ctx: ToolExecutionContext, payload: BaseModel) -> BaseMo
     # by the platform invariant — no capability grants of any kind.
     agent = Agent(
         workspace_id=ctx.workspace_id,
-        name=data.name.strip(),
+        name=name,
         slug=slug,
         role_title=data.role_title,
         description=data.description,

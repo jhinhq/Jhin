@@ -41,11 +41,19 @@ _PREPARE_RETRY = RetryPolicy(
     maximum_interval=timedelta(seconds=15),
     maximum_attempts=5,
 )
+# Under ``PHASE10_TRIGGER_SYNC_PATCH`` this activity runs on the tool worker's
+# queue, so it inherits the same argument ``_TOOL_STEP_RETRY`` makes in
+# ``jhin_workflows.agent_task``: the drain refuses instantly and asks to be
+# tried again in ten seconds, and three attempts is not enough budget to
+# survive one restart and still have a retry left for a genuinely flaky call.
+# This is the activity the drain was written for — the one that claims a
+# ``tool_call`` and then posts a comment on somebody else's system — and it
+# was the one still on three.
 _SYNC_RETRY = RetryPolicy(
     initial_interval=timedelta(seconds=2),
     backoff_coefficient=2.0,
     maximum_interval=timedelta(seconds=30),
-    maximum_attempts=3,
+    maximum_attempts=5,
 )
 
 

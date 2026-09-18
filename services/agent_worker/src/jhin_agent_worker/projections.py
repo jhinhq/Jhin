@@ -10,13 +10,14 @@ from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio import activity
 from temporalio.client import Client as TemporalClient
 from temporalio.exceptions import ApplicationError
 
 from jhin_agent_worker.coordination_activities import (
+    corpus_sync_start_from_output,
     person_question_ask_from_output,
     review_decision_from_output,
     work_request_start_from_output,
@@ -64,6 +65,7 @@ from jhin_observability import (
 )
 from jhin_secrets.redaction import redact_text
 from jhin_tools import stable_tool_invocation_id
+from jhin_tools.sanitize import invalid_tool_arguments, strict_json_loads
 from jhin_workflows.agent_task.shared import (
     ACTIVITY_COMMIT_AGENT_STEP,
     ACTIVITY_COMMIT_APPROVAL_PROJECTION,
@@ -79,6 +81,7 @@ from jhin_workflows.agent_task.shared import (
     StepResult,
     WorkRequestStart,
 )
+from jhin_workflows.blog_corpus import BlogCorpusSyncInput
 from jhin_workflows.memory_maintenance import (
     SOURCE_KIND_TASK_OUTCOME,
     MemoryMaintenanceInput,
@@ -86,6 +89,11 @@ from jhin_workflows.memory_maintenance import (
 )
 
 _MAX_ARGUMENTS_CHARS = 8_192
+_OMITTED_REJECTED_ARGUMENTS = (
+    "The rejected arguments were omitted from the tool-call history because their stored "
+    "representation was incomplete or unusable. Build a new JSON object from the tool's "
+    "declared schema; no argument wrapper is required."
+)
 _MAX_PROVIDER_TEXT_CHARS = 200
 _MAX_REASON_CHARS = 2_000
 # The backstop note for a run that produced no text (agent name + reported
@@ -143,6 +151,13 @@ _AGENT_EXECUTION_UNKNOWN_VALUE = "execution_unknown"
 _AGENT_BUDGET_VALUE = "budget"
 _AGENT_INTERNAL_VALUE = "internal"
 _FINALIZATION_VALIDATION_MEASUREMENT = 0
+#: What the failure card says when the run ended failed and carried no
+#: reason. It states the two things a person can act on — that the run is over
+#: and that it produced no explanation — rather than inventing one.
+_UNEXPLAINED_FAILURE_TEXT = (
+    "This run stopped without reporting a reason. Nothing further will happen "
+    "on it; send a new message to try again."
+)
 
 logger = get_logger(__name__)
 
@@ -158,6 +173,35 @@ class _ProjectedToolOutcome:
     risk: str | None
     approval: Approval | None
 
+    def transcript_arguments(self) -> tuple[str, bool]:
+        """Keep audit envelopes out of model argument syntax.
+
+        Only the tool worker's already-sanitized copy may be unwrapped: its
+        process can know secrets the agent worker's manifest redactor did not.
+        A lost prefix is never repaired from the manifest or parsed loosely.
+        """
+        audit = self.row.sanitized_input_json
+        if (
+            self.status == "denied"
+            and self.row.error_code == "invalid_input"
+            and set(audit) == {"_raw_arguments"}
+        ):
+            raw = audit.get("_raw_arguments")
+            if isinstance(raw, str):
+                try:
+                    arguments = strict_json_loads(raw)
+                except (TypeError, ValueError):
+                    pass
+                else:
+                    if isinstance(arguments, dict) and invalid_tool_arguments(arguments) is None:
+                        encoded = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+                        if len(encoded) <= _MAX_ARGUMENTS_CHARS:
+                            return encoded, False
+            return "{}", True
+        return json.dumps(audit, ensure_ascii=False, separators=(",", ":"))[
+            :_MAX_ARGUMENTS_CHARS
+        ], False
+
     def observation_json(self) -> str:
         if self.status == "executed":
             return json.dumps(
@@ -165,10 +209,13 @@ class _ProjectedToolOutcome:
                 ensure_ascii=False,
                 default=str,
             )
+        reason = self.decision_reason
+        if self.transcript_arguments()[1]:
+            reason += f". {_OMITTED_REJECTED_ARGUMENTS}"
         return json.dumps(
             {
                 "error": self.row.error_code or self.status,
-                "detail": self.decision_reason,
+                "detail": reason,
             },
             ensure_ascii=False,
         )
@@ -622,6 +669,13 @@ class AgentProjectionActivities:
                 non_retryable=True,
             )
         raw_work_requests = raw_result.get("work_request_starts", [])
+        raw_corpus_syncs = raw_result.get("corpus_sync_starts", [])
+        if not isinstance(raw_corpus_syncs, list):
+            raise ApplicationError(
+                "committed corpus sync starts are malformed",
+                type="step_result_malformed",
+                non_retryable=True,
+            )
         if not isinstance(raw_work_requests, list):
             raise ApplicationError(
                 "committed step work request starts are malformed",
@@ -659,6 +713,11 @@ class AgentProjectionActivities:
                 ],
                 work_request_starts=[
                     WorkRequestStart(**item) for item in raw_work_requests if isinstance(item, dict)
+                ],
+                corpus_sync_starts=[
+                    BlogCorpusSyncInput(**item)
+                    for item in raw_corpus_syncs
+                    if isinstance(item, dict)
                 ],
                 review_decisions=[
                     ReviewDecisionSignal(**item)
@@ -1160,6 +1219,7 @@ class AgentProjectionActivities:
 
             delegations: list[DelegationRequest] = []
             work_request_starts: list[WorkRequestStart] = []
+            corpus_sync_starts: list[BlogCorpusSyncInput] = []
             review_decisions: list[ReviewDecisionSignal] = []
             person_questions: list[PersonQuestionAsk] = []
             for result in projected:
@@ -1171,6 +1231,14 @@ class AgentProjectionActivities:
                 work_request = self._work_request_start(result)
                 if work_request is not None:
                     work_request_starts.append(work_request)
+                if result.status == "executed":
+                    corpus = corpus_sync_start_from_output(
+                        result.row.sanitized_output_json,
+                        tool_name=result.row.tool_name,
+                        workspace_id=str(result.row.workspace_id),
+                    )
+                    if corpus is not None:
+                        corpus_sync_starts.append(corpus)
                 decided_review = self._review_decision(result)
                 if decided_review is not None:
                     review_decisions.append(decided_review)
@@ -1206,6 +1274,7 @@ class AgentProjectionActivities:
                 waiting_review_id=waiting_review_id,
                 delegations=delegations,
                 work_request_starts=work_request_starts,
+                corpus_sync_starts=corpus_sync_starts,
                 review_decisions=review_decisions,
                 person_questions=person_questions,
                 execution_unknown_tool_call_id=execution_unknown_tool_call_id,
@@ -1294,11 +1363,7 @@ class AgentProjectionActivities:
                         "tool_call_id": str(result.row.id),
                         "provider_call_id": result.provider_call_id,
                         "tool_name": result.manifest.tool_name,
-                        "arguments_json": json.dumps(
-                            result.row.sanitized_input_json,
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        )[:_MAX_ARGUMENTS_CHARS],
+                        "arguments_json": result.transcript_arguments()[0],
                     },
                 )
                 seq = self._record_gateway_result(
@@ -2208,6 +2273,17 @@ class AgentProjectionActivities:
                 run.status = params.status
                 completed_at = datetime.now(UTC)
                 run.completed_at = completed_at
+                from jhin_db.models.timeline import ModelGeneration
+
+                await session.execute(
+                    update(ModelGeneration)
+                    .where(
+                        ModelGeneration.run_id == run.id,
+                        ModelGeneration.workspace_id == workspace_id,
+                        ModelGeneration.status == "running",
+                    )
+                    .values(status="interrupted", completed_at=completed_at)
+                )
                 run.steps_used = max(run.steps_used, params.steps_used)
                 run.error_code = effective_error_code
                 run.error_message = effective_error_message
@@ -2242,7 +2318,26 @@ class AgentProjectionActivities:
             if task is not None:
                 task.state = params.status
                 task_conversation_id = task.conversation_id
-                if effective_error_message:
+                # A failed run always gets its card, message or no message.
+                #
+                # The condition used to be the message alone, which reads as
+                # "say something when there is something to say" and is in
+                # fact "say nothing when there is nothing to say" — and a run
+                # that fails without a sentence is exactly the failure a
+                # person cannot work out for themselves. Every path that ends
+                # a run failed is supposed to carry a reason, so the empty one
+                # is a bug somewhere upstream; the transcript is not the place
+                # to discover that, because there the bug shows up as a chat
+                # that stops mid-turn with no card, no error and no way
+                # forward. This is the same hole that was closed for the run
+                # that never started, closed on the other side.
+                #
+                # Failure is the only status that gets this treatment.
+                # ``completed`` has the agent's own final message and
+                # ``cancelled`` is a thing a person just did, so neither is
+                # left unexplained by an empty error; both keep the old
+                # behaviour of speaking only when there is something to say.
+                if effective_error_message or params.status == _AGENT_FAILED_VALUE:
                     session.add(
                         Message(
                             workspace_id=workspace_id,
@@ -2254,7 +2349,11 @@ class AgentProjectionActivities:
                             recipient_id=task_id,
                             message_type="error",
                             content_json={
-                                "text": f"Run {params.status}: {effective_error_message}",
+                                "text": (
+                                    f"Run {params.status}: {effective_error_message}"
+                                    if effective_error_message
+                                    else _UNEXPLAINED_FAILURE_TEXT
+                                ),
                                 "error_code": effective_error_code,
                             },
                             visibility=MessageVisibility.VISIBLE.value,

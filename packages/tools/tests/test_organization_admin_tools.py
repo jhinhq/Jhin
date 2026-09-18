@@ -205,8 +205,8 @@ async def test_create_agent_is_approval_gated_and_seeds_collaboration_grants(
 
     # A created agent holds exactly the platform default grant set — find
     # colleagues, ask them for help, answer them, remember, ask the person
-    # it is talking to, and choose its own persona — and never delegation
-    # or any other higher-authority capability.
+    # it is talking to, choose its own persona, and set its own name — and
+    # never delegation or any other higher-authority capability.
     grants = list(
         await session.scalars(
             select(AgentCapabilityGrant).where(AgentCapabilityGrant.agent_id == connie.id)
@@ -222,6 +222,32 @@ async def test_create_agent_is_approval_gated_and_seeds_collaboration_grants(
         "memory.propose": {},
         "organization.ask_person": {},
         "organization.persona.self": {},
+        "organization.identity.self": {},
+        "variables.read": {},
+        "variables.write": {},
+        "schedules.read": {},
+        "schedules.manage": {},
+        "ghost.connection.bind": {},
+        "unsplash.connection.bind": {},
+        "ghost.post.list": {"variable_audience": True},
+        "ghost.post.read": {"variable_audience": True},
+        "ghost.draft.create": {"variable_audience": True},
+        "ghost.draft.update": {"variable_audience": True},
+        "ghost.review.request": {"variable_audience": True},
+        "ghost.review.read": {"variable_audience": True},
+        "ghost.review.decide": {"variable_audience": True},
+        "ghost.post.publish": {"variable_audience": True},
+        "ghost.assignment.create": {"variable_audience": True},
+        "ghost.assignment.read": {"variable_audience": True},
+        "ghost.assignment.revise": {"variable_audience": True},
+        "ghost.assignment.cancel": {"variable_audience": True},
+        "ghost.assignment.attach_evidence": {"variable_audience": True},
+        "ghost.archive.sync": {"variable_audience": True},
+        "ghost.archive.status": {"variable_audience": True},
+        "ghost.archive.search": {"variable_audience": True},
+        "ghost.archive.read": {"variable_audience": True},
+        "unsplash.photos.search": {"variable_audience": True},
+        "unsplash.photos.select": {"variable_audience": True},
     }
     assert "organization.delegate" not in by_capability
 

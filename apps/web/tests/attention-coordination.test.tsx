@@ -106,6 +106,11 @@ const data: Attention = {
 };
 
 describe("AttentionInbox coordination sections", () => {
+  it("links exact director evidence and does not offer a human override for Ghost publication", () => {
+    render(<AttentionInbox data={{...data,pending_reviews:[],reviews_in_progress:[{...review,reviewer_type:"agent",reviewer_agent_id:"director",evidence_json:{kind:"ghost_editorial",connection_id:"ghost1",editorial_review_id:"ed1"}}]}} canDecide isAdmin onDecide={vi.fn()} onReviewDecide={vi.fn()} now={now} />);
+    expect(screen.getByRole("link",{name:"Director review"}).getAttribute("href")).toBe("/editorial-reviews?connection=ghost1&review=ed1");
+    expect(screen.queryByRole("button",{name:"Decide instead"})).toBeNull();
+  });
   it("lists reviews and sends the verdict with feedback from the dialog", () => {
     const onReviewDecide = vi.fn();
     render(<AttentionInbox data={data} canDecide onDecide={vi.fn()} onReviewDecide={onReviewDecide} now={now} />);
@@ -300,6 +305,13 @@ describe("AttentionInbox coordination sections", () => {
       />,
     );
     expect(screen.getByText("Ran into a problem (2)")).toBeDefined();
+    // The section must not promise a control it cannot see. A retry is offered
+    // for a chat's newest turn, when nothing is running and nothing on it was
+    // left unaccounted for; a delegated task or an automation has none. So it
+    // points at the chat and lets the failure there say what it can do.
+    const blurb = screen.getByText(/These pieces of work stopped/).textContent ?? "";
+    expect(blurb).not.toContain("you won't have to retype anything");
+    expect(blurb).toContain("where a chat can try the message again, it says so on the failure");
     expect(screen.getByRole("link", { name: /Deploy broke/ }).getAttribute("href")).toBe("/chats/conv-t1");
     fireEvent.click(screen.getByRole("button", { name: "Dismiss “Deploy broke”" }));
     expect(onDismissFailure).toHaveBeenCalledWith("t1");

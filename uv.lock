@@ -859,6 +859,7 @@ dependencies = [
     { name = "jhin-db" },
     { name = "jhin-models" },
     { name = "jhin-personas" },
+    { name = "jhin-policy" },
     { name = "pydantic" },
     { name = "sqlalchemy", extra = ["asyncio"] },
 ]
@@ -868,6 +869,7 @@ requires-dist = [
     { name = "jhin-db", editable = "packages/db" },
     { name = "jhin-models", editable = "packages/models" },
     { name = "jhin-personas", editable = "packages/personas" },
+    { name = "jhin-policy", editable = "packages/policy" },
     { name = "pydantic", specifier = ">=2.10" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.36" },
 ]
@@ -976,6 +978,7 @@ dependencies = [
     { name = "httpx" },
     { name = "jhin-db" },
     { name = "jhin-domain" },
+    { name = "jhin-media" },
     { name = "jhin-policy" },
     { name = "jhin-secrets" },
     { name = "jhin-tools" },
@@ -993,6 +996,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28" },
     { name = "jhin-db", editable = "packages/db" },
     { name = "jhin-domain", editable = "packages/domain" },
+    { name = "jhin-media", editable = "packages/media" },
     { name = "jhin-policy", editable = "packages/policy" },
     { name = "jhin-secrets", editable = "packages/secrets" },
     { name = "jhin-tools", editable = "packages/tools" },
@@ -1102,7 +1106,9 @@ source = { editable = "packages/media" }
 dependencies = [
     { name = "jhin-db" },
     { name = "jhin-domain" },
+    { name = "jhin-observability" },
     { name = "pillow" },
+    { name = "pypdf" },
     { name = "sqlalchemy", extra = ["asyncio"] },
 ]
 
@@ -1110,7 +1116,9 @@ dependencies = [
 requires-dist = [
     { name = "jhin-db", editable = "packages/db" },
     { name = "jhin-domain", editable = "packages/domain" },
+    { name = "jhin-observability", editable = "packages/observability" },
     { name = "pillow", specifier = ">=11.0" },
+    { name = "pypdf", specifier = ">=5.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.36" },
 ]
 
@@ -1226,11 +1234,15 @@ name = "jhin-policy"
 version = "0.1.0"
 source = { editable = "packages/policy" }
 dependencies = [
+    { name = "jhin-personas" },
     { name = "pydantic" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pydantic", specifier = ">=2.10" }]
+requires-dist = [
+    { name = "jhin-personas", editable = "packages/personas" },
+    { name = "pydantic", specifier = ">=2.10" },
+]
 
 [[package]]
 name = "jhin-sandbox-runner"
@@ -1244,6 +1256,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "uvicorn" },
+    { name = "websockets" },
 ]
 
 [package.metadata]
@@ -1255,6 +1268,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.10" },
     { name = "pydantic-settings", specifier = ">=2.7" },
     { name = "uvicorn", specifier = ">=0.34" },
+    { name = "websockets", specifier = ">=15" },
 ]
 
 [[package]]
@@ -1294,10 +1308,12 @@ name = "jhin-tool-worker"
 version = "0.1.0"
 source = { editable = "services/tool_worker" }
 dependencies = [
+    { name = "fastapi" },
     { name = "jhin-connectors" },
     { name = "jhin-db" },
     { name = "jhin-domain" },
     { name = "jhin-events" },
+    { name = "jhin-media" },
     { name = "jhin-oauth" },
     { name = "jhin-observability" },
     { name = "jhin-secrets" },
@@ -1307,14 +1323,18 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "temporalio" },
+    { name = "uvicorn", extra = ["standard"] },
+    { name = "websockets" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "fastapi", specifier = ">=0.115" },
     { name = "jhin-connectors", editable = "packages/connectors" },
     { name = "jhin-db", editable = "packages/db" },
     { name = "jhin-domain", editable = "packages/domain" },
     { name = "jhin-events", editable = "packages/events" },
+    { name = "jhin-media", editable = "packages/media" },
     { name = "jhin-oauth", editable = "packages/oauth" },
     { name = "jhin-observability", editable = "packages/observability" },
     { name = "jhin-secrets", editable = "packages/secrets" },
@@ -1324,6 +1344,8 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.10" },
     { name = "pydantic-settings", specifier = ">=2.7" },
     { name = "temporalio", specifier = ">=1.31" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.34" },
+    { name = "websockets", specifier = ">=15" },
 ]
 
 [[package]]
@@ -2170,6 +2192,15 @@ wheels = [
 [package.optional-dependencies]
 crypto = [
     { name = "cryptography" },
+]
+
+[[package]]
+name = "pypdf"
+version = "6.18.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/4f/c2/e537e78a8282b51ed47031566be118debbc34c04782a9afd8739672eb07d/pypdf-6.18.1.tar.gz", hash = "sha256:2441fc839053745638d9b9ddb38ed66beed8d611f47a3036c9838fc4e3074dea", size = 7027577, upload-time = "2026-09-11T10:10:07.616Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/58/13/645df3995075112cb3cce15e8797c205f0f88fb50acc11012b84b071bc22/pypdf-6.18.1-py3-none-any.whl", hash = "sha256:ee93a2665670ecf57ee81d197a4ca548f3dc15f9cefc56e59b8140866aaa3de5", size = 394327, upload-time = "2026-09-11T10:10:06.103Z" },
 ]
 
 [[package]]

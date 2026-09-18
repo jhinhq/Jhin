@@ -36,4 +36,10 @@ def test_metric_name_has_one_authority() -> None:
         "temporal_activity_failures",
         "connector_health",
         "connector_connections",
+        "runtime_session_cleanup_total",
+        "conversation_reconnects_total",
+        "artifact_publications_total",
+        "runtime_stuck_sessions",
+        "conversation_event_delivery_seconds",
+        "conversation_recovery_seconds",
     }

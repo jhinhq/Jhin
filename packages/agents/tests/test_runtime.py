@@ -3,7 +3,9 @@
 from collections.abc import AsyncIterator
 from uuid import uuid4
 
-from jhin_agents.context import TaskContext
+import pytest
+
+from jhin_agents.context import UNTRUSTED_LABEL, ConversationTurn, TaskContext, build_messages
 from jhin_agents.runtime import estimate_cost_micros, execute_step
 from jhin_agents.snapshot import (
     AgentExecutionSnapshot,
@@ -13,10 +15,12 @@ from jhin_agents.snapshot import (
 )
 from jhin_models import (
     ModelClient,
+    ModelProviderError,
     ModelRequest,
     ModelResponse,
     ModelUsage,
     ReasoningConfig,
+    ToolSchema,
     WebSearchConfig,
 )
 
@@ -137,6 +141,100 @@ async def test_execute_step_passes_profile_reasoning_to_the_adapter() -> None:
     assert request.reasoning is not None
     assert request.reasoning.effort == "none"
     assert request.reasoning.supports_reasoning is True
+
+
+@pytest.mark.parametrize(
+    "body", ["archive result " * 12_000, "研究资料😀" * 12_000], ids=["ascii", "unicode"]
+)
+async def test_ollama_context_reserves_output_and_preserves_authority_and_tool_pairs(body):
+    client = FakeClient()
+    base = make_snapshot()
+    snapshot = base.model_copy(
+        update={
+            "max_output_tokens": None,
+            "model_profile": base.model_profile.model_copy(update={"provider_type": "ollama"}),
+        }
+    )
+    task = TaskContext(
+        title="Draft the researched article",
+        description="Only Ashley may publish; keep this assignment draft_only.",
+        history=(
+            ConversationTurn(role="user", text="Use the creator workspace photo search."),
+            ConversationTurn(
+                role="agent",
+                text="Reading the archive",
+                kind="tool_call",
+                tool_call_id="persisted-call-123",
+                tool_name="ghost.posts.list",
+                arguments_json='{"page":1,"limit":20}',
+            ),
+            ConversationTurn(
+                role="agent",
+                text=body,
+                kind="tool_result",
+                tool_call_id="persisted-call-123",
+                tool_name="ghost.posts.list",
+            ),
+        ),
+        user_instructions=("Do not publish or disclose credentials.",),
+    )
+    tools = (ToolSchema(name="ghost.posts.list", parameters={"type": "object"}),)
+    original = build_messages(snapshot, task, has_tools=True)
+
+    await execute_step(client, snapshot, task, tools)
+
+    request = client.requests[0]
+    assert request.max_output_tokens == 4096
+    assert request.messages[0] == original[0]
+    assert [m for m in request.messages if m.role == "user"] == [
+        m for m in original if m.role == "user"
+    ]
+    assert request.messages[3].tool_calls == original[3].tool_calls
+    result = request.messages[4]
+    assert result.tool_call_id == "persisted-call-123"
+    assert result.content.startswith(UNTRUSTED_LABEL)
+    assert "persisted-call-123" in result.content
+    assert "incomplete" in result.content
+    assert len(result.content.encode("utf-8")) < 4096
+    assert body not in result.content
+    assert request.tools == tools
+
+
+async def test_context_budget_rejects_oversized_protected_instructions_before_dispatch():
+    client = FakeClient()
+    base = make_snapshot()
+    snapshot = base.model_copy(
+        update={"model_profile": base.model_profile.model_copy(update={"context_window": 16_384})}
+    )
+    with pytest.raises(ModelProviderError, match="context budget") as raised:
+        await execute_step(
+            client, snapshot, TaskContext(title="Work", description="human instruction " * 10_000)
+        )
+    assert raised.value.error_code == "model_context_budget_exceeded"
+    assert not client.requests
+
+
+async def test_context_budget_includes_expanded_ollama_tool_schemas():
+    client = FakeClient()
+    base = make_snapshot()
+    snapshot = base.model_copy(
+        update={
+            "model_profile": base.model_profile.model_copy(
+                update={"provider_type": "ollama", "context_window": 16_384}
+            )
+        }
+    )
+    tool = ToolSchema(
+        name="large.schema",
+        parameters={
+            "$defs": {"Body": {"type": "string", "description": "schema text " * 1000}},
+            "type": "object",
+            "properties": {f"field_{i}": {"$ref": "#/$defs/Body"} for i in range(4)},
+        },
+    )
+    with pytest.raises(ModelProviderError, match="context budget"):
+        await execute_step(client, snapshot, TaskContext(title="Work", description=""), (tool,))
+    assert not client.requests
 
 
 def test_reasoning_override_folds_in_the_supports_reasoning_column() -> None:

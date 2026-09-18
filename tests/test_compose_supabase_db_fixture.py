@@ -40,7 +40,12 @@ def test_supabase_database_fixture_is_absent_from_production_compose() -> None:
     production = _render_compose("compose.yaml")
     serialized = json.dumps(production, sort_keys=True)
 
-    assert "JHIN_CONNECTOR_ALLOWED_DB_HOSTS" not in serialized
+    for name, service in production["services"].items():
+        environment = service.get("environment", {})
+        if name in {"api", "tool-worker"}:
+            assert environment["JHIN_CONNECTOR_ALLOWED_DB_HOSTS"] == ""
+        else:
+            assert "JHIN_CONNECTOR_ALLOWED_DB_HOSTS" not in environment
     for marker in FIXTURE_MARKERS:
         assert marker not in serialized
 
@@ -103,7 +108,7 @@ def test_development_compose_defines_an_isolated_sentinel_ready_fixture() -> Non
     assert "pg_isready" not in health_command
 
 
-def test_stateful_named_volumes_never_copy_image_metadata() -> None:
+def test_stateful_volumes_preserve_reviewed_initialization_and_access_modes() -> None:
     development = _render_compose("compose.yaml", "compose.dev.yaml")
 
     expected = {
@@ -117,8 +122,16 @@ def test_stateful_named_volumes_never_copy_image_metadata() -> None:
         for mount in service.get("volumes", [])
         if mount.get("type") == "volume"
     }
-    assert set(observed) == expected
-    assert all(mount.get("volume") == {"nocopy": True} for mount in observed.values())
+    file_readers = {"agent-worker", "runtime-gateway"}
+    file_writers = {"api", "tool-worker"}
+    managed = {(name, "managed_files", "/data/files") for name in file_readers | file_writers}
+    assert set(observed) == expected | managed
+    assert all(observed[key].get("volume") == {"nocopy": True} for key in expected)
+    for key in managed:
+        # Docker copies the empty image directory's non-root ownership into
+        # this volume; nocopy would make first-start uploads unwritable.
+        assert observed[key].get("volume") == {}
+        assert observed[key].get("read_only", False) is (key[0] in file_readers)
 
 
 def test_only_database_callers_receive_the_dev_fixture_allowlist() -> None:

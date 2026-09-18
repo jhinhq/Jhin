@@ -15,7 +15,7 @@ from datetime import timedelta
 from typing import Any
 
 from temporalio import workflow
-from temporalio.common import RetryPolicy
+from temporalio.common import RetryPolicy, WorkflowIDReusePolicy
 from temporalio.exceptions import ActivityError, ApplicationError, WorkflowAlreadyStartedError
 from temporalio.workflow import ChildWorkflowHandle, ParentClosePolicy
 
@@ -73,6 +73,12 @@ from jhin_workflows.agent_task.shared import (
     WorkRequestStart,
     bound_tool_call_id,
 )
+from jhin_workflows.blog_corpus.shared import (
+    ACTIVITY_ADVANCE_BLOG_CORPUS_SYNC,
+    BlogCorpusSyncInput,
+    BlogCorpusSyncResult,
+    blog_corpus_workflow_id,
+)
 from jhin_workflows.delegated_task.shared import (
     ACTIVITY_DELIVER_DELEGATION_RESULT,
     DelegatedTaskInput,
@@ -83,8 +89,11 @@ from jhin_workflows.task_queues import AGENT_TASK_QUEUE, TOOL_TASK_QUEUE
 from jhin_workflows.work_request_task.shared import (
     ACTIVITY_FINALIZE_WORK_REQUEST,
     ACTIVITY_NOTE_WORK_REQUEST_UNANSWERED,
+    ACTIVITY_PREPARE_WORK_REQUEST_CONTINUATION,
+    WORK_REQUEST_CONTINUATION_PATCH,
     FinalizeWorkRequestInput,
     NoteWorkRequestUnansweredInput,
+    PrepareWorkRequestContinuationInput,
     WorkRequestTaskInput,
     WorkRequestTaskResult,
     work_request_workflow_id,
@@ -95,7 +104,12 @@ _GENERIC_FAILURE_TEXTS = frozenset({"Activity task failed", "Child workflow exec
 # Failure types raised by activities that the run record should carry verbatim
 # (instead of the generic step_failed) so the UI can react to them.
 _SPECIFIC_FAILURE_CODES = frozenset(
-    {"insufficient_funds", "budget_exceeded", "model_incompatible_request"}
+    {
+        "insufficient_funds",
+        "budget_exceeded",
+        "model_incompatible_request",
+        "model_output_truncated",
+    }
 )
 
 
@@ -182,13 +196,54 @@ _STEP_RETRY = RetryPolicy(
     maximum_interval=timedelta(seconds=30),
     maximum_attempts=3,
 )
+# EVERY activity that runs on the tool worker's queue gets a longer budget
+# than the rest of a step, for one reason: that worker is redeployed, and a
+# turn that arrives during a redeploy must not die of it.
+#
+# Three attempts at 2s and 4s is six seconds of patience, which is less than
+# any restart takes, and the refusal a draining worker returns is instant — so
+# a turn could spend its whole budget inside a single drain window and fail
+# with "an activity failed" for a deploy that went perfectly. Two things fix
+# that together, and neither is sufficient alone: the drain's refusal now
+# carries its own ``next_retry_delay`` (``jhin_tool_worker.drain``), so it is
+# waited out rather than hammered, and the budget here is wide enough that a
+# call which is genuinely flaky still has attempts left after a restart has
+# taken one. Nothing is retried that Temporal does not already consider
+# retryable: an ordinary tool failure is raised non-retryable and is not
+# affected by any of this.
+#
+# It applies to every one of them, and that is the point. The reasoning is
+# about *where the activity runs*, not about what it does: a redeploy refuses
+# an approval resolution and a workspace cleanup exactly as instantly as it
+# refuses a tool step, and a budget applied to two of the six leaves the other
+# four dying of the same deploy for the same reason. Sibling workflows that
+# also dispatch onto this queue carry the same policy for the same argument
+# (``jhin_workflows.triggered_task``, ``.engineering_ticket``, ``.tool_compat``).
+_TOOL_STEP_RETRY = RetryPolicy(
+    initial_interval=timedelta(seconds=2),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(seconds=30),
+    maximum_attempts=5,
+)
 _FINALIZE_RETRY = RetryPolicy(
     initial_interval=timedelta(seconds=1),
     backoff_coefficient=2.0,
     maximum_interval=timedelta(seconds=15),
     maximum_attempts=5,
 )
-_CLEANUP_SCHEDULE_TO_CLOSE_TIMEOUT = timedelta(seconds=30)
+# The whole window a run's workspace cleanup gets, retries included.
+#
+# Thirty seconds was a window a single redeploy could close. The drain refuses
+# instantly and asks to be tried again in ten (``DRAINING_RETRY_DELAY``, one
+# stop grace), so three refusals — a perfectly ordinary restart — reached the
+# old deadline with the activity never having run, and the volume for that run
+# was left on disk for the runner's age sweep to find a day later. Ninety
+# seconds is a restart plus the retries either side of it, and the cleanup is
+# still best effort: the caller suppresses whatever comes out of it.
+_CLEANUP_SCHEDULE_TO_CLOSE_TIMEOUT = timedelta(seconds=90)
+# The legacy in-agent-worker approval resolution only. Its tool-worker
+# counterpart moved to ``_TOOL_STEP_RETRY``: the drain that instant-refuses
+# lives on the tool queue, and this activity never goes there.
 _RESOLVE_APPROVAL_RETRY = RetryPolicy(
     initial_interval=timedelta(seconds=1),
     backoff_coefficient=2.0,
@@ -355,6 +410,12 @@ class AgentTaskWorkflow:
         # hit. Purely data-driven — old histories never set denied_code, so
         # replays take the same path they always did.
         if snapshot.denied_code:
+            if snapshot.denied_code == "turn_cancelled":
+                self._status = "cancelled"
+                await self._finalize(
+                    params, run_id=None, status="cancelled", error_code=None, error_message=None
+                )
+                return AgentTaskResult(run_id=None, status="cancelled", steps_used=0)
             self._status = "failed"
             await self._finalize(
                 params,
@@ -491,7 +552,7 @@ class AgentTaskWorkflow:
                         result_type=list[AdvertisedTool],
                         task_queue=TOOL_TASK_QUEUE,
                         start_to_close_timeout=timedelta(seconds=30),
-                        retry_policy=_STEP_RETRY,
+                        retry_policy=_TOOL_STEP_RETRY,
                     )
                     reasoned = await workflow.execute_activity(
                         ACTIVITY_REASON_AGENT_STEP,
@@ -528,7 +589,7 @@ class AgentTaskWorkflow:
                                 result_type=BoundToolResult,
                                 task_queue=TOOL_TASK_QUEUE,
                                 start_to_close_timeout=timedelta(minutes=10),
-                                retry_policy=_STEP_RETRY,
+                                retry_policy=_TOOL_STEP_RETRY,
                             )
                         except ActivityError as exc:
                             if not _is_ordinary_tool_failure(exc):
@@ -593,6 +654,11 @@ class AgentTaskWorkflow:
                     )
             except Exception as exc:
                 error_code = _failure_code(exc, "step_failed")
+                if error_code == "generation_cancelled":
+                    self._cancelled = True
+                    error_code = None
+                    error_message = None
+                    break
                 error_message = _failure_message(exc)
                 break
             self._steps_used += 1
@@ -631,6 +697,9 @@ class AgentTaskWorkflow:
             for ask in step.person_questions[:1]:
                 await self._await_person_answer(params, snapshot.run_id, ask)
 
+            for sync in step.corpus_sync_starts:
+                await self._await_corpus_sync(sync)
+
             # Accepted work requests (coordination release) run as abandoned
             # children; a duplicate start (retry) is a no-op. The requester
             # then waits a bounded while for the answer so it can report it
@@ -638,13 +707,22 @@ class AgentTaskWorkflow:
             # accepted, does not. Two asks in one step are waited on one after
             # the other: rare enough not to justify racing them, and each hop
             # is bounded, so the worst case is still finite.
+            yield_for_result = False
             for accepted in step.work_request_starts:
-                await self._start_work_request_task(params, accepted)
+                yield_for_result = (
+                    await self._start_work_request_task(params, accepted)
+                ) or yield_for_result
 
             # Reviews this agent decided as the assigned AI reviewer wake the
             # source task workflow (same signal the human API sends).
             for decided in step.review_decisions:
                 await self._forward_review_decision(params, decided)
+
+            if yield_for_result:
+                # The armed result outbox owns the next episode. Completing
+                # this run frees the slot so a colleague can execute even
+                # when the workspace permits only one concurrent run.
+                return True, error_code, error_message
 
             waiting_approval_id = step.waiting_approval_id
             if step.waiting_review_id is not None:
@@ -683,7 +761,7 @@ class AgentTaskWorkflow:
                         result_type=BoundToolResult,
                         task_queue=TOOL_TASK_QUEUE,
                         start_to_close_timeout=timedelta(minutes=10),
-                        retry_policy=_RESOLVE_APPROVAL_RETRY,
+                        retry_policy=_TOOL_STEP_RETRY,
                     )
                     reviewed = await workflow.execute_activity(
                         ACTIVITY_COMMIT_REVIEW_PROJECTION,
@@ -746,7 +824,7 @@ class AgentTaskWorkflow:
                             result_type=BoundToolResult,
                             task_queue=TOOL_TASK_QUEUE,
                             start_to_close_timeout=timedelta(minutes=10),
-                            retry_policy=_RESOLVE_APPROVAL_RETRY,
+                            retry_policy=_TOOL_STEP_RETRY,
                         )
                         await workflow.execute_activity(
                             ACTIVITY_COMMIT_APPROVAL_PROJECTION,
@@ -858,9 +936,52 @@ class AgentTaskWorkflow:
         with contextlib.suppress(Exception):
             await handle.signal(SIGNAL_REVIEW_DECISION, args=[decided.review_id, decided.status])
 
+    async def _await_corpus_sync(self, params: BlogCorpusSyncInput) -> None:
+        try:
+            await workflow.execute_child_workflow(
+                "BlogCorpusSyncWorkflow",
+                params,
+                id=blog_corpus_workflow_id(params.sync_id),
+                result_type=BlogCorpusSyncResult,
+                parent_close_policy=ParentClosePolicy.ABANDON,
+                id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+            )
+        except WorkflowAlreadyStartedError:
+            # A recovery dispatcher may already own the model-free sync.
+            # Reading/advancing the locked checkpoint is safe from either
+            # workflow and does not require attaching a child handle.
+            while not self._cancelled:
+                result = await workflow.execute_activity(
+                    ACTIVITY_ADVANCE_BLOG_CORPUS_SYNC,
+                    params,
+                    task_queue=TOOL_TASK_QUEUE,
+                    result_type=BlogCorpusSyncResult,
+                    start_to_close_timeout=timedelta(minutes=2),
+                )
+                if result.status not in {"queued", "running"}:
+                    break
+
     async def _start_work_request_task(
         self, params: AgentTaskInput, accepted: WorkRequestStart
-    ) -> None:
+    ) -> bool:
+        durable = (
+            accepted.side == WORK_REQUEST_SIDE_REQUESTER
+            and accepted.agent_id != params.agent_id
+            and workflow.patched(WORK_REQUEST_CONTINUATION_PATCH)
+        )
+        if durable:
+            await workflow.execute_activity(
+                ACTIVITY_PREPARE_WORK_REQUEST_CONTINUATION,
+                PrepareWorkRequestContinuationInput(
+                    workspace_id=params.workspace_id,
+                    work_request_id=accepted.work_request_id,
+                    requester_task_id=params.task_id,
+                    requester_agent_id=params.agent_id,
+                ),
+                result_type=str,
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=_FINALIZE_RETRY,
+            )
         try:
             handle = await workflow.start_child_workflow(
                 "WorkRequestTaskWorkflow",
@@ -873,12 +994,16 @@ class AgentTaskWorkflow:
                 id=work_request_workflow_id(accepted.work_request_id),
                 parent_close_policy=ParentClosePolicy.ABANDON,
                 result_type=WorkRequestTaskResult,
+                id_reuse_policy=(
+                    WorkflowIDReusePolicy.REJECT_DUPLICATE
+                    if durable
+                    else WorkflowIDReusePolicy.ALLOW_DUPLICATE
+                ),
             )
         except WorkflowAlreadyStartedError:
-            # A retried tool call reported the same accepted request. The
-            # first start owns the wait and Temporal offers no way to attach
-            # to a child already running, so this one only stays a no-op.
-            return
+            # New histories already attached durable delivery before start;
+            # old histories retain their original non-attaching behavior.
+            return durable
         except Exception:
             # The request row is already `accepted` with a task that will now
             # never run. Close it instead of leaving a colleague's ask stuck
@@ -898,8 +1023,10 @@ class AgentTaskWorkflow:
                     start_to_close_timeout=timedelta(seconds=30),
                     retry_policy=_FINALIZE_RETRY,
                 )
-            return
-        await self._await_work_request_answer(params, accepted, handle)
+            return durable
+        if not durable:
+            await self._await_work_request_answer(params, accepted, handle)
+        return durable
 
     async def _await_work_request_answer(
         self,
@@ -982,7 +1109,7 @@ class AgentTaskWorkflow:
         try:
             await workflow.wait_condition(
                 lambda: ask.question_id in self._question_answers or self._cancelled,
-                timeout=_PERSON_ANSWER_WAIT,
+                timeout=None if ask.required else _PERSON_ANSWER_WAIT,
             )
         except TimeoutError:
             timed_out = True
@@ -1047,7 +1174,7 @@ class AgentTaskWorkflow:
                 task_queue=TOOL_TASK_QUEUE,
                 start_to_close_timeout=timedelta(seconds=30),
                 schedule_to_close_timeout=_CLEANUP_SCHEDULE_TO_CLOSE_TIMEOUT,
-                retry_policy=_FINALIZE_RETRY,
+                retry_policy=_TOOL_STEP_RETRY,
             )
 
     async def _finalize(

@@ -16,6 +16,29 @@ Invariants enforced here:
 
 The gateway stages rows in the caller's session; the caller (a Temporal
 activity) owns the commit so a crash cannot persist half a decision.
+
+At-most-once execution (plan 14, docs/architecture/tool-worker-boundary.md)
+is enforced by a claim on the stable invocation id, taken in two durable
+steps rather than one:
+
+``claimed``
+    This attempt owns the invocation. Nothing has been dispatched. A row
+    found here on re-entry is *proof* that no executor ran, because the only
+    code that leaves this state is the compare-and-set below, and it runs
+    with the executor call on its next line. Such a call is re-authorized
+    from scratch and dispatched once, rather than thrown away.
+``executing``
+    The compare-and-set from ``claimed`` succeeded and committed, and the
+    executor was entered. Nothing here can be proven, so a row found in this
+    state on re-entry is ``execution_unknown`` and stays there: it may have
+    pushed a branch, and nothing in the database can say it did not.
+
+The compare-and-set is the at-most-once guarantee, not merely a record of
+it: two attempts that both believe they hold the claim both try to move the
+same row out of ``claimed``, exactly one succeeds, and the loser reads the
+other's ``executing`` and reconciles as unknown. That holds without the
+invocation lifecycle lock, which is why it is safe for the lock to be an
+optimization rather than the guarantee.
 """
 
 from __future__ import annotations
@@ -24,8 +47,9 @@ import asyncio
 import copy
 import hashlib
 import json
+import math
 import time
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -45,6 +69,7 @@ from jhin_db.models import (
     AuditEvent,
     Connection,
     Secret,
+    Task,
     ToolCall,
     WorkReview,
 )
@@ -58,6 +83,7 @@ from jhin_policy import (
     authorizing_allow_grants,
     evaluate,
 )
+from jhin_secrets.redaction import redact_text
 from jhin_tools.builtin import ToolCatalog, ToolExecutionContext, ToolExecutor
 from jhin_tools.errors import ToolExecutionError
 from jhin_tools.invocation import TOOL_INVOCATION_FORMAT_VERSION
@@ -90,6 +116,40 @@ _TERMINAL_TOOL_STATUSES = frozenset(
         ToolCallStatus.REJECTED.value,
     }
 )
+#: Statuses that mean "this call was claimed but its executor was never
+#: entered". Only the dispatch compare-and-set leaves them, so finding one on
+#: re-entry proves no external effect can have happened.
+_UNDISPATCHED_TOOL_STATUSES = frozenset({ToolCallStatus.CLAIMED.value})
+#: Statuses that mean "this call reached its executor and nothing recorded
+#: what the executor did". They are the same two states an operator used to
+#: be handed: the row a dead worker left mid-flight, and the row a previous
+#: attempt already reconciled as unknown. What happens to one now depends on
+#: the tool: see :meth:`ToolGateway._reconcile_unproven_dispatch`.
+_UNPROVEN_DISPATCH_STATUSES = frozenset(
+    {ToolCallStatus.EXECUTING.value, ToolCallStatus.EXECUTION_UNKNOWN.value}
+)
+#: How many times one invocation may ever be dispatched, counted from the
+#: durable ``tool.call.dispatched`` trail rather than from anything in this
+#: process. Three is a small number on purpose: two of them are the ones that
+#: rescue a redeploy, and a call that has been dispatched three times without
+#: once producing an outcome is not going to produce one on the fourth.
+MAX_DISPATCH_ATTEMPTS = 3
+#: Waits between one attempt's unproven outcome and the next dispatch. Short,
+#: because the thing being waited out is a worker or a runner coming back, and
+#: a person is watching the conversation while it happens. One entry per
+#: *re*-dispatch, so there are one fewer of these than there are dispatches.
+_REDISPATCH_BACKOFF_SECONDS = (1.0, 3.0)
+#: How many times one request may walk through the front door: once per
+#: dispatch the budget allows, plus the closing entry that dispatches nothing
+#: and exists only to turn a spent budget into ``execution_not_confirmed``.
+#: Without it the last dispatch's own unproven outcome — ``execution_unknown``,
+#: the sentence about manual reconciliation — was what the caller got back.
+_MAX_INVOCATION_ENTRIES = MAX_DISPATCH_ATTEMPTS + 1
+#: What a call that exhausted its dispatches is recorded as. It is a failure
+#: and not an unknown, and only a tool whose every effect stays inside Jhin
+#: can ever reach it — for anything else, "we could not tell" remains the
+#: answer, because it is the true one.
+REDISPATCH_EXHAUSTED_CODE = "execution_not_confirmed"
 _PROCESS_INVOCATION_LOCKS: dict[UUID, asyncio.Lock] = {}
 _PROCESS_INVOCATION_LOCK_ENTRANTS: dict[UUID, int] = {}
 _PROCESS_INVOCATION_LOCKS_GUARD = asyncio.Lock()
@@ -156,21 +216,42 @@ class GatewayOutcome(BaseModel):
 
 
 _MAX_SCHEMA_ERRORS_NAMED = 6
+_SCHEMA_NUMERIC_CONSTRAINTS = {
+    "string_too_long": "max_length",
+    "string_too_short": "min_length",
+    "too_long": "max_length",
+    "too_short": "min_length",
+    "less_than": "lt",
+    "less_than_equal": "le",
+    "greater_than": "gt",
+    "greater_than_equal": "ge",
+    "multiple_of": "multiple_of",
+}
 
 
 def _schema_error_summary(exc: ValidationError) -> str:
-    """Name the offending fields and pydantic error types (schema-defined
-    identifiers only — never the submitted values) so the model can fix the
-    call: ``project_ref: missing; sql: string_too_long``."""
+    """Name the offending fields, error types and safe numeric constraints so the
+    model can fix the call: ``sql: string_too_long (max_length=4000)``."""
     parts: list[str] = []
     for error in exc.errors(include_url=False, include_input=False)[:_MAX_SCHEMA_ERRORS_NAMED]:
         location = ".".join(str(piece) for piece in error.get("loc", ())) or "<root>"
-        parts.append(f"{location}: {error.get('type', 'invalid')}")
+        error_type = error.get("type", "invalid")
+        part = f"{location}: {error_type}"
+        if error_type in {"model_type", "model_attributes_type", "dict_type"}:
+            part += " (expected a JSON object; do not quote or JSON-encode this field)"
+        constraint = _SCHEMA_NUMERIC_CONSTRAINTS.get(error_type)
+        value = (error.get("ctx") or {}).get(constraint) if constraint else None
+        if (type(value) is int and value.bit_length() <= 256) or (
+            type(value) is float and math.isfinite(value)
+        ):
+            part += f" ({constraint}={value})"
+        parts.append(part)
     remaining = exc.error_count() - len(parts)
     summary = "; ".join(parts)
     if remaining > 0:
         summary += f"; and {remaining} more"
-    return f"{exc.error_count()} error(s) — {summary}"
+    # Extra-field names and mapping keys in the location may come from input.
+    return str(redact_text(f"{exc.error_count()} error(s) — {summary}"))
 
 
 def denial_output(code: str, reason: str) -> dict[str, str]:
@@ -505,7 +586,18 @@ class ToolGateway:
         tool_call_id: UUID,
         *,
         risk: str | None,
+        detail: str = "",
     ) -> GatewayOutcome:
+        """Record that a dispatched call's outcome cannot be proven.
+
+        ``detail`` is what the executor managed to say before it gave up —
+        an exit code, a stderr tail, a provider's message. An unknown outcome
+        is the one an operator has to reconcile by hand, and it used to be the
+        one with an empty ``sanitized_output_json``: "outcome unknown" and
+        nothing else, for a push that had a finished container and an exit
+        code behind it. Uncertainty about *whether* an effect happened is not
+        a reason to discard the evidence about *what* happened.
+        """
         unknown_session = self._ctx.session
         row = await unknown_session.scalar(
             select(ToolCall)
@@ -528,6 +620,10 @@ class ToolGateway:
             row.status = ToolCallStatus.EXECUTION_UNKNOWN.value
             row.completed_at = datetime.now(UTC)
             row.error_code = "execution_outcome_unknown"
+            if detail:
+                row.sanitized_output_json = self._sanitize(
+                    {"error": "execution_outcome_unknown", "detail": detail}
+                )
             metadata = {"code": "execution_outcome_unknown"}
             if approval is not None:
                 metadata["approval_id"] = str(approval.id)
@@ -548,6 +644,431 @@ class ToolGateway:
             risk=risk,
             replayed=False,
         )
+
+    async def _audit_claim_reentered(
+        self,
+        row: ToolCall,
+        *,
+        approval: Approval | None = None,
+    ) -> None:
+        """Record the one verdict that lets a claimed call run after all.
+
+        The counterpart of ``tool.call.execution_unknown``: both say a claim
+        was re-entered, and this one says why that was safe. It names the
+        evidence rather than the conclusion, because the conclusion is only
+        as good as the evidence and an operator reading the trail afterwards
+        is entitled to check it.
+        """
+        self._audit(
+            "tool.call.claim_reentered",
+            row.id,
+            {
+                "code": "claim_not_dispatched",
+                "tool_name": row.tool_name,
+                "evidence": (
+                    "the tool_call row is still 'claimed'; only the dispatch "
+                    "compare-and-set leaves that state, and it commits before the "
+                    "executor is entered, so no executor ran"
+                ),
+                **({"approval_id": str(approval.id)} if approval is not None else {}),
+            },
+        )
+        await self._ctx.session.commit()
+
+    def _redispatch_is_safe(self, tool_name: str | None) -> bool:
+        """Whether the registered tool of this name says a repeat is safe.
+
+        Read from the live registry rather than from anything stored on the
+        row, so a tool reclassified after a bad call is reclassified for that
+        call too. An unregistered name answers no: recovery never guesses.
+        """
+        entry = self._catalog.get(tool_name) if tool_name else None
+        return entry is not None and entry[0].redispatch_is_safe
+
+    async def _dispatch_count(self, tool_call_id: UUID) -> int:
+        """How many times this invocation has been handed to an executor.
+
+        The dispatch compare-and-set writes ``tool.call.dispatched`` in the
+        same transaction that moves the row to ``executing``, so the audit
+        trail already counts this and cannot drift from it. Counting from
+        there rather than from a column is what makes the bound survive the
+        thing it exists for: the process that was doing the counting dying.
+        """
+        counted = await self._ctx.session.scalar(
+            select(func.count())
+            .select_from(AuditEvent)
+            .where(
+                AuditEvent.workspace_id == self._ctx.workspace_id,
+                AuditEvent.action == "tool.call.dispatched",
+                AuditEvent.target_id == tool_call_id,
+            )
+        )
+        return int(counted or 0)
+
+    async def _reconcile_unproven_dispatch(
+        self,
+        row: ToolCall,
+        *,
+        risk: str | None,
+        approval: Approval | None,
+    ) -> GatewayOutcome | None:
+        """Decide what an unproven dispatch means for *this* tool.
+
+        The in-process failure path has always asked the question this one
+        was missing: could the executor have changed anything outside the
+        sandbox? A ``SandboxRunnerError`` carries the answer as
+        ``side_effect_possible`` and the gateway turns a "no" into an
+        ordinary, readable tool failure. Recovery could not ask, because
+        there is no exception to ask — the worker process was killed — so it
+        treated every dispatched row the way it must treat a push.
+
+        Now it asks the tool definition, which knows the same thing durably
+        and in advance. Three endings:
+
+        * the tool says a repeat is safe and the dispatch budget has room —
+          the row goes back to ``claimed`` and the caller re-decides it from
+          live grants and policy and dispatches it once more;
+        * the tool says a repeat is safe and the budget is spent — the call
+          is recorded as a *failure*, which is honest for a tool that cannot
+          have touched anything outside Jhin, and which the agent can read
+          and act on instead of the run ending;
+        * the tool says anything else — ``execution_unknown``, exactly as
+          before. That is the at-most-once guarantee, and it is untouched.
+
+        Returns ``None`` when the caller should carry on and run the call.
+
+        The row is re-read under a row lock first. Every caller is already
+        inside the invocation's lifecycle lock, so this is not the guarantee —
+        it is the check that the row still says what the caller read, because
+        one of the three callers reaches here from a snapshot it took before
+        that lock existed.
+        """
+        locked = await self._ctx.session.scalar(
+            select(ToolCall)
+            .where(
+                ToolCall.id == row.id,
+                ToolCall.workspace_id == self._ctx.workspace_id,
+            )
+            .with_for_update()
+        )
+        if locked is None:
+            raise GatewayStateError(f"tool call {row.id} disappeared while being reconciled")
+        row = locked
+        if row.status in _TERMINAL_TOOL_STATUSES:
+            # Somebody finished it between the read and the lock. Their
+            # outcome is the outcome.
+            return self._replayed_outcome(row, approval=approval, risk=risk)
+        if row.status not in _UNPROVEN_DISPATCH_STATUSES:
+            raise GatewayStateError(
+                f"tool call {row.id} left an unproven dispatch for '{row.status}'"
+            )
+        if self._redispatch_is_safe(row.tool_name):
+            attempts = await self._dispatch_count(row.id)
+            if attempts < MAX_DISPATCH_ATTEMPTS:
+                await self._reopen_unproven_dispatch(row, attempts=attempts, approval=approval)
+                return None
+            return await self._persist_redispatch_exhausted(
+                row,
+                attempts=attempts,
+                risk=risk,
+                approval=approval,
+            )
+        if row.status == ToolCallStatus.EXECUTION_UNKNOWN.value:
+            return self._execution_unknown_outcome(row, approval=approval, risk=risk)
+        row.status = ToolCallStatus.EXECUTION_UNKNOWN.value
+        row.completed_at = datetime.now(UTC)
+        row.error_code = "execution_outcome_unknown"
+        self._audit(
+            "tool.call.execution_unknown",
+            row.id,
+            {
+                "code": "execution_outcome_unknown",
+                # The absence of proof, named. This row reached the executor;
+                # nothing recorded here can say what the executor then did or
+                # did not do outside Jhin.
+                "evidence": "the tool_call row was dispatched to its executor",
+                "tool_name": row.tool_name,
+                **({"approval_id": str(approval.id)} if approval is not None else {}),
+            },
+        )
+        await self._ctx.session.commit()
+        return self._execution_unknown_outcome(
+            row,
+            approval=approval,
+            risk=risk,
+            replayed=False,
+        )
+
+    async def _reopen_unproven_dispatch(
+        self,
+        row: ToolCall,
+        *,
+        attempts: int,
+        approval: Approval | None,
+    ) -> None:
+        """Put a re-runnable call back into ``claimed`` and say why.
+
+        The row is already locked ``FOR UPDATE`` by the caller and the whole
+        request holds the invocation's lifecycle lock, so exactly one attempt
+        can be here. Everything the previous attempt left behind is cleared —
+        its start time, its error code, whatever partial output it managed —
+        because the row is about to be decided again from live grants and
+        policy, and inheriting an old attempt's leftovers is how a re-run
+        stops being a re-run.
+        """
+        row.status = ToolCallStatus.CLAIMED.value
+        row.error_code = None
+        row.started_at = None
+        row.completed_at = None
+        row.duration_ms = None
+        row.sanitized_output_json = {}
+        self._audit(
+            "tool.call.claim_reentered",
+            row.id,
+            {
+                "code": "redispatch_after_unproven_outcome",
+                "tool_name": row.tool_name,
+                "evidence": (
+                    "the tool_call row was dispatched and its outcome was never "
+                    "proven, and this tool's definition says re-executing it "
+                    "cannot produce an effect outside the sandbox that the "
+                    "earlier dispatch may already have produced"
+                ),
+                "dispatch_attempts": attempts,
+                "dispatch_attempt_limit": MAX_DISPATCH_ATTEMPTS,
+                **({"approval_id": str(approval.id)} if approval is not None else {}),
+            },
+        )
+        await self._ctx.session.commit()
+
+    async def _persist_redispatch_exhausted(
+        self,
+        row: ToolCall,
+        *,
+        attempts: int,
+        risk: str | None,
+        approval: Approval | None,
+        reason: str = "",
+    ) -> GatewayOutcome:
+        """Close a re-runnable call that never produced an outcome.
+
+        A failure rather than an unknown, and the difference is not a
+        softening: this ending is only reachable for a tool that cannot have
+        reached anything outside Jhin, so there is genuinely nothing for a
+        person to go and reconcile. What is left is a tool call that did not
+        work, which is a thing agents already know how to read.
+
+        ``reason`` is why *this* call ran out of ways to be proven. The
+        default is the budget one; the other caller has a different sentence
+        and the same conclusion.
+        """
+        reason = reason or (
+            f"the {row.tool_name} tool was started {attempts} times and never reported an "
+            "outcome, most likely because the worker running it was restarted each time; "
+            "nothing outside the sandbox can have changed"
+        )
+        row.status = ToolCallStatus.FAILED.value
+        row.completed_at = datetime.now(UTC)
+        row.error_code = REDISPATCH_EXHAUSTED_CODE
+        row.sanitized_output_json = self._sanitize(
+            {
+                "error": REDISPATCH_EXHAUSTED_CODE,
+                "hint": (
+                    "This call never got to report a result, and nothing outside the "
+                    "sandbox changed. Call the tool again; if it keeps ending this way, "
+                    "say so rather than assuming the work was done."
+                ),
+                "detail": reason,
+            }
+        )
+        self._audit(
+            "tool.call.failed",
+            row.id,
+            {
+                "code": REDISPATCH_EXHAUSTED_CODE,
+                "tool_name": row.tool_name,
+                "risk": risk,
+                "dispatch_attempts": attempts,
+                **({"approval_id": str(approval.id)} if approval is not None else {}),
+            },
+        )
+        await self._ctx.session.commit()
+        return GatewayOutcome(
+            status="failed",
+            tool_call_id=row.id,
+            tool_name=row.tool_name,
+            risk=risk,
+            decision_code=REDISPATCH_EXHAUSTED_CODE,
+            decision_reason=reason,
+            sanitized_input=row.sanitized_input_json,
+            sanitized_output=row.sanitized_output_json,
+            approval_id=row.approval_id,
+            error_code=REDISPATCH_EXHAUSTED_CODE,
+        )
+
+    async def _close_unprovable_unvalidated(
+        self,
+        row: ToolCall,
+        *,
+        approval: Approval | None,
+    ) -> GatewayOutcome:
+        """End a dispatched call that can no longer be described, or re-run.
+
+        The definition-independent re-entry path — the tool was revoked, or
+        its schema now refuses these arguments — reaches an ``executing`` row
+        with no way to validate an input and therefore no way to dispatch it
+        again. It used to write ``execution_unknown`` here without asking the
+        tool anything, which made the claim that the reconciler owns every
+        such place untrue: the same row, reached through the ordinary door,
+        would have been re-run or closed as a readable failure.
+
+        So the question gets asked in this doorway too, and the answer means
+        what it means everywhere else. A tool whose every effect stays inside
+        Jhin cannot have reached anything a person would have to reconcile,
+        and the honest ending is a failure the agent can read — the same
+        ``execution_not_confirmed`` the spent-budget path writes, because the
+        conclusion is the same one and there should be one name for it.
+        Anything else — including a tool nobody can look up any more, which
+        answers no by default — stays ``execution_unknown``.
+        """
+        if self._redispatch_is_safe(row.tool_name):
+            return await self._persist_redispatch_exhausted(
+                row,
+                attempts=await self._dispatch_count(row.id),
+                risk=None,
+                approval=approval,
+                reason=(
+                    f"the {row.tool_name} call was dispatched and never reported an outcome, "
+                    "and it can no longer be re-run because its arguments no longer match the "
+                    "tool's schema; nothing outside the sandbox can have changed"
+                ),
+            )
+        if row.status == ToolCallStatus.EXECUTION_UNKNOWN.value:
+            return self._execution_unknown_outcome(row, approval=approval)
+        row.status = ToolCallStatus.EXECUTION_UNKNOWN.value
+        row.completed_at = datetime.now(UTC)
+        row.error_code = "execution_outcome_unknown"
+        self._audit(
+            "tool.call.execution_unknown",
+            row.id,
+            {
+                "code": "execution_outcome_unknown",
+                "evidence": "the tool_call row was dispatched to its executor",
+                "tool_name": row.tool_name,
+            },
+        )
+        await self._ctx.session.commit()
+        return self._execution_unknown_outcome(
+            row,
+            approval=approval,
+            replayed=False,
+        )
+
+    async def _adopt_undispatched_claim(
+        self,
+        invocation_id: UUID,
+        *,
+        to_status: ToolCallStatus,
+        approval_id: UUID | None = None,
+        review_id: UUID | None = None,
+    ) -> ToolCall | None:
+        """Take over a claim whose executor was never entered.
+
+        Guarded on ``claimed`` under the row lock, so it can only ever move a
+        row that is still provably undispatched. A row some other attempt has
+        since dispatched fails the guard and returns None; its caller then
+        reconciles the call as unknown rather than staging it again.
+        """
+        row = await self._ctx.session.scalar(
+            select(ToolCall)
+            .where(
+                ToolCall.id == invocation_id,
+                ToolCall.workspace_id == self._ctx.workspace_id,
+            )
+            .with_for_update()
+        )
+        if row is None or row.status not in _UNDISPATCHED_TOOL_STATUSES:
+            return None
+        row.status = to_status.value
+        row.error_code = None
+        if approval_id is not None:
+            row.approval_id = approval_id
+        if review_id is not None:
+            row.review_id = review_id
+        return row
+
+    async def _mark_dispatched(
+        self,
+        session: AsyncSession,
+        tool_call_id: UUID,
+        *,
+        tool_name: str,
+        risk: str | None,
+    ) -> bool:
+        """Move ``claimed`` to ``executing`` and commit, on the last line
+        before the executor is entered.
+
+        Durable *before* dispatch rather than after, because that is the only
+        ordering that makes the two states mean anything: a worker killed on
+        the next statement leaves ``executing``, which recovery must read as
+        "an external effect may have happened", and one killed a statement
+        earlier leaves ``claimed``, which recovery may read as "nothing
+        happened". Getting this the wrong way round would silently re-run
+        pushes.
+
+        The compare-and-set is also the mutual exclusion. Two attempts that
+        both hold what they believe is the claim both try to move the same
+        row out of ``claimed``; exactly one wins, and the loser gets False
+        and reconciles as unknown.
+
+        It commits on its own connection wherever the process has an isolated
+        session factory, so an approved call's shared connection/credential
+        locks — deliberately held across the executor to close the
+        approval/executor rotation window — are not released by this commit.
+        """
+        sessions = self._fresh_sessions()
+        if sessions is None:
+            # No isolated factory: portable tests and legacy direct callers,
+            # neither of which holds locks across the executor. The claim is
+            # still durable before dispatch, which is what matters here.
+            return await self._mark_dispatched_on(
+                session, tool_call_id, tool_name=tool_name, risk=risk
+            )
+        async with sessions() as fence_session:
+            return await self._mark_dispatched_on(
+                fence_session, tool_call_id, tool_name=tool_name, risk=risk
+            )
+
+    async def _mark_dispatched_on(
+        self,
+        session: AsyncSession,
+        tool_call_id: UUID,
+        *,
+        tool_name: str,
+        risk: str | None,
+    ) -> bool:
+        dispatched = await session.scalar(
+            update(ToolCall)
+            .where(
+                ToolCall.id == tool_call_id,
+                ToolCall.workspace_id == self._ctx.workspace_id,
+                ToolCall.status == ToolCallStatus.CLAIMED.value,
+            )
+            .values(status=ToolCallStatus.EXECUTING.value, started_at=datetime.now(UTC))
+            .returning(ToolCall.id)
+            .execution_options(synchronize_session=False)
+        )
+        if dispatched is None:
+            await session.rollback()
+            return False
+        self._audit_on(
+            session,
+            "tool.call.dispatched",
+            tool_call_id,
+            {"tool_name": tool_name, "risk": risk},
+        )
+        await session.commit()
+        return True
 
     async def _require_durable_execution_context(self) -> AgentRun:
         run = await self._ctx.session.scalar(
@@ -570,18 +1091,25 @@ class ToolGateway:
         invocation_id: UUID,
         definition: ToolDefinition,
         dumped: dict[str, Any],
-    ) -> GatewayOutcome | None:
-        """Replay or fail closed for a deterministic runtime invocation.
+    ) -> tuple[GatewayOutcome | None, bool]:
+        """Replay, fail closed, or re-open a deterministic runtime invocation.
 
         The deterministic primary key is the cross-retry claim key. Reuse is
         accepted only for the exact original tool, canonical input, and
         durable workspace/agent/run/task context.
+
+        Returns ``(outcome, adopt_claim)``. ``adopt_claim`` is True for the
+        one case the caller may carry on from: a row still in ``claimed``,
+        whose executor provably never ran. The caller then re-runs the whole
+        decision — live grants, policy, validator, review gate — and stages
+        onto that row, so nothing about the earlier attempt is inherited
+        except its identity.
         """
         row = await self._ctx.session.scalar(
             select(ToolCall).where(ToolCall.id == invocation_id).with_for_update()
         )
         if row is None:
-            return None
+            return None, False
         run = await self._ctx.session.get(AgentRun, row.run_id)
         if (
             row.workspace_id != self._ctx.workspace_id
@@ -595,10 +1123,9 @@ class ToolGateway:
             or row.sanitized_input_json != dumped
             or row.connection_id != _connection_uuid(dumped)
         ):
-            return await self._invocation_mismatch(
-                invocation_id,
-                definition,
-                dumped,
+            return (
+                await self._invocation_mismatch(invocation_id, definition, dumped),
+                False,
             )
 
         approval: Approval | None = None
@@ -610,10 +1137,9 @@ class ToolGateway:
                 )
             )
             if approval is None:
-                return await self._invocation_mismatch(
-                    invocation_id,
-                    definition,
-                    dumped,
+                return (
+                    await self._invocation_mismatch(invocation_id, definition, dumped),
+                    False,
                 )
             payload = approval.action_payload_sanitized
             expected = {
@@ -637,10 +1163,9 @@ class ToolGateway:
                 or approval.action_type != definition.name
                 or any(payload.get(key) != value for key, value in expected.items())
             ):
-                return await self._invocation_mismatch(
-                    invocation_id,
-                    definition,
-                    dumped,
+                return (
+                    await self._invocation_mismatch(invocation_id, definition, dumped),
+                    False,
                 )
 
         if row.status == ToolCallStatus.PENDING_REVIEW.value:
@@ -649,61 +1174,67 @@ class ToolGateway:
             # workflow receives the review_decision signal.
             review = await self._review_for_row(row)
             if review is None:
-                return await self._invocation_mismatch(invocation_id, definition, dumped)
-            return self._needs_review_outcome(
-                row,
-                review,
-                risk=definition.risk.value,
-                reason=f"this call is parked on review {review.id}",
-                replayed=True,
+                return (
+                    await self._invocation_mismatch(invocation_id, definition, dumped),
+                    False,
+                )
+            return (
+                self._needs_review_outcome(
+                    row,
+                    review,
+                    risk=definition.risk.value,
+                    reason=f"this call is parked on review {review.id}",
+                    replayed=True,
+                ),
+                False,
             )
         if row.status in _TERMINAL_TOOL_STATUSES:
-            return self._replayed_outcome(
-                row,
-                approval=approval,
-                risk=definition.risk.value,
-            )
-        if row.status in (ToolCallStatus.EXECUTING.value,):
-            row.status = ToolCallStatus.EXECUTION_UNKNOWN.value
-            row.completed_at = datetime.now(UTC)
-            row.error_code = "execution_outcome_unknown"
-            self._audit(
-                "tool.call.execution_unknown",
-                row.id,
-                {
-                    "code": "execution_outcome_unknown",
-                    **({"approval_id": str(approval.id)} if approval is not None else {}),
-                },
-            )
-            await self._ctx.session.commit()
-            return self._execution_unknown_outcome(
-                row,
-                approval=approval,
-                risk=definition.risk.value,
-                replayed=False,
-            )
-        if row.status == ToolCallStatus.EXECUTION_UNKNOWN.value:
-            return self._execution_unknown_outcome(
-                row,
-                approval=approval,
-                risk=definition.risk.value,
-            )
-        if row.status == ToolCallStatus.PENDING_APPROVAL.value and approval is not None:
-            return GatewayOutcome(
-                status="needs_approval",
-                tool_call_id=row.id,
-                tool_name=row.tool_name,
-                risk=definition.risk.value,
-                decision_code="approval_required",
-                decision_reason=approval.reason,
-                sanitized_input=row.sanitized_input_json,
-                approval_id=approval.id,
-                provider_call_id=(
-                    payload.get("provider_call_id")
-                    if isinstance(payload.get("provider_call_id"), str)
-                    else None
+            return (
+                self._replayed_outcome(
+                    row,
+                    approval=approval,
+                    risk=definition.risk.value,
                 ),
-                replayed=True,
+                False,
+            )
+        if row.status in _UNDISPATCHED_TOOL_STATUSES:
+            # The claim exists and its executor never ran. Nothing outside
+            # Jhin can have happened, so this is a call to finish rather than
+            # a mystery to hand a person: the caller re-decides it from live
+            # state and dispatches it once.
+            await self._audit_claim_reentered(row, approval=approval)
+            return None, True
+        if row.status in _UNPROVEN_DISPATCH_STATUSES:
+            # The row reached its executor and nobody can say what happened.
+            # Whether that is a mystery for a person or a call to run again
+            # is the tool's answer to give, not this branch's.
+            unproven = await self._reconcile_unproven_dispatch(
+                row,
+                risk=definition.risk.value,
+                approval=approval,
+            )
+            if unproven is None:
+                return None, True
+            return unproven, False
+        if row.status == ToolCallStatus.PENDING_APPROVAL.value and approval is not None:
+            return (
+                GatewayOutcome(
+                    status="needs_approval",
+                    tool_call_id=row.id,
+                    tool_name=row.tool_name,
+                    risk=definition.risk.value,
+                    decision_code="approval_required",
+                    decision_reason=approval.reason,
+                    sanitized_input=row.sanitized_input_json,
+                    approval_id=approval.id,
+                    provider_call_id=(
+                        payload.get("provider_call_id")
+                        if isinstance(payload.get("provider_call_id"), str)
+                        else None
+                    ),
+                    replayed=True,
+                ),
+                False,
             )
         raise GatewayStateError(f"tool call {invocation_id} has unexpected status '{row.status}'")
 
@@ -757,6 +1288,8 @@ class ToolGateway:
         tool_name: str,
         sanitized_input: dict[str, Any],
         canonical_input: dict[str, Any] | None = None,
+        denial_code: str,
+        denial_reason: str,
     ) -> GatewayOutcome | None:
         row = await self._ctx.session.scalar(
             select(ToolCall).where(ToolCall.id == invocation_id).with_for_update()
@@ -783,7 +1316,29 @@ class ToolGateway:
         expected_input = (
             sanitized_input if row.status == ToolCallStatus.DENIED.value else canonical_input
         )
-        if expected_input is None or row.sanitized_input_json != expected_input:
+        # The input comparison guards *reuse* of somebody else's outcome: a
+        # replayed result, a parked approval, an unknown execution. It cannot
+        # guard the undispatched case, and demanding it there was wrong.
+        #
+        # A claim's stored input is the model dump of a validated payload, and
+        # this function is reached precisely when that validation is no longer
+        # possible — the tool was revoked, or its schema now refuses the
+        # arguments — so the caller has only the raw arguments and cannot
+        # reproduce the dump. Every such re-entry therefore compared unequal
+        # and came back ``invocation_mismatch``: a shape that says "this id
+        # belongs to some other call" about a row that is this call, sending a
+        # person to reconcile a collision that never happened and leaving the
+        # claim stranded for nobody.
+        #
+        # Identity is already established above from the durable execution
+        # context — workspace, agent, run, task and tool name — and the row is
+        # provably undispatched, so nothing ran and there is no outcome to
+        # reuse. The only two endings available are a denial and a false
+        # collision, and the call is being refused either way.
+        undispatched = row.status in _UNDISPATCHED_TOOL_STATUSES
+        if not undispatched and (
+            expected_input is None or row.sanitized_input_json != expected_input
+        ):
             return await self._invocation_mismatch_outcome(
                 invocation_id,
                 tool_name=tool_name,
@@ -798,22 +1353,35 @@ class ToolGateway:
         if row.status in _TERMINAL_TOOL_STATUSES:
             return self._replayed_outcome(row, approval=approval)
         if row.status == ToolCallStatus.EXECUTION_UNKNOWN.value:
-            return self._execution_unknown_outcome(row, approval=approval)
-        if row.status == ToolCallStatus.EXECUTING.value:
-            row.status = ToolCallStatus.EXECUTION_UNKNOWN.value
-            row.completed_at = datetime.now(UTC)
-            row.error_code = "execution_outcome_unknown"
+            return await self._close_unprovable_unvalidated(row, approval=approval)
+        if row.status in _UNDISPATCHED_TOOL_STATUSES:
+            # Claimed, never dispatched, and no longer describable by a
+            # registered tool and schema. Nothing ran, so the honest ending is
+            # the denial this attempt was about to record anyway — not an
+            # unknown outcome for a person to go and reconcile.
+            now = datetime.now(UTC)
+            row.status = ToolCallStatus.DENIED.value
+            row.completed_at = now
+            row.error_code = denial_code
+            row.sanitized_output_json = denial_output(denial_code, denial_reason)
             self._audit(
-                "tool.call.execution_unknown",
+                "tool.call.denied",
                 row.id,
-                {"code": "execution_outcome_unknown"},
+                {"code": denial_code, "reason": denial_reason},
             )
             await self._ctx.session.commit()
-            return self._execution_unknown_outcome(
-                row,
-                approval=approval,
-                replayed=False,
+            return GatewayOutcome(
+                status="denied",
+                tool_call_id=row.id,
+                tool_name=row.tool_name,
+                risk=None,
+                decision_code=denial_code,
+                decision_reason=denial_reason,
+                sanitized_input=row.sanitized_input_json,
+                error_code=denial_code,
             )
+        if row.status == ToolCallStatus.EXECUTING.value:
+            return await self._close_unprovable_unvalidated(row, approval=approval)
         if row.status in (
             ToolCallStatus.PENDING_APPROVAL.value,
             ToolCallStatus.PENDING_REVIEW.value,
@@ -840,7 +1408,39 @@ class ToolGateway:
         sanitized_input: dict[str, Any],
         risk: str | None,
         connection_id: UUID | None = None,
+        adopt_claim: bool = False,
     ) -> GatewayOutcome:
+        if adopt_claim and invocation_id is not None:
+            # Re-deciding a claim whose executor never ran, and this time the
+            # answer is no. The row already exists, so the denial is written
+            # onto it; nothing was dispatched, so the denial is the whole
+            # truth about the call.
+            denied_row = await self._adopt_undispatched_claim(
+                invocation_id, to_status=ToolCallStatus.DENIED
+            )
+            if denied_row is not None:
+                denied_row.completed_at = datetime.now(UTC)
+                denied_row.error_code = code
+                denied_row.sanitized_output_json = denial_output(code, reason)
+                denied_row.connection_id = connection_id
+                self._audit(
+                    "tool.call.denied",
+                    denied_row.id,
+                    {"code": code, "reason": reason, "risk": risk},
+                )
+                await self._ctx.session.commit()
+                return GatewayOutcome(
+                    status="denied",
+                    tool_call_id=denied_row.id,
+                    tool_name=tool_name,
+                    risk=risk,
+                    decision_code=code,
+                    decision_reason=reason,
+                    sanitized_input=sanitized_input,
+                    error_code=code,
+                )
+            # The claim moved on under us; the ordinary insert below collides
+            # and reloads whatever it really became.
         if invocation_id is None:
             row, outcome = self._denied(
                 tool_name,
@@ -896,11 +1496,17 @@ class ToolGateway:
         except IntegrityError:
             await self._ctx.session.rollback()
             self._ctx.session.expire_all()
+            # A row appeared under this id between the lookup above and this
+            # insert. The reload recognises an undispatched claim by identity
+            # rather than by input, so a claim for this same call ends as the
+            # denial this attempt was recording rather than as a collision.
             replay = await self._existing_unvalidated_invocation(
                 invocation_id,
                 tool_name=tool_name,
                 sanitized_input=sanitized_input,
                 canonical_input=None,
+                denial_code=code,
+                denial_reason=reason,
             )
             if replay is None:
                 raise GatewayStateError(
@@ -926,12 +1532,45 @@ class ToolGateway:
         sanitized_input: dict[str, Any],
         dumped: dict[str, Any],
         connection_id: UUID | None,
+        adopt_claim: bool = False,
     ) -> tuple[ToolCall | None, GatewayOutcome | None]:
-        """Insert the deterministic claim and commit it before execution."""
+        """Insert the deterministic claim and commit it before execution.
+
+        ``adopt_claim`` says this attempt is re-entering a claim whose
+        executor was never entered: the row already exists, so it is taken
+        over in place instead of inserted, and the fresh decision that just
+        allowed the call is what dispatches it.
+        """
         if self._fresh_sessions() is None:
             raise GatewayStateError(
                 "deterministic runtime execution requires an isolated session factory"
             )
+        if adopt_claim:
+            adopted = await self._adopt_undispatched_claim(
+                invocation_id, to_status=ToolCallStatus.CLAIMED
+            )
+            if adopted is None:
+                replay, _adopt = await self._existing_invocation_outcome(
+                    invocation_id, definition, dumped
+                )
+                if replay is None:
+                    raise GatewayStateError(
+                        f"tool call {invocation_id} could not be reclaimed or reloaded"
+                    )
+                return None, replay
+            self._audit_on(
+                self._ctx.session,
+                "tool.call.claimed",
+                invocation_id,
+                {
+                    "tool_name": definition.name,
+                    "claim_kind": "reclaimed_undispatched",
+                },
+            )
+            await self._ctx.session.commit()
+            if self._ctx.test_barrier is not None:
+                await self._ctx.test_barrier.arrive_and_wait(TOOL_AFTER_CLAIM, invocation_id)
+            return adopted, None
         try:
             claim_session = self._ctx.session
             row = ToolCall(
@@ -943,7 +1582,7 @@ class ToolGateway:
                 connection_id=connection_id,
                 sanitized_input_json=sanitized_input,
                 sanitized_output_json={},
-                status=ToolCallStatus.EXECUTING.value,
+                status=ToolCallStatus.CLAIMED.value,
                 started_at=datetime.now(UTC),
             )
             claim_session.add(row)
@@ -968,7 +1607,21 @@ class ToolGateway:
         except IntegrityError:
             await self._ctx.session.rollback()
             self._ctx.session.expire_all()
-            replay = await self._existing_invocation_outcome(invocation_id, definition, dumped)
+            replay, adopt = await self._existing_invocation_outcome(
+                invocation_id, definition, dumped
+            )
+            if replay is None and adopt:
+                # Another attempt inserted the claim between this attempt's
+                # own lookup and its insert, and it never dispatched. Take it
+                # over rather than losing the decision just made.
+                return await self._claim_direct_call(
+                    definition,
+                    invocation_id=invocation_id,
+                    sanitized_input=sanitized_input,
+                    dumped=dumped,
+                    connection_id=connection_id,
+                    adopt_claim=True,
+                )
             if replay is None:
                 raise GatewayStateError(
                     f"tool call {invocation_id} could not be claimed or reloaded"
@@ -988,21 +1641,53 @@ class ToolGateway:
             Connection.workspace_id == self._ctx.workspace_id,
         )
         if lock:
-            connection_query = connection_query.with_for_update(read=True).execution_options(
+            # Executors may mutate or serialize writes through this connection.
+            # Avoid SHARE→UPDATE upgrades after taking the credential lock.
+            connection_query = connection_query.with_for_update(key_share=True).execution_options(
                 populate_existing=True
             )
         connection = await self._ctx.session.scalar(connection_query)
-        if connection is None or connection.encrypted_secret_id is None:
+        if connection is None:
+            return None
+
+        credential_id = connection.encrypted_secret_id
+        variable_revision = None
+        variable_field = {
+            "ghost": "admin_key_variable_id",
+            "unsplash": "access_key_variable_id",
+        }.get(connection.connector_type)
+        if variable_field and connection.config_json.get(variable_field):
+            from jhin_db.models.variables import ScopedVariable
+
+            try:
+                variable_id = UUID(str(connection.config_json[variable_field]))
+            except ValueError:
+                return None
+            variable_query = select(ScopedVariable).where(
+                ScopedVariable.id == variable_id,
+                ScopedVariable.workspace_id == self._ctx.workspace_id,
+            )
+            if lock:
+                variable_query = variable_query.with_for_update(read=True).execution_options(
+                    populate_existing=True
+                )
+            variable = await self._ctx.session.scalar(variable_query)
+            if variable is None or not variable.sensitive:
+                return None
+            credential_id = variable.secret_id
+            variable_revision = variable.version
+        if credential_id is None:
             return None
 
         secret_query = select(Secret).where(
-            Secret.id == connection.encrypted_secret_id,
+            Secret.id == credential_id,
             Secret.workspace_id == self._ctx.workspace_id,
         )
         if lock:
-            secret_query = secret_query.with_for_update(read=True).execution_options(
-                populate_existing=True
-            )
+            # reveal() stamps last_used_at in this transaction. Two SHARE
+            # holders upgrading to UPDATE can deadlock after provider work;
+            # serialize consumers of one credential before either reveals it.
+            secret_query = secret_query.with_for_update().execution_options(populate_existing=True)
         secret = await self._ctx.session.scalar(secret_query)
         if secret is None:
             return None
@@ -1015,6 +1700,7 @@ class ToolGateway:
                 "config": connection.config_json,
                 "credential_fingerprint": secret.secret_fingerprint,
                 "credential_key_version": secret.key_version,
+                "variable_revision": variable_revision,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -1034,9 +1720,11 @@ class ToolGateway:
             .where(
                 ToolCall.id == row_id,
                 ToolCall.workspace_id == self._ctx.workspace_id,
-                ToolCall.status == ToolCallStatus.PENDING_APPROVAL.value,
+                ToolCall.status.in_(
+                    [ToolCallStatus.PENDING_APPROVAL.value, *sorted(_UNDISPATCHED_TOOL_STATUSES)]
+                ),
             )
-            .values(status=ToolCallStatus.EXECUTING.value)
+            .values(status=ToolCallStatus.CLAIMED.value)
             .returning(ToolCall.id)
             .execution_options(synchronize_session=False)
         )
@@ -1073,29 +1761,24 @@ class ToolGateway:
             raise GatewayStateError(f"tool call {row_id} disappeared while claiming approval")
         if current.status in _TERMINAL_TOOL_STATUSES:
             return self._replayed_outcome(current, approval=fresh_approval)
-        if current.status == ToolCallStatus.EXECUTING.value:
-            current.status = ToolCallStatus.EXECUTION_UNKNOWN.value
-            current.completed_at = datetime.now(UTC)
-            current.error_code = "execution_outcome_unknown"
-            self._audit(
-                "tool.call.execution_unknown",
-                current.id,
-                {
-                    "code": "execution_outcome_unknown",
-                    "approval_id": str(fresh_approval.id),
-                },
-            )
-            await self._ctx.session.commit()
-            return self._execution_unknown_outcome(
+        if current.status in _UNDISPATCHED_TOOL_STATUSES:
+            # An earlier resolution of this same approval already claimed the
+            # call and stopped before dispatching it. The claim is this
+            # attempt's to finish; the dispatch compare-and-set still decides
+            # which single attempt runs the effect.
+            await self._audit_claim_reentered(current, approval=fresh_approval)
+            await self._ctx.session.refresh(row)
+            return None
+        if current.status in _UNPROVEN_DISPATCH_STATUSES:
+            unproven = await self._reconcile_unproven_dispatch(
                 current,
-                approval=fresh_approval,
-                replayed=False,
-            )
-        if current.status == ToolCallStatus.EXECUTION_UNKNOWN.value:
-            return self._execution_unknown_outcome(
-                current,
+                risk=None,
                 approval=fresh_approval,
             )
+            if unproven is None:
+                await self._ctx.session.refresh(row)
+                return None
+            return unproven
         raise GatewayStateError(
             f"tool call {row_id} changed to unexpected status '{current.status}'"
         )
@@ -1125,18 +1808,21 @@ class ToolGateway:
         authorized_by = authorizing_allow_grants(
             definition, grants=grants, requested_scope=requested_scope
         )
-        durably_claimed = row.status == ToolCallStatus.EXECUTING.value
+        durably_claimed = row.status in _UNDISPATCHED_TOOL_STATUSES
 
         if durably_claimed:
             execution_session = self._ctx.session
+            # Read without ``FOR UPDATE``: the guard that matters is the
+            # dispatch compare-and-set in :meth:`_run_executor`, which is
+            # atomic, durable and — where the process has an isolated session
+            # factory — taken on its own connection, so a row lock held here
+            # would only block it.
             execution_row = await execution_session.scalar(
-                select(ToolCall)
-                .where(
+                select(ToolCall).where(
                     ToolCall.id == row.id,
                     ToolCall.workspace_id == self._ctx.workspace_id,
-                    ToolCall.status == ToolCallStatus.EXECUTING.value,
+                    ToolCall.status.in_(sorted(_UNDISPATCHED_TOOL_STATUSES)),
                 )
-                .with_for_update()
             )
             if execution_row is None:
                 raise GatewayStateError(
@@ -1187,8 +1873,33 @@ class ToolGateway:
         )
         tool_call_id = row.id
 
+        if commit_terminal:
+            # The last durable statement before anything can happen. After it
+            # commits the row reads ``executing``, which recovery treats as
+            # "an effect may have occurred"; until it commits the row reads
+            # ``claimed``, which recovery treats as "nothing happened". A
+            # losing compare-and-set means another attempt is already past
+            # this line, and that call is exactly the one nobody can vouch
+            # for, so it reconciles as unknown.
+            if not await self._mark_dispatched(
+                session,
+                tool_call_id,
+                tool_name=definition.name,
+                risk=definition.risk.value,
+            ):
+                await session.rollback()
+                return await self._persist_execution_unknown(
+                    tool_call_id,
+                    risk=definition.risk.value,
+                )
+            await session.refresh(row)
+
         started = time.monotonic()
-        row.started_at = datetime.now(UTC)
+        execution_started_at = datetime.now(UTC)
+        # Keep the durable dispatch row clean throughout execution. A query
+        # inside a connector otherwise autoflushes this timestamp, and the
+        # conversation journal trigger holds its parent lock while independent
+        # workspace/job transactions wait for that same parent indefinitely.
         try:
             output_model = await executor(execution_ctx, validated_input)
             output = self._sanitize(output_model.model_dump(mode="json"))
@@ -1202,13 +1913,22 @@ class ToolGateway:
                 return await self._persist_execution_unknown(
                     tool_call_id,
                     risk=definition.risk.value,
+                    detail=exc.detail,
                 )
-            # Only the validated, bounded code (plus the connector's static
-            # retry hint) crosses the gateway boundary; provider exception
-            # messages are never persisted or observed.
+            # The validated code, the connector's static retry hint, and the
+            # failure's own bounded account of itself. That last part is the
+            # provider's or the container's own words rather than Jhin's, and
+            # it is here because a failure reported as ``github_http_403`` and
+            # nothing else is a failure nobody can act on: GitHub said
+            # "Resource not accessible by integration", which names the fix.
+            # It is untrusted text, so it is bounded at the raise site and
+            # redacted by ``_sanitize`` on the way to the row, and it is
+            # evidence for the model rather than instruction to it.
             failure: dict[str, Any] = {"error": exc.code}
             if exc.hint:
                 failure["hint"] = exc.hint
+            if exc.detail:
+                failure["detail"] = exc.detail
             output = self._sanitize(failure)
             status = "failed"
             error_code = exc.code
@@ -1244,6 +1964,8 @@ class ToolGateway:
             raise
         duration_ms = int((time.monotonic() - started) * 1000)
 
+        if not commit_terminal:
+            row.started_at = execution_started_at
         row.completed_at = datetime.now(UTC)
         row.duration_ms = duration_ms
         row.sanitized_output_json = output
@@ -1308,12 +2030,89 @@ class ToolGateway:
         async with self._invocation_lifecycle_lock(invocation_id) as gateway:
             if gateway._ctx.test_barrier is not None:
                 await gateway._ctx.test_barrier.arrive_and_wait(TOOL_BEFORE_CLAIM, invocation_id)
-            return await gateway._request_once(
+            return await gateway._request_until_proven(
                 tool_name,
                 arguments_json,
                 provider_call_id=provider_call_id,
                 invocation_id=invocation_id,
             )
+
+    async def _request_until_proven(
+        self,
+        tool_name: str,
+        arguments_json: str,
+        *,
+        provider_call_id: str,
+        invocation_id: UUID,
+    ) -> GatewayOutcome:
+        """Run one invocation, retrying only what is safe to retry.
+
+        This is the *other* half of the same rule, for the failure that
+        happens while somebody is still here to see it: a runner that stopped
+        answering, an executor that raised, a dispatch compare-and-set this
+        attempt lost. The gateway already knows those produce an unproven
+        outcome, and now it also knows which tools may simply be run again —
+        so an agent asking for a file listing gets the listing rather than a
+        stopped run, and a push gets the same careful ending it always did.
+
+        The retry lives here, inside the invocation's lifecycle lock, which
+        is the only place that can promise no second attempt is interleaving
+        with it. It is bounded twice over: by the loop, and by the durable
+        dispatch count that ``_reconcile_unproven_dispatch`` reads — so a
+        worker killed mid-retry resumes into the same budget rather than a
+        fresh one, and the retries cannot become a loop.
+        """
+
+        async def once() -> GatewayOutcome:
+            return await self._request_once(
+                tool_name,
+                arguments_json,
+                provider_call_id=provider_call_id,
+                invocation_id=invocation_id,
+            )
+
+        return await self._retry_while_unproven(once)
+
+    async def _retry_while_unproven(
+        self,
+        run_once: Callable[[], Awaitable[GatewayOutcome]],
+    ) -> GatewayOutcome:
+        """Re-run one invocation while its outcome is unproven and safe to
+        repeat.
+
+        Every re-run goes back through the ordinary front door: the row is
+        re-read, re-decided against live grants and policy, and dispatched by
+        the same compare-and-set. Nothing here shortcuts a decision, which is
+        why a grant revoked between two attempts denies the second one.
+
+        The loop runs one entry *past* the dispatch budget, and that last
+        entry is the whole point of the fix rather than an off-by-one. A
+        re-dispatch does not decide it was the last one — it dispatches, and
+        comes back ``execution_unknown`` like the two before it. The only code
+        that turns a spent budget into the readable ``execution_not_confirmed``
+        is :meth:`_reconcile_unproven_dispatch`, on the *next* way in, where it
+        reads the durable dispatch count and closes the row instead of
+        re-opening it. Stopping at the third dispatch therefore returned the
+        exact sentence this whole change exists to prevent — three attempts
+        spent and "manual reconciliation is required" at the end of them — so
+        the closing entry is made here, where it costs nothing: it cannot
+        dispatch (the budget it would need is gone) and it waits for nothing
+        (there is nothing left to wait for).
+        """
+        outcome = await run_once()
+        entries = 1
+        while (
+            outcome.status == "execution_unknown"
+            and entries < _MAX_INVOCATION_ENTRIES
+            and self._redispatch_is_safe(outcome.tool_name)
+        ):
+            if entries <= len(_REDISPATCH_BACKOFF_SECONDS):
+                # Long enough for a runner to finish coming back, short enough
+                # that the person watching the conversation does not notice.
+                await asyncio.sleep(_REDISPATCH_BACKOFF_SECONDS[entries - 1])
+            entries += 1
+            outcome = await run_once()
+        return outcome
 
     async def _request_once(
         self,
@@ -1353,21 +2152,34 @@ class ToolGateway:
             persisted_name = (
                 sanitized_name[:200] if isinstance(sanitized_name, str) else ""
             ) or "unknown"
+            not_found_reason = f"no registered tool named '{persisted_name}'"
             if invocation_id is not None:
                 replay = await self._existing_unvalidated_invocation(
                     invocation_id,
                     tool_name=persisted_name,
                     sanitized_input=raw,
                     canonical_input=canonical_unvalidated_input,
+                    denial_code="tool_not_found",
+                    denial_reason=not_found_reason,
                 )
                 if replay is not None:
                     return replay
                 await self._require_durable_execution_context()
+            # No ``adopt_claim`` here, and it is not an omission. This is a
+            # pre-claim path: ``_existing_unvalidated_invocation`` returns None
+            # in exactly one case, which is that no ``tool_call`` row with this
+            # id exists — every other state it finds it answers itself,
+            # including a claim nothing dispatched, which it now denies in
+            # place. So there is provably no claim to adopt by the time this
+            # line runs, and the whole call is inside the per-invocation
+            # lifecycle lock, so no second attempt can insert one underneath
+            # it. The insert's own ``IntegrityError`` path re-enters that same
+            # reload, which is what covers a row written outside the lock.
             return await self._persist_denial(
                 invocation_id=invocation_id,
                 tool_name=persisted_name,
                 code="tool_not_found",
-                reason=f"no registered tool named '{persisted_name}'",
+                reason=not_found_reason,
                 sanitized_input=raw,
                 risk=None,
             )
@@ -1403,21 +2215,28 @@ class ToolGateway:
             raw_arguments = raw.get("_raw_arguments")
             if isinstance(raw_arguments, str):
                 raw["_raw_arguments"] = raw_arguments[:2_000]
+            invalid_reason = parse_error or "invalid input"
             if invocation_id is not None:
                 replay = await self._existing_unvalidated_invocation(
                     invocation_id,
                     tool_name=definition.name,
                     sanitized_input=raw,
                     canonical_input=canonical_unvalidated_input,
+                    denial_code="invalid_input",
+                    denial_reason=invalid_reason,
                 )
                 if replay is not None:
                     return replay
                 await self._require_durable_execution_context()
+            # Pre-claim, for the same reason as ``tool_not_found`` above: the
+            # only way past ``_existing_unvalidated_invocation`` is that no row
+            # with this id exists, so ``adopt_claim`` would have nothing to
+            # adopt.
             return await self._persist_denial(
                 invocation_id=invocation_id,
                 tool_name=definition.name,
                 code="invalid_input",
-                reason=parse_error or "invalid input",
+                reason=invalid_reason,
                 sanitized_input=raw,
                 risk=definition.risk.value,
             )
@@ -1435,8 +2254,11 @@ class ToolGateway:
         # rather than from a provider-generated call id. A retried model call
         # can therefore regenerate provider ids without repeating a durable
         # external mutation.
+        adopt_claim = False
         if invocation_id is not None:
-            replay = await self._existing_invocation_outcome(invocation_id, definition, dumped)
+            replay, adopt_claim = await self._existing_invocation_outcome(
+                invocation_id, definition, dumped
+            )
             if replay is not None:
                 return replay
             await self._require_durable_execution_context()
@@ -1454,6 +2276,30 @@ class ToolGateway:
                     sanitized_input=sanitized_input,
                     risk=definition.risk.value,
                     connection_id=connection_id,
+                    adopt_claim=adopt_claim,
+                )
+
+        # The task's immutable per-turn mode is a ceiling, never a grant.
+        # Check after replay lookup so completed effects remain replayable.
+        task = await self._ctx.session.scalar(
+            select(Task).where(
+                Task.id == self._ctx.task_id, Task.workspace_id == self._ctx.workspace_id
+            )
+        )
+        if task is not None:
+            from jhin_tools.turn_modes import mode_denial
+
+            denial = mode_denial(definition, task.metadata_json)
+            if denial:
+                return await self._persist_denial(
+                    invocation_id=invocation_id,
+                    tool_name=definition.name,
+                    code=denial[0],
+                    reason=denial[1],
+                    sanitized_input=sanitized_input,
+                    risk=definition.risk.value,
+                    connection_id=connection_id,
+                    adopt_claim=adopt_claim,
                 )
 
         # 3-5. Grants, scope, and policy — live from Postgres, so a revoked
@@ -1471,6 +2317,7 @@ class ToolGateway:
                 sanitized_input=sanitized_input,
                 risk=definition.risk.value,
                 connection_id=connection_id,
+                adopt_claim=adopt_claim,
             )
 
         # Tool-specific policy validator (plan 7.5): e.g. the delegation
@@ -1488,7 +2335,23 @@ class ToolGateway:
                     sanitized_input=sanitized_input,
                     risk=definition.risk.value,
                     connection_id=connection_id,
+                    adopt_claim=adopt_claim,
                 )
+
+        from jhin_tools.readiness import check_work_readiness
+
+        readiness = await check_work_readiness(self._ctx, definition, validated)
+        if readiness is not None and readiness.decision is DecisionType.DENY:
+            return await self._persist_denial(
+                invocation_id=invocation_id,
+                tool_name=definition.name,
+                code=readiness.code,
+                reason=readiness.reason,
+                sanitized_input=sanitized_input,
+                risk=definition.risk.value,
+                connection_id=connection_id,
+                adopt_claim=adopt_claim,
+            )
 
         # Coordination review gate (docs/architecture/coordination.md):
         # capability/scope/validator -> review gate -> human approval ->
@@ -1515,6 +2378,7 @@ class ToolGateway:
                     sanitized_input=sanitized_input,
                     dumped=dumped,
                     connection_id=connection_id,
+                    adopt_claim=adopt_claim,
                 )
             code, reason = self._review_denial(review_gate)
             return await self._persist_denial(
@@ -1525,6 +2389,7 @@ class ToolGateway:
                 sanitized_input=sanitized_input,
                 risk=definition.risk.value,
                 connection_id=connection_id,
+                adopt_claim=adopt_claim,
             )
 
         if decision.decision is DecisionType.REQUIRE_APPROVAL:
@@ -1545,6 +2410,7 @@ class ToolGateway:
                     sanitized_input=sanitized_input,
                     risk=definition.risk.value,
                     connection_id=connection_id,
+                    adopt_claim=adopt_claim,
                 )
             connection_digest: str | None = None
             if connection_id is not None:
@@ -1560,6 +2426,12 @@ class ToolGateway:
                         sanitized_input=sanitized_input,
                         risk=definition.risk.value,
                         connection_id=connection_id,
+                        # Like every other denial in this method. Without it a
+                        # re-entered claim inserts a second row under the same
+                        # invocation id, hits the unique index, and reports
+                        # ``invocation_mismatch`` -- a wrong answer that also
+                        # strands the original row in ``claimed``.
+                        adopt_claim=adopt_claim,
                     )
             now = datetime.now(UTC)
             tool_call_id = invocation_id or new_uuid7()
@@ -1573,21 +2445,45 @@ class ToolGateway:
                 now=now,
             )
             self._ctx.session.add(approval)
-            row = ToolCall(
-                id=tool_call_id,
-                workspace_id=self._ctx.workspace_id,
-                run_id=self._ctx.run_id,
-                agent_id=self._ctx.agent_id,
-                tool_name=definition.name,
-                connection_id=connection_id,
-                sanitized_input_json=sanitized_input,
-                sanitized_output_json={},
-                status=ToolCallStatus.PENDING_APPROVAL.value,
-                approval_id=approval.id,
-                started_at=now,
-            )
-            self._ctx.session.add(row)
-            self._audit("tool.call.requested", row.id, {"tool_name": definition.name})
+            adopted_row: ToolCall | None = None
+            if adopt_claim and invocation_id is not None:
+                # Policy now wants a person to see this call, and the earlier
+                # claim never ran. The claim becomes the parked row rather
+                # than a second row under the same identity.
+                adopted_row = await self._adopt_undispatched_claim(
+                    invocation_id,
+                    to_status=ToolCallStatus.PENDING_APPROVAL,
+                    approval_id=approval.id,
+                )
+                if adopted_row is None:
+                    await self._ctx.session.rollback()
+                    self._ctx.session.expire_all()
+                    replay, _adopt = await self._existing_invocation_outcome(
+                        invocation_id, definition, dumped
+                    )
+                    if replay is None:
+                        raise GatewayStateError(
+                            f"tool call {invocation_id} approval could not be reloaded"
+                        )
+                    return replay
+            if adopted_row is not None:
+                row = adopted_row
+            else:
+                row = ToolCall(
+                    id=tool_call_id,
+                    workspace_id=self._ctx.workspace_id,
+                    run_id=self._ctx.run_id,
+                    agent_id=self._ctx.agent_id,
+                    tool_name=definition.name,
+                    connection_id=connection_id,
+                    sanitized_input_json=sanitized_input,
+                    sanitized_output_json={},
+                    status=ToolCallStatus.PENDING_APPROVAL.value,
+                    approval_id=approval.id,
+                    started_at=now,
+                )
+                self._ctx.session.add(row)
+                self._audit("tool.call.requested", row.id, {"tool_name": definition.name})
             self._audit(
                 "approval.requested",
                 row.id,
@@ -1604,7 +2500,7 @@ class ToolGateway:
                 except IntegrityError:
                     await self._ctx.session.rollback()
                     self._ctx.session.expire_all()
-                    replay = await self._existing_invocation_outcome(
+                    replay, _adopt = await self._existing_invocation_outcome(
                         invocation_id,
                         definition,
                         dumped,
@@ -1638,6 +2534,7 @@ class ToolGateway:
                 sanitized_input=sanitized_input,
                 dumped=dumped,
                 connection_id=connection_id,
+                adopt_claim=adopt_claim,
             )
             if replay is not None:
                 return replay
@@ -1763,6 +2660,7 @@ class ToolGateway:
         sanitized_input: dict[str, Any],
         dumped: dict[str, Any],
         connection_id: UUID | None,
+        adopt_claim: bool = False,
     ) -> GatewayOutcome:
         """Persist the call as ``pending_review`` before anything else exists.
 
@@ -1782,6 +2680,7 @@ class ToolGateway:
                 sanitized_input=sanitized_input,
                 risk=definition.risk.value,
                 connection_id=connection_id,
+                adopt_claim=adopt_claim,
             )
         review = await self._ctx.session.scalar(
             select(WorkReview).where(
@@ -1790,21 +2689,44 @@ class ToolGateway:
         )
         if review is None:
             raise GatewayStateError(f"review {review_id} disappeared before parking")
-        row = ToolCall(
-            id=invocation_id,
-            workspace_id=self._ctx.workspace_id,
-            run_id=self._ctx.run_id,
-            agent_id=self._ctx.agent_id,
-            tool_name=definition.name,
-            connection_id=connection_id,
-            sanitized_input_json=sanitized_input,
-            sanitized_output_json={},
-            status=ToolCallStatus.PENDING_REVIEW.value,
-            review_id=review.id,
-            started_at=datetime.now(UTC),
-        )
-        self._ctx.session.add(row)
-        self._audit("tool.call.requested", row.id, {"tool_name": definition.name})
+        parked: ToolCall | None = None
+        if adopt_claim:
+            # A review policy now covers this call and the earlier claim never
+            # ran: the claim becomes the parked row, under the same identity.
+            parked = await self._adopt_undispatched_claim(
+                invocation_id,
+                to_status=ToolCallStatus.PENDING_REVIEW,
+                review_id=review.id,
+            )
+            if parked is None:
+                await self._ctx.session.rollback()
+                self._ctx.session.expire_all()
+                replay, _adopt = await self._existing_invocation_outcome(
+                    invocation_id, definition, dumped
+                )
+                if replay is None:
+                    raise GatewayStateError(
+                        f"tool call {invocation_id} review park could not be reloaded"
+                    )
+                return replay
+        if parked is not None:
+            row = parked
+        else:
+            row = ToolCall(
+                id=invocation_id,
+                workspace_id=self._ctx.workspace_id,
+                run_id=self._ctx.run_id,
+                agent_id=self._ctx.agent_id,
+                tool_name=definition.name,
+                connection_id=connection_id,
+                sanitized_input_json=sanitized_input,
+                sanitized_output_json={},
+                status=ToolCallStatus.PENDING_REVIEW.value,
+                review_id=review.id,
+                started_at=datetime.now(UTC),
+            )
+            self._ctx.session.add(row)
+            self._audit("tool.call.requested", row.id, {"tool_name": definition.name})
         self._audit(
             "review.requested",
             row.id,
@@ -1821,7 +2743,9 @@ class ToolGateway:
         except IntegrityError:
             await self._ctx.session.rollback()
             self._ctx.session.expire_all()
-            replay = await self._existing_invocation_outcome(invocation_id, definition, dumped)
+            replay, _adopt = await self._existing_invocation_outcome(
+                invocation_id, definition, dumped
+            )
             if replay is None:
                 raise GatewayStateError(
                     f"tool call {invocation_id} review park could not be reloaded"
@@ -1846,9 +2770,13 @@ class ToolGateway:
                     await gateway._ctx.test_barrier.arrive_and_wait(
                         TOOL_BEFORE_CLAIM, invocation_id
                     )
-                outcome = await gateway._resolve_review_once(review_id)
-                await gateway._ctx.session.commit()
-                return outcome
+
+                async def once() -> GatewayOutcome:
+                    resolved = await gateway._resolve_review_once(review_id)
+                    await gateway._ctx.session.commit()
+                    return resolved
+
+                return await gateway._retry_while_unproven(once)
             except BaseException:
                 await gateway._ctx.session.rollback()
                 raise
@@ -1869,11 +2797,16 @@ class ToolGateway:
             raise GatewayStateError(f"review {review_id} is still pending")
         if row.status in _TERMINAL_TOOL_STATUSES:
             return self._replayed_outcome(row)
-        if row.status in (
-            ToolCallStatus.EXECUTING.value,
-            ToolCallStatus.EXECUTION_UNKNOWN.value,
-        ):
-            return await self._persist_execution_unknown(row.id, risk=None)
+        if row.status in _UNPROVEN_DISPATCH_STATUSES:
+            unproven = await self._reconcile_unproven_dispatch(row, risk=None, approval=None)
+            if unproven is not None:
+                return unproven
+            await self._ctx.session.refresh(row)
+        if row.status in _UNDISPATCHED_TOOL_STATUSES:
+            # A previous resolution of this review claimed the call and
+            # stopped before dispatching it. Nothing ran, so this resolution
+            # re-decides it from live state below and dispatches it once.
+            await self._audit_claim_reentered(row)
         if row.status == ToolCallStatus.PENDING_APPROVAL.value:
             # Already resumed into approval staging; a retry replays it.
             approval = (
@@ -1896,7 +2829,10 @@ class ToolGateway:
                 review_id=review.id,
                 replayed=True,
             )
-        if row.status != ToolCallStatus.PENDING_REVIEW.value:
+        if row.status not in (
+            ToolCallStatus.PENDING_REVIEW.value,
+            *_UNDISPATCHED_TOOL_STATUSES,
+        ):
             raise GatewayStateError(f"tool call {row.id} is '{row.status}', not pending review")
 
         entry = self._catalog.get(row.tool_name)
@@ -1991,6 +2927,20 @@ class ToolGateway:
                     risk=definition.risk.value,
                     review_id=review.id,
                 )
+        from jhin_tools.readiness import check_work_readiness
+
+        readiness = await check_work_readiness(self._ctx, definition, validated)
+        if readiness is not None and readiness.decision is DecisionType.DENY:
+            return self._finish_parked_call(
+                row,
+                None,
+                status="denied",
+                code=readiness.code,
+                reason=readiness.reason,
+                risk=definition.risk.value,
+                review_id=review.id,
+            )
+
         # The gate again: the decided review passes, but another matched
         # policy may still be pending, in which case the call parks on it.
         gate = await self._review_gate(definition, invocation_id=row.id)
@@ -2095,9 +3045,11 @@ class ToolGateway:
             .where(
                 ToolCall.id == row_id,
                 ToolCall.workspace_id == self._ctx.workspace_id,
-                ToolCall.status == ToolCallStatus.PENDING_REVIEW.value,
+                ToolCall.status.in_(
+                    [ToolCallStatus.PENDING_REVIEW.value, *sorted(_UNDISPATCHED_TOOL_STATUSES)]
+                ),
             )
-            .values(status=ToolCallStatus.EXECUTING.value)
+            .values(status=ToolCallStatus.CLAIMED.value)
             .returning(ToolCall.id)
             .execution_options(synchronize_session=False)
         )
@@ -2122,11 +3074,17 @@ class ToolGateway:
             raise GatewayStateError(f"tool call {row_id} disappeared while claiming review")
         if current.status in _TERMINAL_TOOL_STATUSES:
             return self._replayed_outcome(current)
-        if current.status in (
-            ToolCallStatus.EXECUTING.value,
-            ToolCallStatus.EXECUTION_UNKNOWN.value,
-        ):
-            return await self._persist_execution_unknown(current.id, risk=None)
+        if current.status in _UNDISPATCHED_TOOL_STATUSES:
+            # Already claimed by this resolution and never dispatched; the
+            # dispatch compare-and-set still decides who runs the effect.
+            await self._ctx.session.refresh(row)
+            return None
+        if current.status in _UNPROVEN_DISPATCH_STATUSES:
+            unproven = await self._reconcile_unproven_dispatch(current, risk=None, approval=None)
+            if unproven is not None:
+                return unproven
+            await self._ctx.session.refresh(row)
+            return None
         raise GatewayStateError(
             f"tool call {row_id} changed to unexpected status '{current.status}'"
         )
@@ -2327,9 +3285,13 @@ class ToolGateway:
                     await gateway._ctx.test_barrier.arrive_and_wait(
                         TOOL_BEFORE_CLAIM, invocation_id
                     )
-                outcome = await gateway._resolve_approved_once(approval_id)
-                await gateway._ctx.session.commit()
-                return outcome
+
+                async def once() -> GatewayOutcome:
+                    resolved = await gateway._resolve_approved_once(approval_id)
+                    await gateway._ctx.session.commit()
+                    return resolved
+
+                return await gateway._retry_while_unproven(once)
             except BaseException:
                 await gateway._ctx.session.rollback()
                 raise
@@ -2345,16 +3307,25 @@ class ToolGateway:
             raise GatewayStateError(f"approval {approval_id} is '{approval.status}', not approved")
         if row.status in _TERMINAL_TOOL_STATUSES:
             return self._replayed_outcome(row, approval=approval)
-        if row.status in (
-            ToolCallStatus.EXECUTING.value,
-            ToolCallStatus.EXECUTION_UNKNOWN.value,
-        ):
+        if row.status in _UNPROVEN_DISPATCH_STATUSES:
             payload_risk = approval.action_payload_sanitized.get("risk")
-            return await self._persist_execution_unknown(
-                row.id,
+            unproven = await self._reconcile_unproven_dispatch(
+                row,
                 risk=payload_risk if isinstance(payload_risk, str) else None,
+                approval=approval,
             )
-        if row.status != ToolCallStatus.PENDING_APPROVAL.value:
+            if unproven is not None:
+                return unproven
+            # Re-runnable, and back in ``claimed``: fall through into the
+            # ordinary resume chain below, which re-validates the binding,
+            # takes the locks again and dispatches once.
+            await self._ctx.session.refresh(row)
+        if row.status in _UNDISPATCHED_TOOL_STATUSES:
+            # A previous resolution of this approval claimed the call and
+            # stopped before dispatching it. Re-validate the binding, take the
+            # locks again, and dispatch once.
+            await self._audit_claim_reentered(row, approval=approval)
+        elif row.status != ToolCallStatus.PENDING_APPROVAL.value:
             raise GatewayStateError(f"tool call {row.id} is in unexpected status '{row.status}'")
 
         binding, binding_failure = await self._validate_parked_approval_binding(approval, row)
@@ -2406,11 +3377,24 @@ class ToolGateway:
                     risk=definition.risk.value,
                 )
 
+        from jhin_tools.readiness import check_work_readiness
+
+        readiness = await check_work_readiness(self._ctx, definition, validated)
+        if readiness is not None and readiness.decision is DecisionType.DENY:
+            return self._finish_parked_call(
+                row,
+                approval_id,
+                status="denied",
+                code=readiness.code,
+                reason=readiness.reason,
+                risk=definition.risk.value,
+            )
+
         replay = await self._claim_parked_call(approval, row)
         if replay is not None:
             return replay
 
-        # Reacquire shared locks after the durable claim and keep them through
+        # Reacquire authorization locks after the durable claim and keep them through
         # the outer activity commit. This closes the approval/executor TOCTOU
         # window for credential rotation, config, auth type, and status.
         if connection_id is not None:
@@ -2458,16 +3442,21 @@ class ToolGateway:
             raise GatewayStateError(f"approval {approval_id} is '{approval.status}', not rejected")
         if row.status in _TERMINAL_TOOL_STATUSES:
             return self._replayed_outcome(row, approval=approval)
-        if row.status in (
-            ToolCallStatus.EXECUTING.value,
-            ToolCallStatus.EXECUTION_UNKNOWN.value,
-        ):
+        if row.status in _UNPROVEN_DISPATCH_STATUSES:
+            # Deliberately *not* routed through the redispatch classification.
+            # That question is "would running this again be safe", and here a
+            # person has already answered a different one: they said no. A
+            # rejected call that nevertheless reached its executor is exactly
+            # the thing to stop and show them.
             payload_risk = approval.action_payload_sanitized.get("risk")
             return await self._persist_execution_unknown(
                 row.id,
                 risk=payload_risk if isinstance(payload_risk, str) else None,
             )
-        if row.status != ToolCallStatus.PENDING_APPROVAL.value:
+        if row.status not in (
+            ToolCallStatus.PENDING_APPROVAL.value,
+            *_UNDISPATCHED_TOOL_STATUSES,
+        ):
             raise GatewayStateError(f"tool call {row.id} is '{row.status}', not pending approval")
         binding, binding_failure = await self._validate_parked_approval_binding(approval, row)
         if binding_failure is not None:

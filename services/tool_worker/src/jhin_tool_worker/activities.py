@@ -19,6 +19,9 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 import jhin_tools.telemetry as tool_telemetry
+from jhin_connectors import default_registry
+from jhin_connectors.composio.source import workspace_composio_connections
+from jhin_connectors.mcp.source import workspace_mcp_connections
 from jhin_db.models import (
     Agent,
     AgentCapabilityGrant,
@@ -40,6 +43,7 @@ from jhin_observability import (
     set_span_attributes,
 )
 from jhin_policy import Grant, GrantEffect
+from jhin_tool_worker.drain import WorkerDrain
 from jhin_tool_worker.resources import ToolWorkerResources
 from jhin_tools import (
     MAX_TOOL_CALLS_PER_STEP,
@@ -581,11 +585,20 @@ async def _validate_approval_manifest_binding(
 
 
 class ToolActivities:
-    def __init__(self, resources: ToolWorkerResources, catalog: ToolCatalog) -> None:
+    def __init__(
+        self,
+        resources: ToolWorkerResources,
+        catalog: ToolCatalog,
+        *,
+        drain: WorkerDrain | None = None,
+    ) -> None:
         self._resources = resources
         self._catalog = catalog
         self._metrics = resources.runtime.metrics
         self._tracer = resources.runtime.tracer
+        # A worker with no drain (unit tests, direct callers) behaves exactly
+        # as it always did: nothing is refused and nothing is counted.
+        self._drain = drain if drain is not None else WorkerDrain()
 
     async def _load_tool_telemetry_authority(
         self,
@@ -900,306 +913,389 @@ class ToolActivities:
         self,
         params: ResolveAdvertisedToolsInput,
     ) -> list[AdvertisedTool]:
-        workspace_id = _uuid(params.workspace_id, field="workspace_id")
-        agent_id = _uuid(params.agent_id, field="agent_id")
-        task_id = _uuid(params.task_id, field="task_id") if params.task_id else None
-        async with self._resources.session_factory() as session:
-            rows = await session.scalars(
-                select(AgentCapabilityGrant).where(
-                    AgentCapabilityGrant.workspace_id == workspace_id,
-                    AgentCapabilityGrant.agent_id == agent_id,
-                )
-            )
-            grants: list[Grant] = []
-            for row in rows:
-                try:
-                    grants.append(
-                        Grant(
-                            capability=row.capability,
-                            scope=row.scope_json,
-                            effect=GrantEffect(row.effect),
-                        )
+        # Refused while this process is shutting down, and counted while it
+        # is not, exactly like the three activities that dispatch effects
+        # (jhin_tool_worker.drain). Nothing here can leave anything to
+        # reconcile -- it reads grants and returns a list -- so the reason is
+        # the other one the drain has: a worker on its way out should not be
+        # the one holding a turn open while the calls behind it wait. Refusing
+        # costs nothing, because Temporal redelivers it to a worker that is.
+        with self._drain.hold():
+            workspace_id = _uuid(params.workspace_id, field="workspace_id")
+            agent_id = _uuid(params.agent_id, field="agent_id")
+            task_id = _uuid(params.task_id, field="task_id") if params.task_id else None
+            async with self._resources.session_factory() as session:
+                rows = await session.scalars(
+                    select(AgentCapabilityGrant).where(
+                        AgentCapabilityGrant.workspace_id == workspace_id,
+                        AgentCapabilityGrant.agent_id == agent_id,
                     )
-                except (ValueError, ValidationError):
-                    continue
-            # Connector tools need a workspace connection id the model cannot
-            # guess; label the ones the agent's grants pin so the description
-            # can spell them out (prompt context only — never authorization).
-            pinned_ids: set[UUID] = set()
-            for grant in grants:
-                raw = grant.scope.get("connection_id")
-                if isinstance(raw, str):
+                )
+                grants: list[Grant] = []
+                for row in rows:
                     try:
-                        pinned_ids.add(UUID(raw))
-                    except ValueError:
+                        grants.append(
+                            Grant(
+                                capability=row.capability,
+                                scope=row.scope_json,
+                                effect=GrantEffect(row.effect),
+                            )
+                        )
+                    except (ValueError, ValidationError):
                         continue
-            connection_labels: dict[str, str] = {}
-            if pinned_ids:
-                connections = await session.scalars(
-                    select(Connection).where(
-                        Connection.workspace_id == workspace_id,
-                        Connection.id.in_(pinned_ids),
-                        Connection.status == ConnectionStatus.ACTIVE.value,
+                # A valid grant may leave connection_id unpinned. Resolve its
+                # candidates from this workspace, then intersect with connector
+                # definitions and live grants before exposing names or IDs.
+                connections = list(
+                    await session.scalars(
+                        select(Connection)
+                        .where(
+                            Connection.workspace_id == workspace_id,
+                            Connection.status == ConnectionStatus.ACTIVE.value,
+                        )
+                        .order_by(Connection.name, Connection.id)
                     )
                 )
                 connection_labels = {
                     str(connection.id): f"{connection.name} ({connection.connector_type})"
                     for connection in connections
                 }
-            # Workspace-scoped view: static tools plus tools discovered from
-            # this workspace's MCP connections (docs/architecture/mcp.md).
-            catalog = await self._catalog.for_workspace(session, workspace_id)
-            # Task-kind scoping: some tools only mean something for assigned
-            # work (reporting a result back to a delegator). On a plain chat
-            # turn they are withheld so the model answers the person instead
-            # of filing a report at them. Never widens the grant set.
-            task = (
-                await session.scalar(
-                    select(Task).where(Task.id == task_id, Task.workspace_id == workspace_id)
+                registry = default_registry()
+                # Dynamic namespaces belong to the source's chosen connection;
+                # a later duplicate must not inherit another app's tool names.
+                dynamic_connection_ids = {
+                    row.id
+                    for row in (
+                        *(await workspace_mcp_connections(session, workspace_id)),
+                        *(await workspace_composio_connections(session, workspace_id)),
+                    )
+                }
+                connection_tool_names: dict[str, set[str]] = {}
+                for connection in connections:
+                    if (
+                        connection.connector_type in {"mcp", "composio"}
+                        and connection.id not in dynamic_connection_ids
+                    ):
+                        continue
+                    connector = registry.get(connection.connector_type)
+                    if connector is None:
+                        continue
+                    available = connector.connection_tool_definitions(connection.config_json)
+                    if connection.connector_type == "ghost":
+                        from jhin_connectors.ghost.access import ghost_access_allowed
+
+                        access_ctx = ToolExecutionContext(
+                            session=session,
+                            workspace_id=workspace_id,
+                            agent_id=agent_id,
+                            agent_name="",
+                            task_id=task_id or UUID(int=0),
+                            run_id=UUID(int=0),
+                        )
+                        permitted = []
+                        for candidate in available:
+                            if (
+                                candidate.name != "ghost.connection.bind"
+                                and await ghost_access_allowed(
+                                    access_ctx, connection, candidate.name, grants
+                                )
+                            ):
+                                permitted.append(candidate)
+                        available = tuple(permitted)
+                    if connection.connector_type == "supabase":
+                        # These native credentials reach different APIs. Use the
+                        # executor groups, as the app's tool picker does.
+                        from jhin_connectors.supabase.database_tools import SUPABASE_DATABASE_TOOLS
+                        from jhin_connectors.supabase.management_tools import (
+                            SUPABASE_MANAGEMENT_TOOLS,
+                        )
+
+                        applicable = {
+                            "management_token": SUPABASE_MANAGEMENT_TOOLS,
+                            "postgres": SUPABASE_DATABASE_TOOLS,
+                        }.get(connection.auth_type, ())
+                        available = tuple(tool for tool, _executor in applicable)
+                    connection_tool_names[str(connection.id)] = {tool.name for tool in available}
+                # Workspace-scoped view: static tools plus tools discovered from
+                # this workspace's MCP connections (docs/architecture/mcp.md).
+                catalog = await self._catalog.for_workspace(session, workspace_id)
+                # Task-kind scoping: some tools only mean something for assigned
+                # work (reporting a result back to a delegator). On a plain chat
+                # turn they are withheld so the model answers the person instead
+                # of filing a report at them. Never widens the grant set.
+                task = (
+                    await session.scalar(
+                        select(Task).where(Task.id == task_id, Task.workspace_id == workspace_id)
+                    )
+                    if task_id is not None
+                    else None
                 )
-                if task_id is not None
-                else None
-            )
-            # A grant pinned to a connection that is not ACTIVE — deleted,
-            # disabled, lapsed — advertises nothing: the labels above are
-            # exactly the live pins, so they double as the allow-list.
-            definitions = task_scoped_tool_definitions(
-                allowed_tool_definitions(
-                    catalog, grants, live_connection_ids=set(connection_labels)
-                ),
-                task,
-            )
-        return [
-            AdvertisedTool(
-                name=definition.name,
-                description=advertised_description(definition, grants, connection_labels),
-                parameters=definition.input_json_schema(),
-            )
-            for definition in definitions
-        ]
+                # A grant pinned to a connection that is not ACTIVE — deleted,
+                # disabled, lapsed — advertises nothing. Connector tools also
+                # need at least one compatible connection admitted by the grants.
+                definitions = task_scoped_tool_definitions(
+                    allowed_tool_definitions(
+                        catalog,
+                        grants,
+                        live_connection_ids=set(connection_labels),
+                        connection_tool_names=connection_tool_names,
+                    ),
+                    task,
+                )
+            return [
+                AdvertisedTool(
+                    name=definition.name,
+                    description=advertised_description(
+                        definition,
+                        grants,
+                        connection_labels,
+                        connection_tool_names=connection_tool_names,
+                    ),
+                    parameters=definition.input_json_schema(),
+                )
+                for definition in definitions
+            ]
 
     @activity.defn(name=ACTIVITY_EXECUTE_BOUND_TOOL)
     async def execute_bound_tool_activity(
         self,
         params: ExecuteBoundToolInput,
     ) -> BoundToolResult:
+        # Ahead of the drain check because it reads nothing and decides
+        # nothing: the schema self-check must be the first thing every
+        # entrypoint does, before any expression that could touch product.
         _prevalidate_tool_telemetry_schema()
-        workspace_id = _uuid(params.workspace_id, field="workspace_id")
-        run_id = _uuid(params.run_id, field="run_id")
-        if not 0 <= params.step_index <= MAX_TOOL_STEP_INDEX or not (
-            0 <= params.ordinal < MAX_TOOL_CALLS_PER_STEP
-        ):
-            raise _non_retryable(
-                "bound tool position is outside the supported range",
-                error_type="bound_tool_invalid",
-            )
-        async with self._resources.session_factory() as session:
-            entry = await _load_bound_call(session, params)
-            context = await _load_runtime_context(
-                session,
-                workspace_id=workspace_id,
-                run_id=run_id,
-            )
-            invocation_id = stable_tool_invocation_id(run_id, params.step_index, params.ordinal)
-            catalog = await self._catalog.for_workspace(session, workspace_id)
-            scope = _ToolSpanScope(self._tracer, _TOOL_EXECUTE_SPAN_NAME)
-            try:
-                gateway = ToolGateway(
-                    ToolExecutionContext(
-                        session=session,
+        # Refused outright while this process is shutting down, and counted
+        # while it is not, so the shutdown knows what it is still holding
+        # (jhin_tool_worker.drain). The body stays in this frame: the
+        # telemetry contract identifies an activity's own commit by the
+        # name of the function that made it.
+        with self._drain.hold():
+            workspace_id = _uuid(params.workspace_id, field="workspace_id")
+            run_id = _uuid(params.run_id, field="run_id")
+            if not 0 <= params.step_index <= MAX_TOOL_STEP_INDEX or not (
+                0 <= params.ordinal < MAX_TOOL_CALLS_PER_STEP
+            ):
+                raise _non_retryable(
+                    "bound tool position is outside the supported range",
+                    error_type="bound_tool_invalid",
+                )
+            async with self._resources.session_factory() as session:
+                entry = await _load_bound_call(session, params)
+                context = await _load_runtime_context(
+                    session,
+                    workspace_id=workspace_id,
+                    run_id=run_id,
+                )
+                invocation_id = stable_tool_invocation_id(run_id, params.step_index, params.ordinal)
+                catalog = await self._catalog.for_workspace(session, workspace_id)
+                scope = _ToolSpanScope(self._tracer, _TOOL_EXECUTE_SPAN_NAME)
+                try:
+                    gateway = ToolGateway(
+                        ToolExecutionContext(
+                            session=session,
+                            workspace_id=workspace_id,
+                            task_id=context.task_id,
+                            run_id=run_id,
+                            agent_id=context.agent_id,
+                            agent_name=context.agent_name,
+                            crypto=self._resources.crypto,
+                            session_factory=self._resources.session_factory,
+                            test_barrier=self._resources.test_barrier,
+                        ),
+                        catalog,
+                    )
+                    try:
+                        outcome = await gateway.request(
+                            entry.tool_name,
+                            entry.arguments_json,
+                            invocation_id=invocation_id,
+                        )
+                        await session.commit()
+                    except asyncio.CancelledError:
+                        self._record_cancelled_tool_span(scope.span, entry.tool_name)
+                        raise
+                    except GatewayStateError as error:
+                        await session.rollback()
+                        raise _non_retryable(
+                            "bound tool gateway state is invalid",
+                            error_type="bound_tool_state_invalid",
+                        ) from error
+                    await self._record_committed_tool_telemetry(
+                        scope.span,
+                        outcome=outcome,
                         workspace_id=workspace_id,
                         task_id=context.task_id,
                         run_id=run_id,
                         agent_id=context.agent_id,
-                        agent_name=context.agent_name,
-                        crypto=self._resources.crypto,
-                        session_factory=self._resources.session_factory,
-                        test_barrier=self._resources.test_barrier,
-                    ),
-                    catalog,
-                )
-                try:
-                    outcome = await gateway.request(
-                        entry.tool_name,
-                        entry.arguments_json,
-                        invocation_id=invocation_id,
+                        step_index=params.step_index,
+                        ordinal=params.ordinal,
+                        manifest_tool_name=entry.tool_name,
+                        manifest_arguments_json=entry.arguments_json,
+                        approval_id=outcome.approval_id,
                     )
-                    await session.commit()
-                except asyncio.CancelledError:
-                    self._record_cancelled_tool_span(scope.span, entry.tool_name)
+                    if outcome.tool_call_id != invocation_id:
+                        raise _non_retryable(
+                            "runtime tool call identity did not match its bound invocation",
+                            error_type="tool_invocation_mismatch",
+                        )
+                    _raise_ordinary_failure(outcome)
+                    result = _bound_result(outcome)
+                except BaseException as active_error:
+                    scope.finish(active_error)
                     raise
-                except GatewayStateError as error:
-                    await session.rollback()
-                    raise _non_retryable(
-                        "bound tool gateway state is invalid",
-                        error_type="bound_tool_state_invalid",
-                    ) from error
-                await self._record_committed_tool_telemetry(
-                    scope.span,
-                    outcome=outcome,
-                    workspace_id=workspace_id,
-                    task_id=context.task_id,
-                    run_id=run_id,
-                    agent_id=context.agent_id,
-                    step_index=params.step_index,
-                    ordinal=params.ordinal,
-                    manifest_tool_name=entry.tool_name,
-                    manifest_arguments_json=entry.arguments_json,
-                    approval_id=outcome.approval_id,
-                )
-                if outcome.tool_call_id != invocation_id:
-                    raise _non_retryable(
-                        "runtime tool call identity did not match its bound invocation",
-                        error_type="tool_invocation_mismatch",
-                    )
-                _raise_ordinary_failure(outcome)
-                result = _bound_result(outcome)
-            except BaseException as active_error:
-                scope.finish(active_error)
-                raise
-            scope.finish(None)
-            return result
+                scope.finish(None)
+                return result
 
     @activity.defn(name=ACTIVITY_RESOLVE_BOUND_TOOL_APPROVAL)
     async def resolve_bound_tool_approval_activity(
         self,
         params: ResolveBoundToolApprovalInput,
     ) -> BoundToolResult:
+        # Ahead of the drain check because it reads nothing and decides
+        # nothing: the schema self-check must be the first thing every
+        # entrypoint does, before any expression that could touch product.
         _prevalidate_tool_telemetry_schema()
-        workspace_id = _uuid(params.workspace_id, field="workspace_id")
-        task_id = _uuid(params.task_id, field="task_id")
-        run_id = _uuid(params.run_id, field="run_id")
-        agent_id = _uuid(params.agent_id, field="agent_id")
-        approval_id = _uuid(params.approval_id, field="approval_id")
-        async with self._resources.session_factory() as session:
-            durable = (
-                await session.execute(
-                    select(Approval, ToolCall, AgentRun, Agent, Task)
-                    .join(
-                        ToolCall,
-                        (ToolCall.approval_id == Approval.id)
-                        & (ToolCall.workspace_id == Approval.workspace_id),
+        # Refused outright while this process is shutting down, and counted
+        # while it is not, so the shutdown knows what it is still holding
+        # (jhin_tool_worker.drain). The body stays in this frame: the
+        # telemetry contract identifies an activity's own commit by the
+        # name of the function that made it.
+        with self._drain.hold():
+            workspace_id = _uuid(params.workspace_id, field="workspace_id")
+            task_id = _uuid(params.task_id, field="task_id")
+            run_id = _uuid(params.run_id, field="run_id")
+            agent_id = _uuid(params.agent_id, field="agent_id")
+            approval_id = _uuid(params.approval_id, field="approval_id")
+            async with self._resources.session_factory() as session:
+                durable = (
+                    await session.execute(
+                        select(Approval, ToolCall, AgentRun, Agent, Task)
+                        .join(
+                            ToolCall,
+                            (ToolCall.approval_id == Approval.id)
+                            & (ToolCall.workspace_id == Approval.workspace_id),
+                        )
+                        .join(
+                            AgentRun,
+                            (AgentRun.id == ToolCall.run_id)
+                            & (AgentRun.workspace_id == ToolCall.workspace_id),
+                        )
+                        .join(
+                            Agent,
+                            (Agent.id == ToolCall.agent_id)
+                            & (Agent.workspace_id == ToolCall.workspace_id),
+                        )
+                        .join(
+                            Task,
+                            (Task.id == AgentRun.task_id)
+                            & (Task.workspace_id == AgentRun.workspace_id)
+                            & (Task.assigned_agent_id == AgentRun.agent_id),
+                        )
+                        .where(
+                            Approval.id == approval_id,
+                            Approval.workspace_id == workspace_id,
+                            Approval.task_id == task_id,
+                            Approval.run_id == run_id,
+                            Approval.requested_by_agent_id == agent_id,
+                            ToolCall.run_id == run_id,
+                            ToolCall.agent_id == agent_id,
+                            ToolCall.workspace_id == workspace_id,
+                            AgentRun.workspace_id == workspace_id,
+                            AgentRun.task_id == task_id,
+                            AgentRun.agent_id == agent_id,
+                            Agent.id == agent_id,
+                            Task.id == task_id,
+                        )
+                        .limit(2)
                     )
-                    .join(
-                        AgentRun,
-                        (AgentRun.id == ToolCall.run_id)
-                        & (AgentRun.workspace_id == ToolCall.workspace_id),
+                ).one_or_none()
+                if durable is None:
+                    raise _non_retryable(
+                        "approval execution context not found",
+                        error_type="approval_context_not_found",
                     )
-                    .join(
-                        Agent,
-                        (Agent.id == ToolCall.agent_id)
-                        & (Agent.workspace_id == ToolCall.workspace_id),
-                    )
-                    .join(
-                        Task,
-                        (Task.id == AgentRun.task_id)
-                        & (Task.workspace_id == AgentRun.workspace_id)
-                        & (Task.assigned_agent_id == AgentRun.agent_id),
-                    )
-                    .where(
-                        Approval.id == approval_id,
-                        Approval.workspace_id == workspace_id,
-                        Approval.task_id == task_id,
-                        Approval.run_id == run_id,
-                        Approval.requested_by_agent_id == agent_id,
-                        ToolCall.run_id == run_id,
-                        ToolCall.agent_id == agent_id,
-                        ToolCall.workspace_id == workspace_id,
-                        AgentRun.workspace_id == workspace_id,
-                        AgentRun.task_id == task_id,
-                        AgentRun.agent_id == agent_id,
-                        Agent.id == agent_id,
-                        Task.id == task_id,
-                    )
-                    .limit(2)
+                approval, tool_call, _run, agent, _task = durable
+                expected_tool_call_id = tool_call.id
+                catalog = await self._catalog.for_workspace(session, workspace_id)
+                manifest_step_index, entry = await _validate_approval_manifest_binding(
+                    session,
+                    workspace_id=workspace_id,
+                    run_id=run_id,
+                    tool_call=tool_call,
+                    catalog=catalog,
                 )
-            ).one_or_none()
-            if durable is None:
-                raise _non_retryable(
-                    "approval execution context not found",
-                    error_type="approval_context_not_found",
-                )
-            approval, tool_call, _run, agent, _task = durable
-            expected_tool_call_id = tool_call.id
-            catalog = await self._catalog.for_workspace(session, workspace_id)
-            manifest_step_index, entry = await _validate_approval_manifest_binding(
-                session,
-                workspace_id=workspace_id,
-                run_id=run_id,
-                tool_call=tool_call,
-                catalog=catalog,
-            )
-            if approval.status == ApprovalStatus.PENDING.value:
-                raise ApplicationError("approval still pending", type="approval_pending")
-            approval_status = approval.status
-            if approval_status not in {
-                ApprovalStatus.APPROVED.value,
-                ApprovalStatus.REJECTED.value,
-            }:
-                raise _non_retryable(
-                    "approval has no executable decision",
-                    error_type="approval_state_invalid",
-                )
-            pre_gateway_tool_call_status = tool_call.status
-            scope = _ToolSpanScope(self._tracer, _TOOL_APPROVAL_SPAN_NAME)
-            try:
-                gateway = ToolGateway(
-                    ToolExecutionContext(
-                        session=session,
+                if approval.status == ApprovalStatus.PENDING.value:
+                    raise ApplicationError("approval still pending", type="approval_pending")
+                approval_status = approval.status
+                if approval_status not in {
+                    ApprovalStatus.APPROVED.value,
+                    ApprovalStatus.REJECTED.value,
+                }:
+                    raise _non_retryable(
+                        "approval has no executable decision",
+                        error_type="approval_state_invalid",
+                    )
+                pre_gateway_tool_call_status = tool_call.status
+                scope = _ToolSpanScope(self._tracer, _TOOL_APPROVAL_SPAN_NAME)
+                try:
+                    gateway = ToolGateway(
+                        ToolExecutionContext(
+                            session=session,
+                            workspace_id=workspace_id,
+                            task_id=task_id,
+                            run_id=run_id,
+                            agent_id=agent_id,
+                            agent_name=agent.name,
+                            crypto=self._resources.crypto,
+                            session_factory=self._resources.session_factory,
+                            test_barrier=self._resources.test_barrier,
+                        ),
+                        catalog,
+                    )
+                    try:
+                        if approval_status == ApprovalStatus.APPROVED.value:
+                            outcome = await gateway.resolve_approved(approval_id)
+                        else:
+                            outcome = await gateway.resolve_rejected(approval_id)
+                        await session.commit()
+                    except asyncio.CancelledError:
+                        self._record_cancelled_tool_span(scope.span, entry.tool_name)
+                        raise
+                    except GatewayStateError as error:
+                        await session.rollback()
+                        raise _non_retryable(
+                            "approval gateway state is invalid",
+                            error_type="approval_state_invalid",
+                        ) from error
+                    await self._record_committed_tool_telemetry(
+                        scope.span,
+                        outcome=outcome,
                         workspace_id=workspace_id,
                         task_id=task_id,
                         run_id=run_id,
                         agent_id=agent_id,
-                        agent_name=agent.name,
-                        crypto=self._resources.crypto,
-                        session_factory=self._resources.session_factory,
-                        test_barrier=self._resources.test_barrier,
-                    ),
-                    catalog,
-                )
-                try:
-                    if approval_status == ApprovalStatus.APPROVED.value:
-                        outcome = await gateway.resolve_approved(approval_id)
-                    else:
-                        outcome = await gateway.resolve_rejected(approval_id)
-                    await session.commit()
-                except asyncio.CancelledError:
-                    self._record_cancelled_tool_span(scope.span, entry.tool_name)
-                    raise
-                except GatewayStateError as error:
-                    await session.rollback()
-                    raise _non_retryable(
-                        "approval gateway state is invalid",
-                        error_type="approval_state_invalid",
-                    ) from error
-                await self._record_committed_tool_telemetry(
-                    scope.span,
-                    outcome=outcome,
-                    workspace_id=workspace_id,
-                    task_id=task_id,
-                    run_id=run_id,
-                    agent_id=agent_id,
-                    step_index=manifest_step_index,
-                    ordinal=entry.ordinal,
-                    manifest_tool_name=entry.tool_name,
-                    manifest_arguments_json=entry.arguments_json,
-                    approval_id=approval_id,
-                    suppress_terminal_metrics=(
-                        pre_gateway_tool_call_status == ToolCallStatus.EXECUTION_UNKNOWN.value
-                        and outcome.status == "execution_unknown"
-                    ),
-                )
-                if outcome.tool_call_id != expected_tool_call_id:
-                    raise _non_retryable(
-                        "approval tool identity changed during resolution",
-                        error_type="tool_invocation_mismatch",
+                        step_index=manifest_step_index,
+                        ordinal=entry.ordinal,
+                        manifest_tool_name=entry.tool_name,
+                        manifest_arguments_json=entry.arguments_json,
+                        approval_id=approval_id,
+                        suppress_terminal_metrics=(
+                            pre_gateway_tool_call_status == ToolCallStatus.EXECUTION_UNKNOWN.value
+                            and outcome.status == "execution_unknown"
+                        ),
                     )
-                result = _bound_result(outcome)
-            except BaseException as active_error:
-                scope.finish(active_error)
-                raise
-            scope.finish(None)
-            return result
+                    if outcome.tool_call_id != expected_tool_call_id:
+                        raise _non_retryable(
+                            "approval tool identity changed during resolution",
+                            error_type="tool_invocation_mismatch",
+                        )
+                    result = _bound_result(outcome)
+                except BaseException as active_error:
+                    scope.finish(active_error)
+                    raise
+                scope.finish(None)
+                return result
 
     @activity.defn(name=ACTIVITY_RESOLVE_BOUND_TOOL_REVIEW)
     async def resolve_bound_tool_review_activity(
@@ -1216,128 +1312,137 @@ class ToolActivities:
         carrying the reviewer's feedback. A still-pending review is a
         retryable error, exactly like a pending approval.
         """
+        # Ahead of the drain check because it reads nothing and decides
+        # nothing: the schema self-check must be the first thing every
+        # entrypoint does, before any expression that could touch product.
         _prevalidate_tool_telemetry_schema()
-        workspace_id = _uuid(params.workspace_id, field="workspace_id")
-        task_id = _uuid(params.task_id, field="task_id")
-        run_id = _uuid(params.run_id, field="run_id")
-        agent_id = _uuid(params.agent_id, field="agent_id")
-        review_id = _uuid(params.review_id, field="review_id")
-        async with self._resources.session_factory() as session:
-            durable = (
-                await session.execute(
-                    select(WorkReview, ToolCall, AgentRun, Agent, Task)
-                    .join(
-                        ToolCall,
-                        (ToolCall.review_id == WorkReview.id)
-                        & (ToolCall.workspace_id == WorkReview.workspace_id),
+        # Refused outright while this process is shutting down, and counted
+        # while it is not, so the shutdown knows what it is still holding
+        # (jhin_tool_worker.drain). The body stays in this frame: the
+        # telemetry contract identifies an activity's own commit by the
+        # name of the function that made it.
+        with self._drain.hold():
+            workspace_id = _uuid(params.workspace_id, field="workspace_id")
+            task_id = _uuid(params.task_id, field="task_id")
+            run_id = _uuid(params.run_id, field="run_id")
+            agent_id = _uuid(params.agent_id, field="agent_id")
+            review_id = _uuid(params.review_id, field="review_id")
+            async with self._resources.session_factory() as session:
+                durable = (
+                    await session.execute(
+                        select(WorkReview, ToolCall, AgentRun, Agent, Task)
+                        .join(
+                            ToolCall,
+                            (ToolCall.review_id == WorkReview.id)
+                            & (ToolCall.workspace_id == WorkReview.workspace_id),
+                        )
+                        .join(
+                            AgentRun,
+                            (AgentRun.id == ToolCall.run_id)
+                            & (AgentRun.workspace_id == ToolCall.workspace_id),
+                        )
+                        .join(
+                            Agent,
+                            (Agent.id == ToolCall.agent_id)
+                            & (Agent.workspace_id == ToolCall.workspace_id),
+                        )
+                        .join(
+                            Task,
+                            (Task.id == AgentRun.task_id)
+                            & (Task.workspace_id == AgentRun.workspace_id)
+                            & (Task.assigned_agent_id == AgentRun.agent_id),
+                        )
+                        .where(
+                            WorkReview.id == review_id,
+                            WorkReview.workspace_id == workspace_id,
+                            WorkReview.run_id == run_id,
+                            WorkReview.subject_agent_id == agent_id,
+                            ToolCall.run_id == run_id,
+                            ToolCall.agent_id == agent_id,
+                            ToolCall.workspace_id == workspace_id,
+                            AgentRun.workspace_id == workspace_id,
+                            AgentRun.task_id == task_id,
+                            AgentRun.agent_id == agent_id,
+                            Agent.id == agent_id,
+                            Task.id == task_id,
+                        )
+                        .limit(2)
                     )
-                    .join(
-                        AgentRun,
-                        (AgentRun.id == ToolCall.run_id)
-                        & (AgentRun.workspace_id == ToolCall.workspace_id),
+                ).one_or_none()
+                if durable is None:
+                    raise _non_retryable(
+                        "review execution context not found",
+                        error_type="review_context_not_found",
                     )
-                    .join(
-                        Agent,
-                        (Agent.id == ToolCall.agent_id)
-                        & (Agent.workspace_id == ToolCall.workspace_id),
-                    )
-                    .join(
-                        Task,
-                        (Task.id == AgentRun.task_id)
-                        & (Task.workspace_id == AgentRun.workspace_id)
-                        & (Task.assigned_agent_id == AgentRun.agent_id),
-                    )
-                    .where(
-                        WorkReview.id == review_id,
-                        WorkReview.workspace_id == workspace_id,
-                        WorkReview.run_id == run_id,
-                        WorkReview.subject_agent_id == agent_id,
-                        ToolCall.run_id == run_id,
-                        ToolCall.agent_id == agent_id,
-                        ToolCall.workspace_id == workspace_id,
-                        AgentRun.workspace_id == workspace_id,
-                        AgentRun.task_id == task_id,
-                        AgentRun.agent_id == agent_id,
-                        Agent.id == agent_id,
-                        Task.id == task_id,
-                    )
-                    .limit(2)
+                review, tool_call, _run, agent, _task = durable
+                expected_tool_call_id = tool_call.id
+                catalog = await self._catalog.for_workspace(session, workspace_id)
+                manifest_step_index, entry = await _validate_approval_manifest_binding(
+                    session,
+                    workspace_id=workspace_id,
+                    run_id=run_id,
+                    tool_call=tool_call,
+                    catalog=catalog,
                 )
-            ).one_or_none()
-            if durable is None:
-                raise _non_retryable(
-                    "review execution context not found",
-                    error_type="review_context_not_found",
-                )
-            review, tool_call, _run, agent, _task = durable
-            expected_tool_call_id = tool_call.id
-            catalog = await self._catalog.for_workspace(session, workspace_id)
-            manifest_step_index, entry = await _validate_approval_manifest_binding(
-                session,
-                workspace_id=workspace_id,
-                run_id=run_id,
-                tool_call=tool_call,
-                catalog=catalog,
-            )
-            if review.status == WorkReviewStatus.PENDING.value:
-                raise ApplicationError("review still pending", type="review_pending")
-            pre_gateway_tool_call_status = tool_call.status
-            scope = _ToolSpanScope(self._tracer, _TOOL_REVIEW_SPAN_NAME)
-            try:
-                gateway = ToolGateway(
-                    ToolExecutionContext(
-                        session=session,
+                if review.status == WorkReviewStatus.PENDING.value:
+                    raise ApplicationError("review still pending", type="review_pending")
+                pre_gateway_tool_call_status = tool_call.status
+                scope = _ToolSpanScope(self._tracer, _TOOL_REVIEW_SPAN_NAME)
+                try:
+                    gateway = ToolGateway(
+                        ToolExecutionContext(
+                            session=session,
+                            workspace_id=workspace_id,
+                            task_id=task_id,
+                            run_id=run_id,
+                            agent_id=agent_id,
+                            agent_name=agent.name,
+                            crypto=self._resources.crypto,
+                            session_factory=self._resources.session_factory,
+                            test_barrier=self._resources.test_barrier,
+                        ),
+                        catalog,
+                    )
+                    try:
+                        outcome = await gateway.resolve_review(review_id)
+                        await session.commit()
+                    except asyncio.CancelledError:
+                        self._record_cancelled_tool_span(scope.span, entry.tool_name)
+                        raise
+                    except GatewayStateError as error:
+                        await session.rollback()
+                        raise _non_retryable(
+                            "review gateway state is invalid",
+                            error_type="review_state_invalid",
+                        ) from error
+                    await self._record_committed_tool_telemetry(
+                        scope.span,
+                        outcome=outcome,
                         workspace_id=workspace_id,
                         task_id=task_id,
                         run_id=run_id,
                         agent_id=agent_id,
-                        agent_name=agent.name,
-                        crypto=self._resources.crypto,
-                        session_factory=self._resources.session_factory,
-                        test_barrier=self._resources.test_barrier,
-                    ),
-                    catalog,
-                )
-                try:
-                    outcome = await gateway.resolve_review(review_id)
-                    await session.commit()
-                except asyncio.CancelledError:
-                    self._record_cancelled_tool_span(scope.span, entry.tool_name)
-                    raise
-                except GatewayStateError as error:
-                    await session.rollback()
-                    raise _non_retryable(
-                        "review gateway state is invalid",
-                        error_type="review_state_invalid",
-                    ) from error
-                await self._record_committed_tool_telemetry(
-                    scope.span,
-                    outcome=outcome,
-                    workspace_id=workspace_id,
-                    task_id=task_id,
-                    run_id=run_id,
-                    agent_id=agent_id,
-                    step_index=manifest_step_index,
-                    ordinal=entry.ordinal,
-                    manifest_tool_name=entry.tool_name,
-                    manifest_arguments_json=entry.arguments_json,
-                    approval_id=outcome.approval_id,
-                    suppress_terminal_metrics=(
-                        pre_gateway_tool_call_status == ToolCallStatus.EXECUTION_UNKNOWN.value
-                        and outcome.status == "execution_unknown"
-                    ),
-                )
-                if outcome.tool_call_id != expected_tool_call_id:
-                    raise _non_retryable(
-                        "review tool identity changed during resolution",
-                        error_type="tool_invocation_mismatch",
+                        step_index=manifest_step_index,
+                        ordinal=entry.ordinal,
+                        manifest_tool_name=entry.tool_name,
+                        manifest_arguments_json=entry.arguments_json,
+                        approval_id=outcome.approval_id,
+                        suppress_terminal_metrics=(
+                            pre_gateway_tool_call_status == ToolCallStatus.EXECUTION_UNKNOWN.value
+                            and outcome.status == "execution_unknown"
+                        ),
                     )
-                result = _bound_result(outcome)
-            except BaseException as active_error:
-                scope.finish(active_error)
-                raise
-            scope.finish(None)
-            return result
+                    if outcome.tool_call_id != expected_tool_call_id:
+                        raise _non_retryable(
+                            "review tool identity changed during resolution",
+                            error_type="tool_invocation_mismatch",
+                        )
+                    result = _bound_result(outcome)
+                except BaseException as active_error:
+                    scope.finish(active_error)
+                    raise
+                scope.finish(None)
+                return result
 
 
 __all__ = [

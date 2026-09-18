@@ -13,7 +13,7 @@ import { Button, Dialog, ErrorNote, Field, Input, Select } from "@/components/ui
 import { api, ApiError, errorText } from "@/lib/api";
 import { useSecrets } from "@/lib/hooks";
 import { storeApiKey } from "@/lib/model-secrets";
-import { PROVIDER_TYPES } from "@/lib/models";
+import { PROVIDER_EXAMPLES, PROVIDER_TYPES } from "@/lib/models";
 import type { ModelProvider, ModelProviderType } from "@/lib/types";
 
 export function ProviderDialog({
@@ -41,6 +41,7 @@ export function ProviderDialog({
   const [adminKey, setAdminKey] = useState("");
 
   const typeMeta = PROVIDER_TYPES.find((t) => t.value === type)!;
+  const examples = PROVIDER_EXAMPLES[type];
 
   // The provider can only be saved after a live check of exactly these inputs.
   const draftKey = JSON.stringify({ type, baseUrl: baseUrl.trim(), keyMode, apiKey, secretId });
@@ -168,7 +169,7 @@ export function ProviderDialog({
             maxLength={200}
             value={displayName}
             onChange={(e) => setDisplayName(e.target.value)}
-            placeholder="OpenAI (production)"
+            placeholder={examples.displayName}
           />
         </Field>
         <Field
@@ -185,7 +186,7 @@ export function ProviderDialog({
             maxLength={500}
             value={baseUrl}
             onChange={(e) => setBaseUrl(e.target.value)}
-            placeholder="https://…/v1"
+            placeholder={examples.baseUrl}
             required={type === "openai_compatible"}
           />
         </Field>
@@ -211,7 +212,7 @@ export function ProviderDialog({
                 autoComplete="off"
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
-                placeholder="sk-…"
+                placeholder={examples.apiKey}
                 required={typeMeta.needsKey}
               />
             ) : null}

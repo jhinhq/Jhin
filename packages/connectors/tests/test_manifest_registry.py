@@ -475,8 +475,14 @@ def test_connector_tool_validators_are_registered() -> None:
     catalog = build_default_catalog()
     assert catalog.validator_for("cli.repository.checkout") is not None
     assert catalog.validator_for("cli.repository.push") is not None
-    # Only the tools that name a repository carry one.
-    assert catalog.validator_for("cli.file.read") is None
+    # Every sandbox tool carries one, in one of two shapes. The tools that
+    # name a repository are checked on the name; the ones that name none read
+    # whatever the durable workspace holds, and are checked on that — without
+    # which dropping a repository from the list left its clone readable for as
+    # long as the disk lasted.
+    assert catalog.validator_for("cli.file.read") is not None
+    assert catalog.validator_for("cli.command.execute") is not None
+    # Nothing outside the sandbox connector gains one.
     assert catalog.validator_for("github.pull_request.create") is None
 
 

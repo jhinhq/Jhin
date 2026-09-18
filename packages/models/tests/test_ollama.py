@@ -90,10 +90,13 @@ NOT_FOUND = {"error": "model 'nope:latest' not found, try pulling it first"}
 
 def _chat_response() -> dict[str, Any]:
     return {
-        "id": "chatcmpl-1",
         "model": "qwen3.8:latest",
-        "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        "created_at": "2026-09-02T10:00:00Z",
+        "message": {"role": "assistant", "content": "hi"},
+        "done": True,
+        "done_reason": "stop",
+        "prompt_eval_count": 1,
+        "eval_count": 1,
     }
 
 
@@ -127,7 +130,7 @@ def _handler(
                     "done_reason": "unload" if body["keep_alive"] == 0 else "load",
                 },
             )
-        if path == "/v1/chat/completions":
+        if path == "/api/chat":
             return httpx.Response(200, json=_chat_response())
         return httpx.Response(404, json={"error": f"unexpected path {path}"})
 
@@ -387,26 +390,27 @@ async def test_api_key_rides_along_as_a_bearer_for_reverse_proxies() -> None:
     assert seen[0].headers["authorization"] == "Bearer proxy-token"
 
 
-async def test_chat_still_goes_to_v1_and_close_closes_both_clients() -> None:
+async def test_chat_goes_to_the_native_api_and_close_closes_both_clients() -> None:
     seen: list[httpx.Request] = []
     client = _client(_handler(seen))
     response = await client.generate(
         ModelRequest(model="qwen3.8:latest", messages=(ModelMessage(role="user", content="hi"),))
     )
     assert response.text == "hi"
-    assert str(seen[0].url) == "http://fake/v1/chat/completions"
+    # Chat is the one route that moved off ``/v1``: only the native API lets a
+    # request choose the window the instance is served with.
+    assert str(seen[0].url) == "http://fake/api/chat"
 
-    # A base URL without ``/v1`` still chats on it and manages on the origin.
+    # A base URL without ``/v1`` names the same origin, so both still land.
     bare_seen: list[httpx.Request] = []
     bare = _client(_handler(bare_seen), base_url="http://host:11434")
-    with pytest.raises(ModelProviderError):
-        await bare.generate(
-            ModelRequest(model="x", messages=(ModelMessage(role="user", content="hi"),))
-        )
+    await bare.generate(
+        ModelRequest(model="x", messages=(ModelMessage(role="user", content="hi"),))
+    )
     await bare.installed_models()
     await bare.close()
     assert [str(request.url) for request in bare_seen] == [
-        "http://host:11434/chat/completions",
+        "http://host:11434/api/chat",
         "http://host:11434/api/tags",
     ]
 

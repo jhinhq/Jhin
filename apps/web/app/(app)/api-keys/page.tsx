@@ -6,7 +6,7 @@
 import { useMutation } from "@tanstack/react-query";
 import { ArrowRight, BookOpen, KeyRound, Plus, Trash2 } from "lucide-react";
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { PageBody, PageHeader } from "@/components/app-shell";
 import {
   ExpiryPicker,
@@ -289,6 +289,22 @@ function CreateKeyDialog({
   const [unit, setUnit] = useState<ExpiryUnit>("days");
   const [created, setCreated] = useState<ApiKeyCreated | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const formId = useId();
+  const revealRef = useRef<HTMLDivElement>(null);
+  const availableScopes = catalog.data?.categories.flatMap((category) =>
+    category.scopes.filter((scope) => scope.available),
+  ) ?? [];
+  const fullAccess = availableScopes.map((scope) => scope.key);
+  const readOnly = availableScopes.filter((scope) => scope.action === "read").map((scope) => scope.key);
+  const matchesSelection = (keys: string[]) =>
+    keys.length > 0 && keys.length === scopes.size && keys.every((key) => scopes.has(key));
+
+  useEffect(() => {
+    if (created) {
+      // Creating replaces the focused submit button; move into the new step.
+      revealRef.current?.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
+    }
+  }, [created]);
 
   const create = useMutation({
     mutationFn: () =>
@@ -326,9 +342,34 @@ function CreateKeyDialog({
       description={
         created ? undefined : "Pick a name, choose what it may do, and decide how long it lasts."
       }
+      footer={created ? undefined : (
+        <div className="space-y-3">
+          <ErrorNote message={error} />
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="text-xs text-faint" data-testid="scope-count" role="status">
+              {scopes.size === 0
+                ? "Choose at least one permission."
+                : `${scopes.size} permission${scopes.size === 1 ? "" : "s"} selected`}
+            </p>
+            <div className="ml-auto flex gap-2">
+              <Button variant="ghost" type="button" onClick={close}>
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                type="submit"
+                form={formId}
+                disabled={create.isPending || scopes.size === 0 || name.trim() === ""}
+              >
+                {create.isPending ? "Creating…" : "Create key"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     >
       {created ? (
-        <div className="space-y-4">
+        <div ref={revealRef} className="space-y-4">
           <OneTimeSecret
             testId="api-key-reveal"
             label={created.api_key.name}
@@ -347,6 +388,7 @@ function CreateKeyDialog({
         </div>
       ) : (
         <form
+          id={formId}
           className="space-y-4"
           onSubmit={(event) => {
             event.preventDefault();
@@ -363,8 +405,51 @@ function CreateKeyDialog({
             />
           </Field>
 
-          <div>
-            <p className="mb-2 text-sm font-medium">What may it do?</p>
+          <ExpiryPicker
+            amount={amount}
+            unit={unit}
+            onAmountChange={setAmount}
+            onUnitChange={setUnit}
+          />
+
+          <div className="space-y-3">
+            <div>
+              <p className="text-sm font-medium">What may it do?</p>
+              <p className="mt-1 text-xs text-dim">
+                Full access selects every permission your role can grant. You can adjust them below.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2" role="group" aria-label="Permission shortcuts">
+              <Button
+                type="button"
+                size="sm"
+                aria-pressed={matchesSelection(fullAccess)}
+                variant={matchesSelection(fullAccess) ? "primary" : "outline"}
+                disabled={fullAccess.length === 0}
+                onClick={() => setScopes(new Set(fullAccess))}
+              >
+                Full access
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                aria-pressed={matchesSelection(readOnly)}
+                variant={matchesSelection(readOnly) ? "primary" : "outline"}
+                disabled={readOnly.length === 0}
+                onClick={() => setScopes(new Set(readOnly))}
+              >
+                Read only
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                disabled={scopes.size === 0}
+                onClick={() => setScopes(new Set())}
+              >
+                Clear
+              </Button>
+            </div>
             {catalog.isPending ? (
               <Spinner />
             ) : catalog.data ? (
@@ -374,33 +459,6 @@ function CreateKeyDialog({
             )}
           </div>
 
-          <ExpiryPicker
-            amount={amount}
-            unit={unit}
-            onAmountChange={setAmount}
-            onUnitChange={setUnit}
-          />
-
-          <ErrorNote message={error} />
-          <div className="flex items-center justify-between gap-3">
-            <p className="text-xs text-faint" data-testid="scope-count">
-              {scopes.size === 0
-                ? "Choose at least one permission."
-                : `${scopes.size} permission${scopes.size === 1 ? "" : "s"} selected`}
-            </p>
-            <div className="flex gap-2">
-              <Button variant="ghost" type="button" onClick={close}>
-                Cancel
-              </Button>
-              <Button
-                variant="primary"
-                type="submit"
-                disabled={create.isPending || scopes.size === 0 || name.trim() === ""}
-              >
-                {create.isPending ? "Creating…" : "Create key"}
-              </Button>
-            </div>
-          </div>
         </form>
       )}
     </Dialog>

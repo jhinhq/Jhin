@@ -1357,12 +1357,20 @@ def test_constructor_rejects_missing_owned_runtime_handles(resources: object) ->
 def test_constructor_has_only_exact_owned_handle_bindings_and_no_fallback() -> None:
     source = inspect.getsource(ToolActivities.__init__)
     function = cast(ast.FunctionDef, ast.parse(textwrap.dedent(source)).body[0])
-    assert len(function.body) == 4
+    # Five, since the worker gained a drain. The contract this test defends is
+    # that every binding here is an *exact* handle taken from the caller, with
+    # no observability fallback smuggled in behind a getattr or a noop — see
+    # the forbidden-call assertions below, which are the teeth. The drain's
+    # default is a fresh, never-draining ``WorkerDrain``: it refuses nothing
+    # and hides nothing, so a caller that passes none behaves exactly as the
+    # worker did before draining existed.
+    assert len(function.body) == 5
     expected = (
         ("_resources", "resources"),
         ("_catalog", "catalog"),
         ("_metrics", "resources.runtime.metrics"),
         ("_tracer", "resources.runtime.tracer"),
+        ("_drain", "drain if drain is not None else WorkerDrain()"),
     )
     for statement, (attribute, expression) in zip(function.body, expected, strict=True):
         assert isinstance(statement, ast.Assign)

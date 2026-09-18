@@ -4,9 +4,12 @@ callbacks — enough to exercise service-layer logic without the compose stack
 (integration tests cover the real stack)."""
 
 import logging
+import socket
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
+from ipaddress import ip_address
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -19,6 +22,7 @@ from fastapi import FastAPI, Request
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from jhin_api.connections import service as connections_service
 from jhin_api.deps import (
     AuthContext,
     Principal,
@@ -31,11 +35,62 @@ from jhin_api.deps import (
 from jhin_api.oauth.router import oauth_public_router
 from jhin_api.settings import Settings
 from jhin_db.base import Base
-from jhin_db.models import User, UserSession, Workspace, WorkspaceMembership
+from jhin_db.models import Connection, User, UserSession, Workspace, WorkspaceMembership
 from jhin_domain import WorkspaceRole, new_uuid7
 from jhin_observability.bootstrap import _reset_observability_for_test
 from jhin_secrets import SecretCrypto
 from jhin_secrets.crypto import MasterKey, decode_master_key_material, generate_master_key_material
+
+
+@pytest.fixture
+def skip_remote_initial_connection_checks(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Keep legacy persistence/policy fixtures offline without stubbing Verify.
+
+    These tests seed fake credentials at provider-shaped URLs. Their setup
+    predates automatic checks and does not test provider authentication.
+    Actual loopback FakeServer checks still run; dedicated initial-check
+    tests deliberately do not opt into this fixture.
+    """
+    original_check = connections_service.check_initial_connection
+    original_resolver = socket.getaddrinfo
+    original_connect = socket.socket.connect
+    external_attempts: list[str] = []
+
+    def loopback(host: str) -> bool:
+        if host == "localhost":
+            return True
+        try:
+            return ip_address(host).is_loopback
+        except ValueError:
+            return False
+
+    async def initial_check(db: AsyncSession, crypto: SecretCrypto, connection: Connection) -> None:
+        if connection.connector_type in {"github", "supabase", "linear", "vercel", "mcp", "http"}:
+            endpoint = connection.config_json.get("base_url") or connection.config_json.get(
+                "server_url"
+            )
+            if not isinstance(endpoint, str) or not loopback(urlsplit(endpoint).hostname or ""):
+                return
+        await original_check(db, crypto, connection)
+
+    def resolve(host: Any, *args: Any, **kwargs: Any) -> Any:
+        name = host.decode() if isinstance(host, bytes) else str(host or "")
+        if name and not loopback(name):
+            external_attempts.append(name)
+            raise AssertionError("A legacy connection test attempted external DNS")
+        return original_resolver(host, *args, **kwargs)
+
+    def connect(sock: socket.socket, address: Any) -> Any:
+        if isinstance(address, tuple) and address and not loopback(str(address[0])):
+            external_attempts.append(str(address[0]))
+            raise AssertionError("A legacy connection test attempted an external connection")
+        return original_connect(sock, address)
+
+    monkeypatch.setattr(connections_service, "check_initial_connection", initial_check)
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    yield
+    assert not external_attempts, f"Unexpected external network attempts: {external_attempts}"
 
 
 @pytest.fixture

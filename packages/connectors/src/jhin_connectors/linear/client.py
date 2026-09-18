@@ -2,8 +2,7 @@
 
 Linear's API is a single GraphQL endpoint (``POST /graphql``). Personal API
 keys are sent as the bare ``Authorization`` header value — no ``Bearer``
-prefix (that is Linear's documented scheme for API keys; OAuth access tokens
-would use ``Bearer`` when OAuth support arrives).
+prefix. OAuth access tokens use ``Bearer``.
 
 The exact destination origin is validated at the final outbound boundary,
 and every response uses the shared redirect-free streaming cap. Error
@@ -18,6 +17,7 @@ import httpx
 
 from jhin_connectors.endpoints import EndpointPolicyError, validate_http_origin
 from jhin_connectors.http_client import ProviderHTTPError, send_bounded_json
+from jhin_secrets.redaction import get_redactor
 from jhin_tools.errors import ToolExecutionError
 
 DEFAULT_BASE_URL = "https://api.linear.app"
@@ -63,8 +63,19 @@ class LinearApiError(ToolExecutionError):
         self.status_code = status_code
 
 
+def linear_authorization(auth_type: str, credentials: dict[str, str]) -> str:
+    if auth_type not in (AUTH_API_KEY, AUTH_OAUTH):
+        raise LinearApiError("Unsupported Linear authentication type")
+    key = "access_token" if auth_type == AUTH_OAUTH else "api_key"
+    token = credentials.get(key, "")
+    if not token or any(char in token for char in "\r\n\0"):
+        raise LinearApiError("Linear connection has no usable credential")
+    get_redactor().register(token)
+    return f"Bearer {token}" if auth_type == AUTH_OAUTH else token
+
+
 def linear_headers(api_key: str) -> dict[str, str]:
-    # Personal API keys go into Authorization verbatim (no Bearer prefix).
+    # The caller resolves bare API keys or OAuth Bearer values explicitly.
     return {
         "Authorization": api_key,
         "Content-Type": "application/json",

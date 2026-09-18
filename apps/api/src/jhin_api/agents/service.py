@@ -9,7 +9,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -77,6 +77,58 @@ async def _unique_slug(db: AsyncSession, workspace_id: UUID, name: str) -> str:
         select(Agent.id).where(Agent.workspace_id == workspace_id, Agent.slug == slug)
     )
     return with_suffix(slug) if taken else slug
+
+
+async def _validate_name_is_free(
+    db: AsyncSession, workspace_id: UUID, name: str, *, except_agent_id: UUID | None = None
+) -> None:
+    """The collision rule the agent's own tool enforces, on the human path.
+
+    ``PATCH /agents/{id}`` with a colleague's name returned 200 and left two
+    agents called "QA Engineer" in one workspace — and "qa engineer" and
+    "Qa-Engineer" did the same, the last one slugging onto the colleague's
+    handle. The agent's tool refuses all three (``agent_name_taken``), so an
+    admin could hand-create exactly the ambiguity that tool exists to
+    prevent, and the colleague directory an agent reads then held two
+    identical names.
+
+    Both halves matter, for the same reasons they do in the tool: two agents
+    with one name make every roster line and every "ask X to…" ambiguous,
+    and a name whose slug is already a colleague's handle is the same
+    collision one step removed. This is the read-then-write half; the
+    ``(workspace_id, lower(name))`` unique index is what makes it true under
+    a race.
+    """
+    conditions = [
+        func.lower(Agent.name) == name.lower(),
+        Agent.slug == slugify(name),
+    ]
+    query = select(Agent.name).where(Agent.workspace_id == workspace_id, or_(*conditions))
+    if except_agent_id is not None:
+        query = query.where(Agent.id != except_agent_id)
+    clash = await db.scalar(query.limit(1))
+    if clash is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"An agent in this workspace is already called {clash}",
+        )
+
+
+async def _flush_or_name_conflict(db: AsyncSession) -> None:
+    """Flush, reporting a lost name race as the conflict it is.
+
+    The check above reads before it writes, so two requests can both pass it.
+    The database settles that, and a 500 on a duplicate name would be the
+    same ambiguity reported as a bug in the server.
+    """
+    try:
+        await db.flush()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An agent in this workspace is already called that",
+        ) from exc
 
 
 async def _validate_team(db: AsyncSession, workspace_id: UUID, team_id: UUID | None) -> None:
@@ -455,13 +507,14 @@ async def create_agent(
     await _validate_new_agent_manager(db, ctx.workspace_id, values.get("manager_agent_id"))
     await _validate_model_profile(db, ctx.workspace_id, values.get("model_profile_id"))
     await _validate_persona(db, ctx.workspace_id, values.get("persona_id"))
+    await _validate_name_is_free(db, ctx.workspace_id, values["name"])
     agent = Agent(
         workspace_id=ctx.workspace_id,
         slug=await _unique_slug(db, ctx.workspace_id, values["name"]),
         **values,
     )
     db.add(agent)
-    await db.flush()
+    await _flush_or_name_conflict(db)
     await _replace_memberships_locked(
         db,
         ctx.workspace_id,
@@ -511,6 +564,11 @@ async def update_agent(
     ip_hash: str,
 ) -> Agent:
     changes = dict(changes)
+    # A PATCH body carrying an explicit ``"name": null`` used to reach
+    # ``setattr`` and fail on the not-null column. An agent has to be called
+    # something, so a null name is "leave it alone", not "clear it".
+    if "name" in changes and changes["name"] is None:
+        del changes["name"]
     changed_fields = set(changes)
     secondary_team_ids = changes.pop("secondary_team_ids", None)
     topology_changed = "team_id" in changes or secondary_team_ids is not None
@@ -538,9 +596,21 @@ async def update_agent(
             agent.persona_id,
             await _validate_persona(db, ctx.workspace_id, changes["persona_id"]),
         )
+    # Captured before the writes, because the audit row says what it was.
+    rename: tuple[str, str] | None = None
+    if "name" in changes and changes["name"] != agent.name:
+        rename = (agent.name, changes["name"])
+        # The same rule the agent's own tool applies to itself: an admin
+        # renaming an agent onto a colleague's name (or onto their handle) is
+        # the ambiguity that tool exists to prevent, arriving by the other door.
+        await _validate_name_is_free(
+            db, ctx.workspace_id, changes["name"], except_agent_id=agent.id
+        )
     primary_team_id = changes.pop("team_id", agent.team_id)
     for field, value in changes.items():
         setattr(agent, field, value)
+    if rename is not None:
+        await _flush_or_name_conflict(db)
     if topology_changed:
         if secondary_team_ids is None:
             active = list(
@@ -579,6 +649,32 @@ async def update_agent(
         ip_hash=ip_hash,
         metadata={"changed_fields": sorted(changed_fields)},
     )
+    if rename is not None:
+        # The same ``agent.renamed`` row the agent's own tool writes, so "who
+        # changed this agent's name, and from what" is one query rather than
+        # two — and a rename is not something anyone should have to infer
+        # from "changed_fields includes name".
+        previous_name, new_name = rename
+        audit.record(
+            db,
+            action="agent.renamed",
+            target_type="agent",
+            target_id=agent.id,
+            workspace_id=ctx.workspace_id,
+            actor_id=ctx.user.id,
+            request_id=request_id,
+            ip_hash=ip_hash,
+            metadata={
+                "from": previous_name,
+                "to": new_name,
+                # Unchanged on purpose: the slug is the stable handle, and a
+                # rename must not move anyone's links.
+                "slug": agent.slug,
+                "requested_by_user_id": str(ctx.user.id),
+                "requested_by_name": ctx.user.display_name,
+                "via": "api",
+            },
+        )
     if persona_change is not None:
         # Its own row beside agent.updated: which card an agent wears is
         # the kind of change somebody later wants to find on its own.

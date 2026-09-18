@@ -659,6 +659,37 @@ def _assert_sandbox_network_contract(
         )
 
 
+def _assert_managed_files_contract(services: Mapping[str, Any]) -> None:
+    # Copy-up gives this initially empty directory its image-owned UID/GID
+    # 10001. Unlike DB/NATS volumes, nocopy would leave it unwritable.
+    expected_read_only = {
+        "api": False,
+        "tool-worker": False,
+        "agent-worker": True,
+        "runtime-gateway": True,
+    }
+    observed: dict[str, list[dict[str, Any]]] = {}
+    for name, service in services.items():
+        mounts = [
+            mount
+            for mount in service.get("volumes", [])
+            if mount.get("source") == "managed_files" or mount.get("target") == "/data/files"
+        ]
+        if mounts:
+            observed[name] = mounts
+    _require(set(observed) == set(expected_read_only), "managed files recipients drifted")
+    for name, read_only in expected_read_only.items():
+        expected: dict[str, Any] = {
+            "type": "volume",
+            "source": "managed_files",
+            "target": "/data/files",
+            "volume": {},
+        }
+        if read_only:
+            expected["read_only"] = True
+        _require(observed[name] == [expected], f"{name} managed files mount drifted")
+
+
 def _assert_dev_contract(services: Mapping[str, Any], *, dev: bool) -> None:
     allowlist_recipients = {
         name
@@ -671,9 +702,20 @@ def _assert_dev_contract(services: Mapping[str, Any], *, dev: bool) -> None:
         for name, service in services.items()
         if "JHIN_CONNECTOR_ALLOWED_DB_HOSTS" in cast(dict[str, Any], service).get("environment", {})
     }
+    _require(allowlist_recipients == {"api", "tool-worker"}, "HTTP allowlist owners drifted")
+    _require(database_recipients == {"api", "tool-worker"}, "DB allowlist owners drifted")
     if not dev:
-        _require(not allowlist_recipients, "HTTP connector allowlist leaked to production")
-        _require(not database_recipients, "DB connector allowlist leaked to production")
+        # The operator may configure exact private origins in their deployment.
+        # This contract verifies the production defaults grant no such access.
+        for name in allowlist_recipients:
+            _require(
+                services[name]["environment"]["JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS"] == "",
+                f"{name} HTTP allowlist must be empty by default",
+            )
+            _require(
+                services[name]["environment"]["JHIN_CONNECTOR_ALLOWED_DB_HOSTS"] == "",
+                f"{name} DB allowlist must be empty by default",
+            )
         serialized = json.dumps(services, sort_keys=True)
         _require("JHIN_TEST_CRASH_BARRIER_" not in serialized, "crash controls leaked")
         _require("/run/jhin/test-barriers" not in serialized, "crash mount leaked")
@@ -689,8 +731,6 @@ def _assert_dev_contract(services: Mapping[str, Any], *, dev: bool) -> None:
             _require(fake not in services, f"{fake} leaked to production")
         return
 
-    _require(allowlist_recipients == {"api", "tool-worker"}, "HTTP allowlist owners drifted")
-    _require(database_recipients == {"api", "tool-worker"}, "DB allowlist owners drifted")
     for name in allowlist_recipients:
         _require(
             services[name]["environment"]["JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS"]
@@ -713,7 +753,13 @@ def _assert_dev_contract(services: Mapping[str, Any], *, dev: bool) -> None:
             "JHIN_TEST_CRASH_BARRIER_HOST_DIR" not in environment,
             f"{name} received the host barrier path",
         )
-        volumes = services[name].get("volumes", [])
+        # The shared immutable artifact store is checked separately, including
+        # access mode. The dev barrier remains the only other worker mount.
+        volumes = [
+            mount
+            for mount in services[name].get("volumes", [])
+            if mount.get("target") != "/data/files"
+        ]
         _require(
             len(volumes) == 1
             and volumes[0]["target"] == "/run/jhin/test-barriers"
@@ -837,17 +883,27 @@ def _assert_rootless(
     _require(expected_socket_source is not None, "rootless expected socket source is required")
     volume = volumes[0]
     _require(
-        volume
-        == {
-            "type": "bind",
-            "source": expected_socket_source,
-            "target": "/run/host/docker.sock",
-            "bind": {},
-        }
+        _is_socket_bind(volume, source=expected_socket_source, target="/run/host/docker.sock")
         and str(expected_socket_source).startswith("/"),
         "adapter socket source or canonical long bind drifted",
     )
     _require(config["networks"]["engine"].get("internal") is True, "engine must be internal")
+
+
+def _is_socket_bind(mount: object, *, source: str | None, target: str) -> bool:
+    if not isinstance(mount, dict):
+        return False
+    bind = mount.get("bind")
+    # Compose versions either omit or preserve the explicit false option.
+    # Accept only those equivalent encodings, never truthy/coerced values or
+    # other bind options. The source YAML still requires explicit false.
+    if bind != {} and not (
+        isinstance(bind, dict)
+        and set(bind) == {"create_host_path"}
+        and bind["create_host_path"] is False
+    ):
+        return False
+    return {**mount, "bind": {}} == {"type": "bind", "source": source, "target": target, "bind": {}}
 
 
 def _assert_rootful(
@@ -884,15 +940,10 @@ def _assert_rootful(
         "rootful runner received transport URL",
     )
     _require(
-        runner.get("volumes")
-        == [
-            {
-                "type": "bind",
-                "source": expected_socket_source,
-                "target": "/run/jhin/docker.sock",
-                "bind": {},
-            }
-        ],
+        len(runner.get("volumes", [])) == 1
+        and _is_socket_bind(
+            runner["volumes"][0], source=expected_socket_source, target="/run/jhin/docker.sock"
+        ),
         "rootful socket bind must be canonical long syntax",
     )
 
@@ -925,15 +976,10 @@ def _assert_desktop(
     for key in ("SANDBOX_DOCKER_GID", "SANDBOX_DOCKER_TRANSPORT_URL"):
         _require(key not in environment, f"desktop runner received {key}")
     _require(
-        runner.get("volumes")
-        == [
-            {
-                "type": "bind",
-                "source": expected_socket_source,
-                "target": "/run/jhin/docker.sock",
-                "bind": {},
-            }
-        ]
+        len(runner.get("volumes", [])) == 1
+        and _is_socket_bind(
+            runner["volumes"][0], source=expected_socket_source, target="/run/jhin/docker.sock"
+        )
         and str(expected_socket_source).startswith("/"),
         "desktop socket bind must be canonical long syntax",
     )
@@ -991,6 +1037,7 @@ def assert_rendered_contract(
         expected_app_env=expected_app_env,
         expected_sandbox_network=expected_sandbox_network,
     )
+    _assert_managed_files_contract(services)
     _assert_dev_contract(services, dev=dev)
     _assert_sandbox_network_contract(
         config,
@@ -1027,8 +1074,13 @@ def assert_rendered_contract(
         name for name, service in services.items() if "runner" in _network_names(service)
     }
     _require(
-        runner_users == {"sandbox-runner", "tool-worker"},
+        runner_users == {"sandbox-runner", "tool-worker", "runtime-gateway"},
         "runner network authority leaked",
+    )
+    _require(
+        _network_names(cast(dict[str, Any], services["runtime-gateway"]))
+        == {"edge", "data", "runner"},
+        "runtime gateway network boundary drifted",
     )
     _require(
         _network_names(cast(dict[str, Any], services["api"])) == {"control", "data", "edge"},

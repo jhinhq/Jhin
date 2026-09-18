@@ -127,6 +127,25 @@ async def load(world: World, session: AsyncSession, task: Task) -> list[tuple[st
     return [(turn.role, turn.kind, turn.text) for turn in history]
 
 
+async def test_branch_dialogue_without_old_task_ids_reaches_first_turn(world: World) -> None:
+    async with world.session_factory() as session:
+        current = make_task(world, seconds=100, description="Continue the branch")
+        session.add(current)
+        await session.flush()
+        copied = make_message(world, current, seconds=1, text="The chosen total is 60")
+        copied.task_id = None
+        copied.content_json = {**copied.content_json, "branched_from_message_id": str(new_uuid7())}
+        unrelated = make_message(world, current, seconds=2, text="Unrelated taskless notice")
+        unrelated.task_id = None
+        session.add_all(
+            [copied, unrelated, make_message(world, current, seconds=100, text="Continue")]
+        )
+        await session.commit()
+        turns = await load(world, session, current)
+        assert ("user", "text", "The chosen total is 60") in turns
+        assert all("Unrelated" not in text for _, _, text in turns)
+
+
 async def test_earlier_tasks_precede_current_history_without_internal_rows(world: World) -> None:
     async with world.session_factory() as session:
         earlier = make_task(world, seconds=0, description="First ask")

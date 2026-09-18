@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 from jhin_policy.ask_person import ASK_PERSON_CAPABILITY
+from jhin_policy.identity import identity_grant_specs
 from jhin_policy.memory import MEMORY_PROPOSE_CAPABILITY, MEMORY_READ_CAPABILITY
 from jhin_policy.personas import persona_grant_specs
 from jhin_policy.work_requests import collaboration_grant_specs
@@ -46,12 +47,46 @@ def default_agent_grant_specs() -> tuple[tuple[str, dict[str, Any]], ...]:
         + memory_grant_specs()
         + ask_person_grant_specs()
         + persona_grant_specs()
+        + identity_grant_specs()
+        + (
+            ("variables.read", {}),
+            ("variables.write", {}),
+            ("schedules.read", {}),
+            ("schedules.manage", {}),
+            ("ghost.connection.bind", {}),
+            ("unsplash.connection.bind", {}),
+        )
+        + tuple(
+            (name, {"variable_audience": True})
+            for name in (
+                "ghost.post.list",
+                "ghost.post.read",
+                "ghost.draft.create",
+                "ghost.draft.update",
+                "ghost.review.request",
+                "ghost.review.read",
+                "ghost.review.decide",
+                "ghost.post.publish",
+                "ghost.assignment.create",
+                "ghost.assignment.read",
+                "ghost.assignment.revise",
+                "ghost.assignment.cancel",
+                "ghost.assignment.attach_evidence",
+                "ghost.archive.sync",
+                "ghost.archive.status",
+                "ghost.archive.search",
+                "ghost.archive.read",
+                "unsplash.photos.search",
+                "unsplash.photos.select",
+            )
+        )
     )
 
 
 __all__ = [
     "ask_person_grant_specs",
     "default_agent_grant_specs",
+    "identity_grant_specs",
     "memory_grant_specs",
     "persona_grant_specs",
 ]

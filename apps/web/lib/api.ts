@@ -64,6 +64,7 @@ interface RequestOptions {
   method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: unknown;
   params?: Record<string, string | number | undefined>;
+  signal?: AbortSignal;
 }
 
 /** `{code}` at the top level or nested under `detail` (FastAPI HTTPException
@@ -163,6 +164,7 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
     }
     return fetch(url, {
       method,
+      signal: options.signal,
       headers,
       body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
     });
@@ -191,6 +193,41 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
     );
   }
   return payload as T;
+}
+
+/** Cancellable uploads with native browser progress. Desktop uses its authenticated fetch bridge. */
+export function apiUploadProgress<T>(path: string, formData: FormData, signal: AbortSignal, onProgress: (percent: number | null) => void): Promise<T> {
+  if (IS_DESKTOP) {
+    onProgress(null);
+    const headers: Record<string, string> = {};
+    const csrf = readCookie(CSRF_COOKIE);
+    if (csrf) headers[CSRF_HEADER] = csrf;
+    return fetch(path, { method: "POST", headers, body: formData, signal }).then(async (response) => {
+      const payload = await response.json();
+      if (!response.ok) throw new ApiError(response.status, extractDetail(payload) ?? "Upload failed");
+      return payload as T;
+    });
+  }
+  return new Promise<T>((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("POST", path);
+    const csrf = readCookie(CSRF_COOKIE);
+    if (csrf) request.setRequestHeader(CSRF_HEADER, csrf);
+    const abort = () => request.abort();
+    signal.addEventListener("abort", abort, { once: true });
+    request.upload.onprogress = (event) => onProgress(event.lengthComputable ? Math.round(event.loaded / event.total * 100) : null);
+    request.onerror = () => reject(new Error("Connection lost during upload"));
+    request.onabort = () => reject(new DOMException("Upload cancelled", "AbortError"));
+    request.onloadend = () => signal.removeEventListener("abort", abort);
+    request.onload = () => {
+      let payload: unknown;
+      try { payload = JSON.parse(request.responseText); } catch { reject(new Error("Invalid upload response")); return; }
+      if (request.status >= 200 && request.status < 300) resolve(payload as T);
+      else reject(new ApiError(request.status, extractDetail(payload) ?? "Upload failed"));
+    };
+    if (signal.aborted) { reject(new DOMException("Upload cancelled", "AbortError")); return; }
+    request.send(formData);
+  });
 }
 
 /** Multipart upload (avatars). Sends the CSRF header; the browser sets the

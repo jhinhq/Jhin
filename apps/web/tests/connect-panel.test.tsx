@@ -13,6 +13,7 @@ import type {
   OAuthStartOut,
 } from "@/lib/types";
 import { WorkspaceProvider } from "@/lib/workspace-context";
+import type { ConnectionPrefill } from "@/components/connection-create-dialog";
 
 /** What the panel calls, recorded rather than performed. */
 const calls = {
@@ -236,7 +237,7 @@ const GITHUB_CONNECTOR: ConnectorInfo = {
 const DEVICE_REFUSED =
   "GitHub has device sign-in turned off for this app. Use the browser sign-in instead — it needs no change on GitHub.";
 
-function renderPanel(onConnected = vi.fn(), onClose = vi.fn(), connector = MCP_CONNECTOR) {
+function renderPanel(onConnected = vi.fn(), onClose = vi.fn(), connector = MCP_CONNECTOR, prefill?: ConnectionPrefill, providerKey?: "composio") {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -259,7 +260,8 @@ function renderPanel(onConnected = vi.fn(), onClose = vi.fn(), connector = MCP_C
         <ConnectPanel
           workspaceId="workspace-1"
           connector={connector}
-          prefill={{
+          providerKey={providerKey}
+          prefill={prefill ?? {
             name: "Linear",
             authType: "bearer",
             config: { server_url: "https://mcp.example.com/mcp", server_slug: "linear" },
@@ -290,6 +292,85 @@ afterEach(() => {
 });
 
 describe("ConnectPanel", () => {
+  it("starts a catalog managed app with its toolkit and slug without a manual credential option", async () => {
+    probeResult = probe({ method: "composio", client_configured: true, scopes: [], resource: "" });
+    renderPanel(undefined, undefined, {
+      ...GITHUB_CONNECTOR, connector_type: "composio",
+      managed_auth: { provider: "composio", configured: true, toolkit: "", auth_type: "managed" },
+      auth_schemes: [{ type: "managed", label: "Composio", description: "", secret_fields: [] }],
+      config_fields: ["toolkit", "server_slug"].map((name) => ({ name, label: name, required: true, placeholder: "", help: "", kind: "text", auth_types: ["managed"], default: null, minimum: null, maximum: null })),
+    }, { name: "Notion", config: { toolkit: "notion", server_slug: "notion" } });
+    const proceed = await screen.findByRole("button", { name: "Continue with Composio" });
+    expect(screen.queryByRole("button", { name: "Use an API key instead" })).toBeNull();
+    expect(screen.queryByLabelText("toolkit")).toBeNull();
+    fireEvent.click(proceed);
+    expect(calls.start).toEqual([{ connector_type: "composio", name: "Notion", provider_key: "composio", config: { toolkit: "notion", server_slug: "notion" } }]);
+  });
+  it("probes official MCP directly from localhost without selecting a managed provider", async () => {
+    window.history.replaceState(null, "", "/apps");
+    probeResult = probe();
+    renderPanel();
+    await screen.findByTestId("oauth-consent-step");
+    expect(calls.probe).toEqual([{ connector_type: "mcp", server_url: "https://mcp.example.com/mcp" }]);
+    fireEvent.click(screen.getByRole("button", { name: "Continue to auth.example.com" }));
+    expect(calls.start[0]).not.toHaveProperty("provider_key");
+  });
+  it("passes a managed provider to the probe only after that method is selected", async () => {
+    probeResult = probe({ method: "composio", client_configured: true });
+    renderPanel(undefined, undefined, GITHUB_CONNECTOR, undefined, "composio");
+    await screen.findByRole("button", { name: "Continue with Composio" });
+    expect(calls.probe).toEqual([{ connector_type: "github", server_url: "https://mcp.example.com/mcp", provider_key: "composio" }]);
+  });
+  const managedConnector: ConnectorInfo = {
+    ...GITHUB_CONNECTOR,
+    connector_type: "supabase",
+    managed_auth: { provider: "composio", configured: true, toolkit: "supabase", auth_type: "management_token" },
+    auth_schemes: [{ type: "management_token", label: "Management token", description: "", secret_fields: [] }],
+    config_fields: [{ name: "project_ref", label: "Project reference", required: true, placeholder: "project", help: "", kind: "text", auth_types: ["management_token"], default: null, minimum: null, maximum: null }],
+  };
+
+  it("starts managed sign-in only after required public configuration is supplied", async () => {
+    probeResult = probe({ method: "composio", client_configured: true, scopes: [], resource: "" });
+    renderPanel(undefined, undefined, managedConnector);
+    const proceed = await screen.findByRole("button", { name: "Continue with Composio" });
+    fireEvent.click(proceed);
+    expect(calls.start).toHaveLength(0);
+    fireEvent.change(screen.getByLabelText("Project reference"), { target: { value: "project-one" } });
+    fireEvent.click(proceed);
+    expect(calls.start).toEqual([expect.objectContaining({ connector_type: "supabase", provider_key: "composio", config: expect.objectContaining({ project_ref: "project-one" }) })]);
+    expect(calls.navigate).toEqual([startResult.authorization_url]);
+  });
+
+  it("explains missing managed setup and keeps manual credentials an explicit choice", async () => {
+    probeResult = probe({ method: "composio", client_configured: false, reason: "composio_not_configured" });
+    renderPanel(undefined, undefined, { ...managedConnector, managed_auth: { ...managedConnector.managed_auth!, configured: false } });
+    expect(await screen.findByText(/administrator.*Composio project key/i)).toBeTruthy();
+    expect(screen.queryByTestId("create-connection-form")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Use an API key instead" }));
+    expect(await screen.findByTestId("create-connection-form")).toBeTruthy();
+  });
+
+  it("keeps managed probe failures out of the manual credential form", async () => {
+    probeFails = true;
+    renderPanel(undefined, undefined, managedConnector, undefined, "composio");
+    expect(await screen.findByText(/could not check managed sign-in/i)).toBeTruthy();
+    expect(screen.queryByTestId("create-connection-form")).toBeNull();
+    expect(screen.getByRole("button", { name: "Use an API key instead" })).toBeTruthy();
+  });
+  it("keeps a direct native probe failure on its normal credential fallback", async () => {
+    probeFails = true;
+    renderPanel(undefined, undefined, { ...GITHUB_CONNECTOR, managed_auth: managedConnector.managed_auth });
+    expect(await screen.findByTestId("create-connection-form")).toBeTruthy();
+    expect(screen.queryByText(/could not check managed sign-in/i)).toBeNull();
+  });
+
+  it("explains an app-specific managed OAuth registration requirement", async () => {
+    probeResult = probe({ method: "composio", client_configured: false, reason: "composio_auth_config_required" });
+    renderPanel(undefined, undefined, managedConnector);
+    expect(await screen.findByText(/custom OAuth auth configuration/i)).toBeTruthy();
+    expect(screen.queryByText(/administrator must configure the Composio project key/i)).toBeNull();
+  });
+
   it("asks the server how the app signs in rather than guessing", async () => {
     renderPanel();
     await waitFor(() => expect(calls.probe).toHaveLength(1));

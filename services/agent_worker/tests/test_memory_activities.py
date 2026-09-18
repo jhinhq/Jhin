@@ -202,7 +202,10 @@ async def world() -> Any:
             )
 
         w.user_message = msg(
-            SenderType.USER, "Please remember I prefer concise updates.", MessageVisibility.VISIBLE
+            SenderType.USER,
+            "Please remember I prefer concise updates. We deploy every other Thursday. "
+            "The release day is every other Thursday. Release day is every other Thursday.",
+            MessageVisibility.VISIBLE,
         )
         w.internal_message = msg(
             SenderType.AGENT,
@@ -211,6 +214,18 @@ async def world() -> Any:
         )
         w.agent_message = msg(
             SenderType.AGENT, "Noted: concise updates from now on.", MessageVisibility.VISIBLE
+        )
+        session.add(
+            Message(
+                workspace_id=ws,
+                task_id=w.team_task.id,
+                sender_type="user",
+                recipient_type="task",
+                recipient_id=w.team_task.id,
+                message_type="text",
+                visibility="visible",
+                content_json={"text": "Eng deploys Tuesdays."},
+            )
         )
         session.add_all([w.user_message, w.internal_message, w.agent_message])
         await session.commit()
@@ -222,7 +237,7 @@ VALID_OUTPUT = json.dumps(
     {
         "candidates": [
             {
-                "content": "The user prefers concise updates.",
+                "content": "I prefer concise updates.",
                 "kind": "preference",
                 "subject": "user.update_style",
             },
@@ -250,7 +265,7 @@ def apply_input(w: World, **overrides: Any) -> ApplyMemoryCandidatesInput:
         "agent_id": str(w.agent.id),
         "source_kind": "message",
         "source_id": str(w.agent_message.id),
-        "candidates_json": [{"content": "The user prefers concise updates.", "kind": "preference"}],
+        "candidates_json": [{"content": "I prefer concise updates.", "kind": "preference"}],
         "task_id": str(w.task.id),
         "conversation_id": str(w.conversation.id),
         "idempotency_key": "memory-maintenance-message-x",
@@ -260,6 +275,43 @@ def apply_input(w: World, **overrides: Any) -> ApplyMemoryCandidatesInput:
 
 
 class TestLoadSource:
+    @pytest.mark.parametrize("field", ["description", "expected_output", "result", "message_json"])
+    async def test_legacy_source_credentials_are_projected_before_field_bounds(self, world, field):
+        key = "a" * 24 + ":" + "b" * 64
+        async with world.session_factory() as session:
+            task = await session.get(Task, world.task.id)
+            message = await session.get(Message, world.user_message.id)
+            if field == "description":
+                task.description = "x" * 1970 + " " + key
+            elif field == "expected_output":
+                task.metadata_json = {"delegation": {"expected_output": "x" * 970 + " " + key}}
+            elif field == "result":
+                task.metadata_json = {"result": {"note": "x" * 2940 + " " + key}}
+            else:
+                message.content_json = {"nested": {"note": "x" * 940 + " " + key}}
+            await session.commit()
+            loaded = await load_source_text(
+                session,
+                workspace_id=world.workspace.id,
+                agent_id=world.agent.id,
+                source_kind="task_outcome",
+                source_id=world.task.id,
+            )
+            assert loaded is not None
+            text, refs = loaded
+            assert "a" * 24 not in text and "b" * 64 not in text
+            assert "REDACTED" in text
+            assert refs["task_id"] == str(world.task.id)
+            await session.refresh(task)
+            await session.refresh(message)
+            assert key in json.dumps(
+                {
+                    "description": task.description,
+                    "metadata": task.metadata_json,
+                    "message": message.content_json,
+                }
+            )
+
     async def test_message_source_is_visible_only_and_bounded(self, world: World) -> None:
         async with world.session_factory() as session:
             loaded = await load_source_text(
@@ -334,10 +386,33 @@ class TestExtract:
         )
         assert result.ok
         assert result.model == "fake-mini"
-        assert result.candidates_json[0]["content"] == "The user prefers concise updates."
+        assert result.candidates_json[0]["content"] == "I prefer concise updates."
         assert result.input_tokens == 3
         assert client.closed
         assert client.requests[0].messages[0].role == "system"
+
+    async def test_extraction_asks_for_the_agents_own_serving_window(
+        self, world: World, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Extraction runs against the agent's own resident model. If it asked
+        for a different window -- or none -- Ollama would reload the runner
+        underneath the agent's steps, and the next step would measure the
+        smaller instance and budget against that instead."""
+        async with world.session_factory() as session:
+            profile = await session.get(ModelProfile, world.workspace.default_model_profile_id)
+            provider = await session.get(ModelProvider, profile.provider_id)
+            provider.type = "ollama"
+            profile.context_window = 65_536
+            await session.commit()
+
+        client = StubClient(VALID_OUTPUT)
+        monkeypatch.setattr(module, "build_model_client", lambda *a, **k: client)
+        result = await ActivityEnvironment().run(
+            world.activities.extract_memory_candidates_activity, extract_input(world)
+        )
+
+        assert result.ok
+        assert client.requests[0].extra["options"]["num_ctx"] == 65_536
 
     async def test_malformed_output_is_typed(
         self, world: World, monkeypatch: pytest.MonkeyPatch
@@ -376,6 +451,68 @@ class TestExtract:
 
 
 class TestApply:
+    @pytest.mark.parametrize("revoked", [False, True])
+    async def test_background_capture_rechecks_standing_authority(self, world, revoked):
+        from datetime import timedelta
+
+        from jhin_db.models import AgentCapabilityGrant, User, WorkspaceMembership
+        from jhin_db.models.memory_capture import MemoryCapturePolicy
+
+        now = datetime.now(UTC)
+        async with world.session_factory() as session:
+            user = User(
+                email=f"{new_uuid7()}@example.test", display_name="Owner", password_hash="unused"
+            )
+            session.add(user)
+            await session.flush()
+            message = await session.get(Message, world.user_message.id)
+            message.sender_id = user.id
+            message.created_at = now
+            session.add_all(
+                [
+                    WorkspaceMembership(
+                        workspace_id=world.workspace.id, user_id=user.id, role="owner"
+                    ),
+                    AgentCapabilityGrant(
+                        workspace_id=world.workspace.id,
+                        agent_id=world.agent.id,
+                        capability="memory.propose",
+                        effect="allow",
+                        scope_json={},
+                    ),
+                    MemoryCapturePolicy(
+                        workspace_id=world.workspace.id,
+                        scope="team",
+                        scope_id=world.team.id,
+                        granted_by_user_id=user.id,
+                        source_user_id=user.id,
+                        actor_ids_json=[str(world.agent.id)],
+                        allowed_classes_json=["recurring_preference"],
+                        effective_from=now - timedelta(seconds=5),
+                        revoked_at=now if revoked else None,
+                    ),
+                ]
+            )
+            await session.commit()
+        result = await ActivityEnvironment().run(
+            world.activities.apply_memory_candidates_activity,
+            apply_input(
+                world,
+                source_id=str(world.user_message.id),
+                candidates_json=[
+                    {
+                        "content": "I prefer concise updates.",
+                        "capture_class": "recurring_preference",
+                        "requested_scope": "team",
+                        "scope_id": str(world.team.id),
+                        "source_message_id": str(world.user_message.id),
+                    }
+                ],
+            ),
+        )
+        assert result.activated == (0 if revoked else 1)
+        assert result.rejected == (1 if revoked else 0)
+
     async def test_ordinary_turn_activates_private_memory(self, world: World) -> None:
         result = await ActivityEnvironment().run(
             world.activities.apply_memory_candidates_activity, apply_input(world)
@@ -499,6 +636,33 @@ class TestApply:
         assert result.rejected == 1
         async with world.session_factory() as session:
             assert (await session.scalar(select(MemoryRecord))) is None
+
+    async def test_secret_candidate_never_reaches_embedding_provider(self, world, monkeypatch):
+        sent = []
+
+        class Embedder:
+            model = "test"
+
+            async def embed_texts(self, texts, **kwargs):
+                sent.extend(texts)
+                return None
+
+            async def close(self):
+                pass
+
+        async def resolve(*args, **kwargs):
+            return Embedder()
+
+        monkeypatch.setattr(module, "resolve_memory_embedder", resolve)
+        result = await ActivityEnvironment().run(
+            world.activities.apply_memory_candidates_activity,
+            apply_input(
+                world,
+                candidates_json=[{"content": "Token ghp_abcdefghijklmnopqrstuvwxyz0123456789"}],
+            ),
+        )
+        assert result.rejected == 1
+        assert not sent
 
     async def test_invalid_candidates_and_missing_source_are_typed(self, world: World) -> None:
         env = ActivityEnvironment()
@@ -771,7 +935,9 @@ class TestAgentToAgentLearning:
         assert '"summary": "Docs written."' in text
         assert "review feedback: Looks good. (verdict: pass)" in text
 
-    async def test_same_team_delegation_may_activate_team_memory(self, world: World) -> None:
+    async def test_same_team_delegation_cannot_establish_an_unsupported_setup_claim(
+        self, world: World
+    ) -> None:
         child = await self._make_delegation(world, same_team=True)
         result = await ActivityEnvironment().run(
             world.activities.apply_memory_candidates_activity,
@@ -786,11 +952,11 @@ class TestAgentToAgentLearning:
                 ],
             ),
         )
-        assert result.activated == 1
+        assert result.activated == 0 and result.rejected == 1
+        assert "unsupported_claim" in result.reasons
         async with world.session_factory() as session:
             record = await session.scalar(select(MemoryRecord))
-            assert record is not None
-            assert record.scope == "team" and record.scope_id == world.team.id
+            assert record is None
 
     async def test_cross_team_delegation_stays_agent_private(self, world: World) -> None:
         child = await self._make_delegation(world, same_team=False)

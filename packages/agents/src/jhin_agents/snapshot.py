@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -50,6 +50,9 @@ class ModelProfileSnapshot(BaseModel):
     display_name: str
     input_cost_micros_per_million: int | None
     output_cost_micros_per_million: int | None
+    # Runtime admission budget; absent on older snapshots. This must reflect
+    # the deployment's effective context, not just the architecture maximum.
+    context_window: int | None = Field(default=None, ge=1)
     # Model-native web search opt-in from the profile's config_json
     # (docs/architecture/web.md). None when the profile does not enable it.
     web_search: WebSearchConfig | None = None
@@ -57,6 +60,7 @@ class ModelProfileSnapshot(BaseModel):
     # supports_reasoning flag. None when the profile says nothing, in which
     # case the adapter applies the automatic tool-compatibility rule.
     reasoning: ReasoningConfig | None = None
+    supports_images: bool | None = None
 
 
 class AgentExecutionSnapshot(BaseModel):
@@ -68,6 +72,11 @@ class AgentExecutionSnapshot(BaseModel):
     # existed deserialize with "" and render without the workspace clause.
     workspace_name: str = ""
     name: str
+    # The stable handle. It is NOT rewritten when an agent renames itself,
+    # so it is also the canonical name the preamble falls back to when the
+    # display name cannot be rendered. Additive: snapshots serialized
+    # before this field deserialize with "" and simply have no fallback.
+    slug: str = ""
     role_title: str
     system_prompt: str
     autonomy_level: str
@@ -134,7 +143,11 @@ def _persona_card(row: Persona) -> PersonaCard | None:
 
 
 async def resolve_snapshot(
-    session: AsyncSession, workspace_id: UUID, agent_id: UUID
+    session: AsyncSession,
+    workspace_id: UUID,
+    agent_id: UUID,
+    *,
+    model_profile_id: UUID | None = None,
 ) -> AgentExecutionSnapshot:
     """Resolve the immutable snapshot for one agent in one workspace.
 
@@ -148,7 +161,7 @@ async def resolve_snapshot(
         raise SnapshotError("agent_not_found", f"agent {agent_id} not found in workspace")
 
     workspace = await session.get(Workspace, workspace_id)
-    profile_id = agent.model_profile_id
+    profile_id = model_profile_id or agent.model_profile_id
     if profile_id is None:
         profile_id = workspace.default_model_profile_id if workspace else None
     if profile_id is None:
@@ -205,6 +218,7 @@ async def resolve_snapshot(
         workspace_id=agent.workspace_id,
         workspace_name=workspace.name if workspace is not None else "",
         name=agent.name,
+        slug=agent.slug,
         role_title=agent.role_title,
         system_prompt=agent.system_prompt,
         autonomy_level=agent.autonomy_level,
@@ -222,8 +236,12 @@ async def resolve_snapshot(
             display_name=profile.display_name,
             input_cost_micros_per_million=profile.input_cost_micros_per_million,
             output_cost_micros_per_million=profile.output_cost_micros_per_million,
+            context_window=profile.context_window,
             web_search=_enabled_web_search(profile.config_json),
             reasoning=_reasoning_override(profile.config_json, profile.supports_reasoning),
+            supports_images=profile.config_json.get("supports_images")
+            if isinstance(profile.config_json.get("supports_images"), bool)
+            else None,
         ),
         temperature=agent.temperature,
         max_output_tokens=agent.max_output_tokens,

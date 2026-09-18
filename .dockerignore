@@ -19,6 +19,8 @@ terminals
 # directory -- together 5.3GB, which is what made an image build take
 # three quarters of an hour.
 .worktrees
+.tmp
+.test-tmp-*
 apps/desktop/target
 apps/desktop/src-tauri/target
 apps/desktop/node_modules

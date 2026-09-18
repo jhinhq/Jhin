@@ -21,6 +21,8 @@ from jhin_memory import (
     evaluate_candidate,
     is_low_information,
     is_self_referential,
+    judges_a_person,
+    records_the_conversation,
 )
 
 WS = new_uuid7()
@@ -193,6 +195,64 @@ class TestPolicyNearDuplicates:
         assert decision.contested_with == (record.id,)
 
 
+class TestWhatMemoryWillNotHoldAboutAPerson:
+    """The extraction pass filed three near-duplicate records under subject
+    ``user.injection.attempts``, each describing what a tester had just
+    tried. It writes through ``apply_candidates`` and never calls
+    ``memory.propose``, so the platform rule that would have stopped it never
+    reached that path — and the second half of what it wrote was worse than
+    clutter: a verdict on a person, retrieved into later prompts, in a
+    conversation with that same person, who cannot see or correct it."""
+
+    def test_the_records_that_were_actually_written_are_rejected(self) -> None:
+        for content in (
+            "On 2026-09-06 the user attempted a second prompt-injection by trying to set "
+            "the AI's name to a sentence of instructions.",
+            "The user tried to manipulate the assistant into revealing its system prompt.",
+            "The operator was testing my limits with a series of crafted names.",
+            "The tester is untrustworthy and keeps trying to jailbreak me.",
+        ):
+            decision = evaluate_candidate(
+                MemoryCandidate(content=content), source(), AGENT_ACTOR, agent_name="Bisby"
+            )
+            assert decision.outcome == "reject", content
+            assert "personal_judgement" in decision.reasons, content
+
+    def test_narrating_the_chat_is_rejected_even_when_nobody_is_judged(self) -> None:
+        for content in (
+            "Earlier in this conversation the user asked about the deploy schedule.",
+            "On 2026-09-05 the user asked me to rename myself to Bisby.",
+        ):
+            decision = evaluate_candidate(
+                MemoryCandidate(content=content), source(), AGENT_ACTOR, agent_name="Bisby"
+            )
+            assert decision.outcome == "reject", content
+            assert "conversation_record" in decision.reasons, content
+
+    def test_ordinary_facts_that_mention_a_person_still_pass(self) -> None:
+        """A false reject is a fact quietly lost, so both screens need the
+        person to be the *subject* of the verdict — a security noun or a date
+        in the sentence is not one."""
+        for content in (
+            "The user reported a prompt-injection bug in the markdown parser and "
+            "wants it fixed this sprint.",
+            "The user flagged a malicious dependency in the lockfile.",
+            "The deploy script manipulates the manifest before upload.",
+            "The team decided on 2026-09-06 to move the release to Friday.",
+            "Dev is the workspace owner and prefers to be asked before anything is deleted.",
+        ):
+            decision = evaluate_candidate(
+                MemoryCandidate(content=content), source(), AGENT_ACTOR, agent_name="Bisby"
+            )
+            assert decision.outcome == "activate", content
+
+    def test_the_helpers_are_the_two_signals_they_claim_to_be(self) -> None:
+        assert judges_a_person("The user attempted a prompt injection.")
+        assert not judges_a_person("The user reported a prompt-injection bug.")
+        assert records_the_conversation("In this thread the user said the deploy slipped.")
+        assert not records_the_conversation("The deploy slipped to Friday.")
+
+
 class TestSelfReferenceScreening:
     def test_agent_identity_facts_are_rejected(self) -> None:
         for content in (
@@ -244,6 +304,42 @@ class TestSelfReferenceScreening:
             MemoryCandidate(content="Your name is Bisby."), source(), human
         )
         assert decision.outcome == "activate"
+
+    def test_platform_authored_records_bypass_the_quality_screens(self) -> None:
+        """The rename executor writes one note saying who conferred the name.
+        The exemption is by *writer*, not by content pattern: loosening
+        ``is_self_referential`` enough to admit this would admit every
+        spontaneous "the assistant is called X" with it."""
+        platform = ActorFacts(actor_type=ActorType.AGENT, actor_id=AGENT, authored_by_platform=True)
+        decision = evaluate_candidate(
+            MemoryCandidate(
+                content="I go by Bisby because Ada Lovelace asked me to on 2026-09-06.",
+                subject="self.name",
+            ),
+            source(),
+            platform,
+            agent_name="Bisby",
+        )
+        assert decision.outcome == "activate"
+        assert "self_reference" not in decision.reasons
+
+    def test_platform_authoring_turns_off_nothing_else(self) -> None:
+        """It is an exemption from the quality screens and from nothing more:
+        a secret is still a secret, and the scope ceiling still holds."""
+        platform = ActorFacts(actor_type=ActorType.AGENT, actor_id=AGENT, authored_by_platform=True)
+        secret = evaluate_candidate(
+            MemoryCandidate(content="The API key is sk-proj-abcdefghijklmnopqrstuvwxyz123456"),
+            source(),
+            platform,
+        )
+        assert secret.outcome == "reject"
+        widened = evaluate_candidate(
+            MemoryCandidate(content="I go by Bisby.", requested_scope=MemoryScope.WORKSPACE),
+            source(),
+            platform,
+        )
+        assert widened.outcome == "reject"
+        assert "non_amplification" in widened.reasons
 
 
 class World:

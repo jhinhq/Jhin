@@ -6,10 +6,14 @@ import httpx
 import pytest
 
 from jhin_connectors.http_client import (
+    MAX_PROVIDER_MESSAGE_CHARS,
     MAX_PROVIDER_RESPONSE_BYTES,
     ProviderHTTPError,
+    bounded_provider_message,
     send_bounded_json,
 )
+from jhin_secrets.redaction import SecretRedactor
+from jhin_tools.sanitize import sanitize_payload
 
 
 class TrackingStream(httpx.AsyncByteStream):
@@ -182,7 +186,116 @@ async def test_provider_error_is_credential_safe(
     for rendered in (str(exc_info.value), str(url_exc_info.value), captured):
         assert bearer_token not in rendered
         assert url_password not in rendered
-    assert stream.yielded == 0
+    # The failed body *is* read now, bounded, so that a provider's own reason
+    # ("Resource not accessible by integration") survives the boundary. The
+    # exception's message is unchanged, which is what everything that renders
+    # or logs one uses; the body travels on its own channel and is redacted
+    # where it is stored.
+    assert stream.yielded == 1
+    assert stream.closed is True
+
+
+async def test_a_provider_error_body_is_bounded_flattened_and_redactable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What survives of a failed response, and what does not.
+
+    Read to a cap, reduced to the provider's sentence, stripped of anything a
+    terminal would act on — and, where it is stored, run through the process
+    redactor that already knows every credential this run decrypted.
+    """
+    _forbid_response_aread(monkeypatch)
+    token = "ghs_installation_token_that_must_not_leak"
+    body = (
+        '{"message":"Resource not\\u001b[31m accessible by integration '
+        f'(token {token})","documentation_url":"https://docs.example"}}'
+    ).encode()
+    stream = TrackingStream((body,))
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, stream=stream)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        request = client.build_request("POST", "https://provider.example/pulls")
+        with pytest.raises(ProviderHTTPError) as exc_info:
+            await send_bounded_json(client, request)
+
+    message = exc_info.value.provider_message
+    assert exc_info.value.status_code == 403
+    # The sentence, and only the sentence: the documentation URL and every
+    # other key the body carried are not what a failure is being asked for.
+    # The escape that would have started a terminal sequence is gone; what is
+    # left of it is ordinary text.
+    assert message == f"Resource not [31m accessible by integration (token {token})"
+    assert "\x1b" not in message
+    assert stream.closed is True
+
+    redactor = SecretRedactor()
+    redactor.register(token)
+    assert token not in str(sanitize_payload({"detail": message}, redactor=redactor))
+
+
+async def test_a_json_body_with_no_sentence_hands_over_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A JSON error document is read for its sentence or not at all.
+
+    The fallback to raw text used to run whenever no recognised key matched,
+    not only when the body was unparseable — so a provider that echoed the
+    request back handed over the whole echo, four hundred characters of it,
+    ``secret`` field included. ``_readable_message``'s promise that it does not
+    search the whole document was true of that function and untrue of the one
+    that called it.
+    """
+    _forbid_response_aread(monkeypatch)
+    body = b'{"echo":{"secret":"echoed-canary","query":"select 1"},"status":"rejected"}'
+    stream = TrackingStream((body,))
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, stream=stream)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        request = client.build_request("POST", "https://provider.example/query")
+        with pytest.raises(ProviderHTTPError) as exc_info:
+            await send_bounded_json(client, request)
+
+    assert exc_info.value.provider_message == ""
+    assert "echoed-canary" not in str(exc_info.value)
+
+    # A body that is not JSON at all is still worth one line: that is where a
+    # proxy puts its error page, and the page is what the fallback is for.
+    assert bounded_provider_message(b"<html><body>502 Bad Gateway</body></html>") == (
+        "<html><body>502 Bad Gateway</body></html>"
+    )
+
+
+async def test_a_huge_provider_error_body_is_cut_off_rather_than_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A body too big to be an error message is not read like one.
+
+    The read stops at its cap, so the JSON never parses and the leading text
+    stands in — bounded to the same few hundred characters. The point is the
+    bound, not the recovery: nothing about a failure justifies a second
+    transfer.
+    """
+    _forbid_response_aread(monkeypatch)
+    body = ('{"message":"Bad credentials","padding":"' + "x" * 200_000 + '"}').encode()
+    stream = TrackingStream(
+        tuple(body[index : index + 2048] for index in range(0, len(body), 2048))
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, stream=stream)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        request = client.build_request("GET", "https://provider.example/data")
+        with pytest.raises(ProviderHTTPError) as exc_info:
+            await send_bounded_json(client, request)
+
+    assert len(exc_info.value.provider_message) <= MAX_PROVIDER_MESSAGE_CHARS
+    assert "Bad credentials" in exc_info.value.provider_message
+    assert stream.yielded <= 3
     assert stream.closed is True
 
 

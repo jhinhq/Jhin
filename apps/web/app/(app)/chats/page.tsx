@@ -2,7 +2,9 @@
 
 /** Chats home: pick an agent, say what you need, and a new chat starts. */
 
-import { useMutation } from "@tanstack/react-query";
+import { useTransientMutation } from "@/lib/use-transient-mutation";
+import { mayContainSecret, type SecureChatInput } from "@/lib/private-input";
+import { SecureInputButton } from "@/components/chat/secure-input";
 import { Sparkles } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useMemo, useRef, useState } from "react";
@@ -13,7 +15,9 @@ import { LogoMark } from "@/components/brand/logo-mark";
 import { EmptyState, ErrorNote, Spinner } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import { LAST_AGENT_STORAGE_KEY, STARTER_PROMPTS, newTurn, stashCarriedDraft } from "@/lib/chat";
-import { useAgents, useInvalidateConversations } from "@/lib/hooks";
+import { useAgents, useInvalidateConversations, useModelProfiles } from "@/lib/hooks";
+import { AGENTIC_WORKSPACE_ENABLED } from "@/lib/agentic-features";
+import { emptyDraft, saveDraft, type ExecutionMode } from "@/lib/agentic-chat";
 import type { Agent, ConversationDetail } from "@/lib/types";
 import { useWorkspace } from "@/lib/workspace-context";
 
@@ -33,6 +37,8 @@ function rememberAgent(id: string) {
   }
 }
 
+type CreateChatBody = { agent_id: string; text?: string; client_turn_id?: string; execution_mode?: ExecutionMode; model_profile_id?: string; secure_inputs?: SecureChatInput[] };
+
 function ChatsHome() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -41,6 +47,8 @@ function ChatsHome() {
   const { workspace, user, can } = useWorkspace();
   const workspaceId = workspace.workspace_id;
   const agents = useAgents(workspaceId);
+  const profiles = useModelProfiles(workspaceId);
+  const [executionMode, setExecutionMode] = useState<ExecutionMode>("act"), [profileId, setProfileId] = useState("");
   const invalidate = useInvalidateConversations(workspaceId);
   const [text, setText] = useState("");
   // Mirrors `text` so the mutation callbacks read what is in the box now, not
@@ -56,6 +64,7 @@ function ChatsHome() {
     typeof window === "undefined" ? null : readLastAgent(),
   );
   const [error, setError] = useState<string | null>(null);
+  const [pendingCreate, setPendingCreate] = useState<CreateChatBody | null>(null);
 
   const activeAgents = useMemo<Agent[]>(
     () => (agents.data ?? []).filter((agent) => agent.status === "active"),
@@ -72,37 +81,42 @@ function ChatsHome() {
     return activeAgents[0]?.id ?? null;
   }, [chosenAgentId, requestedAgentId, rememberedId, activeAgents]);
 
-  const create = useMutation({
-    mutationFn: (body: { agent_id: string; text: string; client_turn_id: string }) =>
+  const create = useTransientMutation({
+    mutationFn: (body: CreateChatBody) =>
       api<ConversationDetail>(`/api/v1/workspaces/${workspaceId}/conversations`, {
         method: "POST",
         body,
       }),
-    onSuccess: (detail) => {
+    onMutate: (body) => { setError(null); setPendingCreate(body); },
+    onSuccess: (detail, variables) => {
       setError(null);
+      setPendingCreate(null);
       rememberAgent(detail.conversation.primary_agent_id ?? agentId ?? "");
       // Anything typed while the first turn was in flight would be lost with
       // this page; hand it to the conversation we are about to open.
       stashCarriedDraft(detail.conversation.id, textRef.current);
+      if (!variables.text) saveDraft(workspaceId, detail.conversation.id, { ...emptyDraft(), text: textRef.current, execution_mode: variables.execution_mode ?? "act", model_profile_id: variables.model_profile_id });
       invalidate();
       router.push(`/chats/${detail.conversation.id}`);
     },
     onError: (err, variables) => {
-      setText((current) => current || variables.text);
+      setText((current) => current || (variables.text && !variables.secure_inputs?.length && !mayContainSecret(variables.text) ? variables.text : ""));
       setError(
-        err instanceof ApiError
+        err instanceof ApiError && !variables.secure_inputs?.length && !mayContainSecret(variables.text ?? "")
           ? `Couldn't start the chat: ${err.detail}`
           : "Couldn't start the chat. Check your connection and try again.",
       );
     },
   });
 
-  const send = (value: string) => {
+  const send = (value: string, secureInputs?: SecureChatInput[]) => {
     if (!agentId) return;
     // Clear straight away so the box is usable during the redirect, exactly
     // as it behaves once the chat exists.
     changeText("");
-    create.mutate({ agent_id: agentId, ...newTurn(value) });
+    const body: CreateChatBody = { agent_id: agentId, ...newTurn(value || "Use this credential for the requested setup."), ...(secureInputs ? { secure_inputs: secureInputs } : {}), ...(AGENTIC_WORKSPACE_ENABLED ? { execution_mode: executionMode, model_profile_id: profileId || undefined } : {}) };
+    const signature = (candidate: CreateChatBody) => JSON.stringify({...candidate,client_turn_id:undefined});
+    create.mutate(pendingCreate && signature(pendingCreate)===signature(body) ? pendingCreate : body);
   };
 
   const selectedAgent = activeAgents.find((agent) => agent.id === agentId) ?? null;
@@ -166,8 +180,11 @@ function ChatsHome() {
                   ? `Talking to ${selectedAgent.name}${selectedAgent.role_title ? `, ${selectedAgent.role_title}` : ""}. Enter to send · Shift+Enter for a new line`
                   : null
               }
+              controls={AGENTIC_WORKSPACE_ENABLED ? <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1"><select aria-label="First turn's mode" value={executionMode} onChange={(event) => setExecutionMode(event.target.value as ExecutionMode)} disabled={create.isPending} className="h-9 rounded-lg bg-transparent p-1 text-xs text-dim"><option value="ask">Ask</option><option value="plan">Plan</option><option value="act">Act</option></select><select aria-label="First turn's model" value={profileId} onChange={(event) => setProfileId(event.target.value)} disabled={create.isPending} className="h-9 min-w-0 max-w-40 rounded-lg bg-transparent p-1 text-xs text-dim"><option value="">Agent’s model</option>{profiles.data?.map((profile) => <option key={profile.id} value={profile.id}>{profile.display_name}</option>)}</select><button type="button" disabled={!canStart || !agentId || create.isPending} className="min-h-9 rounded-lg px-2 text-xs text-accent-strong hover:bg-hover disabled:opacity-40" onClick={() => { if (agentId) create.mutate({ agent_id: agentId, execution_mode: executionMode, model_profile_id: profileId || undefined }); }}>Start with files or a project</button></div> : undefined}
             />
+            <SecureInputButton disabled={!canStart || !agentId || create.isPending} onSend={(input) => send(text, [input])} />
             <ErrorNote message={error} />
+            {pendingCreate && error && !create.isPending ? <button type="button" onClick={()=>create.mutate(pendingCreate)} className="min-h-10 rounded-xl border border-line px-3 text-sm text-accent-strong">Retry starting chat</button> : null}
 
             <section className="space-y-2">
               <h2 className="text-[11px] font-medium uppercase tracking-wider text-faint">

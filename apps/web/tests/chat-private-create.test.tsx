@@ -1,0 +1,23 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, expect, it, vi } from "vitest";
+import ChatsPage from "@/app/(app)/chats/page";
+import { api } from "@/lib/api";
+vi.mock("next/navigation",()=>({useRouter:()=>({push:vi.fn()}),useSearchParams:()=>new URLSearchParams()}));
+vi.mock("@/lib/workspace-context",()=>({useWorkspace:()=>({workspace:{workspace_id:"w1"},user:{display_name:"Dev Owner"},can:()=>true})}));
+vi.mock("@/lib/hooks",()=>({useAgents:()=>({data:[{id:"a1",name:"Blogger",status:"active",role_title:"Writer"}]}),useModelProfiles:()=>({data:[]}),useInvalidateConversations:()=>vi.fn()}));
+vi.mock("@/lib/api", async(original)=>({...await original<typeof import("@/lib/api")>(),api:vi.fn()}));
+afterEach(()=>{cleanup();vi.clearAllMocks();localStorage.clear();});
+it("retries an uncertain credential-bearing first turn with the same identity and no cached key",async()=>{
+  const client=new QueryClient();vi.mocked(api).mockRejectedValueOnce(new Error("Response lost")).mockResolvedValue({conversation:{id:"c1",primary_agent_id:"a1"}});
+  render(<QueryClientProvider client={client}><ChatsPage /></QueryClientProvider>);
+  const secret=`${"c".repeat(24)}:${"d".repeat(64)}`;
+  fireEvent.change(screen.getByRole("textbox",{name:"Message"}),{target:{value:secret}});fireEvent.click(screen.getByRole("button",{name:"Send message"}));
+  await screen.findByRole("alert");
+  expect((screen.getByRole("textbox",{name:"Message"}) as HTMLTextAreaElement).value).toBe("");
+  expect(client.getMutationCache().getAll()).toHaveLength(0);
+  fireEvent.click(screen.getByRole("button",{name:"Retry starting chat"}));
+  await waitFor(()=>expect(api).toHaveBeenCalledTimes(2));
+  expect((vi.mocked(api).mock.calls[0][1]?.body as {client_turn_id:string}).client_turn_id).toBe((vi.mocked(api).mock.calls[1][1]?.body as {client_turn_id:string}).client_turn_id);
+  expect(document.body.textContent).not.toContain(secret);
+});

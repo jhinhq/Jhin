@@ -133,7 +133,7 @@ async def test_two_agents_two_profiles_run_through_temporal(
             client,
             f"/api/v1/workspaces/{ws}/agents",
             {
-                "name": f"Exit Agent {model} {tag}",
+                "name": f"Exit {model} {tag}",
                 "role_title": "Integration Tester",
                 "system_prompt": "You complete integration test tasks precisely.",
                 "model_profile_id": profiles[model]["id"],
@@ -183,6 +183,11 @@ async def test_two_agents_two_profiles_run_through_temporal(
             # Each step also records the tool names it was offered, in the
             # same commit as the manifest/reasoning pair it belongs to.
             "agent.step.tools_offered",
+            "node.load_context",
+            "node.reason",
+            # A tool-free answer receives one evidence-review nudge and
+            # another generation before the single durable step is committed.
+            "node.reason",
             "node.load_context",
             "node.reason",
             "agent.step.committed",
@@ -238,7 +243,7 @@ async def test_message_agent_creates_conversational_task(
         f"/api/v1/workspaces/{ws}/agents",
         {
             "name": f"Chat Agent {tag}",
-            "system_prompt": "You answer user messages helpfully.",
+            "system_prompt": "You answer user messages helpfully. [[echo_latest_user]]",
             "model_profile_id": profile["id"],
         },
     )

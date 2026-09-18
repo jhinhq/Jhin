@@ -22,6 +22,7 @@ services:
     environment:
       APP_NAME: ${APP_NAME:-Jhin}
       API_INTERNAL_URL: http://api:8000
+      JHIN_RUNTIME_GATEWAY_URL: http://runtime-gateway:8086
     ports:
       - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-3000}:3000"
     depends_on:
@@ -44,6 +45,9 @@ services:
       APP_ENV: ${APP_ENV:-production}
       APP_URL: ${APP_URL:?set APP_URL to the public https origin}
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      # Never expose the broker project key to web, agents, or sandbox jobs.
+      COMPOSIO_API_KEY: ${COMPOSIO_API_KEY:-}
+      COMPOSIO_AUTH_CONFIGS: ${COMPOSIO_AUTH_CONFIGS:-}
       # X-Forwarded-For is believed only from these networks (the compose
       # bridges and whatever terminates TLS in front of the stack). Without it
       # the per-IP login lockout sees only the proxy's address.
@@ -54,10 +58,16 @@ services:
       TEMPORAL_ADDRESS: ${TEMPORAL_ADDRESS:-temporal:7233}
       TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
       MASTER_KEY_FILE: /run/secrets/jhin_master_key
+      JHIN_AGENTIC_WORKSPACE: ${JHIN_AGENTIC_WORKSPACE:-1}
+      JHIN_RUNTIME_GATEWAY_URL: http://runtime-gateway:8086
+      JHIN_FILES_ROOT: /data/files
+      JHIN_FILES_WORKSPACE_QUOTA_BYTES: ${JHIN_FILES_WORKSPACE_QUOTA_BYTES:-10737418240}
       JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS: ${JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS:-}
       JHIN_CONNECTOR_ALLOWED_DB_HOSTS: ${JHIN_CONNECTOR_ALLOWED_DB_HOSTS:-}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-0.10}
+    volumes:
+      - managed_files:/data/files
     secrets:
       - jhin_master_key
     # Direct API publication is opt-in for loopback administration only.
@@ -118,8 +128,12 @@ services:
       TEMPORAL_ADDRESS: ${TEMPORAL_ADDRESS:-temporal:7233}
       TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
       MASTER_KEY_FILE: /run/secrets/jhin_master_key
+      JHIN_FILES_ROOT: /data/files
+      JHIN_FILES_WORKSPACE_QUOTA_BYTES: ${JHIN_FILES_WORKSPACE_QUOTA_BYTES:-10737418240}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-0.10}
+    volumes:
+      - managed_files:/data/files:ro
     secrets:
       - jhin_master_key
     depends_on:
@@ -149,13 +163,18 @@ services:
       TEMPORAL_ADDRESS: ${TEMPORAL_ADDRESS:-temporal:7233}
       TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
       MASTER_KEY_FILE: /run/secrets/jhin_master_key
+      JHIN_FILES_ROOT: /data/files
+      JHIN_FILES_WORKSPACE_QUOTA_BYTES: ${JHIN_FILES_WORKSPACE_QUOTA_BYTES:-10737418240}
       SANDBOX_RUNNER_URL: http://sandbox-runner:8085
+      COMPOSIO_API_KEY: ${COMPOSIO_API_KEY:-}
       SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:?set SANDBOX_RUNNER_TOKEN}
       SANDBOX_DEFAULT_IMAGE: ${SANDBOX_DEFAULT_IMAGE:?set SANDBOX_DEFAULT_IMAGE}
       JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS: ${JHIN_CONNECTOR_ALLOWED_HTTP_ORIGINS:-}
       JHIN_CONNECTOR_ALLOWED_DB_HOSTS: ${JHIN_CONNECTOR_ALLOWED_DB_HOSTS:-}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-0.10}
+    volumes:
+      - managed_files:/data/files
     secrets:
       - jhin_master_key
     depends_on:
@@ -172,6 +191,32 @@ services:
       retries: 3
       start_period: 30s
     networks: [control, data, runner]
+    restart: unless-stopped
+
+  # Scoped PTY and preview transport. Shares the tool-worker release image,
+  # but receives neither connector credentials nor the encryption master key.
+  runtime-gateway:
+    image: ${JHIN_IMAGE_NAMESPACE:-ghcr.io/jhinhq}/jhin-tool-worker:${JHIN_VERSION:?set JHIN_VERSION}
+    command: ["jhin-runtime-gateway"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-jhin}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-jhin}
+      SANDBOX_RUNNER_URL: http://sandbox-runner:8085
+      SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:?set SANDBOX_RUNNER_TOKEN}
+      JHIN_FILES_ROOT: /data/files
+      JHIN_FILES_WORKSPACE_QUOTA_BYTES: ${JHIN_FILES_WORKSPACE_QUOTA_BYTES:-10737418240}
+    volumes:
+      - managed_files:/data/files:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      sandbox-runner:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8086/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [edge, data, runner]
     restart: unless-stopped
 
   # The only service allowed to create sandbox jobs. Docker authority comes
@@ -322,7 +367,7 @@ networks:
     driver: bridge
   data:
     driver: bridge
-  # tool-worker <-> sandbox-runner only. Job containers are never attached.
+  # Tool-worker/runtime-gateway <-> sandbox-runner. Job containers never attach.
   runner:
     driver: bridge
   # Dedicated bridge for network_policy=internet jobs; no control-plane
@@ -334,6 +379,7 @@ networks:
 volumes:
   postgres_data:
   nats_data:
+  managed_files:
 
 secrets:
   jhin_master_key:

@@ -9,6 +9,7 @@ import re
 import sys
 import threading
 import time
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import fields, replace
 from pathlib import Path
@@ -39,6 +40,7 @@ import jhin_observability.bootstrap as bootstrap_module
 import jhin_observability.metrics as metrics_module
 from jhin_observability import (
     DB_TABLE_VALUES,
+    LOG_SCHEMA_VERSION,
     MAX_EXPORT_TIMEOUT_MILLIS,
     MAX_METRIC_EXPORT_INTERVAL_MILLIS,
     MAX_SPAN_EXPORT_BATCH_SIZE,
@@ -280,7 +282,7 @@ def test_empty_endpoint_installs_noop_telemetry_but_json_logging(
     with runtime.tracer.start_as_current_span("test.noop") as span:
         assert span.is_recording() is False
     get_logger(__name__).info("api.started")
-    assert json.loads(capsys.readouterr().out)["schema_version"] == 1
+    assert json.loads(capsys.readouterr().out)["schema_version"] == LOG_SCHEMA_VERSION
     assert runtime.metrics is noop_metrics()
     assert runtime.status().configured is False
 
@@ -596,6 +598,52 @@ def test_settings_environment_is_closed() -> None:
     assert ObservabilitySettings(app_env="dev").app_env == "dev"
     with pytest.raises(ValueError):
         ObservabilitySettings(app_env="development")
+
+
+def test_an_unrecognised_log_level_warns_and_falls_back_instead_of_refusing_to_boot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A typo in ``LOG_LEVEL`` must not stop a service starting.
+
+    Until ``log_level`` reached the root logger, every spelling of it worked
+    because none of them did anything, and every install has been running at
+    INFO whatever its compose file says. The first release that reads the
+    value must not also be the first release that refuses to start on a value
+    nobody has ever had to get right — the fallback is exactly where those
+    installs already are. It is a warning rather than silence because silence
+    is what made this setting a decoration in the first place.
+    """
+    monkeypatch.setenv("LOG_LEVEL", "chatty")
+    settings = ObservabilitySettings(_env_file=None)
+    with pytest.warns(RuntimeWarning, match="chatty"):
+        config = settings.observability_config(service_name="api", service_version="0.1.0")
+    assert config.log_level == "INFO"
+
+    # A level that is merely untidy is still honoured, not fallen back from.
+    monkeypatch.setenv("LOG_LEVEL", "  debug ")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        resolved = ObservabilitySettings(_env_file=None).observability_config(
+            service_name="api", service_version="0.1.0"
+        )
+    assert resolved.log_level == "DEBUG"
+
+
+def test_an_invalid_log_level_in_code_is_still_a_programming_error() -> None:
+    """The deployment path falls back; the literal path does not.
+
+    A name that is not a level is a typo in a compose file when it arrives
+    from the environment and a bug when it is written into a constructor
+    call, and only the first one has an install behind it that has been
+    booting happily for months.
+    """
+    with pytest.raises(ValueError, match="log level must be one of"):
+        ObservabilityConfig(
+            service_name="api",
+            service_version="0.1.0",
+            environment="test",
+            log_level="chatty",
+        )
 
 
 def test_settings_forward_known_secret_processors() -> None:

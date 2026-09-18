@@ -314,26 +314,41 @@ async def test_rbac_roles_and_workspace_isolation(api: ApiHarness) -> None:
         assert denied_pause.status_code == 403
         assert (await second.get(f"/api/v1/workspaces/{ws}/audit-events")).status_code == 403
 
-        # Promote to member: pause/resume become available, admin writes stay closed.
+        # Members can operate tasks, but pausing an agent changes shared
+        # workspace state and remains admin-only (architecture/rbac.md).
         promoted = await api.client.patch(
             f"/api/v1/workspaces/{ws}/members/{membership_id}",
             json={"role": "member"},
             headers=api.csrf(),
         )
         assert promoted.status_code == 200
-        paused = await second.post(
+        still_denied_pause = await second.post(
             f"/api/v1/workspaces/{ws}/agents/{agent['id']}/pause", headers=csrf2
         )
-        assert paused.status_code == 200
-        assert paused.json()["status"] == "paused"
-        resumed = await second.post(
+        assert still_denied_pause.status_code == 403
+        still_denied_resume = await second.post(
             f"/api/v1/workspaces/{ws}/agents/{agent['id']}/resume", headers=csrf2
         )
-        assert resumed.json()["status"] == "active"
+        assert still_denied_resume.status_code == 403
         still_denied = await second.post(
             f"/api/v1/workspaces/{ws}/teams", json={"name": "Nope"}, headers=csrf2
         )
         assert still_denied.status_code == 403
+
+        promoted_admin = await api.client.patch(
+            f"/api/v1/workspaces/{ws}/members/{membership_id}",
+            json={"role": "admin"},
+            headers=api.csrf(),
+        )
+        assert promoted_admin.status_code == 200
+        paused = await second.post(
+            f"/api/v1/workspaces/{ws}/agents/{agent['id']}/pause", headers=csrf2
+        )
+        assert paused.status_code == 200 and paused.json()["status"] == "paused"
+        resumed = await second.post(
+            f"/api/v1/workspaces/{ws}/agents/{agent['id']}/resume", headers=csrf2
+        )
+        assert resumed.status_code == 200 and resumed.json()["status"] == "active"
 
         # Isolation both ways: owner cannot see the second user's workspace.
         their_ws = (

@@ -420,12 +420,27 @@ _UNSET = object()
 
 class _ProbeSession(AsyncSession):
     fail_next_commit: ClassVar[BaseException | None] = None
+    fail_reasoning_commit: ClassVar[BaseException | None] = None
     task_correlation_override: ClassVar[object] = _UNSET
     run_started_override: ClassVar[object] = _UNSET
     usage_read_override: ClassVar[tuple[str, object] | None] = None
     commit_order: ClassVar[list[str] | None] = None
     scalar_statements: ClassVar[list[Any] | None] = None
     committed_completed_at: ClassVar[datetime | None] = None
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        from sqlalchemy import event
+
+        super().__init__(*args, **kwargs)
+
+        def before_flush(session: Any, *_args: Any) -> None:
+            if any(
+                isinstance(value, RunEvent) and value.event_type == "agent.step.reasoning"
+                for value in session.new
+            ):
+                session.info["reasoning_bind_pending"] = True
+
+        event.listen(self.sync_session, "before_flush", before_flush)
 
     async def scalar(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
         if type(self).scalar_statements is not None:
@@ -458,16 +473,27 @@ class _ProbeSession(AsyncSession):
         return _ScalarRows(rows)
 
     async def commit(self) -> None:
+        reasoning_bind = self.info.get("reasoning_bind_pending", False) or any(
+            isinstance(value, RunEvent) and value.event_type == "agent.step.reasoning"
+            for value in self.new
+        )
+        if reasoning_bind and type(self).fail_reasoning_commit is not None:
+            failure = type(self).fail_reasoning_commit
+            type(self).fail_reasoning_commit = None
+            raise failure
         failure = type(self).fail_next_commit
         if failure is not None:
             type(self).fail_next_commit = None
             raise failure
         await super().commit()
+        self.info.pop("reasoning_bind_pending", None)
         for value in self.identity_map.values():
             if isinstance(value, AgentRun) and type(value.completed_at) is datetime:
                 type(self).committed_completed_at = value.completed_at
         if type(self).commit_order is not None:
             type(self).commit_order.append("db_commit")
+            if reasoning_bind:
+                type(self).commit_order.append("reasoning_bind_commit")
 
 
 class _ScalarRows:
@@ -778,6 +804,7 @@ async def _owned_world(
         yield owned
     finally:
         _ProbeSession.fail_next_commit = None
+        _ProbeSession.fail_reasoning_commit = None
         _ProbeSession.task_correlation_override = _UNSET
         _ProbeSession.run_started_override = _UNSET
         _ProbeSession.usage_read_override = None
@@ -2797,7 +2824,7 @@ async def test_reasoning_commit_failure_rolls_back_pair_and_emits_no_usage(
     world: AgentWorld,
 ) -> None:
     failure = RuntimeError("reasoning-commit-authority")
-    _ProbeSession.fail_next_commit = failure
+    _ProbeSession.fail_reasoning_commit = failure
     world.raw_model.responses.append(world.response())
 
     with pytest.raises(RuntimeError) as caught:
@@ -2885,8 +2912,10 @@ async def test_legacy_sidecar_repair_is_a_fresh_usage_owner(world: AgentWorld) -
         provider_type="ollama",
     ) == pytest.approx(0.000013)
     order = world.telemetry.order
-    assert order.count("db_commit") == 1
-    commit_index = order.index("db_commit")
+    # Generation attempts and public progress have independent durable commits.
+    # The manifest/sidecar commit is the usage ownership boundary under test.
+    assert order.count("reasoning_bind_commit") == 1
+    commit_index = order.index("reasoning_bind_commit")
     hook_index = order.index("after_reasoning_bind_commit")
     barrier_index = order.index("phase9_after_manifest")
     usage_indices = [
@@ -2903,7 +2932,7 @@ async def test_legacy_sidecar_commit_failure_keeps_manifest_without_usage(
 ) -> None:
     await world.seed_manifest_only()
     failure = RuntimeError("legacy-sidecar-commit-authority")
-    _ProbeSession.fail_next_commit = failure
+    _ProbeSession.fail_reasoning_commit = failure
     world.raw_model.responses.append(world.response())
 
     with pytest.raises(RuntimeError) as caught:

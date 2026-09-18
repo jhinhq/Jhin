@@ -11,9 +11,10 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
 from jhin_memory.types import MAX_CANDIDATE_CHARS
+from jhin_secrets.intake import redact_legacy_text
 
 
 class QuestionOptionOut(BaseModel):
@@ -23,8 +24,16 @@ class QuestionOptionOut(BaseModel):
     label: str
     detail: str
 
+    @field_serializer("value", "label", "detail")
+    def serialize_legacy_text(self, value: str) -> str:
+        return redact_legacy_text(value)
+
 
 class QuestionOut(BaseModel):
+    @field_serializer("question", "context", "answer_text", "answer_option_value")
+    def serialize_legacy_text(self, value: str) -> str:
+        return redact_legacy_text(value)
+
     id: UUID
     workspace_id: UUID
     conversation_id: UUID | None
@@ -34,6 +43,9 @@ class QuestionOut(BaseModel):
     agent_name: str | None
     # "open" | "memory_scope"
     kind: str
+    required: bool = False
+    input_key: str = ""
+    value_type: str = "text"
     question: str
     context: str
     options: list[QuestionOptionOut]

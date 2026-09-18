@@ -40,11 +40,11 @@ export function ChatHeader({
   onToggleDetails,
   detailed,
   onToggleDetailed,
+  showDetailedToggle = true,
   onRename,
   onTogglePin,
   onToggleArchive,
   busy = false,
-  quickControls = null,
 }: {
   conversation: Conversation;
   agent: ConversationAgentSummary | null;
@@ -55,13 +55,11 @@ export function ChatHeader({
   /** Show routine progress chips (Started working / Finished) in the transcript. */
   detailed: boolean;
   onToggleDetailed: () => void;
+  showDetailedToggle?: boolean;
   onRename: (title: string) => void;
   onTogglePin: () => void;
   onToggleArchive: () => void;
   busy?: boolean;
-  /** In-chat quick settings (model, mode, tools, cost). Passed in as a slot so
-   * the header stays free of data hooks. */
-  quickControls?: React.ReactNode;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(conversation.title);
@@ -90,9 +88,10 @@ export function ChatHeader({
     requestAnimationFrame(() => titleButtonRef.current?.focus());
   };
 
-  // `relative z-20` on the header: its backdrop-blur already makes it a
-  // stacking context, so without an explicit z-index the transcript below
-  // paints over anything the header pops out (the quick-settings popover).
+  // `relative z-20`: the backdrop-blur already makes the header a stacking
+  // context, and without an explicit z-index anything positioned in the
+  // transcript below would paint over it. The composer's own popovers sit
+  // higher still (z-40), so they open across the header rather than under it.
   return (
     <header className="relative z-20 flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-line bg-surface/80 px-3 py-2.5 backdrop-blur sm:flex-nowrap sm:px-5">
       <Link
@@ -143,7 +142,14 @@ export function ChatHeader({
             ) : null}
           </button>
         )}
-        <p className="flex min-w-0 items-center gap-2 text-xs text-dim">
+        {/* Wraps rather than competes. The live pill can carry a whole
+         * sentence ("Making a change in GitHub" + a timer), and on one line
+         * at 320px that squeezed the byline beside it down to "Bi…" — the
+         * agent's name, which is the one thing on this row that is always
+         * worth reading. Given a second line it keeps its name and the pill
+         * keeps its sentence. `gap-y-1` because 8px of vertical gap between
+         * two 16px lines reads as two separate rows. */}
+        <p className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-dim">
           <span className="truncate">
             {agentName}
             {role ? ` · ${role}` : ""}
@@ -154,7 +160,6 @@ export function ChatHeader({
         </p>
       </div>
       <div className="flex w-full shrink-0 items-center justify-end gap-0.5 sm:w-auto">
-        {quickControls}
         {canEdit ? (
           <>
             <IconButton
@@ -174,14 +179,14 @@ export function ChatHeader({
             </IconButton>
           </>
         ) : null}
-        <IconButton
+        {showDetailedToggle ? <IconButton
           label={detailed ? "Hide progress updates" : "Show progress updates"}
           active={detailed}
           aria-pressed={detailed}
           onClick={onToggleDetailed}
         >
           <ListChecks size={16} aria-hidden />
-        </IconButton>
+        </IconButton> : null}
         <IconButton
           label={detailsOpen ? "Hide details" : "Show details"}
           active={detailsOpen}

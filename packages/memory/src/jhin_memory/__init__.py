@@ -59,6 +59,8 @@ from jhin_memory.screening import (
     contains_secret,
     is_low_information,
     is_self_referential,
+    judges_a_person,
+    records_the_conversation,
     screen_content,
 )
 from jhin_memory.similarity import (
@@ -125,10 +127,12 @@ __all__ = [
     "forget_record",
     "is_low_information",
     "is_self_referential",
+    "judges_a_person",
     "normalize_content",
     "parse_adjudication",
     "parse_candidates",
     "record_retrieval_provenance",
+    "records_the_conversation",
     "resolve_memory_adjudicator",
     "resolve_memory_embedder",
     "screen_content",

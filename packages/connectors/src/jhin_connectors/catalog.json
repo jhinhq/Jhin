@@ -1,5 +1,16 @@
 [
   {
+    "slug": "ghost",
+    "name": "Ghost",
+    "category": "Documents & knowledge",
+    "icon": "ghost",
+    "description": "Read posts, prepare drafts, and route exact revisions to your publishing director.",
+    "connector_type": "ghost",
+    "auth_hint": "header",
+    "auth_note": "Use your actual Ghost Admin URL and an Admin API integration key. You can also provide the key securely in chat.",
+    "docs_url": "https://docs.ghost.org/admin-api"
+  },
+  {
     "slug": "github",
     "name": "GitHub",
     "category": "Developer tools",

@@ -13,10 +13,12 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -44,6 +46,13 @@ class Conversation(Base, UuidPkMixin, TimestampMixin):
         StdUuid, ForeignKey("workspace.id", ondelete="CASCADE"), index=True
     )
     title: Mapped[str] = mapped_column(String(200))
+    project_id: Mapped[UUID | None] = mapped_column(
+        StdUuid, ForeignKey("chat_project.id", ondelete="SET NULL"), default=None, index=True
+    )
+    workspace_version: Mapped[int] = mapped_column(Integer, default=1, server_default=text("0"))
+    source_conversation_id: Mapped[UUID | None] = mapped_column(StdUuid, default=None)
+    source_message_id: Mapped[UUID | None] = mapped_column(StdUuid, default=None)
+    source_checkpoint_id: Mapped[UUID | None] = mapped_column(StdUuid, default=None)
     status: Mapped[str] = mapped_column(
         String(16), default=ConversationStatus.ACTIVE.value, server_default=text("'active'")
     )
@@ -55,6 +64,7 @@ class Conversation(Base, UuidPkMixin, TimestampMixin):
         StdUuid, ForeignKey("user.id", ondelete="SET NULL"), default=None
     )
     last_activity_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    timeline_sequence: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"))
 
 
 class UserQuestion(Base, UuidPkMixin, TimestampMixin):
@@ -111,6 +121,11 @@ class UserQuestion(Base, UuidPkMixin, TimestampMixin):
         StdUuid, ForeignKey("message.id", ondelete="SET NULL"), default=None
     )
     kind: Mapped[str] = mapped_column(String(32), default="open", server_default=text("'open'"))
+    required: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    input_key: Mapped[str] = mapped_column(String(100), default="", server_default=text("''"))
+    value_type: Mapped[str] = mapped_column(
+        String(16), default="text", server_default=text("'text'")
+    )
     question: Mapped[str] = mapped_column(Text)
     context: Mapped[str] = mapped_column(Text, default="", server_default=text("''"))
     options_json: Mapped[list[Any]] = mapped_column(JsonList, default=list)

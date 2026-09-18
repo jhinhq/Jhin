@@ -192,6 +192,11 @@ function installServer(entry: CatalogEntryDetail) {
       const path = String(input);
       const method = init?.method ?? "GET";
       if (path === `/api/v1/catalog/entries/${entry.slug}` && method === "GET") return json(entry);
+      if (path.endsWith("/oauth/probe") && method === "POST") {
+        writes.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return json({ method: "oauth_discovery", client_configured: true, supports_oauth: true, supports_dcr: true, issuer: "https://provider.example.com", authorization_server_display: "provider.example.com", scopes: [], resource: "", redirect_flow: { available: true }, device_flow: { available: false } });
+      }
+      if (path.endsWith("/oauth/redirect-uri")) return json({ redirect_uri: "http://localhost:3000/api/v1/oauth/callback" });
       if (path === "/api/v1/workspaces/workspace-1/connections" && method === "POST") {
         const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
         writes.push(body);
@@ -230,6 +235,7 @@ function renderDialog(
   });
   render(
     <QueryClientProvider client={client}>
+      <WorkspaceProvider user={{ id: "user-1", email: "test@example.com", display_name: "Test", created_at: "2026-01-01" }} workspace={{ workspace_id: "workspace-1", workspace_name: "Test", workspace_slug: "test", role: "owner" }}>
       <CatalogEntryDialog
         slug={entry.slug}
         workspaceId="workspace-1"
@@ -237,12 +243,22 @@ function renderDialog(
         onClose={onClose}
         onCreated={onCreated}
       />
+      </WorkspaceProvider>
     </QueryClientProvider>,
   );
   return { onCreated, onClose };
 }
 
 describe("CatalogEntryDialog", () => {
+  it("uses direct OAuth discovery for a known official MCP URL from app details", async () => {
+    const app = detail({ auth_hint: "oauth", composio_toolkit: "notion" });
+    const writes = installServer(app);
+    renderDialog(app, undefined, undefined, [{ ...MCP_CONNECTOR, auth_schemes: [...MCP_CONNECTOR.auth_schemes, { type: "oauth", label: "Sign in", description: "", secret_fields: [] }] }]);
+    fireEvent.click(await screen.findByRole("button", { name: "Connect" }));
+    expect(await screen.findByRole("button", { name: "Continue to provider.example.com" })).toBeTruthy();
+    expect(writes).toEqual([{ connector_type: "mcp", server_url: app.mcp_url }]);
+    expect(screen.queryByTestId("create-connection-form")).toBeNull();
+  });
   it("shows the entry with its provenance in plain language", async () => {
     installServer(detail());
     renderDialog(detail());

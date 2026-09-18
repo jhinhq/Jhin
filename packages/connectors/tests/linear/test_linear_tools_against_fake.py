@@ -74,12 +74,36 @@ async def test_verify_connection_bad_key(fake_linear: FakeLinearServer) -> None:
     assert not health.ok
 
 
-async def test_verify_connection_oauth_not_implemented() -> None:
+async def test_verify_connection_oauth_uses_bearer(monkeypatch) -> None:
+    async def graphql(base_url, authorization, query):
+        assert authorization == "Bearer oauth-token"
+        return {"viewer": {"name": "OAuth user"}}
+
+    monkeypatch.setattr("jhin_connectors.linear.connector.linear_graphql", graphql)
     health = await connector.verify_connection(
-        VerifyContext(auth_type="oauth", credentials={"access_token": "x"})
+        VerifyContext(auth_type="oauth", credentials={"access_token": "oauth-token"})
     )
-    assert not health.ok
-    assert "not implemented" in health.message
+    assert health.ok
+    assert health.details["auth"] == "oauth"
+
+
+async def test_oauth_metadata_tool_uses_bearer(workspace, context, make_connection, monkeypatch):
+    connection = await make_connection(
+        workspace,
+        connector_type="linear",
+        auth_type="oauth",
+        credentials={"access_token": "oauth-token"},
+    )
+
+    async def graphql(base_url, authorization, query):
+        assert authorization == "Bearer oauth-token"
+        return {"teams": {"nodes": []}}
+
+    monkeypatch.setattr("jhin_connectors.linear.tools.linear_graphql", graphql)
+    result = await EXECUTORS["linear.metadata.read"](
+        context, MetadataReadInput(connection_id=str(connection.id))
+    )
+    assert result.teams == []
 
 
 async def test_issue_read_by_identifier(context: ToolExecutionContext, linear_connection) -> None:

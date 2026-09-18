@@ -8,7 +8,11 @@ from enum import StrEnum
 from pathlib import Path
 
 from jhin_observability.errors import SafeErrorCode
-from jhin_observability.redaction import MAX_TRACEBACK_FRAMES
+from jhin_observability.redaction import (
+    MAX_LOG_STRING,
+    MAX_TRACEBACK_FRAMES,
+    sanitize_url,
+)
 
 
 class FieldKind(StrEnum):
@@ -19,6 +23,115 @@ class FieldKind(StrEnum):
     ENUM = "enum"
     ERROR_TYPE = "error_type"
     ERROR = "error"
+    #: Free text this codebase did not write. The only kind whose value is
+    #: not drawn from a closed vocabulary, and therefore the only one that
+    #: has to be treated as hostile: it is bounded, stripped of anything a
+    #: terminal would read as a control sequence, and it has already been
+    #: through both structural redaction passes and the process secret
+    #: redactor by the time it reaches here. Reserved for
+    #: ``stdlib.message``; application events keep typed fields.
+    TEXT = "text"
+
+
+#: How much of a library's log message is kept. Long enough for the sentence
+#: a library actually writes ("Completing activity as failed", an httpx
+#: request line, a uvicorn error line); short enough that a message which
+#: turns out to carry a payload cannot become the log.
+MAX_LIBRARY_MESSAGE_CHARS = 512
+
+#: The loggers whose free text may be written to a log line, by dotted prefix.
+#:
+#: An allow-list rather than a deny-list, and the reason is a bug this list
+#: exists to have prevented: ``sqlalchemy.engine.Engine`` logs every statement
+#: and every bound parameter at INFO whenever its effective level is INFO --
+#: which ``echo=False`` does not change, because ``echo`` only decides whether
+#: SQLAlchemy attaches a level of its own. Keeping foreign text by default
+#: therefore meant writing ``INSERT INTO ...`` and ``(1, 'ghu_...')`` into
+#: production logs. A deny-list would have to be right about every library in
+#: the dependency tree and every library added after it; an allow-list has to
+#: be right about the ones somebody has actually read, and a new dependency is
+#: silent rather than leaking.
+#:
+#: Each entry below is a library whose messages have been read and are
+#: descriptions of what the library did, not of what it carried. A logger that
+#: is not here still logs -- with its name, level, timestamp, context ids and
+#: structured error -- it just does not get to choose free text. To add one,
+#: read what it logs at the levels this install runs at.
+LIBRARY_TEXT_LOGGERS: tuple[str, ...] = (
+    "aiodocker",
+    "alembic",
+    "fastapi",
+    "grpc",
+    "httpx",
+    "nats",
+    "opentelemetry",
+    "starlette",
+    "temporalio",
+    "uvicorn",
+)
+
+#: Denied even where a prefix above would allow them.
+#:
+#: ``uvicorn.access`` writes the request line, and a request line carries a
+#: query string: ``/oauth/callback?code=...`` is an access log entry and an
+#: OAuth authorization code at the same time. The bare path is not a URL, so
+#: the URL sanitizer inside :func:`bounded_library_text` never sees it. Jhin
+#: logs its own ``api.request_finished`` with typed fields, so nothing is lost.
+#:
+#: ``asyncio`` writes ``repr(future)`` into the text of its default exception
+#: handler's record -- "Future exception was never retrieved" carries
+#: ``<Future finished exception=OperationalError('... password=hunter2 ...')>``
+#: -- so allowing its text re-admitted, through one library, exactly the free
+#: exception text :func:`_normalize_exception` strips from every record
+#: everywhere else. Reproduced with a DSN password and with a token-shaped
+#: string. The event this leaves is still ``stdlib.message`` at ERROR from
+#: ``asyncio``, which is enough to know an exception went unretrieved; the
+#: exception itself belongs in a structured ``error`` field, which the
+#: contract already carries.
+#:
+#: ``httpcore`` logs trace records that carry response headers, ``set-cookie``
+#: among them (reproduced on ``httpcore.http11``). Those records are DEBUG,
+#: which is why nothing had been seen: bootstrap never passed a level and the
+#: root logger sat at INFO by default. That was an accident rather than a
+#: decision -- ``LOG_LEVEL`` is now plumbed through, so the same install at
+#: DEBUG would have written them. httpx, one layer up, logs the request line
+#: and is still allowed.
+#:
+#: ``sqlalchemy`` is not under any allowed prefix, and is named here anyway so
+#: that widening the list above can never quietly re-open the statement log.
+#: The whole family is denied rather than only ``sqlalchemy.engine``: a
+#: ``SAWarning`` quotes the statement it is warning about, and "the loggers
+#: somebody has read" is a smaller set than "the loggers that turned out to be
+#: fine". The cost is that a SQLAlchemy warning arrives as a name, a level and
+#: a structured error with no sentence; an operator who needs the sentence in a
+#: debugging environment adds the one logger they need to the list above, which
+#: is a deliberate act with a diff attached.
+LIBRARY_TEXT_DENIED: tuple[str, ...] = (
+    "asyncio",
+    "httpcore",
+    "sqlalchemy",
+    "uvicorn.access",
+)
+
+
+def _matches_logger(name: str, prefixes: tuple[str, ...]) -> bool:
+    """Dotted-prefix match: ``uvicorn`` covers ``uvicorn.error`` and not
+    ``uvicornetta``."""
+    return any(name == prefix or name.startswith(f"{prefix}.") for prefix in prefixes)
+
+
+def library_text_allowed(logger_name: object) -> bool:
+    """Whether this logger's own words may appear on a log line.
+
+    Fail-closed in both directions a record can be malformed: a missing or
+    non-string logger name is not a logger anybody has read, so it is not one
+    whose text is kept.
+    """
+    if not isinstance(logger_name, str) or not logger_name:
+        return False
+    if _matches_logger(logger_name, LIBRARY_TEXT_DENIED):
+        return False
+    return _matches_logger(logger_name, LIBRARY_TEXT_LOGGERS)
 
 
 CONTEXT_FIELD_RULES = {
@@ -212,6 +325,8 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
     },
     "heartbeat.recorded": {},
     "health.heartbeat_write_failed": {},
+    "coordination.continuation_retry": {"error_type": FieldKind.ERROR_TYPE},
+    "schedules.reconcile_failed": {},
     "ingress.invalid_envelope": {"error_code": FieldKind.ENUM},
     "ingress.unhandled": {
         "connector_type": FieldKind.ENUM,
@@ -317,7 +432,12 @@ EVENT_FIELD_RULES: dict[str, dict[str, FieldKind]] = {
         "error_type": FieldKind.ERROR_TYPE,
         "error": FieldKind.ERROR,
     },
-    "stdlib.message": {},
+    # A record from a library outside this codebase. ``message`` is that
+    # library's own text, and ``error`` the structured form of any exception
+    # it attached; without them the line says only that *something* happened
+    # in ``temporalio.activity`` or ``httpx``, which is what made a real
+    # incident unreadable. Both are bounded and redacted; neither is trusted.
+    "stdlib.message": {"message": FieldKind.TEXT, "error": FieldKind.ERROR},
     "log.event_rejected": {},
 }
 
@@ -542,6 +662,52 @@ BASE_FIELDS = frozenset(
 )
 
 
+#: A URL inside a sentence, for any scheme with an authority rather than for
+#: ``http(s)`` alone: a driver that cannot reach its database writes the DSN
+#: into the sentence, and ``postgresql+asyncpg://user:pass@host/db`` is not
+#: less of a credential for not being a web address. The scheme production is
+#: RFC 3986's, so ``postgresql+asyncpg`` and ``grpc+tls`` match as one token.
+_EMBEDDED_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s\"'<>]+")
+
+
+def bounded_library_text(value: object) -> str | None:
+    """One library's log message, made safe to write on a line of its own.
+
+    Everything a control character could do to whoever reads the log — split
+    one record into two, move a cursor, colour a forgery — it does because
+    the character survived, so none of them do. Anything not printable
+    becomes a space, the result is bounded, and a message with nothing left
+    in it is dropped rather than logged as an empty string.
+
+    URLs are stripped to scheme, host and path here rather than left to
+    :func:`sanitize_url`, which only sees a value that *is* a URL. A library
+    writes them inside a sentence — ``HTTP Request: GET https://…?token=…`` is
+    httpx's own format — and a query string is exactly where a credential
+    ends up.
+    """
+    if not isinstance(value, str):
+        return None
+    flattened = "".join(
+        character if character.isprintable() else " " for character in value[:MAX_LOG_STRING]
+    )
+    text = _EMBEDDED_URL_RE.sub(_sanitized_match, flattened).strip()[:MAX_LIBRARY_MESSAGE_CHARS]
+    return text or None
+
+
+def _sanitized_match(match: re.Match[str]) -> str:
+    """One URL found inside free text, with its credentials and query gone.
+
+    Trailing sentence punctuation is handed back unchanged: it is far more
+    likely to be the library's prose than part of the address.
+    """
+    raw = match.group(0)
+    trailing = ""
+    while raw and raw[-1] in ".,;:!?)]}":
+        trailing = raw[-1] + trailing
+        raw = raw[:-1]
+    return sanitize_url(raw) + trailing if raw else trailing
+
+
 def normalize_log_field(event: str, key: str, value: object, kind: FieldKind) -> object | None:
     if kind is FieldKind.ID:
         return value if isinstance(value, str) and _ID_RE.fullmatch(value) else None
@@ -561,6 +727,8 @@ def normalize_log_field(event: str, key: str, value: object, kind: FieldKind) ->
         return value if isinstance(value, str) and _ERROR_TYPE_RE.fullmatch(value) else None
     if kind is FieldKind.ERROR:
         return filter_structured_error(value) if isinstance(value, Mapping) else None
+    if kind is FieldKind.TEXT:
+        return bounded_library_text(value)
     exact = EVENT_FIELD_ENUM_VALUES.get((event, key))
     if exact is not None:
         return value if isinstance(value, str) and value in exact else None
@@ -614,7 +782,20 @@ def filter_log_event(event_dict: Mapping[str, object]) -> dict[str, object]:
     output = {key: event_dict[key] for key in BASE_FIELDS - {"event"} if key in event_dict}
     output["event"] = event
     rules = {**CONTEXT_FIELD_RULES, **EVENT_FIELD_RULES[event]}
+    # The last gate, and the one that holds no matter how a record got here.
+    # Free text is admitted only for a logger somebody has read; everything
+    # else keeps its name, level, ids and structured error and loses its
+    # sentence. Enforced here rather than only at the point the sentence is
+    # copied, because this function is the single place the contract is
+    # decided and any other producer of a ``message`` field has to pass it too.
+    text_denied = {
+        key
+        for key, kind in rules.items()
+        if kind is FieldKind.TEXT and not library_text_allowed(event_dict.get("logger"))
+    }
     for key, kind in rules.items():
+        if key in text_denied:
+            continue
         if (
             key in event_dict
             and (value := normalize_log_field(event, key, event_dict[key], kind)) is not None

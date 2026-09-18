@@ -198,7 +198,10 @@ async def _repository_list(ctx: ToolExecutionContext, payload: BaseModel) -> Bas
         truncated = True
         entries = kept
     return RepositoryListOutput(
-        repositories=entries, truncated=truncated, limited_by_grant=limited_by_grant
+        returned_count=len(entries),
+        repositories=entries,
+        truncated=truncated,
+        limited_by_grant=limited_by_grant,
     )
 
 
@@ -473,6 +476,26 @@ async def _workflow_run_status(ctx: ToolExecutionContext, payload: BaseModel) ->
 
 _REPO_SCOPE = ("connection_id", "repository")
 
+# ``redispatch_is_safe`` across this connector, in one place because the line
+# falls in one place: GitHub is somebody else's system, so the split is
+# between the calls that only look at it and the calls that change it.
+#
+# Every GET is True. A repository read, a listing, a branch listing, a file
+# read, an issue or pull request read, a check read, a workflow-run read —
+# running one of these a second time after a worker died mid-call returns the
+# same answer and leaves GitHub exactly as it was. There is nothing to
+# reconcile, and stopping the run to ask a person about one was always the
+# wrong ending.
+#
+# Every mutation is False, including the ones that would arguably survive a
+# repeat. ``github.branch.create`` would answer "reference already exists" the
+# second time and ``github.pull_request.create`` might too — but "probably
+# refuses" is not the same promise as "cannot happen twice", and a second
+# ``issue.comment``, ``workflow.dispatch`` or ``pull_request.merge`` is a
+# visible, sometimes irreversible act in somebody's repository. These are the
+# calls a human approves, and the thing they are approving is that it happens
+# once.
+
 GITHUB_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor], ...] = (
     (
         ToolDefinition(
@@ -483,6 +506,7 @@ GITHUB_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor], ...] = (
             output_model=RepositoryReadOutput,
             required_capability="github.repository.read",
             scope_keys=_REPO_SCOPE,
+            redispatch_is_safe=True,
         ),
         _repository_read,
     ),
@@ -493,7 +517,9 @@ GITHUB_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor], ...] = (
                 "Find repositories: list the ones this GitHub connection can reach, in name "
                 "order, with an optional query matching part of owner/name. Takes no "
                 "repository — call it when you need a repository's owner/name and do not "
-                "already know it."
+                "already know it. Use returned_count for the number of visible rows in "
+                "this response. If truncated is true, more matching rows may exist; "
+                "limited_by_grant means this agent's permissions narrowed the listing."
             ),
             risk=RiskLevel.READ,
             input_model=RepositoryListInput,
@@ -505,6 +531,7 @@ GITHUB_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor], ...] = (
             # evaluator matches such a grant on the connection alone.
             scope_keys=_REPO_SCOPE,
             result_scope_keys=("repository",),
+            redispatch_is_safe=True,
         ),
         _repository_list,
     ),
@@ -517,6 +544,7 @@ GITHUB_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor], ...] = (
             output_model=BranchListOutput,
             required_capability="github.repository.read",
             scope_keys=_REPO_SCOPE,
+            redispatch_is_safe=True,
         ),
         _branch_list,
     ),
@@ -529,6 +557,7 @@ GITHUB_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor], ...] = (
             output_model=FileReadOutput,
             required_capability="github.repository.read",
             scope_keys=_REPO_SCOPE,
+            redispatch_is_safe=True,
         ),
         _file_read,
     ),
@@ -542,6 +571,7 @@ GITHUB_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor], ...] = (
             required_capability="github.branch.create",
             supports_approval=True,
             scope_keys=("connection_id", "repository", "branch"),
+            redispatch_is_safe=False,
         ),
         _branch_create,
     ),
@@ -554,6 +584,7 @@ GITHUB_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor], ...] = (
             output_model=IssueReadOutput,
             required_capability="github.issue.read",
             scope_keys=_REPO_SCOPE,
+            redispatch_is_safe=True,
         ),
         _issue_read,
     ),
@@ -567,6 +598,7 @@ GITHUB_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor], ...] = (
             required_capability="github.issue.comment",
             supports_approval=True,
             scope_keys=_REPO_SCOPE,
+            redispatch_is_safe=False,
         ),
         _issue_comment,
     ),
@@ -586,6 +618,7 @@ GITHUB_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor], ...] = (
             # a grant constrains — an unstated base is an unlimited one.
             scope_keys=(*_REPO_SCOPE, "head", "base"),
             required_grant_scope_keys=(*_REPO_SCOPE, "base"),
+            redispatch_is_safe=False,
         ),
         _pull_request_create,
     ),
@@ -598,6 +631,7 @@ GITHUB_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor], ...] = (
             output_model=PullRequestReadOutput,
             required_capability="github.pull_request.read",
             scope_keys=_REPO_SCOPE,
+            redispatch_is_safe=True,
         ),
         _pull_request_read,
     ),
@@ -611,6 +645,7 @@ GITHUB_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor], ...] = (
             required_capability="github.pull_request.comment",
             supports_approval=True,
             scope_keys=_REPO_SCOPE,
+            redispatch_is_safe=False,
         ),
         _pull_request_comment,
     ),
@@ -624,6 +659,7 @@ GITHUB_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor], ...] = (
             required_capability="github.pull_request.merge",
             supports_approval=True,
             scope_keys=_REPO_SCOPE,
+            redispatch_is_safe=False,
         ),
         _pull_request_merge,
     ),
@@ -636,6 +672,7 @@ GITHUB_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor], ...] = (
             output_model=CheckRunsOutput,
             required_capability="github.check.read",
             scope_keys=_REPO_SCOPE,
+            redispatch_is_safe=True,
         ),
         _check_runs,
     ),
@@ -649,6 +686,7 @@ GITHUB_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor], ...] = (
             required_capability="github.workflow.dispatch",
             supports_approval=True,
             scope_keys=_REPO_SCOPE,
+            redispatch_is_safe=False,
         ),
         _workflow_dispatch,
     ),
@@ -661,6 +699,7 @@ GITHUB_TOOLS: tuple[tuple[ToolDefinition, ToolExecutor], ...] = (
             output_model=WorkflowRunStatusOutput,
             required_capability="github.workflow_run.read",
             scope_keys=_REPO_SCOPE,
+            redispatch_is_safe=True,
         ),
         _workflow_run_status,
     ),

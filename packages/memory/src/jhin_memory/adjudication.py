@@ -29,8 +29,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from jhin_db.models import ModelProfile, ModelProvider, Workspace
 from jhin_models import ModelClient, ModelMessage, ModelRequest, build_model_client
+from jhin_models.providers.ollama import requested_serving_window, serving_window_options
 from jhin_observability import JhinMetrics, get_logger, noop_metrics, noop_tracer
 from jhin_secrets import SecretCrypto, SecretStore
+from jhin_secrets.intake import redact_legacy_text
 
 logger = get_logger(__name__)
 
@@ -79,12 +81,27 @@ class AdjudicationParseError(ValueError):
     """Model output was not a strictly valid verdict document."""
 
 
-def build_adjudication_request(*, model: str, pairs: Sequence[AdjudicationPair]) -> ModelRequest:
+def build_adjudication_request(
+    *,
+    model: str,
+    pairs: Sequence[AdjudicationPair],
+    provider_type: str = "",
+    context_window: int | None = None,
+) -> ModelRequest:
+    """One compact request for all pairs, asking for the profile's window.
+
+    ``provider_type`` and ``context_window`` belong to the default profile this
+    runs under. Ollama treats a changed effective ``num_ctx`` as a reload, so
+    adjudicating with no window pinned would drop that profile's resident
+    instance back to the host default under every other Jhin path sharing it.
+    """
     lines: list[str] = []
     for index, pair in enumerate(pairs, start=1):
-        lines.append(f"Pair {index} (subjects: {pair.subject_a or '-'} | {pair.subject_b or '-'})")
-        lines.append(f"A: {pair.content_a[:MAX_PAIR_TEXT_CHARS]}")
-        lines.append(f"B: {pair.content_b[:MAX_PAIR_TEXT_CHARS]}")
+        left_subject = redact_legacy_text(pair.subject_a or "-")
+        right_subject = redact_legacy_text(pair.subject_b or "-")
+        lines.append(f"Pair {index} (subjects: {left_subject} | {right_subject})")
+        lines.append(f"A: {redact_legacy_text(pair.content_a)[:MAX_PAIR_TEXT_CHARS]}")
+        lines.append(f"B: {redact_legacy_text(pair.content_b)[:MAX_PAIR_TEXT_CHARS]}")
     user = "Decide SAME or DIFFERENT for each pair.\n\n" + "\n".join(lines)
     return ModelRequest(
         model=model,
@@ -94,6 +111,9 @@ def build_adjudication_request(*, model: str, pairs: Sequence[AdjudicationPair])
         ),
         temperature=0.0,
         max_output_tokens=_MAX_OUTPUT_TOKENS,
+        extra=serving_window_options(
+            requested_serving_window(provider_type=provider_type, context_window=context_window)
+        ),
     )
 
 
@@ -142,22 +162,38 @@ class MemoryAdjudicator:
         client: ModelClient,
         *,
         model: str,
+        provider_type: str = "",
+        context_window: int | None = None,
         metrics: JhinMetrics | None = None,
     ) -> None:
         self._client = client
         self._model = model
+        self._provider_type = provider_type
+        self._context_window = context_window
         self._metrics = metrics if metrics is not None else noop_metrics()
 
     @property
     def model(self) -> str:
         return self._model
 
+    @property
+    def requested_context_window(self) -> int | None:
+        """The serving window this adjudicator's requests ask for, if any."""
+        return requested_serving_window(
+            provider_type=self._provider_type, context_window=self._context_window
+        )
+
     async def adjudicate(
         self, pairs: Sequence[AdjudicationPair], *, workspace_id: UUID
     ) -> list[bool]:
         if not pairs:
             return []
-        request = build_adjudication_request(model=self._model, pairs=pairs)
+        request = build_adjudication_request(
+            model=self._model,
+            pairs=pairs,
+            provider_type=self._provider_type,
+            context_window=self._context_window,
+        )
         try:
             response = await self._client.generate(request)
         except Exception as error:
@@ -239,4 +275,12 @@ async def resolve_memory_adjudicator(
             count=0,
         )
         return None
-    return MemoryAdjudicator(client, model=profile.model_name, metrics=metrics)
+    return MemoryAdjudicator(
+        client,
+        model=profile.model_name,
+        # The profile's own window, so this path asks the host for the same
+        # instance size the agent steps on that profile ask for.
+        provider_type=provider.type,
+        context_window=profile.context_window,
+        metrics=metrics,
+    )

@@ -16,6 +16,38 @@ vi.mock("@/lib/hooks", () => ({}));
 
 afterEach(cleanup);
 
+it("retains the reviewed schedule brief after an activation answer", () => {
+  const context = "Schedule: Weekly reminder\nWhen: Monday at 09:00\nStanding brief:\nWrite a reminder here.";
+  render(<QuestionCard message={questionMessage({
+    question: "Activate this recurring work?", input_key: "schedule_activate_test", context,
+    status: "answered", answer: "Activate recurring work", answered_by_name: "Varand",
+  })} userName="Varand" canAnswer onAnswer={vi.fn()} />);
+  const details = screen.getByText("Reviewed schedule").closest("details");
+  expect(details?.textContent).toContain("Write a reminder here.");
+  expect(details?.textContent).toContain("Monday at 09:00");
+});
+
+it("shows required free-text input immediately and waits for an explicit answer", async () => {
+  const onAnswer = vi.fn().mockResolvedValue(undefined);
+  render(<QuestionCard message={questionMessage({ options: [], required: true, input_key: "ghost_admin_url", value_type: "url", other_label: "Ghost Admin URL", question: "What is the exact Ghost Admin URL?" })} userName="Dev" canAnswer onAnswer={onAnswer} />);
+  expect(screen.getByText(/Required before work continues/)).toBeDefined();
+  const input = screen.getByLabelText("Ghost Admin URL");
+  fireEvent.change(input, { target: { value: "https://blog.example/ghost" } });
+  fireEvent.keyDown(input, { key: "Enter", ctrlKey: true });
+  await waitFor(() => expect(onAnswer).toHaveBeenCalledWith("q-1", { other_text: "https://blog.example/ghost" }));
+});
+it("clears a credential answer before sending and displays only the server's sanitized answer", async()=>{
+  let finish!:(result:AnswerQuestionOut)=>void;
+  const onAnswer=vi.fn(()=>new Promise<AnswerQuestionOut>((resolve)=>{finish=resolve;}));
+  render(<QuestionCard message={questionMessage({options:[],required:true,other_label:"Your answer"})} userName="Dev" canAnswer onAnswer={onAnswer} />);
+  const secret=`${"a".repeat(24)}:${"b".repeat(64)}`;
+  fireEvent.change(screen.getByLabelText("Your answer"),{target:{value:secret}});fireEvent.click(screen.getByTestId("question-other-send"));
+  expect((screen.getByLabelText("Your answer") as HTMLTextAreaElement).value).toBe("");
+  const result=answerResult(true);result.question.answer_text="[secure input]";
+  finish(result); await waitFor(()=>expect(screen.getByTestId("question-card").getAttribute("data-state")).toBe("answered"));
+  expect(screen.getByTestId("question-card").textContent).toContain("[secure input]");expect(document.body.textContent).not.toContain(secret);
+});
+
 const QUESTION =
   "Is this deployment schedule only for the Engineering team, or does the whole company deploy on Mondays at 9am PST?";
 
@@ -151,7 +183,8 @@ describe("QuestionCard — pending", () => {
   });
 
   it("posts free text from the other row and never as an option", async () => {
-    const onAnswer = vi.fn().mockResolvedValue(answerResult(true));
+    const result = answerResult(true); result.question.answer_text = "Only the platform pod";
+    const onAnswer = vi.fn().mockResolvedValue(result);
     renderCard(questionMessage(), { onAnswer });
 
     fireEvent.click(screen.getByTestId("question-other"));
@@ -308,7 +341,7 @@ describe("QuestionCard — settled states", () => {
     expect(screen.getByText(QUESTION)).toBeTruthy();
     expect(screen.queryByRole("radiogroup")).toBeNull();
     // The escape hatch is still there, which is the whole point of it.
-    expect(screen.getByTestId("question-other")).toBeTruthy();
+    expect(screen.getByTestId("question-other-input")).toBeTruthy();
   });
 });
 

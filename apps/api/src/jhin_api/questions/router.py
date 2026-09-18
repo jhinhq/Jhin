@@ -80,5 +80,6 @@ async def answer_question(
         payload,
         request_id=req_id(request),
         ip_hash=ip_hash(request),
+        crypto=getattr(request.app.state, "secret_crypto", None),
     )
     return AnswerQuestionOut(question=question, resumed=resumed)

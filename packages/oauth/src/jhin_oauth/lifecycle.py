@@ -357,7 +357,10 @@ class ConnectionTokenService:
             await self._secrets.rotate(
                 connection.workspace_id, connection.encrypted_secret_id, plaintext
             )
-        connection.status = ConnectionStatus.ACTIVE.value
+        # Renewing credentials does not undo an administrator's decision to
+        # disable the connection, even for the transaction that stores them.
+        if connection.status != ConnectionStatus.DISABLED.value:
+            connection.status = ConnectionStatus.ACTIVE.value
         connection.last_error = None
         connection.oauth_client_registration_id = registration_id
         connection.oauth_issuer = issuer or None

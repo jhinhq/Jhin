@@ -9,6 +9,7 @@ from uuid import UUID
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -101,6 +102,116 @@ async def seed_proposed(
 
 
 class TestCreate:
+    @pytest.mark.parametrize("action", ["create", "update"])
+    @pytest.mark.parametrize("field", ["content", "subject", "tags"])
+    async def test_credential_fields_cannot_be_persisted(
+        self, session, admin_ctx, world, action, field, monkeypatch
+    ):
+        from sqlalchemy import func
+
+        previous = await service.create_memory(session, admin_ctx, create_payload(world))
+        before = await session.scalar(select(func.count()).select_from(MemoryRecord))
+        embedded = []
+
+        async def capture_embedding(*args, **kwargs):
+            embedded.append(True)
+            return 0
+
+        monkeypatch.setattr(service, "_embed_best_effort", capture_embedding)
+        key = "a" * 24 + ":" + "b" * 64
+        changes = {field: [key] if field == "tags" else f"Ghost {key}"}
+        with pytest.raises((HTTPException, ValidationError)):
+            if action == "create":
+                values = {"content": "Ghost drafts need director review.", **changes}
+                await service.create_memory(session, admin_ctx, create_payload(world, **values))
+            else:
+                await service.update_memory(
+                    session, admin_ctx, previous.id, MemoryUpdate.model_validate(changes)
+                )
+        assert await session.scalar(select(func.count()).select_from(MemoryRecord)) == before
+        assert embedded == []
+        await session.refresh(previous)
+        assert previous.status == "active" and previous.version == 1
+        assert previous.content == "Ava prefers concise updates."
+
+    async def test_password_edit_preserves_redaction_without_persisting_the_value(
+        self, session, admin_ctx, world
+    ):
+        previous = await service.create_memory(session, admin_ctx, create_payload(world))
+        updated = await service.update_memory(
+            session,
+            admin_ctx,
+            previous.id,
+            MemoryUpdate(content="The staging password is hunter2 and rotates monthly."),
+        )
+        assert "hunter2" not in updated.content and "[REDACTED]" in updated.content
+        assert updated.sensitivity == "redacted"
+        assert updated.supersedes_id == previous.id
+
+    async def test_new_version_does_not_copy_credentials_from_legacy_metadata(
+        self, session, admin_ctx, world
+    ):
+        previous = await service.create_memory(session, admin_ctx, create_payload(world))
+        key = "a" * 24 + ":" + "b" * 64
+        previous.subject = key
+        previous.tags_json = ["ghost", key]
+        await session.commit()
+        updated = await service.update_memory(
+            session, admin_ctx, previous.id, MemoryUpdate(content="Drafts need director review.")
+        )
+        assert key not in str(updated.subject) and key not in str(updated.tags_json)
+        assert updated.tags_json[0] == "ghost"
+        await session.refresh(previous)
+        assert previous.subject == key and previous.tags_json == ["ghost", key]
+
+    @pytest.mark.parametrize("method", ["POST", "PATCH"])
+    @pytest.mark.parametrize("field", ["subject", "tags"])
+    async def test_rejected_credential_api_response_does_not_echo_input(
+        self, session, admin_ctx, world, method, field
+    ):
+        from typing import get_args
+
+        import httpx
+        from fastapi import FastAPI
+        from fastapi.exceptions import RequestValidationError
+
+        from jhin_api.deps import MemberCtx, get_db
+        from jhin_api.memory.router import router
+        from jhin_api.security.csrf import csrf_protect
+        from jhin_api.security.validation import safe_validation_error_handler
+
+        previous = await service.create_memory(session, admin_ctx, create_payload(world))
+        app = FastAPI()
+        app.include_router(router)
+        app.add_exception_handler(RequestValidationError, safe_validation_error_handler)
+        app.dependency_overrides[get_db] = lambda: session
+        app.dependency_overrides[get_args(MemberCtx)[1].dependency] = lambda: admin_ctx
+        app.dependency_overrides[csrf_protect] = lambda: None
+
+        @app.middleware("http")
+        async def request_identity(request, call_next):
+            request.state.request_id = new_uuid7()
+            return await call_next(request)
+
+        key = "a" * 24 + ":" + "b" * 64
+        payload = {field: [key] if field == "tags" else key}
+        url = f"/api/v1/workspaces/{admin_ctx.workspace_id}/memories"
+        if method == "POST":
+            payload.update(
+                content="Ghost drafts need director review.", agent_id=str(world.agent.id)
+            )
+        else:
+            url += f"/{previous.id}"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.request(method, url, json=payload)
+        assert response.status_code == 422, response.text
+        assert "a" * 24 not in response.text and "b" * 64 not in response.text
+        detail = response.json()["detail"]
+        errors = detail if isinstance(detail, list) else [detail]
+        assert all("input" not in item for item in errors)
+
     async def test_member_remembers_agent_scope_as_active(
         self, session: AsyncSession, member_ctx: WorkspaceContext, world: World
     ) -> None:

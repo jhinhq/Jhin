@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, Request
 from jhin_api.deps import AdminCtx, DbSession, SecretCryptoDep, ViewerCtx
 from jhin_api.deps import client_ip_hash as ip_hash
 from jhin_api.deps import get_request_id as req_id
-from jhin_api.policy import bundles, service
+from jhin_api.policy import bundles, service, terminal_internet
 from jhin_api.policy.schemas import (
     BundleApply,
     BundleApplyOut,
@@ -42,6 +42,9 @@ async def list_tools(ctx: ViewerCtx, db: DbSession) -> list[ToolOut]:
     the tools discovered from this workspace's MCP connections."""
     definitions = list(build_default_definition_catalog().definitions())
     definitions.extend(await workspace_mcp_tool_definitions(db, ctx.workspace_id))
+    from jhin_connectors.composio.source import workspace_composio_tool_definitions
+
+    definitions.extend(await workspace_composio_tool_definitions(db, ctx.workspace_id))
     return [
         ToolOut(
             name=definition.name,
@@ -77,6 +80,39 @@ async def list_grants(agent_id: UUID, ctx: ViewerCtx, db: DbSession) -> list[Gra
         )
         for row, problems, connection_name in rows
     ]
+
+
+@router.get("/agents/{agent_id}/terminal-internet")
+async def get_terminal_internet(
+    agent_id: UUID,
+    ctx: AdminCtx,
+    db: DbSession,
+) -> terminal_internet.TerminalInternetStatus:
+    return await terminal_internet.get_status(
+        db,
+        ctx,
+        agent_id,
+        include_connections=bundles.may_read_connections(ctx),
+    )
+
+
+@router.put("/agents/{agent_id}/terminal-internet")
+async def set_terminal_internet(
+    agent_id: UUID,
+    payload: terminal_internet.TerminalInternetUpdate,
+    request: Request,
+    ctx: AdminCtx,
+    db: DbSession,
+) -> terminal_internet.TerminalInternetStatus:
+    return await terminal_internet.update(
+        db,
+        ctx,
+        agent_id,
+        payload,
+        request_id=req_id(request),
+        ip_hash=ip_hash(request),
+        include_connections=bundles.may_read_connections(ctx),
+    )
 
 
 @router.get("/agents/{agent_id}/bundles")

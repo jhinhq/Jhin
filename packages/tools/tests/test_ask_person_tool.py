@@ -131,6 +131,287 @@ async def org(session: AsyncSession) -> Org:
     return f
 
 
+async def test_required_question_blocks_real_gateway_actions_until_valid_answer(session, org):
+    from pydantic import BaseModel
+
+    from jhin_policy import RiskLevel, ToolDefinition
+    from jhin_tools.builtin import ToolCatalog
+    from jhin_tools.readiness import resolve_required_answer
+
+    class Arguments(BaseModel):
+        url: str
+
+    calls = []
+
+    async def execute(ctx, payload):
+        calls.append(payload.url)
+        return payload
+
+    catalog = ToolCatalog()
+    catalog.register(
+        ToolDefinition(
+            name="research.fetch",
+            description="Fetch",
+            risk=RiskLevel.READ,
+            input_model=Arguments,
+            output_model=Arguments,
+            required_capability="research.read",
+        ),
+        execute,
+    )
+    session.add(
+        AgentCapabilityGrant(
+            workspace_id=org.workspace.id,
+            agent_id=org.me.id,
+            capability="research.read",
+            effect="allow",
+            scope_json={},
+        )
+    )
+    ctx = ToolExecutionContext(
+        session=session,
+        workspace_id=org.workspace.id,
+        task_id=org.task.id,
+        run_id=org.run_id,
+        agent_id=org.me.id,
+        agent_name=org.me.name,
+    )
+    asked = await _ask_person(
+        ctx,
+        AskPersonInput(
+            question="What is the Ghost Admin URL?",
+            input_key="ghost_admin_url",
+            value_type="url",
+            options=[],
+            required=True,
+        ),
+    )
+    question = await session.get(UserQuestion, UUID(asked.question_id))
+    # The old timeout cannot authorize dependent research or other actions.
+    question.expires_at = datetime.now(UTC) - timedelta(hours=1)
+    gateway = ToolGateway(ctx, catalog)
+    denied = await gateway.request("research.fetch", '{"url":"https://guessed.example"}')
+    assert denied.decision_code == "required_input_missing" and calls == []
+    with pytest.raises(ValueError):
+        await resolve_required_answer(session, question, "some guessed website")
+    assert org.task.metadata_json["required_inputs"]
+    await resolve_required_answer(session, question, "https://actual.example/admin/")
+    question.status = "answered"
+    await session.flush()
+    allowed = await gateway.request("research.fetch", '{"url":"https://actual.example/admin/"}')
+    assert allowed.status == "executed" and calls == ["https://actual.example/admin/"]
+
+
+async def test_live_publishing_setup_question_is_accepted_without_rewording(session, org):
+    question_text = (
+        "To set up the recurring Monday 9am (Pacific) blog publishing job, tell me the setup: "
+        "(1) Where do posts get published — the site/destination URL, and (2) each week do I "
+        "auto-publish the post or leave it as a draft for you/Mindy to review? (3) What kind "
+        "of post or topic does each Monday cover? If we don't yet have a Ghost connection "
+        "set up, let me know and I'll walk you through the Admin URL + stored API key "
+        "you'll need to give me."
+    )
+    context_text = (
+        "You asked to set up recurring blog publishing on Mondays at 9am PST. I'll assume "
+        '"PST" means Pacific local time (America/Los_Angeles) — which in September is actually '
+        "9am PDT. Correct me if you meant fixed UTC-8. I currently have no publishing "
+        "destination stored, so I need these details before creating the recurring job."
+    )
+    result = await org.gateway(session).request(
+        "organization.ask_person",
+        json.dumps(
+            {
+                "question": question_text,
+                "context": context_text,
+                "required": True,
+                "allow_other": True,
+            }
+        ),
+    )
+    assert result.status == "executed", result
+    row = await session.get(UserQuestion, UUID(result.sanitized_output["question_id"]))
+    assert row.question == question_text and row.context == context_text
+
+
+def test_question_and_supplementary_context_accept_the_documented_boundary():
+    data = AskPersonInput(question="q" * 1000, context="c" * 2000)
+    assert data.question == "q" * 1000 and data.context == "c" * 2000
+
+
+@pytest.mark.parametrize("field,length", [("question", 1001), ("context", 2001)])
+def test_question_limits_reject_oversized_words_instead_of_truncating(field, length):
+    from pydantic import ValidationError
+
+    values = {"question": "Which site should receive the posts?", field: "x" * length}
+    with pytest.raises(ValidationError) as error:
+        AskPersonInput(**values)
+    assert error.value.errors()[0]["loc"] == (field,)
+    assert error.value.errors()[0]["type"] == "string_too_long"
+
+
+@pytest.mark.parametrize(
+    "value_type,values",
+    [
+        ("timezone", ["America/Los_Angeles", "Etc/GMT+8"]),
+        ("time", ["09:00", "10:00"]),
+        ("url", ["https://first.example", "https://second.example"]),
+    ],
+)
+def test_typed_question_choices_display_their_actual_values(value_type, values):
+    data = AskPersonInput(
+        question="Which value should I use?",
+        value_type=value_type,
+        options=[
+            {"label": "Misleading fixed PST", "value": value, "detail": "Invented interpretation"}
+            for value in values
+        ],
+    )
+    assert [item.value for item in data.options] == values
+    assert [item.label for item in data.options] == values
+    assert all(item.detail == "" for item in data.options)
+    assert data.allow_other
+
+
+@pytest.mark.parametrize(
+    "value_type,values",
+    [
+        ("timezone", ["pdt_pst", "pst_fixed"]),
+        ("time", ["nine_am", "ten_am"]),
+        ("url", ["my_blog", "other_blog"]),
+    ],
+)
+def test_typed_question_aliases_become_free_text_without_guessing(value_type, values):
+    data = AskPersonInput(
+        question="What is the actual value?",
+        value_type=value_type,
+        allow_other=False,
+        options=[{"label": "America/Los_Angeles", "value": value} for value in values],
+    )
+    assert data.options == [] and data.allow_other
+
+
+async def test_live_timezone_alias_question_reaches_a_free_text_card(session, org):
+    result = await org.gateway(session).request(
+        "organization.ask_person",
+        json.dumps(
+            {
+                "question": "Which timezone should Monday 9am use?",
+                "value_type": "timezone",
+                "required": True,
+                "input_key": "publishing_timezone",
+                "allow_other": False,
+                "options": [
+                    {"label": "Pacific with daylight saving", "value": "pdt_pst"},
+                    {"label": "Fixed Pacific standard time", "value": "pst_fixed"},
+                ],
+            }
+        ),
+    )
+    assert result.status == "executed", result
+    row = await session.get(UserQuestion, UUID(result.sanitized_output["question_id"]))
+    assert row.options_json == [] and row.allow_other and row.value_type == "timezone"
+
+
+@pytest.mark.parametrize("cli_refusal", [False, True])
+async def test_unchanged_failed_operation_is_bounded_in_gateway(session, org, cli_refusal):
+    from pydantic import BaseModel
+
+    from jhin_policy import RiskLevel, ToolDefinition
+    from jhin_tools.builtin import ToolCatalog
+    from jhin_tools.errors import ToolExecutionError
+
+    class Arguments(BaseModel):
+        url: str
+
+    class CommandResult(BaseModel):
+        stdout: str
+        exit_code: int
+
+    calls = []
+
+    async def execute(ctx, payload):
+        calls.append(payload.url)
+        if cli_refusal:
+            return CommandResult(stdout="HTTP/2 403 Forbidden", exit_code=0)
+        raise ToolExecutionError(
+            "Forbidden", code="http_403", hint="Correct access", side_effect_possible=False
+        )
+
+    catalog = ToolCatalog()
+    name = "cli.http_probe" if cli_refusal else "research.fetch"
+    catalog.register(
+        ToolDefinition(
+            name=name,
+            description="Fetch",
+            risk=RiskLevel.READ,
+            input_model=Arguments,
+            output_model=CommandResult if cli_refusal else Arguments,
+            required_capability="research.read",
+        ),
+        execute,
+    )
+    session.add(
+        AgentCapabilityGrant(
+            workspace_id=org.workspace.id,
+            agent_id=org.me.id,
+            capability="research.read",
+            effect="allow",
+            scope_json={},
+        )
+    )
+    ctx = ToolExecutionContext(
+        session=session,
+        workspace_id=org.workspace.id,
+        task_id=org.task.id,
+        run_id=org.run_id,
+        agent_id=org.me.id,
+        agent_name=org.me.name,
+    )
+    gateway = ToolGateway(ctx, catalog)
+    for _ in range(2):
+        assert (await gateway.request(name, '{"url":"https://actual.example"}')).status == (
+            "executed" if cli_refusal else "failed"
+        )
+    blocked = await gateway.request(name, '{"url":"https://actual.example"}')
+    assert blocked.decision_code == "unchanged_failure_limit" and len(calls) == 2
+
+
+async def test_reserved_publisher_question_uses_canonical_card_and_cannot_reuse_unreserved_answer(
+    session, org
+):
+    wording = "Which agent may review and publish Ghost drafts?"
+    old = await ask(
+        session,
+        org,
+        question=wording,
+        context="Do not use this person",
+        kind="open",
+        options=[],
+        required=False,
+    )
+    row = await session.get(UserQuestion, UUID(old.sanitized_output["question_id"]))
+    row.status = "answered"
+    row.answer_text = "Bisby"
+    await session.flush()
+    new = await ask(
+        session,
+        org,
+        question="Which person must never publish?",
+        context="Avoid this person",
+        kind="open",
+        options=[],
+        input_key="ghost_publisher_agent_id",
+    )
+    assert new.sanitized_output["status"] == "asked"
+    current = await session.get(UserQuestion, UUID(new.sanitized_output["question_id"]))
+    assert current.id != row.id
+    assert current.question == wording and current.context == ""
+    assert current.required and current.options_json == [] and current.allow_other
+    assert "ghost_publisher_agent_id" not in org.task.metadata_json.get("resolved_inputs", {})
+    card = await session.get(Message, current.message_id)
+    assert card.content_json["question"] == wording
+
+
 async def ask(
     session: AsyncSession,
     org: Org,

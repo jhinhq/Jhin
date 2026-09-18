@@ -25,6 +25,7 @@ from jhin_models.base import (
     ModelProviderError,
     ModelRequest,
     ModelResponse,
+    ModelStreamEvent,
     ModelToolCall,
     ModelUsage,
     classify_retryable,
@@ -104,6 +105,23 @@ class OpenAICompatibleClient(ModelClient):
 
     def _serialize_message(self, message: ModelMessage) -> dict[str, Any]:
         wire: dict[str, Any] = {"role": message.role, "content": message.content}
+        if message.content_parts:
+            blocks: list[dict[str, Any]] = (
+                [{"type": "text", "text": message.content}] if message.content else []
+            )
+            for part in message.content_parts:
+                if part.type == "text":
+                    blocks.append({"type": "text", "text": part.text})
+                elif part.type == "image":
+                    blocks.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{part.mime_type};base64,{part.data_base64}"
+                            },
+                        }
+                    )
+            wire["content"] = blocks
         if message.tool_calls:
             wire["tool_calls"] = [
                 {
@@ -315,6 +333,36 @@ class OpenAICompatibleClient(ModelClient):
                 f"{self.provider_name}: network error during stream: {type(exc).__name__}",
                 retryable=True,
             ) from exc
+
+    async def stream_events(self, request: ModelRequest) -> AsyncIterator[ModelStreamEvent]:
+        from jhin_models.streaming import StreamAccumulator
+
+        started = time.monotonic()
+        accumulator = StreamAccumulator(request.model, [tool.name for tool in request.tools])
+        payload = self._payload(request, stream=True)
+        payload["stream_options"] = {"include_usage": True}
+        try:
+            async with self._client.stream("POST", "/chat/completions", json=payload) as response:
+                if response.status_code >= 400:
+                    raise self._http_error(
+                        response.status_code, (await response.aread()).decode(errors="replace")
+                    )
+                async for line in response.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line.removeprefix("data:").strip()
+                    if not data or data == "[DONE]":
+                        continue
+                    for event in accumulator.openai(json.loads(data)):
+                        yield event
+        except httpx.HTTPError as exc:
+            raise ModelProviderError(
+                f"{self.provider_name}: stream transport failed", retryable=True
+            ) from exc
+        yield ModelStreamEvent(
+            type="completed",
+            response=accumulator.response(int((time.monotonic() - started) * 1000)),
+        )
 
     async def verify(self) -> str:
         """List models — the cheapest authenticated call on this API family."""

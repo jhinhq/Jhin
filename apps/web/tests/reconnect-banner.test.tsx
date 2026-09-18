@@ -4,9 +4,9 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ReconnectBanner } from "@/components/connect/reconnect-banner";
+import { BrowserSignInButton, ReconnectBanner } from "@/components/connect/reconnect-banner";
 import { api } from "@/lib/api";
-import type { ConnectionInfo } from "@/lib/types";
+import type { ConnectionInfo, ConnectorInfo } from "@/lib/types";
 
 const navigated: string[] = [];
 
@@ -59,6 +59,43 @@ afterEach(() => {
 });
 
 describe("ReconnectBanner", () => {
+  const managedConnector = {
+    connector_type: "supabase",
+    managed_auth: { provider: "composio", configured: true, toolkit: "supabase", auth_type: "management_token" },
+    config_fields: [{ name: "project_ref", auth_types: ["management_token"] }],
+  } as ConnectorInfo;
+
+  function renderMigration(overrides: Partial<ConnectionInfo> = {}) {
+    return render(<QueryClientProvider client={new QueryClient({ defaultOptions: { mutations: { retry: false } } })}>
+      <BrowserSignInButton workspaceId="workspace-1" connector={managedConnector} connection={connection({
+        connector_type: "supabase", auth_type: "management_token", auth_provider: "local",
+        config_json: { project_ref: "project-one", unrelated_bookkeeping: "omit" }, ...overrides,
+      })} />
+    </QueryClientProvider>);
+  }
+
+  it("migrates the existing native connection using only declared public configuration", async () => {
+    vi.mocked(api).mockResolvedValue({ authorization_url: "https://connect.composio.dev/link" });
+    renderMigration();
+    fireEvent.click(screen.getByRole("button", { name: "Use Composio sign-in" }));
+    await waitFor(() => expect(api).toHaveBeenCalledWith("/api/v1/workspaces/workspace-1/oauth/start", {
+      method: "POST", body: { connector_type: "supabase", connection_id: "connection-1", name: "Linear", provider_key: "composio", config: { project_ref: "project-one" } },
+    }));
+    await waitFor(() => expect(navigated).toEqual(["https://connect.composio.dev/link"]));
+  });
+
+  it("does not offer migration for PostgreSQL connections", () => {
+    renderMigration({ auth_type: "postgres" });
+    expect(screen.queryByRole("button", { name: "Use Composio sign-in" })).toBeNull();
+  });
+
+  it("keeps migration errors safe and stays on the current connection", async () => {
+    vi.mocked(api).mockRejectedValue(new Error("private upstream details"));
+    renderMigration();
+    fireEvent.click(screen.getByRole("button", { name: "Use Composio sign-in" }));
+    expect((await screen.findByRole("alert")).textContent).toBe("Starting browser sign-in failed. Try again.");
+    expect(navigated).toEqual([]);
+  });
   it("stays out of the way while every sign-in is good", () => {
     const { container } = renderBanner([connection(), connection({ id: "c2", status: "error" })]);
     expect(container.firstChild).toBeNull();

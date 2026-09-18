@@ -8,6 +8,8 @@ process redactor and stamps ``last_used_at``.
 
 from __future__ import annotations
 
+import json
+import re
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -17,7 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from jhin_db.models import Secret
 from jhin_domain import SecretType
 from jhin_secrets.crypto import EncryptedPayload, SecretCrypto
-from jhin_secrets.material import register_secret_material
+from jhin_secrets.material import decode_string_secret_map, register_secret_material
+from jhin_secrets.redaction import get_redactor
 
 MASK_CHAR = "\u2022"  # •
 
@@ -30,6 +33,32 @@ def mask_hint(plaintext: str) -> str:
 
 class SecretNotFoundError(LookupError):
     pass
+
+
+def _register_typed_material(plaintext: str, secret_type: str) -> None:
+    if secret_type != SecretType.COMPOSIO_BINDING.value:
+        register_secret_material(plaintext)
+        return
+    binding = decode_string_secret_map(plaintext)
+    required = {
+        "composio_account_id",
+        "composio_user_id",
+        "composio_auth_config_id",
+        "composio_toolkit",
+    }
+    if set(binding) != required or not re.fullmatch(
+        r"[a-z0-9_-]{1,100}", binding["composio_toolkit"]
+    ):
+        # Unexpected shapes receive the full generic policy; this typed route
+        # cannot smuggle additional credential fields past registration.
+        register_secret_material(plaintext)
+        return
+    register_secret_material(
+        json.dumps({k: v for k, v in binding.items() if k != "composio_toolkit"})
+    )
+    # Preserve whole-envelope scrubbing while excluding only the explicitly
+    # public app slug from independently leakable credential fragments.
+    get_redactor().register(plaintext)
 
 
 class SecretStore:
@@ -48,7 +77,7 @@ class SecretStore:
         secret_type: SecretType = SecretType.API_KEY,
         created_by_user_id: UUID | None = None,
     ) -> Secret:
-        register_secret_material(plaintext)
+        _register_typed_material(plaintext, secret_type.value)
         payload = self._crypto.encrypt(plaintext)
         secret = Secret(
             workspace_id=workspace_id,
@@ -80,8 +109,13 @@ class SecretStore:
         )
         return list(rows)
 
-    async def reveal(self, workspace_id: UUID, secret_id: UUID) -> str:
-        """Decrypt for in-process use. Never expose the result over an API."""
+    async def reveal(self, workspace_id: UUID, secret_id: UUID, *, record_use: bool = True) -> str:
+        """Decrypt for in-process use, always registering redaction material.
+
+        A secondary authorization transaction may set ``record_use=False``
+        when its caller already records use and holds this secret's row lock.
+        Never expose the result over an API.
+        """
         secret = await self.get(workspace_id, secret_id)
         plaintext = self._crypto.decrypt(
             EncryptedPayload(
@@ -92,15 +126,16 @@ class SecretStore:
                 fingerprint=secret.secret_fingerprint,
             )
         )
-        register_secret_material(plaintext)
-        secret.last_used_at = datetime.now(UTC)
+        _register_typed_material(plaintext, secret.type)
+        if record_use:
+            secret.last_used_at = datetime.now(UTC)
         return plaintext
 
     async def rotate(self, workspace_id: UUID, secret_id: UUID, new_plaintext: str) -> Secret:
         secret = await self.get(workspace_id, secret_id)
         # Validate/register before mutating the ORM row. If validation fails,
         # even a later caller commit cannot persist a half-rotated secret.
-        register_secret_material(new_plaintext)
+        _register_typed_material(new_plaintext, secret.type)
         payload = self._crypto.encrypt(new_plaintext)
         secret.ciphertext = payload.ciphertext
         secret.nonce = payload.nonce

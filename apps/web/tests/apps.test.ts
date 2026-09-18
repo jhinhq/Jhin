@@ -109,6 +109,11 @@ describe("filterCatalog", () => {
 });
 
 describe("connectionsForApp", () => {
+  it("keeps generic managed connections associated with their own app", () => {
+    const app = entry({ slug: "notion", connector_type: "composio", composio_toolkit: "notion" });
+    const own = connection("composio", { server_slug: "notion", toolkit: "notion" });
+    expect(connectionsForApp(app, [own, connection("composio", { server_slug: "slack", toolkit: "slack" })])).toEqual([own]);
+  });
   it("matches native connections by type and MCP connections by server slug", () => {
     const rows = [
       connection("github"),
@@ -122,6 +127,22 @@ describe("connectionsForApp", () => {
 });
 
 describe("connectTarget", () => {
+  it("prefills a generic managed app while preserving native precedence", () => {
+    const connectors = [...CONNECTORS, CONNECTOR("composio")];
+    const target = connectTarget(entry({ slug: "notion", composio_toolkit: "notion" }), connectors, "composio");
+    expect(target).toMatchObject({ kind: "native", connector: { connector_type: "composio" }, prefill: { config: { toolkit: "notion", server_slug: "notion" } } });
+    expect(connectTarget({ ...GITHUB, composio_toolkit: "github" }, connectors)).toMatchObject({ connector: { connector_type: "github" } });
+  });
+  it("prefers official MCP browser sign-in over managed and manual native credentials", () => {
+    // Declared, not inferred: the catalog marks Supabase as signing in at its
+    // own MCP server, which is what sends it there despite a native connector.
+    const app = entry({ slug: "supabase", connector_type: "supabase", auth_hint: "oauth", sign_in: "remote_mcp", mcp_url: "https://mcp.supabase.com/mcp" });
+    const native = { ...CONNECTOR("supabase"), managed_auth: { provider: "composio" as const, configured: true, toolkit: "supabase", auth_type: "management_token" } };
+    const target = connectTarget(app, [...CONNECTORS, native]);
+    expect(target).toMatchObject({ kind: "mcp", prefill: { config: { server_slug: "supabase", server_url: app.mcp_url } } });
+    expect(connectTarget(app, [...CONNECTORS, native], "native")).toMatchObject({ connector: { connector_type: "supabase" } });
+    expect(connectTarget(app, [...CONNECTORS, native], "composio")).toMatchObject({ providerKey: "composio", connector: { connector_type: "supabase" } });
+  });
   it("routes to the native connector when Jhin has one", () => {
     const target = connectTarget(GITHUB, CONNECTORS);
     expect(target.kind).toBe("native");

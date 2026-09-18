@@ -102,6 +102,49 @@ def test_a_new_optional_request_field_is_not_breaking() -> None:
     assert breaks(document(), new) == []
 
 
+def test_new_optional_attachment_array_keeps_text_only_clients_compatible() -> None:
+    new = document(
+        properties={
+            "name": {"type": "string"},
+            "attachments": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"id": {"type": "string"}},
+                    "required": ["id"],
+                },
+            },
+        }
+    )
+    assert breaks(document(), new) == []
+
+
+def test_required_field_added_to_existing_optional_array_is_still_breaking() -> None:
+    old = document(
+        properties={
+            "name": {"type": "string"},
+            "attachments": {
+                "type": "array",
+                "items": {"type": "object", "properties": {"name": {"type": "string"}}},
+            },
+        }
+    )
+    new = document(
+        properties={
+            "name": {"type": "string"},
+            "attachments": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}, "id": {"type": "string"}},
+                    "required": ["id"],
+                },
+            },
+        }
+    )
+    assert any("new required" in issue for issue in breaks(old, new))
+
+
 def test_a_new_response_field_is_not_breaking() -> None:
     new = document()
     new["components"]["schemas"]["Thing"]["properties"]["colour"] = {"type": "string"}

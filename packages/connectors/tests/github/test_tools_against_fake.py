@@ -91,9 +91,9 @@ async def test_branch_create_then_pull_request_flow(
     assert isinstance(branch, BranchCreateOutput)
     assert branch.ref == "refs/heads/agent/fix-login"
 
-    # Like GitHub, the fake refuses a pull request whose head has no commits
-    # beyond the base (the branch was only created, never pushed to).
-    with pytest.raises(GitHubApiError):
+    # Like GitHub, the stand-in refuses a pull request whose head has no
+    # commits beyond the base (the branch was only created, never pushed to).
+    with pytest.raises(GitHubApiError) as exc_info:
         await EXECUTORS["github.pull_request.create"](
             context,
             PullRequestCreateInput(
@@ -105,6 +105,11 @@ async def test_branch_create_then_pull_request_flow(
                 body="Automated fix.",
             ),
         )
+    # The provider said why. A failure reported as three digits sent a live
+    # run round the same call again; the sentence names the actual problem.
+    assert exc_info.value.detail.startswith("GitHub said: ")
+    assert "commits between" in exc_info.value.detail
+    assert exc_info.value.side_effect_possible is False
     # Simulate the agent's push landing a commit on the branch.
     with fake_github.state.lock:
         fake_github.state.repos["octo/alpha"]["branches"]["agent/fix-login"] = "f1x" * 13 + "0"

@@ -5,6 +5,7 @@
 import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef } from "react";
 import { api, ApiError } from "@/lib/api";
+import { useTransientMutation } from "@/lib/use-transient-mutation";
 import { ollamaNamePath } from "@/lib/models";
 import { devicePollDelayMs, SLOW_DOWN_STEP_MS } from "@/lib/oauth";
 import type {
@@ -24,6 +25,7 @@ import type {
   ConversationDetail,
   ConversationList,
   ConversationMessage,
+  ConversationToolCallList,
   ApiKeyInfo,
   ApiKeyUsagePage,
   ApprovalList,
@@ -486,6 +488,7 @@ export function useInvalidateAgentAccess(workspaceId: string, agentId: string) {
   const queryClient = useQueryClient();
   return () => {
     void queryClient.invalidateQueries({ queryKey: ["agent-grants", workspaceId, agentId] });
+    void queryClient.invalidateQueries({ queryKey: ["terminal-internet", workspaceId, agentId] });
     void queryClient.invalidateQueries({ queryKey: ["agent-policy", workspaceId, agentId] });
     void queryClient.invalidateQueries({ queryKey: ["agent", workspaceId, agentId] });
     void queryClient.invalidateQueries({ queryKey: ["agent-bundles", workspaceId, agentId] });
@@ -704,9 +707,27 @@ export function useCatalogEntry(slug: string | null) {
 
 /** Which catalog release is live, or null before the first sync lands. */
 export function useCatalogVersion() {
+  const queryClient = useQueryClient();
   return useQuery({
     queryKey: ["catalog-version"],
-    queryFn: () => api<CatalogVersion | null>("/api/v1/catalog/version"),
+    queryFn: async () => {
+      const previous = queryClient.getQueryData<CatalogVersion | null>(["catalog-version"]);
+      const version = await api<CatalogVersion | null>("/api/v1/catalog/version");
+      // Compare successful fetches, not renders. Initial loading establishes
+      // the baseline; an unchanged release cannot trigger a refetch loop.
+      if (previous !== undefined && (
+        previous?.data_sha256 !== version?.data_sha256 ||
+        previous?.release_tag !== version?.release_tag ||
+        previous?.activated_at !== version?.activated_at
+      )) {
+        for (const key of ["catalog-search", "catalog-facets", "catalog-entry", "app-catalog"]) {
+          // Active observers refetch with their existing filters and paging;
+          // inactive cached variants become stale for their next use.
+          void queryClient.invalidateQueries({ queryKey: [key] });
+        }
+      }
+      return version;
+    },
     staleTime: 300_000,
   });
 }
@@ -787,7 +808,7 @@ export function useRedirectUri() {
  */
 export function useOAuthProbe(workspaceId: string) {
   return useMutation({
-    mutationFn: (body: { connector_type: string; server_url?: string | null }) =>
+    mutationFn: (body: { connector_type: string; server_url?: string | null; provider_key?: "composio" }) =>
       api<OAuthProbeOut>(`/api/v1/workspaces/${workspaceId}/oauth/probe`, {
         method: "POST",
         body,
@@ -1023,6 +1044,7 @@ export function useConversationMessages(
   workspaceId: string,
   conversationId: string | null,
   live = true,
+  enabled = true,
 ) {
   return useQuery({
     queryKey: ["conversation-messages", workspaceId, conversationId],
@@ -1030,6 +1052,21 @@ export function useConversationMessages(
       api<ConversationMessage[]>(
         `/api/v1/workspaces/${workspaceId}/conversations/${conversationId}/messages`,
       ),
+    enabled: conversationId !== null && enabled,
+    refetchInterval: live ? LIVE_POLL_MS : false,
+  });
+}
+
+export function useConversationToolCalls(
+  workspaceId: string,
+  conversationId: string | null,
+  live = true,
+) {
+  return useQuery({
+    queryKey: ["conversation-tool-calls", workspaceId, conversationId],
+    queryFn: () => api<ConversationToolCallList>(
+      `/api/v1/workspaces/${workspaceId}/conversations/${conversationId}/tool-calls`,
+    ),
     enabled: conversationId !== null,
     refetchInterval: live ? LIVE_POLL_MS : false,
   });
@@ -1078,6 +1115,7 @@ export function useInvalidateConversations(workspaceId: string) {
     void queryClient.invalidateQueries({ queryKey: ["conversation", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["conversation-messages", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["conversation-activity", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: ["conversation-tool-calls", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["activity", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["attention", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: ["tasks", workspaceId] });
@@ -1095,7 +1133,7 @@ export function useInvalidateConversations(workspaceId: string) {
  */
 export function useAnswerQuestion(workspaceId: string) {
   const invalidate = useInvalidateConversations(workspaceId);
-  return useMutation({
+  return useTransientMutation({
     mutationFn: ({ questionId, body }: { questionId: string; body: AnswerQuestionIn }) =>
       api<AnswerQuestionOut>(
         `/api/v1/workspaces/${workspaceId}/questions/${questionId}/answer`,

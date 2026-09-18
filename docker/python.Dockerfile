@@ -59,7 +59,9 @@ RUN if [ "$INSTALL_GIT" = "1" ]; then \
         && rm -rf /var/lib/apt/lists/*; \
     fi
 RUN groupadd --gid 10001 jhin \
-    && useradd --create-home --uid 10001 --gid 10001 jhin
+    && useradd --create-home --uid 10001 --gid 10001 jhin \
+    && mkdir -p /data/files \
+    && chown 10001:10001 /data/files
 COPY --from=builder --chown=jhin:jhin /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1

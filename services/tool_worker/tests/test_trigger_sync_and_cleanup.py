@@ -693,6 +693,105 @@ async def test_cleanup_uses_run_workspace_name_once(
     assert deleted_names == [f"run-{sync_world.run.id}"]
 
 
+async def test_cleanup_releases_a_durable_workspace_without_deleting_it(
+    sync_world: SyncWorld,
+) -> None:
+    """Finalize gives an agent's disk back; it does not destroy it.
+
+    This is the whole difference durable workspaces make. Before, every run's
+    volume died at finalize and the next turn re-cloned; now the row is
+    unheld, the last holder is remembered, and the runner is never called.
+    """
+    from jhin_connectors.cli.workspace import KIND_AGENT, agent_workspace_key
+    from jhin_db.models import SandboxWorkspace
+
+    key = agent_workspace_key(sync_world.workspace.id, sync_world.agent.id)
+    async with sync_world.sessions() as session:
+        session.add(
+            SandboxWorkspace(
+                workspace_id=sync_world.workspace.id,
+                agent_id=sync_world.agent.id,
+                kind=KIND_AGENT,
+                workspace_key=key,
+                holder_run_id=sync_world.run.id,
+            )
+        )
+        await session.commit()
+
+    deleted: list[str] = []
+
+    async def delete_workspace(workspace_name: str) -> bool:
+        deleted.append(workspace_name)
+        return True
+
+    activities = CleanupActivities(
+        sync_world.resources,  # type: ignore[arg-type]
+        delete_workspace=delete_workspace,
+    )
+    result = await activities.cleanup_run_workspace_activity(
+        CleanupRunWorkspaceInput(
+            workspace_id=str(sync_world.workspace.id),
+            run_id=str(sync_world.run.id),
+        )
+    )
+
+    assert result == CleanupRunWorkspaceResult(deleted=False)
+    assert deleted == []
+    async with sync_world.sessions() as session:
+        row = await session.scalar(
+            select(SandboxWorkspace).where(SandboxWorkspace.workspace_key == key)
+        )
+    assert row is not None
+    assert row.holder_run_id is None
+    assert row.last_holder_run_id == sync_world.run.id
+
+
+async def test_cleanup_still_destroys_a_private_run_workspace(
+    sync_world: SyncWorld,
+) -> None:
+    """A second concurrent run of one agent works on a run-scoped disk, and
+    that one dies at finalize exactly as every workspace used to."""
+    from jhin_connectors.cli.workspace import KIND_RUN, run_workspace_key
+    from jhin_db.models import SandboxWorkspace
+
+    key = run_workspace_key(sync_world.run.id)
+    async with sync_world.sessions() as session:
+        session.add(
+            SandboxWorkspace(
+                workspace_id=sync_world.workspace.id,
+                agent_id=sync_world.agent.id,
+                kind=KIND_RUN,
+                workspace_key=key,
+                run_id=sync_world.run.id,
+                holder_run_id=sync_world.run.id,
+            )
+        )
+        await session.commit()
+
+    deleted: list[str] = []
+
+    async def delete_workspace(workspace_name: str) -> bool:
+        deleted.append(workspace_name)
+        return True
+
+    activities = CleanupActivities(
+        sync_world.resources,  # type: ignore[arg-type]
+        delete_workspace=delete_workspace,
+    )
+    result = await activities.cleanup_run_workspace_activity(
+        CleanupRunWorkspaceInput(
+            workspace_id=str(sync_world.workspace.id),
+            run_id=str(sync_world.run.id),
+        )
+    )
+
+    assert result == CleanupRunWorkspaceResult(deleted=True)
+    assert deleted == [key]
+    async with sync_world.sessions() as session:
+        remaining = list(await session.scalars(select(SandboxWorkspace)))
+    assert remaining == []
+
+
 async def test_cleanup_rejects_invalid_identity_before_runner_call(
     sync_world: SyncWorld,
 ) -> None:
