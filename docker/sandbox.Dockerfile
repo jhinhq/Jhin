@@ -9,7 +9,7 @@
 # agent may request; teams can build richer toolchain images and allow them
 # per agent.
 
-FROM node:22-bookworm-slim
+FROM node:25-bookworm-slim
 
 # readline-common's first-install script uses a metadata-preserving copy when
 # /etc/inputrc is absent. Rootless overlay2 rejects that metadata operation, so
